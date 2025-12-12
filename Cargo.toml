@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/gox-common",
+    "crates/gox-syntax",
+    "crates/gox-analysis",
+    "crates/gox-codegen-llvm",
+    "crates/gox-codegen-wasm",
+    "crates/gox-codegen-vm",
+    "crates/gox-vm",
+    "crates/gox-cli",
+]
+resolver = "2"

@@ -1,0 +1,9 @@
+[package]
+name = "gox-codegen-vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-analysis = { path = "../gox-analysis" }
+gox-vm = { path = "../gox-vm" }

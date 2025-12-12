@@ -1,0 +1,10 @@
+[package]
+name = "gox-syntax"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+
+[dev-dependencies]
+insta = { version = "1.34", features = ["yaml", "glob"] }

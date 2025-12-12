@@ -1,0 +1,66 @@
+// Interface and implements demonstration
+package main;
+
+interface Reader {
+    Read(buf []byte) int;
+};
+
+interface Writer {
+    Write(data []byte) int;
+};
+
+interface ReadWriter {
+    Reader;
+    Writer;
+};
+
+interface Closer {
+    Close() int;
+};
+
+type File struct {
+    name string;
+    data []byte;
+    pos int;
+};
+
+implements File : Reader, Writer, Closer;
+
+func (f File) Read(buf []byte) int {
+    n := len(buf);
+    for i := 0; i < n; i += 1 {
+        if f.pos >= len(f.data) {
+            return i;
+        }
+        buf[i] = f.data[f.pos];
+        f.pos += 1;
+    }
+    return n;
+}
+
+func (f File) Write(data []byte) int {
+    for i := 0; i < len(data); i += 1 {
+        f.data = append(f.data, data[i]);
+    }
+    return len(data);
+}
+
+func (f File) Close() int {
+    f.data = nil;
+    f.pos = 0;
+    return 0;
+}
+
+func processReader(r Reader) {
+    var buf [1024]byte;
+    n := r.Read(buf);
+    println(n);
+}
+
+func main() {
+    f := File{name: "test.txt", data: nil, pos: 0};
+    data := []byte{1, 2, 3, 4, 5};
+    f.Write(data);
+    processReader(f);
+    f.Close();
+}

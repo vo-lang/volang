@@ -1,0 +1,7 @@
+Design a programming language that will later have three backends: LLVM / WASM / a custom VM. For now, you only need to consider the syntax definition.
+
+Requirements:
+1. Go-like syntax, but it does not need to be a strict subset of Go.
+2. Keep it as simple and easy to implement as possible.
+3. Treat this as the final version: at the syntax level it should feel usable to end users.
+4. You may refer to Lua for inspiration, but don’t make it that “hacky”.

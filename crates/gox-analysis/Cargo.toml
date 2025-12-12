@@ -1,0 +1,8 @@
+[package]
+name = "gox-analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-syntax = { path = "../gox-syntax" }

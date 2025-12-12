@@ -1,0 +1,3 @@
+Implement this language based on the content of gox_language_spec.
+For now, you only need to design the overall project structure, i.e., the typical components of a programming language. Keep in mind that this language will have three backends: LLVM / WASM / a custom VM.
+This language will be implemented in Rust. You now need to generate multiple projects (crates) in this repository, and write a README for each project explaining its purpose.

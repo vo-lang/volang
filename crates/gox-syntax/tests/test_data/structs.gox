@@ -1,0 +1,52 @@
+// Struct and method definitions
+package main;
+
+type Person struct {
+    name string;
+    age int;
+    email string "json:\"email\"";
+};
+
+func (p Person) Greet() string {
+    return "Hello, " + p.name;
+}
+
+func (p Person) IsAdult() bool {
+    return p.age >= 18;
+}
+
+type Address struct {
+    street string;
+    city string;
+    zipcode string;
+};
+
+type Employee struct {
+    person Person;
+    address Address;
+    salary int;
+    department string;
+};
+
+func (e Employee) FullInfo() string {
+    return e.person.name + " works in " + e.department;
+}
+
+func main() {
+    p := Person{name: "Alice", age: 30, email: "alice@example.com"};
+    println(p.Greet());
+    
+    if p.IsAdult() {
+        println("Adult");
+    } else {
+        println("Minor");
+    }
+    
+    emp := Employee{
+        person: Person{name: "Bob", age: 25},
+        address: Address{street: "123 Main St", city: "NYC", zipcode: "10001"},
+        salary: 50000,
+        department: "Engineering",
+    };
+    println(emp.FullInfo());
+}

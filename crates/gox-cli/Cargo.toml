@@ -1,0 +1,19 @@
+[package]
+name = "gox-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gox"
+path = "src/main.rs"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-syntax = { path = "../gox-syntax" }
+gox-analysis = { path = "../gox-analysis" }
+gox-codegen-llvm = { path = "../gox-codegen-llvm" }
+gox-codegen-wasm = { path = "../gox-codegen-wasm" }
+gox-codegen-vm = { path = "../gox-codegen-vm" }
+gox-vm = { path = "../gox-vm" }
+clap = { version = "4", features = ["derive"] }
+
