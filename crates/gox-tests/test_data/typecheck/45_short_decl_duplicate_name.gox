@@ -1,0 +1,9 @@
+// Duplicate variable name in same := statement
+package main
+
+func main() {
+    x, x := 1, 2
+}
+
+=== typecheck ===
+E2000

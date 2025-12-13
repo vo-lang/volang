@@ -1408,10 +1408,54 @@ impl<'a> TypeChecker<'a> {
             rhs_types
         };
 
-        // Define variables in local scope
+        // Check for duplicate names in the same := statement (excluding blank identifier).
+        let mut seen: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+        for name in &sv.names {
+            let name_str = self.interner.resolve(name.symbol).unwrap_or("");
+            if name_str == "_" {
+                continue;
+            }
+            if !seen.insert(name.symbol) {
+                self.error_msg(
+                    TypeError::Redeclared,
+                    name.span,
+                    format!("{} repeated on left side of :=", name_str),
+                );
+                return;
+            }
+        }
+
+        // First pass: determine if there is at least one new variable (blank identifier doesn't count).
         let mut has_new = false;
+        for name in &sv.names {
+            let name_str = self.interner.resolve(name.symbol).unwrap_or("");
+            if name_str == "_" {
+                continue;
+            }
+            let is_new = if let Some(ref scope) = self.local_scope {
+                !scope.contains_local(name.symbol)
+            } else {
+                true
+            };
+            if is_new {
+                has_new = true;
+                break;
+            }
+        }
+
+        // If there are no new variables, report and stop (avoid cascading extra errors).
+        if !has_new {
+            self.error(TypeError::NoNewVarsInShortDecl, sv.names[0].span);
+            return;
+        }
+
+        // Second pass: define new vars, and type-check redeclared vars as assignments.
         for (name, ty) in sv.names.iter().zip(var_types.iter()) {
-            // Check if this is a new variable or redeclaration
+            let name_str = self.interner.resolve(name.symbol).unwrap_or("");
+            if name_str == "_" {
+                continue;
+            }
+
             let is_new = if let Some(ref scope) = self.local_scope {
                 !scope.contains_local(name.symbol)
             } else {
@@ -1419,15 +1463,34 @@ impl<'a> TypeChecker<'a> {
             };
 
             if is_new {
-                has_new = true;
-                // Convert untyped to default type for variable declaration
                 let var_ty = self.default_type(ty);
                 self.define_var(name.symbol, var_ty, name.span);
+            } else {
+                let Some(ref local) = self.local_scope else {
+                    continue;
+                };
+                let Some(entity) = local.lookup_local(name.symbol) else {
+                    continue;
+                };
+                match entity {
+                    Entity::Var(v) => {
+                        if !self.is_assignable(ty, &v.ty) {
+                            self.error_msg(
+                                TypeError::AssignTypeMismatch,
+                                name.span,
+                                format!("cannot assign to {}", name_str),
+                            );
+                        }
+                    }
+                    _ => {
+                        self.error_msg(
+                            TypeError::Redeclared,
+                            name.span,
+                            TypeError::Redeclared.with_name(name_str),
+                        );
+                    }
+                }
             }
-        }
-
-        if !has_new {
-            self.error(TypeError::NoNewVarsInShortDecl, sv.names[0].span);
         }
     }
 
