@@ -1,0 +1,46 @@
+// Test interface with multiple levels of embedding
+package main
+
+type Closer interface {
+    Close()
+}
+
+type Reader interface {
+    Read() int
+}
+
+type ReadCloser interface {
+    Reader
+    Closer
+}
+
+type WriteCloser interface {
+    Write(x int)
+    Closer
+}
+
+type ReadWriteCloser interface {
+    ReadCloser
+    WriteCloser
+}
+
+type File struct {
+    data int
+}
+
+func (f File) Read() int { return f.data }
+func (f File) Write(x int) { f.data = x }
+func (f File) Close() {}
+
+func main() {
+    var rwc ReadWriteCloser
+    f := File{data: 0}
+    
+    rwc = f
+    rwc.Read()
+    rwc.Write(42)
+    rwc.Close()  // Close appears in both ReadCloser and WriteCloser, but same signature - OK
+}
+
+=== typecheck ===
+OK

@@ -1,0 +1,26 @@
+// Test interface implementation with wrong method signature
+package main
+
+type Reader interface {
+    Read() int
+}
+
+type BadReader struct {
+    data int
+}
+
+// Wrong signature: Read takes a parameter
+func (b BadReader) Read(n int) int {
+    return b.data
+}
+
+func main() {
+    var r Reader
+    b := BadReader{data: 0}
+    
+    r = b  // error: BadReader.Read has wrong signature
+    _ = r
+}
+
+=== typecheck ===
+E2601

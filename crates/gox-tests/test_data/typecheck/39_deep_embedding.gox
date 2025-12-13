@@ -1,0 +1,39 @@
+// Test deep embedding chain - method promoted through multiple levels
+package main
+
+type Level0 struct {
+    value int
+}
+
+func (l Level0) GetValue() int {
+    return l.value
+}
+
+type Level1 struct {
+    Level0
+}
+
+type Level2 struct {
+    Level1
+}
+
+type Level3 struct {
+    Level2
+}
+
+func main() {
+    l3 := Level3{Level2: Level2{Level1: Level1{Level0: Level0{value: 42}}}}
+    
+    // Method promoted through 3 levels of embedding
+    _ = l3.GetValue()
+    _ = l3.Level2.GetValue()
+    _ = l3.Level2.Level1.GetValue()
+    _ = l3.Level2.Level1.Level0.GetValue()
+    
+    // Field access through chain
+    _ = l3.value
+    _ = l3.Level2.value
+}
+
+=== typecheck ===
+OK

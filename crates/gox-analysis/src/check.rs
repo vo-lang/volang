@@ -51,6 +51,7 @@ use gox_syntax::ast::{self, BinaryOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::constant::Constant;
 use crate::errors::TypeError;
+use crate::lookup::{Lookup, LookupResult};
 use crate::resolve::ResolveResult;
 use crate::scope::{BuiltinKind, Entity, Scope, ScopeKind, VarEntity};
 use crate::types::{
@@ -791,44 +792,33 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks a selector expression (field or method access).
-    fn check_selector(&mut self, sel: &ast::SelectorExpr, span: Span) -> Type {
+    fn check_selector(&mut self, sel: &ast::SelectorExpr, _span: Span) -> Type {
         let base_ty = self.check_expr(&sel.expr);
         let field_name = sel.sel.symbol;
 
-        // Try field access first
-        if let Some(field_ty) = self.lookup_field(&base_ty, field_name) {
-            return field_ty;
-        }
-
-        // Try method access
-        let method_set = self.registry.method_set(&base_ty);
-        if let Some(method) = method_set.get(field_name) {
-            return Type::Func(method.sig.clone());
-        }
-
-        let name = self.interner.resolve(field_name).unwrap_or("<unknown>");
-        self.error_msg(TypeError::NoFieldOrMethod, sel.sel.span, TypeError::NoFieldOrMethod.with_name(name));
-        Type::Invalid
-    }
-
-    /// Looks up a field in a type.
-    fn lookup_field(&self, ty: &Type, name: Symbol) -> Option<Type> {
-        match self.underlying_type(ty) {
-            Type::Struct(s) | Type::Obx(s) => {
-                for field in &s.fields {
-                    if field.name == Some(name) {
-                        return Some(field.ty.clone());
-                    }
-                    // Check embedded fields
-                    if field.embedded {
-                        if let Some(ty) = self.lookup_field(&field.ty, name) {
-                            return Some(ty);
-                        }
-                    }
-                }
-                None
+        // Use Lookup for field/method access
+        let lookup = Lookup::new(&self.named_types);
+        match lookup.lookup_field_or_method(&base_ty, field_name) {
+            LookupResult::Field(ty, _indices, _indirect) => ty,
+            LookupResult::Method(sig, _indices, _indirect) => Type::Func(sig),
+            LookupResult::Ambiguous(_indices) => {
+                let name = self.interner.resolve(field_name).unwrap_or("<unknown>");
+                self.error_msg(
+                    TypeError::NoFieldOrMethod,
+                    sel.sel.span,
+                    format!("ambiguous selector {}", name),
+                );
+                Type::Invalid
             }
-            _ => None,
+            LookupResult::NotFound => {
+                let name = self.interner.resolve(field_name).unwrap_or("<unknown>");
+                self.error_msg(
+                    TypeError::NoFieldOrMethod,
+                    sel.sel.span,
+                    TypeError::NoFieldOrMethod.with_name(name),
+                );
+                Type::Invalid
+            }
         }
     }
 

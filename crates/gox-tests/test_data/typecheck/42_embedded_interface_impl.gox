@@ -1,0 +1,34 @@
+// Test embedded struct satisfies interface via promoted methods
+package main
+
+type Stringer interface {
+    String() string
+}
+
+type Named struct {
+    name string
+}
+
+func (n Named) String() string {
+    return n.name
+}
+
+type Person struct {
+    Named  // embeds Named, promotes String() method
+    age int
+}
+
+func main() {
+    var s Stringer
+    p := Person{Named: Named{name: "Alice"}, age: 30}
+    
+    // Person implements Stringer via promoted Named.String()
+    s = p
+    _ = s.String()
+    
+    // Direct call also works
+    _ = p.String()
+}
+
+=== typecheck ===
+OK

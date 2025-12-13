@@ -1,0 +1,38 @@
+// Test diamond embedding - same type embedded via two paths
+package main
+
+type Base struct {
+    x int
+}
+
+type Left struct {
+    Base
+}
+
+type Right struct {
+    Base
+}
+
+type Diamond struct {
+    Left
+    Right
+}
+
+func main() {
+    d := Diamond{
+        Left: Left{Base: Base{x: 1}},
+        Right: Right{Base: Base{x: 2}},
+    }
+    
+    // Ambiguous: Base.x reachable via Left.Base.x and Right.Base.x
+    _ = d.x
+    
+    // Explicit paths are OK
+    _ = d.Left.x
+    _ = d.Right.x
+    _ = d.Left.Base.x
+    _ = d.Right.Base.x
+}
+
+=== typecheck ===
+E2510

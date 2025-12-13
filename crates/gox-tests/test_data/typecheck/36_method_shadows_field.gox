@@ -1,0 +1,28 @@
+// Test method shadows field with same name
+package main
+
+type Inner struct {
+    Value int
+}
+
+type Outer struct {
+    Inner
+}
+
+func (o Outer) Value() int {
+    return o.Inner.Value * 2
+}
+
+func main() {
+    o := Outer{Inner: Inner{Value: 10}}
+    
+    // Method Outer.Value shadows field Inner.Value
+    // Calling Value() returns method, not field
+    _ = o.Value()
+    
+    // Explicit field access still works
+    _ = o.Inner.Value
+}
+
+=== typecheck ===
+OK

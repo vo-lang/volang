@@ -1,0 +1,29 @@
+// Test field shadowing at different depths
+// Shallower depth shadows deeper depth (no ambiguity)
+package main
+
+type Inner struct {
+    x int
+}
+
+type Middle struct {
+    Inner
+    y int
+}
+
+type Outer struct {
+    Middle
+    x int  // shadows Inner.x (shallower depth wins)
+}
+
+func main() {
+    o := Outer{Middle: Middle{Inner: Inner{x: 1}, y: 2}, x: 3}
+    
+    // x at depth 0 shadows x at depth 2 - OK, no ambiguity
+    _ = o.x       // Outer.x (depth 0)
+    _ = o.y       // Middle.y (depth 1)
+    _ = o.Inner.x // Inner.x explicitly
+}
+
+=== typecheck ===
+OK
