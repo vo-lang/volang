@@ -46,10 +46,11 @@
 //! }
 //! ```
 
-use gox_common::{Diagnostic, DiagnosticSink, Ident, Label, Span, Symbol, SymbolInterner};
+use gox_common::{DiagnosticSink, Ident, Span, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, BinaryOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::constant::Constant;
+use crate::errors::TypeError;
 use crate::resolve::ResolveResult;
 use crate::scope::{BuiltinKind, Entity, Scope, ScopeKind, VarEntity};
 use crate::types::{
@@ -99,21 +100,14 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Emits an error diagnostic with a span.
-    fn error_at(&mut self, span: Span, message: impl Into<String>) {
-        self.diagnostics.emit(
-            Diagnostic::error(message)
-                .with_label(Label::primary(self.file_id, span))
-        );
+    /// Emits a type error diagnostic.
+    fn error(&mut self, err: TypeError, span: Span) {
+        self.diagnostics.emit(err.at(self.file_id, span));
     }
 
-    /// Emits an error diagnostic with a span and additional context.
-    fn error_at_with_note(&mut self, span: Span, message: impl Into<String>, note: impl Into<String>) {
-        self.diagnostics.emit(
-            Diagnostic::error(message)
-                .with_label(Label::primary(self.file_id, span))
-                .with_note(note)
-        );
+    /// Emits a type error diagnostic with a custom message.
+    fn error_msg(&mut self, err: TypeError, span: Span, message: impl Into<String>) {
+        self.diagnostics.emit(err.at_with_message(self.file_id, span, message));
     }
 
     /// Looks up a symbol, checking local scope first, then package scope.
@@ -329,9 +323,7 @@ impl<'a> TypeChecker<'a> {
             Some(Entity::Func(f)) => Type::Func(f.sig.clone()),
             Some(Entity::Type(_)) => {
                 let name = self.interner.resolve(ident.symbol).unwrap_or("<unknown>");
-                self.diagnostics.emit(
-                    Diagnostic::error(format!("{} is a type, not a value", name)),
-                );
+                self.error_msg(TypeError::TypeNotValue, ident.span, TypeError::TypeNotValue.with_name(name));
                 Type::Invalid
             }
             Some(Entity::Builtin(b)) => {
@@ -340,7 +332,7 @@ impl<'a> TypeChecker<'a> {
             }
             None => {
                 let name = self.interner.resolve(ident.symbol).unwrap_or("<unknown>");
-                self.error_at(ident.span, format!("undefined: {}", name));
+                self.error_msg(TypeError::Undefined, ident.span, TypeError::Undefined.with_name(name));
                 Type::Invalid
             }
             _ => Type::Invalid,
@@ -390,18 +382,14 @@ impl<'a> TypeChecker<'a> {
 
         // Both must be numeric
         if !self.is_numeric_type(left) || !self.is_numeric_type(right) {
-            self.diagnostics.emit(
-                Diagnostic::error("operator requires numeric operands"),
-            );
+            self.error(TypeError::NumericOperandRequired, span);
             return Type::Invalid;
         }
 
         // % requires integer operands
         if op == BinaryOp::Rem {
             if !self.is_integer_type(left) || !self.is_integer_type(right) {
-                self.diagnostics.emit(
-                    Diagnostic::error("% operator requires integer operands"),
-                );
+                self.error(TypeError::IntegerOperandRequired, span);
                 return Type::Invalid;
             }
         }
@@ -412,9 +400,7 @@ impl<'a> TypeChecker<'a> {
     /// Checks equality operators (==, !=).
     fn check_equality_op(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         if !self.are_comparable(left, right) {
-            self.diagnostics.emit(
-                Diagnostic::error("cannot compare these types"),
-            );
+            self.error(TypeError::NotComparable, span);
         }
         Type::Basic(BasicType::Bool)
     }
@@ -422,9 +408,7 @@ impl<'a> TypeChecker<'a> {
     /// Checks ordering operators (<, <=, >, >=).
     fn check_ordering_op(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         if !self.is_ordered_type(left) || !self.is_ordered_type(right) {
-            self.diagnostics.emit(
-                Diagnostic::error("operator requires ordered operands"),
-            );
+            self.error(TypeError::OrderedOperandRequired, span);
         }
         Type::Basic(BasicType::Bool)
     }
@@ -432,9 +416,7 @@ impl<'a> TypeChecker<'a> {
     /// Checks logical operators (&&, ||).
     fn check_logical_op(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         if !self.is_bool_type(left) || !self.is_bool_type(right) {
-            self.diagnostics.emit(
-                Diagnostic::error("operator requires boolean operands"),
-            );
+            self.error(TypeError::BooleanOperandRequired, span);
         }
         Type::Basic(BasicType::Bool)
     }
@@ -442,9 +424,7 @@ impl<'a> TypeChecker<'a> {
     /// Checks bitwise operators (&, |, ^, &^).
     fn check_bitwise_op(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         if !self.is_integer_type(left) || !self.is_integer_type(right) {
-            self.diagnostics.emit(
-                Diagnostic::error("operator requires integer operands"),
-            );
+            self.error(TypeError::IntegerOperandRequired, span);
             return Type::Invalid;
         }
         self.common_type(left, right)
@@ -453,16 +433,12 @@ impl<'a> TypeChecker<'a> {
     /// Checks shift operators (<<, >>).
     fn check_shift_op(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         if !self.is_integer_type(left) {
-            self.diagnostics.emit(
-                Diagnostic::error("shift operand must be integer"),
-            );
+            self.error(TypeError::ShiftOperandInteger, span);
             return Type::Invalid;
         }
         // Right operand must be unsigned integer or untyped
         if !self.is_unsigned_or_untyped_int(right) {
-            self.diagnostics.emit(
-                Diagnostic::error("shift count must be unsigned integer"),
-            );
+            self.error(TypeError::ShiftCountUnsigned, span);
         }
         left.clone()
     }
@@ -474,9 +450,7 @@ impl<'a> TypeChecker<'a> {
         match un.op {
             UnaryOp::Neg => {
                 if !self.is_numeric_type(&operand_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unary - requires numeric operand"),
-                    );
+                    self.error(TypeError::UnaryNegNumeric, span);
                     Type::Invalid
                 } else {
                     operand_ty
@@ -484,9 +458,7 @@ impl<'a> TypeChecker<'a> {
             }
             UnaryOp::Not => {
                 if !self.is_bool_type(&operand_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unary ! requires boolean operand"),
-                    );
+                    self.error(TypeError::UnaryNotBoolean, span);
                     Type::Invalid
                 } else {
                     operand_ty
@@ -494,9 +466,7 @@ impl<'a> TypeChecker<'a> {
             }
             UnaryOp::BitNot => {
                 if !self.is_integer_type(&operand_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unary ^ requires integer operand"),
-                    );
+                    self.error(TypeError::UnaryBitNotInteger, span);
                     Type::Invalid
                 } else {
                     operand_ty
@@ -504,9 +474,7 @@ impl<'a> TypeChecker<'a> {
             }
             UnaryOp::Pos => {
                 if !self.is_numeric_type(&operand_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unary + requires numeric operand"),
-                    );
+                    self.error(TypeError::UnaryPosNumeric, span);
                     Type::Invalid
                 } else {
                     operand_ty
@@ -530,9 +498,7 @@ impl<'a> TypeChecker<'a> {
             Type::Func(sig) => self.check_func_call(sig, &call.args, span),
             Type::Invalid => Type::Invalid,
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("cannot call non-function"),
-                );
+                self.error(TypeError::NotCallable, span);
                 Type::Invalid
             }
         }
@@ -555,11 +521,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks len(x) - returns int.
-    fn check_len(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_len(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 1 {
-            self.diagnostics.emit(
-                Diagnostic::error("len requires exactly one argument"),
-            );
+            self.error(TypeError::LenArgCount, span);
             return Type::Invalid;
         }
 
@@ -568,20 +532,16 @@ impl<'a> TypeChecker<'a> {
             Type::Array(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_)
             | Type::Basic(BasicType::String) => Type::Basic(BasicType::Int),
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("invalid argument type for len"),
-                );
+                self.error(TypeError::LenArgType, span);
                 Type::Invalid
             }
         }
     }
 
     /// Checks cap(x) - returns int.
-    fn check_cap(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_cap(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 1 {
-            self.diagnostics.emit(
-                Diagnostic::error("cap requires exactly one argument"),
-            );
+            self.error(TypeError::CapArgCount, span);
             return Type::Invalid;
         }
 
@@ -589,20 +549,16 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&arg_ty) {
             Type::Array(_) | Type::Slice(_) | Type::Chan(_) => Type::Basic(BasicType::Int),
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("invalid argument type for cap"),
-                );
+                self.error(TypeError::CapArgType, span);
                 Type::Invalid
             }
         }
     }
 
     /// Checks append(slice, elems...) - returns slice type.
-    fn check_append(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_append(&mut self, args: &[Expr], span: Span) -> Type {
         if args.is_empty() {
-            self.diagnostics.emit(
-                Diagnostic::error("append requires at least one argument"),
-            );
+            self.error(TypeError::AppendArgCount, span);
             return Type::Invalid;
         }
 
@@ -613,28 +569,22 @@ impl<'a> TypeChecker<'a> {
                 for arg in &args[1..] {
                     let arg_ty = self.check_expr(arg);
                     if !self.is_assignable(&arg_ty, &s.elem) {
-                        self.diagnostics.emit(
-                            Diagnostic::error("cannot append: element type mismatch"),
-                        );
+                        self.error(TypeError::ElementTypeMismatch, arg.span);
                     }
                 }
                 slice_ty.clone()
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("first argument to append must be slice"),
-                );
+                self.error(TypeError::AppendArgType, span);
                 Type::Invalid
             }
         }
     }
 
     /// Checks copy(dst, src) - returns int.
-    fn check_copy(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_copy(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 2 {
-            self.diagnostics.emit(
-                Diagnostic::error("copy requires exactly two arguments"),
-            );
+            self.error(TypeError::CopyArgCount, span);
             return Type::Invalid;
         }
 
@@ -655,20 +605,16 @@ impl<'a> TypeChecker<'a> {
         match (dst_elem, src_elem) {
             (Some(d), Some(s)) if d == s => Type::Basic(BasicType::Int),
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("invalid arguments to copy"),
-                );
+                self.error(TypeError::CopyArgType, span);
                 Type::Invalid
             }
         }
     }
 
     /// Checks delete(map, key).
-    fn check_delete(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_delete(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 2 {
-            self.diagnostics.emit(
-                Diagnostic::error("delete requires exactly two arguments"),
-            );
+            self.error(TypeError::DeleteArgCount, span);
             return Type::Tuple(vec![]);
         }
 
@@ -678,15 +624,11 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&map_ty) {
             Type::Map(m) => {
                 if !self.is_assignable(&key_ty, &m.key) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("delete: key type mismatch"),
-                    );
+                    self.error(TypeError::KeyTypeMismatch, args[1].span);
                 }
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("first argument to delete must be map"),
-                );
+                self.error(TypeError::DeleteArgType, span);
             }
         }
 
@@ -694,11 +636,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks make(type, args...).
-    fn check_make(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_make(&mut self, args: &[Expr], span: Span) -> Type {
         if args.is_empty() {
-            self.diagnostics.emit(
-                Diagnostic::error("make requires at least one argument"),
-            );
+            self.error(TypeError::MakeArgCount, span);
             return Type::Invalid;
         }
 
@@ -710,9 +650,7 @@ impl<'a> TypeChecker<'a> {
         for arg in &args[1..] {
             let arg_ty = self.check_expr(arg);
             if !self.is_integer_type(&arg_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("make: size argument must be integer"),
-                );
+                self.error(TypeError::IndexNotInteger, arg.span);
             }
         }
 
@@ -721,11 +659,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks close(chan).
-    fn check_close(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_close(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 1 {
-            self.diagnostics.emit(
-                Diagnostic::error("close requires exactly one argument"),
-            );
+            self.error(TypeError::CloseArgCount, span);
             return Type::Tuple(vec![]);
         }
 
@@ -733,15 +669,11 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&chan_ty) {
             Type::Chan(c) => {
                 if c.dir == crate::types::ChanDir::RecvOnly {
-                    self.diagnostics.emit(
-                        Diagnostic::error("cannot close receive-only channel"),
-                    );
+                    self.error(TypeError::ReceiveFromSendOnly, span);
                 }
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("close requires channel argument"),
-                );
+                self.error(TypeError::CloseArgType, span);
             }
         }
 
@@ -749,11 +681,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks panic(v).
-    fn check_panic(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_panic(&mut self, args: &[Expr], span: Span) -> Type {
         if args.len() != 1 {
-            self.diagnostics.emit(
-                Diagnostic::error("panic requires exactly one argument"),
-            );
+            self.error(TypeError::PanicArgCount, span);
         } else {
             self.check_expr(&args[0]);
         }
@@ -761,11 +691,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks recover() - returns interface{}.
-    fn check_recover(&mut self, args: &[Expr], _span: Span) -> Type {
+    fn check_recover(&mut self, args: &[Expr], span: Span) -> Type {
         if !args.is_empty() {
-            self.diagnostics.emit(
-                Diagnostic::error("recover takes no arguments"),
-            );
+            self.error(TypeError::RecoverArgCount, span);
         }
         // Returns interface{}
         Type::Interface(crate::types::InterfaceType {
@@ -790,21 +718,17 @@ impl<'a> TypeChecker<'a> {
 
         if sig.variadic {
             if got < expected - 1 {
-                self.diagnostics.emit(
-                    Diagnostic::error(format!(
-                        "not enough arguments: expected at least {}, got {}",
-                        expected - 1,
-                        got
-                    )),
-                );
+                self.error_msg(TypeError::WrongArgCount, span, format!(
+                    "not enough arguments: expected at least {}, got {}",
+                    expected - 1,
+                    got
+                ));
             }
         } else if got != expected {
-            self.diagnostics.emit(
-                Diagnostic::error(format!(
-                    "wrong number of arguments: expected {}, got {}",
-                    expected, got
-                )),
-            );
+            self.error_msg(TypeError::WrongArgCount, span, format!(
+                "wrong number of arguments: expected {}, got {}",
+                expected, got
+            ));
         }
 
         // Check argument types
@@ -813,12 +737,10 @@ impl<'a> TypeChecker<'a> {
             if i < sig.params.len() {
                 let param_ty = &sig.params[i];
                 if !self.is_assignable(&arg_ty, param_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error(format!(
-                            "cannot use argument {} as parameter type",
-                            i + 1
-                        )),
-                    );
+                    self.error_msg(TypeError::ArgTypeMismatch, arg.span, format!(
+                        "cannot use argument {} as parameter type",
+                        i + 1
+                    ));
                 }
             }
         }
@@ -839,40 +761,30 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&base_ty) {
             Type::Array(arr) => {
                 if !self.is_integer_type(&index_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("array index must be integer"),
-                    );
+                    self.error(TypeError::IndexNotInteger, idx.index.span);
                 }
                 (*arr.elem).clone()
             }
             Type::Slice(sl) => {
                 if !self.is_integer_type(&index_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("slice index must be integer"),
-                    );
+                    self.error(TypeError::IndexNotInteger, idx.index.span);
                 }
                 (*sl.elem).clone()
             }
             Type::Map(m) => {
                 if !self.is_assignable(&index_ty, &m.key) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("map key type mismatch"),
-                    );
+                    self.error(TypeError::KeyTypeMismatch, idx.index.span);
                 }
                 (*m.value).clone()
             }
             Type::Basic(BasicType::String) => {
                 if !self.is_integer_type(&index_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("string index must be integer"),
-                    );
+                    self.error(TypeError::IndexNotInteger, idx.index.span);
                 }
                 Type::Basic(BasicType::Uint8)
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("cannot index this type"),
-                );
+                self.error(TypeError::NotIndexable, span);
                 Type::Invalid
             }
         }
@@ -895,9 +807,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         let name = self.interner.resolve(field_name).unwrap_or("<unknown>");
-        self.diagnostics.emit(
-            Diagnostic::error(format!("no field or method '{}'", name)),
-        );
+        self.error_msg(TypeError::NoFieldOrMethod, sel.sel.span, TypeError::NoFieldOrMethod.with_name(name));
         Type::Invalid
     }
 
@@ -992,9 +902,7 @@ impl<'a> TypeChecker<'a> {
                 // Type resolution failed, already reported
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("invalid composite literal type"),
-                );
+                self.error(TypeError::InvalidCompositeLitType, _span);
             }
         }
 
@@ -1014,15 +922,11 @@ impl<'a> TypeChecker<'a> {
                     let field = s.fields.iter().find(|f| f.name == Some(field_name.symbol));
                     if let Some(f) = field {
                         if !self.is_assignable(&value_ty, &f.ty) {
-                            self.diagnostics.emit(
-                                Diagnostic::error("incompatible type in struct literal"),
-                            );
+                            self.error(TypeError::FieldTypeMismatch, elem.value.span);
                         }
                     } else {
                         let name = self.interner.resolve(field_name.symbol).unwrap_or("<unknown>");
-                        self.diagnostics.emit(
-                            Diagnostic::error(format!("unknown field '{}' in struct literal", name)),
-                        );
+                        self.error_msg(TypeError::UnknownField, field_name.span, TypeError::UnknownField.with_name(name));
                     }
                 }
             }
@@ -1034,9 +938,7 @@ impl<'a> TypeChecker<'a> {
         for elem in elems {
             let value_ty = self.check_expr(&elem.value);
             if !self.is_assignable(&value_ty, elem_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("incompatible element type in array literal"),
-                );
+                self.error(TypeError::ElementTypeMismatch, elem.value.span);
             }
         }
     }
@@ -1046,9 +948,7 @@ impl<'a> TypeChecker<'a> {
         for elem in elems {
             let value_ty = self.check_expr(&elem.value);
             if !self.is_assignable(&value_ty, elem_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("incompatible element type in slice literal"),
-                );
+                self.error(TypeError::ElementTypeMismatch, elem.value.span);
             }
         }
     }
@@ -1061,23 +961,17 @@ impl<'a> TypeChecker<'a> {
                 if let ast::CompositeLitKey::Expr(key_expr) = key {
                     let k_ty = self.check_expr(key_expr);
                     if !self.is_assignable(&k_ty, key_ty) {
-                        self.diagnostics.emit(
-                            Diagnostic::error("incompatible key type in map literal"),
-                        );
+                        self.error(TypeError::KeyTypeMismatch, key_expr.span);
                     }
                 }
             } else {
-                self.diagnostics.emit(
-                    Diagnostic::error("missing key in map literal"),
-                );
+                self.error(TypeError::KeyTypeMismatch, elem.value.span);
             }
 
             // Check value
             let v_ty = self.check_expr(&elem.value);
             if !self.is_assignable(&v_ty, value_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("incompatible value type in map literal"),
-                );
+                self.error(TypeError::ElementTypeMismatch, elem.value.span);
             }
         }
     }
@@ -1088,9 +982,7 @@ impl<'a> TypeChecker<'a> {
 
         // Expression must be interface type
         if !self.is_interface_type(&expr_ty) {
-            self.diagnostics.emit(
-                Diagnostic::error("type assertion requires interface type"),
-            );
+            self.error(TypeError::TypeAssertNonInterface, span);
             return Type::Invalid;
         }
 
@@ -1126,17 +1018,13 @@ impl<'a> TypeChecker<'a> {
         if let Some(ref low) = sl.low {
             let low_ty = self.check_expr(low);
             if !self.is_integer_type(&low_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("slice index must be integer"),
-                );
+                self.error(TypeError::SliceIndexNotInteger, low.span);
             }
         }
         if let Some(ref high) = sl.high {
             let high_ty = self.check_expr(high);
             if !self.is_integer_type(&high_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error("slice index must be integer"),
-                );
+                self.error(TypeError::SliceIndexNotInteger, high.span);
             }
         }
 
@@ -1147,9 +1035,7 @@ impl<'a> TypeChecker<'a> {
             Type::Slice(sl) => Type::Slice(sl.clone()),
             Type::Basic(BasicType::String) => Type::Basic(BasicType::String),
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("cannot slice this type"),
-                );
+                self.error(TypeError::NotSliceable, span);
                 Type::Invalid
             }
         }
@@ -1162,16 +1048,12 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&chan_ty) {
             Type::Chan(c) => {
                 if c.dir == crate::types::ChanDir::SendOnly {
-                    self.diagnostics.emit(
-                        Diagnostic::error("cannot receive from send-only channel"),
-                    );
+                    self.error(TypeError::ReceiveFromSendOnly, span);
                 }
                 (*c.elem).clone()
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("receive requires channel type"),
-                );
+                self.error(TypeError::ReceiveNonChannel, span);
                 Type::Invalid
             }
         }
@@ -1419,9 +1301,7 @@ impl<'a> TypeChecker<'a> {
                     // Type is declared - check initializer compatibility
                     if i < value_types.len() {
                         if !self.is_assignable(&value_types[i], ty) {
-                            self.diagnostics.emit(
-                                Diagnostic::error("incompatible type in variable initialization"),
-                            );
+                            self.error(TypeError::VarInitTypeMismatch, name.span);
                         }
                     }
                     ty.clone()
@@ -1430,9 +1310,7 @@ impl<'a> TypeChecker<'a> {
                     self.default_type(&value_types[i])
                 } else {
                     // No type and no initializer - error
-                    self.diagnostics.emit(
-                        Diagnostic::error("variable declaration requires type or initializer"),
-                    );
+                    self.error(TypeError::VarInitTypeMismatch, name.span);
                     Type::Invalid
                 };
 
@@ -1464,25 +1342,21 @@ impl<'a> TypeChecker<'a> {
                         // Check each result type
                         for (i, (lhs, rhs)) in lhs_types.iter().zip(results.iter()).enumerate() {
                             if !self.is_assignable(rhs, lhs) {
-                                self.diagnostics.emit(
-                                    Diagnostic::error(format!(
-                                        "cannot assign value {} to variable",
-                                        i + 1
-                                    )),
-                                );
+                                self.error_msg(TypeError::AssignTypeMismatch, assign.lhs[i].span, format!(
+                                    "cannot assign value {} to variable",
+                                    i + 1
+                                ));
                             }
                         }
                         return;
                     }
                 }
             }
-            self.diagnostics.emit(
-                Diagnostic::error(format!(
-                    "assignment mismatch: {} variables but {} values",
-                    lhs_types.len(),
-                    rhs_types.len()
-                )),
-            );
+            self.error_msg(TypeError::AssignCountMismatch, assign.lhs[0].span, format!(
+                "assignment mismatch: {} variables but {} values",
+                lhs_types.len(),
+                rhs_types.len()
+            ));
             return;
         }
 
@@ -1493,21 +1367,17 @@ impl<'a> TypeChecker<'a> {
                 continue;
             }
             if !self.is_assignable(rhs, lhs_ty) {
-                self.diagnostics.emit(
-                    Diagnostic::error(format!(
-                        "cannot assign to variable {}",
-                        i + 1
-                    )),
-                );
+                self.error_msg(TypeError::AssignTypeMismatch, lhs_expr.span, format!(
+                    "cannot assign to variable {}",
+                    i + 1
+                ));
             }
         }
 
         // For compound assignment, check operator is valid
         if assign.op != ast::AssignOp::Assign {
             if lhs_types.len() != 1 {
-                self.diagnostics.emit(
-                    Diagnostic::error("compound assignment requires single variable"),
-                );
+                self.error(TypeError::AssignCountMismatch, assign.lhs[0].span);
             }
         }
     }
@@ -1522,33 +1392,27 @@ impl<'a> TypeChecker<'a> {
                 if results.len() == sv.names.len() {
                     results.clone()
                 } else {
-                    self.diagnostics.emit(
-                        Diagnostic::error(format!(
-                            "assignment mismatch: {} variables but {} values",
-                            sv.names.len(),
-                            results.len()
-                        )),
-                    );
+                    self.error_msg(TypeError::AssignCountMismatch, sv.names[0].span, format!(
+                        "assignment mismatch: {} variables but {} values",
+                        sv.names.len(),
+                        results.len()
+                    ));
                     return;
                 }
             } else {
-                self.diagnostics.emit(
-                    Diagnostic::error(format!(
-                        "assignment mismatch: {} variables but {} values",
-                        sv.names.len(),
-                        rhs_types.len()
-                    )),
-                );
-                return;
-            }
-        } else if sv.names.len() != rhs_types.len() {
-            self.diagnostics.emit(
-                Diagnostic::error(format!(
+                self.error_msg(TypeError::AssignCountMismatch, sv.names[0].span, format!(
                     "assignment mismatch: {} variables but {} values",
                     sv.names.len(),
                     rhs_types.len()
-                )),
-            );
+                ));
+                return;
+            }
+        } else if sv.names.len() != rhs_types.len() {
+            self.error_msg(TypeError::AssignCountMismatch, sv.names[0].span, format!(
+                "assignment mismatch: {} variables but {} values",
+                sv.names.len(),
+                rhs_types.len()
+            ));
             return;
         } else {
             rhs_types
@@ -1573,31 +1437,29 @@ impl<'a> TypeChecker<'a> {
         }
 
         if !has_new {
-            self.diagnostics.emit(
-                Diagnostic::error("no new variables on left side of :="),
-            );
+            self.error(TypeError::NoNewVarsInShortDecl, sv.names[0].span);
         }
     }
 
     /// Checks a return statement.
     fn check_return(&mut self, ret: &ast::ReturnStmt) {
         let actual_types: Vec<Type> = ret.values.iter().map(|e| self.check_expr(e)).collect();
+        let return_types = self.return_types.clone();
+        let value_spans: Vec<Span> = ret.values.iter().map(|v| v.span).collect();
 
         // Check return count matches expected
-        if actual_types.len() != self.return_types.len() {
+        if actual_types.len() != return_types.len() {
             // Special case: single multi-value expression
             if actual_types.len() == 1 {
                 if let Type::Tuple(results) = &actual_types[0] {
-                    if results.len() == self.return_types.len() {
+                    if results.len() == return_types.len() {
                         // Check each result type
-                        for (i, (actual, expected)) in results.iter().zip(self.return_types.iter()).enumerate() {
+                        for (i, (actual, expected)) in results.iter().zip(return_types.iter()).enumerate() {
                             if !self.is_assignable(actual, expected) {
-                                self.diagnostics.emit(
-                                    Diagnostic::error(format!(
-                                        "cannot use value as return value {} in return statement",
-                                        i + 1
-                                    )),
-                                );
+                                self.error_msg(TypeError::ReturnTypeMismatch, value_spans[0], format!(
+                                    "cannot use value as return value {} in return statement",
+                                    i + 1
+                                ));
                             }
                         }
                         return;
@@ -1605,28 +1467,25 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             // Bare return is allowed if function has named returns
-            if actual_types.is_empty() && !self.return_types.is_empty() && self.has_named_returns {
+            if actual_types.is_empty() && !return_types.is_empty() && self.has_named_returns {
                 return;
             }
-            self.diagnostics.emit(
-                Diagnostic::error(format!(
-                    "wrong number of return values: have {}, want {}",
-                    actual_types.len(),
-                    self.return_types.len()
-                )),
-            );
+            let span = value_spans.first().copied().unwrap_or(Span::dummy());
+            self.error_msg(TypeError::WrongReturnCount, span, format!(
+                "wrong number of return values: have {}, want {}",
+                actual_types.len(),
+                return_types.len()
+            ));
             return;
         }
 
         // Check each return value type
-        for (i, (actual, expected)) in actual_types.iter().zip(self.return_types.iter()).enumerate() {
+        for (i, (actual, expected)) in actual_types.iter().zip(return_types.iter()).enumerate() {
             if !self.is_assignable(actual, expected) {
-                self.diagnostics.emit(
-                    Diagnostic::error(format!(
-                        "cannot use type as return value {} in return statement",
-                        i + 1
-                    )),
-                );
+                self.error_msg(TypeError::ReturnTypeMismatch, value_spans[i], format!(
+                    "cannot use type as return value {} in return statement",
+                    i + 1
+                ));
             }
         }
     }
@@ -1644,9 +1503,7 @@ impl<'a> TypeChecker<'a> {
         // Check condition is boolean
         let cond_ty = self.check_expr(&if_stmt.cond);
         if !self.is_bool_type(&cond_ty) {
-            self.diagnostics.emit(
-                Diagnostic::error("if condition must be boolean"),
-            );
+            self.error(TypeError::NonBoolCondition, if_stmt.cond.span);
         }
 
         // Check then block
@@ -1669,9 +1526,7 @@ impl<'a> TypeChecker<'a> {
             ast::ForClause::Cond(Some(cond)) => {
                 let cond_ty = self.check_expr(cond);
                 if !self.is_bool_type(&cond_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("for condition must be boolean"),
-                    );
+                    self.error(TypeError::NonBoolCondition, cond.span);
                 }
             }
             ast::ForClause::Cond(None) => {
@@ -1684,9 +1539,7 @@ impl<'a> TypeChecker<'a> {
                 if let Some(ref cond) = cond {
                     let cond_ty = self.check_expr(cond);
                     if !self.is_bool_type(&cond_ty) {
-                        self.diagnostics.emit(
-                            Diagnostic::error("for condition must be boolean"),
-                        );
+                        self.error(TypeError::NonBoolCondition, cond.span);
                     }
                 }
                 if let Some(ref post) = post {
@@ -1703,9 +1556,7 @@ impl<'a> TypeChecker<'a> {
                     Type::Chan(c) => ((*c.elem).clone(), Type::Invalid),
                     Type::Basic(BasicType::String) => (Type::Basic(BasicType::Int), Type::Basic(BasicType::Int32)),
                     _ => {
-                        self.diagnostics.emit(
-                            Diagnostic::error("cannot range over this type"),
-                        );
+                        self.error(TypeError::NotIterable, expr.span);
                         (Type::Invalid, Type::Invalid)
                     }
                 };
@@ -1753,9 +1604,7 @@ impl<'a> TypeChecker<'a> {
             for expr in &case.exprs {
                 let case_ty = self.check_expr(expr);
                 if !self.are_comparable(&tag_ty, &case_ty) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("case expression type mismatch"),
-                    );
+                    self.error(TypeError::NotComparable, expr.span);
                 }
             }
             for stmt in &case.body {
@@ -1775,9 +1624,7 @@ impl<'a> TypeChecker<'a> {
 
         let expr_ty = self.check_expr(&ts.expr);
         if !self.is_interface_type(&expr_ty) {
-            self.diagnostics.emit(
-                Diagnostic::error("type switch requires interface type"),
-            );
+            self.error(TypeError::TypeAssertNonInterface, ts.expr.span);
         }
 
         for case in &ts.cases {
@@ -1814,9 +1661,7 @@ impl<'a> TypeChecker<'a> {
     fn check_inc_dec(&mut self, inc_dec: &ast::IncDecStmt) {
         let ty = self.check_expr(&inc_dec.expr);
         if !self.is_numeric_type(&ty) {
-            self.diagnostics.emit(
-                Diagnostic::error("increment/decrement requires numeric operand"),
-            );
+            self.error(TypeError::NumericOperandRequired, inc_dec.expr.span);
         }
     }
 
@@ -1828,43 +1673,33 @@ impl<'a> TypeChecker<'a> {
         match self.underlying_type(&chan_ty) {
             Type::Chan(c) => {
                 if c.dir == crate::types::ChanDir::RecvOnly {
-                    self.diagnostics.emit(
-                        Diagnostic::error("cannot send to receive-only channel"),
-                    );
+                    self.error(TypeError::SendOnReceiveOnly, send.chan.span);
                 }
                 if !self.is_assignable(&value_ty, &c.elem) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("cannot send value to channel: type mismatch"),
-                    );
+                    self.error(TypeError::SendTypeMismatch, send.value.span);
                 }
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("send requires channel type"),
-                );
+                self.error(TypeError::ReceiveNonChannel, send.chan.span);
             }
         }
     }
 
     /// Checks a go statement.
     fn check_go(&mut self, go: &ast::GoStmt) {
-        let ty = self.check_expr(&go.call);
+        let _ty = self.check_expr(&go.call);
         // go statement requires a function call
         if !matches!(&go.call.kind, ExprKind::Call(_)) {
-            self.diagnostics.emit(
-                Diagnostic::error("go requires function call"),
-            );
+            self.error(TypeError::NotCallable, go.call.span);
         }
     }
 
     /// Checks a defer statement.
     fn check_defer(&mut self, defer: &ast::DeferStmt) {
-        let ty = self.check_expr(&defer.call);
+        let _ty = self.check_expr(&defer.call);
         // defer statement requires a function call
         if !matches!(&defer.call.kind, ExprKind::Call(_)) {
-            self.diagnostics.emit(
-                Diagnostic::error("defer requires function call"),
-            );
+            self.error(TypeError::NotCallable, defer.call.span);
         }
     }
 
@@ -1889,15 +1724,11 @@ impl<'a> TypeChecker<'a> {
                 match self.underlying_type(&chan_ty) {
                     Type::Chan(c) => {
                         if c.dir == crate::types::ChanDir::SendOnly {
-                            self.diagnostics.emit(
-                                Diagnostic::error("cannot receive from send-only channel"),
-                            );
+                            self.error(TypeError::ReceiveFromSendOnly, recv.expr.span);
                         }
                     }
                     _ => {
-                        self.diagnostics.emit(
-                            Diagnostic::error("receive requires channel type"),
-                        );
+                        self.error(TypeError::ReceiveNonChannel, recv.expr.span);
                     }
                 }
             }

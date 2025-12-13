@@ -1,0 +1,10 @@
+// Test undefined variable error
+package main
+
+func main() {
+    x := y
+    _ = x
+}
+
+=== typecheck ===
+E2100

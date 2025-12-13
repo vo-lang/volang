@@ -1,0 +1,19 @@
+// Test method call type checking
+package main
+
+type Counter struct {
+    value int
+}
+
+func (c Counter) Value() int {
+    return c.value
+}
+
+func main() {
+    c := Counter{value: 42}
+    x := c.Value()
+    _ = x
+}
+
+=== typecheck ===
+OK

@@ -40,10 +40,11 @@
 
 use std::collections::HashSet;
 
-use gox_common::{Diagnostic, DiagnosticSink, Span, Symbol, SymbolInterner};
+use gox_common::{DiagnosticSink, Span, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, TypeExprKind};
 
 use crate::collect::{CollectResult, FuncSigPlaceholder, MethodPlaceholder, NamedTypePlaceholder, VarTypePlaceholder};
+use crate::errors::TypeError;
 use crate::constant::Constant;
 use crate::scope::{Entity, Scope, ScopeKind};
 use crate::types::{
@@ -191,7 +192,7 @@ impl<'a> TypeResolver<'a> {
                 // Receiver type not found
                 let name = self.interner.resolve(method.receiver_type).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    Diagnostic::error(format!("undefined receiver type: {}", name)),
+                    TypeError::UndefinedReceiverType.with_message(TypeError::UndefinedReceiverType.with_name(name)),
                 );
             }
         }
@@ -240,10 +241,10 @@ impl<'a> TypeResolver<'a> {
         if self.resolving.contains(&id) {
             if !self.in_indirect {
                 let name = self.placeholders[idx].name;
-                let span = self.placeholders[idx].span;
+                let _span = self.placeholders[idx].span;
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    Diagnostic::error(format!("invalid recursive type {}", name_str)),
+                    TypeError::InvalidRecursiveType.with_message(TypeError::InvalidRecursiveType.with_name(name_str)),
                 );
             }
             return Type::Invalid;
@@ -296,9 +297,7 @@ impl<'a> TypeResolver<'a> {
 
                 // Validate: key must be comparable
                 if !self.is_comparable(&key) {
-                    self.diagnostics.emit(
-                        Diagnostic::error("invalid map key type: must be comparable"),
-                    );
+                    self.diagnostics.emit(TypeError::InvalidMapKey.diagnostic());
                 }
 
                 Type::Map(MapType {
@@ -386,7 +385,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    Diagnostic::error(format!("{} is not a type", name_str)),
+                    TypeError::NotAType.with_message(TypeError::NotAType.with_name(name_str)),
                 );
                 Type::Invalid
             }
@@ -397,14 +396,14 @@ impl<'a> TypeResolver<'a> {
             Some(_) => {
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    Diagnostic::error(format!("{} is not a type", name_str)),
+                    TypeError::NotAType.with_message(TypeError::NotAType.with_name(name_str)),
                 );
                 Type::Invalid
             }
             None => {
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    Diagnostic::error(format!("undefined: {}", name_str)),
+                    TypeError::Undefined.with_message(TypeError::Undefined.with_name(name_str)),
                 );
                 Type::Invalid
             }
@@ -509,15 +508,11 @@ impl<'a> TypeResolver<'a> {
         match self.eval_const_expr(expr) {
             Some(Constant::Int(n)) if n >= 0 => n as u64,
             Some(Constant::Int(_)) => {
-                self.diagnostics.emit(
-                    Diagnostic::error("array length must be non-negative"),
-                );
+                self.diagnostics.emit(TypeError::NegativeArrayLength.diagnostic());
                 0
             }
             _ => {
-                self.diagnostics.emit(
-                    Diagnostic::error("array length must be a constant integer"),
-                );
+                self.diagnostics.emit(TypeError::NonConstantArrayLength.diagnostic());
                 0
             }
         }

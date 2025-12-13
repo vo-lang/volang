@@ -70,6 +70,7 @@
 pub mod types;
 pub mod scope;
 pub mod constant;
+pub mod errors;
 pub mod collect;
 pub mod resolve;
 pub mod check;

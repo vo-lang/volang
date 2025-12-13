@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use gox_common::diagnostics::DiagnosticSink;
 use gox_common::source::FileId;
 use gox_syntax::parser;
 
@@ -106,7 +107,7 @@ pub fn run_test_file(path: &Path) -> TestResult {
     }
     
     // Check for unexpected errors
-    if sections.errors.is_none() {
+    if sections.errors.is_none() && sections.typecheck.is_none() {
         let (_, diagnostics, _) = parser::parse(FileId::new(0), &sections.source);
         if diagnostics.has_errors() {
             let actual_errors = format_diagnostics(&diagnostics);
@@ -117,6 +118,51 @@ pub fn run_test_file(path: &Path) -> TestResult {
                 expected: String::new(),
                 actual: actual_errors,
             };
+        }
+    }
+    
+    // Run type checker if typecheck section exists
+    if let Some(expected_typecheck) = sections.typecheck {
+        let (file, parse_diag, interner) = parser::parse(FileId::new(0), &sections.source);
+        
+        if parse_diag.has_errors() {
+            let actual_errors = format_diagnostics(&parse_diag);
+            return TestResult {
+                file_name,
+                passed: false,
+                message: "Parse errors before type checking".to_string(),
+                expected: String::new(),
+                actual: actual_errors,
+            };
+        }
+        
+        let mut typecheck_diag = DiagnosticSink::new();
+        let _result = gox_analysis::typecheck_file(&file, &interner, &mut typecheck_diag);
+        
+        let actual_errors = format_diagnostics(&typecheck_diag);
+        
+        // If expected_typecheck starts with "OK", expect no errors
+        if expected_typecheck.trim() == "OK" {
+            if typecheck_diag.has_errors() {
+                return TestResult {
+                    file_name,
+                    passed: false,
+                    message: "Unexpected type errors".to_string(),
+                    expected: "OK (no errors)".to_string(),
+                    actual: actual_errors,
+                };
+            }
+        } else {
+            // Expect specific errors
+            if !errors_match(&actual_errors, &expected_typecheck) {
+                return TestResult {
+                    file_name,
+                    passed: false,
+                    message: "Type check errors don't match".to_string(),
+                    expected: expected_typecheck,
+                    actual: actual_errors,
+                };
+            }
         }
     }
     
@@ -133,6 +179,7 @@ pub fn run_test_file(path: &Path) -> TestResult {
 struct TestSections {
     source: String,
     parser: Option<String>,
+    typecheck: Option<String>,
     errors: Option<String>,
 }
 
@@ -140,6 +187,7 @@ struct TestSections {
 fn parse_test_file(content: &str) -> TestSections {
     let mut source = String::new();
     let mut parser = None;
+    let mut typecheck = None;
     let mut errors = None;
     
     let mut current_section = "source";
@@ -153,6 +201,7 @@ fn parse_test_file(content: &str) -> TestSections {
             match current_section {
                 "source" => source = current_content.trim().to_string(),
                 "parser" => parser = Some(current_content.trim().to_string()),
+                "typecheck" => typecheck = Some(current_content.trim().to_string()),
                 "errors" => errors = Some(current_content.trim().to_string()),
                 _ => {}
             }
@@ -171,24 +220,35 @@ fn parse_test_file(content: &str) -> TestSections {
     match current_section {
         "source" => source = current_content.trim().to_string(),
         "parser" => parser = Some(current_content.trim().to_string()),
+        "typecheck" => typecheck = Some(current_content.trim().to_string()),
         "errors" => errors = Some(current_content.trim().to_string()),
         _ => {}
     }
     
-    TestSections { source, parser, errors }
+    TestSections { source, parser, typecheck, errors }
 }
 
 /// Formats diagnostics for comparison.
+/// Format: "[E{code}] {message}" or just "{message}" if no code.
 fn format_diagnostics(diagnostics: &gox_common::diagnostics::DiagnosticSink) -> String {
     let mut output = String::new();
     for diag in diagnostics.iter() {
-        output.push_str(&diag.message);
+        if let Some(code) = diag.code {
+            output.push_str(&format!("[E{:04}] {}", code, diag.message));
+        } else {
+            output.push_str(&diag.message);
+        }
         output.push('\n');
     }
     output.trim().to_string()
 }
 
 /// Checks if actual errors match expected errors.
+/// Expected format can be:
+/// - "E2100" - match by error code only
+/// - "[E2100]" - match by error code only  
+/// - "[E2100] message" - match by error code and message contains
+/// - "message" - legacy: match by message contains
 fn errors_match(actual: &str, expected: &str) -> bool {
     let actual_lines: Vec<&str> = actual.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     let expected_lines: Vec<&str> = expected.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with("//")).collect();
@@ -198,12 +258,42 @@ fn errors_match(actual: &str, expected: &str) -> bool {
     }
     
     for (a, e) in actual_lines.iter().zip(expected_lines.iter()) {
-        if !a.contains(e) && !e.contains(a) {
+        if !error_line_matches(a, e) {
             return false;
         }
     }
     
     true
+}
+
+/// Checks if a single actual error line matches an expected pattern.
+fn error_line_matches(actual: &str, expected: &str) -> bool {
+    // Check if expected is just an error code like "E2100" or "[E2100]"
+    let expected_trimmed = expected.trim_start_matches('[').trim_end_matches(']');
+    if expected_trimmed.starts_with('E') && expected_trimmed[1..].chars().all(|c| c.is_ascii_digit()) {
+        // Match by error code only
+        return actual.contains(&format!("[{}]", expected_trimmed));
+    }
+    
+    // Check if expected starts with "[Exxxx]" pattern
+    if expected.starts_with("[E") {
+        if let Some(bracket_end) = expected.find(']') {
+            let code = &expected[1..bracket_end];
+            // Check code matches
+            if !actual.contains(&format!("[{}]", code)) {
+                return false;
+            }
+            // If there's a message part, check it too
+            let message_part = expected[bracket_end + 1..].trim();
+            if !message_part.is_empty() {
+                return actual.contains(message_part);
+            }
+            return true;
+        }
+    }
+    
+    // Legacy: match by message contains
+    actual.contains(expected) || expected.contains(actual)
 }
 
 /// Checks if actual AST matches expected AST.

@@ -143,8 +143,8 @@ impl Suggestion {
 pub struct Diagnostic {
     /// The severity of this diagnostic.
     pub severity: Severity,
-    /// A unique error code (e.g., "E0001").
-    pub code: Option<String>,
+    /// A unique numeric error code.
+    pub code: Option<u16>,
     /// The main message.
     pub message: String,
     /// Labels pointing to relevant source locations.
@@ -189,8 +189,8 @@ impl Diagnostic {
     }
 
     /// Sets the error code.
-    pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.code = Some(code.into());
+    pub fn with_code(mut self, code: u16) -> Self {
+        self.code = Some(code);
         self
     }
 
@@ -422,8 +422,8 @@ impl<'a> DiagnosticEmitter<'a> {
         let mut cs_diagnostic = CSDiagnostic::new(diagnostic.severity.into())
             .with_message(&diagnostic.message);
 
-        if let Some(code) = &diagnostic.code {
-            cs_diagnostic = cs_diagnostic.with_code(code.clone());
+        if let Some(code) = diagnostic.code {
+            cs_diagnostic = cs_diagnostic.with_code(format!("E{:04}", code));
         }
 
         let labels: Vec<CSLabel<usize>> = diagnostic

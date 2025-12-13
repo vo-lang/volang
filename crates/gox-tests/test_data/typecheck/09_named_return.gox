@@ -1,0 +1,17 @@
+// Test named return values
+package main
+
+func split(sum int) (x int, y int) {
+    x = sum / 2
+    y = sum - x
+    return
+}
+
+func main() {
+    a, b := split(10)
+    _ = a
+    _ = b
+}
+
+=== typecheck ===
+OK

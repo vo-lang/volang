@@ -10,8 +10,9 @@ use std::str::Chars;
 
 use gox_common::source::FileId;
 use gox_common::span::Span;
-use gox_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
+use gox_common::diagnostics::DiagnosticSink;
 
+use crate::errors::SyntaxError;
 use crate::token::{Token, TokenKind};
 
 /// The lexer for GoX source code.
@@ -202,10 +203,7 @@ impl<'src> Lexer<'src> {
         while depth > 0 {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unterminated block comment")
-                            .with_label(Label::primary(self.file_id, start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::UnterminatedBlockComment.at(self.file_id, start..self.pos));
                     return;
                 }
                 Some('*') if self.peek_next() == Some('/') => {
@@ -428,10 +426,7 @@ impl<'src> Lexer<'src> {
             _ => {
                 let start = self.pos;
                 self.advance();
-                self.diagnostics.emit(
-                    Diagnostic::error(format!("unexpected character: {:?}", c))
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(self.file_id, start..self.pos, format!("unexpected character: {:?}", c)));
                 TokenKind::Invalid
             }
         }
@@ -511,10 +506,7 @@ impl<'src> Lexer<'src> {
             self.advance();
             if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
                 let start = self.pos.saturating_sub(3);
-                self.diagnostics.emit(
-                    Diagnostic::error("hexadecimal float literal has no digits")
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::HexFloatNoDigits.at(self.file_id, start..self.pos));
                 return TokenKind::Invalid;
             }
             self.scan_hex_digits();
@@ -523,10 +515,7 @@ impl<'src> Lexer<'src> {
         
         if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
             let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(
-                Diagnostic::error("hexadecimal literal has no digits")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::HexNoDigits.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -552,10 +541,7 @@ impl<'src> Lexer<'src> {
         
         if !self.peek().map_or(false, |c| matches!(c, '0'..='7')) {
             let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(
-                Diagnostic::error("octal literal has no digits")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::OctalNoDigits.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -565,10 +551,7 @@ impl<'src> Lexer<'src> {
                 '8' | '9' => {
                     let digit_start = self.pos;
                     self.advance();
-                    self.diagnostics.emit(
-                        Diagnostic::error(format!("invalid digit '{}' in octal literal", c))
-                            .with_label(Label::primary(self.file_id, digit_start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(self.file_id, digit_start..self.pos, format!("invalid digit '{}' in octal literal", c)));
                 }
                 _ => break,
             }
@@ -583,10 +566,7 @@ impl<'src> Lexer<'src> {
         
         if !self.peek().map_or(false, |c| matches!(c, '0' | '1')) {
             let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(
-                Diagnostic::error("binary literal has no digits")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::BinaryNoDigits.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -596,10 +576,7 @@ impl<'src> Lexer<'src> {
                 '2'..='9' => {
                     let digit_start = self.pos;
                     self.advance();
-                    self.diagnostics.emit(
-                        Diagnostic::error(format!("invalid digit '{}' in binary literal", c))
-                            .with_label(Label::primary(self.file_id, digit_start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::BinaryInvalidDigit.at_with_message(self.file_id, digit_start..self.pos, format!("invalid digit '{}' in binary literal", c)));
                 }
                 _ => break,
             }
@@ -651,10 +628,7 @@ impl<'src> Lexer<'src> {
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
             let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(
-                Diagnostic::error("exponent has no digits")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -666,10 +640,7 @@ impl<'src> Lexer<'src> {
     fn scan_hex_exponent(&mut self) -> TokenKind {
         if self.peek() != Some('p') && self.peek() != Some('P') {
             let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(
-                Diagnostic::error("hexadecimal float literal requires 'p' exponent")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::HexFloatNoExponent.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -681,10 +652,7 @@ impl<'src> Lexer<'src> {
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
             let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(
-                Diagnostic::error("exponent has no digits")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -700,10 +668,7 @@ impl<'src> Lexer<'src> {
         loop {
             match self.peek() {
                 None | Some('\n') => {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unterminated string literal")
-                            .with_label(Label::primary(self.file_id, start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::UnterminatedString.at(self.file_id, start..self.pos));
                     return TokenKind::Invalid;
                 }
                 Some('"') => {
@@ -729,10 +694,7 @@ impl<'src> Lexer<'src> {
         loop {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(
-                        Diagnostic::error("unterminated raw string literal")
-                            .with_label(Label::primary(self.file_id, start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::UnterminatedRawString.at(self.file_id, start..self.pos));
                     return TokenKind::Invalid;
                 }
                 Some('`') => {
@@ -753,18 +715,12 @@ impl<'src> Lexer<'src> {
 
         match self.peek() {
             None | Some('\n') => {
-                self.diagnostics.emit(
-                    Diagnostic::error("unterminated rune literal")
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::UnterminatedRune.at(self.file_id, start..self.pos));
                 return TokenKind::Invalid;
             }
             Some('\'') => {
                 self.advance();
-                self.diagnostics.emit(
-                    Diagnostic::error("empty rune literal")
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::EmptyRune.at(self.file_id, start..self.pos));
                 return TokenKind::Invalid;
             }
             Some('\\') => {
@@ -791,10 +747,7 @@ impl<'src> Lexer<'src> {
                 self.advance();
             }
             
-            self.diagnostics.emit(
-                Diagnostic::error("rune literal has more than one character")
-                    .with_label(Label::primary(self.file_id, start..self.pos))
-            );
+            self.diagnostics.emit(SyntaxError::MultiCharRune.at(self.file_id, start..self.pos));
             return TokenKind::Invalid;
         }
 
@@ -829,16 +782,10 @@ impl<'src> Lexer<'src> {
             }
             Some(c) => {
                 self.advance();
-                self.diagnostics.emit(
-                    Diagnostic::error(format!("unknown escape sequence: \\{}", c))
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::UnknownEscape.at_with_message(self.file_id, start..self.pos, format!("unknown escape sequence: \\{}", c)));
             }
             None => {
-                self.diagnostics.emit(
-                    Diagnostic::error("escape sequence not terminated")
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                );
+                self.diagnostics.emit(SyntaxError::UnterminatedEscape.at(self.file_id, start..self.pos));
             }
         }
     }
@@ -851,13 +798,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(
-                        Diagnostic::error(format!(
-                            "escape sequence requires {} hex digits",
-                            digits
-                        ))
-                        .with_label(Label::primary(self.file_id, start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::EscapeHexDigits.at_with_message(self.file_id, start..self.pos, format!("escape sequence requires {} hex digits", digits)));
                     return;
                 }
             }
@@ -872,10 +813,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(
-                        Diagnostic::error("octal escape sequence requires 3 octal digits")
-                            .with_label(Label::primary(self.file_id, start..self.pos))
-                    );
+                    self.diagnostics.emit(SyntaxError::EscapeOctalDigits.at(self.file_id, start..self.pos));
                     return;
                 }
             }

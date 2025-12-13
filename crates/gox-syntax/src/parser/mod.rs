@@ -12,8 +12,9 @@ mod types;
 use gox_common::source::FileId;
 use gox_common::span::Span;
 use gox_common::symbol::{Ident, Symbol, SymbolInterner};
-use gox_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
+use gox_common::diagnostics::DiagnosticSink;
 
+use crate::errors::SyntaxError;
 use crate::token::{Token, TokenKind};
 use crate::lexer::Lexer;
 use crate::ast::*;
@@ -221,15 +222,11 @@ impl<'a> Parser<'a> {
 
     fn error(&mut self, message: impl Into<String>) {
         let span = self.current.span;
-        self.diagnostics.emit(
-            Diagnostic::error(message).with_label(Label::primary(self.file_id, span))
-        );
+        self.diagnostics.emit(SyntaxError::UnexpectedToken.at_with_message(self.file_id, span, message));
     }
 
     fn error_at(&mut self, span: Span, message: impl Into<String>) {
-        self.diagnostics.emit(
-            Diagnostic::error(message).with_label(Label::primary(self.file_id, span))
-        );
+        self.diagnostics.emit(SyntaxError::UnexpectedToken.at_with_message(self.file_id, span, message));
     }
 
     fn error_expected(&mut self, expected: &str) {

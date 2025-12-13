@@ -35,6 +35,7 @@ use gox_common::{Diagnostic, DiagnosticSink, Span, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, BinaryOp, Decl, File, UnaryOp};
 
 use crate::constant::Constant;
+use crate::errors::TypeError;
 use crate::scope::{
     BuiltinKind, Entity, FuncEntity, Scope, ScopeKind, TypeEntity, VarEntity,
 };
@@ -504,7 +505,7 @@ impl<'a> TypeCollector<'a> {
 
             let name = self.interner.resolve(sym).unwrap_or("<unknown>");
             self.diagnostics.emit(
-                Diagnostic::error(format!("{} redeclared in this block", name)),
+                TypeError::Redeclared.with_message(TypeError::Redeclared.with_name(name)),
             );
 
             if !existing_span.is_dummy() {

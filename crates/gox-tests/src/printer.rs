@@ -253,9 +253,12 @@ impl<'a> AstPrinter<'a> {
         if !sig.results.is_empty() {
             self.write_indent();
             write!(self.output, "results: [").unwrap();
-            for (i, ty) in sig.results.iter().enumerate() {
+            for (i, result) in sig.results.iter().enumerate() {
                 if i > 0 { write!(self.output, ", ").unwrap(); }
-                self.write_type_inline(ty);
+                if let Some(ref name) = result.name {
+                    write!(self.output, "{} ", self.resolve_symbol(name.symbol)).unwrap();
+                }
+                self.write_type_inline(&result.ty);
             }
             writeln!(self.output, "],").unwrap();
         }

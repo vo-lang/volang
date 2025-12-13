@@ -219,6 +219,7 @@ dependencies = [
 name = "gox-tests"
 version = "0.1.0"
 dependencies = [
+ "gox-analysis",
  "gox-common",
  "gox-syntax",
 ]

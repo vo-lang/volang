@@ -1,0 +1,9 @@
+// Test return type checking
+package main
+
+func foo() int {
+    return "hello"
+}
+
+=== typecheck ===
+E2204
