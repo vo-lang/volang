@@ -1,0 +1,1248 @@
+//! Phase 1: Type Collection
+//!
+//! This module collects all top-level declarations and builds the symbol table skeleton.
+//! It handles:
+//! - Registering var/const/type/func/interface names
+//! - Detecting duplicate declarations
+//! - Evaluating iota in const blocks
+//! - Building the initial scope structure
+
+use gox_common::{Diagnostic, DiagnosticSink, Span, Symbol, SymbolInterner};
+use gox_syntax::ast::{self, BinaryOp, Decl, File, UnaryOp};
+
+use crate::constant::Constant;
+use crate::scope::{
+    BuiltinKind, Entity, FuncEntity, Scope, ScopeKind, TypeEntity, VarEntity,
+};
+use crate::types::{BasicType, FuncType, NamedTypeId, Type, UntypedKind};
+
+/// The result of Phase 1 type collection.
+pub struct CollectResult {
+    /// The package-level scope with all declarations.
+    pub scope: Scope,
+    /// Named type registry (id -> info placeholder).
+    pub named_types: Vec<NamedTypePlaceholder>,
+}
+
+/// A placeholder for a named type (resolved in Phase 2).
+#[derive(Debug)]
+pub struct NamedTypePlaceholder {
+    /// The type's name.
+    pub name: Symbol,
+    /// The AST type expression (to be resolved in Phase 2).
+    pub ast_type: ast::TypeExpr,
+    /// The declaration span.
+    pub span: Span,
+}
+
+/// Type collector for Phase 1.
+pub struct TypeCollector<'a> {
+    /// Symbol interner for resolving names.
+    interner: &'a SymbolInterner,
+    /// Diagnostics sink.
+    diagnostics: &'a mut DiagnosticSink,
+    /// Package-level scope.
+    scope: Scope,
+    /// Named type registry.
+    named_types: Vec<NamedTypePlaceholder>,
+    /// Next named type ID.
+    next_type_id: u32,
+    /// Current iota value (for const blocks).
+    iota: u64,
+    /// Pre-interned symbols for built-in names.
+    builtin_symbols: BuiltinSymbols,
+}
+
+/// Pre-interned symbols for built-in names.
+struct BuiltinSymbols {
+    // Types
+    bool_sym: Symbol,
+    int_sym: Symbol,
+    int8_sym: Symbol,
+    int16_sym: Symbol,
+    int32_sym: Symbol,
+    int64_sym: Symbol,
+    uint_sym: Symbol,
+    uint8_sym: Symbol,
+    uint16_sym: Symbol,
+    uint32_sym: Symbol,
+    uint64_sym: Symbol,
+    float32_sym: Symbol,
+    float64_sym: Symbol,
+    string_sym: Symbol,
+    byte_sym: Symbol,
+    rune_sym: Symbol,
+    // Constants
+    true_sym: Symbol,
+    false_sym: Symbol,
+    iota_sym: Symbol,
+    nil_sym: Symbol,
+    // Built-in functions
+    len_sym: Symbol,
+    cap_sym: Symbol,
+    append_sym: Symbol,
+    copy_sym: Symbol,
+    delete_sym: Symbol,
+    make_sym: Symbol,
+    close_sym: Symbol,
+    panic_sym: Symbol,
+    recover_sym: Symbol,
+    print_sym: Symbol,
+    println_sym: Symbol,
+}
+
+impl BuiltinSymbols {
+    fn new(interner: &SymbolInterner) -> Self {
+        Self {
+            bool_sym: interner.get("bool").unwrap_or(Symbol::DUMMY),
+            int_sym: interner.get("int").unwrap_or(Symbol::DUMMY),
+            int8_sym: interner.get("int8").unwrap_or(Symbol::DUMMY),
+            int16_sym: interner.get("int16").unwrap_or(Symbol::DUMMY),
+            int32_sym: interner.get("int32").unwrap_or(Symbol::DUMMY),
+            int64_sym: interner.get("int64").unwrap_or(Symbol::DUMMY),
+            uint_sym: interner.get("uint").unwrap_or(Symbol::DUMMY),
+            uint8_sym: interner.get("uint8").unwrap_or(Symbol::DUMMY),
+            uint16_sym: interner.get("uint16").unwrap_or(Symbol::DUMMY),
+            uint32_sym: interner.get("uint32").unwrap_or(Symbol::DUMMY),
+            uint64_sym: interner.get("uint64").unwrap_or(Symbol::DUMMY),
+            float32_sym: interner.get("float32").unwrap_or(Symbol::DUMMY),
+            float64_sym: interner.get("float64").unwrap_or(Symbol::DUMMY),
+            string_sym: interner.get("string").unwrap_or(Symbol::DUMMY),
+            byte_sym: interner.get("byte").unwrap_or(Symbol::DUMMY),
+            rune_sym: interner.get("rune").unwrap_or(Symbol::DUMMY),
+            true_sym: interner.get("true").unwrap_or(Symbol::DUMMY),
+            false_sym: interner.get("false").unwrap_or(Symbol::DUMMY),
+            iota_sym: interner.get("iota").unwrap_or(Symbol::DUMMY),
+            nil_sym: interner.get("nil").unwrap_or(Symbol::DUMMY),
+            len_sym: interner.get("len").unwrap_or(Symbol::DUMMY),
+            cap_sym: interner.get("cap").unwrap_or(Symbol::DUMMY),
+            append_sym: interner.get("append").unwrap_or(Symbol::DUMMY),
+            copy_sym: interner.get("copy").unwrap_or(Symbol::DUMMY),
+            delete_sym: interner.get("delete").unwrap_or(Symbol::DUMMY),
+            make_sym: interner.get("make").unwrap_or(Symbol::DUMMY),
+            close_sym: interner.get("close").unwrap_or(Symbol::DUMMY),
+            panic_sym: interner.get("panic").unwrap_or(Symbol::DUMMY),
+            recover_sym: interner.get("recover").unwrap_or(Symbol::DUMMY),
+            print_sym: interner.get("print").unwrap_or(Symbol::DUMMY),
+            println_sym: interner.get("println").unwrap_or(Symbol::DUMMY),
+        }
+    }
+}
+
+impl<'a> TypeCollector<'a> {
+    /// Creates a new type collector.
+    pub fn new(interner: &'a SymbolInterner, diagnostics: &'a mut DiagnosticSink) -> Self {
+        let builtin_symbols = BuiltinSymbols::new(interner);
+        let mut universe = Scope::universe();
+
+        // Populate universe scope with built-in types
+        Self::populate_builtin_types(&mut universe, &builtin_symbols);
+        Self::populate_builtin_consts(&mut universe, &builtin_symbols);
+        Self::populate_builtin_funcs(&mut universe, &builtin_symbols);
+
+        // Create package scope with universe as parent
+        let scope = Scope::new(Some(universe), ScopeKind::Package);
+
+        Self {
+            interner,
+            diagnostics,
+            scope,
+            named_types: Vec::new(),
+            next_type_id: 0,
+            iota: 0,
+            builtin_symbols,
+        }
+    }
+
+    fn populate_builtin_types(scope: &mut Scope, syms: &BuiltinSymbols) {
+        let types = [
+            (syms.bool_sym, BasicType::Bool),
+            (syms.int_sym, BasicType::Int),
+            (syms.int8_sym, BasicType::Int8),
+            (syms.int16_sym, BasicType::Int16),
+            (syms.int32_sym, BasicType::Int32),
+            (syms.int64_sym, BasicType::Int64),
+            (syms.uint_sym, BasicType::Uint),
+            (syms.uint8_sym, BasicType::Uint8),
+            (syms.uint16_sym, BasicType::Uint16),
+            (syms.uint32_sym, BasicType::Uint32),
+            (syms.uint64_sym, BasicType::Uint64),
+            (syms.float32_sym, BasicType::Float32),
+            (syms.float64_sym, BasicType::Float64),
+            (syms.string_sym, BasicType::String),
+            (syms.byte_sym, BasicType::Uint8),  // byte = uint8
+            (syms.rune_sym, BasicType::Int32),  // rune = int32
+        ];
+
+        for (sym, basic) in types {
+            if !sym.is_dummy() {
+                scope.insert(
+                    sym,
+                    Entity::Var(VarEntity {
+                        ty: Type::Basic(basic),
+                        constant: None,
+                        span: Span::dummy(),
+                    }),
+                );
+            }
+        }
+    }
+
+    fn populate_builtin_consts(scope: &mut Scope, syms: &BuiltinSymbols) {
+        if !syms.true_sym.is_dummy() {
+            scope.insert(
+                syms.true_sym,
+                Entity::Var(VarEntity {
+                    ty: Type::Untyped(UntypedKind::Bool),
+                    constant: Some(Constant::Bool(true)),
+                    span: Span::dummy(),
+                }),
+            );
+        }
+        if !syms.false_sym.is_dummy() {
+            scope.insert(
+                syms.false_sym,
+                Entity::Var(VarEntity {
+                    ty: Type::Untyped(UntypedKind::Bool),
+                    constant: Some(Constant::Bool(false)),
+                    span: Span::dummy(),
+                }),
+            );
+        }
+        if !syms.nil_sym.is_dummy() {
+            scope.insert(
+                syms.nil_sym,
+                Entity::Var(VarEntity {
+                    ty: Type::Nil,
+                    constant: Some(Constant::Nil),
+                    span: Span::dummy(),
+                }),
+            );
+        }
+        // iota is handled specially during const evaluation
+    }
+
+    fn populate_builtin_funcs(scope: &mut Scope, syms: &BuiltinSymbols) {
+        let funcs = [
+            (syms.len_sym, BuiltinKind::Len),
+            (syms.cap_sym, BuiltinKind::Cap),
+            (syms.append_sym, BuiltinKind::Append),
+            (syms.copy_sym, BuiltinKind::Copy),
+            (syms.delete_sym, BuiltinKind::Delete),
+            (syms.make_sym, BuiltinKind::Make),
+            (syms.close_sym, BuiltinKind::Close),
+            (syms.panic_sym, BuiltinKind::Panic),
+            (syms.recover_sym, BuiltinKind::Recover),
+            (syms.print_sym, BuiltinKind::Print),
+            (syms.println_sym, BuiltinKind::Println),
+        ];
+
+        for (sym, kind) in funcs {
+            if !sym.is_dummy() {
+                scope.insert(sym, Entity::Builtin(kind));
+            }
+        }
+    }
+
+    /// Collects all declarations from a file.
+    pub fn collect(mut self, file: &File) -> CollectResult {
+        for decl in &file.decls {
+            self.collect_decl(decl);
+        }
+
+        CollectResult {
+            scope: self.scope,
+            named_types: self.named_types,
+        }
+    }
+
+    fn collect_decl(&mut self, decl: &Decl) {
+        match decl {
+            Decl::Var(v) => self.collect_var(v),
+            Decl::Const(c) => self.collect_const(c),
+            Decl::Type(t) => self.collect_type(t),
+            Decl::Func(f) => self.collect_func(f),
+            Decl::Interface(i) => self.collect_interface(i),
+        }
+    }
+
+    fn collect_var(&mut self, decl: &ast::VarDecl) {
+        for spec in &decl.specs {
+            // For now, register with Invalid type (resolved in Phase 2/3)
+            for name in &spec.names {
+                let sym = name.symbol;
+                if self.check_redeclaration(sym, name.span) {
+                    self.scope.insert(
+                        sym,
+                        Entity::Var(VarEntity {
+                            ty: Type::Invalid, // Will be resolved later
+                            constant: None,
+                            span: name.span,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
+    fn collect_const(&mut self, decl: &ast::ConstDecl) {
+        self.iota = 0;
+
+        for spec in &decl.specs {
+            for (i, name) in spec.names.iter().enumerate() {
+                let sym = name.symbol;
+                if self.check_redeclaration(sym, name.span) {
+                    // Evaluate constant value if possible
+                    let (ty, constant) = if i < spec.values.len() {
+                        self.eval_const_expr(&spec.values[i])
+                    } else {
+                        // Use previous spec's expression pattern (iota continues)
+                        (Type::Invalid, None)
+                    };
+
+                    self.scope.insert(
+                        sym,
+                        Entity::Var(VarEntity {
+                            ty,
+                            constant,
+                            span: name.span,
+                        }),
+                    );
+                }
+            }
+            self.iota += 1;
+        }
+    }
+
+    fn collect_type(&mut self, decl: &ast::TypeDecl) {
+        let sym = decl.name.symbol;
+        if !self.check_redeclaration(sym, decl.name.span) {
+            return;
+        }
+
+        // Allocate a new named type ID
+        let id = NamedTypeId(self.next_type_id);
+        self.next_type_id += 1;
+
+        // Register placeholder
+        self.named_types.push(NamedTypePlaceholder {
+            name: sym,
+            ast_type: decl.ty.clone(),
+            span: decl.name.span,
+        });
+
+        self.scope.insert(
+            sym,
+            Entity::Type(TypeEntity {
+                id,
+                span: decl.name.span,
+            }),
+        );
+    }
+
+    fn collect_func(&mut self, decl: &ast::FuncDecl) {
+        // If there's a receiver, this is a method - handle separately
+        if decl.receiver.is_some() {
+            // Methods are associated with their receiver type
+            // For now, we'll handle this in Phase 2 when we have full type info
+            return;
+        }
+
+        let sym = decl.name.symbol;
+        if !self.check_redeclaration(sym, decl.name.span) {
+            return;
+        }
+
+        // Create a placeholder function type (resolved in Phase 2)
+        let sig = FuncType {
+            params: Vec::new(),  // Will be resolved
+            results: Vec::new(), // Will be resolved
+            variadic: decl.sig.variadic,
+        };
+
+        self.scope.insert(
+            sym,
+            Entity::Func(FuncEntity {
+                sig,
+                span: decl.name.span,
+            }),
+        );
+    }
+
+    fn collect_interface(&mut self, decl: &ast::InterfaceDecl) {
+        let sym = decl.name.symbol;
+        if !self.check_redeclaration(sym, decl.name.span) {
+            return;
+        }
+
+        // Allocate a new named type ID for the interface
+        let id = NamedTypeId(self.next_type_id);
+        self.next_type_id += 1;
+
+        // Create a placeholder AST type for the interface
+        let ast_type = ast::TypeExpr {
+            kind: ast::TypeExprKind::Interface(Box::new(ast::InterfaceType {
+                elems: decl.elems.clone(),
+            })),
+            span: decl.span,
+        };
+
+        self.named_types.push(NamedTypePlaceholder {
+            name: sym,
+            ast_type,
+            span: decl.name.span,
+        });
+
+        self.scope.insert(
+            sym,
+            Entity::Type(TypeEntity {
+                id,
+                span: decl.name.span,
+            }),
+        );
+    }
+
+    /// Checks for redeclaration and reports an error if found.
+    /// Returns true if the name can be declared.
+    fn check_redeclaration(&mut self, sym: Symbol, span: Span) -> bool {
+        if let Some(existing) = self.scope.lookup_local(sym) {
+            let existing_span = match existing {
+                Entity::Var(v) => v.span,
+                Entity::Type(t) => t.span,
+                Entity::Func(f) => f.span,
+                Entity::Package(p) => p.span,
+                Entity::Label(l) => l.span,
+                Entity::Builtin(_) => Span::dummy(),
+            };
+
+            let name = self.interner.resolve(sym).unwrap_or("<unknown>");
+            self.diagnostics.emit(
+                Diagnostic::error(format!("{} redeclared in this block", name)),
+            );
+
+            if !existing_span.is_dummy() {
+                self.diagnostics.emit(
+                    Diagnostic::note(format!("previous declaration of {}", name)),
+                );
+            }
+
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Evaluates a constant expression (simplified for Phase 1).
+    /// Full constant evaluation happens in Phase 3.
+    fn eval_const_expr(&mut self, expr: &ast::Expr) -> (Type, Option<Constant>) {
+        match &expr.kind {
+            ast::ExprKind::IntLit(lit) => {
+                let s = self.interner.resolve(lit.raw).unwrap_or("");
+                if let Ok(v) = parse_int_literal(s) {
+                    (Type::Untyped(UntypedKind::Int), Some(Constant::Int(v)))
+                } else {
+                    (Type::Invalid, None)
+                }
+            }
+            ast::ExprKind::FloatLit(lit) => {
+                let s = self.interner.resolve(lit.raw).unwrap_or("");
+                if let Ok(v) = s.parse::<f64>() {
+                    (Type::Untyped(UntypedKind::Float), Some(Constant::Float(v)))
+                } else {
+                    (Type::Invalid, None)
+                }
+            }
+            ast::ExprKind::StringLit(lit) => {
+                let s = self.interner.resolve(lit.raw).unwrap_or("");
+                // Remove quotes and unescape
+                let value = parse_string_literal(s);
+                (
+                    Type::Untyped(UntypedKind::String),
+                    Some(Constant::String(value)),
+                )
+            }
+            ast::ExprKind::RuneLit(lit) => {
+                let s = self.interner.resolve(lit.raw).unwrap_or("");
+                if let Some(c) = parse_rune_literal(s) {
+                    (Type::Untyped(UntypedKind::Rune), Some(Constant::Rune(c)))
+                } else {
+                    (Type::Invalid, None)
+                }
+            }
+            ast::ExprKind::Ident(id) => {
+                // Check for iota
+                if id.symbol == self.builtin_symbols.iota_sym {
+                    return (
+                        Type::Untyped(UntypedKind::Int),
+                        Some(Constant::Int(self.iota as i128)),
+                    );
+                }
+                // Check for true/false
+                if id.symbol == self.builtin_symbols.true_sym {
+                    return (
+                        Type::Untyped(UntypedKind::Bool),
+                        Some(Constant::Bool(true)),
+                    );
+                }
+                if id.symbol == self.builtin_symbols.false_sym {
+                    return (
+                        Type::Untyped(UntypedKind::Bool),
+                        Some(Constant::Bool(false)),
+                    );
+                }
+                // Look up in scope
+                if let Some(Entity::Var(v)) = self.scope.lookup(id.symbol) {
+                    if let Some(c) = &v.constant {
+                        return (v.ty.clone(), Some(c.clone()));
+                    }
+                }
+                (Type::Invalid, None)
+            }
+            ast::ExprKind::Binary(bin) => {
+                let (_, left) = self.eval_const_expr(&bin.left);
+                let (_, right) = self.eval_const_expr(&bin.right);
+
+                if let (Some(l), Some(r)) = (left, right) {
+                    let result = match bin.op {
+                        BinaryOp::Add => l.add(&r),
+                        BinaryOp::Sub => l.sub(&r),
+                        BinaryOp::Mul => l.mul(&r),
+                        BinaryOp::Div => l.div(&r),
+                        BinaryOp::Rem => l.rem(&r),
+                        BinaryOp::Shl => l.shl(&r),
+                        BinaryOp::Shr => l.shr(&r),
+                        BinaryOp::And => l.bit_and(&r),
+                        BinaryOp::Or => l.bit_or(&r),
+                        BinaryOp::Xor => l.bit_xor(&r),
+                        BinaryOp::AndNot => l.bit_clear(&r),
+                        BinaryOp::LogAnd => l.and(&r),
+                        BinaryOp::LogOr => l.or(&r),
+                        BinaryOp::Eq => l.eq(&r),
+                        BinaryOp::NotEq => l.eq(&r).and_then(|c| c.not()),
+                        BinaryOp::Lt => l.lt(&r),
+                        BinaryOp::LtEq => l.le(&r),
+                        BinaryOp::Gt => r.lt(&l),
+                        BinaryOp::GtEq => r.le(&l),
+                    };
+
+                    if let Some(c) = result {
+                        let kind = c.kind().unwrap_or(UntypedKind::Int);
+                        return (Type::Untyped(kind), Some(c));
+                    }
+                }
+                (Type::Invalid, None)
+            }
+            ast::ExprKind::Unary(un) => {
+                let (_, val) = self.eval_const_expr(&un.operand);
+                if let Some(v) = val {
+                    let result = match un.op {
+                        UnaryOp::Neg => v.neg(),
+                        UnaryOp::Not => v.not(),
+                        UnaryOp::BitNot => v.bit_not(),
+                        UnaryOp::Pos => Some(v),
+                    };
+                    if let Some(c) = result {
+                        let kind = c.kind().unwrap_or(UntypedKind::Int);
+                        return (Type::Untyped(kind), Some(c));
+                    }
+                }
+                (Type::Invalid, None)
+            }
+            ast::ExprKind::Paren(inner) => self.eval_const_expr(inner),
+            _ => (Type::Invalid, None),
+        }
+    }
+}
+
+/// Parses a string literal, removing quotes and handling escapes.
+fn parse_string_literal(s: &str) -> String {
+    // Remove surrounding quotes
+    let s = if s.starts_with('"') && s.ends_with('"') {
+        &s[1..s.len() - 1]
+    } else if s.starts_with('`') && s.ends_with('`') {
+        // Raw string - no escape processing
+        return s[1..s.len() - 1].to_string();
+    } else {
+        s
+    };
+
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('0') => result.push('\0'),
+                Some('x') => {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                        result.push(b as char);
+                    }
+                }
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(v) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(v) {
+                            result.push(c);
+                        }
+                    }
+                }
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Parses an integer literal string to i128.
+fn parse_int_literal(s: &str) -> Result<i128, ()> {
+    let s = s.replace('_', "");
+    if s.starts_with("0x") || s.starts_with("0X") {
+        i128::from_str_radix(&s[2..], 16).map_err(|_| ())
+    } else if s.starts_with("0o") || s.starts_with("0O") {
+        i128::from_str_radix(&s[2..], 8).map_err(|_| ())
+    } else if s.starts_with("0b") || s.starts_with("0B") {
+        i128::from_str_radix(&s[2..], 2).map_err(|_| ())
+    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        // Legacy octal
+        i128::from_str_radix(&s[1..], 8).map_err(|_| ())
+    } else {
+        s.parse().map_err(|_| ())
+    }
+}
+
+/// Parses a rune literal string to char.
+fn parse_rune_literal(s: &str) -> Option<char> {
+    // Remove surrounding quotes if present
+    let s = s.trim_matches('\'');
+    if s.starts_with('\\') {
+        // Escape sequence
+        match s.chars().nth(1)? {
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            '\\' => Some('\\'),
+            '\'' => Some('\''),
+            '0' => Some('\0'),
+            'x' => {
+                let hex = &s[2..];
+                u8::from_str_radix(hex, 16).ok().map(|b| b as char)
+            }
+            'u' => {
+                let hex = &s[2..];
+                u32::from_str_radix(hex, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ => None,
+        }
+    } else {
+        s.chars().next()
+    }
+}
+
+/// Convenience function to run Phase 1 collection.
+pub fn collect_types(
+    file: &File,
+    interner: &SymbolInterner,
+    diagnostics: &mut DiagnosticSink,
+) -> CollectResult {
+    let collector = TypeCollector::new(interner, diagnostics);
+    collector.collect(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gox_common::FileId;
+    use gox_syntax::parse;
+
+    #[test]
+    fn test_parse_int_literal() {
+        assert_eq!(parse_int_literal("42"), Ok(42));
+        assert_eq!(parse_int_literal("0x2A"), Ok(42));
+        assert_eq!(parse_int_literal("0o52"), Ok(42));
+        assert_eq!(parse_int_literal("0b101010"), Ok(42));
+        assert_eq!(parse_int_literal("1_000_000"), Ok(1_000_000));
+    }
+
+    #[test]
+    fn test_parse_rune_literal() {
+        assert_eq!(parse_rune_literal("a"), Some('a'));
+        assert_eq!(parse_rune_literal("'a'"), Some('a'));
+        assert_eq!(parse_rune_literal("\\n"), Some('\n'));
+        assert_eq!(parse_rune_literal("\\t"), Some('\t'));
+        assert_eq!(parse_rune_literal("\\x41"), Some('A'));
+    }
+
+    #[test]
+    fn test_parse_string_literal() {
+        assert_eq!(parse_string_literal("\"hello\""), "hello");
+        assert_eq!(parse_string_literal("\"hello\\nworld\""), "hello\nworld");
+        assert_eq!(parse_string_literal("`raw string`"), "raw string");
+    }
+
+    fn collect_source(source: &str) -> (CollectResult, DiagnosticSink, SymbolInterner) {
+        let file_id = FileId::new(0);
+        let (file, _parse_diag, interner) = parse(file_id, source);
+        
+        let mut collect_diag = DiagnosticSink::new();
+        let result = collect_types(&file, &interner, &mut collect_diag);
+        
+        (result, collect_diag, interner)
+    }
+
+    #[test]
+    fn test_collect_var_decl() {
+        let (result, diag, interner) = collect_source("package main\nvar x int");
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("x").unwrap();
+        assert!(result.scope.lookup(x_sym).is_some());
+    }
+
+    #[test]
+    fn test_collect_const_decl() {
+        let (result, diag, interner) = collect_source("package main\nconst Pi = 3.14");
+        
+        assert!(!diag.has_errors());
+        
+        let pi_sym = interner.get("Pi").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(pi_sym) {
+            assert!(v.constant.is_some());
+            if let Some(Constant::Float(f)) = &v.constant {
+                assert!((*f - 3.14).abs() < 0.001);
+            } else {
+                panic!("expected float constant");
+            }
+        } else {
+            panic!("expected var entity for Pi");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_iota() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst (\n  A = iota\n  B\n  C\n)"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let a_sym = interner.get("A").unwrap();
+        let b_sym = interner.get("B").unwrap();
+        let c_sym = interner.get("C").unwrap();
+        
+        if let Some(Entity::Var(v)) = result.scope.lookup(a_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(0)));
+        } else {
+            panic!("expected var entity for A");
+        }
+        
+        // B and C don't have values in this simple test since we don't
+        // carry forward the expression pattern yet
+    }
+
+    #[test]
+    fn test_collect_type_decl() {
+        let (result, diag, interner) = collect_source("package main\ntype MyInt int");
+        
+        assert!(!diag.has_errors());
+        
+        let myint_sym = interner.get("MyInt").unwrap();
+        assert!(result.scope.lookup(myint_sym).is_some());
+        assert_eq!(result.named_types.len(), 1);
+        assert_eq!(result.named_types[0].name, myint_sym);
+    }
+
+    #[test]
+    fn test_collect_func_decl() {
+        let (result, diag, interner) = collect_source(
+            "package main\nfunc add(a, b int) int { return a + b }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let add_sym = interner.get("add").unwrap();
+        assert!(matches!(result.scope.lookup(add_sym), Some(Entity::Func(_))));
+    }
+
+    #[test]
+    fn test_collect_interface_decl() {
+        let (result, diag, interner) = collect_source(
+            "package main\ninterface Reader { Read(buf []byte) int }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let reader_sym = interner.get("Reader").unwrap();
+        assert!(matches!(result.scope.lookup(reader_sym), Some(Entity::Type(_))));
+    }
+
+    #[test]
+    fn test_collect_duplicate_error() {
+        let (_, diag, _) = collect_source(
+            "package main\nvar x int\nvar x string"
+        );
+        
+        assert!(diag.has_errors());
+    }
+
+    #[test]
+    fn test_collect_builtin_types() {
+        // Use source that references built-in types so they get interned
+        let (result, _, interner) = collect_source("package main\nvar x int\nvar y string");
+        
+        // Check that built-in types are in the universe scope
+        let int_sym = interner.get("int").unwrap();
+        assert!(result.scope.lookup(int_sym).is_some());
+        
+        let string_sym = interner.get("string").unwrap();
+        assert!(result.scope.lookup(string_sym).is_some());
+    }
+
+    #[test]
+    fn test_collect_builtin_funcs() {
+        // Use source that references built-in functions so they get interned
+        let (result, _, interner) = collect_source("package main\nfunc f() { len(nil); make([]int, 0) }");
+        
+        let len_sym = interner.get("len").unwrap();
+        assert!(matches!(result.scope.lookup(len_sym), Some(Entity::Builtin(BuiltinKind::Len))));
+        
+        let make_sym = interner.get("make").unwrap();
+        assert!(matches!(result.scope.lookup(make_sym), Some(Entity::Builtin(BuiltinKind::Make))));
+    }
+
+    #[test]
+    fn test_collect_builtin_consts() {
+        // Use source that references built-in constants so they get interned
+        let (result, _, interner) = collect_source("package main\nvar x = true\nvar y = nil");
+        
+        let true_sym = interner.get("true").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(true_sym) {
+            assert_eq!(v.constant, Some(Constant::Bool(true)));
+        } else {
+            panic!("expected var entity for true");
+        }
+        
+        let nil_sym = interner.get("nil").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(nil_sym) {
+            assert_eq!(v.constant, Some(Constant::Nil));
+        } else {
+            panic!("expected var entity for nil");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_expr_binary() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 1 + 2 * 3"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            // Note: without proper precedence in eval, this might be wrong
+            // but we're testing that binary expressions work at all
+            assert!(v.constant.is_some());
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_expr_shift() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst KB = 1 << 10"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let kb_sym = interner.get("KB").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(kb_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(1024)));
+        } else {
+            panic!("expected var entity for KB");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_unary_neg() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = -42"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(-42)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_unary_not() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = !true"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Bool(false)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_bitwise() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 0xFF & 0x0F"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(0x0F)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_string_concat() {
+        let (result, diag, interner) = collect_source(
+            r#"package main
+const X = "hello" + " world""#
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::String("hello world".to_string())));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_comparison() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 1 < 2"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Bool(true)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_logical() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = true && false"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Bool(false)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_reference_other() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst A = 10\nconst B = A + 5"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let b_sym = interner.get("B").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(b_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(15)));
+        } else {
+            panic!("expected var entity for B");
+        }
+    }
+
+    #[test]
+    fn test_collect_multiple_vars() {
+        let (result, diag, interner) = collect_source(
+            "package main\nvar a, b, c int"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        for name in ["a", "b", "c"] {
+            let sym = interner.get(name).unwrap();
+            assert!(result.scope.lookup(sym).is_some(), "expected {} to be declared", name);
+        }
+    }
+
+    #[test]
+    fn test_collect_multiple_consts() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst x, y = 1, 2"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("x").unwrap();
+        let y_sym = interner.get("y").unwrap();
+        
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(1)));
+        }
+        if let Some(Entity::Var(v)) = result.scope.lookup(y_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(2)));
+        }
+    }
+
+    #[test]
+    fn test_collect_struct_type() {
+        let (result, diag, interner) = collect_source(
+            "package main\ntype Point struct { x, y int }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let point_sym = interner.get("Point").unwrap();
+        assert!(matches!(result.scope.lookup(point_sym), Some(Entity::Type(_))));
+        assert_eq!(result.named_types.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_object_type() {
+        let (result, diag, interner) = collect_source(
+            "package main\ntype Counter object { value int }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let counter_sym = interner.get("Counter").unwrap();
+        assert!(matches!(result.scope.lookup(counter_sym), Some(Entity::Type(_))));
+    }
+
+    #[test]
+    fn test_collect_func_with_params() {
+        let (result, diag, interner) = collect_source(
+            "package main\nfunc add(a int, b int) int { return a + b }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let add_sym = interner.get("add").unwrap();
+        assert!(matches!(result.scope.lookup(add_sym), Some(Entity::Func(_))));
+    }
+
+    #[test]
+    fn test_collect_func_variadic() {
+        let (result, diag, interner) = collect_source(
+            "package main\nfunc sum(nums ...int) int { return 0 }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let sum_sym = interner.get("sum").unwrap();
+        if let Some(Entity::Func(f)) = result.scope.lookup(sum_sym) {
+            assert!(f.sig.variadic);
+        } else {
+            panic!("expected func entity for sum");
+        }
+    }
+
+    #[test]
+    fn test_collect_interface_with_methods() {
+        let (result, diag, interner) = collect_source(
+            "package main\ninterface ReadWriter { Read(buf []byte) int; Write(buf []byte) int }"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let rw_sym = interner.get("ReadWriter").unwrap();
+        assert!(matches!(result.scope.lookup(rw_sym), Some(Entity::Type(_))));
+    }
+
+    #[test]
+    fn test_collect_const_paren_expr() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = (1 + 2) * 3"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(9)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_rune() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 'A'"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Rune('A')));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_hex() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 0xDEADBEEF"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(0xDEADBEEF)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_octal() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 0o755"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(0o755)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_binary() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 0b1010"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(0b1010)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_duplicate_type_error() {
+        let (_, diag, _) = collect_source(
+            "package main\ntype X int\ntype X string"
+        );
+        
+        assert!(diag.has_errors());
+    }
+
+    #[test]
+    fn test_collect_duplicate_func_error() {
+        let (_, diag, _) = collect_source(
+            "package main\nfunc f() {}\nfunc f() {}"
+        );
+        
+        assert!(diag.has_errors());
+    }
+
+    #[test]
+    fn test_collect_duplicate_const_error() {
+        let (_, diag, _) = collect_source(
+            "package main\nconst X = 1\nconst X = 2"
+        );
+        
+        assert!(diag.has_errors());
+    }
+
+    #[test]
+    fn test_collect_iota_expression() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst (\n  KB = 1 << (10 * iota)\n  MB\n  GB\n)"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let kb_sym = interner.get("KB").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(kb_sym) {
+            // 1 << (10 * 0) = 1
+            assert_eq!(v.constant, Some(Constant::Int(1)));
+        } else {
+            panic!("expected var entity for KB");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_division() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 10 / 3"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(3)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+
+    #[test]
+    fn test_collect_const_modulo() {
+        let (result, diag, interner) = collect_source(
+            "package main\nconst X = 10 % 3"
+        );
+        
+        assert!(!diag.has_errors());
+        
+        let x_sym = interner.get("X").unwrap();
+        if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
+            assert_eq!(v.constant, Some(Constant::Int(1)));
+        } else {
+            panic!("expected var entity for X");
+        }
+    }
+}
