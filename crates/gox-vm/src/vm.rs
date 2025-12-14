@@ -875,13 +875,23 @@ impl Vm {
                 let container = self.read_reg(fiber_id, a) as GcRef;
                 let iter = match b {
                     0 => { // slice
-                        let len = slice::len(container);
-                        let elem_size = slice::elem_size(container);
-                        IterState::Slice {
-                            slice_ref: container,
-                            elem_size,
-                            index: 0,
-                            len,
+                        // Handle nil slice
+                        if container.is_null() {
+                            IterState::Slice {
+                                slice_ref: container,
+                                elem_size: 1,
+                                index: 0,
+                                len: 0,
+                            }
+                        } else {
+                            let len = slice::len(container);
+                            let elem_size = slice::elem_size(container);
+                            IterState::Slice {
+                                slice_ref: container,
+                                elem_size,
+                                index: 0,
+                                len,
+                            }
                         }
                     }
                     1 => { // map
@@ -907,62 +917,53 @@ impl Vm {
             
             Opcode::IterNext => {
                 // a=index_dest, b=value_dest, c=done_offset
-                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
-                let iter = fiber.iter_stack.last_mut().unwrap();
-                
-                let done = match iter {
-                    IterState::Slice { slice_ref, elem_size, index, len } => {
-                        if *index >= *len {
-                            true
-                        } else {
-                            let idx = *index;
-                            let val = slice::get(*slice_ref, idx);
-                            *index += 1;
-                            
-                            // Can't borrow self while fiber is borrowed, so store values after
-                            let _ = fiber;
-                            self.write_reg(fiber_id, a, idx as u64);
-                            self.write_reg(fiber_id, b, val);
-                            false
-                        }
-                    }
-                    IterState::Map { map_ref, index } => {
-                        match map::iter_at(*map_ref, *index) {
-                            Some((k, v)) => {
+                // First, get iteration result without holding mutable borrow
+                let (done, key_val, elem_val) = {
+                    let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                    let iter = fiber.iter_stack.last_mut();
+                    
+                    let iter = iter.unwrap();
+                    
+                    match iter {
+                        IterState::Slice { slice_ref, index, len, .. } => {
+                            if *index >= *len {
+                                (true, 0, 0)
+                            } else {
+                                let idx = *index;
+                                let val = slice::get(*slice_ref, idx);
                                 *index += 1;
-                                let _ = fiber;
-                                self.write_reg(fiber_id, a, k);
-                                self.write_reg(fiber_id, b, v);
-                                false
+                                (false, idx as u64, val)
                             }
-                            None => true,
                         }
-                    }
-                    IterState::String { str_ref, byte_pos } => {
-                        let bytes = string::as_bytes(*str_ref);
-                        if *byte_pos >= bytes.len() {
-                            true
-                        } else {
-                            let pos = *byte_pos;
-                            let byte = bytes[pos];
-                            *byte_pos += 1;
-                            let _ = fiber;
-                            self.write_reg(fiber_id, a, pos as u64);
-                            self.write_reg(fiber_id, b, byte as u64);
-                            false
+                        IterState::Map { map_ref, index } => {
+                            match map::iter_at(*map_ref, *index) {
+                                Some((k, v)) => {
+                                    *index += 1;
+                                    (false, k, v)
+                                }
+                                None => (true, 0, 0),
+                            }
                         }
-                    }
-                    IterState::IntRange { current, end, step } => {
-                        let done = if *step > 0 { *current >= *end } else { *current <= *end };
-                        if done {
-                            true
-                        } else {
-                            let val = *current;
-                            *current += *step;
-                            let _ = fiber;
-                            self.write_reg(fiber_id, a, val as u64);
-                            self.write_reg(fiber_id, b, val as u64);
-                            false
+                        IterState::String { str_ref, byte_pos } => {
+                            let bytes = string::as_bytes(*str_ref);
+                            if *byte_pos >= bytes.len() {
+                                (true, 0, 0)
+                            } else {
+                                let pos = *byte_pos;
+                                let byte = bytes[pos];
+                                *byte_pos += 1;
+                                (false, pos as u64, byte as u64)
+                            }
+                        }
+                        IterState::IntRange { current, end, step } => {
+                            let is_done = if *step > 0 { *current >= *end } else { *current <= *end };
+                            if is_done {
+                                (true, 0, 0)
+                            } else {
+                                let val = *current;
+                                *current += *step;
+                                (false, val as u64, val as u64)
+                            }
                         }
                     }
                 };
@@ -972,6 +973,9 @@ impl Vm {
                     let fiber = self.scheduler.get_mut(fiber_id).unwrap();
                     let frame = fiber.frame_mut().unwrap();
                     frame.pc = (frame.pc as i32 + offset - 1) as usize;
+                } else {
+                    self.write_reg(fiber_id, a, key_val);
+                    self.write_reg(fiber_id, b, elem_val);
                 }
             }
             

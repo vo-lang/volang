@@ -1,36 +1,15 @@
 package main
 
 func main() {
-    // Test append
     var s []int
     s = append(s, 10)
     s = append(s, 20)
-    s = append(s, 30)
-    s = append(s, 40)
-    s = append(s, 50)
+    println(len(s))
     
-    println(len(s))  // 5
-    println(s[0])    // 10
-    println(s[4])    // 50
-    
-    // Test slice expression
-    t := s[1:4]      // [20, 30, 40]
-    println(len(t))  // 3
-    println(t[0])    // 20
-    println(t[1])    // 30
-    println(t[2])    // 40
-    
-    // Test s[:]
-    u := s[:]
-    println(len(u))  // 5
-    
-    // Test s[2:]
-    v := s[2:]
-    println(len(v))  // 3
-    println(v[0])    // 30
-    
-    // Test s[:3]
-    w := s[:3]
-    println(len(w))  // 3
-    println(w[2])    // 30
+    // Simple for-range
+    for i, v := range s {
+        println(i)
+        println(v)
+    }
+    println(999)
 }

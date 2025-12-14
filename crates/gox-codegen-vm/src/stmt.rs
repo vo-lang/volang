@@ -339,8 +339,60 @@ fn compile_for(
                 fctx.patch_jump(pc, end_offset);
             }
         }
-        ForClause::Range { .. } => {
-            return Err(CodegenError::Unsupported("for-range".to_string()));
+        ForClause::Range { key, value, define, expr: range_expr } => {
+            // Compile the range expression (slice/map/string)
+            let container = expr::compile_expr(ctx, fctx, range_expr)?;
+            
+            // TODO: determine iter_type from expression type
+            // For now, assume slice (type 0)
+            let iter_type = 0u16;
+            
+            // Allocate registers for key and value first
+            let key_reg = if let Some(k) = key {
+                if *define {
+                    fctx.define_local(*k, 1);
+                }
+                fctx.lookup_local(k.symbol).map(|v| v.reg).unwrap_or_else(|| fctx.regs.alloc(1))
+            } else {
+                fctx.regs.alloc(1) // dummy register
+            };
+            
+            let val_reg = if let Some(v) = value {
+                if *define {
+                    fctx.define_local(*v, 1);
+                }
+                fctx.lookup_local(v.symbol).map(|v| v.reg).unwrap_or_else(|| fctx.regs.alloc(1))
+            } else {
+                fctx.regs.alloc(1) // dummy register
+            };
+            
+            // IterBegin: a=container, b=iter_type
+            fctx.emit(Opcode::IterBegin, container, iter_type, 0);
+            
+            // Loop start - right before IterNext
+            let iter_next_pc = fctx.pc();
+            fctx.emit(Opcode::IterNext, key_reg, val_reg, 0);
+            
+            // Compile loop body
+            compile_block(ctx, fctx, &for_stmt.body)?;
+            
+            // Jump back to IterNext (not IterBegin!)
+            let jump_pc = fctx.pc();
+            fctx.emit(Opcode::Jump, 0, 0, 0);
+            // offset = target - current, VM does: pc = pc + offset - 1
+            // So offset = target - jump_pc
+            let back_offset = (iter_next_pc as i32) - (jump_pc as i32);
+            fctx.patch_jump(jump_pc, back_offset);
+            
+            // Patch IterNext's done_offset to jump here (after IterEnd)
+            let end_pc = fctx.pc();
+            
+            // IterEnd
+            fctx.emit(Opcode::IterEnd, 0, 0, 0);
+            
+            // Patch IterNext to jump past IterEnd when done
+            let end_offset = (fctx.pc() as i32) - (iter_next_pc as i32);
+            fctx.code[iter_next_pc].c = end_offset as u16;
         }
     }
     Ok(())
