@@ -231,6 +231,16 @@ pub mod slice {
     }
     
     pub fn append(gc: &mut Gc, type_id: TypeId, arr_type_id: TypeId, slice: GcRef, val: u64) -> GcRef {
+        // Handle nil slice
+        if slice.is_null() {
+            // Create a new slice with capacity 4
+            let elem_sz = 1; // Default element size for nil slice
+            let elem_ty = 0; // Default element type
+            let new_arr = array::create(gc, arr_type_id, elem_ty, elem_sz, 4);
+            array::set(new_arr, 0, val);
+            return create(gc, type_id, new_arr, 0, 1, 4);
+        }
+        
         let current_len = len(slice);
         let current_cap = cap(slice);
         let elem_sz = elem_size(slice);
