@@ -83,13 +83,9 @@ fn compile_ident(
                         let val = *v as u32;
                         fctx.emit(Opcode::LoadInt, dst, val as u16, (val >> 16) as u16);
                     }
-                    crate::ConstValue::Float(v) => {
-                        // Load float as raw bits
-                        let bits = v.to_bits();
-                        fctx.emit(Opcode::LoadInt, dst, bits as u16, (bits >> 16) as u16);
-                        // For 64-bit float, need to handle high bits too
-                        // For now, store as 64-bit value directly
-                        fctx.emit(Opcode::MovN, dst, (bits >> 32) as u16, (bits >> 48) as u16);
+                    crate::ConstValue::FloatIdx(idx) => {
+                        // Load float from constant pool
+                        fctx.emit(Opcode::LoadConst, dst, *idx, 0);
                     }
                 }
                 Ok(dst)

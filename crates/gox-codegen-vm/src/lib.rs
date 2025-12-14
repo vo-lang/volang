@@ -163,7 +163,8 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
             .collect();
         
         // Collect constant values from scope for inlining
-        let pkg_consts: HashMap<Symbol, ConstValue> = collect_const_values(&pkg.types.scope, &pkg.interner);
+        // Float constants are added to the module's constant pool
+        let pkg_consts: HashMap<Symbol, ConstValue> = collect_const_values(&pkg.types.scope, &pkg.interner, &mut module);
         
         for file in &pkg.files {
             for decl in &file.decls {
@@ -246,20 +247,25 @@ fn compile_simple_expr(
     reg
 }
 
-/// Constant value for inlining (either i64 or f64).
+/// Constant value for inlining.
 #[derive(Clone, Copy)]
 pub enum ConstValue {
+    /// Integer constant (inlined as immediate)
     Int(i64),
-    Float(f64),
+    /// Float constant (stored in constant pool, value is index)
+    FloatIdx(u16),
 }
 
 /// Collect constant values from scope for inlining.
+/// Float constants are added to the module's constant pool.
 fn collect_const_values(
     scope: &gox_analysis::scope::Scope,
     _interner: &SymbolInterner,
+    module: &mut Module,
 ) -> HashMap<Symbol, ConstValue> {
     use gox_analysis::scope::Entity;
     use gox_analysis::types::{Type, BasicType};
+    use gox_vm::bytecode::Constant as VmConstant;
     
     let mut consts = HashMap::new();
     
@@ -271,8 +277,11 @@ fn collect_const_values(
                     Type::Basic(BasicType::Float32) | Type::Basic(BasicType::Float64));
                 
                 if is_float {
-                    // Float constants need constant pool support - skip for now
-                    // TODO: Add float constants to module constant pool
+                    // Add float to constant pool
+                    if let Some(val) = constant.to_f64() {
+                        let idx = module.add_constant(VmConstant::Float(val));
+                        consts.insert(*sym, ConstValue::FloatIdx(idx));
+                    }
                 } else {
                     // For int constants, try to fit in i64
                     if let Some(val) = constant.to_i64() {
