@@ -57,6 +57,14 @@ pub struct LocalVar {
 }
 
 /// Function codegen context.
+/// Loop context for break/continue
+#[derive(Debug, Clone)]
+pub struct LoopContext {
+    pub continue_pc: usize,  // PC to jump to for continue (0 = use continue_pcs)
+    pub break_pcs: Vec<usize>,  // PCs of break jumps to patch
+    pub continue_pcs: Vec<usize>,  // PCs of continue jumps to patch (for three-clause)
+}
+
 #[derive(Debug)]
 pub struct FuncContext {
     pub name: String,
@@ -66,6 +74,7 @@ pub struct FuncContext {
     pub param_count: u16,
     pub param_slots: u16,
     pub ret_slots: u16,
+    pub loop_stack: Vec<LoopContext>,
 }
 
 impl FuncContext {
@@ -78,7 +87,36 @@ impl FuncContext {
             param_count: 0,
             param_slots: 0,
             ret_slots: 0,
+            loop_stack: Vec::new(),
         }
+    }
+    
+    pub fn push_loop(&mut self, continue_pc: usize) {
+        self.loop_stack.push(LoopContext {
+            continue_pc,
+            break_pcs: Vec::new(),
+            continue_pcs: Vec::new(),
+        });
+    }
+    
+    pub fn pop_loop(&mut self) -> Option<LoopContext> {
+        self.loop_stack.pop()
+    }
+    
+    pub fn add_break(&mut self, pc: usize) {
+        if let Some(ctx) = self.loop_stack.last_mut() {
+            ctx.break_pcs.push(pc);
+        }
+    }
+    
+    pub fn add_continue(&mut self, pc: usize) {
+        if let Some(ctx) = self.loop_stack.last_mut() {
+            ctx.continue_pcs.push(pc);
+        }
+    }
+    
+    pub fn current_continue_pc(&self) -> Option<usize> {
+        self.loop_stack.last().map(|ctx| ctx.continue_pc)
     }
     
     pub fn emit(&mut self, op: Opcode, a: u16, b: u16, c: u16) {

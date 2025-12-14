@@ -1,15 +1,23 @@
 package main
 
 func main() {
-    var s []int
-    s = append(s, 10)
-    s = append(s, 20)
-    println(len(s))
-    
-    // Simple for-range
-    for i, v := range s {
+    // Test break
+    println("break:")
+    for i := 0; i < 10; i++ {
+        if i == 3 {
+            break
+        }
         println(i)
-        println(v)
     }
+    
+    // Test continue
+    println("continue:")
+    for i := 0; i < 5; i++ {
+        if i == 2 {
+            continue
+        }
+        println(i)
+    }
+    
     println(999)
 }

@@ -80,8 +80,31 @@ pub fn compile_stmt(
         StmtKind::Select(_) => Err(CodegenError::Unsupported("select statement".to_string())),
         StmtKind::Switch(_) => Err(CodegenError::Unsupported("switch statement".to_string())),
         StmtKind::TypeSwitch(_) => Err(CodegenError::Unsupported("type switch".to_string())),
-        StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Goto(_) | StmtKind::Fallthrough => {
-            Err(CodegenError::Unsupported("branch statement".to_string()))
+        StmtKind::Break(_) => {
+            // Emit jump placeholder, will be patched when loop ends
+            let pc = fctx.pc();
+            fctx.emit(Opcode::Jump, 0, 0, 0);
+            fctx.add_break(pc);
+            Ok(())
+        }
+        StmtKind::Continue(_) => {
+            if let Some(continue_pc) = fctx.current_continue_pc() {
+                let jump_pc = fctx.pc();
+                fctx.emit(Opcode::Jump, 0, 0, 0);
+                if continue_pc == 0 {
+                    // Deferred patching for three-clause loops
+                    fctx.add_continue(jump_pc);
+                } else {
+                    let offset = (continue_pc as i32) - (jump_pc as i32);
+                    fctx.patch_jump(jump_pc, offset);
+                }
+                Ok(())
+            } else {
+                Err(CodegenError::Internal("continue outside loop".to_string()))
+            }
+        }
+        StmtKind::Goto(_) | StmtKind::Fallthrough => {
+            Err(CodegenError::Unsupported("goto/fallthrough".to_string()))
         }
         StmtKind::Labeled(_) => Err(CodegenError::Unsupported("labeled statement".to_string())),
     }
@@ -283,6 +306,7 @@ fn compile_for(
     match &for_stmt.clause {
         ForClause::Cond(cond_opt) => {
             let loop_start = fctx.pc();
+            fctx.push_loop(loop_start);  // continue jumps to loop_start
             
             let jump_end_pc = if let Some(cond) = cond_opt {
                 let cond_reg = expr::compile_expr(ctx, fctx, cond)?;
@@ -300,6 +324,14 @@ fn compile_for(
             fctx.emit(Opcode::Jump, 0, 0, 0);
             let loop_offset = (loop_start as i32) - (jump_pc as i32);
             fctx.patch_jump(jump_pc, loop_offset);
+            
+            // Patch break jumps
+            let loop_ctx = fctx.pop_loop().unwrap();
+            let end_pc = fctx.pc();
+            for break_pc in loop_ctx.break_pcs {
+                let offset = (end_pc as i32) - (break_pc as i32);
+                fctx.patch_jump(break_pc, offset);
+            }
             
             if let Some(pc) = jump_end_pc {
                 let end_offset = (fctx.pc() as i32) - (pc as i32);
@@ -322,7 +354,24 @@ fn compile_for(
                 None
             };
             
+            // For three-clause, continue jumps to post (before loop back)
+            // Push loop with placeholder, will update continue_pc after body
+            fctx.push_loop(0);  // Placeholder
+            
             compile_block(ctx, fctx, &for_stmt.body)?;
+            
+            // Continue target is here (before post)
+            let post_pc = fctx.pc();
+            
+            // Patch deferred continue jumps
+            if let Some(lctx) = fctx.loop_stack.last_mut() {
+                for cont_pc in &lctx.continue_pcs {
+                    let offset = (post_pc as i32) - (*cont_pc as i32);
+                    fctx.code[*cont_pc].b = offset as u16;
+                    fctx.code[*cont_pc].c = (offset >> 16) as u16;
+                }
+                lctx.continue_pcs.clear();
+            }
             
             if let Some(post) = post {
                 compile_stmt(ctx, fctx, post)?;
@@ -333,6 +382,14 @@ fn compile_for(
             fctx.emit(Opcode::Jump, 0, 0, 0);
             let loop_offset = (loop_start as i32) - (jump_pc as i32);
             fctx.patch_jump(jump_pc, loop_offset);
+            
+            // Patch break jumps
+            let loop_ctx = fctx.pop_loop().unwrap();
+            let end_pc = fctx.pc();
+            for break_pc in loop_ctx.break_pcs {
+                let offset = (end_pc as i32) - (break_pc as i32);
+                fctx.patch_jump(break_pc, offset);
+            }
             
             if let Some(pc) = jump_end_pc {
                 let end_offset = (fctx.pc() as i32) - (pc as i32);
@@ -371,6 +428,7 @@ fn compile_for(
             
             // Loop start - right before IterNext
             let iter_next_pc = fctx.pc();
+            fctx.push_loop(iter_next_pc);  // continue jumps back to IterNext
             fctx.emit(Opcode::IterNext, key_reg, val_reg, 0);
             
             // Compile loop body
@@ -384,11 +442,16 @@ fn compile_for(
             let back_offset = (iter_next_pc as i32) - (jump_pc as i32);
             fctx.patch_jump(jump_pc, back_offset);
             
-            // Patch IterNext's done_offset to jump here (after IterEnd)
-            let end_pc = fctx.pc();
-            
             // IterEnd
             fctx.emit(Opcode::IterEnd, 0, 0, 0);
+            
+            // Patch break jumps - break should jump past IterEnd
+            let loop_ctx = fctx.pop_loop().unwrap();
+            let after_end = fctx.pc();
+            for break_pc in loop_ctx.break_pcs {
+                let offset = (after_end as i32) - (break_pc as i32);
+                fctx.patch_jump(break_pc, offset);
+            }
             
             // Patch IterNext to jump past IterEnd when done
             let end_offset = (fctx.pc() as i32) - (iter_next_pc as i32);
