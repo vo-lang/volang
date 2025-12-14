@@ -14,4 +14,11 @@ func main() {
     
     product := math.Multiply(5, 6)
     println(product)
+    
+    pi := math.GetPi()
+    println(pi)
+    
+    math.SetPi(628)
+    pi2 := math.GetPi()
+    println(pi2)
 }

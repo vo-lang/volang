@@ -10,6 +10,14 @@ func Multiply(a int, b int) int {
     return a * b
 }
 
+func GetPi() int {
+    return Pi
+}
+
+func SetPi(v int) {
+    Pi = v
+}
+
 func init() {
     println(100)
 }

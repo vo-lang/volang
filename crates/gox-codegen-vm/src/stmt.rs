@@ -138,7 +138,7 @@ fn compile_assign(
                 if let Some(local) = fctx.lookup_local(ident.symbol) {
                     let dst = local.reg;
                     
-                    // Handle compound assignment
+                    // Handle compound assignment to local variable
                     match assign.op {
                         AssignOp::Assign => {
                             let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
@@ -166,7 +166,35 @@ fn compile_assign(
                             return Err(CodegenError::Unsupported("compound assignment".to_string()));
                         }
                     }
-                } else {
+                } 
+                // Check for global variable assignment
+                else if let Some(&global_idx) = ctx.global_indices.get(&ident.symbol) {
+                    match assign.op {
+                        AssignOp::Assign => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::SetGlobal, global_idx as u16, src, 0);
+                        }
+                        AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                            // For compound assignment, load global first
+                            let tmp = fctx.regs.alloc(1);
+                            fctx.emit(Opcode::GetGlobal, tmp, global_idx as u16, 0);
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            let op = match assign.op {
+                                AssignOp::Add => Opcode::AddI64,
+                                AssignOp::Sub => Opcode::SubI64,
+                                AssignOp::Mul => Opcode::MulI64,
+                                AssignOp::Div => Opcode::DivI64,
+                                _ => unreachable!(),
+                            };
+                            fctx.emit(op, tmp, tmp, src);
+                            fctx.emit(Opcode::SetGlobal, global_idx as u16, tmp, 0);
+                        }
+                        _ => {
+                            return Err(CodegenError::Unsupported("compound assignment".to_string()));
+                        }
+                    }
+                }
+                else {
                     return Err(CodegenError::Internal(format!("undefined variable")));
                 }
             }

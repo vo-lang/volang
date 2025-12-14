@@ -71,9 +71,17 @@ fn compile_ident(
             Ok(dst)
         }
         _ => {
+            // First check local variables
             if let Some(local) = fctx.lookup_local(ident.symbol) {
                 Ok(local.reg)
-            } else {
+            } 
+            // Then check global variables
+            else if let Some(&global_idx) = ctx.global_indices.get(&ident.symbol) {
+                let dst = fctx.regs.alloc(1);
+                fctx.emit(Opcode::GetGlobal, dst, global_idx as u16, 0);
+                Ok(dst)
+            }
+            else {
                 Err(CodegenError::Internal(format!("undefined: {}", name_str)))
             }
         }

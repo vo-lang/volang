@@ -349,27 +349,52 @@ impl<'a> TypeCollector<'a> {
 
     fn collect_var(&mut self, decl: &ast::VarDecl) {
         for spec in &decl.specs {
-            // For now, register with Invalid type (resolved in Phase 2/3)
-            for name in &spec.names {
+            for (i, name) in spec.names.iter().enumerate() {
                 let sym = name.symbol;
                 if self.check_redeclaration(sym, name.span) {
+                    // Determine type: explicit type, inferred from initializer, or Invalid
+                    let ty = if let Some(ref ty_expr) = spec.ty {
+                        // Track for type resolution
+                        self.var_types.push(VarTypePlaceholder {
+                            name: sym,
+                            ty: Some(ty_expr.clone()),
+                        });
+                        Type::Invalid // Will be resolved in Phase 2
+                    } else if i < spec.values.len() {
+                        // Infer type from initializer (simple cases)
+                        self.infer_type_from_expr(&spec.values[i])
+                    } else {
+                        Type::Invalid
+                    };
+                    
                     self.scope.insert(
                         sym,
                         Entity::Var(VarEntity {
-                            ty: Type::Invalid, // Will be resolved later
+                            ty,
                             constant: None,
                             span: name.span,
                         }),
                     );
-                    // Track for type resolution if type is specified
-                    if let Some(ref ty) = spec.ty {
-                        self.var_types.push(VarTypePlaceholder {
-                            name: sym,
-                            ty: Some(ty.clone()),
-                        });
-                    }
                 }
             }
+        }
+    }
+    
+    /// Infer type from a simple expression (for var initialization).
+    fn infer_type_from_expr(&self, expr: &ast::Expr) -> Type {
+        use ast::ExprKind;
+        match &expr.kind {
+            ExprKind::IntLit(_) => Type::Basic(BasicType::Int),
+            ExprKind::FloatLit(_) => Type::Basic(BasicType::Float64),
+            ExprKind::StringLit(_) => Type::Basic(BasicType::String),
+            ExprKind::Ident(ident) => {
+                let name = self.interner.resolve(ident.symbol).unwrap_or("");
+                match name {
+                    "true" | "false" => Type::Basic(BasicType::Bool),
+                    _ => Type::Invalid,
+                }
+            }
+            _ => Type::Invalid,
         }
     }
 
