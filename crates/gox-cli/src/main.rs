@@ -38,8 +38,12 @@ enum Commands {
         module_version: String,
     },
 
-    /// Build the current module
-    Build,
+    /// Build a GoX project
+    Build {
+        /// Path to project directory (default: current directory)
+        #[arg(default_value = ".")]
+        path: String,
+    },
 
     /// Type-check the current module without building
     Check,
@@ -86,7 +90,7 @@ fn main() {
     let result = match cli.command {
         Commands::Init { module_path } => cmd_init(&module_path),
         Commands::Get { module_version } => cmd_get(&module_version),
-        Commands::Build => cmd_build(),
+        Commands::Build { path } => cmd_build(&path),
         Commands::Check => cmd_check(),
         Commands::RunBytecode { test } => bytecode_tests::run_test(&test),
         Commands::Run { file } => cmd_run(&file),
@@ -175,30 +179,48 @@ fn cmd_get(module_version: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Build the current module.
-fn cmd_build() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    let mod_file_path = cwd.join("gox.mod");
+/// Build a GoX project.
+fn cmd_build(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use gox_common::vfs::{FileSet, RealFs};
+    use gox_analysis::analyze_project;
+    use gox_codegen_vm::compile_project;
+    
+    let project_dir = std::path::Path::new(path).canonicalize()?;
+    let mod_file_path = project_dir.join("gox.mod");
 
-    // Load gox.mod
-    let mod_file = ModFile::parse_file(&mod_file_path)?;
-    println!("Building module: {}", mod_file.module);
-
-    // Create resolver and compute closure
-    let resolver = ModuleResolver::new(&cwd);
-    let closure = resolver.compute_closure(&mod_file)?;
-
-    println!("Dependency closure:");
-    if closure.modules.is_empty() {
-        println!("  (no dependencies)");
+    // Check if gox.mod exists (optional for simple projects)
+    let module_name = if mod_file_path.exists() {
+        let mod_file = ModFile::parse_file(&mod_file_path)?;
+        println!("Building module: {}", mod_file.module);
+        mod_file.module
     } else {
-        for (path, resolved) in &closure.modules {
-            println!("  {}@{}", path, resolved.version);
-        }
-    }
+        println!("Building project in: {}", project_dir.display());
+        "main".to_string()
+    };
 
-    // TODO: Actually compile the module
-    println!("\nBuild not implemented yet");
+    // Collect all .gox files
+    let fs = RealFs;
+    let file_set = FileSet::collect(&fs, &project_dir)?;
+    
+    if file_set.files.is_empty() {
+        return Err("no .gox files found".into());
+    }
+    
+    println!("Found {} source files", file_set.files.len());
+    
+    // Analyze project
+    let project = analyze_project(file_set).map_err(|e| format!("analysis error: {}", e))?;
+    println!("Analyzed {} packages", project.packages.len());
+    
+    // Compile to bytecode
+    let module = compile_project(&project).map_err(|e| format!("codegen error: {}", e))?;
+    
+    // Write to file
+    let out_path = project_dir.join(format!("{}.goxc", module_name));
+    let bytes = module.to_bytes();
+    std::fs::write(&out_path, &bytes)?;
+    
+    println!("✓ Built {} ({} bytes)", out_path.display(), bytes.len());
     Ok(())
 }
 
@@ -220,18 +242,17 @@ fn cmd_check() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Run a bytecode text file.
+/// Run a bytecode file (.goxc, .goxb, or .goxt).
 fn cmd_run(file: &str) -> Result<(), Box<dyn std::error::Error>> {
     use gox_vm::{Module, VmResult};
     
-    let content = std::fs::read_to_string(file)?;
-    
-    let module = if file.ends_with(".goxb") {
+    let module = if file.ends_with(".goxc") || file.ends_with(".goxb") {
         // Binary format
         let bytes = std::fs::read(file)?;
         Module::from_bytes(&bytes)?
     } else {
-        // Text format
+        // Text format (.goxt)
+        let content = std::fs::read_to_string(file)?;
         bytecode_text::parse_text(&content).map_err(|e| e)?
     };
     

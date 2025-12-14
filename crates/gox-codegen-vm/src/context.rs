@@ -128,6 +128,120 @@ pub struct CodegenContext<'a> {
     pub const_indices: HashMap<String, u16>,
 }
 
+/// Codegen context that compiles into an existing module.
+pub struct CodegenContextRef<'a, 'm> {
+    pub file: &'a File,
+    pub result: &'a TypeCheckResult,
+    pub interner: &'a SymbolInterner,
+    pub module: &'m mut Module,
+    pub func_indices: HashMap<Symbol, u32>,
+    pub native_indices: HashMap<String, u32>,
+    pub const_indices: HashMap<String, u16>,
+}
+
+impl<'a, 'm> CodegenContextRef<'a, 'm> {
+    pub fn compile_into_module(&mut self) -> Result<(), crate::CodegenError> {
+        // First pass: collect function declarations
+        for decl in &self.file.decls {
+            if let Decl::Func(func) = decl {
+                let idx = self.module.functions.len() as u32;
+                self.func_indices.insert(func.name.symbol, idx);
+                self.module.functions.push(FunctionDef::new(
+                    self.interner.resolve(func.name.symbol).unwrap_or("")
+                ));
+            }
+        }
+        
+        // Second pass: compile function bodies
+        for decl in &self.file.decls {
+            if let Decl::Func(func) = decl {
+                let func_def = self.compile_func(func)?;
+                let idx = self.func_indices[&func.name.symbol] as usize;
+                self.module.functions[idx] = func_def;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn compile_func(&mut self, func: &FuncDecl) -> Result<FunctionDef, crate::CodegenError> {
+        let name = self.interner.resolve(func.name.symbol).unwrap_or("");
+        let mut fctx = FuncContext::new(name);
+        
+        for param in &func.sig.params {
+            for name in &param.names {
+                fctx.param_count += 1;
+                fctx.param_slots += 1;
+                fctx.define_local(*name, 1);
+            }
+        }
+        
+        fctx.ret_slots = func.sig.results.len() as u16;
+        
+        if let Some(ref body) = func.body {
+            // Create a temporary owned context for stmt compilation
+            let mut temp_ctx = CodegenContext {
+                file: self.file,
+                result: self.result,
+                interner: self.interner,
+                module: Module::new(""),
+                func_indices: self.func_indices.clone(),
+                native_indices: self.native_indices.clone(),
+                const_indices: self.const_indices.clone(),
+            };
+            crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
+            // Merge back any new natives/constants
+            for (k, v) in temp_ctx.native_indices {
+                self.native_indices.insert(k, v);
+            }
+            for (k, v) in temp_ctx.const_indices {
+                self.const_indices.insert(k, v);
+            }
+        }
+        
+        if fctx.code.is_empty() || !matches!(fctx.code.last().map(|i| i.opcode()), Some(Opcode::Return)) {
+            fctx.emit(Opcode::Return, 0, 0, 0);
+        }
+        
+        Ok(fctx.build())
+    }
+    
+    pub fn register_native(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
+        if let Some(&idx) = self.native_indices.get(name) {
+            return idx;
+        }
+        let idx = self.module.add_native(name, param_slots, ret_slots);
+        self.native_indices.insert(name.to_string(), idx);
+        idx
+    }
+    
+    pub fn add_constant(&mut self, c: Constant) -> u16 {
+        let key = match &c {
+            Constant::String(s) => format!("s:{}", s),
+            Constant::Int(i) => format!("i:{}", i),
+            Constant::Float(f) => format!("f:{}", f),
+            Constant::Bool(b) => format!("b:{}", b),
+            Constant::Nil => "nil".to_string(),
+        };
+        
+        if let Some(&idx) = self.const_indices.get(&key) {
+            return idx;
+        }
+        
+        let idx = self.module.add_constant(c);
+        self.const_indices.insert(key, idx);
+        idx
+    }
+    
+    pub fn lookup_func(&self, sym: Symbol) -> Option<u32> {
+        self.func_indices.get(&sym).copied()
+    }
+    
+    pub fn lookup_native(&self, name: &str) -> Option<u32> {
+        self.native_indices.get(name).copied()
+    }
+}
+
 impl<'a> CodegenContext<'a> {
     pub fn new(
         file: &'a File,
@@ -139,6 +253,24 @@ impl<'a> CodegenContext<'a> {
             result,
             interner,
             module: Module::new(""),
+            func_indices: HashMap::new(),
+            native_indices: HashMap::new(),
+            const_indices: HashMap::new(),
+        }
+    }
+    
+    /// Create a context that compiles into an existing module.
+    pub fn new_with_module(
+        file: &'a File,
+        result: &'a TypeCheckResult,
+        interner: &'a SymbolInterner,
+        module: &'a mut Module,
+    ) -> CodegenContextRef<'a, 'a> {
+        CodegenContextRef {
+            file,
+            result,
+            interner,
+            module,
             func_indices: HashMap::new(),
             native_indices: HashMap::new(),
             const_indices: HashMap::new(),

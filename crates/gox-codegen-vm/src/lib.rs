@@ -21,7 +21,7 @@ mod context;
 mod expr;
 mod stmt;
 
-use gox_analysis::TypeCheckResult;
+use gox_analysis::{Project, TypeCheckResult, TypedPackage};
 use gox_common::SymbolInterner;
 use gox_syntax::ast::File;
 use gox_vm::bytecode::Module;
@@ -36,6 +36,37 @@ pub fn compile(
 ) -> Result<Module, CodegenError> {
     let mut ctx = CodegenContext::new(file, result, interner);
     ctx.compile()
+}
+
+/// Compile a multi-package project to bytecode.
+pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
+    let mut module = Module::new(&project.main_package);
+    
+    // Compile each package in dependency order
+    for pkg in &project.packages {
+        compile_package(&mut module, pkg, &project.interner)?;
+    }
+    
+    // Find and set entry point (main.main)
+    let main_idx = module.functions.iter()
+        .position(|f| f.name == "main")
+        .ok_or_else(|| CodegenError::Internal("no main function found".to_string()))?;
+    module.entry_func = main_idx as u32;
+    
+    Ok(module)
+}
+
+/// Compile a single package into the module.
+fn compile_package(
+    module: &mut Module,
+    pkg: &TypedPackage,
+    _interner: &SymbolInterner,
+) -> Result<(), CodegenError> {
+    for (file, file_interner) in &pkg.files {
+        let mut ctx = CodegenContext::new_with_module(file, &pkg.types, file_interner, module);
+        ctx.compile_into_module()?;
+    }
+    Ok(())
 }
 
 /// Codegen error.

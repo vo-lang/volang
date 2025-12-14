@@ -11,8 +11,10 @@ pub mod source;
 pub mod span;
 pub mod diagnostics;
 pub mod symbol;
+pub mod vfs;
 
 pub use source::{SourceMap, SourceFile, FileId};
 pub use span::{Span, Spanned, BytePos};
 pub use diagnostics::{Diagnostic, DiagnosticSink, Severity, Label};
 pub use symbol::{Symbol, SymbolInterner, Ident};
+pub use vfs::{FileSystem, RealFs, MemoryFs, FileSet};

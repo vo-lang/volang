@@ -157,7 +157,7 @@ impl BuiltinKind {
 }
 
 /// A scope in the symbol table hierarchy.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Scope {
     /// Parent scope (None for universe scope).
     parent: Option<Box<Scope>>,
@@ -168,9 +168,10 @@ pub struct Scope {
 }
 
 /// The kind of a scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScopeKind {
     /// Universe scope (predefined types, constants, built-ins).
+    #[default]
     Universe,
     /// Package scope (top-level declarations).
     Package,

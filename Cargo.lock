@@ -204,6 +204,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "gox-analysis",
+ "gox-codegen-vm",
  "gox-common",
  "gox-module",
  "gox-runtime-vm",

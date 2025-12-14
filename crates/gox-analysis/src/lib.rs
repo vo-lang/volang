@@ -75,6 +75,7 @@ pub mod lookup;
 pub mod collect;
 pub mod resolve;
 pub mod check;
+pub mod project;
 
 use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_syntax::ast::{Decl, File};
@@ -85,8 +86,10 @@ pub use constant::Constant;
 pub use collect::{collect_types, CollectResult};
 pub use resolve::{resolve_types, ResolveResult};
 pub use check::{check_types, TypeChecker};
+pub use project::{analyze_project, Project, TypedPackage, ProjectError};
 
 /// The result of type checking a file.
+#[derive(Debug, Default)]
 pub struct TypeCheckResult {
     /// The resolved scope with all declarations.
     pub scope: Scope,
