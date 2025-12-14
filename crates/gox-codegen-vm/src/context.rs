@@ -130,6 +130,8 @@ pub struct CodegenContext<'a> {
     pub func_indices: HashMap<Symbol, u32>,
     /// Cross-package function index: "pkg.Func" -> func_idx
     pub cross_pkg_funcs: HashMap<String, u32>,
+    /// Global variable indices: var_symbol -> global_idx
+    pub global_indices: HashMap<Symbol, u32>,
     pub native_indices: HashMap<String, u32>,
     pub const_indices: HashMap<String, u16>,
 }
@@ -142,6 +144,7 @@ pub struct CodegenContextRef<'a, 'm> {
     pub module: &'m mut Module,
     pub func_indices: HashMap<Symbol, u32>,
     pub cross_pkg_funcs: HashMap<String, u32>,
+    pub global_indices: HashMap<Symbol, u32>,
     pub native_indices: HashMap<String, u32>,
     pub const_indices: HashMap<String, u16>,
 }
@@ -194,6 +197,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 module: Module::new(""),
                 func_indices: self.func_indices.clone(),
                 cross_pkg_funcs: self.cross_pkg_funcs.clone(),
+                global_indices: self.global_indices.clone(),
                 native_indices: self.native_indices.clone(),
                 const_indices: self.const_indices.clone(),
             };
@@ -268,6 +272,7 @@ impl<'a> CodegenContext<'a> {
             module: Module::new(""),
             func_indices: HashMap::new(),
             cross_pkg_funcs: HashMap::new(),
+            global_indices: HashMap::new(),
             native_indices: HashMap::new(),
             const_indices: HashMap::new(),
         }
@@ -287,6 +292,7 @@ impl<'a> CodegenContext<'a> {
             module,
             func_indices: HashMap::new(),
             cross_pkg_funcs: HashMap::new(),
+            global_indices: HashMap::new(),
             native_indices: HashMap::new(),
             const_indices: HashMap::new(),
         }

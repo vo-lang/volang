@@ -85,12 +85,20 @@ pub struct NativeDef {
     pub ret_slots: u16,
 }
 
+/// Global variable definition.
+#[derive(Clone, Debug)]
+pub struct GlobalDef {
+    pub name: String,
+    pub slots: u16,
+}
+
 /// Bytecode module.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub name: String,
     pub types: Vec<TypeMeta>,
     pub constants: Vec<Constant>,
+    pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
     pub natives: Vec<NativeDef>,
     pub entry_func: u32,
@@ -102,10 +110,21 @@ impl Module {
             name: name.to_string(),
             types: Vec::new(),
             constants: Vec::new(),
+            globals: Vec::new(),
             functions: Vec::new(),
             natives: Vec::new(),
             entry_func: 0,
         }
+    }
+    
+    /// Add a global variable and return its index.
+    pub fn add_global(&mut self, name: &str, slots: u16) -> u32 {
+        let idx = self.globals.len();
+        self.globals.push(GlobalDef {
+            name: name.to_string(),
+            slots,
+        });
+        idx as u32
     }
     
     /// Add a constant and return its index.
@@ -178,6 +197,13 @@ impl Module {
             write_constant(&mut buf, c);
         }
         
+        // Globals section
+        write_u32(&mut buf, self.globals.len() as u32);
+        for g in &self.globals {
+            write_string(&mut buf, &g.name);
+            write_u16(&mut buf, g.slots);
+        }
+        
         // Natives section
         write_u32(&mut buf, self.natives.len() as u32);
         for n in &self.natives {
@@ -231,6 +257,15 @@ impl Module {
             constants.push(read_constant(&mut cursor)?);
         }
         
+        // Globals section
+        let global_count = read_u32(&mut cursor)?;
+        let mut globals = Vec::with_capacity(global_count as usize);
+        for _ in 0..global_count {
+            let g_name = read_string(&mut cursor)?;
+            let slots = read_u16(&mut cursor)?;
+            globals.push(GlobalDef { name: g_name, slots });
+        }
+        
         // Natives section
         let native_count = read_u32(&mut cursor)?;
         let mut natives = Vec::with_capacity(native_count as usize);
@@ -252,6 +287,7 @@ impl Module {
             name,
             types,
             constants,
+            globals,
             functions,
             natives,
             entry_func,

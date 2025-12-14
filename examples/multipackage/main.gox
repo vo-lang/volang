@@ -2,6 +2,8 @@ package main
 
 import "./math"
 
+var Counter = 42
+
 func init() {
     println(200)
 }

@@ -85,6 +85,9 @@ pub struct Vm {
     
     // Resolved native function pointers
     native_ptrs: Vec<Option<NativeFn>>,
+    
+    // Global variables storage
+    globals: Vec<u64>,
 }
 
 impl Vm {
@@ -97,6 +100,7 @@ impl Vm {
             module: None,
             string_constants: Vec::new(),
             native_ptrs: Vec::new(),
+            globals: Vec::new(),
         }
     }
     
@@ -109,6 +113,7 @@ impl Vm {
             module: None,
             string_constants: Vec::new(),
             native_ptrs: Vec::new(),
+            globals: Vec::new(),
         }
     }
     
@@ -131,6 +136,11 @@ impl Vm {
             let ptr = self.natives.get(&native.name);
             self.native_ptrs.push(ptr);
         }
+        
+        // Allocate global variables
+        self.globals.clear();
+        let total_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
+        self.globals.resize(total_slots, 0);
         
         self.module = Some(module);
     }
@@ -257,6 +267,17 @@ impl Vm {
                 for (i, v) in vals.into_iter().enumerate() {
                     self.write_reg(fiber_id, a + i as u16, v);
                 }
+            }
+            
+            // ============ Globals ============
+            Opcode::GetGlobal => {
+                let val = self.globals[b as usize];
+                self.write_reg(fiber_id, a, val);
+            }
+            
+            Opcode::SetGlobal => {
+                let val = self.read_reg(fiber_id, b);
+                self.globals[a as usize] = val;
             }
             
             // ============ Arithmetic (i64) ============

@@ -49,6 +49,10 @@ pub enum Opcode {
     Mov,          // a = b
     MovN,         // copy c slots from b to a
     
+    // ============ Globals ============
+    GetGlobal = 10, // a = globals[b]
+    SetGlobal,      // globals[a] = b
+    
     // ============ Arithmetic (i64) ============
     AddI64 = 20,  // a = b + c
     SubI64,       // a = b - c
@@ -197,6 +201,9 @@ impl Opcode {
             5 => Self::LoadConst,
             6 => Self::Mov,
             7 => Self::MovN,
+            
+            10 => Self::GetGlobal,
+            11 => Self::SetGlobal,
             
             20 => Self::AddI64,
             21 => Self::SubI64,

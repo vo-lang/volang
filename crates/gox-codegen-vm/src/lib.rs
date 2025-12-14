@@ -52,13 +52,35 @@ pub fn compile(
 /// Packages are compiled in init order (dependencies first).
 /// A module-level $init function is generated that calls all package inits.
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
+    use gox_vm::instruction::Instruction;
+    use gox_syntax::ast::VarDecl;
+    
     let mut module = Module::new(&project.main_package);
     
     // Build cross-package function index: "pkg.Func" -> func_idx
     let mut cross_pkg_funcs: HashMap<String, u32> = HashMap::new();
     
-    // First pass: collect all function declarations from ALL packages
-    // This allows cross-package function resolution
+    // Global variable indices: (pkg_name, var_name) -> global_idx
+    let mut global_indices: HashMap<(String, Symbol), u32> = HashMap::new();
+    
+    // First pass: collect all global variables from ALL packages
+    for pkg in &project.packages {
+        for file in &pkg.files {
+            for decl in &file.decls {
+                if let Decl::Var(var) = decl {
+                    for spec in &var.specs {
+                        for name in &spec.names {
+                            let var_name = pkg.interner.resolve(name.symbol).unwrap_or("");
+                            let idx = module.add_global(var_name, 1);
+                            global_indices.insert((pkg.name.clone(), name.symbol), idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Second pass: collect all function declarations from ALL packages
     let mut pkg_func_indices: Vec<HashMap<Symbol, u32>> = Vec::new();
     
     for pkg in &project.packages {
@@ -92,9 +114,53 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
         pkg_func_indices.push(func_indices);
     }
     
-    // Second pass: compile all function bodies
+    // Third pass: generate $var_init functions for each package with var decls
+    for pkg in &project.packages {
+        if !pkg.has_var_decls {
+            continue;
+        }
+        
+        let var_init_idx = module.functions.len() as u32;
+        let var_init_name = format!("{}.$var_init", pkg.name);
+        cross_pkg_funcs.insert(var_init_name.clone(), var_init_idx);
+        
+        let mut func = FunctionDef::new(&format!("$var_init_{}", pkg.name));
+        func.local_slots = 8; // Temp registers for init expressions
+        
+        // Compile var initializers
+        for file in &pkg.files {
+            for decl in &file.decls {
+                if let Decl::Var(var) = decl {
+                    for spec in &var.specs {
+                        // If there are initializers, compile them
+                        if !spec.values.is_empty() {
+                            for (name, value) in spec.names.iter().zip(spec.values.iter()) {
+                                if let Some(&global_idx) = global_indices.get(&(pkg.name.clone(), name.symbol)) {
+                                    // Compile init expression to register 0
+                                    let val_reg = compile_simple_expr(&pkg.interner, value, &mut func, 0);
+                                    // SetGlobal global_idx, val_reg
+                                    func.code.push(Instruction::new(Opcode::SetGlobal, global_idx as u16, val_reg, 0));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        func.code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+        module.functions.push(func);
+    }
+    
+    // Fourth pass: compile all function bodies
     for (pkg_idx, pkg) in project.packages.iter().enumerate() {
         let func_indices = &pkg_func_indices[pkg_idx];
+        
+        // Build package-local global indices
+        let pkg_globals: HashMap<Symbol, u32> = global_indices.iter()
+            .filter(|((pn, _), _)| pn == &pkg.name)
+            .map(|((_, sym), idx)| (*sym, *idx))
+            .collect();
         
         for file in &pkg.files {
             for decl in &file.decls {
@@ -102,6 +168,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     let mut ctx = context::CodegenContext::new(file, &pkg.types, &pkg.interner);
                     ctx.func_indices = func_indices.clone();
                     ctx.cross_pkg_funcs = cross_pkg_funcs.clone();
+                    ctx.global_indices = pkg_globals.clone();
                     
                     let func_def = ctx.compile_func_body(func)?;
                     let idx = func_indices[&func.name.symbol] as usize;
@@ -111,7 +178,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
         }
     }
     
-    // Generate module $init function that calls package inits in order
+    // Generate module $init function that calls var inits then package inits in order
     let module_init_idx = module.functions.len() as u32;
     let module_init = generate_module_init(project, &cross_pkg_funcs);
     module.functions.push(module_init);
@@ -131,7 +198,51 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     Ok(module)
 }
 
-/// Generate the module $init function that calls all package inits in order.
+/// Compile a simple expression for var initialization.
+/// Returns the register containing the result.
+fn compile_simple_expr(
+    interner: &SymbolInterner,
+    expr: &gox_syntax::ast::Expr,
+    func: &mut FunctionDef,
+    reg: u16,
+) -> u16 {
+    use gox_vm::instruction::Instruction;
+    use gox_syntax::ast::ExprKind;
+    
+    match &expr.kind {
+        ExprKind::IntLit(v) => {
+            let val = interner.resolve(v.raw)
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+                func.code.push(Instruction::new(Opcode::LoadInt, reg, 
+                    (val as u32) as u16, ((val as u32) >> 16) as u16));
+            } else {
+                // TODO: handle large ints via constants
+                func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));
+            }
+        }
+        ExprKind::Ident(ident) => {
+            // Check for true/false
+            let name = interner.resolve(ident.symbol).unwrap_or("");
+            if name == "true" {
+                func.code.push(Instruction::new(Opcode::LoadTrue, reg, 0, 0));
+            } else if name == "false" {
+                func.code.push(Instruction::new(Opcode::LoadFalse, reg, 0, 0));
+            } else {
+                // Default to 0
+                func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));
+            }
+        }
+        _ => {
+            // Complex expressions: default to 0 for now
+            func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));
+        }
+    }
+    reg
+}
+
+/// Generate the module $init function that calls var inits then package inits in order.
 fn generate_module_init(
     project: &Project,
     cross_pkg_funcs: &HashMap<String, u32>,
@@ -141,12 +252,17 @@ fn generate_module_init(
     let mut func = FunctionDef::new("$init");
     func.local_slots = 0;
     
-    // Call each package's init in dependency order
+    // Call each package's var init first, then init() in dependency order
     for pkg in &project.packages {
-        // Check if package has init() function
+        // Call $var_init if package has var declarations
+        let var_init_name = format!("{}.$var_init", pkg.name);
+        if let Some(&var_init_idx) = cross_pkg_funcs.get(&var_init_name) {
+            func.code.push(Instruction::with_flags(Opcode::Call, 0, var_init_idx as u16, 0, 0));
+        }
+        
+        // Call init() if package has init function
         let init_name = format!("{}.$init", pkg.name);
         if let Some(&init_idx) = cross_pkg_funcs.get(&init_name) {
-            // Call init: Call func_id=init_idx, arg_start=0, arg_count=0, ret_count=0
             func.code.push(Instruction::with_flags(Opcode::Call, 0, init_idx as u16, 0, 0));
         }
     }

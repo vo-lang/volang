@@ -102,6 +102,9 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::Mov => format!("Mov r{}, r{}", a, b),
         Opcode::MovN => format!("MovN r{}, r{}, {}", a, b, c),
         
+        Opcode::GetGlobal => format!("GetGlobal r{}, g{}", a, b),
+        Opcode::SetGlobal => format!("SetGlobal g{}, r{}", a, b),
+        
         Opcode::AddI64 => format!("AddI64 r{}, r{}, r{}", a, b, c),
         Opcode::SubI64 => format!("SubI64 r{}, r{}, r{}", a, b, c),
         Opcode::MulI64 => format!("MulI64 r{}, r{}, r{}", a, b, c),
