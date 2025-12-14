@@ -354,8 +354,9 @@ fn compile_call(
         match name {
             "len" => return compile_builtin_len(ctx, fctx, call),
             "cap" => return compile_builtin_cap(ctx, fctx, call),
-            "make" => return compile_builtin_make(fctx),
+            "make" => return compile_builtin_make(ctx, fctx, call),
             "append" => return compile_builtin_append(ctx, fctx, call),
+            "delete" => return compile_builtin_delete(ctx, fctx, call),
             "println" | "print" => return compile_builtin_print(ctx, fctx, call),
             _ => {}
         }
@@ -484,11 +485,33 @@ fn compile_index(
     fctx: &mut FuncContext,
     index: &gox_syntax::ast::IndexExpr,
 ) -> Result<u16, CodegenError> {
-    let arr = compile_expr(ctx, fctx, &index.expr)?;
+    let container = compile_expr(ctx, fctx, &index.expr)?;
     let idx = compile_expr(ctx, fctx, &index.index)?;
-    let dst = fctx.regs.alloc(1);
-    fctx.emit(Opcode::SliceGet, dst, arr, idx);
+    let dst = fctx.regs.alloc(2); // Map returns value + ok flag
+    
+    // Check if this is a map type
+    if is_map_expr(fctx, &index.expr) {
+        fctx.emit(Opcode::MapGet, dst, container, idx);
+    } else {
+        fctx.emit(Opcode::SliceGet, dst, container, idx);
+    }
     Ok(dst)
+}
+
+/// Check if an expression is a map type
+fn is_map_expr(fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
+    use gox_syntax::ast::ExprKind;
+    use crate::context::VarKind;
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if let Some(local) = fctx.lookup_local(ident.symbol) {
+                local.kind == VarKind::Map
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Compile slice expression: s[low:high]
@@ -539,13 +562,47 @@ fn compile_selector(
 }
 
 fn compile_composite_lit(
-    _ctx: &mut CodegenContext,
+    ctx: &mut CodegenContext,
     fctx: &mut FuncContext,
-    _lit: &gox_syntax::ast::CompositeLit,
+    lit: &gox_syntax::ast::CompositeLit,
 ) -> Result<u16, CodegenError> {
-    // TODO: handle struct, array, slice, map literals
+    use gox_syntax::ast::TypeExprKind;
+    
     let dst = fctx.regs.alloc(1);
-    fctx.emit(Opcode::LoadNil, dst, 0, 0);
+    
+    match &lit.ty.kind {
+        TypeExprKind::Map(_map_type) => {
+            // Create empty map
+            fctx.emit(Opcode::MapNew, dst, 0, 0);
+            
+            // Initialize with elements if any
+            for elem in &lit.elems {
+                if let Some(key) = &elem.key {
+                    // Get key expression
+                    let key_reg = match key {
+                        gox_syntax::ast::CompositeLitKey::Expr(k) => compile_expr(ctx, fctx, k)?,
+                        gox_syntax::ast::CompositeLitKey::Ident(ident) => {
+                            // Convert ident to value - for now just use as int
+                            let r = fctx.regs.alloc(1);
+                            fctx.emit(Opcode::LoadInt, r, 0, 0);
+                            r
+                        }
+                    };
+                    let val_reg = compile_expr(ctx, fctx, &elem.value)?;
+                    fctx.emit(Opcode::MapSet, dst, key_reg, val_reg);
+                }
+            }
+        }
+        TypeExprKind::Slice(_) => {
+            // Create nil slice (append will create it)
+            fctx.emit(Opcode::LoadNil, dst, 0, 0);
+        }
+        _ => {
+            // TODO: handle struct, array literals
+            fctx.emit(Opcode::LoadNil, dst, 0, 0);
+        }
+    }
+    
     Ok(dst)
 }
 
@@ -561,7 +618,13 @@ fn compile_builtin_len(
     }
     let arg = compile_expr(ctx, fctx, &call.args[0])?;
     let dst = fctx.regs.alloc(1);
-    fctx.emit(Opcode::SliceLen, dst, arg, 0);
+    
+    // Use MapLen for maps, SliceLen for slices
+    if is_map_expr(fctx, &call.args[0]) {
+        fctx.emit(Opcode::MapLen, dst, arg, 0);
+    } else {
+        fctx.emit(Opcode::SliceLen, dst, arg, 0);
+    }
     Ok(dst)
 }
 
@@ -579,7 +642,57 @@ fn compile_builtin_cap(
     Ok(dst)
 }
 
-fn compile_builtin_make(fctx: &mut FuncContext) -> Result<u16, CodegenError> {
+fn compile_builtin_make(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    call: &CallExpr,
+) -> Result<u16, CodegenError> {
+    // make(type, args...) - currently support map and slice
+    // The type argument is passed as a CompositeLit with empty elements for map
+    // or directly as a type in some cases
+    let dst = fctx.regs.alloc(1);
+    
+    // Check if this is make(map[...]) by looking at the type argument
+    if !call.args.is_empty() {
+        // Check for CompositeLit with Map type
+        if let ExprKind::CompositeLit(lit) = &call.args[0].kind {
+            if let gox_syntax::ast::TypeExprKind::Map(_) = &lit.ty.kind {
+                // make(map[K]V) - create empty map
+                fctx.emit(Opcode::MapNew, dst, 0, 0);
+                return Ok(dst);
+            }
+        }
+        // Check for Ident that could be a type alias for map
+        // For now, check if the identifier name contains "map"
+        if let ExprKind::Ident(ident) = &call.args[0].kind {
+            if let Some(name) = ctx.interner.resolve(ident.symbol) {
+                if name.starts_with("map[") || name == "map" {
+                    fctx.emit(Opcode::MapNew, dst, 0, 0);
+                    return Ok(dst);
+                }
+            }
+        }
+    }
+    
+    // Default: create nil (for slices, nil is valid)
+    fctx.emit(Opcode::LoadNil, dst, 0, 0);
+    Ok(dst)
+}
+
+fn compile_builtin_delete(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    call: &CallExpr,
+) -> Result<u16, CodegenError> {
+    // delete(map, key)
+    if call.args.len() < 2 {
+        return Err(CodegenError::Internal("delete requires 2 arguments".to_string()));
+    }
+    let map_reg = compile_expr(ctx, fctx, &call.args[0])?;
+    let key_reg = compile_expr(ctx, fctx, &call.args[1])?;
+    fctx.emit(Opcode::MapDelete, map_reg, key_reg, 0);
+    
+    // delete returns nothing, return a dummy register
     let dst = fctx.regs.alloc(1);
     fctx.emit(Opcode::LoadNil, dst, 0, 0);
     Ok(dst)

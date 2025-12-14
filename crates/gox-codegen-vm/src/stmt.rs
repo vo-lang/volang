@@ -116,6 +116,8 @@ fn compile_short_var(
     fctx: &mut FuncContext,
     sv: &ShortVarDecl,
 ) -> Result<(), CodegenError> {
+    use crate::context::VarKind;
+    
     for (i, name) in sv.names.iter().enumerate() {
         // Check if this is the blank identifier
         let is_blank = ctx.interner.resolve(name.symbol) == Some("_");
@@ -126,7 +128,14 @@ fn compile_short_var(
                 expr::compile_expr(ctx, fctx, &sv.values[i])?;
             }
         } else {
-            let dst = fctx.define_local(*name, 1);
+            // Determine the type kind from the RHS expression
+            let kind = if i < sv.values.len() {
+                infer_var_kind(&sv.values[i])
+            } else {
+                VarKind::Other
+            };
+            
+            let dst = fctx.define_local_with_kind(*name, 1, kind);
             if i < sv.values.len() {
                 let src = expr::compile_expr(ctx, fctx, &sv.values[i])?;
                 if src != dst {
@@ -136,6 +145,32 @@ fn compile_short_var(
         }
     }
     Ok(())
+}
+
+/// Infer VarKind from an expression (for type tracking)
+fn infer_var_kind(expr: &gox_syntax::ast::Expr) -> crate::context::VarKind {
+    use gox_syntax::ast::{ExprKind, TypeExprKind};
+    use crate::context::VarKind;
+    
+    match &expr.kind {
+        ExprKind::CompositeLit(lit) => {
+            match &lit.ty.kind {
+                TypeExprKind::Map(_) => VarKind::Map,
+                TypeExprKind::Slice(_) => VarKind::Slice,
+                _ => VarKind::Other,
+            }
+        }
+        ExprKind::Call(call) => {
+            // Check if it's make(map[...])
+            if let ExprKind::Ident(ident) = &call.func.kind {
+                // We can't resolve the name here easily, but make typically creates containers
+                VarKind::Other
+            } else {
+                VarKind::Other
+            }
+        }
+        _ => VarKind::Other,
+    }
 }
 
 /// Compile assignment statement.
@@ -221,12 +256,42 @@ fn compile_assign(
                     return Err(CodegenError::Internal(format!("undefined variable")));
                 }
             }
+            ExprKind::Index(index_expr) => {
+                // Handle slice/map index assignment: a[i] = v or m[k] = v
+                let container = expr::compile_expr(ctx, fctx, &index_expr.expr)?;
+                let index = expr::compile_expr(ctx, fctx, &index_expr.index)?;
+                let value = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                
+                // Check if this is a map type
+                if is_map_expr(fctx, &index_expr.expr) {
+                    fctx.emit(Opcode::MapSet, container, index, value);
+                } else {
+                    fctx.emit(Opcode::SliceSet, container, index, value);
+                }
+            }
             _ => {
                 return Err(CodegenError::Unsupported("complex assignment target".to_string()));
             }
         }
     }
     Ok(())
+}
+
+/// Check if an expression is a map type (for index assignment)
+fn is_map_expr(fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
+    use gox_syntax::ast::ExprKind;
+    use crate::context::VarKind;
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            // Check local variable type
+            if let Some(local) = fctx.lookup_local(ident.symbol) {
+                local.kind == VarKind::Map
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Compile return statement.
@@ -400,9 +465,12 @@ fn compile_for(
             // Compile the range expression (slice/map/string)
             let container = expr::compile_expr(ctx, fctx, range_expr)?;
             
-            // TODO: determine iter_type from expression type
-            // For now, assume slice (type 0)
-            let iter_type = 0u16;
+            // Determine iter_type from expression type: 0=slice, 1=map, 2=string
+            let iter_type = if is_map_expr(fctx, range_expr) {
+                1u16 // map
+            } else {
+                0u16 // slice (default)
+            };
             
             // Allocate registers for key and value first
             let key_reg = if let Some(k) = key {

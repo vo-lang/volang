@@ -1,0 +1,32 @@
+package main
+
+func main() {
+    // Test map creation and basic operations
+    m := map[int]int{}
+    
+    // Test map assignment
+    m[1] = 10
+    m[2] = 20
+    m[3] = 30
+    
+    // Test map access
+    println(m[1])  // 10
+    println(m[2])  // 20
+    println(m[3])  // 30
+    
+    // Test len
+    println(len(m))  // 3
+    
+    // Test delete
+    delete(m, 2)
+    println(len(m))  // 2
+    
+    // Test for-range
+    println("range:")
+    for k, v := range m {
+        println(k)
+        println(v)
+    }
+    
+    println(999)
+}

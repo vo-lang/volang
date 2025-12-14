@@ -49,11 +49,23 @@ impl Registers {
     }
 }
 
+/// Simple type kind for codegen (to distinguish map vs slice)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarKind {
+    Int,
+    Float,
+    String,
+    Slice,
+    Map,
+    Other,
+}
+
 /// Local variable info.
 #[derive(Debug, Clone)]
 pub struct LocalVar {
     pub reg: u16,
     pub slots: u16,
+    pub kind: VarKind,
 }
 
 /// Function codegen context.
@@ -138,8 +150,12 @@ impl FuncContext {
     }
     
     pub fn define_local(&mut self, ident: Ident, slots: u16) -> u16 {
+        self.define_local_with_kind(ident, slots, VarKind::Other)
+    }
+    
+    pub fn define_local_with_kind(&mut self, ident: Ident, slots: u16, kind: VarKind) -> u16 {
         let reg = self.regs.alloc(slots);
-        self.locals.insert(ident.symbol, LocalVar { reg, slots });
+        self.locals.insert(ident.symbol, LocalVar { reg, slots, kind });
         reg
     }
     
