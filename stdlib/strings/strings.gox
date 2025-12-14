@@ -1,0 +1,19 @@
+package strings
+
+// Split splits a string by separator.
+func Split(s, sep string) []string {
+    // TODO: implement
+    return []string{s}
+}
+
+// Join joins strings with separator.
+func Join(parts []string, sep string) string {
+    // TODO: implement
+    return ""
+}
+
+// Contains checks if s contains substr.
+func Contains(s, substr string) bool {
+    // TODO: implement
+    return false
+}

@@ -1,0 +1,17 @@
+package fmt
+
+// Println prints values to stdout with a newline.
+func Println(args ...any) {
+    __native_println(args)
+}
+
+// Print prints values to stdout without a newline.
+func Print(args ...any) {
+    __native_print(args)
+}
+
+// Sprintf formats and returns a string.
+func Sprintf(format string, args ...any) string {
+    // TODO: implement formatting
+    return format
+}

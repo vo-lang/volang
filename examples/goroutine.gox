@@ -1,0 +1,21 @@
+package main
+
+func worker(id int, ch chan int) {
+    for i := 0; i < 5; i++ {
+        ch <- id * 10 + i
+    }
+}
+
+func main() int {
+    ch := make(chan int, 10)
+    
+    go worker(1, ch)
+    go worker(2, ch)
+    
+    for i := 0; i < 10; i++ {
+        v := <-ch
+        println(v)
+    }
+    
+    return 0
+}

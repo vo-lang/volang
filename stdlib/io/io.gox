@@ -1,0 +1,17 @@
+package io
+
+// Reader interface for reading bytes.
+interface Reader {
+    Read(p []byte) (int, error)
+}
+
+// Writer interface for writing bytes.
+interface Writer {
+    Write(p []byte) (int, error)
+}
+
+// ReadAll reads all bytes from a Reader.
+func ReadAll(r Reader) ([]byte, error) {
+    // TODO: implement
+    return nil, nil
+}

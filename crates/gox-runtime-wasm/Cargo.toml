@@ -1,0 +1,12 @@
+[package]
+name = "gox-runtime-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly runtime implementation for GoX"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-runtime-core = { path = "../gox-runtime-core" }
+
+[dev-dependencies]

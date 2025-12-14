@@ -1,0 +1,13 @@
+[package]
+name = "gox-runtime-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VM runtime implementation for GoX"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-runtime-core = { path = "../gox-runtime-core" }
+gox-vm = { path = "../gox-vm" }
+
+[dev-dependencies]

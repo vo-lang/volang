@@ -1,0 +1,13 @@
+[package]
+name = "gox-target-sbf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Solana eBPF (SBF) compilation target for GoX"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-codegen-llvm = { path = "../gox-codegen-llvm" }
+gox-runtime-core = { path = "../gox-runtime-core" }
+
+[dev-dependencies]

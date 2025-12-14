@@ -219,13 +219,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gox-codegen-wasm"
-version = "0.1.0"
-dependencies = [
- "gox-common",
-]
-
-[[package]]
 name = "gox-common"
 version = "0.1.0"
 dependencies = [
@@ -246,6 +239,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "gox-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "gox-common",
+]
+
+[[package]]
+name = "gox-runtime-native"
+version = "0.1.0"
+dependencies = [
+ "gox-common",
+ "gox-runtime-core",
+]
+
+[[package]]
+name = "gox-runtime-sbf"
+version = "0.1.0"
+dependencies = [
+ "gox-common",
+ "gox-runtime-core",
+]
+
+[[package]]
+name = "gox-runtime-vm"
+version = "0.1.0"
+dependencies = [
+ "gox-common",
+ "gox-runtime-core",
+ "gox-vm",
+]
+
+[[package]]
+name = "gox-runtime-wasm"
+version = "0.1.0"
+dependencies = [
+ "gox-common",
+ "gox-runtime-core",
+]
+
+[[package]]
 name = "gox-syntax"
 version = "0.1.0"
 dependencies = [
@@ -257,6 +290,33 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "gox-target-native"
+version = "0.1.0"
+dependencies = [
+ "gox-codegen-llvm",
+ "gox-common",
+ "gox-runtime-core",
+]
+
+[[package]]
+name = "gox-target-sbf"
+version = "0.1.0"
+dependencies = [
+ "gox-codegen-llvm",
+ "gox-common",
+ "gox-runtime-core",
+]
+
+[[package]]
+name = "gox-target-wasm"
+version = "0.1.0"
+dependencies = [
+ "gox-codegen-llvm",
+ "gox-common",
+ "gox-runtime-core",
 ]
 
 [[package]]

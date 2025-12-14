@@ -1,15 +1,33 @@
 [workspace]
 resolver = "2"
 members = [
+  # Frontend
   "crates/gox-common",
   "crates/gox-syntax",
   "crates/gox-analysis",
   "crates/gox-module",
-  "crates/gox-cli",
-  "crates/gox-codegen-llvm",
-  "crates/gox-codegen-wasm",
+  
+  # Code Generation
   "crates/gox-codegen-vm",
+  "crates/gox-codegen-llvm",
+  
+  # Compilation Targets
+  "crates/gox-target-native",
+  "crates/gox-target-wasm",
+  "crates/gox-target-sbf",
+  
+  # VM
   "crates/gox-vm",
+  
+  # Runtime
+  "crates/gox-runtime-core",
+  "crates/gox-runtime-vm",
+  "crates/gox-runtime-native",
+  "crates/gox-runtime-wasm",
+  "crates/gox-runtime-sbf",
+  
+  # Tools
+  "crates/gox-cli",
   "crates/gox-tests",
 ]
 

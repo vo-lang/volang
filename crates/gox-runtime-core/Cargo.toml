@@ -1,9 +1,9 @@
 [package]
-name = "gox-codegen-wasm"
+name = "gox-runtime-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "WebAssembly code generation backend for GoX"
+description = "Core runtime API definitions for GoX (shared across all backends)"
 
 [dependencies]
 gox-common = { path = "../gox-common" }
