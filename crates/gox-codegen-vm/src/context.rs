@@ -68,6 +68,22 @@ pub struct LocalVar {
     pub kind: VarKind,
 }
 
+/// Upvalue info for closures
+#[derive(Debug, Clone)]
+pub struct Upvalue {
+    pub name: Symbol,
+    pub index: u16,        // Index in the closure's upvalue array
+    pub is_local: bool,    // true if captured from immediate parent, false if from grandparent
+    pub parent_index: u16, // Index in parent's locals (if is_local) or upvalues (if !is_local)
+}
+
+/// Where a variable is located
+#[derive(Debug, Clone, Copy)]
+pub enum VarLocation {
+    Local(u16),    // Register index
+    Upvalue(u16),  // Upvalue index
+}
+
 /// Function codegen context.
 /// Loop context for break/continue
 #[derive(Debug, Clone)]
@@ -87,6 +103,12 @@ pub struct FuncContext {
     pub param_slots: u16,
     pub ret_slots: u16,
     pub loop_stack: Vec<LoopContext>,
+    /// Upvalues captured by this function (for closures)
+    pub upvalues: Vec<Upvalue>,
+    /// Parent function's locals (for nested closures)
+    pub parent_locals: Option<HashMap<Symbol, LocalVar>>,
+    /// Parent function's upvalues (for multi-level capture)
+    pub parent_upvalues: Option<Vec<Upvalue>>,
 }
 
 impl FuncContext {
@@ -100,7 +122,81 @@ impl FuncContext {
             param_slots: 0,
             ret_slots: 0,
             loop_stack: Vec::new(),
+            upvalues: Vec::new(),
+            parent_locals: None,
+            parent_upvalues: None,
         }
+    }
+    
+    /// Create a new closure context with parent's locals and upvalues for multi-level capture
+    pub fn new_closure(name: &str, parent_locals: HashMap<Symbol, LocalVar>, parent_upvalues: Vec<Upvalue>) -> Self {
+        Self {
+            name: name.to_string(),
+            regs: Registers::new(),
+            locals: HashMap::new(),
+            code: Vec::new(),
+            param_count: 0,
+            param_slots: 0,
+            ret_slots: 0,
+            loop_stack: Vec::new(),
+            upvalues: Vec::new(),
+            parent_locals: Some(parent_locals),
+            parent_upvalues: Some(parent_upvalues),
+        }
+    }
+    
+    /// Add an upvalue and return its index
+    pub fn add_upvalue(&mut self, name: Symbol, is_local: bool, parent_index: u16) -> u16 {
+        // Check if already captured
+        for upval in &self.upvalues {
+            if upval.name == name {
+                return upval.index;
+            }
+        }
+        let index = self.upvalues.len() as u16;
+        self.upvalues.push(Upvalue {
+            name,
+            index,
+            is_local,
+            parent_index,
+        });
+        index
+    }
+    
+    /// Lookup a variable, checking locals first then upvalues
+    pub fn resolve_var(&mut self, sym: Symbol) -> Option<VarLocation> {
+        // First check locals
+        if let Some(local) = self.locals.get(&sym) {
+            return Some(VarLocation::Local(local.reg));
+        }
+        
+        // Then check already captured upvalues
+        for upval in &self.upvalues {
+            if upval.name == sym {
+                return Some(VarLocation::Upvalue(upval.index));
+            }
+        }
+        
+        // Try to capture from parent's locals
+        if let Some(ref parent_locals) = self.parent_locals {
+            if let Some(parent_local) = parent_locals.get(&sym) {
+                let upval_idx = self.add_upvalue(sym, true, parent_local.reg);
+                return Some(VarLocation::Upvalue(upval_idx));
+            }
+        }
+        
+        // Try to capture from parent's upvalues (multi-level capture)
+        if let Some(ref parent_upvalues) = self.parent_upvalues {
+            for parent_upval in parent_upvalues {
+                if parent_upval.name == sym {
+                    // Capture from parent's upvalue (is_local=false means from parent's upvalue)
+                    let upval_idx = self.add_upvalue(sym, false, parent_upval.index);
+                    return Some(VarLocation::Upvalue(upval_idx));
+                }
+            }
+        }
+        
+        None
     }
     
     pub fn push_loop(&mut self, continue_pc: usize) {
@@ -190,6 +286,8 @@ pub struct CodegenContext<'a> {
     pub const_values: HashMap<Symbol, crate::ConstValue>,
     pub native_indices: HashMap<String, u32>,
     pub const_indices: HashMap<String, u16>,
+    /// Offset for closure function indices (used when temp context has empty module)
+    pub closure_func_offset: u32,
 }
 
 /// Codegen context that compiles into an existing module.
@@ -247,6 +345,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         
         if let Some(ref body) = func.body {
             // Create a temporary owned context for stmt compilation
+            // Pass the current function count as closure_func_offset so closures get correct indices
             let mut temp_ctx = CodegenContext {
                 file: self.file,
                 result: self.result,
@@ -258,6 +357,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 const_values: self.const_values.clone(),
                 native_indices: self.native_indices.clone(),
                 const_indices: self.const_indices.clone(),
+                closure_func_offset: self.module.functions.len() as u32,
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
             // Merge back any new natives/constants
@@ -266,6 +366,10 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
             }
             for (k, v) in temp_ctx.const_indices {
                 self.const_indices.insert(k, v);
+            }
+            // Merge back any closure functions
+            for closure_func in temp_ctx.module.functions {
+                self.module.functions.push(closure_func);
             }
         }
         
@@ -346,6 +450,7 @@ impl<'a> CodegenContext<'a> {
             const_values: HashMap::new(),
             native_indices: HashMap::new(),
             const_indices: HashMap::new(),
+            closure_func_offset: 0,
         }
     }
     

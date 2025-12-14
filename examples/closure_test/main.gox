@@ -1,0 +1,111 @@
+package main
+
+func main() {
+    // Test 1: Simple closure without capture
+    add := func(a int, b int) int {
+        return a + b
+    }
+    println(add(3, 4))  // 7
+    
+    // Test 2: Closure capturing one variable
+    x := 10
+    addX := func(y int) int {
+        return x + y
+    }
+    println(addX(5))  // 15
+    
+    // Test 3: Closure capturing multiple variables
+    a := 100
+    b := 200
+    sumAB := func(c int) int {
+        return a + b + c
+    }
+    println(sumAB(50))  // 350
+    
+    // Test 4: Multiple closures capturing same variable (read-only)
+    factor := 5
+    mul := func(n int) int {
+        return n * factor
+    }
+    div := func(n int) int {
+        return n / factor
+    }
+    println(mul(20))  // 100
+    println(div(100)) // 20
+    
+    // Test 5: Closure with multiple params and capture
+    base := 1000
+    compute := func(x int, y int) int {
+        return base + x * y
+    }
+    println(compute(3, 4))  // 1012
+    
+    // Test 6: Calling captured closure multiple times
+    offset := 7
+    addOffset := func(n int) int {
+        return n + offset
+    }
+    println(addOffset(10))  // 17
+    println(addOffset(20))  // 27
+    println(addOffset(30))  // 37
+    
+    // Test 7: Nested closure - inner captures from parent's upvalue
+    outer := 100
+    level1 := func(x int) int {
+        // level1 explicitly captures outer first
+        o := outer
+        inner := func(y int) int {
+            // inner captures o (which is level1's local containing outer's value)
+            return o + x + y
+        }
+        return inner(5)
+    }
+    println(level1(10))  // 115 (100+10+5)
+    
+    // Test 8: Deep nesting - 3 levels
+    deep := 1000
+    l1 := func(a int) int {
+        d := deep
+        l2 := func(b int) int {
+            d2 := d
+            a2 := a
+            l3 := func(c int) int {
+                return d2 + a2 + b + c
+            }
+            return l3(3)
+        }
+        return l2(2)
+    }
+    println(l1(1))  // 1006 (1000+1+2+3)
+    
+    // Test 9: 5 levels of nesting
+    base5 := 10000
+    n1 := func(v1 int) int {
+        b := base5
+        n2 := func(v2 int) int {
+            b2 := b
+            v1c := v1
+            n3 := func(v3 int) int {
+                b3 := b2
+                v1c2 := v1c
+                v2c := v2
+                n4 := func(v4 int) int {
+                    b4 := b3
+                    v1c3 := v1c2
+                    v2c2 := v2c
+                    v3c := v3
+                    n5 := func(v5 int) int {
+                        return b4 + v1c3 + v2c2 + v3c + v4 + v5
+                    }
+                    return n5(5)
+                }
+                return n4(4)
+            }
+            return n3(3)
+        }
+        return n2(2)
+    }
+    println(n1(1))  // 10015 (10000+1+2+3+4+5)
+    
+    println(999)
+}

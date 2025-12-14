@@ -180,6 +180,8 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.const_values = pkg_consts.clone();
                     ctx.native_indices = native_indices.clone();
                     ctx.const_indices = const_indices.clone();
+                    // Set closure_func_offset to current function count so closures get correct indices
+                    ctx.closure_func_offset = module.functions.len() as u32;
                     // Share the module's constant pool
                     ctx.module.constants = module.constants.clone();
                     
@@ -192,6 +194,10 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     const_indices = ctx.const_indices;
                     module.constants = ctx.module.constants;
                     module.natives = ctx.module.natives;
+                    // Merge back any closure functions
+                    for closure_func in ctx.module.functions {
+                        module.functions.push(closure_func);
+                    }
                 }
             }
         }

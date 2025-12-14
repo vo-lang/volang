@@ -104,7 +104,7 @@ pub fn compile_expr(
             fctx.emit(Opcode::ChanRecv, dst, ch, 0);
             Ok(dst)
         }
-        ExprKind::FuncLit(_) => Err(CodegenError::Unsupported("function literal".to_string())),
+        ExprKind::FuncLit(func_lit) => compile_func_lit(ctx, fctx, func_lit),
         ExprKind::Slice(slice) => compile_slice_expr(ctx, fctx, slice),
         ExprKind::TypeAssert(_) => Err(CodegenError::Unsupported("type assertion".to_string())),
         ExprKind::Conversion(_) => Err(CodegenError::Unsupported("type conversion".to_string())),
@@ -145,7 +145,22 @@ fn compile_ident(
             // First check local variables
             if let Some(local) = fctx.lookup_local(ident.symbol) {
                 Ok(local.reg)
-            } 
+            }
+            // Check upvalues (for closures)
+            else if let Some(location) = fctx.resolve_var(ident.symbol) {
+                use crate::context::VarLocation;
+                match location {
+                    VarLocation::Local(reg) => Ok(reg),
+                    VarLocation::Upvalue(idx) => {
+                        // Load upvalue into a register
+                        // ClosureGet needs the closure reference - use register 0 (closure self)
+                        let dst = fctx.regs.alloc(1);
+                        // In a closure, register 0 implicitly holds the closure reference
+                        fctx.emit(Opcode::ClosureGet, dst, 0, idx);
+                        Ok(dst)
+                    }
+                }
+            }
             // Then check constants (inline their values)
             else if let Some(const_val) = ctx.const_values.get(&ident.symbol) {
                 let dst = fctx.regs.alloc(1);
@@ -365,6 +380,11 @@ fn compile_call(
         if let Some(func_idx) = ctx.lookup_func(ident.symbol) {
             return compile_func_call(ctx, fctx, func_idx, call);
         }
+        
+        // Check if it's a closure variable
+        if let Some(local) = fctx.lookup_local(ident.symbol) {
+            return compile_closure_call(ctx, fctx, local.reg, call);
+        }
     }
     
     // Package.Function call (e.g., math.Add, fmt.Println)
@@ -416,6 +436,30 @@ fn compile_func_call(
     let arg_count = call.args.len() as u16;
     // flags = ret_count (1 for single return value)
     fctx.emit_with_flags(Opcode::Call, 1, func_idx as u16, arg_start, arg_count);
+    
+    Ok(arg_start)
+}
+
+fn compile_closure_call(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    closure_reg: u16,
+    call: &CallExpr,
+) -> Result<u16, CodegenError> {
+    let arg_start = fctx.regs.current();
+    
+    // Compile each argument
+    for (i, arg) in call.args.iter().enumerate() {
+        let expected_reg = arg_start + i as u16;
+        let actual_reg = compile_expr(ctx, fctx, arg)?;
+        if actual_reg != expected_reg {
+            fctx.emit(Opcode::Mov, expected_reg, actual_reg, 0);
+        }
+    }
+    
+    let arg_count = call.args.len() as u16;
+    // ClosureCall: a=closure_reg, b=arg_start, c=arg_count, flags=ret_count
+    fctx.emit_with_flags(Opcode::ClosureCall, 1, closure_reg, arg_start, arg_count);
     
     Ok(arg_start)
 }
@@ -558,6 +602,75 @@ fn compile_selector(
     let dst = fctx.regs.alloc(1);
     // TODO: resolve field index
     fctx.emit(Opcode::GetField, dst, obj, 0);
+    Ok(dst)
+}
+
+/// Compile function literal (closure)
+fn compile_func_lit(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    func_lit: &gox_syntax::ast::FuncLit,
+) -> Result<u16, CodegenError> {
+    use crate::context::FuncContext;
+    
+    // Generate a unique name for the closure
+    let closure_name = format!("{}$closure{}", fctx.name, ctx.module.functions.len());
+    
+    // Create a new function context for the closure, passing parent's locals and upvalues for multi-level capture
+    let mut closure_fctx = FuncContext::new_closure(&closure_name, fctx.locals.clone(), fctx.upvalues.clone());
+    
+    // Reserve register 0 for the closure reference (used to access upvalues)
+    closure_fctx.regs.alloc(1);
+    
+    // Process parameters (starting at register 1)
+    for param in &func_lit.sig.params {
+        for name in &param.names {
+            closure_fctx.param_count += 1;
+            closure_fctx.param_slots += 1;
+            closure_fctx.define_local(*name, 1);
+        }
+    }
+    
+    closure_fctx.ret_slots = func_lit.sig.results.len() as u16;
+    
+    // Compile the closure body
+    crate::stmt::compile_block(ctx, &mut closure_fctx, &func_lit.body)?;
+    
+    // Ensure return at end
+    if closure_fctx.code.is_empty() || !matches!(closure_fctx.code.last().map(|i| i.opcode()), Some(Opcode::Return)) {
+        closure_fctx.emit(Opcode::Return, 0, 0, 0);
+    }
+    
+    // Get upvalue count before building
+    let upvalue_count = closure_fctx.upvalues.len() as u16;
+    let upvalues = closure_fctx.upvalues.clone();
+    
+    // Add the closure function to the module
+    let func_def = closure_fctx.build();
+    // Use closure_func_offset + local index to get the actual function index
+    let func_idx = ctx.closure_func_offset + ctx.module.functions.len() as u32;
+    ctx.module.functions.push(func_def);
+    
+    // Generate closure creation code
+    let dst = fctx.regs.alloc(1);
+    fctx.emit(Opcode::ClosureNew, dst, func_idx as u16, upvalue_count);
+    
+    // Initialize upvalues from parent's locals or parent's upvalues
+    for upval in &upvalues {
+        if upval.is_local {
+            // Capture from parent's local register
+            fctx.emit(Opcode::ClosureSet, dst, upval.index, upval.parent_index);
+        } else {
+            // Capture from parent's upvalue (multi-level capture)
+            // First load parent's upvalue into a temp register
+            let tmp = fctx.regs.alloc(1);
+            // Register 0 holds parent closure reference
+            fctx.emit(Opcode::ClosureGet, tmp, 0, upval.parent_index);
+            // Then store into new closure's upvalue
+            fctx.emit(Opcode::ClosureSet, dst, upval.index, tmp);
+        }
+    }
+    
     Ok(dst)
 }
 

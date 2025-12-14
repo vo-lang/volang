@@ -1005,6 +1005,29 @@ impl Vm {
                 closure::set_upvalue(cl, b as usize, val);
             }
             
+            Opcode::ClosureCall => {
+                // a=closure_reg, b=arg_start, c=arg_count, flags=ret_count
+                let cl = self.read_reg(fiber_id, a) as GcRef;
+                let func_id = closure::func_id(cl);
+                let module = self.module.as_ref().unwrap();
+                let func = &module.functions[func_id as usize];
+                
+                // Copy arguments before pushing frame
+                let args: Vec<u64> = (0..c).map(|i| self.read_reg(fiber_id, b + i)).collect();
+                
+                // Push frame: ret_reg = b (return to arg_start), ret_count = flags
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                fiber.push_frame(func_id, b, func.local_slots as usize, b, flags);
+                
+                // Write closure reference to register 0 for upvalue access
+                fiber.write_reg(0, cl as u64);
+                
+                // Copy arguments to new frame (starting after closure ref at reg 1)
+                for (i, arg) in args.into_iter().enumerate() {
+                    fiber.write_reg((i + 1) as u16, arg);
+                }
+            }
+            
             // ============ Goroutine ============
             Opcode::Go => {
                 // a=func_id, b=arg_start, c=arg_count
