@@ -162,6 +162,9 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
             .map(|((_, sym), idx)| (*sym, *idx))
             .collect();
         
+        // Collect constant values from scope for inlining
+        let pkg_consts: HashMap<Symbol, i64> = collect_const_values(&pkg.types.scope, &pkg.interner);
+        
         for file in &pkg.files {
             for decl in &file.decls {
                 if let Decl::Func(func) = decl {
@@ -169,6 +172,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.func_indices = func_indices.clone();
                     ctx.cross_pkg_funcs = cross_pkg_funcs.clone();
                     ctx.global_indices = pkg_globals.clone();
+                    ctx.const_values = pkg_consts.clone();
                     
                     let func_def = ctx.compile_func_body(func)?;
                     let idx = func_indices[&func.name.symbol] as usize;
@@ -240,6 +244,28 @@ fn compile_simple_expr(
         }
     }
     reg
+}
+
+/// Collect constant values from scope for inlining.
+fn collect_const_values(
+    scope: &gox_analysis::scope::Scope,
+    _interner: &SymbolInterner,
+) -> HashMap<Symbol, i64> {
+    use gox_analysis::scope::Entity;
+    
+    let mut consts = HashMap::new();
+    
+    for (sym, entity) in scope.local_symbols() {
+        if let Entity::Var(var) = entity {
+            if let Some(ref constant) = var.constant {
+                if let Some(val) = constant.to_i64() {
+                    consts.insert(*sym, val);
+                }
+            }
+        }
+    }
+    
+    consts
 }
 
 /// Generate the module $init function that calls var inits then package inits in order.

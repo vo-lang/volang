@@ -561,7 +561,7 @@ impl<'a> TypeCollector<'a> {
             ast::ExprKind::IntLit(lit) => {
                 let s = self.interner.resolve(lit.raw).unwrap_or("");
                 if let Ok(v) = parse_int_literal(s) {
-                    (Type::Untyped(UntypedKind::Int), Some(Constant::Int(v)))
+                    (Type::Untyped(UntypedKind::Int), Some(Constant::int(v)))
                 } else {
                     (Type::Invalid, None)
                 }
@@ -569,7 +569,7 @@ impl<'a> TypeCollector<'a> {
             ast::ExprKind::FloatLit(lit) => {
                 let s = self.interner.resolve(lit.raw).unwrap_or("");
                 if let Ok(v) = s.parse::<f64>() {
-                    (Type::Untyped(UntypedKind::Float), Some(Constant::Float(v)))
+                    (Type::Untyped(UntypedKind::Float), Some(Constant::float(v)))
                 } else {
                     (Type::Invalid, None)
                 }
@@ -596,7 +596,7 @@ impl<'a> TypeCollector<'a> {
                 if id.symbol == self.builtin_symbols.iota_sym {
                     return (
                         Type::Untyped(UntypedKind::Int),
-                        Some(Constant::Int(self.iota as i128)),
+                        Some(Constant::int(self.iota as i64)),
                     );
                 }
                 // Check for true/false
@@ -639,8 +639,8 @@ impl<'a> TypeCollector<'a> {
                         BinaryOp::AndNot => l.bit_clear(&r),
                         BinaryOp::LogAnd => l.and(&r),
                         BinaryOp::LogOr => l.or(&r),
-                        BinaryOp::Eq => l.eq(&r),
-                        BinaryOp::NotEq => l.eq(&r).and_then(|c| c.not()),
+                        BinaryOp::Eq => l.const_eq(&r),
+                        BinaryOp::NotEq => l.const_eq(&r).and_then(|c| c.not()),
                         BinaryOp::Lt => l.lt(&r),
                         BinaryOp::LtEq => l.le(&r),
                         BinaryOp::Gt => r.lt(&l),
@@ -728,18 +728,18 @@ fn parse_string_literal(s: &str) -> String {
     result
 }
 
-/// Parses an integer literal string to i128.
-fn parse_int_literal(s: &str) -> Result<i128, ()> {
+/// Parses an integer literal string to i64.
+fn parse_int_literal(s: &str) -> Result<i64, ()> {
     let s = s.replace('_', "");
     if s.starts_with("0x") || s.starts_with("0X") {
-        i128::from_str_radix(&s[2..], 16).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 16).map_err(|_| ())
     } else if s.starts_with("0o") || s.starts_with("0O") {
-        i128::from_str_radix(&s[2..], 8).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 8).map_err(|_| ())
     } else if s.starts_with("0b") || s.starts_with("0B") {
-        i128::from_str_radix(&s[2..], 2).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 2).map_err(|_| ())
     } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
         // Legacy octal
-        i128::from_str_radix(&s[1..], 8).map_err(|_| ())
+        i64::from_str_radix(&s[1..], 8).map_err(|_| ())
     } else {
         s.parse().map_err(|_| ())
     }
@@ -861,10 +861,12 @@ mod tests {
         let pi_sym = interner.get("Pi").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(pi_sym) {
             assert!(v.constant.is_some());
-            if let Some(Constant::Float(f)) = &v.constant {
-                assert!((*f - 3.14).abs() < 0.001);
-            } else {
-                panic!("expected float constant");
+            if let Some(c) = &v.constant {
+                if let Some(f) = c.to_f64() {
+                    assert!((f - 3.14).abs() < 0.001);
+                } else {
+                    panic!("expected float constant");
+                }
             }
         } else {
             panic!("expected var entity for Pi");
@@ -884,7 +886,7 @@ mod tests {
         let c_sym = interner.get("C").unwrap();
         
         if let Some(Entity::Var(v)) = result.scope.lookup(a_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(0)));
+            assert_eq!(v.constant, Some(Constant::int(0)));
         } else {
             panic!("expected var entity for A");
         }
@@ -1011,7 +1013,7 @@ mod tests {
         
         let kb_sym = interner.get("KB").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(kb_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(1024)));
+            assert_eq!(v.constant, Some(Constant::int(1024)));
         } else {
             panic!("expected var entity for KB");
         }
@@ -1027,7 +1029,7 @@ mod tests {
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(-42)));
+            assert_eq!(v.constant, Some(Constant::int(-42)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1059,7 +1061,7 @@ mod tests {
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(0x0F)));
+            assert_eq!(v.constant, Some(Constant::int(0x0F)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1124,7 +1126,7 @@ const X = "hello" + " world""#
         
         let b_sym = interner.get("B").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(b_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(15)));
+            assert_eq!(v.constant, Some(Constant::int(15)));
         } else {
             panic!("expected var entity for B");
         }
@@ -1156,10 +1158,10 @@ const X = "hello" + " world""#
         let y_sym = interner.get("y").unwrap();
         
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(1)));
+            assert_eq!(v.constant, Some(Constant::int(1)));
         }
         if let Some(Entity::Var(v)) = result.scope.lookup(y_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(2)));
+            assert_eq!(v.constant, Some(Constant::int(2)));
         }
     }
 
@@ -1238,7 +1240,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(9)));
+            assert_eq!(v.constant, Some(Constant::int(9)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1270,7 +1272,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(0xDEADBEEF)));
+            assert_eq!(v.constant, Some(Constant::int(0xDEADBEEF)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1286,7 +1288,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(0o755)));
+            assert_eq!(v.constant, Some(Constant::int(0o755)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1302,7 +1304,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(0b1010)));
+            assert_eq!(v.constant, Some(Constant::int(0b1010)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1346,7 +1348,7 @@ const X = "hello" + " world""#
         let kb_sym = interner.get("KB").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(kb_sym) {
             // 1 << (10 * 0) = 1
-            assert_eq!(v.constant, Some(Constant::Int(1)));
+            assert_eq!(v.constant, Some(Constant::int(1)));
         } else {
             panic!("expected var entity for KB");
         }
@@ -1362,7 +1364,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(3)));
+            assert_eq!(v.constant, Some(Constant::int(3)));
         } else {
             panic!("expected var entity for X");
         }
@@ -1378,7 +1380,7 @@ const X = "hello" + " world""#
         
         let x_sym = interner.get("X").unwrap();
         if let Some(Entity::Var(v)) = result.scope.lookup(x_sym) {
-            assert_eq!(v.constant, Some(Constant::Int(1)));
+            assert_eq!(v.constant, Some(Constant::int(1)));
         } else {
             panic!("expected var entity for X");
         }

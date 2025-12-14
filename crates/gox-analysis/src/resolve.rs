@@ -506,10 +506,18 @@ impl<'a> TypeResolver<'a> {
     /// Evaluates an array length expression to a constant.
     fn eval_array_length(&mut self, expr: &ast::Expr) -> u64 {
         match self.eval_const_expr(expr) {
-            Some(Constant::Int(n)) if n >= 0 => n as u64,
-            Some(Constant::Int(_)) => {
-                self.diagnostics.emit(TypeError::NegativeArrayLength.diagnostic());
-                0
+            Some(c) => {
+                if let Some(n) = c.to_i64() {
+                    if n >= 0 {
+                        n as u64
+                    } else {
+                        self.diagnostics.emit(TypeError::NegativeArrayLength.diagnostic());
+                        0
+                    }
+                } else {
+                    self.diagnostics.emit(TypeError::NonConstantArrayLength.diagnostic());
+                    0
+                }
             }
             _ => {
                 self.diagnostics.emit(TypeError::NonConstantArrayLength.diagnostic());
@@ -523,7 +531,7 @@ impl<'a> TypeResolver<'a> {
         match &expr.kind {
             ast::ExprKind::IntLit(lit) => {
                 let s = self.interner.resolve(lit.raw)?;
-                parse_int_literal(s).ok().map(Constant::Int)
+                parse_int_literal(s).ok().map(|v| Constant::int(v))
             }
             ast::ExprKind::Ident(ident) => {
                 if let Some(Entity::Var(v)) = self.scope.lookup(ident.symbol) {
@@ -562,17 +570,17 @@ impl<'a> TypeResolver<'a> {
     }
 }
 
-/// Parses an integer literal string to i128.
-fn parse_int_literal(s: &str) -> Result<i128, ()> {
+/// Parses an integer literal string to i64.
+fn parse_int_literal(s: &str) -> Result<i64, ()> {
     let s = s.replace('_', "");
     if s.starts_with("0x") || s.starts_with("0X") {
-        i128::from_str_radix(&s[2..], 16).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 16).map_err(|_| ())
     } else if s.starts_with("0o") || s.starts_with("0O") {
-        i128::from_str_radix(&s[2..], 8).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 8).map_err(|_| ())
     } else if s.starts_with("0b") || s.starts_with("0B") {
-        i128::from_str_radix(&s[2..], 2).map_err(|_| ())
+        i64::from_str_radix(&s[2..], 2).map_err(|_| ())
     } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
-        i128::from_str_radix(&s[1..], 8).map_err(|_| ())
+        i64::from_str_radix(&s[1..], 8).map_err(|_| ())
     } else {
         s.parse().map_err(|_| ())
     }

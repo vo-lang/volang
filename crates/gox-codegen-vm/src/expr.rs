@@ -75,6 +75,14 @@ fn compile_ident(
             if let Some(local) = fctx.lookup_local(ident.symbol) {
                 Ok(local.reg)
             } 
+            // Then check constants (inline their values)
+            else if let Some(&const_val) = ctx.const_values.get(&ident.symbol) {
+                let dst = fctx.regs.alloc(1);
+                // Load constant value as immediate
+                let val = const_val as u32;
+                fctx.emit(Opcode::LoadInt, dst, val as u16, (val >> 16) as u16);
+                Ok(dst)
+            }
             // Then check global variables
             else if let Some(&global_idx) = ctx.global_indices.get(&ident.symbol) {
                 let dst = fctx.regs.alloc(1);

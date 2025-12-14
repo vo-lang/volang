@@ -1,0 +1,23 @@
+package main
+
+const (
+    A = 1 << 10       // 1024
+    B = 1 << 20       // 1048576  
+    C = A + B         // 1049600
+    D = 100 * 100     // 10000
+    E = D / 10        // 1000
+    F = 0xFF & 0x0F   // 15
+    G = 3 | 4         // 7
+    H = -42           // -42
+)
+
+func main() {
+    println(A)
+    println(B)
+    println(C)
+    println(D)
+    println(E)
+    println(F)
+    println(G)
+    println(H)
+}

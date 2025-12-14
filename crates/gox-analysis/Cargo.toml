@@ -8,5 +8,8 @@ description = "Semantic analysis and type checking for the GoX programming langu
 [dependencies]
 gox-common = { path = "../gox-common" }
 gox-syntax = { path = "../gox-syntax" }
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
 
 [dev-dependencies]
