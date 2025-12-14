@@ -110,6 +110,8 @@ pub enum TokenKind {
     Interface,
     /// `map`
     Map,
+    /// `native`
+    Native,
     /// `object` (named `Obx` to avoid Rust naming conflicts)
     Obx,
     /// `package`
@@ -375,6 +377,7 @@ impl TokenKind {
             "import" => Some(TokenKind::Import),
             "interface" => Some(TokenKind::Interface),
             "map" => Some(TokenKind::Map),
+            "native" => Some(TokenKind::Native),
             "object" => Some(TokenKind::Obx),
             "package" => Some(TokenKind::Package),
             "range" => Some(TokenKind::Range),
@@ -418,6 +421,7 @@ impl TokenKind {
             TokenKind::Import => "import",
             TokenKind::Interface => "interface",
             TokenKind::Map => "map",
+            TokenKind::Native => "native",
             TokenKind::Obx => "object",
             TokenKind::Package => "package",
             TokenKind::Range => "range",

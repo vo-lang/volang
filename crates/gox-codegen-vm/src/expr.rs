@@ -378,8 +378,14 @@ fn compile_call(
                 return compile_func_call(ctx, fctx, func_idx, call);
             }
             
-            // Try native functions (registered via FFI)
+            // Try native functions (already registered or register now)
             if let Some(native_idx) = ctx.lookup_native(&full_name) {
+                return compile_native_call(ctx, fctx, native_idx, call);
+            }
+            
+            // Check if this is a native function from imported package
+            if ctx.is_native_func(pkg_ident.symbol, sel.sel.symbol) {
+                let native_idx = ctx.register_native(&full_name, 1, 1);
                 return compile_native_call(ctx, fctx, native_idx, call);
             }
         }

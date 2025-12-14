@@ -152,6 +152,9 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
         module.functions.push(func);
     }
     
+    // Shared native indices across all packages
+    let mut native_indices: HashMap<String, u32> = HashMap::new();
+    
     // Fourth pass: compile all function bodies
     for (pkg_idx, pkg) in project.packages.iter().enumerate() {
         let func_indices = &pkg_func_indices[pkg_idx];
@@ -174,10 +177,19 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.cross_pkg_funcs = cross_pkg_funcs.clone();
                     ctx.global_indices = pkg_globals.clone();
                     ctx.const_values = pkg_consts.clone();
+                    ctx.native_indices = native_indices.clone();
                     
                     let func_def = ctx.compile_func_body(func)?;
                     let idx = func_indices[&func.name.symbol] as usize;
                     module.functions[idx] = func_def;
+                    
+                    // Merge back any new natives registered during compilation
+                    for (name, native_idx) in ctx.native_indices {
+                        if !native_indices.contains_key(&name) {
+                            native_indices.insert(name.clone(), native_idx);
+                            module.add_native(&name, 1, 1);
+                        }
+                    }
                 }
             }
         }

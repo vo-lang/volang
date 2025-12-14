@@ -261,6 +261,18 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
     pub fn lookup_native(&self, name: &str) -> Option<u32> {
         self.native_indices.get(name).copied()
     }
+    
+    /// Check if a function from an imported package is native.
+    pub fn is_native_func(&self, pkg_sym: Symbol, _func_sym: Symbol) -> bool {
+        // Get package name from symbol
+        if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
+            // For stdlib packages (no dots, not relative), treat all functions as native
+            if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl<'a> CodegenContext<'a> {
@@ -417,5 +429,17 @@ impl<'a> CodegenContext<'a> {
     
     pub fn lookup_native(&self, name: &str) -> Option<u32> {
         self.native_indices.get(name).copied()
+    }
+    
+    /// Check if a function from an imported package is native.
+    pub fn is_native_func(&self, pkg_sym: Symbol, _func_sym: Symbol) -> bool {
+        // Get package name from symbol
+        if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
+            // For stdlib packages (no dots, not relative), treat all functions as native
+            if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
+                return true;
+            }
+        }
+        false
     }
 }

@@ -13,6 +13,10 @@ impl<'a> Parser<'a> {
             TokenKind::Const => self.parse_const_decl().map(Decl::Const),
             TokenKind::Type => self.parse_type_decl().map(Decl::Type),
             TokenKind::Func => self.parse_func_decl().map(Decl::Func),
+            TokenKind::Native => {
+                self.advance(); // consume 'native'
+                self.parse_native_func_decl().map(Decl::Func)
+            }
             TokenKind::Interface => self.parse_interface_decl().map(Decl::Interface),
             _ => {
                 self.error_expected("declaration");
@@ -135,7 +139,17 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a function declaration.
+    /// Supports both regular and native functions: `func f()` or `native func f()`
     pub fn parse_func_decl(&mut self) -> ParseResult<FuncDecl> {
+        self.parse_func_decl_with_native(false)
+    }
+    
+    /// Parses a native function declaration: `native func f()`
+    pub fn parse_native_func_decl(&mut self) -> ParseResult<FuncDecl> {
+        self.parse_func_decl_with_native(true)
+    }
+    
+    fn parse_func_decl_with_native(&mut self, is_native: bool) -> ParseResult<FuncDecl> {
         let start = self.current.span.start;
         self.expect(TokenKind::Func)?;
         
@@ -149,8 +163,11 @@ impl<'a> Parser<'a> {
         let name = self.parse_ident()?;
         let sig = self.parse_func_sig()?;
         
-        // Body is optional (for forward declarations)
+        // Body is optional (for forward declarations), but native funcs must not have body
         let body = if self.at(TokenKind::LBrace) {
+            if is_native {
+                return Err(self.error("native functions cannot have a body"));
+            }
             Some(self.parse_block()?)
         } else {
             self.expect_semi();
@@ -158,6 +175,7 @@ impl<'a> Parser<'a> {
         };
         
         Ok(FuncDecl {
+            is_native,
             receiver,
             name,
             sig,

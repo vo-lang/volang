@@ -178,8 +178,9 @@ pub fn analyze_project(file_set: FileSet, vfs: &Vfs) -> Result<Project, ProjectE
     // Step 1: Parse all files and group by package (by directory)
     let mut parsed_packages = parse_packages(&file_set, &mut interner)?;
     
-    // Step 2: Resolve imports (map import paths to package names)
+    // Step 2: Resolve imports and load stdlib packages
     resolve_imports(&mut parsed_packages)?;
+    load_stdlib_packages(&mut parsed_packages, vfs, &mut interner)?;
     
     // Step 3: Build dependency graph and topologically sort for init order
     let sorted_names = topological_sort(&parsed_packages)?;
@@ -360,6 +361,59 @@ fn resolve_imports(packages: &mut HashMap<String, ParsedPackage>) -> Result<(), 
                 }
             }
         }
+    }
+    
+    Ok(())
+}
+
+/// Load stdlib packages referenced by imports.
+fn load_stdlib_packages(
+    packages: &mut HashMap<String, ParsedPackage>,
+    vfs: &Vfs,
+    _interner: &mut SymbolInterner,
+) -> Result<(), ProjectError> {
+    // Collect all stdlib imports
+    let mut stdlib_imports: HashSet<String> = HashSet::new();
+    for pkg in packages.values() {
+        for import in &pkg.imports {
+            if let ImportPath::Stdlib(_) = ImportPath::parse(&import.path) {
+                stdlib_imports.insert(import.package_name.clone());
+            }
+        }
+    }
+    
+    // Load each stdlib package through VFS
+    for pkg_name in stdlib_imports {
+        if packages.contains_key(&pkg_name) {
+            continue; // Already loaded
+        }
+        
+        if let Some(vfs_pkg) = vfs.resolve(&pkg_name) {
+            let mut pkg_interner = SymbolInterner::new();
+            let mut files = Vec::new();
+            let file_id = FileId::new(0); // Dummy file ID for stdlib
+            
+            for vfs_file in &vfs_pkg.files {
+                let content = &vfs_file.content;
+                let (ast, _diag, new_interner) = parse_with_interner(file_id, content, pkg_interner);
+                pkg_interner = new_interner;
+                files.push((vfs_file.path.clone(), ast));
+            }
+            
+            if !files.is_empty() {
+                let parsed = ParsedPackage {
+                    name: pkg_name.clone(),
+                    dir: PathBuf::from(format!("std/{}", pkg_name)),
+                    files,
+                    interner: pkg_interner,
+                    imports: Vec::new(),
+                    has_init: false,
+                    has_var_decls: false,
+                };
+                packages.insert(pkg_name, parsed);
+            }
+        }
+        // If VFS can't resolve, that's OK - natives don't need source files
     }
     
     Ok(())

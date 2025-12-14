@@ -114,6 +114,8 @@ pub struct TypeDecl {
 /// A function declaration.
 #[derive(Debug, Clone)]
 pub struct FuncDecl {
+    /// Whether this is a native function (implemented in Rust).
+    pub is_native: bool,
     /// The receiver, if this is a method.
     pub receiver: Option<Receiver>,
     /// The function name.
