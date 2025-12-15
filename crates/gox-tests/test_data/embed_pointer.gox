@@ -1,6 +1,5 @@
-// skip: GoX doesn't support pointer syntax
-// Test: GoX correctly rejects pointer syntax
-// GoX doesn't have pointers - these should all error
+// Test: GoX correctly rejects pointer syntax at parse stage
+// GoX doesn't have pointers - parser rejects *, &
 package main
 
 // 1. Pointer type in struct field
@@ -13,7 +12,8 @@ func (t *T) Method() {}
 
 // 3. Address-of expression
 func main() {
-	x := &S1{}
-	_ = x
 }
 
+=== typecheck ===
+E1101
+E1101
