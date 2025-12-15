@@ -13,5 +13,7 @@ path = "src/main.rs"
 gox-common = { path = "../gox-common" }
 gox-syntax = { path = "../gox-syntax" }
 gox-analysis = { path = "../gox-analysis" }
+gox-codegen-vm = { path = "../gox-codegen-vm" }
+gox-vm = { path = "../gox-vm" }
 
 [dev-dependencies]

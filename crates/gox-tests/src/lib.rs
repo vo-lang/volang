@@ -38,6 +38,7 @@ mod runner;
 
 pub use printer::AstPrinter;
 pub use runner::{TestRunner, TestResult, run_test_file, run_all_tests};
+pub use runner::{VirtualFs, CodegenTestResult, run_source, run_source_with_vfs};
 
 #[cfg(test)]
 mod tests {

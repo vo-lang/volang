@@ -1,5 +1,6 @@
 //! Test runner for file-based tests.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -8,6 +9,140 @@ use gox_common::source::FileId;
 use gox_syntax::parser;
 
 use crate::printer::AstPrinter;
+
+/// Virtual file system for testing single files without disk I/O.
+#[derive(Debug, Clone, Default)]
+pub struct VirtualFs {
+    files: HashMap<String, String>,
+}
+
+impl VirtualFs {
+    pub fn new() -> Self {
+        Self { files: HashMap::new() }
+    }
+    
+    /// Add a file to the virtual filesystem.
+    pub fn add_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
+        self.files.insert(path.into(), content.into());
+    }
+    
+    /// Get file content by path.
+    pub fn get(&self, path: &str) -> Option<&str> {
+        self.files.get(path).map(|s| s.as_str())
+    }
+    
+    /// Check if a file exists.
+    pub fn exists(&self, path: &str) -> bool {
+        self.files.contains_key(path)
+    }
+    
+    /// List all files.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.files.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+/// Result of running a single source test.
+#[derive(Debug)]
+pub struct CodegenTestResult {
+    pub name: String,
+    pub passed: bool,
+    pub output: String,
+    pub error: Option<String>,
+}
+
+/// Run a single .gox source from string (for codegen tests).
+/// Returns the test result with output capture.
+pub fn run_source(name: &str, source: &str) -> CodegenTestResult {
+    // Create virtual filesystem with the source
+    let mut vfs = VirtualFs::new();
+    vfs.add_file("main.gox", source);
+    
+    run_source_with_vfs(name, &vfs)
+}
+
+/// Run source from virtual filesystem.
+pub fn run_source_with_vfs(name: &str, vfs: &VirtualFs) -> CodegenTestResult {
+    // Get main.gox content
+    let source = match vfs.get("main.gox") {
+        Some(s) => s,
+        None => {
+            return CodegenTestResult {
+                name: name.to_string(),
+                passed: false,
+                output: String::new(),
+                error: Some("main.gox not found in virtual filesystem".to_string()),
+            };
+        }
+    };
+    
+    // Parse
+    let (file, parse_diag, interner) = parser::parse(FileId::new(0), source);
+    if parse_diag.has_errors() {
+        return CodegenTestResult {
+            name: name.to_string(),
+            passed: false,
+            output: String::new(),
+            error: Some(format!("Parse error: {}", format_diagnostics(&parse_diag))),
+        };
+    }
+    
+    // Type check
+    let mut typecheck_diag = DiagnosticSink::new();
+    let typecheck_result = gox_analysis::typecheck_file(&file, &interner, &mut typecheck_diag);
+    if typecheck_diag.has_errors() {
+        return CodegenTestResult {
+            name: name.to_string(),
+            passed: false,
+            output: String::new(),
+            error: Some(format!("Type error: {}", format_diagnostics(&typecheck_diag))),
+        };
+    }
+    
+    // Compile single file
+    let module = match gox_codegen_vm::compile(&file, &typecheck_result, &interner) {
+        Ok(m) => m,
+        Err(e) => {
+            return CodegenTestResult {
+                name: name.to_string(),
+                passed: false,
+                output: String::new(),
+                error: Some(format!("Codegen error: {:?}", e)),
+            };
+        }
+    };
+    
+    // Run
+    let mut vm = gox_vm::Vm::new();
+    vm.load_module(module);
+    
+    match vm.run() {
+        gox_vm::VmResult::Done | gox_vm::VmResult::Ok => {
+            CodegenTestResult {
+                name: name.to_string(),
+                passed: true,
+                output: String::new(),
+                error: None,
+            }
+        }
+        gox_vm::VmResult::Panic(msg) => {
+            CodegenTestResult {
+                name: name.to_string(),
+                passed: false,
+                output: String::new(),
+                error: Some(msg),
+            }
+        }
+        gox_vm::VmResult::Yield => {
+            CodegenTestResult {
+                name: name.to_string(),
+                passed: false,
+                output: String::new(),
+                error: Some("Unexpected yield".to_string()),
+            }
+        }
+    }
+}
 
 /// Result of running a single test.
 #[derive(Debug)]
