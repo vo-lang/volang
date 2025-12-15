@@ -1,4 +1,4 @@
-// skip: method promotion not implemented
+
 // Test: struct embedding - method promotion
 package main
 

@@ -318,6 +318,8 @@ pub struct CodegenContext<'a> {
     pub closure_func_offset: u32,
     /// Method table: "TypeName.MethodName" -> func_idx
     pub method_table: HashMap<String, u32>,
+    /// Interface parameter positions for functions: func_idx -> Vec<param_index>
+    pub func_interface_params: HashMap<u32, Vec<u16>>,
 }
 
 /// Codegen context that compiles into an existing module.
@@ -334,6 +336,8 @@ pub struct CodegenContextRef<'a, 'm> {
     pub const_indices: HashMap<String, u16>,
     /// Method table: "TypeName.MethodName" -> func_idx
     pub method_table: HashMap<String, u32>,
+    /// Interface parameter positions for functions: func_idx -> Vec<param_index>
+    pub func_interface_params: HashMap<u32, Vec<u16>>,
 }
 
 impl<'a, 'm> CodegenContextRef<'a, 'm> {
@@ -393,6 +397,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 const_indices: self.const_indices.clone(),
                 closure_func_offset: self.module.functions.len() as u32,
                 method_table: self.method_table.clone(),
+                func_interface_params: self.func_interface_params.clone(),
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
             // Merge back any new natives/constants
@@ -487,6 +492,7 @@ impl<'a> CodegenContext<'a> {
             const_indices: HashMap::new(),
             closure_func_offset: 0,
             method_table: HashMap::new(),
+            func_interface_params: HashMap::new(),
         }
     }
     
@@ -509,6 +515,7 @@ impl<'a> CodegenContext<'a> {
             native_indices: HashMap::new(),
             const_indices: HashMap::new(),
             method_table: HashMap::new(),
+            func_interface_params: HashMap::new(),
         }
     }
     
@@ -602,10 +609,11 @@ impl<'a> CodegenContext<'a> {
         // Allocate registers for parameters with type info
         for param in &func.sig.params {
             let (kind, type_sym) = infer_type_from_type_expr(self.result, &param.ty);
+            let slots = if kind == VarKind::Interface { 2 } else { 1 };
             for name in &param.names {
                 fctx.param_count += 1;
-                fctx.param_slots += 1;
-                fctx.define_local_with_type(*name, 1, kind.clone(), type_sym);
+                fctx.param_slots += slots;
+                fctx.define_local_with_type(*name, slots, kind.clone(), type_sym);
             }
         }
         
@@ -681,12 +689,13 @@ pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast:
         TypeExprKind::Struct(s) => (VarKind::Struct(s.fields.len() as u16), None),
         TypeExprKind::Obx(_) => (VarKind::Obx, None),
         TypeExprKind::Ident(ident) => {
-            // Named type - check if struct or object
+            // Named type - check if struct, object, or interface
             for named in &result.named_types {
                 if named.name == ident.symbol {
                     match &named.underlying {
                         Type::Struct(s) => return (VarKind::Struct(s.fields.len() as u16), Some(ident.symbol)),
                         Type::Obx(_) => return (VarKind::Obx, Some(ident.symbol)),
+                        Type::Interface(_) => return (VarKind::Interface, Some(ident.symbol)),
                         _ => {}
                     }
                 }

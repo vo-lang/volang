@@ -1,4 +1,4 @@
-// skip: method promotion not implemented
+
 // Test: interface satisfaction via embedded fields
 package main
 

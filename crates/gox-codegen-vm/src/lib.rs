@@ -86,6 +86,9 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     // method_table: "TypeName.MethodName" -> func_idx
     let mut method_table: HashMap<String, u32> = HashMap::new();
     
+    // func_interface_params: func_idx -> Vec<param_index> for params that are interfaces
+    let mut func_interface_params: HashMap<u32, Vec<u16>> = HashMap::new();
+    
     for pkg in &project.packages {
         let mut func_indices: HashMap<Symbol, u32> = HashMap::new();
         
@@ -94,6 +97,23 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                 if let Decl::Func(func) = decl {
                     let func_name = pkg.interner.resolve(func.name.symbol).unwrap_or("");
                     let idx = module.functions.len() as u32;
+                    
+                    // Track interface parameters
+                    let mut iface_params: Vec<u16> = Vec::new();
+                    let mut param_idx = 0u16;
+                    for param in &func.sig.params {
+                        if is_interface_type_expr(&pkg.types, &param.ty) {
+                            for _ in &param.names {
+                                iface_params.push(param_idx);
+                                param_idx += 1;
+                            }
+                        } else {
+                            param_idx += param.names.len() as u16;
+                        }
+                    }
+                    if !iface_params.is_empty() {
+                        func_interface_params.insert(idx, iface_params);
+                    }
                     
                     // Register method with receiver type
                     if let Some(ref receiver) = func.receiver {
@@ -193,6 +213,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.native_indices = native_indices.clone();
                     ctx.const_indices = const_indices.clone();
                     ctx.method_table = method_table.clone();
+                    ctx.func_interface_params = func_interface_params.clone();
                     // Set closure_func_offset to current function count so closures get correct indices
                     ctx.closure_func_offset = module.functions.len() as u32;
                     // Share the module's constant pool
@@ -324,6 +345,11 @@ fn compile_simple_expr(
         }
     }
     reg
+}
+
+/// Check if a type expression refers to an interface type.
+fn is_interface_type_expr(types: &gox_analysis::TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> bool {
+    context::infer_type_from_type_expr(types, ty).0 == context::VarKind::Interface
 }
 
 /// Constant value for inlining.

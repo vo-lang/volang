@@ -453,7 +453,7 @@ fn is_interface_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax
 }
 
 /// Infer runtime type ID for boxing into interface
-fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
+pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
     use gox_syntax::ast::ExprKind;
     use gox_vm::types::builtin;
     use crate::context::VarKind;

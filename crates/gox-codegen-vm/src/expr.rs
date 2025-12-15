@@ -494,17 +494,29 @@ fn compile_call(
             
             // Try method call on a local variable FIRST (receiver.Method())
             if let Some(local) = fctx.lookup_local(pkg_ident.symbol) {
+                // Extract values we need before any mutable borrows
+                let local_kind = local.kind.clone();
+                let local_reg = local.reg;
+                let local_type_sym = local.type_sym;
+                
                 // Check if this is an interface variable - needs dynamic dispatch
-                if local.kind == crate::context::VarKind::Interface {
-                    return compile_interface_method_call(ctx, fctx, local.reg, method, call);
+                if local_kind == crate::context::VarKind::Interface {
+                    return compile_interface_method_call(ctx, fctx, local_reg, method, call);
                 }
                 
                 // Get receiver type name for static dispatch
-                if let Some(type_sym) = local.type_sym {
+                if let Some(type_sym) = local_type_sym {
                     let type_name = ctx.interner.resolve(type_sym).unwrap_or("");
                     let method_key = format!("{}.{}", type_name, method);
                     if let Some(&func_idx) = ctx.method_table.get(&method_key) {
-                        return compile_method_call(ctx, fctx, func_idx, local.reg, call);
+                        return compile_method_call(ctx, fctx, func_idx, local_reg, call);
+                    }
+                    
+                    // Try promoted method from embedded fields
+                    if let Some(ty) = lookup_named_type(ctx, type_sym) {
+                        if let Some((embedded_type_name, field_offset, func_idx)) = find_promoted_method(ctx, ty, method, 0) {
+                            return compile_promoted_method_call(ctx, fctx, local_reg, &embedded_type_name, field_offset, func_idx, call);
+                        }
                     }
                 }
             }
@@ -542,6 +554,12 @@ fn compile_call(
                     let receiver_reg = compile_expr(ctx, fctx, &sel.expr)?;
                     return compile_method_call(ctx, fctx, func_idx, receiver_reg, call);
                 }
+                
+                // Try promoted method from embedded fields
+                if let Some((embedded_type_name, field_offset, func_idx)) = find_promoted_method(ctx, &recv_type, method_name, 0) {
+                    let receiver_reg = compile_expr(ctx, fctx, &sel.expr)?;
+                    return compile_promoted_method_call(ctx, fctx, receiver_reg, &embedded_type_name, field_offset, func_idx, call);
+                }
             }
         }
     }
@@ -557,12 +575,52 @@ fn compile_func_call(
 ) -> Result<u16, CodegenError> {
     use gox_syntax::ast::ExprKind;
     use crate::context::VarKind;
+    use crate::stmt::infer_runtime_type_id;
+    
+    // Get interface parameter positions for this function
+    let iface_params = ctx.func_interface_params.get(&func_idx).cloned().unwrap_or_default();
     
     let arg_start = fctx.regs.current();
     
     // Compile each argument and ensure it's in the correct position
+    // Track current slot offset (interface params take 2 slots)
+    let mut slot_offset = 0u16;
+    
     for (i, arg) in call.args.iter().enumerate() {
-        let expected_reg = arg_start + i as u16;
+        let param_idx = i as u16;
+        let is_interface_param = iface_params.contains(&param_idx);
+        let expected_reg = arg_start + slot_offset;
+        
+        // Check if this argument needs to be boxed into interface
+        if is_interface_param {
+            // Check if the argument is already an interface
+            let is_already_interface = if let ExprKind::Ident(ident) = &arg.kind {
+                if let Some(local) = fctx.lookup_local(ident.symbol) {
+                    matches!(local.kind, VarKind::Interface)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            
+            if is_already_interface {
+                // Already interface, copy both slots
+                let actual_reg = compile_expr(ctx, fctx, arg)?;
+                if actual_reg != expected_reg {
+                    fctx.emit(Opcode::Mov, expected_reg, actual_reg, 0);
+                    fctx.emit(Opcode::Mov, expected_reg + 1, actual_reg + 1, 0);
+                }
+            } else {
+                // Need to box into interface
+                let src_reg = compile_expr(ctx, fctx, arg)?;
+                let type_id = infer_runtime_type_id(ctx, fctx, arg);
+                fctx.emit(Opcode::BoxInterface, expected_reg, type_id, src_reg);
+            }
+            slot_offset += 2; // Interface takes 2 slots
+            continue;
+        }
+        
         let actual_reg = compile_expr(ctx, fctx, arg)?;
         
         // Check if this is a struct argument that needs to be copied
@@ -578,25 +636,30 @@ fn compile_func_call(
         
         if needs_copy {
             // Deep copy struct including nested structs
-            // Extract type_sym first to avoid borrow conflicts
             let type_sym = if let ExprKind::Ident(ident) = &arg.kind {
                 fctx.lookup_local(ident.symbol).and_then(|l| l.type_sym)
             } else {
                 None
             };
-            // Allocate temp and deep copy, then move to expected_reg
             let temp_dst = fctx.regs.alloc(1);
             crate::context::emit_deep_struct_copy(ctx.result, fctx, temp_dst, actual_reg, type_sym);
             fctx.emit(Opcode::Mov, expected_reg, temp_dst, 0);
         } else if actual_reg != expected_reg {
-            // Move result to expected argument position
             fctx.emit(Opcode::Mov, expected_reg, actual_reg, 0);
         }
+        slot_offset += 1; // Non-interface takes 1 slot
     }
     
-    let arg_count = call.args.len() as u16;
-    // flags = ret_count (1 for single return value)
-    fctx.emit_with_flags(Opcode::Call, 1, func_idx as u16, arg_start, arg_count);
+    // Calculate actual slot count (interface params take 2 slots)
+    let mut slot_count = 0u16;
+    for i in 0..call.args.len() {
+        if iface_params.contains(&(i as u16)) {
+            slot_count += 2; // Interface takes 2 slots
+        } else {
+            slot_count += 1;
+        }
+    }
+    fctx.emit_with_flags(Opcode::Call, 1, func_idx as u16, arg_start, slot_count);
     
     Ok(arg_start)
 }
@@ -641,48 +704,76 @@ fn compile_interface_method_call(
     
     let mut jump_to_end: Vec<usize> = Vec::new();
     
+    // Also check for types that satisfy interface via promoted methods
+    let types_with_promoted_method = find_types_with_promoted_method(ctx, method_name);
+    
+    // Collect all dispatch cases: (type_name, func_idx, embedded_info)
+    // embedded_info: None for direct methods, Some((embedded_type, offset)) for promoted
+    let mut dispatch_cases: Vec<(&str, u32, Option<(&str, u16)>)> = Vec::new();
+    
     for (method_key, func_idx) in &matching_methods {
-        // Extract type name from "TypeName.MethodName"
         let type_name = method_key.split('.').next().unwrap_or("");
+        dispatch_cases.push((type_name, *func_idx, None));
+    }
+    
+    for (concrete_type, embedded_type, field_offset, func_idx) in &types_with_promoted_method {
+        dispatch_cases.push((concrete_type.as_str(), *func_idx, Some((embedded_type.as_str(), *field_offset))));
+    }
+    
+    // Generate dispatch code for all cases
+    for (type_name, func_idx, embedded_info) in &dispatch_cases {
+        let Some(type_id) = get_type_id_for_name(ctx, type_name) else { continue };
         
-        // Look up type_id for this type name
-        if let Some(type_id) = get_type_id_for_name(ctx, type_name) {
-            // Compare type_id_reg with expected type_id
-            fctx.emit(Opcode::LoadInt, expected_reg, type_id as u16, 0);
-            fctx.emit(Opcode::EqI64, cmp_reg, type_id_reg, expected_reg);
-            
-            // If not equal, jump to next check
-            let skip_pc = fctx.pc();
-            fctx.emit(Opcode::JumpIfNot, cmp_reg, 0, 0);
-            
-            // Set up call: receiver + args in consecutive registers
-            let arg_start = fctx.regs.current();
+        // Compare type_id_reg with expected type_id
+        fctx.emit(Opcode::LoadInt, expected_reg, type_id as u16, 0);
+        fctx.emit(Opcode::EqI64, cmp_reg, type_id_reg, expected_reg);
+        
+        // If not equal, jump to next check
+        let skip_pc = fctx.pc();
+        fctx.emit(Opcode::JumpIfNot, cmp_reg, 0, 0);
+        
+        // Set up call: receiver + args in consecutive registers
+        let arg_start = fctx.regs.current();
+        
+        // Set up receiver based on whether it's a promoted method
+        if let Some((embedded_type, field_offset)) = embedded_info {
+            // Promoted method: extract embedded field as receiver
+            let embedded_slot_count = get_embedded_type_slot_count(ctx, embedded_type);
+            let embedded_reg = fctx.regs.alloc(1);
+            fctx.emit(Opcode::Alloc, embedded_reg, 0, embedded_slot_count);
+            for i in 0..embedded_slot_count {
+                let tmp = fctx.regs.alloc(1);
+                fctx.emit(Opcode::GetField, tmp, data_reg, field_offset + i);
+                fctx.emit(Opcode::SetField, embedded_reg, i, tmp);
+                fctx.regs.free(1);
+            }
+        } else {
+            // Direct method: use data_reg as receiver
             let recv_dst = fctx.regs.alloc(1);
             fctx.emit(Opcode::Mov, recv_dst, data_reg, 0);
-            
-            // Copy pre-compiled arguments to call position
-            for &arg_reg in &arg_regs {
-                let dst = fctx.regs.alloc(1);
-                fctx.emit(Opcode::Mov, dst, arg_reg, 0);
-            }
-            
-            let arg_count = (call.args.len() + 1) as u16;
-            fctx.emit_with_flags(Opcode::Call, 1, *func_idx as u16, arg_start, arg_count);
-            fctx.emit(Opcode::Mov, result_reg, arg_start, 0);
-            
-            // Reset register allocator for next branch
-            fctx.regs.reset_to(arg_start);
-            
-            // Jump to end
-            let end_pc = fctx.pc();
-            fctx.emit(Opcode::Jump, 0, 0, 0);
-            jump_to_end.push(end_pc);
-            
-            // Patch skip jump
-            let current_pc = fctx.pc();
-            let offset = (current_pc as i32) - (skip_pc as i32);
-            fctx.patch_jump(skip_pc, offset);
         }
+        
+        // Copy pre-compiled arguments to call position
+        for &arg_reg in &arg_regs {
+            let dst = fctx.regs.alloc(1);
+            fctx.emit(Opcode::Mov, dst, arg_reg, 0);
+        }
+        
+        // Emit call and save result
+        let arg_count = (call.args.len() + 1) as u16;
+        fctx.emit_with_flags(Opcode::Call, 1, *func_idx as u16, arg_start, arg_count);
+        fctx.emit(Opcode::Mov, result_reg, arg_start, 0);
+        
+        // Reset register allocator for next branch
+        fctx.regs.reset_to(arg_start);
+        
+        // Jump to end and patch skip
+        let end_pc = fctx.pc();
+        fctx.emit(Opcode::Jump, 0, 0, 0);
+        jump_to_end.push(end_pc);
+        
+        let current_pc = fctx.pc();
+        fctx.patch_jump(skip_pc, (current_pc as i32) - (skip_pc as i32));
     }
     
     // Patch all jumps to end
@@ -1270,6 +1361,130 @@ fn get_embedded_field_offset(ctx: &CodegenContext, ty: &gox_analysis::Type, fiel
             0
         }
         _ => 0,
+    }
+}
+
+/// Compile a promoted method call by extracting the embedded receiver.
+fn compile_promoted_method_call(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    outer_reg: u16,
+    embedded_type_name: &str,
+    field_offset: u16,
+    func_idx: u32,
+    call: &CallExpr,
+) -> Result<u16, CodegenError> {
+    let embedded_slot_count = get_embedded_type_slot_count(ctx, embedded_type_name);
+    
+    // Allocate a temporary struct for the embedded receiver
+    let embedded_reg = fctx.regs.alloc(1);
+    fctx.emit(Opcode::Alloc, embedded_reg, 0, embedded_slot_count);
+    
+    // Copy fields from the outer struct to the temp embedded struct
+    for i in 0..embedded_slot_count {
+        let tmp = fctx.regs.alloc(1);
+        fctx.emit(Opcode::GetField, tmp, outer_reg, field_offset + i);
+        fctx.emit(Opcode::SetField, embedded_reg, i, tmp);
+        fctx.regs.free(1);
+    }
+    
+    compile_method_call(ctx, fctx, func_idx, embedded_reg, call)
+}
+
+/// Get slot count for a named type by name string
+fn get_embedded_type_slot_count(ctx: &CodegenContext, type_name: &str) -> u16 {
+    for named in &ctx.result.named_types {
+        if ctx.interner.resolve(named.name) == Some(type_name) {
+            return get_type_slot_count(ctx, &named.underlying);
+        }
+    }
+    1 // Default to 1 slot
+}
+
+/// Find all types that have a promoted method with the given name.
+/// Returns Vec of (concrete_type_name, embedded_type_name, field_offset, func_idx)
+fn find_types_with_promoted_method(
+    ctx: &CodegenContext,
+    method_name: &str,
+) -> Vec<(String, String, u16, u32)> {
+    use gox_analysis::Type;
+    
+    let mut results = Vec::new();
+    
+    for named in &ctx.result.named_types {
+        // Skip interface types
+        if matches!(named.underlying, Type::Interface(_)) {
+            continue;
+        }
+        
+        let concrete_name = ctx.interner.resolve(named.name).unwrap_or("").to_string();
+        
+        // Check if this type has the method directly - if so, skip (handled by direct dispatch)
+        let direct_method_key = format!("{}.{}", concrete_name, method_name);
+        if ctx.method_table.contains_key(&direct_method_key) {
+            continue;
+        }
+        
+        // Check for promoted method
+        if let Some((embedded_type, field_offset, func_idx)) = find_promoted_method(ctx, &named.underlying, method_name, 0) {
+            results.push((concrete_name, embedded_type, field_offset, func_idx));
+        }
+    }
+    
+    results
+}
+
+/// Find a promoted method from embedded fields.
+/// Returns (embedded_type_name, field_offset, func_idx) if found.
+fn find_promoted_method(
+    ctx: &CodegenContext,
+    ty: &gox_analysis::Type,
+    method_name: &str,
+    base_offset: u16,
+) -> Option<(String, u16, u32)> {
+    use gox_analysis::Type;
+    
+    match ty {
+        Type::Struct(s) | Type::Obx(s) => {
+            let mut offset = base_offset;
+            for field in &s.fields {
+                if field.embedded {
+                    // Get the embedded type name
+                    let embedded_type_name = match &field.ty {
+                        Type::Named(id) => {
+                            ctx.result.named_types.get(id.0 as usize)
+                                .map(|n| ctx.interner.resolve(n.name).unwrap_or("").to_string())
+                        }
+                        _ => None,
+                    };
+                    
+                    if let Some(type_name) = embedded_type_name {
+                        // Check if this embedded type has the method
+                        let method_key = format!("{}.{}", type_name, method_name);
+                        if let Some(&func_idx) = ctx.method_table.get(&method_key) {
+                            return Some((type_name, offset, func_idx));
+                        }
+                        
+                        // Recursively search in nested embedded types
+                        if let Some(result) = find_promoted_method(ctx, &field.ty, method_name, offset) {
+                            return Some(result);
+                        }
+                    }
+                    
+                    offset += get_type_slot_count(ctx, &field.ty);
+                } else {
+                    offset += 1;
+                }
+            }
+            None
+        }
+        Type::Named(id) => {
+            if let Some(named) = ctx.result.named_types.get(id.0 as usize) {
+                return find_promoted_method(ctx, &named.underlying, method_name, base_offset);
+            }
+            None
+        }
+        _ => None,
     }
 }
 
