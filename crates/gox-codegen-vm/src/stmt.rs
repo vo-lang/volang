@@ -421,8 +421,35 @@ fn compile_assign(
                             let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
                             fctx.emit(Opcode::DivI64, dst, dst, src);
                         }
-                        _ => {
-                            return Err(CodegenError::Unsupported("compound assignment".to_string()));
+                        AssignOp::Rem => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::ModI64, dst, dst, src);
+                        }
+                        AssignOp::And => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::Band, dst, dst, src);
+                        }
+                        AssignOp::Or => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::Bor, dst, dst, src);
+                        }
+                        AssignOp::Xor => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::Bxor, dst, dst, src);
+                        }
+                        AssignOp::AndNot => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            let tmp = fctx.regs.alloc(1);
+                            fctx.emit(Opcode::Bnot, tmp, src, 0);
+                            fctx.emit(Opcode::Band, dst, dst, tmp);
+                        }
+                        AssignOp::Shl => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::Shl, dst, dst, src);
+                        }
+                        AssignOp::Shr => {
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            fctx.emit(Opcode::Shr, dst, dst, src);
                         }
                     }
                 } 
@@ -433,7 +460,9 @@ fn compile_assign(
                             let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
                             fctx.emit(Opcode::SetGlobal, global_idx as u16, src, 0);
                         }
-                        AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                        AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div |
+                        AssignOp::Rem | AssignOp::And | AssignOp::Or | AssignOp::Xor |
+                        AssignOp::Shl | AssignOp::Shr => {
                             // For compound assignment, load global first
                             let tmp = fctx.regs.alloc(1);
                             fctx.emit(Opcode::GetGlobal, tmp, global_idx as u16, 0);
@@ -443,13 +472,25 @@ fn compile_assign(
                                 AssignOp::Sub => Opcode::SubI64,
                                 AssignOp::Mul => Opcode::MulI64,
                                 AssignOp::Div => Opcode::DivI64,
+                                AssignOp::Rem => Opcode::ModI64,
+                                AssignOp::And => Opcode::Band,
+                                AssignOp::Or => Opcode::Bor,
+                                AssignOp::Xor => Opcode::Bxor,
+                                AssignOp::Shl => Opcode::Shl,
+                                AssignOp::Shr => Opcode::Shr,
                                 _ => unreachable!(),
                             };
                             fctx.emit(op, tmp, tmp, src);
                             fctx.emit(Opcode::SetGlobal, global_idx as u16, tmp, 0);
                         }
-                        _ => {
-                            return Err(CodegenError::Unsupported("compound assignment".to_string()));
+                        AssignOp::AndNot => {
+                            let tmp = fctx.regs.alloc(1);
+                            fctx.emit(Opcode::GetGlobal, tmp, global_idx as u16, 0);
+                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                            let tmp2 = fctx.regs.alloc(1);
+                            fctx.emit(Opcode::Bnot, tmp2, src, 0);
+                            fctx.emit(Opcode::Band, tmp, tmp, tmp2);
+                            fctx.emit(Opcode::SetGlobal, global_idx as u16, tmp, 0);
                         }
                     }
                 }
