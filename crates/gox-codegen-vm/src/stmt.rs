@@ -186,7 +186,7 @@ fn compile_short_var(
                     // Check if we need struct copy
                     if let Some(_field_count) = src_struct_info {
                         // Deep copy struct including nested structs
-                        emit_deep_struct_copy(ctx, fctx, dst, src, type_sym);
+                        crate::context::emit_deep_struct_copy(ctx.result, fctx, dst, src, type_sym);
                     } else {
                         fctx.emit(Opcode::Mov, dst, src, 0);
                     }
@@ -195,72 +195,6 @@ fn compile_short_var(
         }
     }
     Ok(())
-}
-
-/// Emit deep copy of a struct, handling nested structs recursively
-fn emit_deep_struct_copy(
-    ctx: &CodegenContext,
-    fctx: &mut FuncContext,
-    dst: u16,
-    src: u16,
-    type_sym: Option<gox_common::Symbol>,
-) {
-    // Get struct field info from type
-    let field_info = get_struct_field_info(ctx, type_sym);
-    let field_count = field_info.len() as u16;
-    
-    if field_count == 0 {
-        // Fallback: simple copy if no type info
-        fctx.emit(Opcode::Mov, dst, src, 0);
-        return;
-    }
-    
-    // Allocate new struct
-    fctx.emit(Opcode::Alloc, dst, 0, field_count);
-    
-    // Copy each field, recursively copying nested structs
-    for (f, field_type_sym) in field_info.iter().enumerate() {
-        let tmp = fctx.regs.alloc(1);
-        fctx.emit(Opcode::GetField, tmp, src, f as u16);
-        
-        if let Some(nested_sym) = field_type_sym {
-            // This field is a nested struct - need to deep copy
-            let nested_dst = fctx.regs.alloc(1);
-            emit_deep_struct_copy(ctx, fctx, nested_dst, tmp, Some(*nested_sym));
-            fctx.emit(Opcode::SetField, dst, f as u16, nested_dst);
-        } else {
-            // Primitive field - simple copy
-            fctx.emit(Opcode::SetField, dst, f as u16, tmp);
-        }
-    }
-}
-
-/// Get field type info for a struct - returns Vec of Option<Symbol> for each field
-/// Some(sym) means the field is a struct type, None means primitive
-fn get_struct_field_info(ctx: &CodegenContext, type_sym: Option<gox_common::Symbol>) -> Vec<Option<gox_common::Symbol>> {
-    use gox_analysis::Type;
-    
-    if let Some(sym) = type_sym {
-        for named in &ctx.result.named_types {
-            if named.name == sym {
-                if let Type::Struct(s) = &named.underlying {
-                    return s.fields.iter().map(|field| {
-                        // Check if field type is a named struct type
-                        if let Type::Named(id) = &field.ty {
-                            // Look up if this named type is a struct
-                            if let Some(named_info) = ctx.result.named_types.get(id.0 as usize) {
-                                if matches!(named_info.underlying, Type::Struct(_)) {
-                                    return Some(named_info.name);
-                                }
-                            }
-                        }
-                        None
-                    }).collect();
-                }
-            }
-        }
-    }
-    Vec::new()
 }
 
 /// Infer VarKind and type symbol from an expression (for type tracking)
@@ -296,7 +230,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, expr: &gox_syntax::ast::Expr) -
                         if func_decl.name.symbol == func_ident.symbol {
                             // Found the function - check its return type
                             if let Some(ret_type) = func_decl.sig.results.first() {
-                                return infer_type_from_type_expr(ctx, &ret_type.ty);
+                                return crate::context::infer_type_from_type_expr(ctx.result, &ret_type.ty);
                             }
                         }
                     }
@@ -361,33 +295,6 @@ fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
         }
     }
     false
-}
-
-/// Infer VarKind and type_sym from a type expression
-fn infer_type_from_type_expr(ctx: &CodegenContext, ty: &gox_syntax::ast::TypeExpr) -> (crate::context::VarKind, Option<gox_common::Symbol>) {
-    use gox_syntax::ast::TypeExprKind;
-    use crate::context::VarKind;
-    
-    match &ty.kind {
-        TypeExprKind::Map(_) => (VarKind::Map, None),
-        TypeExprKind::Slice(_) => (VarKind::Slice, None),
-        TypeExprKind::Struct(s) => (VarKind::Struct(s.fields.len() as u16), None),
-        TypeExprKind::Obx(_) => (VarKind::Obx, None),
-        TypeExprKind::Ident(ident) => {
-            // Named type - check if struct or object
-            for named in &ctx.result.named_types {
-                if named.name == ident.symbol {
-                    match &named.underlying {
-                        Type::Struct(s) => return (VarKind::Struct(s.fields.len() as u16), Some(ident.symbol)),
-                        Type::Obx(_) => return (VarKind::Obx, Some(ident.symbol)),
-                        _ => {}
-                    }
-                }
-            }
-            (VarKind::Other, None)
-        }
-        _ => (VarKind::Other, None),
-    }
 }
 
 /// Get hash for a struct key, or return the key as-is for primitives

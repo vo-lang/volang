@@ -344,7 +344,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         
         for param in &func.sig.params {
             // Infer VarKind and type_sym from parameter type
-            let (kind, type_sym) = infer_param_type(self.result, &param.ty);
+            let (kind, type_sym) = infer_type_from_type_expr(self.result, &param.ty);
             for name in &param.names {
                 fctx.param_count += 1;
                 fctx.param_slots += 1;
@@ -566,7 +566,7 @@ impl<'a> CodegenContext<'a> {
         
         // Allocate registers for parameters with type info
         for param in &func.sig.params {
-            let (kind, type_sym) = infer_param_type(self.result, &param.ty);
+            let (kind, type_sym) = infer_type_from_type_expr(self.result, &param.ty);
             for name in &param.names {
                 fctx.param_count += 1;
                 fctx.param_slots += 1;
@@ -616,7 +616,7 @@ impl<'a> CodegenContext<'a> {
 }
 
 /// Infer VarKind and type_sym from a parameter type expression
-fn infer_param_type(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> (VarKind, Option<Symbol>) {
+pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> (VarKind, Option<Symbol>) {
     use gox_syntax::ast::TypeExprKind;
     use gox_analysis::Type;
     
@@ -639,5 +639,63 @@ fn infer_param_type(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) ->
             (VarKind::Other, None)
         }
         _ => (VarKind::Other, None),
+    }
+}
+
+/// Get field type info for a struct - returns Vec of Option<Symbol> for each field
+/// Some(sym) means the field is a struct type, None means primitive
+pub fn get_struct_field_info(result: &TypeCheckResult, type_sym: Option<Symbol>) -> Vec<Option<Symbol>> {
+    use gox_analysis::Type;
+    
+    if let Some(sym) = type_sym {
+        for named in &result.named_types {
+            if named.name == sym {
+                if let Type::Struct(s) = &named.underlying {
+                    return s.fields.iter().map(|field| {
+                        if let Type::Named(id) = &field.ty {
+                            if let Some(named_info) = result.named_types.get(id.0 as usize) {
+                                if matches!(named_info.underlying, Type::Struct(_)) {
+                                    return Some(named_info.name);
+                                }
+                            }
+                        }
+                        None
+                    }).collect();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Emit deep copy of a struct, handling nested structs recursively
+pub fn emit_deep_struct_copy(
+    result: &TypeCheckResult,
+    fctx: &mut FuncContext,
+    dst: u16,
+    src: u16,
+    type_sym: Option<Symbol>,
+) {
+    let field_info = get_struct_field_info(result, type_sym);
+    let field_count = field_info.len() as u16;
+    
+    if field_count == 0 {
+        fctx.emit(Opcode::Mov, dst, src, 0);
+        return;
+    }
+    
+    fctx.emit(Opcode::Alloc, dst, 0, field_count);
+    
+    for (f, field_type_sym) in field_info.iter().enumerate() {
+        let tmp = fctx.regs.alloc(1);
+        fctx.emit(Opcode::GetField, tmp, src, f as u16);
+        
+        if let Some(nested_sym) = field_type_sym {
+            let nested_dst = fctx.regs.alloc(1);
+            emit_deep_struct_copy(result, fctx, nested_dst, tmp, Some(*nested_sym));
+            fctx.emit(Opcode::SetField, dst, f as u16, nested_dst);
+        } else {
+            fctx.emit(Opcode::SetField, dst, f as u16, tmp);
+        }
     }
 }
