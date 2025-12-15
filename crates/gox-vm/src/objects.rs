@@ -422,8 +422,10 @@ pub mod channel {
             panic!("send on closed channel");
         }
         
-        // If there's a waiting receiver, send directly
+        // If there's a waiting receiver, buffer the value and return receiver to unblock
+        // The receiver will get the value from the buffer when it retries
         if let Some(receiver_id) = state.waiting_receivers.pop_front() {
+            state.buffer.push_back(val);
             return Ok(Some(receiver_id));
         }
         

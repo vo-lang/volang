@@ -127,13 +127,20 @@ pub fn compile_expr(
         ExprKind::Receive(inner) => {
             let ch = compile_expr(ctx, fctx, inner)?;
             let dst = fctx.regs.alloc(1);
-            fctx.emit(Opcode::ChanRecv, dst, ch, 0);
+            // Allocate a separate register for the ok value to avoid overwriting channel
+            let ok_reg = fctx.regs.alloc(1);
+            fctx.emit(Opcode::ChanRecv, dst, ch, ok_reg);
+            fctx.regs.free(1); // Free ok_reg, we don't use it in simple receive
             Ok(dst)
         }
         ExprKind::FuncLit(func_lit) => compile_func_lit(ctx, fctx, func_lit),
         ExprKind::Slice(slice) => compile_slice_expr(ctx, fctx, slice),
         ExprKind::TypeAssert(ta) => compile_type_assert(ctx, fctx, ta),
         ExprKind::Conversion(conv) => compile_conversion_expr(ctx, fctx, conv),
+        // Type used as expression (for make/new first argument) - not compiled directly
+        ExprKind::TypeAsExpr(_) => {
+            Err(CodegenError::Internal("type expression used as value".to_string()))
+        }
     }
 }
 
@@ -1674,24 +1681,70 @@ fn compile_builtin_make(
     fctx: &mut FuncContext,
     call: &CallExpr,
 ) -> Result<u16, CodegenError> {
-    // make(type, args...) - currently support map and slice
-    // The type argument is passed as a CompositeLit with empty elements for map
-    // or directly as a type in some cases
+    // make(type, args...) - support map, slice, and chan
     let dst = fctx.regs.alloc(1);
     
-    // Check if this is make(map[...]) by looking at the type argument
-    if !call.args.is_empty() {
-        // Check for CompositeLit with Map type
-        if let ExprKind::CompositeLit(lit) = &call.args[0].kind {
+    if call.args.is_empty() {
+        fctx.emit(Opcode::LoadNil, dst, 0, 0);
+        return Ok(dst);
+    }
+    
+    // Check first argument for type
+    let type_arg = &call.args[0];
+    
+    // Handle TypeAsExpr wrapper
+    if let ExprKind::TypeAsExpr(ty) = &type_arg.kind {
+        match &ty.kind {
+            // make(chan T) or make(chan T, capacity)
+            gox_syntax::ast::TypeExprKind::Chan(_) => {
+                let capacity = if call.args.len() > 1 {
+                    if let ExprKind::IntLit(lit) = &call.args[1].kind {
+                        let raw = ctx.interner.resolve(lit.raw).unwrap_or("0");
+                        raw.parse::<u16>().unwrap_or(0)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                fctx.emit(Opcode::ChanNew, dst, 0, capacity);
+                return Ok(dst);
+            }
+            // make(map[K]V)
+            gox_syntax::ast::TypeExprKind::Map(_) => {
+                fctx.emit(Opcode::MapNew, dst, 0, 0);
+                return Ok(dst);
+            }
+            // make([]T, len) or make([]T, len, cap)
+            gox_syntax::ast::TypeExprKind::Slice(_) => {
+                if call.args.len() > 1 {
+                    let len_reg = compile_expr(ctx, fctx, &call.args[1])?;
+                    let cap_reg = if call.args.len() > 2 {
+                        compile_expr(ctx, fctx, &call.args[2])?
+                    } else {
+                        len_reg
+                    };
+                    fctx.emit(Opcode::SliceNew, dst, len_reg, cap_reg);
+                    return Ok(dst);
+                }
+                fctx.emit(Opcode::LoadNil, dst, 0, 0);
+                return Ok(dst);
+            }
+            _ => {}
+        }
+    }
+    
+    // Handle legacy cases
+    match &type_arg.kind {
+        // Check for CompositeLit with Map type (legacy)
+        ExprKind::CompositeLit(lit) => {
             if let gox_syntax::ast::TypeExprKind::Map(_) = &lit.ty.kind {
-                // make(map[K]V) - create empty map
                 fctx.emit(Opcode::MapNew, dst, 0, 0);
                 return Ok(dst);
             }
         }
-        // Check for Ident that could be a type alias for map
-        // For now, check if the identifier name contains "map"
-        if let ExprKind::Ident(ident) = &call.args[0].kind {
+        // Check for Ident that could be a type alias
+        ExprKind::Ident(ident) => {
             if let Some(name) = ctx.interner.resolve(ident.symbol) {
                 if name.starts_with("map[") || name == "map" {
                     fctx.emit(Opcode::MapNew, dst, 0, 0);
@@ -1699,9 +1752,10 @@ fn compile_builtin_make(
                 }
             }
         }
+        _ => {}
     }
     
-    // Default: create nil (for slices, nil is valid)
+    // Default: create nil
     fctx.emit(Opcode::LoadNil, dst, 0, 0);
     Ok(dst)
 }

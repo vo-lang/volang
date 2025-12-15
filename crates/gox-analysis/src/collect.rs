@@ -397,6 +397,32 @@ impl<'a> TypeCollector<'a> {
                     _ => Type::Invalid,
                 }
             }
+            // Handle make/new calls - infer type from first argument
+            ExprKind::Call(call) => {
+                if let ExprKind::Ident(func_ident) = &call.func.kind {
+                    let func_name = self.interner.resolve(func_ident.symbol).unwrap_or("");
+                    if (func_name == "make" || func_name == "new") && !call.args.is_empty() {
+                        return self.infer_type_from_type_arg(&call.args[0]);
+                    }
+                }
+                Type::Invalid
+            }
+            _ => Type::Invalid,
+        }
+    }
+    
+    /// Infer type from a type argument expression (for make/new).
+    fn infer_type_from_type_arg(&self, expr: &ast::Expr) -> Type {
+        use ast::ExprKind;
+        match &expr.kind {
+            ExprKind::Ident(ident) => {
+                // Named type - look up in scope
+                if let Some(Entity::Type(type_entity)) = self.scope.lookup(ident.symbol) {
+                    return Type::Named(type_entity.id);
+                }
+                Type::Invalid
+            }
+            ExprKind::TypeAsExpr(ty) => self.infer_type_from_type_expr(ty),
             _ => Type::Invalid,
         }
     }
@@ -437,7 +463,7 @@ impl<'a> TypeCollector<'a> {
         }
     }
     
-    /// Infer basic type from a type expression (for typed constants).
+    /// Infer type from a type expression.
     fn infer_type_from_type_expr(&self, ty_expr: &ast::TypeExpr) -> Type {
         use ast::TypeExprKind;
         match &ty_expr.kind {
@@ -458,8 +484,32 @@ impl<'a> TypeCollector<'a> {
                     "float64" => Type::Basic(BasicType::Float64),
                     "bool" => Type::Basic(BasicType::Bool),
                     "string" => Type::Basic(BasicType::String),
-                    _ => Type::Invalid,
+                    _ => {
+                        // Check for named types
+                        if let Some(Entity::Type(type_entity)) = self.scope.lookup(ident.symbol) {
+                            return Type::Named(type_entity.id);
+                        }
+                        Type::Invalid
+                    }
                 }
+            }
+            TypeExprKind::Chan(c) => {
+                let elem_ty = self.infer_type_from_type_expr(&c.elem);
+                let dir = match c.dir {
+                    ast::ChanDir::Both => crate::types::ChanDir::Both,
+                    ast::ChanDir::Send => crate::types::ChanDir::SendOnly,
+                    ast::ChanDir::Recv => crate::types::ChanDir::RecvOnly,
+                };
+                Type::Chan(crate::types::ChanType { elem: Box::new(elem_ty), dir })
+            }
+            TypeExprKind::Map(m) => {
+                let key_ty = self.infer_type_from_type_expr(&m.key);
+                let value_ty = self.infer_type_from_type_expr(&m.value);
+                Type::Map(crate::types::MapType { key: Box::new(key_ty), value: Box::new(value_ty) })
+            }
+            TypeExprKind::Slice(elem) => {
+                let elem_ty = self.infer_type_from_type_expr(elem);
+                Type::Slice(crate::types::SliceType { elem: Box::new(elem_ty) })
             }
             _ => Type::Invalid,
         }

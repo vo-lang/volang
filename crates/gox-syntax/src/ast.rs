@@ -682,6 +682,8 @@ pub enum ExprKind {
     Receive(Box<Expr>),
     /// A parenthesized expression.
     Paren(Box<Expr>),
+    /// A type used as an expression (for make/new first argument).
+    TypeAsExpr(Box<TypeExpr>),
 }
 
 /// An integer literal.
@@ -1133,6 +1135,7 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
         }
         ExprKind::Receive(e) => visitor.visit_expr(e),
         ExprKind::Paren(e) => visitor.visit_expr(e),
+        ExprKind::TypeAsExpr(t) => visitor.visit_type_expr(t),
     }
 }
 

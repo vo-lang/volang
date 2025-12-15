@@ -869,7 +869,12 @@ impl Vm {
                         self.write_reg(fiber_id, c, 0); // ok = false
                     }
                     Err(()) => {
-                        // Would block
+                        // Would block - decrement PC so we retry this instruction when unblocked
+                        if let Some(fiber) = self.scheduler.get_mut(fiber_id) {
+                            if let Some(frame) = fiber.frame_mut() {
+                                frame.pc -= 1;
+                            }
+                        }
                         let state = channel::get_state(ch);
                         state.waiting_receivers.push_back(fiber_id);
                         self.scheduler.block_current(BlockReason::ChanRecv(ch));

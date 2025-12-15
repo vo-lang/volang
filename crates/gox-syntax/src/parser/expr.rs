@@ -281,7 +281,18 @@ impl<'a> Parser<'a> {
             // Call expression
             TokenKind::LParen => {
                 self.advance();
-                let (args, spread) = self.parse_call_args()?;
+                // Check if this is a make/new call which takes a type as first argument
+                let is_make_or_new = if let ExprKind::Ident(ref ident) = left.kind {
+                    let name = self.interner.resolve(ident.symbol);
+                    name == Some("make") || name == Some("new")
+                } else {
+                    false
+                };
+                let (args, spread) = if is_make_or_new {
+                    self.parse_make_args()?
+                } else {
+                    self.parse_call_args()?
+                };
                 self.expect(TokenKind::RParen)?;
                 Ok(Expr {
                     kind: ExprKind::Call(Box::new(CallExpr { func: left, args, spread })),
@@ -365,6 +376,45 @@ impl<'a> Parser<'a> {
         }
         
         Ok((args, spread))
+    }
+    
+    /// Parse arguments for make/new calls where first argument is a type
+    fn parse_make_args(&mut self) -> ParseResult<(Vec<Expr>, bool)> {
+        let mut args = Vec::new();
+        
+        if self.at(TokenKind::RParen) {
+            return Ok((args, false));
+        }
+        
+        // First argument is a type - wrap it in a special expression
+        let ty_start = self.current.span.start;
+        let ty = self.parse_type()?;
+        let ty_span = Span::new(ty_start, self.current.span.start);
+        
+        // Wrap the type in a TypeExpr expression (using Ident for named types, or we need a new variant)
+        // For simplicity, convert the type to an expression representation
+        let type_expr = self.type_to_expr(ty, ty_span)?;
+        args.push(type_expr);
+        
+        // Parse remaining arguments as expressions
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RParen) {
+                break;
+            }
+            args.push(self.parse_expr()?);
+        }
+        
+        Ok((args, false))
+    }
+    
+    /// Convert a type expression to an expression (for make/new first argument)
+    fn type_to_expr(&self, ty: TypeExpr, span: Span) -> ParseResult<Expr> {
+        // For identifier types, keep as Ident for backward compatibility
+        if let TypeExprKind::Ident(ident) = ty.kind {
+            return Ok(Expr { kind: ExprKind::Ident(ident), span });
+        }
+        // Wrap other types in TypeAsExpr
+        Ok(Expr { kind: ExprKind::TypeAsExpr(Box::new(ty)), span })
     }
 
     fn parse_index_or_slice(&mut self, expr: Expr, start: gox_common::span::BytePos) -> ParseResult<Expr> {

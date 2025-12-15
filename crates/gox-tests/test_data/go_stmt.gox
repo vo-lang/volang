@@ -1,12 +1,21 @@
-// skip: goroutine deadlock on nil channel
-// Test: go statement - typecheck only (VM execution crashes)
+// Test: go statement with channels
 package main
 
-var ch chan int
+var ch = make(chan int, 2)
 
 func main() {
 	go worker()
 	go compute(10)
+	
+	// Wait for both goroutines
+	r1 := <-ch
+	r2 := <-ch
+	
+	// Results can arrive in any order
+	sum := r1 + r2
+	assert(sum == 21, "sum should be 21 (1 + 20)")
+	
+	println("go statement tests passed")
 }
 
 func worker() {

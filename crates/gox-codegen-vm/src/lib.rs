@@ -283,6 +283,41 @@ fn compile_simple_expr(
                 func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));
             }
         }
+        ExprKind::Call(call) => {
+            // Handle make() calls for global var initialization
+            if let ExprKind::Ident(func_ident) = &call.func.kind {
+                let func_name = interner.resolve(func_ident.symbol).unwrap_or("");
+                if func_name == "make" && !call.args.is_empty() {
+                    // Check for TypeAsExpr wrapper
+                    if let ExprKind::TypeAsExpr(ty) = &call.args[0].kind {
+                        match &ty.kind {
+                            gox_syntax::ast::TypeExprKind::Chan(_) => {
+                                let capacity = if call.args.len() > 1 {
+                                    if let ExprKind::IntLit(lit) = &call.args[1].kind {
+                                        interner.resolve(lit.raw)
+                                            .and_then(|s| s.parse::<u16>().ok())
+                                            .unwrap_or(0)
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                func.code.push(Instruction::new(Opcode::ChanNew, reg, 0, capacity));
+                                return reg;
+                            }
+                            gox_syntax::ast::TypeExprKind::Map(_) => {
+                                func.code.push(Instruction::new(Opcode::MapNew, reg, 0, 0));
+                                return reg;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Default for other calls
+            func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));
+        }
         _ => {
             // Complex expressions: default to 0 for now
             func.code.push(Instruction::new(Opcode::LoadInt, reg, 0, 0));

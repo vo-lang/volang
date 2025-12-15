@@ -751,6 +751,9 @@ impl<'a> AstPrinter<'a> {
                 self.write_expr_inline(e);
                 write!(self.output, ")").unwrap();
             }
+            ExprKind::TypeAsExpr(t) => {
+                self.write_type_inline(t);
+            }
         }
     }
 

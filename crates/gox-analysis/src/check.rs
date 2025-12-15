@@ -405,6 +405,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::TypeAssert(ta) => self.check_type_assert(ta, expr.span),
             ExprKind::Slice(sl) => self.check_slice_expr(sl, expr.span),
             ExprKind::Receive(recv) => self.check_receive(recv.as_ref(), expr.span),
+            // Type used as expression (for make/new first argument)
+            ExprKind::TypeAsExpr(ty) => self.resolve_type_expr(ty),
             _ => Type::Invalid,
         }
     }
