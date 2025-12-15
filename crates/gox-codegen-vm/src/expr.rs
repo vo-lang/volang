@@ -742,6 +742,37 @@ fn get_expr_type(
             }
             None
         }
+        ExprKind::Index(index) => {
+            // For slice/array/map indexing, get the element type
+            // First check if the container is a variable with known element type
+            if let ExprKind::Ident(ident) = &index.expr.kind {
+                if let Some(local) = fctx.lookup_local(ident.symbol) {
+                    if local.kind == crate::context::VarKind::Slice {
+                        // For slices, type_sym is the element type
+                        if let Some(elem_type_sym) = local.type_sym {
+                            for named in &ctx.result.named_types {
+                                if named.name == elem_type_sym {
+                                    return Some(named.underlying.clone());
+                                }
+                            }
+                        }
+                    } else if local.kind == crate::context::VarKind::Map {
+                        // For maps, need to get value type - TODO
+                    }
+                }
+            }
+            // Fallback: try to get container type and extract element type
+            if let Some(container_ty) = get_expr_type(ctx, fctx, &index.expr) {
+                match &container_ty {
+                    Type::Slice(s) => Some((*s.elem).clone()),
+                    Type::Array(a) => Some((*a.elem).clone()),
+                    Type::Map(m) => Some((*m.value).clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
