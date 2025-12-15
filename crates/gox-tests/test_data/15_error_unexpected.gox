@@ -1,7 +1,0 @@
-// Test: Parse error - unexpected token
-func main() {
-    +
-}
-
-=== errors ===
-expected expression

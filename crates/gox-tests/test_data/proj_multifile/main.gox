@@ -1,0 +1,22 @@
+// Multi-file test: main calls functions from math.gox
+package main
+
+func main() {
+    // Test Add
+    sum := Add(3, 4)
+    assert(sum == 7, "Add(3, 4) should be 7")
+    
+    // Test Multiply
+    prod := Multiply(5, 6)
+    assert(prod == 30, "Multiply(5, 6) should be 30")
+    
+    // Test Factorial
+    fact := Factorial(5)
+    assert(fact == 120, "Factorial(5) should be 120")
+    
+    // Combined
+    result := Add(Multiply(2, 3), 4)
+    assert(result == 10, "Add(Multiply(2, 3), 4) should be 10")
+    
+    println("proj_multifile: ALL PASSED")
+}

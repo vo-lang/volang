@@ -1,0 +1,46 @@
+// Test: FFI / native function calls
+package main
+
+func main() {
+    // Test println (native function)
+    println("FFI test: println works")
+    
+    // Test print
+    print("FFI test: ")
+    println("print works")
+}
+
+=== codegen ===
+module main
+
+const 0 string "FFI test: println works"
+const 1 string "FFI test: "
+const 2 string "print works"
+
+func main
+  locals 2
+  0: LoadConst r0, $0
+  1: DebugPrint r0
+  2: LoadNil r1
+  3: LoadConst r0, $1
+  4: DebugPrint r0
+  5: LoadNil r1
+  6: LoadConst r0, $2
+  7: DebugPrint r0
+  8: LoadNil r1
+  9: Return r0, 0
+end
+
+func $init
+  locals 0
+  0: Return r0, 0
+end
+
+func $entry
+  locals 0
+  0: Call 1, r0, 0, 0
+  1: Call 0, r0, 0, 0
+  2: Return r0, 0
+end
+
+entry $entry

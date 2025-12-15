@@ -373,6 +373,7 @@ name = "gox-tests"
 version = "0.1.0"
 dependencies = [
  "gox-analysis",
+ "gox-cli",
  "gox-codegen-vm",
  "gox-common",
  "gox-module",

@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use gox_module::{ModFile, ModuleResolver};
 
 mod bytecode_tests;
-mod bytecode_text;
+use gox_cli::bytecode_text;
 
 #[derive(Parser)]
 #[command(name = "gox")]
