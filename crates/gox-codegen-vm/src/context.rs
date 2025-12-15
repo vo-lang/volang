@@ -275,6 +275,18 @@ impl FuncContext {
         self.locals.get(&sym)
     }
     
+    /// Look up a local type by symbol, returns (slot_count, field_names)
+    pub fn get_local_type(&self, sym: Symbol) -> Option<&(u16, Vec<Symbol>)> {
+        self.local_types.get(&sym)
+    }
+    
+    /// Get field index for a local type
+    pub fn get_local_type_field_index(&self, type_sym: Symbol, field_name: Symbol) -> Option<u16> {
+        self.local_types.get(&type_sym)
+            .and_then(|(_, fields)| fields.iter().position(|&f| f == field_name))
+            .map(|i| i as u16)
+    }
+    
     pub fn build(self) -> FunctionDef {
         FunctionDef {
             name: self.name,

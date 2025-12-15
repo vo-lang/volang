@@ -988,17 +988,10 @@ fn get_local_type_field_index(
 ) -> Option<u16> {
     use gox_syntax::ast::ExprKind;
     
-    // Get the variable name from the expression
     if let ExprKind::Ident(ident) = &expr.kind {
-        // Check if this variable has a local type
         if let Some(local) = fctx.lookup_local(ident.symbol) {
-            // Use the type_sym to look up the local type
             if let Some(type_sym) = local.type_sym {
-                if let Some((_, field_names)) = fctx.local_types.get(&type_sym) {
-                    if let Some(idx) = field_names.iter().position(|&f| f == field_name) {
-                        return Some(idx as u16);
-                    }
-                }
+                return fctx.get_local_type_field_index(type_sym, field_name);
             }
         }
     }
@@ -1273,13 +1266,8 @@ fn get_embedded_field_offset(ctx: &CodegenContext, ty: &gox_analysis::Type, fiel
     }
 }
 
-/// Get the number of slots a type occupies (public version for stmt.rs)
-pub fn get_type_slot_count_pub(ctx: &CodegenContext, ty: &gox_analysis::Type) -> u16 {
-    get_type_slot_count(ctx, ty)
-}
-
 /// Get the number of slots a type occupies (for calculating embedded struct offsets)
-fn get_type_slot_count(ctx: &CodegenContext, ty: &gox_analysis::Type) -> u16 {
+pub fn get_type_slot_count(ctx: &CodegenContext, ty: &gox_analysis::Type) -> u16 {
     use gox_analysis::Type;
     
     match ty {
@@ -1560,9 +1548,7 @@ fn compile_composite_lit(
         }
         TypeExprKind::Ident(type_ident) => {
             // Check local types first, then global types
-            let local_type_info = fctx.local_types.get(&type_ident.symbol).cloned();
-            
-            let slot_count = if let Some((count, _)) = &local_type_info {
+            let slot_count = if let Some((count, _)) = fctx.get_local_type(type_ident.symbol) {
                 *count
             } else if let Some(type_info) = ctx.get_named_type_info(type_ident.symbol) {
                 get_type_slot_count(ctx, &type_info.underlying)
@@ -1575,12 +1561,10 @@ fn compile_composite_lit(
             for elem in &lit.elems {
                 if let Some(gox_syntax::ast::CompositeLitKey::Ident(field_ident)) = &elem.key {
                     // Check local type for field index
-                    if let Some((_, field_names)) = &local_type_info {
-                        if let Some(idx) = field_names.iter().position(|&f| f == field_ident.symbol) {
-                            let val_reg = compile_expr(ctx, fctx, &elem.value)?;
-                            fctx.emit(Opcode::SetField, dst, idx as u16, val_reg);
-                            continue;
-                        }
+                    if let Some(idx) = fctx.get_local_type_field_index(type_ident.symbol, field_ident.symbol) {
+                        let val_reg = compile_expr(ctx, fctx, &elem.value)?;
+                        fctx.emit(Opcode::SetField, dst, idx, val_reg);
+                        continue;
                     }
                     
                     // Pre-compute type info before mutable borrow
