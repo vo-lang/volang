@@ -5,7 +5,7 @@ use gox_vm::instruction::Opcode;
 use gox_analysis::Type;
 
 use crate::{CodegenContext, CodegenError};
-use crate::context::FuncContext;
+use crate::context::{FuncContext, VarKind};
 use crate::expr;
 
 /// Compile a block of statements.
@@ -42,15 +42,35 @@ pub fn compile_stmt(
         StmtKind::ShortVar(sv) => compile_short_var(ctx, fctx, sv),
         StmtKind::Var(var_decl) => {
             for spec in &var_decl.specs {
+                // Check if this is an interface type declaration
+                let is_interface = spec.ty.as_ref().map_or(false, |ty| {
+                    matches!(ty.kind, gox_syntax::ast::TypeExprKind::Interface(_))
+                });
+                
                 for (i, name) in spec.names.iter().enumerate() {
-                    let dst = fctx.define_local(*name, 1);
-                    if i < spec.values.len() {
-                        let src = expr::compile_expr(ctx, fctx, &spec.values[i])?;
-                        if src != dst {
-                            fctx.emit(Opcode::Mov, dst, src, 0);
+                    if is_interface {
+                        // Interface needs 2 slots (type_id + data)
+                        let dst = fctx.define_local_with_kind(*name, 2, VarKind::Interface);
+                        if i < spec.values.len() {
+                            // Box the value into interface
+                            let src = expr::compile_expr(ctx, fctx, &spec.values[i])?;
+                            let type_id = infer_runtime_type_id(ctx, fctx, &spec.values[i]);
+                            fctx.emit(Opcode::BoxInterface, dst, type_id, src);
+                        } else {
+                            // nil interface (type=0, data=0)
+                            fctx.emit(Opcode::LoadInt, dst, 0, 0);
+                            fctx.emit(Opcode::LoadInt, dst + 1, 0, 0);
                         }
                     } else {
-                        fctx.emit(Opcode::LoadNil, dst, 0, 0);
+                        let dst = fctx.define_local(*name, 1);
+                        if i < spec.values.len() {
+                            let src = expr::compile_expr(ctx, fctx, &spec.values[i])?;
+                            if src != dst {
+                                fctx.emit(Opcode::Mov, dst, src, 0);
+                            }
+                        } else {
+                            fctx.emit(Opcode::LoadNil, dst, 0, 0);
+                        }
                     }
                 }
             }
@@ -360,6 +380,44 @@ fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
     expr::lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Obx(_)))
 }
 
+/// Infer runtime type ID for boxing into interface
+fn infer_runtime_type_id(_ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
+    use gox_syntax::ast::ExprKind;
+    use gox_vm::types::builtin;
+    use crate::context::VarKind;
+    
+    match &expr.kind {
+        ExprKind::IntLit(_) => builtin::INT64 as u16,
+        ExprKind::FloatLit(_) => builtin::FLOAT64 as u16,
+        ExprKind::StringLit(_) => builtin::STRING as u16,
+        ExprKind::RuneLit(_) => builtin::INT32 as u16,
+        ExprKind::Ident(ident) => {
+            // Check local variable type
+            if let Some(local) = fctx.lookup_local(ident.symbol) {
+                match local.kind {
+                    VarKind::Int => builtin::INT64 as u16,
+                    VarKind::Float => builtin::FLOAT64 as u16,
+                    VarKind::String => builtin::STRING as u16,
+                    VarKind::Slice => builtin::SLICE as u16,
+                    VarKind::Map => builtin::MAP as u16,
+                    _ => builtin::INT64 as u16, // default
+                }
+            } else {
+                builtin::INT64 as u16
+            }
+        }
+        ExprKind::Binary(_) => {
+            // Check if float expression
+            if expr::is_float_expr(_ctx, fctx, expr) {
+                builtin::FLOAT64 as u16
+            } else {
+                builtin::INT64 as u16
+            }
+        }
+        _ => builtin::INT64 as u16,
+    }
+}
+
 
 /// Compile assignment statement.
 fn compile_assign(
@@ -388,20 +446,28 @@ fn compile_assign(
                     // Handle compound assignment to local variable
                     match assign.op {
                         AssignOp::Assign => {
-                            let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
-                            if src != dst {
-                                // Check if this is a struct (value type) - need to deep copy
-                                if let crate::context::VarKind::Struct(field_count) = local_kind {
-                                    // Allocate new struct and copy fields
-                                    fctx.emit(Opcode::Alloc, dst, 0, field_count);
-                                    for f in 0..field_count {
-                                        let tmp = fctx.regs.alloc(1);
-                                        fctx.emit(Opcode::GetField, tmp, src, f);
-                                        fctx.emit(Opcode::SetField, dst, f, tmp);
+                            // Check if assigning to interface variable
+                            if local_kind == VarKind::Interface {
+                                // Box the value into interface
+                                let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                                let type_id = infer_runtime_type_id(ctx, fctx, &assign.rhs[i]);
+                                fctx.emit(Opcode::BoxInterface, dst, type_id, src);
+                            } else {
+                                let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                                if src != dst {
+                                    // Check if this is a struct (value type) - need to deep copy
+                                    if let VarKind::Struct(field_count) = local_kind {
+                                        // Allocate new struct and copy fields
+                                        fctx.emit(Opcode::Alloc, dst, 0, field_count);
+                                        for f in 0..field_count {
+                                            let tmp = fctx.regs.alloc(1);
+                                            fctx.emit(Opcode::GetField, tmp, src, f);
+                                            fctx.emit(Opcode::SetField, dst, f, tmp);
+                                        }
+                                    } else {
+                                        // Reference type or primitive - just copy reference
+                                        fctx.emit(Opcode::Mov, dst, src, 0);
                                     }
-                                } else {
-                                    // Reference type or primitive - just copy reference
-                                    fctx.emit(Opcode::Mov, dst, src, 0);
                                 }
                             }
                         }

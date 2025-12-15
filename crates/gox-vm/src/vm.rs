@@ -1194,10 +1194,22 @@ impl Vm {
             
             // ============ Debug ============
             Opcode::DebugPrint => {
-                let val = self.read_reg(fiber_id, a);
                 let type_tag = crate::ffi::TypeTag::from_u8(b as u8);
-                let s = format_value(val, type_tag);
-                println!("{}", s);
+                
+                let (val, inner_tag, is_iface) = if type_tag == crate::ffi::TypeTag::Interface {
+                    let type_id = self.read_reg(fiber_id, a) as u32;
+                    let data = self.read_reg(fiber_id, a + 1);
+                    (data, type_id_to_tag(type_id), true)
+                } else {
+                    (self.read_reg(fiber_id, a), type_tag, false)
+                };
+                
+                let s = format_value(val, inner_tag);
+                if is_iface {
+                    println!("(interface){}", s);
+                } else {
+                    println!("{}", s);
+                }
             }
             
             Opcode::AssertBegin => {
@@ -1228,10 +1240,22 @@ impl Vm {
             Opcode::AssertArg => {
                 let fiber = self.scheduler.get(fiber_id).unwrap();
                 if fiber.assert_failed {
-                    let val = self.read_reg(fiber_id, a);
                     let type_tag = crate::ffi::TypeTag::from_u8(b as u8);
-                    let s = format_value(val, type_tag);
-                    eprint!("{}", s);
+                    
+                    let (val, inner_tag, is_iface) = if type_tag == crate::ffi::TypeTag::Interface {
+                        let type_id = self.read_reg(fiber_id, a) as u32;
+                        let data = self.read_reg(fiber_id, a + 1);
+                        (data, type_id_to_tag(type_id), true)
+                    } else {
+                        (self.read_reg(fiber_id, a), type_tag, false)
+                    };
+                    
+                    let s = format_value(val, inner_tag);
+                    if is_iface {
+                        eprint!("(interface){}", s);
+                    } else {
+                        eprint!("{}", s);
+                    }
                 }
             }
             
@@ -1341,5 +1365,20 @@ fn format_value(val: u64, type_tag: crate::ffi::TypeTag) -> String {
         _ => {
             format!("{}", val as i64)
         }
+    }
+}
+
+/// Convert boxed type_id to TypeTag for formatting.
+fn type_id_to_tag(type_id: u32) -> crate::ffi::TypeTag {
+    use crate::types::builtin;
+    match type_id {
+        0 => crate::ffi::TypeTag::Nil,
+        t if t == builtin::INT64 => crate::ffi::TypeTag::Int64,
+        t if t == builtin::INT32 => crate::ffi::TypeTag::Int32,
+        t if t == builtin::FLOAT64 => crate::ffi::TypeTag::Float64,
+        t if t == builtin::FLOAT32 => crate::ffi::TypeTag::Float32,
+        t if t == builtin::STRING => crate::ffi::TypeTag::String,
+        t if t == builtin::BOOL => crate::ffi::TypeTag::Bool,
+        _ => crate::ffi::TypeTag::Int64, // default
     }
 }

@@ -60,6 +60,7 @@ pub enum VarKind {
     Map,
     Struct(u16),  // struct with field count
     Obx,          // object (reference type)
+    Interface,    // interface (2 slots: type_id + data)
     Other,
 }
 

@@ -1145,11 +1145,28 @@ fn compile_builtin_print(
     fctx: &mut FuncContext,
     call: &CallExpr,
 ) -> Result<u16, CodegenError> {
+    use crate::context::VarKind;
+    
     for arg in &call.args {
-        let type_tag = infer_type_tag(ctx, fctx, arg);
-        let reg = compile_expr(ctx, fctx, arg)?;
-        // Pass type tag in b parameter for proper formatting
-        fctx.emit(Opcode::DebugPrint, reg, type_tag as u16, 0);
+        // Check if this is an interface variable
+        let is_interface = if let ExprKind::Ident(ident) = &arg.kind {
+            fctx.lookup_local(ident.symbol)
+                .map_or(false, |local| matches!(local.kind, VarKind::Interface))
+        } else {
+            false
+        };
+        
+        if is_interface {
+            // For interface, emit special print that reads type from slot 0
+            let reg = compile_expr(ctx, fctx, arg)?;
+            // Use TypeTag::Interface (19) to signal interface printing
+            fctx.emit(Opcode::DebugPrint, reg, 19, 0);
+        } else {
+            let type_tag = infer_type_tag(ctx, fctx, arg);
+            let reg = compile_expr(ctx, fctx, arg)?;
+            // Pass type tag in b parameter for proper formatting
+            fctx.emit(Opcode::DebugPrint, reg, type_tag as u16, 0);
+        }
     }
     let dst = fctx.regs.alloc(1);
     fctx.emit(Opcode::LoadNil, dst, 0, 0);
