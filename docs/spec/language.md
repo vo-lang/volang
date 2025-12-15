@@ -214,7 +214,7 @@ nil
 _
 
 // Functions (compiler built-ins)
-len  cap  append  copy  delete  make  close  panic  recover  print  println
+len  cap  append  copy  delete  make  close  panic  recover  print  println  assert
 ```
 
 **Blank identifier `_`**: Used to discard values or declare unused variables. It can appear on the left side of assignments and short variable declarations.
@@ -1385,6 +1385,7 @@ The following functions are **compiler built-ins**. Their signatures use meta-no
 | `recover()` | Captures a panic value during deferred function execution |
 | `print(args...)` | Debug output (no newline) |
 | `println(args...)` | Debug output (with newline) |
+| `assert(cond, args...)` | Terminates program if condition is false |
 
 **Usage Examples**:
 ```gox
@@ -1433,6 +1434,58 @@ type UserRef object {
 p := make(UserRef)           // new object allocated
 p.name = "Alice"
 ```
+
+### 10.3 Assert
+
+`assert` checks a condition and terminates the program if it is false. It is active in both debug and release builds.
+
+**Syntax**:
+```ebnf
+AssertCall ::= "assert" "(" Expr ( "," Expr )* ")" ;
+```
+
+**Parameters**:
+- First argument: boolean condition (required)
+- Subsequent arguments: diagnostic values printed on failure (optional, same behavior as `println`)
+
+**Behavior**:
+- If condition is `true`: no effect, execution continues
+- If condition is `false`: prints error message to stderr and terminates the program
+
+**Output Format**:
+```
+assertion failed: <arg2><arg3>...
+  at <file>:<line>
+```
+
+Without additional arguments:
+```
+assertion failed
+  at main.gox:42
+```
+
+**Examples**:
+```gox
+x := 10
+assert(x > 0)                              // passes silently
+
+y := -1
+assert(y >= 0, "y=", y, " must be >= 0")   // fails, prints:
+// assertion failed: y=-1 must be >= 0
+//   at main.gox:5
+
+// Multiple diagnostic values
+name := "test"
+count := 0
+assert(count > 0, "count=", count, " name=", name)
+// assertion failed: count=0 name=test
+//   at main.gox:10
+```
+
+**Notes**:
+- Unlike `panic`, `assert` does not unwind the stack or run deferred functions
+- The diagnostic arguments follow the same formatting rules as `println`
+- `assert` is always active; there is no compile-time flag to disable it
 
 ---
 
