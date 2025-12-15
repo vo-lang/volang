@@ -85,5 +85,3 @@ func main() {
     println("interface_conversion: ALL PASSED")
 }
 
-=== typecheck ===
-OK

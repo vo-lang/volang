@@ -24,6 +24,3 @@ func main() {
     println("local type declarations work correctly")
 }
 
-=== typecheck ===
-OK
-

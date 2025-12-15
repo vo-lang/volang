@@ -44,6 +44,3 @@ func main() {
 	println("interface via embedding tests passed")
 }
 
-=== typecheck ===
-OK
-

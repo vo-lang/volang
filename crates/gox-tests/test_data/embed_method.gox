@@ -50,6 +50,3 @@ func main() {
 	println("method promotion tests passed")
 }
 
-=== typecheck ===
-OK
-

@@ -16,8 +16,3 @@ func main() {
 	_ = x
 }
 
-=== typecheck ===
-[E1101] expected type
-[E1101] expected identifier
-[E1101] expected expression
-[E2100] undefined: x

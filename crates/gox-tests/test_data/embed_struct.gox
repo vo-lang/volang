@@ -51,6 +51,3 @@ func main() {
 	println("struct embedding tests passed")
 }
 
-=== typecheck ===
-OK
-

@@ -1,0 +1,13 @@
+// Test: channel send/receive - typecheck only
+package main
+
+var ch chan int
+
+func sendToChannel() {
+	ch <- 42
+}
+
+func recvFromChannel() int {
+	return <-ch
+}
+
