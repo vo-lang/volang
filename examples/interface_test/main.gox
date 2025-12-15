@@ -100,12 +100,68 @@ func testMultipleTypes() {
     println("Test 4 PASSED: multiple types implement same interface")
 }
 
+// ============ Test 5: Interface to interface assignment ============
+type Reader interface {
+    Read() int
+}
+
+type ReadWriter interface {
+    Read() int
+    Write(x int)
+}
+
+type File struct {
+    data int
+}
+
+func (f File) Read() int {
+    return f.data
+}
+
+func (f File) Write(x int) {
+    f.data = x
+}
+
+func testInterfaceToInterface() {
+    var r Reader
+    var rw ReadWriter
+    
+    // File implements both interfaces
+    f := File{data: 100}
+    rw = f
+    
+    // ReadWriter -> Reader (superset to subset): OK
+    r = rw
+    result := r.Read()
+    println("Reader.Read():", result)
+    assert(result == 100, "Reader.Read() should be 100")
+    
+    println("Test 5 PASSED: interface to interface assignment")
+}
+
+// ============ Test 6: Named interface to empty interface ============
+func testNamedToEmpty() {
+    var e interface{}
+    var a Adder
+    
+    n := MyNum{value: 50}
+    a = n
+    
+    // Named interface -> empty interface: always OK
+    e = a
+    println("empty interface from Adder:", e)
+    
+    println("Test 6 PASSED: named interface to empty interface")
+}
+
 // ============ Main ============
 func main() {
     testEmptyInterface()
     testStructInterface()
     testObjectInterface()
     testMultipleTypes()
+    testInterfaceToInterface()
+    testNamedToEmpty()
     
     println("interface_test: ALL PASSED")
 }

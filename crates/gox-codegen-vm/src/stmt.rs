@@ -392,6 +392,22 @@ fn is_named_interface_type(ctx: &CodegenContext, sym: gox_common::Symbol) -> boo
     expr::lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Interface(_)))
 }
 
+/// Check if an expression is an interface variable
+fn is_interface_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
+    use gox_syntax::ast::ExprKind;
+    
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if let Some(local) = fctx.lookup_local(ident.symbol) {
+                return local.kind == VarKind::Interface;
+            }
+            false
+        }
+        ExprKind::Paren(inner) => is_interface_expr(ctx, fctx, inner),
+        _ => false,
+    }
+}
+
 /// Infer runtime type ID for boxing into interface
 fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
     use gox_syntax::ast::ExprKind;
@@ -488,10 +504,18 @@ fn compile_assign(
                         AssignOp::Assign => {
                             // Check if assigning to interface variable
                             if local_kind == VarKind::Interface {
-                                // Box the value into interface
-                                let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
-                                let type_id = infer_runtime_type_id(ctx, fctx, &assign.rhs[i]);
-                                fctx.emit(Opcode::BoxInterface, dst, type_id, src);
+                                // Check if source is also an interface variable
+                                if is_interface_expr(ctx, fctx, &assign.rhs[i]) {
+                                    // Interface to interface: copy both slots
+                                    let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                                    fctx.emit(Opcode::Mov, dst, src, 0);      // type_id
+                                    fctx.emit(Opcode::Mov, dst + 1, src + 1, 0); // data
+                                } else {
+                                    // Box the value into interface
+                                    let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
+                                    let type_id = infer_runtime_type_id(ctx, fctx, &assign.rhs[i]);
+                                    fctx.emit(Opcode::BoxInterface, dst, type_id, src);
+                                }
                             } else {
                                 let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
                                 if src != dst {
