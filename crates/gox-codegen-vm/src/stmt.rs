@@ -1019,14 +1019,17 @@ fn compile_go(
     // go func() - spawn a new goroutine
     if let ExprKind::Call(call) = &go_stmt.call.kind {
         if let ExprKind::Ident(ident) = &call.func.kind {
-            let func_name = ctx.interner.resolve(ident.symbol).unwrap_or("");
             if let Some(&func_idx) = ctx.func_indices.get(&ident.symbol) {
                 let arg_start = fctx.regs.current();
                 let arg_count = call.args.len() as u16;
                 
-                // Compile arguments
-                for arg in &call.args {
-                    expr::compile_expr(ctx, fctx, arg)?;
+                // Compile arguments and ensure they're in consecutive registers
+                for (i, arg) in call.args.iter().enumerate() {
+                    let expected_reg = arg_start + i as u16;
+                    let actual_reg = expr::compile_expr(ctx, fctx, arg)?;
+                    if actual_reg != expected_reg {
+                        fctx.emit(Opcode::Mov, expected_reg, actual_reg, 0);
+                    }
                 }
                 
                 // Spawn goroutine
