@@ -9,7 +9,7 @@
 //! - **Literals**: Infers types for integer, float, string, and boolean literals
 //! - **Identifiers**: Looks up variables, functions, and constants in scope
 //! - **Binary operations**: Validates operand types for arithmetic, comparison, and logical ops
-//! - **Unary operations**: Validates operand types for negation, not, address-of, etc.
+//! - **Unary operations**: Validates operand types for negation, not, bitwise complement, etc.
 //! - **Function calls**: Checks argument count and types against function signature
 //! - **Selectors**: Resolves field access and method calls on structs and interfaces
 //! - **Index expressions**: Validates indexable types (arrays, slices, maps, strings)
