@@ -1,0 +1,47 @@
+// BUG: GoX doesn't have pointers, but parser silently accepts *Type and &expr
+// This test documents the bug - it should fail but currently passes
+package main
+
+type Base struct {
+	id int
+}
+
+func (b *Base) SetID(id int) {
+	b.id = id
+}
+
+func (b *Base) GetID() int {
+	return b.id
+}
+
+type Derived struct {
+	*Base  // pointer embedding
+	name string
+}
+
+func main() {
+	// Pointer embedding - need to initialize
+	d := Derived{
+		Base: &Base{id: 1},
+		name: "test",
+	}
+	
+	// Access promoted field through pointer
+	assert(d.id == 1, "d.id should be 1")
+	
+	// Access promoted method
+	assert(d.GetID() == 1, "d.GetID() should be 1")
+	
+	// Modify through promoted method
+	d.SetID(42)
+	assert(d.id == 42, "d.id should be 42 after SetID")
+	
+	// Explicit access
+	assert(d.Base.id == 42, "d.Base.id should be 42")
+	
+	println("pointer embedding tests passed")
+}
+
+=== typecheck ===
+OK
+

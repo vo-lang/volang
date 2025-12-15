@@ -1,0 +1,49 @@
+// Test: interface satisfaction via embedded fields
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type Named struct {
+	name string
+}
+
+func (n Named) String() string {
+	return n.name
+}
+
+// Product embeds Named, so it satisfies Stringer via promotion
+type Product struct {
+	Named
+	price int
+}
+
+// Category also embeds Named
+type Category struct {
+	Named
+	items []string
+}
+
+func printString(s Stringer) string {
+	return s.String()
+}
+
+func main() {
+	p := Product{Named: Named{name: "Widget"}, price: 100}
+	c := Category{Named: Named{name: "Electronics"}}
+	
+	// Both satisfy Stringer through embedded Named
+	assert(printString(p) == "Widget", "printString(p) should be Widget")
+	assert(printString(c) == "Electronics", "printString(c) should be Electronics")
+	
+	// Direct method call also works
+	assert(p.String() == "Widget", "p.String() should be Widget")
+	assert(c.String() == "Electronics", "c.String() should be Electronics")
+	
+	println("interface via embedding tests passed")
+}
+
+=== typecheck ===
+OK
+

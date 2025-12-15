@@ -27,5 +27,3 @@ func main() {
 === typecheck ===
 OK
 
-=== output ===
-local type declarations work correctly
