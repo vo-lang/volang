@@ -744,25 +744,13 @@ fn get_expr_type(
         }
         ExprKind::Index(index) => {
             // For slice/array/map indexing, get the element type
-            // First check if the container is a variable with known element type
             if let ExprKind::Ident(ident) = &index.expr.kind {
                 if let Some(local) = fctx.lookup_local(ident.symbol) {
-                    if local.kind == crate::context::VarKind::Slice {
-                        // For slices, type_sym is the element type
+                    // For slices and maps, type_sym is the element/value type
+                    if matches!(local.kind, crate::context::VarKind::Slice | crate::context::VarKind::Map) {
                         if let Some(elem_type_sym) = local.type_sym {
-                            for named in &ctx.result.named_types {
-                                if named.name == elem_type_sym {
-                                    return Some(named.underlying.clone());
-                                }
-                            }
-                        }
-                    } else if local.kind == crate::context::VarKind::Map {
-                        // For maps, type_sym is the value type
-                        if let Some(val_type_sym) = local.type_sym {
-                            for named in &ctx.result.named_types {
-                                if named.name == val_type_sym {
-                                    return Some(named.underlying.clone());
-                                }
+                            if let Some(ty) = lookup_named_type(ctx, elem_type_sym) {
+                                return Some(ty.clone());
                             }
                         }
                     }
@@ -782,6 +770,13 @@ fn get_expr_type(
         }
         _ => None,
     }
+}
+
+/// Look up a named type and return its underlying type
+fn lookup_named_type<'a>(ctx: &'a CodegenContext, sym: gox_common::Symbol) -> Option<&'a Type> {
+    ctx.result.named_types.iter()
+        .find(|n| n.name == sym)
+        .map(|n| &n.underlying)
 }
 
 /// Find field index in a type
