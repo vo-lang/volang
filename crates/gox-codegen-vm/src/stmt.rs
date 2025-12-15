@@ -349,32 +349,6 @@ fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
     lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Obx(_)))
 }
 
-/// Resolve field index for a selector expression
-fn resolve_selector_field_index(
-    ctx: &CodegenContext,
-    fctx: &FuncContext,
-    expr: &gox_syntax::ast::Expr,
-    field_name: gox_common::Symbol,
-) -> u16 {
-    use gox_syntax::ast::ExprKind;
-    
-    if let ExprKind::Ident(ident) = &expr.kind {
-        if let Some(local) = fctx.lookup_local(ident.symbol) {
-            if let Some(type_sym) = local.type_sym {
-                if let Some(ty) = lookup_named_type(ctx, type_sym) {
-                    if let Type::Struct(s) | Type::Obx(s) = ty {
-                        for (idx, field) in s.fields.iter().enumerate() {
-                            if field.name == Some(field_name) {
-                                return idx as u16;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    0
-}
 
 /// Compile assignment statement.
 fn compile_assign(
@@ -491,7 +465,7 @@ fn compile_assign(
                 // Handle struct/object field assignment: s.x = v
                 let obj = expr::compile_expr(ctx, fctx, &sel.expr)?;
                 let value = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
-                let field_idx = resolve_selector_field_index(ctx, fctx, &sel.expr, sel.sel.symbol);
+                let field_idx = expr::resolve_field_index(ctx, fctx, &sel.expr, sel.sel.symbol);
                 fctx.emit(Opcode::SetField, obj, field_idx, value);
             }
             _ => {

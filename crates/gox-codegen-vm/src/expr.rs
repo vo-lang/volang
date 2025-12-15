@@ -667,7 +667,7 @@ fn compile_selector(
 }
 
 /// Resolve field index for a selector expression
-fn resolve_field_index(
+pub fn resolve_field_index(
     ctx: &CodegenContext,
     fctx: &FuncContext,
     expr: &gox_syntax::ast::Expr,
