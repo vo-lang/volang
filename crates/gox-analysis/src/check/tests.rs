@@ -435,3 +435,123 @@ fn test_check_chained_comparison() {
     let ty = check_expr_type("package main", "1 < 2 && 2 < 3 && 3 < 4");
     assert!(matches!(ty, Type::Untyped(UntypedKind::Bool)));
 }
+
+// ========== Error reporting tests ==========
+
+/// Helper to check that errors are reported with the expected code.
+fn check_has_error(source: &str, expected_code: u16) -> bool {
+    let (file, _parse_diag, interner) = parse(source, 0);
+
+    let mut diag = DiagnosticSink::new();
+    let _result = crate::typecheck_file(&file, &interner, &mut diag);
+
+    let found = diag.iter().any(|d| d.code == Some(expected_code));
+    found
+}
+
+#[test]
+fn test_error_redeclared() {
+    // Error code 2000: Redeclared
+    let source = r#"
+package main
+var x int = 1
+var x int = 2
+"#;
+    assert!(check_has_error(source, 2000));
+}
+
+#[test]
+fn test_error_undefined() {
+    // Error code 2100: Undefined
+    let source = r#"
+package main
+func main() {
+    var x = undefined_var
+}
+"#;
+    assert!(check_has_error(source, 2100));
+}
+
+#[test]
+fn test_error_not_a_type() {
+    // Error code 2101: NotAType - use a var name where type is expected
+    let source = r#"
+package main
+var notAType int = 1
+type T []notAType
+"#;
+    assert!(check_has_error(source, 2101));
+}
+
+#[test]
+fn test_error_invalid_recursive_type() {
+    // Error code 2102: InvalidRecursiveType
+    let source = r#"
+package main
+type A A
+"#;
+    assert!(check_has_error(source, 2102));
+}
+
+#[test]
+fn test_error_invalid_map_key() {
+    // Error code 2103: InvalidMapKey (slices are not comparable)
+    let source = r#"
+package main
+type M map[[]int]string
+"#;
+    assert!(check_has_error(source, 2103));
+}
+
+#[test]
+fn test_error_type_not_value() {
+    // Error code 2200: TypeNotValue
+    let source = r#"
+package main
+type T int
+func main() {
+    var x = T
+}
+"#;
+    assert!(check_has_error(source, 2200));
+}
+
+#[test]
+fn test_error_not_callable() {
+    // Error code 2201: NotCallable
+    let source = r#"
+package main
+func main() {
+    var x int = 1
+    var y = x()
+}
+"#;
+    assert!(check_has_error(source, 2201));
+}
+
+#[test]
+fn test_error_no_field_or_method() {
+    // Error code 2510: NoFieldOrMethod
+    let source = r#"
+package main
+type S struct { a int }
+func main() {
+    var s S
+    var x = s.nonexistent
+}
+"#;
+    assert!(check_has_error(source, 2510));
+}
+
+#[test]
+fn test_error_non_bool_condition() {
+    // Error code 2700: NonBoolCondition
+    let source = r#"
+package main
+func main() {
+    if 42 {
+    }
+}
+"#;
+    assert!(check_has_error(source, 2700));
+}
