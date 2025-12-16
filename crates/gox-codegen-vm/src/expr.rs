@@ -76,9 +76,9 @@ pub fn infer_type_tag(ctx: &CodegenContext, fctx: &FuncContext, expr: &Expr) -> 
             }
         }
         ExprKind::Paren(inner) => infer_type_tag(ctx, fctx, inner),
-        ExprKind::Call(call) => {
+        ExprKind::Call(_) => {
             // Use unified lookup for all function calls
-            if let Some(kind) = ctx.lookup_call_return_type(call) {
+            if let Some(kind) = ctx.lookup_call_return_type(expr) {
                 return crate::context::var_kind_to_type_tag(&kind);
             }
             TypeTag::Int64

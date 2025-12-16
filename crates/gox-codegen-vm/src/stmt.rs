@@ -384,9 +384,9 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                 _ => (VarKind::Other, None),
             }
         }
-        ExprKind::Call(call) => {
+        ExprKind::Call(_) => {
             // Use unified lookup for all function calls
-            if let Some(kind) = ctx.lookup_call_return_type(call) {
+            if let Some(kind) = ctx.lookup_call_return_type(expr) {
                 return (kind, None);
             }
             (VarKind::Other, None)
@@ -509,9 +509,9 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
                 builtin::INT64 as u16
             }
         }
-        ExprKind::Call(call) => {
+        ExprKind::Call(_) => {
             // Use unified lookup for all function calls
-            if let Some(kind) = ctx.lookup_call_return_type(call) {
+            if let Some(kind) = ctx.lookup_call_return_type(expr) {
                 return crate::context::var_kind_to_builtin_type(&kind);
             }
             builtin::INT64 as u16

@@ -343,8 +343,6 @@ pub struct CodegenContext<'a> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
-    /// Function return types: "pkg.FuncName" -> VarKind (for cross-package type inference)
-    pub func_return_types: HashMap<String, VarKind>,
 }
 
 /// Codegen context that compiles into an existing module.
@@ -363,8 +361,6 @@ pub struct CodegenContextRef<'a, 'm> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
-    /// Function return types: "pkg.FuncName" -> VarKind (for cross-package type inference)
-    pub func_return_types: HashMap<String, VarKind>,
 }
 
 impl<'a, 'm> CodegenContextRef<'a, 'm> {
@@ -425,7 +421,6 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 closure_func_offset: self.module.functions.len() as u32,
                 method_table: self.method_table.clone(),
                 func_interface_params: self.func_interface_params.clone(),
-                func_return_types: self.func_return_types.clone(),
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
             // Merge back any new natives/constants
@@ -546,45 +541,42 @@ impl<'a> CodegenContext<'a> {
             closure_func_offset: 0,
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
-            func_return_types: HashMap::new(),
+        }
+    }
+    
+    /// Look up the type of an expression using the type checker's expr_types map.
+    pub fn lookup_expr_type(&self, expr: &gox_syntax::ast::Expr) -> Option<gox_analysis::Type> {
+        self.result.expr_types.get(&expr.span.start.0).cloned()
+    }
+    
+    /// Convert a Type to VarKind for codegen purposes.
+    pub fn type_to_var_kind(&self, ty: &gox_analysis::Type) -> VarKind {
+        use gox_analysis::Type;
+        use gox_analysis::BasicType;
+        
+        match ty {
+            Type::Basic(BasicType::String) | Type::Untyped(gox_analysis::UntypedKind::String) => VarKind::String,
+            Type::Basic(BasicType::Float64) | Type::Basic(BasicType::Float32) |
+            Type::Untyped(gox_analysis::UntypedKind::Float) => VarKind::Float,
+            Type::Basic(BasicType::Int) | Type::Basic(BasicType::Int64) |
+            Type::Basic(BasicType::Int32) | Type::Basic(BasicType::Int16) | Type::Basic(BasicType::Int8) |
+            Type::Basic(BasicType::Uint) | Type::Basic(BasicType::Uint64) |
+            Type::Basic(BasicType::Uint32) | Type::Basic(BasicType::Uint16) | Type::Basic(BasicType::Uint8) |
+            Type::Untyped(gox_analysis::UntypedKind::Int) => VarKind::Int,
+            Type::Slice(_) => VarKind::Slice,
+            Type::Map(_) => VarKind::Map,
+            Type::Interface(_) => VarKind::Interface,
+            Type::Struct(s) => VarKind::Struct(s.fields.len() as u16),
+            Type::Obx(_) => VarKind::Obx,
+            _ => VarKind::Other,
         }
     }
     
     /// Look up return type for a function call expression.
-    /// Handles both simple calls (func()) and qualified calls (pkg.Func()).
-    pub fn lookup_call_return_type(&self, call: &gox_syntax::ast::CallExpr) -> Option<VarKind> {
-        use gox_syntax::ast::ExprKind;
-        
-        match &call.func.kind {
-            // Simple function call: func()
-            ExprKind::Ident(ident) => {
-                // Check local functions in current file
-                for decl in &self.file.decls {
-                    if let gox_syntax::ast::Decl::Func(func_decl) = decl {
-                        if func_decl.name.symbol == ident.symbol {
-                            if let Some(ret_type) = func_decl.sig.results.first() {
-                                let (kind, _) = infer_type_from_type_expr_with_interner(
-                                    self.result, &ret_type.ty, Some(self.interner));
-                                return Some(kind);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            // Qualified function call: pkg.Func()
-            ExprKind::Selector(sel) => {
-                if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
-                    let pkg_name = self.interner.resolve(pkg_ident.symbol)?;
-                    let func_name = self.interner.resolve(sel.sel.symbol)?;
-                    let qualified_name = format!("{}.{}", pkg_name, func_name);
-                    self.func_return_types.get(&qualified_name).cloned()
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+    /// Uses the type checker's expr_types to get the type of the call expression.
+    pub fn lookup_call_return_type(&self, call_expr: &gox_syntax::ast::Expr) -> Option<VarKind> {
+        let ty = self.lookup_expr_type(call_expr)?;
+        Some(self.type_to_var_kind(&ty))
     }
     
     /// Create a context that compiles into an existing module.
@@ -607,7 +599,6 @@ impl<'a> CodegenContext<'a> {
             const_indices: HashMap::new(),
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
-            func_return_types: HashMap::new(),
         }
     }
     

@@ -89,6 +89,8 @@ pub struct TypeChecker<'a> {
     package_exported_types: std::collections::HashMap<String, std::collections::HashMap<String, std::collections::HashMap<String, Type>>>,
     /// Local type declarations (function-scoped types).
     local_types: Vec<NamedTypeInfo>,
+    /// Expression types: span_start -> Type (for codegen to look up any expression's type)
+    pub expr_types: std::collections::HashMap<u32, Type>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -112,7 +114,13 @@ impl<'a> TypeChecker<'a> {
             package_exports: std::collections::HashMap::new(),
             package_exported_types: std::collections::HashMap::new(),
             local_types: Vec::new(),
+            expr_types: std::collections::HashMap::new(),
         }
+    }
+    
+    /// Records the type of an expression for later use by codegen.
+    fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
+        self.expr_types.insert(expr.span.start.0, ty);
     }
     
     /// Sets imported packages for cross-package call resolution.
@@ -399,8 +407,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Type-checks an expression and returns its type.
+    /// Also records the type for later use by codegen.
     pub fn check_expr(&mut self, expr: &Expr) -> Type {
-        match &expr.kind {
+        let ty = match &expr.kind {
             ExprKind::IntLit(lit) => self.check_int_lit(lit),
             ExprKind::FloatLit(lit) => self.check_float_lit(lit),
             ExprKind::StringLit(lit) => self.check_string_lit(lit),
@@ -421,7 +430,10 @@ impl<'a> TypeChecker<'a> {
             // Type used as expression (for make/new first argument)
             ExprKind::TypeAsExpr(ty) => self.resolve_type_expr(ty),
             _ => Type::Invalid,
-        }
+        };
+        // Record the type for codegen to look up later
+        self.record_expr_type(expr, ty.clone());
+        ty
     }
 
     /// Checks an integer literal.

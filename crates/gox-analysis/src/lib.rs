@@ -95,6 +95,9 @@ pub struct TypeCheckResult {
     pub scope: Scope,
     /// The resolved named types.
     pub named_types: Vec<NamedTypeInfo>,
+    /// Expression types: span_start -> Type
+    /// Allows looking up the type of any expression by its source position.
+    pub expr_types: std::collections::HashMap<u32, Type>,
 }
 
 /// Type-checks a GoX source file.
@@ -138,10 +141,15 @@ pub fn typecheck_files(
             }
         }
     }
+    
+    // Extract expr_types before dropping checker (which borrows resolve_result)
+    let expr_types = std::mem::take(&mut checker.expr_types);
+    drop(checker);
 
     TypeCheckResult {
         scope: resolve_result.scope,
         named_types: resolve_result.named_types,
+        expr_types,
     }
 }
 
@@ -199,10 +207,15 @@ pub fn typecheck_files_with_imports(
             }
         }
     }
+    
+    // Extract expr_types before dropping checker (which borrows resolve_result)
+    let expr_types = std::mem::take(&mut checker.expr_types);
+    drop(checker);
 
     TypeCheckResult {
         scope: resolve_result.scope,
         named_types: resolve_result.named_types,
+        expr_types,
     }
 }
 
