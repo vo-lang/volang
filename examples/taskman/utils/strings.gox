@@ -1,6 +1,16 @@
 // Package utils provides utility functions
 package utils
 
+// Hello returns a simple greeting
+func Hello() string {
+    return "hello from utils"
+}
+
+// Concat returns two strings concatenated
+func Concat(a, b string) string {
+    return a + b
+}
+
 // Max returns the larger of two integers
 func Max(a, b int) int {
     if a > b {

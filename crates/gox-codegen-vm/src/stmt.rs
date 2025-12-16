@@ -385,19 +385,9 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
             }
         }
         ExprKind::Call(call) => {
-            // Check if it's a function call that returns a struct/object
-            if let ExprKind::Ident(func_ident) = &call.func.kind {
-                // Look up function signature to determine return type
-                for decl in &ctx.file.decls {
-                    if let gox_syntax::ast::Decl::Func(func_decl) = decl {
-                        if func_decl.name.symbol == func_ident.symbol {
-                            // Found the function - check its return type
-                            if let Some(ret_type) = func_decl.sig.results.first() {
-                                return crate::context::infer_type_from_type_expr(ctx.result, &ret_type.ty);
-                            }
-                        }
-                    }
-                }
+            // Use unified lookup for all function calls
+            if let Some(kind) = ctx.lookup_call_return_type(call) {
+                return (kind, None);
             }
             (VarKind::Other, None)
         }
@@ -510,12 +500,21 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
             }
         }
         ExprKind::Binary(_) => {
-            // Check if float expression
+            // Check if float or string expression
             if expr::is_float_expr(ctx, fctx, expr) {
                 builtin::FLOAT64 as u16
+            } else if expr::is_string_expr(ctx, fctx, expr) {
+                builtin::STRING as u16
             } else {
                 builtin::INT64 as u16
             }
+        }
+        ExprKind::Call(call) => {
+            // Use unified lookup for all function calls
+            if let Some(kind) = ctx.lookup_call_return_type(call) {
+                return crate::context::var_kind_to_builtin_type(&kind);
+            }
+            builtin::INT64 as u16
         }
         _ => builtin::INT64 as u16,
     }

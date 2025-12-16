@@ -89,6 +89,9 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     // func_interface_params: func_idx -> Vec<param_index> for params that are interfaces
     let mut func_interface_params: HashMap<u32, Vec<u16>> = HashMap::new();
     
+    // func_return_types: "pkg.FuncName" -> VarKind (for type inference in native calls)
+    let mut func_return_types: HashMap<String, context::VarKind> = HashMap::new();
+    
     for pkg in &project.packages {
         let mut func_indices: HashMap<Symbol, u32> = HashMap::new();
         
@@ -136,7 +139,14 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                         // Register cross-package name for exported functions
                         if func_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                             let qualified_name = format!("{}.{}", pkg.name, func_name);
-                            cross_pkg_funcs.insert(qualified_name, idx);
+                            cross_pkg_funcs.insert(qualified_name.clone(), idx);
+                            
+                            // Store return type for cross-package type inference
+                            if let Some(ret_type) = func.sig.results.first() {
+                                let (kind, _) = context::infer_type_from_type_expr_with_interner(
+                                    &pkg.types, &ret_type.ty, Some(&project.interner));
+                                func_return_types.insert(qualified_name, kind);
+                            }
                         }
                     }
                     
@@ -211,6 +221,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.func_indices = func_indices.clone();
                     ctx.cross_pkg_funcs = cross_pkg_funcs.clone();
                     ctx.global_indices = pkg_globals.clone();
+                    ctx.func_return_types = func_return_types.clone();
                     ctx.const_values = pkg_consts.clone();
                     ctx.native_indices = native_indices.clone();
                     ctx.const_indices = const_indices.clone();
@@ -262,6 +273,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                 ctx.func_indices = func_indices.clone();
                 ctx.cross_pkg_funcs = cross_pkg_funcs.clone();
                 ctx.global_indices = pkg_globals.clone();
+                ctx.func_return_types = func_return_types.clone();
                 ctx.const_values = pkg_consts.clone();
                 ctx.native_indices = native_indices.clone();
                 ctx.const_indices = const_indices.clone();

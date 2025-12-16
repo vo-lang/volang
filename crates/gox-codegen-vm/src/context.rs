@@ -343,6 +343,8 @@ pub struct CodegenContext<'a> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
+    /// Function return types: "pkg.FuncName" -> VarKind (for cross-package type inference)
+    pub func_return_types: HashMap<String, VarKind>,
 }
 
 /// Codegen context that compiles into an existing module.
@@ -361,6 +363,8 @@ pub struct CodegenContextRef<'a, 'm> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
+    /// Function return types: "pkg.FuncName" -> VarKind (for cross-package type inference)
+    pub func_return_types: HashMap<String, VarKind>,
 }
 
 impl<'a, 'm> CodegenContextRef<'a, 'm> {
@@ -421,6 +425,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 closure_func_offset: self.module.functions.len() as u32,
                 method_table: self.method_table.clone(),
                 func_interface_params: self.func_interface_params.clone(),
+                func_return_types: self.func_return_types.clone(),
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
             // Merge back any new natives/constants
@@ -494,6 +499,31 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         }
         false
     }
+    
+}
+
+/// Convert VarKind to FFI TypeTag.
+pub fn var_kind_to_type_tag(kind: &VarKind) -> gox_vm::ffi::TypeTag {
+    use gox_vm::ffi::TypeTag;
+    match kind {
+        VarKind::String => TypeTag::String,
+        VarKind::Float => TypeTag::Float64,
+        VarKind::Int => TypeTag::Int64,
+        _ => TypeTag::Int64,
+    }
+}
+
+/// Convert VarKind to runtime builtin type ID.
+pub fn var_kind_to_builtin_type(kind: &VarKind) -> u16 {
+    use gox_vm::types::builtin;
+    match kind {
+        VarKind::String => builtin::STRING as u16,
+        VarKind::Float => builtin::FLOAT64 as u16,
+        VarKind::Int => builtin::INT64 as u16,
+        VarKind::Slice => builtin::SLICE as u16,
+        VarKind::Map => builtin::MAP as u16,
+        _ => builtin::INT64 as u16,
+    }
 }
 
 impl<'a> CodegenContext<'a> {
@@ -516,6 +546,44 @@ impl<'a> CodegenContext<'a> {
             closure_func_offset: 0,
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
+            func_return_types: HashMap::new(),
+        }
+    }
+    
+    /// Look up return type for a function call expression.
+    /// Handles both simple calls (func()) and qualified calls (pkg.Func()).
+    pub fn lookup_call_return_type(&self, call: &gox_syntax::ast::CallExpr) -> Option<VarKind> {
+        use gox_syntax::ast::ExprKind;
+        
+        match &call.func.kind {
+            // Simple function call: func()
+            ExprKind::Ident(ident) => {
+                // Check local functions in current file
+                for decl in &self.file.decls {
+                    if let gox_syntax::ast::Decl::Func(func_decl) = decl {
+                        if func_decl.name.symbol == ident.symbol {
+                            if let Some(ret_type) = func_decl.sig.results.first() {
+                                let (kind, _) = infer_type_from_type_expr_with_interner(
+                                    self.result, &ret_type.ty, Some(self.interner));
+                                return Some(kind);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Qualified function call: pkg.Func()
+            ExprKind::Selector(sel) => {
+                if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
+                    let pkg_name = self.interner.resolve(pkg_ident.symbol)?;
+                    let func_name = self.interner.resolve(sel.sel.symbol)?;
+                    let qualified_name = format!("{}.{}", pkg_name, func_name);
+                    self.func_return_types.get(&qualified_name).cloned()
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
     
@@ -539,6 +607,7 @@ impl<'a> CodegenContext<'a> {
             const_indices: HashMap::new(),
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
+            func_return_types: HashMap::new(),
         }
     }
     

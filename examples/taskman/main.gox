@@ -101,20 +101,20 @@ func runDemo() {
 }
 
 func main() {
-    // Test string concatenation
-    println("String concat:")
-    a := "hello"
-    b := a + " world"
-    println(b)
+    // Test cross-package string functions
+    println("Cross-package Hello:")
+    println(utils.Hello())
     
-    // Test utils.Repeat (string loop concat)
-    println("Repeat test:")
-    s := utils.Repeat("ab", 3)
-    println(s)
+    println("Cross-package Concat:")
+    println(utils.Concat("foo", "bar"))
     
-    // Test cross-package functions
-    println("Cross-package functions:")
+    println("Cross-package Repeat:")
+    println(utils.Repeat("ab", 3))
+    
+    // Test cross-package int functions
+    println("Cross-package Max/Min/Clamp:")
     println(utils.Max(10, 20))
+    println(utils.Min(10, 20))
     println(utils.Clamp(15, 0, 10))
     
     println("All tests passed!")

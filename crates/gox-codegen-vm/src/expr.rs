@@ -76,7 +76,40 @@ pub fn infer_type_tag(ctx: &CodegenContext, fctx: &FuncContext, expr: &Expr) -> 
             }
         }
         ExprKind::Paren(inner) => infer_type_tag(ctx, fctx, inner),
+        ExprKind::Call(call) => {
+            // Use unified lookup for all function calls
+            if let Some(kind) = ctx.lookup_call_return_type(call) {
+                return crate::context::var_kind_to_type_tag(&kind);
+            }
+            TypeTag::Int64
+        }
         _ => TypeTag::Int64, // default
+    }
+}
+
+/// Convert TypeExpr to FFI TypeTag.
+fn type_expr_to_tag(ctx: &CodegenContext, ty: &gox_syntax::ast::TypeExpr) -> TypeTag {
+    use gox_syntax::ast::TypeExprKind;
+    match &ty.kind {
+        TypeExprKind::Ident(ident) => {
+            let name = ctx.interner.resolve(ident.symbol).unwrap_or("");
+            match name {
+                "string" => TypeTag::String,
+                "bool" => TypeTag::Bool,
+                "int" | "int64" => TypeTag::Int64,
+                "int32" => TypeTag::Int32,
+                "int16" => TypeTag::Int16,
+                "int8" => TypeTag::Int8,
+                "uint" | "uint64" => TypeTag::Uint64,
+                "uint32" => TypeTag::Uint32,
+                "uint16" => TypeTag::Uint16,
+                "uint8" | "byte" => TypeTag::Uint8,
+                "float64" => TypeTag::Float64,
+                "float32" => TypeTag::Float32,
+                _ => TypeTag::Int64,
+            }
+        }
+        _ => TypeTag::Int64,
     }
 }
 
@@ -339,7 +372,7 @@ pub fn is_float_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax
 }
 
 /// Check if an expression is a string type.
-fn is_string_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
+pub fn is_string_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
     use gox_syntax::ast::ExprKind;
     match &expr.kind {
         ExprKind::StringLit(_) => true,
@@ -952,8 +985,9 @@ fn compile_native_call(
     let mut compiled_args: Vec<(u8, u16)> = Vec::new(); // (type_tag, value_reg)
     
     for arg in &call.args {
-        let type_tag = get_type_tag(ctx, arg);
         let val_reg = compile_expr(ctx, fctx, arg)?;
+        // Use infer_type_tag which has access to FuncContext for proper type inference
+        let type_tag = infer_type_tag(ctx, fctx, arg) as u8;
         compiled_args.push((type_tag, val_reg));
     }
     
@@ -978,7 +1012,8 @@ fn compile_native_call(
     Ok(arg_start)
 }
 
-/// Get TypeTag for an expression based on literal type.
+/// Get TypeTag for an expression based on literal type or variable kind.
+/// This is used for native calls that need type information.
 fn get_type_tag(ctx: &CodegenContext, expr: &gox_syntax::ast::Expr) -> u8 {
     use gox_vm::ffi::TypeTag;
     use gox_syntax::ast::ExprKind;
@@ -994,11 +1029,22 @@ fn get_type_tag(ctx: &CodegenContext, expr: &gox_syntax::ast::Expr) -> u8 {
             } else if name == "nil" {
                 TypeTag::Nil as u8
             } else {
-                // Could be a variable - default to Int for now
+                // Default to Int for unknown identifiers
+                // The actual type tag will be inferred by infer_type_tag_with_fctx if called
                 TypeTag::Int as u8
             }
         }
-        _ => TypeTag::Nil as u8,
+        ExprKind::Binary(_) => {
+            // For binary expressions, check if it's a string operation
+            // We can't check without fctx, so default to Int
+            TypeTag::Int as u8
+        }
+        ExprKind::Call(_) | ExprKind::Selector(_) => {
+            // For function calls, we can't determine type without more context
+            // Default to Int - this will be fixed by using infer_type_tag_with_fctx
+            TypeTag::Int as u8
+        }
+        _ => TypeTag::Int as u8,
     }
 }
 
