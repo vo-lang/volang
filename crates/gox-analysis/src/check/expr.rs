@@ -554,8 +554,12 @@ impl<'a> TypeChecker<'a> {
                         return ty.clone();
                     }
                 }
-                // Exported symbol not found, but don't error - codegen will handle
-                // Return Invalid type but don't emit error for now
+                // Exported symbol not found in package
+                self.error_msg(
+                    TypeError::Undefined,
+                    sel.sel.span,
+                    format!("undefined: {}.{}", pkg_name, field_name),
+                );
                 return Type::Invalid;
             }
         }

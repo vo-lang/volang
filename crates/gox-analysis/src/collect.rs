@@ -31,7 +31,7 @@
 //! // result.named_types contains type placeholders for Phase 2
 //! ```
 
-use gox_common::{Diagnostic, DiagnosticSink, Span, Symbol, SymbolInterner};
+use gox_common::{DiagnosticSink, Label, Span, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, BinaryOp, Decl, File, UnaryOp};
 
 use crate::constant::Constant;
@@ -358,7 +358,7 @@ impl<'a> TypeCollector<'a> {
         for spec in &decl.specs {
             for (i, name) in spec.names.iter().enumerate() {
                 let sym = name.symbol;
-                if self.check_redeclaration(sym) {
+                if self.check_redeclaration(sym, name.span) {
                     // First pass: just register the variable name
                     // Type will be resolved later (explicit type) or inferred in second pass
                     if let Some(ref ty_expr) = spec.ty {
@@ -509,7 +509,7 @@ impl<'a> TypeCollector<'a> {
         for spec in &decl.specs {
             for (i, name) in spec.names.iter().enumerate() {
                 let sym = name.symbol;
-                if self.check_redeclaration(sym) {
+                if self.check_redeclaration(sym, name.span) {
                     // Evaluate constant value if possible
                     let (mut ty, constant) = if i < spec.values.len() {
                         self.eval_const_expr(&spec.values[i])
@@ -601,7 +601,7 @@ impl<'a> TypeCollector<'a> {
 
     fn collect_type(&mut self, decl: &ast::TypeDecl) {
         let sym = decl.name.symbol;
-        if !self.check_redeclaration(sym) {
+        if !self.check_redeclaration(sym, decl.name.span) {
             return;
         }
 
@@ -640,7 +640,7 @@ impl<'a> TypeCollector<'a> {
         let name = self.interner.resolve(sym).unwrap_or("");
 
         // Go allows multiple init() functions - skip redeclaration check for init
-        if name != "init" && !self.check_redeclaration(sym) {
+        if name != "init" && !self.check_redeclaration(sym, decl.name.span) {
             return;
         }
 
@@ -669,7 +669,7 @@ impl<'a> TypeCollector<'a> {
 
     fn collect_interface(&mut self, decl: &ast::InterfaceDecl) {
         let sym = decl.name.symbol;
-        if !self.check_redeclaration(sym) {
+        if !self.check_redeclaration(sym, decl.name.span) {
             return;
         }
 
@@ -702,7 +702,7 @@ impl<'a> TypeCollector<'a> {
 
     /// Checks for redeclaration and reports an error if found.
     /// Returns true if the name can be declared.
-    fn check_redeclaration(&mut self, sym: Symbol) -> bool {
+    fn check_redeclaration(&mut self, sym: Symbol, span: Span) -> bool {
         if let Some(existing) = self.scope.lookup_local(sym) {
             let existing_span = match existing {
                 Entity::Var(v) => v.span,
@@ -714,16 +714,16 @@ impl<'a> TypeCollector<'a> {
             };
 
             let name = self.interner.resolve(sym).unwrap_or("<unknown>");
-            self.diagnostics
-                .emit(TypeError::Redeclared.with_message(TypeError::Redeclared.with_name(name)));
+            let mut diag = TypeError::Redeclared
+                .at_with_message(span, TypeError::Redeclared.with_name(name));
 
             if !existing_span.is_dummy() {
-                self.diagnostics.emit(Diagnostic::note(format!(
-                    "previous declaration of {}",
-                    name
-                )));
+                diag = diag.with_label(
+                    Label::secondary(existing_span).with_message("previous declaration here"),
+                );
             }
 
+            self.diagnostics.emit(diag);
             false
         } else {
             true

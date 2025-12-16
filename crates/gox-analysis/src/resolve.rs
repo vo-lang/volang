@@ -40,7 +40,7 @@
 
 use std::collections::HashSet;
 
-use gox_common::{DiagnosticSink, Symbol, SymbolInterner};
+use gox_common::{DiagnosticSink, Span, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, TypeExprKind};
 
 use crate::collect::{
@@ -252,9 +252,10 @@ impl<'a> TypeResolver<'a> {
                     .interner
                     .resolve(method.receiver_type)
                     .unwrap_or("<unknown>");
+                let span = method.decl.receiver.as_ref().map(|r| r.ty.span).unwrap_or(method.decl.span);
                 self.diagnostics.emit(
                     TypeError::UndefinedReceiverType
-                        .with_message(TypeError::UndefinedReceiverType.with_name(name)),
+                        .at_with_message(span, TypeError::UndefinedReceiverType.with_name(name)),
                 );
             }
         }
@@ -307,11 +308,11 @@ impl<'a> TypeResolver<'a> {
         if self.resolving.contains(&id) {
             if !self.in_indirect {
                 let name = self.placeholders[idx].name;
-                let _span = self.placeholders[idx].span;
+                let span = self.placeholders[idx].span;
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
                     TypeError::InvalidRecursiveType
-                        .with_message(TypeError::InvalidRecursiveType.with_name(name_str)),
+                        .at_with_message(span, TypeError::InvalidRecursiveType.with_name(name_str)),
                 );
             }
             return Type::Invalid;
@@ -334,7 +335,7 @@ impl<'a> TypeResolver<'a> {
     /// Resolves an AST type expression to an internal Type.
     fn resolve_type_expr(&mut self, expr: &ast::TypeExpr) -> Type {
         match &expr.kind {
-            TypeExprKind::Ident(ident) => self.resolve_type_name(ident.symbol),
+            TypeExprKind::Ident(ident) => self.resolve_type_name(ident.symbol, ident.span),
 
             TypeExprKind::Selector(sel) => {
                 // Qualified type: pkg.Type - resolve as external type reference
@@ -373,7 +374,7 @@ impl<'a> TypeResolver<'a> {
 
                 // Validate: key must be comparable
                 if !self.is_comparable(&key) {
-                    self.diagnostics.emit(TypeError::InvalidMapKey.diagnostic());
+                    self.diagnostics.emit(TypeError::InvalidMapKey.at(map.key.span));
                 }
 
                 Type::Map(MapType {
@@ -451,7 +452,7 @@ impl<'a> TypeResolver<'a> {
     }
 
     /// Resolves a type name to a Type.
-    fn resolve_type_name(&mut self, name: Symbol) -> Type {
+    fn resolve_type_name(&mut self, name: Symbol, span: Span) -> Type {
         // Look up in scope
         match self.scope.lookup(name) {
             Some(Entity::Var(v)) => {
@@ -461,7 +462,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    TypeError::NotAType.with_message(TypeError::NotAType.with_name(name_str)),
+                    TypeError::NotAType.at_with_message(span, TypeError::NotAType.with_name(name_str)),
                 );
                 Type::Invalid
             }
@@ -472,14 +473,14 @@ impl<'a> TypeResolver<'a> {
             Some(_) => {
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    TypeError::NotAType.with_message(TypeError::NotAType.with_name(name_str)),
+                    TypeError::NotAType.at_with_message(span, TypeError::NotAType.with_name(name_str)),
                 );
                 Type::Invalid
             }
             None => {
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    TypeError::Undefined.with_message(TypeError::Undefined.with_name(name_str)),
+                    TypeError::Undefined.at_with_message(span, TypeError::Undefined.with_name(name_str)),
                 );
                 Type::Invalid
             }
@@ -589,18 +590,18 @@ impl<'a> TypeResolver<'a> {
                         n as u64
                     } else {
                         self.diagnostics
-                            .emit(TypeError::NegativeArrayLength.diagnostic());
+                            .emit(TypeError::NegativeArrayLength.at(expr.span));
                         0
                     }
                 } else {
                     self.diagnostics
-                        .emit(TypeError::NonConstantArrayLength.diagnostic());
+                        .emit(TypeError::NonConstantArrayLength.at(expr.span));
                     0
                 }
             }
             _ => {
                 self.diagnostics
-                    .emit(TypeError::NonConstantArrayLength.diagnostic());
+                    .emit(TypeError::NonConstantArrayLength.at(expr.span));
                 0
             }
         }
