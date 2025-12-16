@@ -241,12 +241,33 @@ pub fn run_single_file(path: &Path) -> TestResult {
         Ok(m) => m,
         Err(e) => {
             let _ = fs::remove_dir_all(&temp_dir);
+            // Check if we expected a codegen error
+            if let Some(expected_codegen) = &test.codegen {
+                if expected_codegen.starts_with("ERROR:") {
+                    let expected_error = expected_codegen.trim_start_matches("ERROR:").trim();
+                    if e.contains(expected_error) {
+                        return TestResult::pass(&path_str);
+                    } else {
+                        return TestResult::fail(&path_str, format!(
+                            "codegen error mismatch\nExpected: {}\nActual: {}", expected_error, e
+                        ));
+                    }
+                }
+            }
             return TestResult::fail(&path_str, e);
         }
     };
     
     // Check codegen section if present
     if let Some(expected_codegen) = &test.codegen {
+        // If expecting an error but compilation succeeded
+        if expected_codegen.starts_with("ERROR:") {
+            let _ = fs::remove_dir_all(&temp_dir);
+            let expected_error = expected_codegen.trim_start_matches("ERROR:").trim();
+            return TestResult::fail(&path_str, format!(
+                "expected codegen error '{}' but compilation succeeded", expected_error
+            ));
+        }
         let actual_bytecode = gox_cli::bytecode_text::format_text(&module);
         if !bytecode_matches(&actual_bytecode, expected_codegen) {
             let _ = fs::remove_dir_all(&temp_dir);

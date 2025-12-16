@@ -1,0 +1,23 @@
+// Test: Variable initialization with init() functions
+// Go spec: $var_init runs before init() functions
+package main
+
+var globalValue = 42
+var anotherValue = 100
+
+// init modifies global variables
+func init() {
+    globalValue = globalValue + 1  // 42 -> 43
+}
+
+func init() {
+    anotherValue = anotherValue * 2  // 100 -> 200
+}
+
+func main() {
+    // Variables initialized first, then init() functions run
+    assert(globalValue == 43, "globalValue should be 43 (42+1 from init)")
+    assert(anotherValue == 200, "anotherValue should be 200 (100*2 from init)")
+    
+    println("var_init_order: ALL TESTS PASSED")
+}
