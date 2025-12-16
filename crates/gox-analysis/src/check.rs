@@ -370,7 +370,7 @@ impl<'a> TypeChecker<'a> {
                 let ty = self.resolve_type_expr(&p.ty);
                 // Repeat the type for each name (or once if no names)
                 let count = if p.names.is_empty() { 1 } else { p.names.len() };
-                std::iter::repeat(ty).take(count)
+                std::iter::repeat_n(ty, count)
             })
             .collect();
         
@@ -495,11 +495,10 @@ impl<'a> TypeChecker<'a> {
     /// Checks arithmetic operators (+, -, *, /, %).
     fn check_arithmetic_op(&mut self, left: &Type, right: &Type, op: BinaryOp, span: Span) -> Type {
         // String concatenation with +
-        if op == BinaryOp::Add {
-            if self.is_string_type(left) && self.is_string_type(right) {
+        if op == BinaryOp::Add
+            && self.is_string_type(left) && self.is_string_type(right) {
                 return self.common_type(left, right);
             }
-        }
 
         // Both must be numeric
         if !self.is_numeric_type(left) || !self.is_numeric_type(right) {
@@ -508,12 +507,11 @@ impl<'a> TypeChecker<'a> {
         }
 
         // % requires integer operands
-        if op == BinaryOp::Rem {
-            if !self.is_integer_type(left) || !self.is_integer_type(right) {
+        if op == BinaryOp::Rem
+            && (!self.is_integer_type(left) || !self.is_integer_type(right)) {
                 self.error(TypeError::IntegerOperandRequired, span);
                 return Type::Invalid;
             }
-        }
 
         self.common_type(left, right)
     }
@@ -659,11 +657,10 @@ impl<'a> TypeChecker<'a> {
         let to_u = self.underlying_type(to);
         
         // nil can be converted to any interface
-        if from.is_nil() {
-            if matches!(&to_u, Type::Interface(_)) {
+        if from.is_nil()
+            && matches!(&to_u, Type::Interface(_)) {
                 return true;
             }
-        }
         
         // To empty interface: always convertible
         if let Type::Interface(iface) = &to_u {
@@ -1047,7 +1044,7 @@ impl<'a> TypeChecker<'a> {
         let lookup_ty = self.resolve_for_lookup(&base_ty);
 
         // Use Lookup for field/method access
-        let lookup = Lookup::new(&self.named_types);
+        let lookup = Lookup::new(self.named_types);
         match lookup.lookup_field_or_method(&lookup_ty, field_name) {
             LookupResult::Field(ty, _indices, _indirect) => ty,
             LookupResult::Method(sig, _indices, _indirect) => Type::Func(sig),
@@ -1104,7 +1101,7 @@ impl<'a> TypeChecker<'a> {
         let params: Vec<Type> = func.sig.params.iter()
             .flat_map(|p| {
                 let ty = self.resolve_type_expr(&p.ty);
-                std::iter::repeat(ty).take(p.names.len().max(1))
+                std::iter::repeat_n(ty, p.names.len().max(1))
             })
             .collect();
 
@@ -1413,8 +1410,8 @@ impl<'a> TypeChecker<'a> {
                 || left.is_nil() || right.is_nil();
         }
 
-        let left_u = self.underlying_type(left);
-        let right_u = self.underlying_type(right);
+        let _left_u = self.underlying_type(left);
+        let _right_u = self.underlying_type(right);
 
         // Same type or assignable
         self.is_assignable(left, right) || self.is_assignable(right, left)
@@ -1567,11 +1564,10 @@ impl<'a> TypeChecker<'a> {
             for (i, name) in spec.names.iter().enumerate() {
                 let var_ty = if let Some(ref ty) = declared_ty {
                     // Type is declared - check initializer compatibility
-                    if i < value_types.len() {
-                        if !self.is_assignable(&value_types[i], ty) {
+                    if i < value_types.len()
+                        && !self.is_assignable(&value_types[i], ty) {
                             self.error(TypeError::VarInitTypeMismatch, name.span);
                         }
-                    }
                     ty.clone()
                 } else if i < value_types.len() {
                     // No declared type - infer from initializer
@@ -1671,11 +1667,10 @@ impl<'a> TypeChecker<'a> {
         }
 
         // For compound assignment, check operator is valid
-        if assign.op != ast::AssignOp::Assign {
-            if lhs_types.len() != 1 {
+        if assign.op != ast::AssignOp::Assign
+            && lhs_types.len() != 1 {
                 self.error(TypeError::AssignCountMismatch, assign.lhs[0].span);
             }
-        }
     }
 
     /// Checks a short variable declaration.

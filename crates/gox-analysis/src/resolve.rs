@@ -269,7 +269,7 @@ impl<'a> TypeResolver<'a> {
         let params: Vec<Type> = sig.params.iter()
             .flat_map(|p| {
                 let ty = self.resolve_type_expr(&p.ty);
-                std::iter::repeat(ty).take(p.names.len().max(1))
+                std::iter::repeat_n(ty, p.names.len().max(1))
             })
             .collect();
 
@@ -587,7 +587,7 @@ impl<'a> TypeResolver<'a> {
         match &expr.kind {
             ast::ExprKind::IntLit(lit) => {
                 let s = self.interner.resolve(lit.raw)?;
-                parse_int_literal(s).ok().map(|v| Constant::int(v))
+                parse_int_literal(s).ok().map(Constant::int)
             }
             ast::ExprKind::Ident(ident) => {
                 if let Some(Entity::Var(v)) = self.scope.lookup(ident.symbol) {
@@ -635,7 +635,7 @@ fn parse_int_literal(s: &str) -> Result<i64, ()> {
         i64::from_str_radix(&s[2..], 8).map_err(|_| ())
     } else if s.starts_with("0b") || s.starts_with("0B") {
         i64::from_str_radix(&s[2..], 2).map_err(|_| ())
-    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
         i64::from_str_radix(&s[1..], 8).map_err(|_| ())
     } else {
         s.parse().map_err(|_| ())

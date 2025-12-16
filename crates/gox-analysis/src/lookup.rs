@@ -370,14 +370,14 @@ impl<'a> Lookup<'a> {
             // Merge depth_methods into result, but only if not already present
             // (shallower depth shadows deeper)
             for (name, entry) in depth_methods {
-                if !result.contains_key(&name) {
+                result.entry(name).or_insert_with(|| {
                     // Check for field collision
                     if depth_fields.contains_key(&name) {
-                        result.insert(name, MethodOrCollision::Collision);
+                        MethodOrCollision::Collision
                     } else {
-                        result.insert(name, entry);
+                        entry
                     }
-                }
+                });
             }
 
             // Mark field collisions
@@ -512,10 +512,13 @@ fn add_to_field_set(
         return;
     }
 
-    if set.contains_key(&name) {
-        set.insert(name, FieldOrCollision::Collision);
-    } else {
-        set.insert(name, FieldOrCollision::Field(ty, indices, indirect));
+    match set.entry(name) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            e.insert(FieldOrCollision::Collision);
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(FieldOrCollision::Field(ty, indices, indirect));
+        }
     }
 }
 
@@ -532,13 +535,13 @@ fn add_to_method_set(
         return;
     }
 
-    if set.contains_key(&method.name) {
-        set.insert(method.name, MethodOrCollision::Collision);
-    } else {
-        set.insert(
-            method.name,
-            MethodOrCollision::Method(method.sig.clone(), indices, indirect),
-        );
+    match set.entry(method.name) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            e.insert(MethodOrCollision::Collision);
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(MethodOrCollision::Method(method.sig.clone(), indices, indirect));
+        }
     }
 }
 

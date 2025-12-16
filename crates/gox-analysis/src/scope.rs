@@ -246,7 +246,7 @@ impl Scope {
     /// Returns true if the symbol is defined in this scope or any parent scope.
     pub fn contains(&self, symbol: Symbol) -> bool {
         self.symbols.contains_key(&symbol)
-            || self.parent.as_ref().map_or(false, |p| p.contains(symbol))
+            || self.parent.as_ref().is_some_and(|p| p.contains(symbol))
     }
 
     /// Returns an iterator over all symbols in this scope (not parent scopes).

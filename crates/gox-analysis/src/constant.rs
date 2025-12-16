@@ -50,7 +50,7 @@ impl Constant {
     
     /// Create a float constant from f64.
     pub fn float(v: f64) -> Self {
-        Constant::Float(BigRational::from_float(v).unwrap_or_else(|| BigRational::zero()))
+        Constant::Float(BigRational::from_float(v).unwrap_or_else(BigRational::zero))
     }
     
     /// Returns the untyped kind of this constant.

@@ -904,7 +904,7 @@ fn parse_int_literal(s: &str) -> Result<i64, ()> {
         i64::from_str_radix(&s[2..], 8).map_err(|_| ())
     } else if s.starts_with("0b") || s.starts_with("0B") {
         i64::from_str_radix(&s[2..], 2).map_err(|_| ())
-    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
         // Legacy octal
         i64::from_str_radix(&s[1..], 8).map_err(|_| ())
     } else {
