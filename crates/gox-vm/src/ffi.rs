@@ -6,59 +6,8 @@
 use crate::gc::GcRef;
 use crate::objects::string;
 
-/// Type tag for argument passing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TypeTag {
-    Nil = 0,
-    Bool = 1,
-    Int = 2,
-    Int8 = 3,
-    Int16 = 4,
-    Int32 = 5,
-    Int64 = 6,
-    Uint = 7,
-    Uint8 = 8,
-    Uint16 = 9,
-    Uint32 = 10,
-    Uint64 = 11,
-    Float32 = 12,
-    Float64 = 13,
-    String = 14,
-    Slice = 15,
-    Map = 16,
-    Struct = 17,
-    Obx = 18,
-    Interface = 19,
-}
-
-impl TypeTag {
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            0 => TypeTag::Nil,
-            1 => TypeTag::Bool,
-            2 => TypeTag::Int,
-            3 => TypeTag::Int8,
-            4 => TypeTag::Int16,
-            5 => TypeTag::Int32,
-            6 => TypeTag::Int64,
-            7 => TypeTag::Uint,
-            8 => TypeTag::Uint8,
-            9 => TypeTag::Uint16,
-            10 => TypeTag::Uint32,
-            11 => TypeTag::Uint64,
-            12 => TypeTag::Float32,
-            13 => TypeTag::Float64,
-            14 => TypeTag::String,
-            15 => TypeTag::Slice,
-            16 => TypeTag::Map,
-            17 => TypeTag::Struct,
-            18 => TypeTag::Obx,
-            19 => TypeTag::Interface,
-            _ => TypeTag::Nil,
-        }
-    }
-}
+// Re-export ValueKind as TypeTag for backward compatibility
+pub use gox_common::ValueKind as TypeTag;
 
 /// A typed value for FFI.
 #[derive(Debug, Clone)]
@@ -93,6 +42,10 @@ impl GoxValue {
             TypeTag::Struct => GoxValue::Struct(raw as GcRef),
             TypeTag::Obx => GoxValue::Obx(raw as GcRef),
             TypeTag::Interface => GoxValue::Interface { type_id: 0, value: raw },
+            // New types added to ValueKind
+            TypeTag::Array => GoxValue::Slice(raw as GcRef), // Arrays are similar to slices at runtime
+            TypeTag::Channel => GoxValue::Int(raw as i64),   // Channel handle
+            TypeTag::Closure => GoxValue::Int(raw as i64),   // Closure reference
         }
     }
 

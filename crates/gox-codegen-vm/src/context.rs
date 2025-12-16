@@ -49,20 +49,12 @@ impl Registers {
     }
 }
 
-/// Simple type kind for codegen (to distinguish map vs slice vs struct vs object)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum VarKind {
-    Int,
-    Float,
-    String,
-    Slice,
-    Map,
-    Struct(u16),  // struct with field count
-    Obx,          // object (reference type)
-    Interface,    // interface (2 slots: type_id + data)
-    Other,
-}
+// Re-export ValueKind for backward compatibility
+pub use gox_common::ValueKind;
+
+/// Alias for backward compatibility during migration.
+#[allow(deprecated)]
+pub type VarKind = ValueKind;
 
 /// Local variable info.
 #[derive(Debug, Clone)]
@@ -70,7 +62,9 @@ pub struct LocalVar {
     pub reg: u16,
     #[allow(dead_code)]
     pub slots: u16,
-    pub kind: VarKind,
+    pub kind: ValueKind,
+    /// For struct types, the number of fields. 0 for non-struct types.
+    pub field_count: u16,
     pub type_sym: Option<Symbol>,  // Named type symbol for struct/object
     pub is_captured: bool,         // True if captured by a closure (uses upval_box)
 }
@@ -265,22 +259,27 @@ impl FuncContext {
     }
     
     pub fn define_local(&mut self, ident: Ident, slots: u16) -> u16 {
-        self.define_local_with_kind(ident, slots, VarKind::Other)
+        self.define_local_with_kind(ident, slots, ValueKind::Int64)
     }
     
-    pub fn define_local_with_kind(&mut self, ident: Ident, slots: u16, kind: VarKind) -> u16 {
+    pub fn define_local_with_kind(&mut self, ident: Ident, slots: u16, kind: ValueKind) -> u16 {
         let reg = self.regs.alloc(slots);
-        self.locals.insert(ident.symbol, LocalVar { reg, slots, kind, type_sym: None, is_captured: false });
+        self.locals.insert(ident.symbol, LocalVar { reg, slots, kind, field_count: 0, type_sym: None, is_captured: false });
         reg
     }
     
-    pub fn define_local_with_type(&mut self, ident: Ident, slots: u16, kind: VarKind, type_sym: Option<Symbol>) -> u16 {
-        self.define_local_full(ident, slots, kind, type_sym, false)
+    pub fn define_local_with_type(&mut self, ident: Ident, slots: u16, kind: ValueKind, type_sym: Option<Symbol>) -> u16 {
+        self.define_local_full(ident, slots, kind, 0, type_sym, false)
     }
     
-    pub fn define_local_full(&mut self, ident: Ident, slots: u16, kind: VarKind, type_sym: Option<Symbol>, is_captured: bool) -> u16 {
+    /// Define a struct local variable with field count.
+    pub fn define_local_struct(&mut self, ident: Ident, slots: u16, field_count: u16, type_sym: Option<Symbol>) -> u16 {
+        self.define_local_full(ident, slots, ValueKind::Struct, field_count, type_sym, false)
+    }
+    
+    pub fn define_local_full(&mut self, ident: Ident, slots: u16, kind: ValueKind, field_count: u16, type_sym: Option<Symbol>, is_captured: bool) -> u16 {
         let reg = self.regs.alloc(slots);
-        self.locals.insert(ident.symbol, LocalVar { reg, slots, kind, type_sym, is_captured });
+        self.locals.insert(ident.symbol, LocalVar { reg, slots, kind, field_count, type_sym, is_captured });
         reg
     }
     
@@ -393,12 +392,13 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         let mut fctx = FuncContext::new(name);
         
         for param in &func.sig.params {
-            // Infer VarKind and type_sym from parameter type
-            let (kind, type_sym) = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
+            // Infer type info from parameter type
+            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
+            let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
                 fctx.param_count += 1;
-                fctx.param_slots += 1;
-                fctx.define_local_with_type(*name, 1, kind.clone(), type_sym);
+                fctx.param_slots += slots;
+                fctx.define_local_full(*name, slots, info.kind, info.field_count, info.type_sym, false);
             }
         }
         
@@ -497,28 +497,52 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
     
 }
 
-/// Convert VarKind to FFI TypeTag.
-pub fn var_kind_to_type_tag(kind: &VarKind) -> gox_vm::ffi::TypeTag {
-    use gox_vm::ffi::TypeTag;
+/// Convert ValueKind to FFI TypeTag (which is just an alias to ValueKind).
+/// This function is now trivial since TypeTag = ValueKind.
+pub fn value_kind_to_type_tag(kind: ValueKind) -> gox_vm::ffi::TypeTag {
+    kind
+}
+
+/// Backward compatible alias.
+#[deprecated(note = "Use value_kind_to_type_tag instead")]
+pub fn var_kind_to_type_tag(kind: &ValueKind) -> gox_vm::ffi::TypeTag {
+    *kind
+}
+
+/// Convert ValueKind to runtime builtin type ID.
+pub fn value_kind_to_builtin_type(kind: ValueKind) -> u16 {
+    use gox_vm::types::builtin;
     match kind {
-        VarKind::String => TypeTag::String,
-        VarKind::Float => TypeTag::Float64,
-        VarKind::Int => TypeTag::Int64,
-        _ => TypeTag::Int64,
+        ValueKind::Nil => builtin::NIL as u16,
+        ValueKind::Bool => builtin::BOOL as u16,
+        ValueKind::Int => builtin::INT as u16,
+        ValueKind::Int8 => builtin::INT8 as u16,
+        ValueKind::Int16 => builtin::INT16 as u16,
+        ValueKind::Int32 => builtin::INT32 as u16,
+        ValueKind::Int64 => builtin::INT64 as u16,
+        ValueKind::Uint => builtin::UINT as u16,
+        ValueKind::Uint8 => builtin::UINT8 as u16,
+        ValueKind::Uint16 => builtin::UINT16 as u16,
+        ValueKind::Uint32 => builtin::UINT32 as u16,
+        ValueKind::Uint64 => builtin::UINT64 as u16,
+        ValueKind::Float32 => builtin::FLOAT32 as u16,
+        ValueKind::Float64 => builtin::FLOAT64 as u16,
+        ValueKind::String => builtin::STRING as u16,
+        ValueKind::Array => builtin::ARRAY as u16,
+        ValueKind::Slice => builtin::SLICE as u16,
+        ValueKind::Map => builtin::MAP as u16,
+        ValueKind::Channel => builtin::CHANNEL as u16,
+        ValueKind::Closure => builtin::CLOSURE as u16,
+        ValueKind::Interface => builtin::INTERFACE as u16,
+        ValueKind::Struct => builtin::INT64 as u16, // struct uses inline slots, not a type ID
+        ValueKind::Obx => builtin::INT64 as u16,    // object uses GcRef
     }
 }
 
-/// Convert VarKind to runtime builtin type ID.
-pub fn var_kind_to_builtin_type(kind: &VarKind) -> u16 {
-    use gox_vm::types::builtin;
-    match kind {
-        VarKind::String => builtin::STRING as u16,
-        VarKind::Float => builtin::FLOAT64 as u16,
-        VarKind::Int => builtin::INT64 as u16,
-        VarKind::Slice => builtin::SLICE as u16,
-        VarKind::Map => builtin::MAP as u16,
-        _ => builtin::INT64 as u16,
-    }
+/// Backward compatible alias.
+#[deprecated(note = "Use value_kind_to_builtin_type instead")]
+pub fn var_kind_to_builtin_type(kind: &ValueKind) -> u16 {
+    value_kind_to_builtin_type(*kind)
 }
 
 impl<'a> CodegenContext<'a> {
@@ -549,34 +573,63 @@ impl<'a> CodegenContext<'a> {
         self.result.expr_types.get(&(expr.span.start.0, expr.span.end.0)).cloned()
     }
     
-    /// Convert a Type to VarKind for codegen purposes.
-    pub fn type_to_var_kind(&self, ty: &gox_analysis::Type) -> VarKind {
+    /// Convert a Type to ValueKind for codegen purposes.
+    pub fn type_to_value_kind(&self, ty: &gox_analysis::Type) -> ValueKind {
         use gox_analysis::Type;
         use gox_analysis::BasicType;
         
         match ty {
-            Type::Basic(BasicType::String) | Type::Untyped(gox_analysis::UntypedKind::String) => VarKind::String,
-            Type::Basic(BasicType::Float64) | Type::Basic(BasicType::Float32) |
-            Type::Untyped(gox_analysis::UntypedKind::Float) => VarKind::Float,
-            Type::Basic(BasicType::Int) | Type::Basic(BasicType::Int64) |
-            Type::Basic(BasicType::Int32) | Type::Basic(BasicType::Int16) | Type::Basic(BasicType::Int8) |
-            Type::Basic(BasicType::Uint) | Type::Basic(BasicType::Uint64) |
-            Type::Basic(BasicType::Uint32) | Type::Basic(BasicType::Uint16) | Type::Basic(BasicType::Uint8) |
-            Type::Untyped(gox_analysis::UntypedKind::Int) => VarKind::Int,
-            Type::Slice(_) => VarKind::Slice,
-            Type::Map(_) => VarKind::Map,
-            Type::Interface(_) => VarKind::Interface,
-            Type::Struct(s) => VarKind::Struct(s.fields.len() as u16),
-            Type::Obx(_) => VarKind::Obx,
-            _ => VarKind::Other,
+            Type::Basic(BasicType::Bool) => ValueKind::Bool,
+            Type::Basic(BasicType::String) | Type::Untyped(gox_analysis::UntypedKind::String) => ValueKind::String,
+            Type::Basic(BasicType::Float64) => ValueKind::Float64,
+            Type::Basic(BasicType::Float32) => ValueKind::Float32,
+            Type::Untyped(gox_analysis::UntypedKind::Float) => ValueKind::Float64,
+            Type::Basic(BasicType::Int) => ValueKind::Int,
+            Type::Basic(BasicType::Int64) => ValueKind::Int64,
+            Type::Basic(BasicType::Int32) => ValueKind::Int32,
+            Type::Basic(BasicType::Int16) => ValueKind::Int16,
+            Type::Basic(BasicType::Int8) => ValueKind::Int8,
+            Type::Basic(BasicType::Uint) => ValueKind::Uint,
+            Type::Basic(BasicType::Uint64) => ValueKind::Uint64,
+            Type::Basic(BasicType::Uint32) => ValueKind::Uint32,
+            Type::Basic(BasicType::Uint16) => ValueKind::Uint16,
+            Type::Basic(BasicType::Uint8) => ValueKind::Uint8,
+            Type::Untyped(gox_analysis::UntypedKind::Int) | Type::Untyped(gox_analysis::UntypedKind::Rune) => ValueKind::Int64,
+            Type::Slice(_) => ValueKind::Slice,
+            Type::Map(_) => ValueKind::Map,
+            Type::Interface(_) => ValueKind::Interface,
+            Type::Struct(_) => ValueKind::Struct,
+            Type::Obx(_) => ValueKind::Obx,
+            Type::Array(_) => ValueKind::Array,
+            Type::Chan(_) => ValueKind::Channel,
+            Type::Func(_) => ValueKind::Closure,
+            Type::Nil => ValueKind::Nil,
+            _ => ValueKind::Int64,
         }
+    }
+    
+    /// Convert a Type to ValueKind and field count for struct types.
+    pub fn type_to_kind_and_fields(&self, ty: &gox_analysis::Type) -> (ValueKind, u16) {
+        use gox_analysis::Type;
+        let kind = self.type_to_value_kind(ty);
+        let field_count = match ty {
+            Type::Struct(s) => s.fields.len() as u16,
+            _ => 0,
+        };
+        (kind, field_count)
+    }
+    
+    /// Backward compatible alias for type_to_value_kind.
+    #[deprecated(note = "Use type_to_value_kind instead")]
+    pub fn type_to_var_kind(&self, ty: &gox_analysis::Type) -> ValueKind {
+        self.type_to_value_kind(ty)
     }
     
     /// Look up return type for a function call expression.
     /// Uses the type checker's expr_types to get the type of the call expression.
-    pub fn lookup_call_return_type(&self, call_expr: &gox_syntax::ast::Expr) -> Option<VarKind> {
+    pub fn lookup_call_return_type(&self, call_expr: &gox_syntax::ast::Expr) -> Option<ValueKind> {
         let ty = self.lookup_expr_type(call_expr)?;
-        Some(self.type_to_var_kind(&ty))
+        Some(self.type_to_value_kind(&ty))
     }
     
     /// Create a context that compiles into an existing module.
@@ -686,17 +739,17 @@ impl<'a> CodegenContext<'a> {
             fctx.param_slots += 1;
             // Define receiver with its type
             let type_sym = Some(receiver.ty.symbol);
-            fctx.define_local_with_type(receiver.name, 1, VarKind::Other, type_sym);
+            fctx.define_local_with_type(receiver.name, 1, ValueKind::Int64, type_sym);
         }
         
         // Allocate registers for parameters with type info
         for param in &func.sig.params {
-            let (kind, type_sym) = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
-            let slots = if kind == VarKind::Interface { 2 } else { 1 };
+            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
+            let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
                 fctx.param_count += 1;
                 fctx.param_slots += slots;
-                fctx.define_local_with_type(*name, slots, kind.clone(), type_sym);
+                fctx.define_local_full(*name, slots, info.kind, info.field_count, info.type_sym, false);
             }
         }
         
@@ -787,30 +840,66 @@ impl<'a> CodegenContext<'a> {
     }
 }
 
-/// Infer VarKind and type_sym from a parameter type expression
-pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> (VarKind, Option<Symbol>) {
+/// Type inference result for a type expression.
+#[derive(Debug, Clone)]
+pub struct TypeInfo {
+    pub kind: ValueKind,
+    pub field_count: u16,
+    pub type_sym: Option<Symbol>,
+}
+
+impl TypeInfo {
+    pub fn new(kind: ValueKind) -> Self {
+        Self { kind, field_count: 0, type_sym: None }
+    }
+    
+    pub fn with_fields(kind: ValueKind, field_count: u16) -> Self {
+        Self { kind, field_count, type_sym: None }
+    }
+    
+    pub fn with_sym(kind: ValueKind, type_sym: Symbol) -> Self {
+        Self { kind, field_count: 0, type_sym: Some(type_sym) }
+    }
+    
+    pub fn struct_type(field_count: u16, type_sym: Option<Symbol>) -> Self {
+        Self { kind: ValueKind::Struct, field_count, type_sym }
+    }
+}
+
+/// Infer type info from a parameter type expression
+pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> TypeInfo {
     infer_type_from_type_expr_with_interner(result, ty, None)
 }
 
-/// Infer VarKind and type_sym from a parameter type expression, with optional interner for basic type checking
-pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr, interner: Option<&gox_common::SymbolInterner>) -> (VarKind, Option<Symbol>) {
+/// Infer type info from a parameter type expression, with optional interner for basic type checking
+pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr, interner: Option<&gox_common::SymbolInterner>) -> TypeInfo {
     use gox_syntax::ast::TypeExprKind;
     use gox_analysis::Type;
     
     match &ty.kind {
-        TypeExprKind::Map(_) => (VarKind::Map, None),
-        TypeExprKind::Slice(_) => (VarKind::Slice, None),
-        TypeExprKind::Struct(s) => (VarKind::Struct(s.fields.len() as u16), None),
-        TypeExprKind::Obx(_) => (VarKind::Obx, None),
+        TypeExprKind::Map(_) => TypeInfo::new(ValueKind::Map),
+        TypeExprKind::Slice(_) => TypeInfo::new(ValueKind::Slice),
+        TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
+        TypeExprKind::Obx(_) => TypeInfo::new(ValueKind::Obx),
         TypeExprKind::Ident(ident) => {
             // Check basic types first if we have an interner
             if let Some(interner) = interner {
                 if let Some(name) = interner.resolve(ident.symbol) {
                     match name {
-                        "string" => return (VarKind::String, None),
-                        "float64" | "float32" => return (VarKind::Float, None),
-                        "int" | "int64" | "int32" | "int16" | "int8" |
-                        "uint" | "uint64" | "uint32" | "uint16" | "uint8" | "byte" => return (VarKind::Int, None),
+                        "bool" => return TypeInfo::new(ValueKind::Bool),
+                        "string" => return TypeInfo::new(ValueKind::String),
+                        "float64" => return TypeInfo::new(ValueKind::Float64),
+                        "float32" => return TypeInfo::new(ValueKind::Float32),
+                        "int" => return TypeInfo::new(ValueKind::Int),
+                        "int64" => return TypeInfo::new(ValueKind::Int64),
+                        "int32" => return TypeInfo::new(ValueKind::Int32),
+                        "int16" => return TypeInfo::new(ValueKind::Int16),
+                        "int8" => return TypeInfo::new(ValueKind::Int8),
+                        "uint" => return TypeInfo::new(ValueKind::Uint),
+                        "uint64" => return TypeInfo::new(ValueKind::Uint64),
+                        "uint32" => return TypeInfo::new(ValueKind::Uint32),
+                        "uint16" => return TypeInfo::new(ValueKind::Uint16),
+                        "uint8" | "byte" => return TypeInfo::new(ValueKind::Uint8),
                         _ => {}
                     }
                 }
@@ -819,16 +908,20 @@ pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &go
             for named in &result.named_types {
                 if named.name == ident.symbol {
                     match &named.underlying {
-                        Type::Struct(s) => return (VarKind::Struct(s.fields.len() as u16), Some(ident.symbol)),
-                        Type::Obx(_) => return (VarKind::Obx, Some(ident.symbol)),
-                        Type::Interface(_) => return (VarKind::Interface, Some(ident.symbol)),
+                        Type::Struct(s) => return TypeInfo::struct_type(s.fields.len() as u16, Some(ident.symbol)),
+                        Type::Obx(_) => return TypeInfo::with_sym(ValueKind::Obx, ident.symbol),
+                        Type::Interface(_) => return TypeInfo::with_sym(ValueKind::Interface, ident.symbol),
                         _ => {}
                     }
                 }
             }
-            (VarKind::Other, None)
+            TypeInfo::new(ValueKind::Int64)
         }
-        _ => (VarKind::Other, None),
+        TypeExprKind::Interface(_) => TypeInfo::new(ValueKind::Interface),
+        TypeExprKind::Array(_) => TypeInfo::new(ValueKind::Array),
+        TypeExprKind::Chan(_) => TypeInfo::new(ValueKind::Channel),
+        TypeExprKind::Func(_) => TypeInfo::new(ValueKind::Closure),
+        _ => TypeInfo::new(ValueKind::Int64),
     }
 }
 

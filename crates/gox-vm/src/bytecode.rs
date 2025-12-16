@@ -1,7 +1,8 @@
 //! Bytecode module format and function definitions.
 
 use crate::instruction::Instruction;
-use crate::types::{TypeMeta, TypeKind};
+use crate::types::TypeMeta;
+use gox_common::ValueKind;
 use std::io::{Read, Write, Cursor};
 
 /// Magic bytes for bytecode files.
@@ -364,7 +365,7 @@ fn write_constant(buf: &mut Vec<u8>, c: &Constant) {
 
 fn write_type_meta(buf: &mut Vec<u8>, ty: &TypeMeta) {
     write_u32(buf, ty.id);
-    buf.push(type_kind_to_u8(ty.kind));
+    buf.push(value_kind_to_u8(ty.kind));
     write_u16(buf, ty.size_slots as u16);
     write_string(buf, &ty.name);
     
@@ -404,20 +405,8 @@ fn write_function_def(buf: &mut Vec<u8>, f: &FunctionDef) {
     }
 }
 
-fn type_kind_to_u8(kind: TypeKind) -> u8 {
-    match kind {
-        TypeKind::Nil => 0,
-        TypeKind::Primitive => 1,
-        TypeKind::Struct => 2,
-        TypeKind::Obx => 3,
-        TypeKind::Array => 4,
-        TypeKind::Slice => 5,
-        TypeKind::String => 6,
-        TypeKind::Map => 7,
-        TypeKind::Channel => 8,
-        TypeKind::Closure => 9,
-        TypeKind::Interface => 10,
-    }
+fn value_kind_to_u8(kind: ValueKind) -> u8 {
+    kind as u8
 }
 
 // === Reader helpers ===
@@ -478,7 +467,7 @@ fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError>
     let id = read_u32(cursor)?;
     let mut kind_byte = [0u8; 1];
     cursor.read_exact(&mut kind_byte).map_err(|_| BytecodeError::UnexpectedEof)?;
-    let kind = u8_to_type_kind(kind_byte[0])?;
+    let kind = u8_to_value_kind(kind_byte[0])?;
     let size_slots = read_u16(cursor)? as usize;
     let name = read_string(cursor)?;
     
@@ -545,20 +534,12 @@ fn read_function_def(cursor: &mut Cursor<&[u8]>) -> Result<FunctionDef, Bytecode
     })
 }
 
-fn u8_to_type_kind(v: u8) -> Result<TypeKind, BytecodeError> {
-    match v {
-        0 => Ok(TypeKind::Nil),
-        1 => Ok(TypeKind::Primitive),
-        2 => Ok(TypeKind::Struct),
-        3 => Ok(TypeKind::Obx),
-        4 => Ok(TypeKind::Array),
-        5 => Ok(TypeKind::Slice),
-        6 => Ok(TypeKind::String),
-        7 => Ok(TypeKind::Map),
-        8 => Ok(TypeKind::Channel),
-        9 => Ok(TypeKind::Closure),
-        10 => Ok(TypeKind::Interface),
-        _ => Err(BytecodeError::InvalidTypeKind(v)),
+fn u8_to_value_kind(v: u8) -> Result<ValueKind, BytecodeError> {
+    // ValueKind has values 0-22, so we can validate the range
+    if v <= 22 {
+        Ok(ValueKind::from_u8(v))
+    } else {
+        Err(BytecodeError::InvalidTypeKind(v))
     }
 }
 

@@ -344,7 +344,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
 
 /// Check if a type expression refers to an interface type.
 fn is_interface_type_expr(types: &gox_analysis::TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> bool {
-    context::infer_type_from_type_expr(types, ty).0 == context::VarKind::Interface
+    context::infer_type_from_type_expr(types, ty).kind == gox_common::ValueKind::Interface
 }
 
 /// Represents a package-level variable with its initializer for dependency analysis.

@@ -9,7 +9,7 @@ use gox_vm::bytecode::Constant;
 use gox_vm::ffi::TypeTag;
 use gox_vm::instruction::Opcode;
 
-use crate::context::FuncContext;
+use crate::context::{FuncContext, ValueKind};
 use crate::{CodegenContext, CodegenError};
 
 /// Infer the type tag of an expression for FFI purposes.
@@ -688,7 +688,7 @@ fn compile_func_call(
         // Check if this is a struct argument that needs to be copied
         let needs_copy = if let ExprKind::Ident(ident) = &arg.kind {
             if let Some(local) = fctx.lookup_local(ident.symbol) {
-                matches!(local.kind, VarKind::Struct(_))
+                local.kind == ValueKind::Struct && local.field_count > 0
             } else {
                 false
             }
@@ -1053,14 +1053,14 @@ pub fn get_struct_key_hash(
     expr: &gox_syntax::ast::Expr,
     key_reg: u16,
 ) -> u16 {
-    use crate::context::VarKind;
     use gox_syntax::ast::ExprKind;
 
     // Check if the key expression is a struct variable
     if let ExprKind::Ident(ident) = &expr.kind {
         if let Some(local) = fctx.lookup_local(ident.symbol) {
-            if let VarKind::Struct(field_count) = local.kind {
+            if local.kind == ValueKind::Struct && local.field_count > 0 {
                 // Emit StructHash to compute hash based on field values
+                let field_count = local.field_count;
                 let hash_reg = fctx.regs.alloc(1);
                 fctx.emit(Opcode::StructHash, hash_reg, key_reg, field_count);
                 return hash_reg;

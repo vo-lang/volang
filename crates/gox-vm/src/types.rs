@@ -1,6 +1,7 @@
 //! Type metadata and type system.
 
 use std::collections::HashMap;
+use gox_common::ValueKind;
 
 /// Type ID (index into type table).
 pub type TypeId = u32;
@@ -34,27 +35,11 @@ pub mod builtin {
     pub const FIRST_USER_TYPE: TypeId = 100;
 }
 
-/// Type kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TypeKind {
-    Nil,
-    Primitive,
-    Struct,
-    Obx,  // GoX object type
-    Array,
-    Slice,
-    String,
-    Map,
-    Channel,
-    Closure,
-    Interface,
-}
-
 /// Type metadata.
 #[derive(Clone, Debug)]
 pub struct TypeMeta {
     pub id: TypeId,
-    pub kind: TypeKind,
+    pub kind: ValueKind,
     pub size_slots: usize,
     pub ptr_bitmap: Vec<bool>,
     pub name: String,
@@ -75,7 +60,7 @@ impl TypeMeta {
     pub fn nil() -> Self {
         Self {
             id: builtin::NIL,
-            kind: TypeKind::Nil,
+            kind: ValueKind::Nil,
             size_slots: 0,
             ptr_bitmap: vec![],
             name: "nil".to_string(),
@@ -87,10 +72,10 @@ impl TypeMeta {
         }
     }
     
-    pub fn primitive(id: TypeId, name: &str) -> Self {
+    pub fn primitive(id: TypeId, name: &str, kind: ValueKind) -> Self {
         Self {
             id,
-            kind: TypeKind::Primitive,
+            kind,
             size_slots: 1,
             ptr_bitmap: vec![false],
             name: name.to_string(),
@@ -105,7 +90,7 @@ impl TypeMeta {
     pub fn struct_(id: TypeId, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
             id,
-            kind: TypeKind::Struct,
+            kind: ValueKind::Struct,
             size_slots,
             ptr_bitmap,
             name: name.to_string(),
@@ -120,7 +105,7 @@ impl TypeMeta {
     pub fn object(id: TypeId, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
             id,
-            kind: TypeKind::Obx,
+            kind: ValueKind::Obx,
             size_slots,
             ptr_bitmap,
             name: name.to_string(),
@@ -133,16 +118,11 @@ impl TypeMeta {
     }
     
     pub fn is_reference_type(&self) -> bool {
-        matches!(
-            self.kind,
-            TypeKind::String | TypeKind::Slice | TypeKind::Map | 
-            TypeKind::Channel | TypeKind::Closure | TypeKind::Obx |
-            TypeKind::Array | TypeKind::Interface
-        )
+        self.kind.is_reference()
     }
     
     pub fn is_primitive(&self) -> bool {
-        matches!(self.kind, TypeKind::Primitive | TypeKind::Nil)
+        matches!(self.kind, ValueKind::Nil | ValueKind::Bool) || self.kind.is_numeric()
     }
 }
 
@@ -170,24 +150,24 @@ impl TypeTable {
         self.types.resize(FIRST_USER_TYPE as usize, TypeMeta::nil());
         
         self.set(NIL, TypeMeta::nil());
-        self.set(BOOL, TypeMeta::primitive(BOOL, "bool"));
-        self.set(INT, TypeMeta::primitive(INT, "int"));
-        self.set(INT8, TypeMeta::primitive(INT8, "int8"));
-        self.set(INT16, TypeMeta::primitive(INT16, "int16"));
-        self.set(INT32, TypeMeta::primitive(INT32, "int32"));
-        self.set(INT64, TypeMeta::primitive(INT64, "int64"));
-        self.set(UINT, TypeMeta::primitive(UINT, "uint"));
-        self.set(UINT8, TypeMeta::primitive(UINT8, "uint8"));
-        self.set(UINT16, TypeMeta::primitive(UINT16, "uint16"));
-        self.set(UINT32, TypeMeta::primitive(UINT32, "uint32"));
-        self.set(UINT64, TypeMeta::primitive(UINT64, "uint64"));
-        self.set(FLOAT32, TypeMeta::primitive(FLOAT32, "float32"));
-        self.set(FLOAT64, TypeMeta::primitive(FLOAT64, "float64"));
+        self.set(BOOL, TypeMeta::primitive(BOOL, "bool", ValueKind::Bool));
+        self.set(INT, TypeMeta::primitive(INT, "int", ValueKind::Int));
+        self.set(INT8, TypeMeta::primitive(INT8, "int8", ValueKind::Int8));
+        self.set(INT16, TypeMeta::primitive(INT16, "int16", ValueKind::Int16));
+        self.set(INT32, TypeMeta::primitive(INT32, "int32", ValueKind::Int32));
+        self.set(INT64, TypeMeta::primitive(INT64, "int64", ValueKind::Int64));
+        self.set(UINT, TypeMeta::primitive(UINT, "uint", ValueKind::Uint));
+        self.set(UINT8, TypeMeta::primitive(UINT8, "uint8", ValueKind::Uint8));
+        self.set(UINT16, TypeMeta::primitive(UINT16, "uint16", ValueKind::Uint16));
+        self.set(UINT32, TypeMeta::primitive(UINT32, "uint32", ValueKind::Uint32));
+        self.set(UINT64, TypeMeta::primitive(UINT64, "uint64", ValueKind::Uint64));
+        self.set(FLOAT32, TypeMeta::primitive(FLOAT32, "float32", ValueKind::Float32));
+        self.set(FLOAT64, TypeMeta::primitive(FLOAT64, "float64", ValueKind::Float64));
         
         // String: GcRef (1 slot, is pointer)
         self.set(STRING, TypeMeta {
             id: STRING,
-            kind: TypeKind::String,
+            kind: ValueKind::String,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "string".to_string(),
@@ -201,7 +181,7 @@ impl TypeTable {
         // Array: GcRef (1 slot)
         self.set(ARRAY, TypeMeta {
             id: ARRAY,
-            kind: TypeKind::Array,
+            kind: ValueKind::Array,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "array".to_string(),
@@ -215,7 +195,7 @@ impl TypeTable {
         // Slice: GcRef (1 slot)
         self.set(SLICE, TypeMeta {
             id: SLICE,
-            kind: TypeKind::Slice,
+            kind: ValueKind::Slice,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "slice".to_string(),
@@ -229,7 +209,7 @@ impl TypeTable {
         // Map: GcRef (1 slot)
         self.set(MAP, TypeMeta {
             id: MAP,
-            kind: TypeKind::Map,
+            kind: ValueKind::Map,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "map".to_string(),
@@ -243,7 +223,7 @@ impl TypeTable {
         // Channel: GcRef (1 slot)
         self.set(CHANNEL, TypeMeta {
             id: CHANNEL,
-            kind: TypeKind::Channel,
+            kind: ValueKind::Channel,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "channel".to_string(),
@@ -257,7 +237,7 @@ impl TypeTable {
         // Closure: GcRef (1 slot)
         self.set(CLOSURE, TypeMeta {
             id: CLOSURE,
-            kind: TypeKind::Closure,
+            kind: ValueKind::Closure,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "closure".to_string(),
@@ -271,7 +251,7 @@ impl TypeTable {
         // Interface: 2 slots (type_id, data)
         self.set(INTERFACE, TypeMeta {
             id: INTERFACE,
-            kind: TypeKind::Interface,
+            kind: ValueKind::Interface,
             size_slots: 2,
             ptr_bitmap: vec![false, false], // data slot depends on actual type
             name: "interface{}".to_string(),
@@ -325,3 +305,7 @@ impl TypeTable {
         self.types.is_empty()
     }
 }
+
+// Re-export TypeKind as an alias for backward compatibility
+#[deprecated(note = "Use gox_common::ValueKind instead")]
+pub type TypeKind = ValueKind;

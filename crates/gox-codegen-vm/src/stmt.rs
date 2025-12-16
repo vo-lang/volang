@@ -5,7 +5,7 @@ use gox_vm::instruction::Opcode;
 use gox_analysis::Type;
 
 use crate::{CodegenContext, CodegenError};
-use crate::context::{FuncContext, VarKind};
+use crate::context::{FuncContext, ValueKind, TypeInfo};
 use crate::expr;
 
 /// Compile a block of statements.
@@ -57,7 +57,7 @@ pub fn compile_stmt(
                 for (i, name) in spec.names.iter().enumerate() {
                     if is_interface {
                         // Interface needs 2 slots (type_id + data)
-                        let dst = fctx.define_local_with_kind(*name, 2, VarKind::Interface);
+                        let dst = fctx.define_local_with_kind(*name, 2, ValueKind::Interface);
                         if i < spec.values.len() {
                             // Box the value into interface
                             let src = expr::compile_expr(ctx, fctx, &spec.values[i])?;
@@ -199,17 +199,19 @@ fn compile_short_var(
             }
         } else {
             // Determine the type kind and type symbol from the RHS expression
-            let (mut kind, mut type_sym) = if i < sv.values.len() {
-                let (k, ts) = infer_var_kind_and_type(ctx, Some(fctx), &sv.values[i]);
+            let mut type_info = if i < sv.values.len() {
+                let info = infer_var_kind_and_type(ctx, Some(fctx), &sv.values[i]);
                 // Also check if it's a float expression using fctx
-                if k == VarKind::Other && expr::is_float_expr(ctx, fctx, &sv.values[i]) {
-                    (VarKind::Float, None)
+                if info.kind == ValueKind::Int64 && expr::is_float_expr(ctx, fctx, &sv.values[i]) {
+                    TypeInfo::new(ValueKind::Float64)
                 } else {
-                    (k, ts)
+                    info
                 }
             } else {
-                (VarKind::Other, None)
+                TypeInfo::new(ValueKind::Int64)
             };
+            let (mut kind, mut type_sym) = (type_info.kind, type_info.type_sym);
+            let mut field_count = type_info.field_count;
             
             // Check if RHS is an identifier referencing a struct/object variable
             // Or if it's an Index expression into a map (for nested maps)
@@ -217,18 +219,16 @@ fn compile_short_var(
                 match &sv.values[i].kind {
                     ExprKind::Ident(ident) => {
                         if let Some(src_local) = fctx.lookup_local(ident.symbol) {
-                            match src_local.kind {
-                                VarKind::Struct(fc) => {
-                                    kind = VarKind::Struct(fc);
-                                    type_sym = src_local.type_sym;
-                                    Some(fc)  // Need struct copy
-                                }
-                                VarKind::Obx => {
-                                    kind = VarKind::Obx;
-                                    type_sym = src_local.type_sym;
-                                    None  // No copy needed - reference semantics
-                                }
-                                _ => None
+                            if src_local.kind == ValueKind::Struct && src_local.field_count > 0 {
+                                kind = ValueKind::Struct;
+                                type_sym = src_local.type_sym;
+                                Some(src_local.field_count)  // Need struct copy
+                            } else if src_local.kind == ValueKind::Obx {
+                                kind = ValueKind::Obx;
+                                type_sym = src_local.type_sym;
+                                None  // No copy needed - reference semantics
+                            } else {
+                                None
                             }
                         } else {
                             None
@@ -239,7 +239,7 @@ fn compile_short_var(
                         if let ExprKind::Ident(container_ident) = &idx.expr.kind {
                             if let Some(container_local) = fctx.lookup_local(container_ident.symbol) {
                                 match container_local.kind {
-                                    VarKind::Map | VarKind::Slice => {
+                                    ValueKind::Map | ValueKind::Slice => {
                                         // Indexing into map/slice - check element/value type
                                         if let Some(elem_type_sym) = container_local.type_sym {
                                             if let Some(underlying) = expr::lookup_named_type(ctx, elem_type_sym) {
@@ -249,21 +249,21 @@ fn compile_short_var(
                                                         return Ok(compile_index_struct_copy(ctx, fctx, name, idx, fc, elem_type_sym)?);
                                                     }
                                                     Type::Obx(_) => {
-                                                        kind = VarKind::Obx;
+                                                        kind = ValueKind::Obx;
                                                         type_sym = Some(elem_type_sym);
                                                     }
                                                     Type::Map(_) => {
-                                                        kind = VarKind::Map;
+                                                        kind = ValueKind::Map;
                                                     }
                                                     _ => {}
                                                 }
-                                            } else if container_local.kind == VarKind::Map {
+                                            } else if container_local.kind == ValueKind::Map {
                                                 // Value type not found - assume nested map
-                                                kind = VarKind::Map;
+                                                kind = ValueKind::Map;
                                             }
-                                        } else if container_local.kind == VarKind::Map {
+                                        } else if container_local.kind == ValueKind::Map {
                                             // No type_sym - assume nested map or primitive
-                                            kind = VarKind::Map;
+                                            kind = ValueKind::Map;
                                         }
                                     }
                                     _ => {}
@@ -281,7 +281,7 @@ fn compile_short_var(
             // Check if this variable will be captured by a closure
             let is_captured = fctx.is_captured(name.symbol);
             
-            let dst = fctx.define_local_full(*name, 1, kind, type_sym, is_captured);
+            let dst = fctx.define_local_full(*name, 1, kind, field_count, type_sym, is_captured);
             
             if i < sv.values.len() {
                 let src = expr::compile_expr(ctx, fctx, &sv.values[i])?;
@@ -324,10 +324,8 @@ fn compile_index_struct_copy(
     field_count: u16,
     type_sym: gox_common::Symbol,
 ) -> Result<(), CodegenError> {
-    use crate::context::VarKind;
-    
     // Define the local variable with struct type
-    let dst = fctx.define_local_with_type(*name, 1, VarKind::Struct(field_count), Some(type_sym));
+    let dst = fctx.define_local_struct(*name, 1, field_count, Some(type_sym));
     
     // Compile the index expression to get the struct pointer
     let ptr = expr::compile_expr(ctx, fctx, &gox_syntax::ast::Expr {
@@ -341,55 +339,54 @@ fn compile_index_struct_copy(
     Ok(())
 }
 
-/// Infer VarKind and type symbol from an expression (for type tracking)
+/// Infer type info from an expression (for type tracking)
 /// If fctx is provided, also checks local types for composite literals
-fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, expr: &gox_syntax::ast::Expr) -> (crate::context::VarKind, Option<gox_common::Symbol>) {
+fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, expr: &gox_syntax::ast::Expr) -> TypeInfo {
     use gox_syntax::ast::{ExprKind, TypeExprKind};
-    use crate::context::VarKind;
     
     match &expr.kind {
         ExprKind::CompositeLit(lit) => {
             match &lit.ty.kind {
                 TypeExprKind::Map(map_ty) => {
                     if let TypeExprKind::Ident(val_ident) = &map_ty.value.kind {
-                        (VarKind::Map, Some(val_ident.symbol))
+                        TypeInfo::with_sym(ValueKind::Map, val_ident.symbol)
                     } else {
-                        (VarKind::Map, None)
+                        TypeInfo::new(ValueKind::Map)
                     }
                 }
                 TypeExprKind::Slice(elem_ty) => {
                     if let TypeExprKind::Ident(elem_ident) = &elem_ty.kind {
-                        (VarKind::Slice, Some(elem_ident.symbol))
+                        TypeInfo::with_sym(ValueKind::Slice, elem_ident.symbol)
                     } else {
-                        (VarKind::Slice, None)
+                        TypeInfo::new(ValueKind::Slice)
                     }
                 }
-                TypeExprKind::Struct(s) => (VarKind::Struct(s.fields.len() as u16), None),
-                TypeExprKind::Obx(_) => (VarKind::Obx, None),
+                TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
+                TypeExprKind::Obx(_) => TypeInfo::new(ValueKind::Obx),
                 TypeExprKind::Ident(ident) => {
                     // Check local types first if fctx is provided
                     if let Some(fc) = fctx {
                         if let Some((slot_count, _)) = fc.get_local_type(ident.symbol) {
-                            return (VarKind::Struct(*slot_count), Some(ident.symbol));
+                            return TypeInfo::struct_type(*slot_count, Some(ident.symbol));
                         }
                     }
                     // Named type - look up in type check results
                     let field_count = lit.elems.len() as u16;
                     if is_named_type_object(ctx, ident.symbol) {
-                        (VarKind::Obx, Some(ident.symbol))
+                        TypeInfo::with_sym(ValueKind::Obx, ident.symbol)
                     } else {
-                        (VarKind::Struct(field_count), Some(ident.symbol))
+                        TypeInfo::struct_type(field_count, Some(ident.symbol))
                     }
                 }
-                _ => (VarKind::Other, None),
+                _ => TypeInfo::new(ValueKind::Int64),
             }
         }
         ExprKind::Call(_) => {
             // Use unified lookup for all function calls
             if let Some(kind) = ctx.lookup_call_return_type(expr) {
-                return (kind, None);
+                return TypeInfo::new(kind);
             }
-            (VarKind::Other, None)
+            TypeInfo::new(ValueKind::Int64)
         }
         ExprKind::Selector(sel) => {
             // Accessing a struct field - infer type from the field
@@ -402,10 +399,10 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                                 if field.name == Some(sel.sel.symbol) {
                                     // Found the field - check its type
                                     match &field.ty {
-                                        Type::Map(_) => return (VarKind::Map, None),
-                                        Type::Slice(_) => return (VarKind::Slice, None),
-                                        Type::Struct(fs) => return (VarKind::Struct(fs.fields.len() as u16), None),
-                                        Type::Obx(_) => return (VarKind::Obx, None),
+                                        Type::Map(_) => return TypeInfo::new(ValueKind::Map),
+                                        Type::Slice(_) => return TypeInfo::new(ValueKind::Slice),
+                                        Type::Struct(fs) => return TypeInfo::with_fields(ValueKind::Struct, fs.fields.len() as u16),
+                                        Type::Obx(_) => return TypeInfo::new(ValueKind::Obx),
                                         _ => {}
                                     }
                                 }
@@ -415,30 +412,30 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                     }
                 }
             }
-            (VarKind::Other, None)
+            TypeInfo::new(ValueKind::Int64)
         }
         ExprKind::Index(_) => {
             // Index expressions need FuncContext to check container type
             // This is handled separately in compile_short_var
-            (VarKind::Other, None)
+            TypeInfo::new(ValueKind::Int64)
         }
-        ExprKind::FloatLit(_) => (VarKind::Float, None),
-        ExprKind::StringLit(_) => (VarKind::String, None),
+        ExprKind::FloatLit(_) => TypeInfo::new(ValueKind::Float64),
+        ExprKind::StringLit(_) => TypeInfo::new(ValueKind::String),
         ExprKind::Binary(bin) => {
             // If either operand is float, result is float
             // If either operand is string (for +), result is string
-            let (left_kind, _) = infer_var_kind_and_type(ctx, fctx, &bin.left);
-            let (right_kind, _) = infer_var_kind_and_type(ctx, fctx, &bin.right);
-            if left_kind == VarKind::String || right_kind == VarKind::String {
-                (VarKind::String, None)
-            } else if left_kind == VarKind::Float || right_kind == VarKind::Float {
-                (VarKind::Float, None)
+            let left_info = infer_var_kind_and_type(ctx, fctx, &bin.left);
+            let right_info = infer_var_kind_and_type(ctx, fctx, &bin.right);
+            if left_info.kind == ValueKind::String || right_info.kind == ValueKind::String {
+                TypeInfo::new(ValueKind::String)
+            } else if left_info.kind == ValueKind::Float64 || right_info.kind == ValueKind::Float64 {
+                TypeInfo::new(ValueKind::Float64)
             } else {
-                (VarKind::Other, None)
+                TypeInfo::new(ValueKind::Int64)
             }
         }
         ExprKind::Paren(inner) => infer_var_kind_and_type(ctx, fctx, inner),
-        _ => (VarKind::Other, None),
+        _ => TypeInfo::new(ValueKind::Int64),
     }
 }
 /// Check if a named type is an object type (reference semantics)
@@ -458,7 +455,7 @@ fn is_interface_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax
     match &expr.kind {
         ExprKind::Ident(ident) => {
             if let Some(local) = fctx.lookup_local(ident.symbol) {
-                return local.kind == VarKind::Interface;
+                return local.kind == ValueKind::Interface;
             }
             false
         }
@@ -488,11 +485,11 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
                     }
                 }
                 match local.kind {
-                    VarKind::Int => builtin::INT64 as u16,
-                    VarKind::Float => builtin::FLOAT64 as u16,
-                    VarKind::String => builtin::STRING as u16,
-                    VarKind::Slice => builtin::SLICE as u16,
-                    VarKind::Map => builtin::MAP as u16,
+                    ValueKind::Int64 => builtin::INT64 as u16,
+                    ValueKind::Float64 => builtin::FLOAT64 as u16,
+                    ValueKind::String => builtin::STRING as u16,
+                    ValueKind::Slice => builtin::SLICE as u16,
+                    ValueKind::Map => builtin::MAP as u16,
                     _ => builtin::INT64 as u16, // default
                 }
             } else {
@@ -566,13 +563,14 @@ fn compile_assign(
                 if let Some(local) = fctx.lookup_local(ident.symbol) {
                     let dst = local.reg;
                     let local_kind = local.kind;
+                    let local_field_count = local.field_count;
                     let is_captured = local.is_captured;
                     
                     // Handle compound assignment to local variable
                     match assign.op {
                         AssignOp::Assign => {
                             // Check if assigning to interface variable
-                            if local_kind == VarKind::Interface {
+                            if local_kind == ValueKind::Interface {
                                 // Check if source is also an interface variable
                                 if is_interface_expr(ctx, fctx, &assign.rhs[i]) {
                                     // Interface to interface: copy both slots
@@ -593,10 +591,10 @@ fn compile_assign(
                                 let src = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
                                 if src != dst {
                                     // Check if this is a struct (value type) - need to deep copy
-                                    if let VarKind::Struct(field_count) = local_kind {
+                                    if local_kind == ValueKind::Struct && local_field_count > 0 {
                                         // Allocate new struct and copy fields
-                                        fctx.emit(Opcode::Alloc, dst, 0, field_count);
-                                        for f in 0..field_count {
+                                        fctx.emit(Opcode::Alloc, dst, 0, local_field_count);
+                                        for f in 0..local_field_count {
                                             let tmp = fctx.regs.alloc(1);
                                             fctx.emit(Opcode::GetField, tmp, src, f);
                                             fctx.emit(Opcode::SetField, dst, f, tmp);
@@ -737,7 +735,7 @@ fn is_map_expr(fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
     use crate::context::VarKind;
     if let ExprKind::Ident(ident) = &expr.kind {
         if let Some(local) = fctx.lookup_local(ident.symbol) {
-            return local.kind == VarKind::Map;
+            return local.kind == ValueKind::Map;
         }
     }
     false
