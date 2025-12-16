@@ -1,0 +1,121 @@
+// TaskMan - A Task Management System Demo
+// Demonstrates multi-package project with object and struct usage
+package main
+
+import (
+    "utils"
+    "task"
+)
+
+// printHeader prints a formatted header
+func printHeader(title string) {
+    line := utils.Repeat("=", 50)
+    println(line)
+    println("  " + title)
+    println(line)
+}
+
+// printSubHeader prints a sub-header
+func printSubHeader(title string) {
+    println("")
+    println("--- " + title + " ---")
+}
+
+// testUtils tests utility functions
+func testUtils() {
+    printSubHeader("Testing Utils Package")
+    
+    assert(utils.Max(10, 20) == 20, "Max(10, 20) should be 20")
+    assert(utils.Min(10, 20) == 10, "Min(10, 20) should be 10")
+    assert(utils.Clamp(15, 0, 10) == 10, "Clamp(15, 0, 10) should be 10")
+    assert(utils.Clamp(-5, 0, 10) == 0, "Clamp(-5, 0, 10) should be 0")
+    assert(utils.Repeat("ab", 3) == "ababab", "Repeat should work")
+    
+    println("  Utils: OK")
+}
+
+// testTaskManager tests TaskManager object (reference type)
+func testTaskManager() {
+    printSubHeader("Testing TaskManager (object)")
+    
+    // Create TaskManager - it's a reference type
+    manager := task.NewTaskManager()
+    
+    // Add tasks - manager state is mutated
+    id1 := manager.AddTask("Design", task.PriorityHigh)
+    id2 := manager.AddTask("Implement", task.PriorityCritical)
+    id3 := manager.AddTask("Test", task.PriorityMedium)
+    
+    assert(manager.Count() == 3, "Should have 3 tasks")
+    
+    // Reference semantics - same manager
+    manager2 := manager
+    manager2.AddTask("Document", task.PriorityLow)
+    assert(manager.Count() == 4, "Original sees new task (shared state)")
+    
+    println("  TaskManager object reference semantics: OK")
+    
+    // Test status transitions
+    assert(manager.StartTask(id1), "Should start task 1")
+    assert(manager.GetStatus(id1) == task.StatusInProgress, "Task 1 in progress")
+    
+    assert(manager.CompleteTask(id1), "Should complete task 1")
+    assert(manager.GetStatus(id1) == task.StatusCompleted, "Task 1 completed")
+    
+    assert(manager.CancelTask(id3), "Should cancel task 3")
+    assert(manager.GetStatus(id3) == task.StatusCancelled, "Task 3 cancelled")
+    
+    println("  Task state transitions: OK")
+}
+
+// runDemo demonstrates the task management system
+func runDemo() {
+    printSubHeader("Task Management Demo")
+    
+    manager := task.NewTaskManager()
+    
+    // Create project tasks
+    manager.AddTask("Design architecture", task.PriorityHigh)
+    manager.AddTask("Implement core", task.PriorityCritical)
+    manager.AddTask("Write tests", task.PriorityMedium)
+    manager.AddTask("Documentation", task.PriorityLow)
+    
+    println("")
+    println("Created " + string(manager.Count()) + " tasks")
+    
+    // Simulate workflow
+    println("")
+    println("Simulating workflow...")
+    
+    manager.StartTask(2)  // Start critical task first
+    manager.StartTask(1)  // Start high priority
+    manager.CompleteTask(1)  // Complete design
+    
+    // Print statistics
+    println("")
+    println("Statistics:")
+    println("  Total: " + string(manager.Count()))
+    println("  Pending: " + string(manager.CountByStatus(task.StatusPending)))
+    println("  In Progress: " + string(manager.CountByStatus(task.StatusInProgress)))
+    println("  Completed: " + string(manager.CountByStatus(task.StatusCompleted)))
+}
+
+func main() {
+    // Test cross-package string functions
+    println("Cross-package Hello:")
+    println(utils.Hello())
+    
+    println("Cross-package Concat:")
+    println(utils.Concat("foo", "bar"))
+    
+    println("Cross-package Repeat:")
+    println(utils.Repeat("ab", 3))
+    
+    // Test cross-package int functions
+    println("Cross-package Max/Min/Clamp:")
+    println(utils.Max(10, 20))
+    println(utils.Min(10, 20))
+    println(utils.Clamp(15, 0, 10))
+    
+    println("All tests passed!")
+}
