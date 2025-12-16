@@ -724,6 +724,20 @@ impl Vm {
                 self.write_reg(fiber_id, a, string::index(s, idx) as u64);
             }
             
+            Opcode::StrEq => {
+                // a=dest, b=str1, c=str2 (content comparison)
+                let s1 = self.read_reg(fiber_id, b) as GcRef;
+                let s2 = self.read_reg(fiber_id, c) as GcRef;
+                self.write_reg(fiber_id, a, if string::eq(s1, s2) { 1 } else { 0 });
+            }
+            
+            Opcode::StrNe => {
+                // a=dest, b=str1, c=str2 (content comparison)
+                let s1 = self.read_reg(fiber_id, b) as GcRef;
+                let s2 = self.read_reg(fiber_id, c) as GcRef;
+                self.write_reg(fiber_id, a, if string::ne(s1, s2) { 1 } else { 0 });
+            }
+            
             // ============ Map ============
             Opcode::MapNew => {
                 // a=dest, b=key_type, c=val_type

@@ -136,6 +136,8 @@ pub enum Opcode {
     StrConcat,        // a = b + c (string concat)
     StrLen,           // a = len(b)
     StrIndex,         // a = b[c]
+    StrEq,            // a = (b == c) for strings (content comparison)
+    StrNe,            // a = (b != c) for strings (content comparison)
     
     // ============ Map ============
     MapNew = 150,     // a = make(map), key_type=b, val_type=c
@@ -284,6 +286,8 @@ impl Opcode {
             141 => Self::StrConcat,
             142 => Self::StrLen,
             143 => Self::StrIndex,
+            144 => Self::StrEq,
+            145 => Self::StrNe,
             
             150 => Self::MapNew,
             151 => Self::MapGet,

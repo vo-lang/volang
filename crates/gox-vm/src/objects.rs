@@ -73,6 +73,22 @@ pub mod string {
     pub fn array_ref(str_ref: GcRef) -> GcRef {
         Gc::read_slot(str_ref, ARRAY_SLOT) as GcRef
     }
+    
+    /// Compare two strings for equality (content comparison).
+    pub fn eq(a: GcRef, b: GcRef) -> bool {
+        if a == b {
+            return true; // Same reference
+        }
+        if a.is_null() || b.is_null() {
+            return a.is_null() && b.is_null();
+        }
+        as_bytes(a) == as_bytes(b)
+    }
+    
+    /// Compare two strings for inequality (content comparison).
+    pub fn ne(a: GcRef, b: GcRef) -> bool {
+        !eq(a, b)
+    }
 }
 
 /// Array object layout (after GcHeader):

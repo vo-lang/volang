@@ -1,7 +1,7 @@
 //! Bytecode text format parser and formatter.
 //!
 //! Text format example:
-//! ```
+//! ```text
 //! module test
 //! 
 //! const 0 int 42
@@ -179,6 +179,8 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::StrConcat => format!("StrConcat r{}, r{}, r{}", a, b, c),
         Opcode::StrLen => format!("StrLen r{}, r{}", a, b),
         Opcode::StrIndex => format!("StrIndex r{}, r{}, r{}", a, b, c),
+        Opcode::StrEq => format!("StrEq r{}, r{}, r{}", a, b, c),
+        Opcode::StrNe => format!("StrNe r{}, r{}, r{}", a, b, c),
         
         Opcode::MapNew => format!("MapNew r{}, {}, {}", a, b, c),
         Opcode::MapGet => format!("MapGet r{}, r{}, r{}", a, b, c),
