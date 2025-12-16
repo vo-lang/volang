@@ -2,57 +2,11 @@
 
 use crate::bytecode::{Constant, Module};
 use crate::fiber::{BlockReason, DeferEntry, FiberId, FiberStatus, IterState, Scheduler};
-use crate::ffi::GoxValue;
 use crate::gc::{Gc, GcRef, NULL_REF};
 use crate::instruction::{Instruction, Opcode};
+use crate::native::{NativeCtx, NativeFn, NativeRegistry, NativeResult};
 use crate::objects::{self, array, channel, closure, interface, map, slice, string};
 use crate::types::{builtin, TypeId, TypeTable};
-use std::collections::HashMap;
-
-/// Native function signature.
-/// Takes typed arguments and returns typed results.
-pub type NativeFn = fn(&mut NativeCtx, Vec<GoxValue>) -> Vec<GoxValue>;
-
-/// Native function context.
-pub struct NativeCtx<'a> {
-    pub vm: &'a mut Vm,
-}
-
-impl<'a> NativeCtx<'a> {
-    pub fn gc(&mut self) -> &mut Gc {
-        &mut self.vm.gc
-    }
-    
-    pub fn new_string(&mut self, s: &str) -> GcRef {
-        string::from_rust_str(&mut self.vm.gc, builtin::STRING, s)
-    }
-    
-    pub fn get_string(&self, ref_: GcRef) -> &str {
-        string::as_str(ref_)
-    }
-}
-
-/// Native function registry.
-#[derive(Default)]
-pub struct NativeRegistry {
-    funcs: HashMap<String, NativeFn>,
-}
-
-impl NativeRegistry {
-    pub fn new() -> Self {
-        Self {
-            funcs: HashMap::new(),
-        }
-    }
-    
-    pub fn register(&mut self, name: &str, func: NativeFn) {
-        self.funcs.insert(name.to_string(), func);
-    }
-    
-    pub fn get(&self, name: &str) -> Option<NativeFn> {
-        self.funcs.get(name).copied()
-    }
-}
 
 /// VM execution result.
 #[derive(Debug)]
@@ -533,7 +487,7 @@ impl Vm {
                 return self.do_return(fiber_id, a, b as usize);
             }
             
-            // ============ Native call ============
+            // ============ Native call (zero-copy) ============
             Opcode::CallNative => {
                 // a=native_id, b=arg_start, c=pair_count (each arg is type,value pair)
                 // Args layout: [type0, val0, type1, val1, ...]
@@ -546,30 +500,41 @@ impl Vm {
                     }
                 };
                 
-                // Collect arguments as GoxValue
-                use crate::ffi::TypeTag;
-                let mut args = Vec::with_capacity(c as usize);
-                for i in 0..c {
-                    let type_tag = TypeTag::from_u8(self.read_reg(fiber_id, b + i * 2) as u8);
-                    let raw_val = self.read_reg(fiber_id, b + i * 2 + 1);
-                    args.push(GoxValue::from_raw(raw_val, type_tag));
-                }
-                
                 // Pause GC during native call
                 self.gc.pause_gc();
                 
-                // Call native
-                let mut ctx = NativeCtx { vm: self };
-                let results = native_fn(&mut ctx, args);
+                // Get fiber stack info for zero-copy register access
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                let bp = fiber.bp();
+                let stack_ptr = fiber.stack.as_mut_ptr();
+                let stack_len = fiber.stack.len();
+                
+                // Create a slice view of registers (safe: no reallocation during native call)
+                // SAFETY: We ensure fiber.stack is not reallocated during native call,
+                // and bp is stable within this call.
+                let regs = unsafe {
+                    std::slice::from_raw_parts_mut(stack_ptr.add(bp), stack_len - bp)
+                };
+                
+                // Create zero-copy native context
+                let mut ctx = NativeCtx::new(
+                    &mut self.gc,
+                    regs,
+                    b as usize,     // arg_base
+                    c as usize,     // arg_count
+                    b as usize,     // ret_base (return values overwrite args)
+                );
+                
+                // Call native function
+                let result = native_fn(&mut ctx);
                 
                 // Resume GC
                 self.gc.resume_gc();
                 
-                // Store results back as raw values
-                let ret_start = b;
-                for (i, v) in results.into_iter().enumerate() {
-                    let raw = v.to_raw();
-                    self.write_reg(fiber_id, ret_start + i as u16, raw);
+                // Handle result
+                match result {
+                    NativeResult::Ok(_) => {}
+                    NativeResult::Panic(msg) => return VmResult::Panic(msg),
                 }
             }
             

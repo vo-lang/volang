@@ -405,6 +405,11 @@ pub mod channel {
         Gc::read_slot(chan, CAP_SLOT) as usize
     }
     
+    /// Returns the number of elements currently in the channel buffer.
+    pub fn len(chan: GcRef) -> usize {
+        get_state(chan).buffer.len()
+    }
+    
     pub fn is_closed(chan: GcRef) -> bool {
         get_state(chan).closed
     }
