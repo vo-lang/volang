@@ -43,14 +43,16 @@ use std::collections::HashSet;
 use gox_common::{DiagnosticSink, Symbol, SymbolInterner};
 use gox_syntax::ast::{self, TypeExprKind};
 
-use crate::collect::{CollectResult, FuncSigPlaceholder, MethodPlaceholder, NamedTypePlaceholder, VarTypePlaceholder};
-use crate::errors::TypeError;
+use crate::collect::{
+    CollectResult, FuncSigPlaceholder, MethodPlaceholder, NamedTypePlaceholder, VarTypePlaceholder,
+};
 use crate::constant::Constant;
+use crate::errors::TypeError;
 use crate::scope::{Entity, Scope};
 use crate::types::BasicType;
 use crate::types::{
-    ArrayType, ChanDir, ChanType, Field, FuncType, InterfaceType,
-    MapType, Method, NamedTypeId, NamedTypeInfo, SliceType, StructType, Type,
+    ArrayType, ChanDir, ChanType, Field, FuncType, InterfaceType, MapType, Method, NamedTypeId,
+    NamedTypeInfo, SliceType, StructType, Type,
 };
 
 /// The result of Phase 2 type resolution.
@@ -157,7 +159,7 @@ impl<'a> TypeResolver<'a> {
                 } else {
                     continue;
                 };
-                
+
                 if current_ty == Type::Invalid {
                     let inferred_ty = self.infer_type_from_expr(init_expr);
                     if inferred_ty != Type::Invalid {
@@ -169,7 +171,7 @@ impl<'a> TypeResolver<'a> {
             }
         }
     }
-    
+
     /// Infer type from expression (for var initialization after function signatures are resolved)
     fn infer_type_from_expr(&self, expr: &ast::Expr) -> Type {
         use gox_syntax::ast::ExprKind;
@@ -246,9 +248,13 @@ impl<'a> TypeResolver<'a> {
                 }
             } else {
                 // Receiver type not found
-                let name = self.interner.resolve(method.receiver_type).unwrap_or("<unknown>");
+                let name = self
+                    .interner
+                    .resolve(method.receiver_type)
+                    .unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    TypeError::UndefinedReceiverType.with_message(TypeError::UndefinedReceiverType.with_name(name)),
+                    TypeError::UndefinedReceiverType
+                        .with_message(TypeError::UndefinedReceiverType.with_name(name)),
                 );
             }
         }
@@ -266,14 +272,18 @@ impl<'a> TypeResolver<'a> {
 
     /// Resolves a function signature.
     fn resolve_func_sig(&mut self, sig: &ast::FuncSig) -> FuncType {
-        let params: Vec<Type> = sig.params.iter()
+        let params: Vec<Type> = sig
+            .params
+            .iter()
             .flat_map(|p| {
                 let ty = self.resolve_type_expr(&p.ty);
                 std::iter::repeat_n(ty, p.names.len().max(1))
             })
             .collect();
 
-        let results: Vec<Type> = sig.results.iter()
+        let results: Vec<Type> = sig
+            .results
+            .iter()
             .map(|r| self.resolve_type_expr(&r.ty))
             .collect();
 
@@ -300,7 +310,8 @@ impl<'a> TypeResolver<'a> {
                 let _span = self.placeholders[idx].span;
                 let name_str = self.interner.resolve(name).unwrap_or("<unknown>");
                 self.diagnostics.emit(
-                    TypeError::InvalidRecursiveType.with_message(TypeError::InvalidRecursiveType.with_name(name_str)),
+                    TypeError::InvalidRecursiveType
+                        .with_message(TypeError::InvalidRecursiveType.with_name(name_str)),
                 );
             }
             return Type::Invalid;
@@ -481,9 +492,10 @@ impl<'a> TypeResolver<'a> {
 
         for ast_field in ast_fields {
             let ty = self.resolve_type_expr(&ast_field.ty);
-            let tag = ast_field.tag.as_ref().map(|t| {
-                self.interner.resolve(t.raw).unwrap_or("").to_string()
-            });
+            let tag = ast_field
+                .tag
+                .as_ref()
+                .map(|t| self.interner.resolve(t.raw).unwrap_or("").to_string());
 
             if ast_field.names.is_empty() {
                 // Embedded field
@@ -576,16 +588,19 @@ impl<'a> TypeResolver<'a> {
                     if n >= 0 {
                         n as u64
                     } else {
-                        self.diagnostics.emit(TypeError::NegativeArrayLength.diagnostic());
+                        self.diagnostics
+                            .emit(TypeError::NegativeArrayLength.diagnostic());
                         0
                     }
                 } else {
-                    self.diagnostics.emit(TypeError::NonConstantArrayLength.diagnostic());
+                    self.diagnostics
+                        .emit(TypeError::NonConstantArrayLength.diagnostic());
                     0
                 }
             }
             _ => {
-                self.diagnostics.emit(TypeError::NonConstantArrayLength.diagnostic());
+                self.diagnostics
+                    .emit(TypeError::NonConstantArrayLength.diagnostic());
                 0
             }
         }
@@ -644,7 +659,10 @@ fn parse_int_literal(s: &str) -> Result<i64, ()> {
         i64::from_str_radix(&s[2..], 8).map_err(|_| ())
     } else if s.starts_with("0b") || s.starts_with("0B") {
         i64::from_str_radix(&s[2..], 2).map_err(|_| ())
-    } else if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
+    } else if s.starts_with('0')
+        && s.len() > 1
+        && s.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+    {
         i64::from_str_radix(&s[1..], 8).map_err(|_| ())
     } else {
         s.parse().map_err(|_| ())
@@ -666,12 +684,10 @@ mod tests {
     use super::*;
     use crate::collect::collect_types;
     use crate::types::BasicType;
-    use gox_common::FileId;
     use gox_syntax::parse;
 
     fn resolve_source(source: &str) -> (ResolveResult, DiagnosticSink, SymbolInterner) {
-        let file_id = FileId::new(0);
-        let (file, _parse_diag, interner) = parse(file_id, source);
+        let (file, _parse_diag, interner) = parse(source, 0);
 
         let mut collect_diag = DiagnosticSink::new();
         let collect_result = collect_types(&file, &interner, &mut collect_diag);
@@ -688,28 +704,31 @@ mod tests {
 
         assert!(!diag.has_errors());
         assert_eq!(result.named_types.len(), 1);
-        assert_eq!(result.named_types[0].underlying, Type::Basic(BasicType::Int));
+        assert_eq!(
+            result.named_types[0].underlying,
+            Type::Basic(BasicType::Int)
+        );
     }
 
     #[test]
     fn test_resolve_chained_type_alias() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype A int\ntype B A"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype A int\ntype B A");
 
         assert!(!diag.has_errors());
         assert_eq!(result.named_types.len(), 2);
         // A -> int
-        assert_eq!(result.named_types[0].underlying, Type::Basic(BasicType::Int));
+        assert_eq!(
+            result.named_types[0].underlying,
+            Type::Basic(BasicType::Int)
+        );
         // B -> Named(A)
         assert!(matches!(result.named_types[1].underlying, Type::Named(_)));
     }
 
     #[test]
     fn test_resolve_struct_type() {
-        let (result, diag, interner) = resolve_source(
-            "package main\ntype Point struct { x, y int }"
-        );
+        let (result, diag, interner) =
+            resolve_source("package main\ntype Point struct { x, y int }");
 
         assert!(!diag.has_errors());
         assert_eq!(result.named_types.len(), 1);
@@ -727,9 +746,7 @@ mod tests {
 
     #[test]
     fn test_resolve_object_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype Counter object { value int }"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype Counter object { value int }");
 
         assert!(!diag.has_errors());
         assert!(matches!(result.named_types[0].underlying, Type::Obx(_)));
@@ -737,9 +754,7 @@ mod tests {
 
     #[test]
     fn test_resolve_slice_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype IntSlice []int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype IntSlice []int");
 
         assert!(!diag.has_errors());
         if let Type::Slice(s) = &result.named_types[0].underlying {
@@ -751,9 +766,7 @@ mod tests {
 
     #[test]
     fn test_resolve_map_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype StringIntMap map[string]int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype StringIntMap map[string]int");
 
         assert!(!diag.has_errors());
         if let Type::Map(m) = &result.named_types[0].underlying {
@@ -766,9 +779,7 @@ mod tests {
 
     #[test]
     fn test_resolve_array_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype IntArray [10]int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype IntArray [10]int");
 
         assert!(!diag.has_errors());
         if let Type::Array(a) = &result.named_types[0].underlying {
@@ -781,9 +792,7 @@ mod tests {
 
     #[test]
     fn test_resolve_chan_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype IntChan chan int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype IntChan chan int");
 
         assert!(!diag.has_errors());
         if let Type::Chan(c) = &result.named_types[0].underlying {
@@ -796,9 +805,7 @@ mod tests {
 
     #[test]
     fn test_resolve_func_type() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype BinaryOp func(int, int) int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype BinaryOp func(int, int) int");
 
         assert!(!diag.has_errors());
         if let Type::Func(f) = &result.named_types[0].underlying {
@@ -812,9 +819,8 @@ mod tests {
 
     #[test]
     fn test_resolve_interface_type() {
-        let (result, diag, interner) = resolve_source(
-            "package main\ninterface Reader { Read(buf []byte) int }"
-        );
+        let (result, diag, interner) =
+            resolve_source("package main\ninterface Reader { Read(buf []byte) int }");
 
         assert!(!diag.has_errors());
         if let Type::Interface(i) = &result.named_types[0].underlying {
@@ -828,27 +834,21 @@ mod tests {
 
     #[test]
     fn test_resolve_direct_cycle_error() {
-        let (_, diag, _) = resolve_source(
-            "package main\ntype A B\ntype B A"
-        );
+        let (_, diag, _) = resolve_source("package main\ntype A B\ntype B A");
 
         assert!(diag.has_errors());
     }
 
     #[test]
     fn test_resolve_struct_cycle_error() {
-        let (_, diag, _) = resolve_source(
-            "package main\ntype Node struct { next Node }"
-        );
+        let (_, diag, _) = resolve_source("package main\ntype Node struct { next Node }");
 
         assert!(diag.has_errors());
     }
 
     #[test]
     fn test_resolve_object_self_reference_ok() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype Node object { next Node }"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype Node object { next Node }");
 
         // Object types allow self-reference (reference semantics)
         assert!(!diag.has_errors());
@@ -857,9 +857,8 @@ mod tests {
 
     #[test]
     fn test_resolve_slice_self_reference_ok() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype Tree struct { children []Tree }"
-        );
+        let (result, diag, _) =
+            resolve_source("package main\ntype Tree struct { children []Tree }");
 
         // Slice breaks the cycle
         assert!(!diag.has_errors());
@@ -868,27 +867,21 @@ mod tests {
 
     #[test]
     fn test_resolve_map_key_not_comparable_error() {
-        let (_, diag, _) = resolve_source(
-            "package main\ntype BadMap map[[]int]string"
-        );
+        let (_, diag, _) = resolve_source("package main\ntype BadMap map[[]int]string");
 
         assert!(diag.has_errors());
     }
 
     #[test]
     fn test_resolve_undefined_type_error() {
-        let (_, diag, _) = resolve_source(
-            "package main\ntype X UndefinedType"
-        );
+        let (_, diag, _) = resolve_source("package main\ntype X UndefinedType");
 
         assert!(diag.has_errors());
     }
 
     #[test]
     fn test_resolve_array_const_length() {
-        let (result, diag, _) = resolve_source(
-            "package main\nconst N = 5\ntype Arr [N]int"
-        );
+        let (result, diag, _) = resolve_source("package main\nconst N = 5\ntype Arr [N]int");
 
         assert!(!diag.has_errors());
         if let Type::Array(a) = &result.named_types[0].underlying {
@@ -900,21 +893,22 @@ mod tests {
 
     #[test]
     fn test_resolve_forward_reference() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype A B\ntype B int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype A B\ntype B int");
 
         assert!(!diag.has_errors());
         // A -> Named(B)
         assert!(matches!(result.named_types[0].underlying, Type::Named(_)));
         // B -> int
-        assert_eq!(result.named_types[1].underlying, Type::Basic(BasicType::Int));
+        assert_eq!(
+            result.named_types[1].underlying,
+            Type::Basic(BasicType::Int)
+        );
     }
 
     #[test]
     fn test_resolve_nested_struct() {
         let (result, diag, _) = resolve_source(
-            "package main\ntype Inner struct { value int }\ntype Outer struct { inner Inner }"
+            "package main\ntype Inner struct { value int }\ntype Outer struct { inner Inner }",
         );
 
         assert!(!diag.has_errors());
@@ -930,7 +924,7 @@ mod tests {
         assert!(!diag.has_errors());
         if let Type::Interface(i) = &result.named_types[1].underlying {
             assert_eq!(i.methods.len(), 1); // Write
-            assert_eq!(i.embeds.len(), 1);  // Reader
+            assert_eq!(i.embeds.len(), 1); // Reader
             let reader_sym = interner.get("Reader").unwrap();
             assert_eq!(i.embeds[0], reader_sym);
         } else {
@@ -940,9 +934,7 @@ mod tests {
 
     #[test]
     fn test_resolve_send_chan() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype SendChan chan<- int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype SendChan chan<- int");
 
         assert!(!diag.has_errors());
         if let Type::Chan(c) = &result.named_types[0].underlying {
@@ -954,9 +946,7 @@ mod tests {
 
     #[test]
     fn test_resolve_recv_chan() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype RecvChan <-chan int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype RecvChan <-chan int");
 
         assert!(!diag.has_errors());
         if let Type::Chan(c) = &result.named_types[0].underlying {
@@ -968,9 +958,7 @@ mod tests {
 
     #[test]
     fn test_resolve_func_type_multiple_params() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype BinaryFunc func(int, int) int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype BinaryFunc func(int, int) int");
 
         assert!(!diag.has_errors());
         if let Type::Func(f) = &result.named_types[0].underlying {
@@ -983,9 +971,8 @@ mod tests {
 
     #[test]
     fn test_resolve_map_with_struct_key() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype Key struct { id int }\ntype M map[Key]string"
-        );
+        let (result, diag, _) =
+            resolve_source("package main\ntype Key struct { id int }\ntype M map[Key]string");
 
         // Struct with comparable fields is valid as map key
         assert!(!diag.has_errors());
@@ -994,9 +981,7 @@ mod tests {
 
     #[test]
     fn test_resolve_array_of_arrays() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype Matrix [3][3]int"
-        );
+        let (result, diag, _) = resolve_source("package main\ntype Matrix [3][3]int");
 
         assert!(!diag.has_errors());
         if let Type::Array(a) = &result.named_types[0].underlying {
@@ -1020,9 +1005,8 @@ mod tests {
 
     #[test]
     fn test_resolve_mutual_recursion_via_object() {
-        let (result, diag, _) = resolve_source(
-            "package main\ntype A object { b B }\ntype B object { a A }"
-        );
+        let (result, diag, _) =
+            resolve_source("package main\ntype A object { b B }\ntype B object { a A }");
 
         // Object types allow mutual recursion
         assert!(!diag.has_errors());

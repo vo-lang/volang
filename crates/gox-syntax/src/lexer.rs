@@ -5,10 +5,12 @@
 //! - Numeric literals (decimal, hex, octal, binary, float)
 //! - String and rune literals with escape sequences
 //! - Automatic semicolon insertion
+//!
+//! The lexer uses global position space - positions are offset by a base value
+//! so that spans uniquely identify both file and location.
 
 use std::str::Chars;
 
-use gox_common::source::FileId;
 use gox_common::span::Span;
 use gox_common::diagnostics::DiagnosticSink;
 
@@ -17,14 +19,14 @@ use crate::token::{Token, TokenKind};
 
 /// The lexer for GoX source code.
 pub struct Lexer<'src> {
-    /// The file ID for diagnostics.
-    file_id: FileId,
     /// The source text being lexed.
     source: &'src str,
     /// Character iterator.
     chars: Chars<'src>,
-    /// Current byte position in the source.
-    pos: u32,
+    /// Base offset in global position space.
+    base: u32,
+    /// Current byte position in the source (local, 0-indexed).
+    local_pos: u32,
     /// The previous token kind (for semicolon insertion).
     prev_kind: Option<TokenKind>,
     /// Whether we need to insert a semicolon before the next token.
@@ -34,17 +36,26 @@ pub struct Lexer<'src> {
 }
 
 impl<'src> Lexer<'src> {
-    /// Creates a new lexer for the given source.
-    pub fn new(file_id: FileId, source: &'src str) -> Self {
+    /// Creates a new lexer for the given source with a base offset.
+    /// 
+    /// The base offset should come from `SourceMap::file_base()` to ensure
+    /// all positions are globally unique.
+    pub fn new(source: &'src str, base: u32) -> Self {
         Self {
-            file_id,
             source,
             chars: source.chars(),
-            pos: 0,
+            base,
+            local_pos: 0,
             prev_kind: None,
             pending_semicolon: false,
             diagnostics: DiagnosticSink::new(),
         }
+    }
+
+    /// Returns the current global position.
+    #[inline]
+    fn pos(&self) -> u32 {
+        self.base + self.local_pos
     }
 
     /// Returns the diagnostics collected during lexing.
@@ -76,7 +87,8 @@ impl<'src> Lexer<'src> {
         // Handle pending semicolon insertion
         if self.pending_semicolon {
             self.pending_semicolon = false;
-            let span = Span::from_u32(self.pos, self.pos);
+            let pos = self.pos();
+            let span = Span::from_u32(pos, pos);
             self.prev_kind = Some(TokenKind::Semicolon);
             return Token::new(TokenKind::Semicolon, span);
         }
@@ -86,19 +98,20 @@ impl<'src> Lexer<'src> {
         // Check again after skipping whitespace (semicolon may have been triggered by newline)
         if self.pending_semicolon {
             self.pending_semicolon = false;
-            let span = Span::from_u32(self.pos, self.pos);
+            let pos = self.pos();
+            let span = Span::from_u32(pos, pos);
             self.prev_kind = Some(TokenKind::Semicolon);
             return Token::new(TokenKind::Semicolon, span);
         }
 
-        let start = self.pos;
+        let start = self.pos();
 
         let kind = match self.peek() {
             None => TokenKind::Eof,
             Some(c) => self.scan_token(c),
         };
 
-        let span = Span::from_u32(start, self.pos);
+        let span = Span::from_u32(start, self.pos());
         let token = Token::new(kind, span);
 
         // Track for semicolon insertion
@@ -122,7 +135,7 @@ impl<'src> Lexer<'src> {
     /// Advances to the next character and returns it.
     fn advance(&mut self) -> Option<char> {
         let c = self.chars.next()?;
-        self.pos += c.len_utf8() as u32;
+        self.local_pos += c.len_utf8() as u32;
         Some(c)
     }
 
@@ -195,7 +208,7 @@ impl<'src> Lexer<'src> {
 
     /// Skips a block comment (/* ... */).
     fn skip_block_comment(&mut self) {
-        let start = self.pos;
+        let start = self.pos();
         self.advance(); // /
         self.advance(); // *
         
@@ -203,7 +216,7 @@ impl<'src> Lexer<'src> {
         while depth > 0 {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedBlockComment.at(self.file_id, start..self.pos));
+                    self.diagnostics.emit(SyntaxError::UnterminatedBlockComment.at(start..self.pos()));
                     return;
                 }
                 Some('*') if self.peek_next() == Some('/') => {
@@ -425,9 +438,9 @@ impl<'src> Lexer<'src> {
 
             // Invalid character
             _ => {
-                let start = self.pos;
+                let start = self.pos();
                 self.advance();
-                self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(self.file_id, start..self.pos, format!("unexpected character: {:?}", c)));
+                self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(start..self.pos(), format!("unexpected character: {:?}", c)));
                 TokenKind::Invalid
             }
         }
@@ -435,7 +448,7 @@ impl<'src> Lexer<'src> {
 
     /// Scans an identifier or keyword.
     fn scan_ident(&mut self) -> TokenKind {
-        let start = self.pos as usize;
+        let start = self.local_pos as usize;
         
         while let Some(c) = self.peek() {
             if is_ident_continue(c) {
@@ -445,13 +458,12 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        let text = &self.source[start..self.pos as usize];
+        let text = &self.source[start..self.local_pos as usize];
         TokenKind::keyword(text).unwrap_or(TokenKind::Ident)
     }
 
     /// Scans a number literal (integer or float).
     fn scan_number(&mut self) -> TokenKind {
-        let _start = self.pos;
         let first = self.advance().unwrap();
 
         if first == '0' {
@@ -506,8 +518,8 @@ impl<'src> Lexer<'src> {
         if self.peek() == Some('.') {
             self.advance();
             if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
-                let start = self.pos.saturating_sub(3);
-                self.diagnostics.emit(SyntaxError::HexFloatNoDigits.at(self.file_id, start..self.pos));
+                let start = self.pos().saturating_sub(3);
+                self.diagnostics.emit(SyntaxError::HexFloatNoDigits.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             self.scan_hex_digits();
@@ -515,8 +527,8 @@ impl<'src> Lexer<'src> {
         }
         
         if !self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
-            let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::HexNoDigits.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(2);
+            self.diagnostics.emit(SyntaxError::HexNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -541,8 +553,8 @@ impl<'src> Lexer<'src> {
         self.advance(); // o or O
         
         if !self.peek().map_or(false, |c| matches!(c, '0'..='7')) {
-            let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::OctalNoDigits.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(2);
+            self.diagnostics.emit(SyntaxError::OctalNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -550,9 +562,9 @@ impl<'src> Lexer<'src> {
             match c {
                 '0'..='7' | '_' => { self.advance(); }
                 '8' | '9' => {
-                    let digit_start = self.pos;
+                    let digit_start = self.pos();
                     self.advance();
-                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(self.file_id, digit_start..self.pos, format!("invalid digit '{}' in octal literal", c)));
+                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(digit_start..self.pos(), format!("invalid digit '{}' in octal literal", c)));
                 }
                 _ => break,
             }
@@ -566,8 +578,8 @@ impl<'src> Lexer<'src> {
         self.advance(); // b or B
         
         if !self.peek().map_or(false, |c| matches!(c, '0' | '1')) {
-            let start = self.pos.saturating_sub(2);
-            self.diagnostics.emit(SyntaxError::BinaryNoDigits.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(2);
+            self.diagnostics.emit(SyntaxError::BinaryNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -575,9 +587,9 @@ impl<'src> Lexer<'src> {
             match c {
                 '0' | '1' | '_' => { self.advance(); }
                 '2'..='9' => {
-                    let digit_start = self.pos;
+                    let digit_start = self.pos();
                     self.advance();
-                    self.diagnostics.emit(SyntaxError::BinaryInvalidDigit.at_with_message(self.file_id, digit_start..self.pos, format!("invalid digit '{}' in binary literal", c)));
+                    self.diagnostics.emit(SyntaxError::BinaryInvalidDigit.at_with_message(digit_start..self.pos(), format!("invalid digit '{}' in binary literal", c)));
                 }
                 _ => break,
             }
@@ -628,8 +640,8 @@ impl<'src> Lexer<'src> {
         }
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
-            let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(1);
+            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -640,8 +652,8 @@ impl<'src> Lexer<'src> {
     /// Scans a hex float exponent (required for hex floats).
     fn scan_hex_exponent(&mut self) -> TokenKind {
         if self.peek() != Some('p') && self.peek() != Some('P') {
-            let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::HexFloatNoExponent.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(1);
+            self.diagnostics.emit(SyntaxError::HexFloatNoExponent.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -652,8 +664,8 @@ impl<'src> Lexer<'src> {
         }
 
         if !self.peek().map_or(false, |c| c.is_ascii_digit()) {
-            let start = self.pos.saturating_sub(1);
-            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(self.file_id, start..self.pos));
+            let start = self.pos().saturating_sub(1);
+            self.diagnostics.emit(SyntaxError::ExponentNoDigits.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -663,13 +675,13 @@ impl<'src> Lexer<'src> {
 
     /// Scans a string literal.
     fn scan_string(&mut self) -> TokenKind {
-        let start = self.pos;
+        let start = self.pos();
         self.advance(); // opening "
 
         loop {
             match self.peek() {
                 None | Some('\n') => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedString.at(self.file_id, start..self.pos));
+                    self.diagnostics.emit(SyntaxError::UnterminatedString.at(start..self.pos()));
                     return TokenKind::Invalid;
                 }
                 Some('"') => {
@@ -689,13 +701,13 @@ impl<'src> Lexer<'src> {
 
     /// Scans a raw string literal.
     fn scan_raw_string(&mut self) -> TokenKind {
-        let start = self.pos;
+        let start = self.pos();
         self.advance(); // opening `
 
         loop {
             match self.peek() {
                 None => {
-                    self.diagnostics.emit(SyntaxError::UnterminatedRawString.at(self.file_id, start..self.pos));
+                    self.diagnostics.emit(SyntaxError::UnterminatedRawString.at(start..self.pos()));
                     return TokenKind::Invalid;
                 }
                 Some('`') => {
@@ -711,17 +723,17 @@ impl<'src> Lexer<'src> {
 
     /// Scans a rune literal.
     fn scan_rune(&mut self) -> TokenKind {
-        let start = self.pos;
+        let start = self.pos();
         self.advance(); // opening '
 
         match self.peek() {
             None | Some('\n') => {
-                self.diagnostics.emit(SyntaxError::UnterminatedRune.at(self.file_id, start..self.pos));
+                self.diagnostics.emit(SyntaxError::UnterminatedRune.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             Some('\'') => {
                 self.advance();
-                self.diagnostics.emit(SyntaxError::EmptyRune.at(self.file_id, start..self.pos));
+                self.diagnostics.emit(SyntaxError::EmptyRune.at(start..self.pos()));
                 return TokenKind::Invalid;
             }
             Some('\\') => {
@@ -748,7 +760,7 @@ impl<'src> Lexer<'src> {
                 self.advance();
             }
             
-            self.diagnostics.emit(SyntaxError::MultiCharRune.at(self.file_id, start..self.pos));
+            self.diagnostics.emit(SyntaxError::MultiCharRune.at(start..self.pos()));
             return TokenKind::Invalid;
         }
 
@@ -758,7 +770,7 @@ impl<'src> Lexer<'src> {
 
     /// Scans an escape sequence.
     fn scan_escape_sequence(&mut self) {
-        let start = self.pos.saturating_sub(1);
+        let start = self.pos().saturating_sub(1);
         
         match self.peek() {
             Some('a') | Some('b') | Some('f') | Some('n') | Some('r') | 
@@ -783,10 +795,10 @@ impl<'src> Lexer<'src> {
             }
             Some(c) => {
                 self.advance();
-                self.diagnostics.emit(SyntaxError::UnknownEscape.at_with_message(self.file_id, start..self.pos, format!("unknown escape sequence: \\{}", c)));
+                self.diagnostics.emit(SyntaxError::UnknownEscape.at_with_message(start..self.pos(), format!("unknown escape sequence: \\{}", c)));
             }
             None => {
-                self.diagnostics.emit(SyntaxError::UnterminatedEscape.at(self.file_id, start..self.pos));
+                self.diagnostics.emit(SyntaxError::UnterminatedEscape.at(start..self.pos()));
             }
         }
     }
@@ -799,7 +811,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(SyntaxError::EscapeHexDigits.at_with_message(self.file_id, start..self.pos, format!("escape sequence requires {} hex digits", digits)));
+                    self.diagnostics.emit(SyntaxError::EscapeHexDigits.at_with_message(start..self.pos(), format!("escape sequence requires {} hex digits", digits)));
                     return;
                 }
             }
@@ -814,7 +826,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                 }
                 _ => {
-                    self.diagnostics.emit(SyntaxError::EscapeOctalDigits.at(self.file_id, start..self.pos));
+                    self.diagnostics.emit(SyntaxError::EscapeOctalDigits.at(start..self.pos()));
                     return;
                 }
             }
@@ -837,13 +849,13 @@ mod tests {
     use super::*;
 
     fn lex(source: &str) -> Vec<TokenKind> {
-        let lexer = Lexer::new(FileId::DUMMY, source);
+        let lexer = Lexer::new(source, 0);
         let (tokens, _) = lexer.collect_tokens();
         tokens.into_iter().map(|t| t.kind).collect()
     }
 
     fn lex_with_errors(source: &str) -> (Vec<TokenKind>, DiagnosticSink) {
-        let lexer = Lexer::new(FileId::DUMMY, source);
+        let lexer = Lexer::new(source, 0);
         let (tokens, diags) = lexer.collect_tokens();
         (tokens.into_iter().map(|t| t.kind).collect(), diags)
     }
@@ -1128,5 +1140,16 @@ mod tests {
         // <-chan should be parsed as <-, chan
         let tokens = lex("<-chan");
         assert_eq!(tokens, vec![TokenKind::Arrow, TokenKind::Chan, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_global_positions() {
+        // Test that positions are offset by base
+        let lexer = Lexer::new("foo", 100);
+        let (tokens, _) = lexer.collect_tokens();
+        
+        // First token "foo" should be at positions 100-103
+        assert_eq!(tokens[0].span.start.0, 100);
+        assert_eq!(tokens[0].span.end.0, 103);
     }
 }

@@ -45,11 +45,10 @@
 //!
 //! ```ignore
 //! use gox_analysis::typecheck_file;
-//! use gox_common::{DiagnosticSink, FileId, SymbolInterner};
+//! use gox_common::DiagnosticSink;
 //! use gox_syntax::parse;
 //!
-//! let file_id = FileId::new(0);
-//! let (file, parse_diag, interner) = parse(file_id, source);
+//! let (file, parse_diag, interner) = parse(source, 0);
 //! let mut diag = DiagnosticSink::new();
 //! let result = typecheck_file(&file, &interner, &mut diag);
 //! if diag.has_errors() {
@@ -222,12 +221,10 @@ pub fn typecheck_files_with_imports(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gox_common::FileId;
     use gox_syntax::parse;
 
     fn typecheck_source(source: &str) -> (TypeCheckResult, DiagnosticSink) {
-        let file_id = FileId::new(0);
-        let (file, _parse_diag, interner) = parse(file_id, source);
+        let (file, _parse_diag, interner) = parse(source, 0);
         let mut diag = DiagnosticSink::new();
         let result = typecheck_file(&file, &interner, &mut diag);
         (result, diag)

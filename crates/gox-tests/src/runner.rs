@@ -17,7 +17,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gox_common::diagnostics::DiagnosticSink;
-use gox_common::source::FileId;
 use gox_common::vfs::{FileSet, RealFs};
 use gox_syntax::parser;
 use gox_analysis::analyze_project;
@@ -151,7 +150,7 @@ pub fn run_single_file(path: &Path) -> TestResult {
     let test = parse_test_file(&content);
     
     // 1. Parse
-    let (file, parse_diag, interner) = parser::parse(FileId::new(0), &test.source);
+    let (file, parse_diag, interner) = parser::parse(&test.source, 0);
     
     // Check parser section if present
     if let Some(expected) = &test.parser {

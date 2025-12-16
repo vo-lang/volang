@@ -35,9 +35,9 @@
 //! - **Block scope**: Variables declared in `if`, `for`, `switch` blocks
 //! - **Shadowing**: Allows inner scopes to shadow outer declarations
 
+mod builtin;
 mod expr;
 mod stmt;
-mod builtin;
 #[cfg(test)]
 mod tests;
 
@@ -47,10 +47,7 @@ use gox_syntax::ast::{self, Expr};
 use crate::errors::TypeError;
 use crate::resolve::ResolveResult;
 use crate::scope::{Entity, Scope, ScopeKind, VarEntity};
-use crate::types::{
-    BasicType, FuncType, NamedTypeInfo,
-    Type, TypeRegistry,
-};
+use crate::types::{BasicType, FuncType, NamedTypeInfo, Type, TypeRegistry};
 
 /// Offset for local type IDs to distinguish from package-level types.
 const LOCAL_TYPE_ID_OFFSET: u32 = 0x1000_0000;
@@ -63,8 +60,6 @@ pub struct TypeChecker<'a> {
     pub(crate) diagnostics: &'a mut DiagnosticSink,
     /// Package-level scope from Phase 2 (for fallback lookups).
     pub(crate) package_scope: &'a Scope,
-    /// File ID for diagnostics (default 0 for single-file).
-    pub(crate) file_id: gox_common::FileId,
     /// Current local scope stack (owned, for function bodies).
     pub(crate) local_scope: Option<Scope>,
     /// Named type information from Phase 2.
@@ -78,9 +73,13 @@ pub struct TypeChecker<'a> {
     /// Imported package names (for cross-package calls).
     pub(crate) imported_packages: std::collections::HashSet<String>,
     /// Imported package exports (pkg_name -> symbol_name -> type).
-    pub(crate) package_exports: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
+    pub(crate) package_exports:
+        std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
     /// Imported package exported types with methods (pkg_name -> type_name -> method_name -> type).
-    pub(crate) package_exported_types: std::collections::HashMap<String, std::collections::HashMap<String, std::collections::HashMap<String, Type>>>,
+    pub(crate) package_exported_types: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
+    >,
     /// Local type declarations (function-scoped types).
     pub(crate) local_types: Vec<NamedTypeInfo>,
     /// Expression types: (span_start, span_end) -> Type (for codegen to look up any expression's type)
@@ -99,7 +98,6 @@ impl<'a> TypeChecker<'a> {
             interner,
             diagnostics,
             package_scope: &resolve_result.scope,
-            file_id: gox_common::FileId::new(0),
             local_scope: None,
             named_types: &resolve_result.named_types,
             registry: TypeRegistry::new(&resolve_result.named_types),
@@ -112,60 +110,71 @@ impl<'a> TypeChecker<'a> {
             expr_types: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Records the type of an expression for later use by codegen.
     /// Uses (start, end) as key to distinguish nested expressions (e.g., `m` vs `m[1]`).
     pub(crate) fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
-        self.expr_types.insert((expr.span.start.0, expr.span.end.0), ty);
+        self.expr_types
+            .insert((expr.span.start.0, expr.span.end.0), ty);
     }
-    
+
     /// Sets imported packages for cross-package call resolution.
     pub fn set_imported_packages(
         &mut self,
         imports: &[crate::project::ResolvedImport],
-        exports: &std::collections::HashMap<String, std::collections::HashMap<String, crate::project::ExportedSymbol>>,
-        exported_types: &std::collections::HashMap<String, std::collections::HashMap<String, crate::project::ExportedType>>,
+        exports: &std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, crate::project::ExportedSymbol>,
+        >,
+        exported_types: &std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, crate::project::ExportedType>,
+        >,
     ) {
         for import in imports {
             if !import.package_name.is_empty() {
-                let local_name = import.alias.as_ref()
-                    .unwrap_or(&import.package_name);
+                let local_name = import.alias.as_ref().unwrap_or(&import.package_name);
                 self.imported_packages.insert(local_name.clone());
-                
+
                 // Copy the exports for this package
                 if let Some(pkg_exports) = exports.get(&import.package_name) {
-                    let type_map: std::collections::HashMap<String, Type> = pkg_exports.iter()
+                    let type_map: std::collections::HashMap<String, Type> = pkg_exports
+                        .iter()
                         .map(|(name, sym)| (name.clone(), sym.ty.clone()))
                         .collect();
                     self.package_exports.insert(local_name.clone(), type_map);
                 }
-                
+
                 // Copy the exported types with methods for this package
                 if let Some(pkg_types) = exported_types.get(&import.package_name) {
-                    let mut types_map: std::collections::HashMap<String, std::collections::HashMap<String, Type>> = std::collections::HashMap::new();
+                    let mut types_map: std::collections::HashMap<
+                        String,
+                        std::collections::HashMap<String, Type>,
+                    > = std::collections::HashMap::new();
                     for (type_name, exported_type) in pkg_types {
                         types_map.insert(type_name.clone(), exported_type.methods.clone());
                     }
-                    self.package_exported_types.insert(local_name.clone(), types_map);
+                    self.package_exported_types
+                        .insert(local_name.clone(), types_map);
                 }
             }
         }
     }
 
     // ========== Error reporting ==========
-    
+
     /// Emits a type error diagnostic.
     pub(crate) fn error(&mut self, err: TypeError, span: Span) {
-        self.diagnostics.emit(err.at(self.file_id, span));
+        self.diagnostics.emit(err.at(span));
     }
 
     /// Emits a type error diagnostic with a custom message.
     pub(crate) fn error_msg(&mut self, err: TypeError, span: Span, message: impl Into<String>) {
-        self.diagnostics.emit(err.at_with_message(self.file_id, span, message));
+        self.diagnostics.emit(err.at_with_message(span, message));
     }
 
     // ========== Scope management ==========
-    
+
     /// Looks up a symbol, checking local scope first, then package scope.
     pub(crate) fn lookup(&self, symbol: Symbol) -> Option<&Entity> {
         // First check local scope
@@ -194,11 +203,14 @@ impl<'a> TypeChecker<'a> {
     /// Defines a variable in the current local scope.
     pub(crate) fn define_var(&mut self, symbol: Symbol, ty: Type, span: Span) {
         if let Some(ref mut scope) = self.local_scope {
-            scope.insert(symbol, Entity::Var(VarEntity {
-                ty,
-                constant: None,
-                span,
-            }));
+            scope.insert(
+                symbol,
+                Entity::Var(VarEntity {
+                    ty,
+                    constant: None,
+                    span,
+                }),
+            );
         }
     }
 
@@ -226,7 +238,10 @@ impl<'a> TypeChecker<'a> {
 
         // Set expected return types for this function
         let old_return_types = std::mem::take(&mut self.return_types);
-        self.return_types = func.sig.results.iter()
+        self.return_types = func
+            .sig
+            .results
+            .iter()
             .map(|r| self.resolve_type_expr(&r.ty))
             .collect();
 
@@ -287,7 +302,9 @@ impl<'a> TypeChecker<'a> {
             }
             ast::TypeExprKind::Slice(elem) => {
                 let elem_ty = self.resolve_type_expr(elem);
-                Type::Slice(crate::types::SliceType { elem: Box::new(elem_ty) })
+                Type::Slice(crate::types::SliceType {
+                    elem: Box::new(elem_ty),
+                })
             }
             ast::TypeExprKind::Array(arr) => {
                 let elem_ty = self.resolve_type_expr(&arr.elem);
@@ -318,17 +335,21 @@ impl<'a> TypeChecker<'a> {
             }
             ast::TypeExprKind::Interface(iface) => {
                 // Resolve interface methods
-                let methods = iface.elems.iter().filter_map(|elem| {
-                    if let ast::InterfaceElem::Method(m) = elem {
-                        let sig = self.resolve_func_sig(&m.sig);
-                        Some(crate::types::Method {
-                            name: m.name.symbol,
-                            sig,
-                        })
-                    } else {
-                        None
-                    }
-                }).collect();
+                let methods = iface
+                    .elems
+                    .iter()
+                    .filter_map(|elem| {
+                        if let ast::InterfaceElem::Method(m) = elem {
+                            let sig = self.resolve_func_sig(&m.sig);
+                            Some(crate::types::Method {
+                                name: m.name.symbol,
+                                sig,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 Type::Interface(crate::types::InterfaceType {
                     methods,
                     embeds: vec![],
@@ -351,9 +372,10 @@ impl<'a> TypeChecker<'a> {
         let mut fields = Vec::new();
         for ast_field in ast_fields {
             let ty = self.resolve_type_expr(&ast_field.ty);
-            let tag = ast_field.tag.as_ref().map(|t| {
-                self.interner.resolve(t.raw).unwrap_or("").to_string()
-            });
+            let tag = ast_field
+                .tag
+                .as_ref()
+                .map(|t| self.interner.resolve(t.raw).unwrap_or("").to_string());
             if ast_field.names.is_empty() {
                 // Embedded field
                 let embedded_name = self.extract_type_name(&ast_field.ty);
@@ -388,7 +410,9 @@ impl<'a> TypeChecker<'a> {
 
     /// Resolves a function signature to a FuncType.
     fn resolve_func_sig(&self, sig: &ast::FuncSig) -> FuncType {
-        let params: Vec<Type> = sig.params.iter()
+        let params: Vec<Type> = sig
+            .params
+            .iter()
             .flat_map(|p| {
                 let ty = self.resolve_type_expr(&p.ty);
                 // Repeat the type for each name (or once if no names)
@@ -396,11 +420,13 @@ impl<'a> TypeChecker<'a> {
                 std::iter::repeat_n(ty, count)
             })
             .collect();
-        
-        let results: Vec<Type> = sig.results.iter()
+
+        let results: Vec<Type> = sig
+            .results
+            .iter()
             .map(|r| self.resolve_type_expr(&r.ty))
             .collect();
-        
+
         FuncType {
             params,
             results,
@@ -418,4 +444,3 @@ pub fn check_types<'a>(
 ) -> TypeChecker<'a> {
     TypeChecker::new(resolve_result, interner, diagnostics)
 }
-

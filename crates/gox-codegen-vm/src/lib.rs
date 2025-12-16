@@ -618,14 +618,13 @@ impl std::error::Error for CodegenError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gox_common::{DiagnosticSink, FileId};
+    use gox_common::DiagnosticSink;
     use gox_syntax::parse;
     use gox_analysis::typecheck_file;
     use gox_vm::VmResult;
 
     fn compile_and_run(source: &str) -> VmResult {
-        let file_id = FileId::new(0);
-        let (file, _parse_diag, interner) = parse(file_id, source);
+        let (file, _parse_diag, interner) = parse(source, 0);
         let mut diag = DiagnosticSink::new();
         let result = typecheck_file(&file, &interner, &mut diag);
         

@@ -1025,7 +1025,6 @@ pub fn collect_types_multi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gox_common::FileId;
     use gox_syntax::parse;
 
     #[test]
@@ -1054,8 +1053,7 @@ mod tests {
     }
 
     fn collect_source(source: &str) -> (CollectResult, DiagnosticSink, SymbolInterner) {
-        let file_id = FileId::new(0);
-        let (file, _parse_diag, interner) = parse(file_id, source);
+        let (file, _parse_diag, interner) = parse(source, 0);
 
         let mut collect_diag = DiagnosticSink::new();
         let result = collect_types(&file, &interner, &mut collect_diag);

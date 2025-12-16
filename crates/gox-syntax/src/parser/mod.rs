@@ -3,6 +3,9 @@
 //! This module provides a recursive descent parser that converts a token stream
 //! into an Abstract Syntax Tree (AST). Expression parsing uses Pratt parsing
 //! for correct precedence handling.
+//!
+//! With global position space, the parser accepts a `base` offset. All span
+//! positions in the resulting AST are global (base + local offset).
 
 mod decl;
 mod expr;
@@ -10,7 +13,6 @@ mod stmt;
 mod types;
 
 use gox_common::diagnostics::DiagnosticSink;
-use gox_common::source::FileId;
 use gox_common::span::{BytePos, Span};
 use gox_common::symbol::{Ident, SymbolInterner};
 
@@ -24,8 +26,8 @@ pub type ParseResult<T> = Result<T, ()>;
 
 /// The parser for GoX source code.
 pub struct Parser<'a> {
-    /// The file ID for diagnostics.
-    file_id: FileId,
+    /// Base offset for global positions.
+    base: u32,
     /// The source text.
     source: &'a str,
     /// The current token.
@@ -43,14 +45,17 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    /// Creates a new parser from source code.
-    pub fn new(file_id: FileId, source: &'a str) -> Self {
-        let mut lexer = Lexer::new(file_id, source);
+    /// Creates a new parser from source code with a base offset.
+    /// 
+    /// The base offset should come from `SourceMap::file_base()` to ensure
+    /// all positions are globally unique.
+    pub fn new(source: &'a str, base: u32) -> Self {
+        let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
 
         Self {
-            file_id,
+            base,
             source,
             current,
             peek,
@@ -62,13 +67,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Creates a new parser with a shared symbol interner.
-    pub fn with_interner(file_id: FileId, source: &'a str, interner: SymbolInterner) -> Self {
-        let mut lexer = Lexer::new(file_id, source);
+    pub fn with_interner(source: &'a str, base: u32, interner: SymbolInterner) -> Self {
+        let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
 
         Self {
-            file_id,
+            base,
             source,
             current,
             peek,
@@ -277,12 +282,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Converts a global span to a local range for indexing into source.
+    fn span_to_local_range(&self, span: Span) -> std::ops::Range<usize> {
+        let start = (span.start.0 - self.base) as usize;
+        let end = (span.end.0 - self.base) as usize;
+        start..end
+    }
+
     fn span_text(&self, span: Span) -> &str {
-        &self.source[span.to_range()]
+        &self.source[self.span_to_local_range(span)]
     }
 
     fn make_ident(&mut self, token: &Token) -> Ident {
-        let text = &self.source[token.span.to_range()];
+        let text = &self.source[self.span_to_local_range(token.span)];
         let symbol = self.interner.intern(text);
         Ident::new(symbol, token.span)
     }
@@ -294,12 +306,12 @@ impl<'a> Parser<'a> {
     fn error(&mut self, message: impl Into<String>) {
         let span = self.current.span;
         self.diagnostics
-            .emit(SyntaxError::UnexpectedToken.at_with_message(self.file_id, span, message));
+            .emit(SyntaxError::UnexpectedToken.at_with_message(span, message));
     }
 
     fn error_at(&mut self, span: Span, message: impl Into<String>) {
         self.diagnostics
-            .emit(SyntaxError::UnexpectedToken.at_with_message(self.file_id, span, message));
+            .emit(SyntaxError::UnexpectedToken.at_with_message(span, message));
     }
 
     fn error_expected(&mut self, expected: &str) {
@@ -375,12 +387,12 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_string_lit(&mut self) -> ParseResult<StringLit> {
         if self.at(TokenKind::StringLit) {
             let token = self.advance();
-            let text = &self.source[token.span.to_range()];
+            let text = &self.source[self.span_to_local_range(token.span)];
             let raw = self.interner.intern(text);
             Ok(StringLit { raw, is_raw: false })
         } else if self.at(TokenKind::RawStringLit) {
             let token = self.advance();
-            let text = &self.source[token.span.to_range()];
+            let text = &self.source[self.span_to_local_range(token.span)];
             let raw = self.interner.intern(text);
             Ok(StringLit { raw, is_raw: true })
         } else {
@@ -411,8 +423,12 @@ impl<'a> Parser<'a> {
 }
 
 /// Parses source code and returns the AST.
-pub fn parse(file_id: FileId, source: &str) -> (File, DiagnosticSink, SymbolInterner) {
-    let mut parser = Parser::new(file_id, source);
+/// 
+/// # Arguments
+/// * `source` - The source code text
+/// * `base` - Base offset for global positions (from SourceMap::file_base)
+pub fn parse(source: &str, base: u32) -> (File, DiagnosticSink, SymbolInterner) {
+    let mut parser = Parser::new(source, base);
     let file = parser.parse_file().unwrap_or_else(|()| File {
         package: None,
         imports: Vec::new(),
@@ -426,11 +442,11 @@ pub fn parse(file_id: FileId, source: &str) -> (File, DiagnosticSink, SymbolInte
 
 /// Parses source code with a shared interner (for multi-file packages).
 pub fn parse_with_interner(
-    file_id: FileId,
     source: &str,
+    base: u32,
     interner: SymbolInterner,
 ) -> (File, DiagnosticSink, SymbolInterner) {
-    let mut parser = Parser::with_interner(file_id, source, interner);
+    let mut parser = Parser::with_interner(source, base, interner);
     let file = parser.parse_file().unwrap_or_else(|()| File {
         package: None,
         imports: Vec::new(),
@@ -445,10 +461,9 @@ pub fn parse_with_interner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gox_common::source::FileId;
 
     fn parse_str(source: &str) -> (File, DiagnosticSink) {
-        let (file, diagnostics, _) = parse(FileId::new(0), source);
+        let (file, diagnostics, _) = parse(source, 0);
         (file, diagnostics)
     }
 
@@ -1173,5 +1188,18 @@ mod tests {
     fn test_error_unexpected_token() {
         let (_, diags) = parse_str("func main() { + }");
         assert!(diags.has_errors());
+    }
+
+    // =========================================================================
+    // Global position tests
+    // =========================================================================
+
+    #[test]
+    fn test_global_positions() {
+        // Parse with a base offset of 100
+        let (file, _, _) = parse("var x int", 100);
+        
+        // Check that spans have been offset
+        assert!(file.span.start.0 >= 100);
     }
 }

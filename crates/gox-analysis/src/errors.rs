@@ -1,9 +1,11 @@
 //! Centralized diagnostic definitions for the GoX type checker.
 //!
 //! All type checker error codes are defined here for easy reference and testing.
+//!
+//! With global position space, all error reporting methods use `Span` directly
+//! without requiring a separate `FileId`.
 
 use gox_common::{Diagnostic, Label, Span};
-use gox_common::source::FileId;
 
 /// Type checker error codes (2xxx range).
 ///
@@ -295,7 +297,7 @@ impl TypeError {
         }
     }
 
-    /// Creates a diagnostic with this error code.
+    /// Creates a diagnostic with this error code (no location).
     pub fn diagnostic(self) -> Diagnostic {
         Diagnostic::error(self.message()).with_code(self.code())
     }
@@ -306,17 +308,18 @@ impl TypeError {
     }
 
     /// Creates a diagnostic with this error code and a span label.
-    pub fn at(self, file_id: FileId, span: impl Into<Span>) -> Diagnostic {
+    /// Uses global position - no FileId needed.
+    pub fn at(self, span: impl Into<Span>) -> Diagnostic {
         Diagnostic::error(self.message())
             .with_code(self.code())
-            .with_label(Label::primary(file_id, span))
+            .with_label(Label::primary(span))
     }
 
     /// Creates a diagnostic with this error code, custom message, and span.
-    pub fn at_with_message(self, file_id: FileId, span: impl Into<Span>, message: impl Into<String>) -> Diagnostic {
+    pub fn at_with_message(self, span: impl Into<Span>, message: impl Into<String>) -> Diagnostic {
         Diagnostic::error(message)
             .with_code(self.code())
-            .with_label(Label::primary(file_id, span))
+            .with_label(Label::primary(span))
     }
 
     /// Creates a formatted message with a name (for errors that reference identifiers).
@@ -367,5 +370,13 @@ mod tests {
     fn test_with_name() {
         assert_eq!(TypeError::Undefined.with_name("foo"), "undefined: foo");
         assert_eq!(TypeError::Redeclared.with_name("x"), "x redeclared in this block");
+    }
+
+    #[test]
+    fn test_at_with_span() {
+        let diag = TypeError::Undefined.at(10u32..20u32);
+        assert_eq!(diag.code, Some(2100));
+        assert_eq!(diag.labels.len(), 1);
+        assert_eq!(diag.labels[0].span.start.0, 10);
     }
 }

@@ -2,6 +2,11 @@
 //!
 //! This module provides comprehensive error and warning reporting with
 //! source spans, labels, and rich formatting for both internal use and end users.
+//!
+//! # Global Position Space
+//!
+//! With the global position space design, `Span` alone uniquely identifies both
+//! the file and location. Labels no longer need a separate `FileId` field.
 
 use std::fmt;
 
@@ -15,7 +20,7 @@ use codespan_reporting::term::{
     Config,
 };
 
-use crate::source::{FileId, SourceMap};
+use crate::source::SourceMap;
 use crate::span::Span;
 
 /// Severity level of a diagnostic.
@@ -68,13 +73,13 @@ impl From<Severity> for CSSeverity {
 }
 
 /// A label attached to a diagnostic, pointing to a specific location in source code.
+/// 
+/// With global position space, the span alone identifies the file.
 #[derive(Clone, Debug)]
 pub struct Label {
     /// The style of the label (primary or secondary).
     pub style: LabelStyle,
-    /// The file containing this label.
-    pub file_id: FileId,
-    /// The span this label points to.
+    /// The span this label points to (global position).
     pub span: Span,
     /// An optional message for this label.
     pub message: Option<String>,
@@ -82,20 +87,18 @@ pub struct Label {
 
 impl Label {
     /// Creates a primary label (the main location of the diagnostic).
-    pub fn primary(file_id: FileId, span: impl Into<Span>) -> Self {
+    pub fn primary(span: impl Into<Span>) -> Self {
         Self {
             style: LabelStyle::Primary,
-            file_id,
             span: span.into(),
             message: None,
         }
     }
 
     /// Creates a secondary label (additional context).
-    pub fn secondary(file_id: FileId, span: impl Into<Span>) -> Self {
+    pub fn secondary(span: impl Into<Span>) -> Self {
         Self {
             style: LabelStyle::Secondary,
-            file_id,
             span: span.into(),
             message: None,
         }
@@ -111,9 +114,7 @@ impl Label {
 /// A suggested fix for a diagnostic.
 #[derive(Clone, Debug)]
 pub struct Suggestion {
-    /// The file containing the suggestion.
-    pub file_id: FileId,
-    /// The span to replace.
+    /// The span to replace (global position).
     pub span: Span,
     /// The replacement text.
     pub replacement: String,
@@ -124,13 +125,11 @@ pub struct Suggestion {
 impl Suggestion {
     /// Creates a new suggestion.
     pub fn new(
-        file_id: FileId,
         span: impl Into<Span>,
         replacement: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
         Self {
-            file_id,
             span: span.into(),
             replacement: replacement.into(),
             message: message.into(),
@@ -429,16 +428,19 @@ impl<'a> DiagnosticEmitter<'a> {
         let labels: Vec<CSLabel<usize>> = diagnostic
             .labels
             .iter()
-            .map(|label| {
-                let mut cs_label = CSLabel::new(
-                    label.style,
-                    label.file_id.as_u32() as usize,
-                    label.span.to_range(),
-                );
+            .filter_map(|label| {
+                // Look up file from global span
+                let file = self.source_map.lookup_span(label.span)?;
+                let file_id = file.id().as_u32() as usize;
+                // Convert global span to local range for codespan-reporting
+                let start = file.local_offset(label.span.start) as usize;
+                let end = file.local_offset(label.span.end) as usize;
+                
+                let mut cs_label = CSLabel::new(label.style, file_id, start..end);
                 if let Some(msg) = &label.message {
                     cs_label = cs_label.with_message(msg);
                 }
-                cs_label
+                Some(cs_label)
             })
             .collect();
 
@@ -495,11 +497,10 @@ mod tests {
 
     #[test]
     fn test_label_creation() {
-        let label = Label::primary(FileId::new(0), 10u32..20u32)
+        let label = Label::primary(10u32..20u32)
             .with_message("test message");
         
         assert_eq!(label.style, LabelStyle::Primary);
-        assert_eq!(label.file_id.as_u32(), 0);
         assert_eq!(label.span.start.0, 10);
         assert_eq!(label.span.end.0, 20);
         assert_eq!(label.message, Some("test message".to_string()));
@@ -507,22 +508,19 @@ mod tests {
 
     #[test]
     fn test_label_secondary() {
-        let label = Label::secondary(FileId::new(1), 5u32..15u32);
+        let label = Label::secondary(5u32..15u32);
         
         assert_eq!(label.style, LabelStyle::Secondary);
-        assert_eq!(label.file_id.as_u32(), 1);
     }
 
     #[test]
     fn test_suggestion() {
         let suggestion = Suggestion::new(
-            FileId::new(0),
             10u32..15u32,
             "replacement",
             "try this instead",
         );
         
-        assert_eq!(suggestion.file_id.as_u32(), 0);
         assert_eq!(suggestion.span.start.0, 10);
         assert_eq!(suggestion.replacement, "replacement");
         assert_eq!(suggestion.message, "try this instead");
@@ -532,7 +530,7 @@ mod tests {
     fn test_diagnostic_creation() {
         let diag = Diagnostic::error("test error")
             .with_code(1)
-            .with_label(Label::primary(FileId::new(0), 0u32..5u32))
+            .with_label(Label::primary(0u32..5u32))
             .with_note("this is a note");
         
         assert!(diag.is_error());
@@ -555,8 +553,8 @@ mod tests {
     fn test_diagnostic_with_multiple_labels() {
         let diag = Diagnostic::error("multiple labels")
             .with_labels([
-                Label::primary(FileId::new(0), 0u32..5u32),
-                Label::secondary(FileId::new(0), 10u32..15u32),
+                Label::primary(0u32..5u32),
+                Label::secondary(10u32..15u32),
             ]);
         
         assert_eq!(diag.labels.len(), 2);
@@ -647,15 +645,13 @@ mod tests {
 
     #[test]
     fn test_diagnostic_emitter() {
-        use crate::source::SourceMap;
-        
         let mut source_map = SourceMap::new();
-        let file_id = source_map.add_file("test.gox", "func main() {}");
+        source_map.add_file("test.gox", "func main() {}");
         
         let emitter = DiagnosticEmitter::new(&source_map);
         
         let diagnostic = Diagnostic::error("undefined variable")
-            .with_label(Label::primary(file_id, 5u32..9u32).with_message("not found"));
+            .with_label(Label::primary(5u32..9u32).with_message("not found"));
         
         let output = emitter.emit_to_string(&diagnostic);
         
@@ -665,14 +661,12 @@ mod tests {
 
     #[test]
     fn test_diagnostic_emitter_all() {
-        use crate::source::SourceMap;
-        
         let mut source_map = SourceMap::new();
-        let file_id = source_map.add_file("test.gox", "var x = 1\nvar y = 2");
+        source_map.add_file("test.gox", "var x = 1\nvar y = 2");
         
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::error("error 1").with_label(Label::primary(file_id, 0u32..3u32)));
-        sink.emit(Diagnostic::warning("warning 1").with_label(Label::primary(file_id, 10u32..13u32)));
+        sink.emit(Diagnostic::error("error 1").with_label(Label::primary(0u32..3u32)));
+        sink.emit(Diagnostic::warning("warning 1").with_label(Label::primary(10u32..13u32)));
         
         let emitter = DiagnosticEmitter::new(&source_map);
         let output = emitter.emit_all_to_string(&sink);
@@ -694,7 +688,6 @@ mod tests {
     fn test_diagnostic_with_suggestion() {
         let diag = Diagnostic::error("missing semicolon")
             .with_suggestion(Suggestion::new(
-                FileId::new(0),
                 10u32..10u32,
                 ";",
                 "add a semicolon",

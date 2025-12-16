@@ -4,12 +4,11 @@ use super::*;
 use crate::collect::collect_types;
 use crate::resolve::resolve_types;
 use crate::types::{BasicType, Type, UntypedKind};
-use gox_common::{DiagnosticSink, FileId, SymbolInterner};
+use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_syntax::{ast, parse};
 
 fn check_source(source: &str) -> (DiagnosticSink, SymbolInterner) {
-    let file_id = FileId::new(0);
-    let (file, _parse_diag, interner) = parse(file_id, source);
+    let (file, _parse_diag, interner) = parse(source, 0);
 
     let mut collect_diag = DiagnosticSink::new();
     let collect_result = collect_types(&file, &interner, &mut collect_diag);
@@ -24,9 +23,8 @@ fn check_source(source: &str) -> (DiagnosticSink, SymbolInterner) {
 }
 
 fn check_expr_type(source: &str, expr_source: &str) -> Type {
-    let file_id = FileId::new(0);
     let full_source = format!("{}\nvar _ = {}", source, expr_source);
-    let (file, _parse_diag, interner) = parse(file_id, &full_source);
+    let (file, _parse_diag, interner) = parse(&full_source, 0);
 
     let mut collect_diag = DiagnosticSink::new();
     let collect_result = collect_types(&file, &interner, &mut collect_diag);

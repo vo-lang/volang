@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gox_common::vfs::FileSet;
-use gox_common::{DiagnosticSink, FileId, SymbolInterner};
+use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_module::vfs::Vfs;
 use gox_syntax::{parse_with_interner, ast};
 use gox_syntax::ast::Decl;
@@ -252,7 +252,7 @@ fn parse_packages(
     
     // Parse each package with a shared interner
     let mut result = HashMap::new();
-    let mut file_id_counter = 0u32;
+    let mut base_offset = 0u32;
     
     for (dir, files) in files_by_dir {
         if files.is_empty() {
@@ -270,13 +270,11 @@ fn parse_packages(
         files.sort_by(|a, b| a.0.file_name().cmp(&b.0.file_name()));
         
         for (path, content) in files {
-            let file_id = FileId::new(file_id_counter);
-            file_id_counter += 1;
-            
             // Take ownership temporarily, then put it back
             let interner_owned = std::mem::take(shared_interner);
-            let (ast, _diag, interner) = parse_with_interner(file_id, &content, interner_owned);
+            let (ast, _diag, interner) = parse_with_interner(&content, base_offset, interner_owned);
             *shared_interner = interner;
+            base_offset += content.len() as u32 + 1; // Add 1 for gap between files
             
             // Extract imports with kind and alias info from AST
             for imp in &ast.imports {
@@ -436,15 +434,16 @@ fn load_stdlib_packages(
         
         if let Some(vfs_pkg) = vfs.resolve(&pkg_name) {
             let mut files = Vec::new();
-            let file_id = FileId::new(0); // Dummy file ID for stdlib
+            let mut stdlib_base = 0u32;
             
             // Use shared interner to ensure symbols are consistent across packages
             let mut current_interner = std::mem::take(shared_interner);
             
             for vfs_file in &vfs_pkg.files {
                 let content = &vfs_file.content;
-                let (ast, _diag, new_interner) = parse_with_interner(file_id, content, current_interner);
+                let (ast, _diag, new_interner) = parse_with_interner(content, stdlib_base, current_interner);
                 current_interner = new_interner;
+                stdlib_base += content.len() as u32 + 1;
                 files.push((vfs_file.path.clone(), ast));
             }
             

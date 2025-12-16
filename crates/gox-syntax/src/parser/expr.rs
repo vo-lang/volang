@@ -80,7 +80,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => self.parse_ident_or_composite_lit(),
             TokenKind::IntLit => {
                 let token = self.advance();
-                let text = &self.source[token.span.to_range()];
+                let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 Ok(Expr {
                     kind: ExprKind::IntLit(IntLit { raw }),
@@ -89,7 +89,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::FloatLit => {
                 let token = self.advance();
-                let text = &self.source[token.span.to_range()];
+                let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 Ok(Expr {
                     kind: ExprKind::FloatLit(FloatLit { raw }),
@@ -98,7 +98,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::RuneLit => {
                 let token = self.advance();
-                let text = &self.source[token.span.to_range()];
+                let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 Ok(Expr {
                     kind: ExprKind::RuneLit(RuneLit { raw }),
@@ -107,7 +107,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit => {
                 let token = self.advance();
-                let text = &self.source[token.span.to_range()];
+                let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 Ok(Expr {
                     kind: ExprKind::StringLit(StringLit { raw, is_raw: false }),
@@ -116,7 +116,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::RawStringLit => {
                 let token = self.advance();
-                let text = &self.source[token.span.to_range()];
+                let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 Ok(Expr {
                     kind: ExprKind::StringLit(StringLit { raw, is_raw: true }),

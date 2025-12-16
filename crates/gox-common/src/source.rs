@@ -1,7 +1,18 @@
-//! Source file management.
+//! Source file management with global position space.
 //!
-//! This module provides types for managing source files, including loading,
-//! storing, and accessing source text efficiently.
+//! This module provides types for managing source files using a global position space.
+//! Each file is assigned a base offset, so any `BytePos` or `Span` uniquely identifies
+//! both the file and the location within it.
+//!
+//! This design is similar to rustc's source mapping:
+//! - File 1: positions [0, 1000)
+//! - File 2: positions [1001, 2500)
+//! - File 3: positions [2501, 3000)
+//!
+//! Benefits:
+//! - No need to pass `FileId` alongside `Span` everywhere
+//! - Simplified diagnostic APIs
+//! - AST node spans contain complete location information
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -86,14 +97,16 @@ pub struct SourceFile {
     path: Option<PathBuf>,
     /// The source text content.
     source: Arc<str>,
-    /// Byte offsets of line starts (0-indexed).
+    /// Base offset in global position space.
+    base: u32,
+    /// Byte offsets of line starts (0-indexed, relative to base).
     /// The first element is always 0.
     line_starts: Vec<u32>,
 }
 
 impl SourceFile {
-    /// Creates a new source file.
-    pub fn new(id: FileId, name: impl Into<Arc<str>>, source: impl Into<Arc<str>>) -> Self {
+    /// Creates a new source file with a base offset.
+    pub fn new(id: FileId, name: impl Into<Arc<str>>, source: impl Into<Arc<str>>, base: u32) -> Self {
         let name = name.into();
         let source = source.into();
         let line_starts = Self::compute_line_starts(&source);
@@ -103,6 +116,7 @@ impl SourceFile {
             name,
             path: None,
             source,
+            base,
             line_starts,
         }
     }
@@ -113,8 +127,9 @@ impl SourceFile {
         name: impl Into<Arc<str>>,
         path: impl Into<PathBuf>,
         source: impl Into<Arc<str>>,
+        base: u32,
     ) -> Self {
-        let mut file = Self::new(id, name, source);
+        let mut file = Self::new(id, name, source, base);
         file.path = Some(path.into());
         file
     }
@@ -152,6 +167,18 @@ impl SourceFile {
     #[inline]
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Returns the base offset in global position space.
+    #[inline]
+    pub const fn base(&self) -> u32 {
+        self.base
+    }
+
+    /// Returns the end position (exclusive) in global position space.
+    #[inline]
+    pub fn end_pos(&self) -> u32 {
+        self.base + self.source.len() as u32
     }
 
     /// Returns the length of the source in bytes.
@@ -201,9 +228,34 @@ impl SourceFile {
         Some(&self.source[start..end])
     }
 
-    /// Converts a byte position to line/column.
+    /// Returns true if the given global position is within this file.
+    #[inline]
+    pub fn contains_pos(&self, pos: BytePos) -> bool {
+        let p = pos.to_u32();
+        p >= self.base && p < self.end_pos()
+    }
+
+    /// Returns true if the given span is within this file.
+    #[inline]
+    pub fn contains_span(&self, span: Span) -> bool {
+        self.contains_pos(span.start) && span.end.to_u32() <= self.end_pos()
+    }
+
+    /// Converts a global byte position to local offset within this file.
+    #[inline]
+    pub fn local_offset(&self, pos: BytePos) -> u32 {
+        pos.to_u32().saturating_sub(self.base)
+    }
+
+    /// Converts a local offset to global byte position.
+    #[inline]
+    pub fn global_pos(&self, local: u32) -> BytePos {
+        BytePos::new(self.base + local)
+    }
+
+    /// Converts a global byte position to line/column.
     pub fn line_col(&self, pos: BytePos) -> LineCol {
-        let offset = pos.to_u32();
+        let offset = self.local_offset(pos);
         
         // Binary search for the line containing this offset
         let line = match self.line_starts.binary_search(&offset) {
@@ -227,14 +279,16 @@ impl SourceFile {
 
     /// Returns the source text for a given span.
     pub fn span_text(&self, span: Span) -> &str {
-        let start = span.start.to_usize().min(self.source.len());
-        let end = span.end.to_usize().min(self.source.len());
+        let start = self.local_offset(span.start) as usize;
+        let end = self.local_offset(span.end) as usize;
+        let start = start.min(self.source.len());
+        let end = end.min(self.source.len());
         &self.source[start..end]
     }
 
     /// Returns a span covering the entire file.
     pub fn full_span(&self) -> Span {
-        Span::from_u32(0, self.source.len() as u32)
+        Span::from_u32(self.base, self.end_pos())
     }
 }
 
@@ -243,31 +297,44 @@ impl fmt::Debug for SourceFile {
         f.debug_struct("SourceFile")
             .field("id", &self.id)
             .field("name", &self.name)
+            .field("base", &self.base)
             .field("len", &self.source.len())
             .field("lines", &self.line_starts.len())
             .finish()
     }
 }
 
-/// A central registry for all source files.
+/// A central registry for all source files with global position space.
 ///
-/// The `SourceMap` owns all source files and provides efficient access
-/// to them via `FileId`.
+/// The `SourceMap` owns all source files and provides efficient lookup
+/// from any global position to its containing file.
 #[derive(Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
+    /// The next available base offset.
+    next_base: u32,
 }
 
 impl SourceMap {
     /// Creates a new empty source map.
     pub fn new() -> Self {
-        Self { files: Vec::new() }
+        Self { 
+            files: Vec::new(),
+            next_base: 0,
+        }
     }
 
     /// Adds a source file to the map and returns its ID.
+    /// The file's base offset is automatically assigned.
     pub fn add_file(&mut self, name: impl Into<Arc<str>>, source: impl Into<Arc<str>>) -> FileId {
+        let source = source.into();
         let id = FileId::new(self.files.len() as u32);
-        let file = SourceFile::new(id, name, source);
+        let base = self.next_base;
+        
+        // Reserve space for this file plus a gap of 1 (to ensure spans don't overlap)
+        self.next_base = base + source.len() as u32 + 1;
+        
+        let file = SourceFile::new(id, name, source, base);
         self.files.push(file);
         id
     }
@@ -279,8 +346,13 @@ impl SourceMap {
         path: impl Into<PathBuf>,
         source: impl Into<Arc<str>>,
     ) -> FileId {
+        let source = source.into();
         let id = FileId::new(self.files.len() as u32);
-        let file = SourceFile::with_path(id, name, path, source);
+        let base = self.next_base;
+        
+        self.next_base = base + source.len() as u32 + 1;
+        
+        let file = SourceFile::with_path(id, name, path, source, base);
         self.files.push(file);
         id
     }
@@ -304,6 +376,30 @@ impl SourceMap {
         self.files.get(id.0 as usize)
     }
 
+    /// Looks up the file containing the given global position.
+    pub fn lookup_file(&self, pos: BytePos) -> Option<&SourceFile> {
+        let p = pos.to_u32();
+        // Binary search for the file
+        let idx = self.files.partition_point(|f| f.base <= p);
+        if idx > 0 {
+            let file = &self.files[idx - 1];
+            if file.contains_pos(pos) {
+                return Some(file);
+            }
+        }
+        None
+    }
+
+    /// Looks up the file containing the given span.
+    pub fn lookup_span(&self, span: Span) -> Option<&SourceFile> {
+        self.lookup_file(span.start)
+    }
+
+    /// Returns the FileId for a span (by looking up the containing file).
+    pub fn span_file_id(&self, span: Span) -> Option<FileId> {
+        self.lookup_span(span).map(|f| f.id())
+    }
+
     /// Returns the number of files in the map.
     #[inline]
     pub fn file_count(&self) -> usize {
@@ -325,14 +421,34 @@ impl SourceMap {
         self.get_file(id).map(|f| f.name())
     }
 
-    /// Converts a position to line/column in a file.
-    pub fn line_col(&self, id: FileId, pos: BytePos) -> Option<LineCol> {
-        self.get_file(id).map(|f| f.line_col(pos))
+    /// Converts a global position to line/column.
+    pub fn line_col(&self, pos: BytePos) -> Option<LineCol> {
+        self.lookup_file(pos).map(|f| f.line_col(pos))
     }
 
-    /// Returns the source text for a span in a file.
-    pub fn span_text(&self, id: FileId, span: Span) -> Option<&str> {
-        self.get_file(id).map(|f| f.span_text(span))
+    /// Returns the source text for a span.
+    pub fn span_text(&self, span: Span) -> Option<&str> {
+        self.lookup_span(span).map(|f| f.span_text(span))
+    }
+
+    /// Returns the base offset for a file (for use in lexer/parser).
+    pub fn file_base(&self, id: FileId) -> Option<u32> {
+        self.get_file(id).map(|f| f.base())
+    }
+
+    /// Returns formatted location string: "filename:line:col"
+    pub fn format_pos(&self, pos: BytePos) -> String {
+        if let Some(file) = self.lookup_file(pos) {
+            let lc = file.line_col(pos);
+            format!("{}:{}:{}", file.name(), lc.line, lc.column)
+        } else {
+            format!("?:{}", pos.to_u32())
+        }
+    }
+
+    /// Returns formatted location string for a span: "filename:line:col"
+    pub fn format_span(&self, span: Span) -> String {
+        self.format_pos(span.start)
     }
 }
 
@@ -340,11 +456,15 @@ impl fmt::Debug for SourceMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SourceMap")
             .field("file_count", &self.files.len())
+            .field("next_base", &self.next_base)
             .finish()
     }
 }
 
 /// A location in a source file, combining file ID and span.
+/// 
+/// Note: With global position space, Span alone is usually sufficient.
+/// This type is kept for backward compatibility.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     /// The file containing this location.
@@ -413,18 +533,97 @@ mod tests {
     }
 
     #[test]
+    fn test_source_map_global_positions() {
+        let mut map = SourceMap::new();
+        
+        // Add first file: 12 bytes, base = 0
+        let id1 = map.add_file("file1.gox", "hello\nworld\n");
+        // Add second file: 8 bytes, base = 13 (12 + 1 gap)
+        let id2 = map.add_file("file2.gox", "content2");
+        
+        let file1 = map.get_file(id1).unwrap();
+        let file2 = map.get_file(id2).unwrap();
+        
+        assert_eq!(file1.base(), 0);
+        assert_eq!(file1.end_pos(), 12);
+        assert_eq!(file2.base(), 13);
+        assert_eq!(file2.end_pos(), 21);
+    }
+
+    #[test]
+    fn test_lookup_file() {
+        let mut map = SourceMap::new();
+        
+        let id1 = map.add_file("file1.gox", "abcde"); // base=0, end=5
+        let id2 = map.add_file("file2.gox", "fghij"); // base=6, end=11
+        
+        // Position 0-4 should be in file1
+        assert_eq!(map.lookup_file(BytePos::new(0)).unwrap().id(), id1);
+        assert_eq!(map.lookup_file(BytePos::new(4)).unwrap().id(), id1);
+        
+        // Position 6-10 should be in file2
+        assert_eq!(map.lookup_file(BytePos::new(6)).unwrap().id(), id2);
+        assert_eq!(map.lookup_file(BytePos::new(10)).unwrap().id(), id2);
+        
+        // Position 5 is in the gap
+        assert!(map.lookup_file(BytePos::new(5)).is_none());
+    }
+
+    #[test]
+    fn test_global_line_col() {
+        let mut map = SourceMap::new();
+        
+        let _id1 = map.add_file("file1.gox", "abc\ndef"); // base=0
+        let id2 = map.add_file("file2.gox", "xyz\n123"); // base=8
+        
+        let file2 = map.get_file(id2).unwrap();
+        
+        // In file2, position 8 is 'x' (line 1, col 1)
+        assert_eq!(file2.line_col(BytePos::new(8)), LineCol::new(1, 1));
+        // Position 12 is '1' (line 2, col 1)
+        assert_eq!(file2.line_col(BytePos::new(12)), LineCol::new(2, 1));
+    }
+
+    #[test]
+    fn test_span_text_global() {
+        let mut map = SourceMap::new();
+        
+        let _id1 = map.add_file("file1.gox", "hello"); // base=0
+        let _id2 = map.add_file("file2.gox", "world"); // base=6
+        
+        // Get text from file1
+        assert_eq!(map.span_text(Span::from_u32(0, 5)), Some("hello"));
+        
+        // Get text from file2
+        assert_eq!(map.span_text(Span::from_u32(6, 11)), Some("world"));
+    }
+
+    #[test]
+    fn test_format_pos() {
+        let mut map = SourceMap::new();
+        
+        map.add_file("test.gox", "line1\nline2\nline3");
+        
+        assert_eq!(map.format_pos(BytePos::new(0)), "test.gox:1:1");
+        assert_eq!(map.format_pos(BytePos::new(6)), "test.gox:2:1");
+        assert_eq!(map.format_pos(BytePos::new(12)), "test.gox:3:1");
+    }
+
+    #[test]
     fn test_source_file_basic() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "hello\nworld\n");
+        let file = SourceFile::new(FileId::new(0), "test.gox", "hello\nworld\n", 0);
         
         assert_eq!(file.name(), "test.gox");
         assert_eq!(file.source(), "hello\nworld\n");
         assert_eq!(file.len(), 12);
         assert!(!file.is_empty());
+        assert_eq!(file.base(), 0);
+        assert_eq!(file.end_pos(), 12);
     }
 
     #[test]
     fn test_source_file_lines() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "line1\nline2\nline3");
+        let file = SourceFile::new(FileId::new(0), "test.gox", "line1\nline2\nline3", 0);
         
         assert_eq!(file.line_count(), 3);
         assert_eq!(file.line_start(0), Some(0));
@@ -440,54 +639,55 @@ mod tests {
 
     #[test]
     fn test_source_file_line_col() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "abc\ndefgh\nij");
+        let file = SourceFile::new(FileId::new(0), "test.gox", "abc\ndefgh\nij", 100);
         
-        // First line
-        assert_eq!(file.line_col(BytePos(0)), LineCol::new(1, 1));
-        assert_eq!(file.line_col(BytePos(2)), LineCol::new(1, 3));
+        // First line (with base offset 100)
+        assert_eq!(file.line_col(BytePos(100)), LineCol::new(1, 1));
+        assert_eq!(file.line_col(BytePos(102)), LineCol::new(1, 3));
         
         // Second line
-        assert_eq!(file.line_col(BytePos(4)), LineCol::new(2, 1));
-        assert_eq!(file.line_col(BytePos(7)), LineCol::new(2, 4));
+        assert_eq!(file.line_col(BytePos(104)), LineCol::new(2, 1));
+        assert_eq!(file.line_col(BytePos(107)), LineCol::new(2, 4));
         
         // Third line
-        assert_eq!(file.line_col(BytePos(10)), LineCol::new(3, 1));
-        assert_eq!(file.line_col(BytePos(11)), LineCol::new(3, 2));
+        assert_eq!(file.line_col(BytePos(110)), LineCol::new(3, 1));
+        assert_eq!(file.line_col(BytePos(111)), LineCol::new(3, 2));
     }
 
     #[test]
     fn test_source_file_span_text() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "hello world");
+        let file = SourceFile::new(FileId::new(0), "test.gox", "hello world", 50);
         
-        assert_eq!(file.span_text(Span::from_u32(0, 5)), "hello");
-        assert_eq!(file.span_text(Span::from_u32(6, 11)), "world");
-        assert_eq!(file.span_text(Span::from_u32(0, 11)), "hello world");
+        assert_eq!(file.span_text(Span::from_u32(50, 55)), "hello");
+        assert_eq!(file.span_text(Span::from_u32(56, 61)), "world");
+        assert_eq!(file.span_text(Span::from_u32(50, 61)), "hello world");
     }
 
     #[test]
-    fn test_source_map() {
-        let mut map = SourceMap::new();
+    fn test_empty_file() {
+        let file = SourceFile::new(FileId::new(0), "empty.gox", "", 0);
         
-        let id1 = map.add_file("file1.gox", "content1");
-        let id2 = map.add_file("file2.gox", "content2");
-        
-        assert_eq!(map.file_count(), 2);
-        assert_eq!(map.file_name(id1), Some("file1.gox"));
-        assert_eq!(map.file_name(id2), Some("file2.gox"));
-        assert_eq!(map.source(id1), Some("content1"));
-        assert_eq!(map.source(id2), Some("content2"));
+        assert!(file.is_empty());
+        assert_eq!(file.line_count(), 1);
+        assert_eq!(file.line_content(0), Some(""));
     }
 
     #[test]
-    fn test_source_map_get_file() {
-        let mut map = SourceMap::new();
-        let id = map.add_file("test.gox", "test content");
+    fn test_single_line_no_newline() {
+        let file = SourceFile::new(FileId::new(0), "test.gox", "single line", 0);
         
-        let file = map.get_file(id).unwrap();
-        assert_eq!(file.name(), "test.gox");
+        assert_eq!(file.line_count(), 1);
+        assert_eq!(file.line_content(0), Some("single line"));
+    }
+
+    #[test]
+    fn test_trailing_newline() {
+        let file = SourceFile::new(FileId::new(0), "test.gox", "line1\nline2\n", 0);
         
-        assert!(map.get_file(FileId::DUMMY).is_none());
-        assert!(map.get_file(FileId::new(999)).is_none());
+        assert_eq!(file.line_count(), 3);
+        assert_eq!(file.line_content(0), Some("line1"));
+        assert_eq!(file.line_content(1), Some("line2"));
+        assert_eq!(file.line_content(2), Some(""));
     }
 
     #[test]
@@ -507,32 +707,5 @@ mod tests {
         
         assert_eq!(merged.span.start.0, 10);
         assert_eq!(merged.span.end.0, 30);
-    }
-
-    #[test]
-    fn test_empty_file() {
-        let file = SourceFile::new(FileId::new(0), "empty.gox", "");
-        
-        assert!(file.is_empty());
-        assert_eq!(file.line_count(), 1);
-        assert_eq!(file.line_content(0), Some(""));
-    }
-
-    #[test]
-    fn test_single_line_no_newline() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "single line");
-        
-        assert_eq!(file.line_count(), 1);
-        assert_eq!(file.line_content(0), Some("single line"));
-    }
-
-    #[test]
-    fn test_trailing_newline() {
-        let file = SourceFile::new(FileId::new(0), "test.gox", "line1\nline2\n");
-        
-        assert_eq!(file.line_count(), 3);
-        assert_eq!(file.line_content(0), Some("line1"));
-        assert_eq!(file.line_content(1), Some("line2"));
-        assert_eq!(file.line_content(2), Some(""));
     }
 }
