@@ -277,6 +277,7 @@ fn compile_string_lit(
 }
 
 /// Compile rune literal.
+/// Uses parse_rune_literal to correctly handle all escape sequences.
 fn compile_rune_lit(
     ctx: &mut CodegenContext,
     fctx: &mut FuncContext,
@@ -284,8 +285,8 @@ fn compile_rune_lit(
 ) -> Result<u16, CodegenError> {
     let dst = fctx.regs.alloc(1);
     let raw = ctx.interner.resolve(lit.raw).unwrap_or("'\0'");
-    // Simple: just get the char value
-    let c = raw.chars().nth(1).unwrap_or('\0') as i64;
+    // Use parse_rune_literal to correctly handle escape sequences
+    let c = gox_analysis::parse_rune_literal(raw).unwrap_or('\0') as i64;
     fctx.emit(Opcode::LoadInt, dst, c as u16, 0);
     Ok(dst)
 }

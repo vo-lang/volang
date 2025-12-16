@@ -87,7 +87,11 @@ impl<'a> TypeChecker<'a> {
             Some(Entity::Func(f)) => Type::Func(f.sig.clone()),
             Some(Entity::Type(_)) => {
                 let name = self.interner.resolve(ident.symbol).unwrap_or("<unknown>");
-                self.error_msg(TypeError::TypeNotValue, ident.span, TypeError::TypeNotValue.with_name(name));
+                self.error_msg(
+                    TypeError::TypeNotValue,
+                    ident.span,
+                    TypeError::TypeNotValue.with_name(name),
+                );
                 Type::Invalid
             }
             Some(Entity::Builtin(_b)) => {
@@ -96,7 +100,11 @@ impl<'a> TypeChecker<'a> {
             }
             None => {
                 let name = self.interner.resolve(ident.symbol).unwrap_or("<unknown>");
-                self.error_msg(TypeError::Undefined, ident.span, TypeError::Undefined.with_name(name));
+                self.error_msg(
+                    TypeError::Undefined,
+                    ident.span,
+                    TypeError::Undefined.with_name(name),
+                );
                 Type::Invalid
             }
             _ => Type::Invalid,
@@ -116,24 +124,18 @@ impl<'a> TypeChecker<'a> {
                 self.check_arithmetic_op(&left_ty, &right_ty, bin.op, span)
             }
             // Comparison operators
-            BinaryOp::Eq | BinaryOp::NotEq => {
-                self.check_equality_op(&left_ty, &right_ty, span)
-            }
+            BinaryOp::Eq | BinaryOp::NotEq => self.check_equality_op(&left_ty, &right_ty, span),
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {
                 self.check_ordering_op(&left_ty, &right_ty, span)
             }
             // Logical operators
-            BinaryOp::LogAnd | BinaryOp::LogOr => {
-                self.check_logical_op(&left_ty, &right_ty, span)
-            }
+            BinaryOp::LogAnd | BinaryOp::LogOr => self.check_logical_op(&left_ty, &right_ty, span),
             // Bitwise operators
             BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::AndNot => {
                 self.check_bitwise_op(&left_ty, &right_ty, span)
             }
             // Shift operators
-            BinaryOp::Shl | BinaryOp::Shr => {
-                self.check_shift_op(&left_ty, &right_ty, span)
-            }
+            BinaryOp::Shl | BinaryOp::Shr => self.check_shift_op(&left_ty, &right_ty, span),
         }
     }
 
@@ -328,7 +330,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks a type conversion call to a basic type.
-    fn check_basic_type_conversion(&mut self, target: BasicType, args: &[Expr], span: Span) -> Type {
+    fn check_basic_type_conversion(
+        &mut self,
+        target: BasicType,
+        args: &[Expr],
+        span: Span,
+    ) -> Type {
         if args.len() != 1 {
             self.error(TypeError::WrongArgCount, span);
             return Type::Basic(target);
@@ -370,14 +377,19 @@ impl<'a> TypeChecker<'a> {
             }
             Type::Untyped(k) => match k {
                 UntypedKind::Bool => to == BasicType::Bool,
-                UntypedKind::Int | UntypedKind::Rune => to.is_integer() || to.is_float() || to == BasicType::String,
+                UntypedKind::Int | UntypedKind::Rune => {
+                    to.is_integer() || to.is_float() || to == BasicType::String
+                }
                 UntypedKind::Float => to.is_float(),
                 UntypedKind::String => to == BasicType::String,
             },
             // String to []byte / []rune
             Type::Slice(s) => {
                 if to == BasicType::String {
-                    matches!(*s.elem, Type::Basic(BasicType::Uint8) | Type::Basic(BasicType::Int32))
+                    matches!(
+                        *s.elem,
+                        Type::Basic(BasicType::Uint8) | Type::Basic(BasicType::Int32)
+                    )
                 } else {
                     false
                 }
@@ -547,7 +559,7 @@ impl<'a> TypeChecker<'a> {
                 return Type::Invalid;
             }
         }
-        
+
         let base_ty = self.check_expr(&sel.expr);
         let field_name = sel.sel.symbol;
         let field_name_str = self.interner.resolve(field_name).unwrap_or("<unknown>");
@@ -583,9 +595,9 @@ impl<'a> TypeChecker<'a> {
             }
         }
     }
-    
+
     /// Look up a method on a cross-package type.
-    /// 
+    ///
     /// This handles the case where a variable's type is from another package.
     /// Since named_types is per-package, we can't rely on the NamedTypeId to look up
     /// the type name. Instead, we search all exported types for the method.
@@ -599,7 +611,7 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
-        
+
         None
     }
 
@@ -636,7 +648,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks struct literal elements.
-    fn check_struct_lit_elems(&mut self, elems: &[ast::CompositeLitElem], s: &crate::types::StructType) {
+    fn check_struct_lit_elems(
+        &mut self,
+        elems: &[ast::CompositeLitElem],
+        s: &crate::types::StructType,
+    ) {
         for elem in elems {
             // Check value expression
             let value_ty = self.check_expr(&elem.value);
@@ -651,8 +667,15 @@ impl<'a> TypeChecker<'a> {
                             self.error(TypeError::FieldTypeMismatch, elem.value.span);
                         }
                     } else {
-                        let name = self.interner.resolve(field_name.symbol).unwrap_or("<unknown>");
-                        self.error_msg(TypeError::UnknownField, field_name.span, TypeError::UnknownField.with_name(name));
+                        let name = self
+                            .interner
+                            .resolve(field_name.symbol)
+                            .unwrap_or("<unknown>");
+                        self.error_msg(
+                            TypeError::UnknownField,
+                            field_name.span,
+                            TypeError::UnknownField.with_name(name),
+                        );
                     }
                 }
             }
@@ -680,7 +703,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Checks map literal elements.
-    fn check_map_lit_elems(&mut self, elems: &[ast::CompositeLitElem], key_ty: &Type, value_ty: &Type) {
+    fn check_map_lit_elems(
+        &mut self,
+        elems: &[ast::CompositeLitElem],
+        key_ty: &Type,
+        value_ty: &Type,
+    ) {
         for elem in elems {
             // Check key
             if let Some(ref key) = elem.key {
@@ -718,16 +746,20 @@ impl<'a> TypeChecker<'a> {
         match &ta.ty {
             Some(ty_expr) => {
                 let asserted_ty = self.resolve_type_expr(ty_expr);
-                
+
                 // Check if the asserted type could possibly implement the interface
                 // (This is a compile-time check - runtime check happens at execution)
                 if let Type::Interface(iface) = self.underlying_type(&expr_ty) {
-                    if self.registry.implements_interface(&asserted_ty, &iface).is_err() {
+                    if self
+                        .registry
+                        .implements_interface(&asserted_ty, &iface)
+                        .is_err()
+                    {
                         // This is just a warning - the assertion might still be valid
                         // if the concrete type at runtime implements the interface
                     }
                 }
-                
+
                 asserted_ty
             }
             None => {
@@ -804,7 +836,10 @@ impl<'a> TypeChecker<'a> {
 
         // Set expected return types
         let old_return_types = std::mem::take(&mut self.return_types);
-        self.return_types = func.sig.results.iter()
+        self.return_types = func
+            .sig
+            .results
+            .iter()
             .map(|r| self.resolve_type_expr(&r.ty))
             .collect();
 
@@ -818,14 +853,20 @@ impl<'a> TypeChecker<'a> {
         self.pop_scope();
 
         // Build the function type
-        let params: Vec<Type> = func.sig.params.iter()
+        let params: Vec<Type> = func
+            .sig
+            .params
+            .iter()
             .flat_map(|p| {
                 let ty = self.resolve_type_expr(&p.ty);
                 std::iter::repeat_n(ty, p.names.len().max(1))
             })
             .collect();
 
-        let results: Vec<Type> = func.sig.results.iter()
+        let results: Vec<Type> = func
+            .sig
+            .results
+            .iter()
             .map(|r| self.resolve_type_expr(&r.ty))
             .collect();
 
@@ -881,7 +922,9 @@ impl<'a> TypeChecker<'a> {
     pub(crate) fn is_numeric_type(&self, ty: &Type) -> bool {
         match self.underlying_type(ty) {
             Type::Basic(b) => b.is_numeric(),
-            Type::Untyped(k) => matches!(k, UntypedKind::Int | UntypedKind::Float | UntypedKind::Rune),
+            Type::Untyped(k) => {
+                matches!(k, UntypedKind::Int | UntypedKind::Float | UntypedKind::Rune)
+            }
             _ => false,
         }
     }
@@ -946,8 +989,10 @@ impl<'a> TypeChecker<'a> {
     pub(crate) fn are_comparable(&self, left: &Type, right: &Type) -> bool {
         // Nil is comparable to object types
         if left.is_nil() || right.is_nil() {
-            return self.is_object_type(left) || self.is_object_type(right)
-                || left.is_nil() || right.is_nil();
+            return self.is_object_type(left)
+                || self.is_object_type(right)
+                || left.is_nil()
+                || right.is_nil();
         }
 
         let _left_u = self.underlying_type(left);
@@ -960,8 +1005,12 @@ impl<'a> TypeChecker<'a> {
     /// Checks if a type is an object type (reference semantics).
     pub(crate) fn is_object_type(&self, ty: &Type) -> bool {
         match self.underlying_type(ty) {
-            Type::Slice(_) | Type::Map(_) | Type::Chan(_) | Type::Func(_)
-            | Type::Obx(_) | Type::Interface(_) => true,
+            Type::Slice(_)
+            | Type::Map(_)
+            | Type::Chan(_)
+            | Type::Func(_)
+            | Type::Obx(_)
+            | Type::Interface(_) => true,
             _ => false,
         }
     }
@@ -1048,4 +1097,3 @@ impl<'a> TypeChecker<'a> {
         }
     }
 }
-

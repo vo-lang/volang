@@ -913,27 +913,72 @@ fn parse_int_literal(s: &str) -> Result<i64, ()> {
 }
 
 /// Parses a rune literal string to char.
-fn parse_rune_literal(s: &str) -> Option<char> {
-    // Remove surrounding quotes if present
-    let s = s.trim_matches('\'');
+/// Supports all Go escape sequences:
+/// - Simple escapes: \a \b \f \n \r \t \v \\ \' \"
+/// - Hex escape: \xhh (2 hex digits)
+/// - Unicode escapes: \uhhhh (4 hex digits), \Uhhhhhhhh (8 hex digits)
+/// - Octal escape: \ooo (3 octal digits)
+pub fn parse_rune_literal(s: &str) -> Option<char> {
+    // Remove surrounding quotes if present (only first and last)
+    let s = if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
+        &s[1..s.len()-1]
+    } else {
+        s
+    };
     if s.starts_with('\\') {
         // Escape sequence
-        match s.chars().nth(1)? {
-            'n' => Some('\n'),
-            'r' => Some('\r'),
-            't' => Some('\t'),
+        let escape_char = s.chars().nth(1)?;
+        match escape_char {
+            // Simple escapes
+            'a' => Some('\x07'),  // bell
+            'b' => Some('\x08'),  // backspace
+            'f' => Some('\x0C'),  // form feed
+            'n' => Some('\n'),    // newline
+            'r' => Some('\r'),    // carriage return
+            't' => Some('\t'),    // horizontal tab
+            'v' => Some('\x0B'),  // vertical tab
             '\\' => Some('\\'),
             '\'' => Some('\''),
-            '0' => Some('\0'),
+            '"' => Some('"'),
+            // Hex escape: \xhh
             'x' => {
                 let hex = &s[2..];
-                u8::from_str_radix(hex, 16).ok().map(|b| b as char)
+                if hex.len() >= 2 {
+                    u8::from_str_radix(&hex[..2], 16).ok().map(|b| b as char)
+                } else {
+                    None
+                }
             }
+            // Unicode escape: \uhhhh (4 hex digits)
             'u' => {
                 let hex = &s[2..];
-                u32::from_str_radix(hex, 16)
-                    .ok()
-                    .and_then(char::from_u32)
+                if hex.len() >= 4 {
+                    u32::from_str_radix(&hex[..4], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+            // Unicode escape: \Uhhhhhhhh (8 hex digits)
+            'U' => {
+                let hex = &s[2..];
+                if hex.len() >= 8 {
+                    u32::from_str_radix(&hex[..8], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+            // Octal escape: \ooo (3 octal digits, 0-7)
+            c if matches!(c, '0'..='7') => {
+                let octal = &s[1..];
+                if octal.len() >= 3 && octal[..3].chars().all(|c| matches!(c, '0'..='7')) {
+                    u8::from_str_radix(&octal[..3], 8).ok().map(|b| b as char)
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -1551,5 +1596,74 @@ const X = "hello" + " world""#
         } else {
             panic!("expected var entity for X");
         }
+    }
+
+    // Tests for parse_rune_literal
+    #[test]
+    fn test_parse_rune_simple() {
+        assert_eq!(parse_rune_literal("'a'"), Some('a'));
+        assert_eq!(parse_rune_literal("'Z'"), Some('Z'));
+        assert_eq!(parse_rune_literal("'0'"), Some('0'));
+        assert_eq!(parse_rune_literal("' '"), Some(' '));
+        assert_eq!(parse_rune_literal("'中'"), Some('中'));
+        assert_eq!(parse_rune_literal("'🎉'"), Some('🎉'));
+    }
+
+    #[test]
+    fn test_parse_rune_simple_escapes() {
+        assert_eq!(parse_rune_literal("'\\n'"), Some('\n'));
+        assert_eq!(parse_rune_literal("'\\r'"), Some('\r'));
+        assert_eq!(parse_rune_literal("'\\t'"), Some('\t'));
+        assert_eq!(parse_rune_literal("'\\\\'"), Some('\\'));
+        assert_eq!(parse_rune_literal("'\\''"), Some('\''));
+        assert_eq!(parse_rune_literal("'\\\"'"), Some('"'));
+    }
+
+    #[test]
+    fn test_parse_rune_bell_escapes() {
+        // Bell, backspace, form feed, vertical tab
+        assert_eq!(parse_rune_literal("'\\a'"), Some('\x07'));
+        assert_eq!(parse_rune_literal("'\\b'"), Some('\x08'));
+        assert_eq!(parse_rune_literal("'\\f'"), Some('\x0C'));
+        assert_eq!(parse_rune_literal("'\\v'"), Some('\x0B'));
+    }
+
+    #[test]
+    fn test_parse_rune_hex_escape() {
+        assert_eq!(parse_rune_literal("'\\x41'"), Some('A'));
+        assert_eq!(parse_rune_literal("'\\x00'"), Some('\0'));
+        assert_eq!(parse_rune_literal("'\\xff'"), Some('\u{00ff}'));
+        assert_eq!(parse_rune_literal("'\\x7F'"), Some('\x7F'));
+    }
+
+    #[test]
+    fn test_parse_rune_unicode_escape() {
+        // \u with 4 hex digits
+        assert_eq!(parse_rune_literal("'\\u0041'"), Some('A'));
+        assert_eq!(parse_rune_literal("'\\u4e2d'"), Some('中'));
+        assert_eq!(parse_rune_literal("'\\u0000'"), Some('\0'));
+        
+        // \U with 8 hex digits
+        assert_eq!(parse_rune_literal("'\\U00000041'"), Some('A'));
+        assert_eq!(parse_rune_literal("'\\U0001F389'"), Some('🎉'));
+        assert_eq!(parse_rune_literal("'\\U00004E2D'"), Some('中'));
+    }
+
+    #[test]
+    fn test_parse_rune_octal_escape() {
+        assert_eq!(parse_rune_literal("'\\000'"), Some('\0'));
+        assert_eq!(parse_rune_literal("'\\101'"), Some('A'));  // 65 in octal
+        assert_eq!(parse_rune_literal("'\\012'"), Some('\n')); // 10 in octal
+        assert_eq!(parse_rune_literal("'\\177'"), Some('\x7F')); // 127 in octal
+    }
+
+    #[test]
+    fn test_parse_rune_invalid() {
+        // Invalid escape sequence
+        assert_eq!(parse_rune_literal("'\\z'"), None);
+        // Empty string
+        assert_eq!(parse_rune_literal(""), None);
+        // Invalid Unicode code point (surrogate)
+        assert_eq!(parse_rune_literal("'\\uD800'"), None);
     }
 }
