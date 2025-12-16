@@ -1,7 +1,7 @@
 //! Bytecode text format parser and formatter.
 //!
 //! Text format example:
-//! ```
+//! ```text
 //! module test
 //! 
 //! const 0 int 42
