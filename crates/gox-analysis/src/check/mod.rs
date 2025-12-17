@@ -383,9 +383,9 @@ impl<'a> TypeChecker<'a> {
                 let fields = self.resolve_struct_fields(&s.fields);
                 Type::Struct(crate::types::StructType { fields })
             }
-            ast::TypeExprKind::Obx(s) => {
-                let fields = self.resolve_struct_fields(&s.fields);
-                Type::Obx(crate::types::StructType { fields })
+            ast::TypeExprKind::Pointer(inner) => {
+                let elem = self.resolve_type_expr(inner);
+                Type::Pointer(Box::new(elem))
             }
             _ => Type::Invalid,
         }

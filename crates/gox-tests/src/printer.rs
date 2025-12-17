@@ -371,20 +371,9 @@ impl<'a> AstPrinter<'a> {
                 }
                 write!(self.output, "}}").unwrap();
             }
-            TypeExprKind::Obx(s) => {
-                write!(self.output, "object {{ ").unwrap();
-                for field in &s.fields {
-                    for (i, name) in field.names.iter().enumerate() {
-                        if i > 0 { write!(self.output, ", ").unwrap(); }
-                        write!(self.output, "{}", self.resolve_symbol(name.symbol)).unwrap();
-                    }
-                    if !field.names.is_empty() {
-                        write!(self.output, " ").unwrap();
-                    }
-                    self.write_type_inline(&field.ty);
-                    write!(self.output, "; ").unwrap();
-                }
-                write!(self.output, "}}").unwrap();
+            TypeExprKind::Pointer(inner) => {
+                write!(self.output, "*").unwrap();
+                self.write_type_inline(inner);
             }
             TypeExprKind::Interface(i) => {
                 write!(self.output, "interface {{ ").unwrap();

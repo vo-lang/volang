@@ -53,7 +53,7 @@ func testTaskManager() {
     manager2.AddTask("Document", task.PriorityLow)
     assert(manager.Count() == 4, "Original sees new task (shared state)")
     
-    println("  TaskManager object reference semantics: OK")
+    println("  TaskManager pointer reference semantics: OK")
     
     // Test status transitions
     assert(manager.StartTask(id1), "Should start task 1")

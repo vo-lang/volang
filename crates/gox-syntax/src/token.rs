@@ -110,8 +110,6 @@ pub enum TokenKind {
     Interface,
     /// `map`
     Map,
-    /// `object` (named `Obx` to avoid Rust naming conflicts)
-    Obx,
     /// `package`
     Package,
     /// `range`
@@ -256,7 +254,6 @@ impl TokenKind {
                 | TokenKind::Import
                 | TokenKind::Interface
                 | TokenKind::Map
-                | TokenKind::Obx
                 | TokenKind::Package
                 | TokenKind::Range
                 | TokenKind::Return
@@ -377,7 +374,6 @@ impl TokenKind {
             "import" => Some(TokenKind::Import),
             "interface" => Some(TokenKind::Interface),
             "map" => Some(TokenKind::Map),
-            "object" => Some(TokenKind::Obx),
             "package" => Some(TokenKind::Package),
             "range" => Some(TokenKind::Range),
             "return" => Some(TokenKind::Return),
@@ -420,7 +416,6 @@ impl TokenKind {
             TokenKind::Import => "import",
             TokenKind::Interface => "interface",
             TokenKind::Map => "map",
-            TokenKind::Obx => "object",
             TokenKind::Package => "package",
             TokenKind::Range => "range",
             TokenKind::Return => "return",
@@ -494,7 +489,7 @@ mod tests {
     fn test_token_kind_keyword() {
         assert_eq!(TokenKind::keyword("func"), Some(TokenKind::Func));
         assert_eq!(TokenKind::keyword("struct"), Some(TokenKind::Struct));
-        assert_eq!(TokenKind::keyword("object"), Some(TokenKind::Obx));
+        assert_eq!(TokenKind::keyword("object"), None);  // object is no longer a keyword
         assert_eq!(TokenKind::keyword("notakeyword"), None);
     }
 
@@ -559,7 +554,7 @@ mod tests {
         let keywords = [
             "break", "case", "chan", "const", "continue", "default", "defer",
             "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
-            "interface", "map", "object", "package", "range", "return", "select",
+            "interface", "map", "package", "range", "return", "select",
             "struct", "switch", "type", "var",
         ];
         

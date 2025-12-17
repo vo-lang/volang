@@ -75,10 +75,10 @@ impl<'a> Parser<'a> {
                 let struct_type = self.parse_struct_body()?;
                 TypeExprKind::Struct(Box::new(struct_type))
             }
-            TokenKind::Obx => {
+            TokenKind::Star => {
                 self.advance();
-                let struct_type = self.parse_struct_body()?;
-                TypeExprKind::Obx(Box::new(struct_type))
+                let inner = self.parse_type()?;
+                TypeExprKind::Pointer(Box::new(inner))
             }
             TokenKind::Interface => {
                 self.advance();
@@ -191,7 +191,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Arrow
                 | TokenKind::Func
                 | TokenKind::Struct
-                | TokenKind::Obx
+                | TokenKind::Star
                 | TokenKind::Interface
         )
     }
@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Arrow
                 | TokenKind::Func
                 | TokenKind::Struct
-                | TokenKind::Obx
+                | TokenKind::Star
                 | TokenKind::Interface
         )
     }

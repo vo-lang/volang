@@ -1,12 +1,14 @@
-// Test: Object type declaration
-type Counter object {
+// Test: Pointer type declaration
+type Counter struct {
     count int
 }
+type CounterRef *Counter
 
 === parser ===
 File {
   package: None,
   decls: [
-    Type { name: "Counter", type: object { count int; } },
+    Type { name: "Counter", type: struct { count int; } },
+    Type { name: "CounterRef", type: *Counter },
   ],
 }

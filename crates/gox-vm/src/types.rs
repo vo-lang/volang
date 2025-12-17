@@ -105,7 +105,7 @@ impl TypeMeta {
     pub fn object(id: TypeId, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
             id,
-            kind: ValueKind::Obx,
+            kind: ValueKind::Pointer,
             size_slots,
             ptr_bitmap,
             name: name.to_string(),

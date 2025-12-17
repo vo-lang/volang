@@ -250,6 +250,21 @@ impl<'a> TypeChecker<'a> {
                     Type::Invalid
                 }
             }
+            UnaryOp::Addr => {
+                // &x - returns pointer to struct
+                // For now, wrap operand type in Pointer
+                Type::Pointer(Box::new(operand_ty))
+            }
+            UnaryOp::Deref => {
+                // *p - dereference pointer
+                match operand_ty {
+                    Type::Pointer(inner) => *inner,
+                    _ => {
+                        // TODO: Add proper error
+                        Type::Invalid
+                    }
+                }
+            }
         }
     }
 
@@ -627,9 +642,15 @@ impl<'a> TypeChecker<'a> {
         let lit_ty = self.resolve_type_expr(&lit.ty);
 
         // Check elements based on the type
-        match self.underlying_type(&lit_ty) {
-            Type::Struct(s) | Type::Obx(s) => {
-                self.check_struct_lit_elems(&lit.elems, &s);
+        let underlying = self.underlying_type(&lit_ty);
+        // For pointer types, dereference to get the struct
+        let check_ty = match &underlying {
+            Type::Pointer(inner) => inner.as_ref(),
+            other => other,
+        };
+        match check_ty {
+            Type::Struct(s) => {
+                self.check_struct_lit_elems(&lit.elems, s);
             }
             Type::Array(arr) => {
                 self.check_array_lit_elems(&lit.elems, &arr.elem);
@@ -1013,7 +1034,7 @@ impl<'a> TypeChecker<'a> {
             | Type::Map(_)
             | Type::Chan(_)
             | Type::Func(_)
-            | Type::Obx(_)
+            | Type::Pointer(_)
             | Type::Interface(_) => true,
             _ => false,
         }

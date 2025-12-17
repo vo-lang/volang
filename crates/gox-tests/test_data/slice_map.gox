@@ -13,7 +13,7 @@ type Container struct {
     scores map[string]int
 }
 
-type ObjNode object {
+type ObjNode struct {
     value int
     name  string
 }
@@ -79,12 +79,12 @@ func main() {
     assert(cplx.point.x == 10, "cplx.point.x should be 10")
     assert(cplx.point.y == 20, "cplx.point.y should be 20")
     
-    // Test 9: Object reference sharing
+    // Test 9: Struct value semantics (copy on assignment)
     obj1 := ObjNode{100, "node1"}
     obj2 := obj1
     obj2.value = 999
-    assert(obj1.value == 999, "object reference: obj1.value should be 999")
-    assert(obj2.value == 999, "object reference: obj2.value should be 999")
+    assert(obj1.value == 100, "struct value: obj1.value should be 100")
+    assert(obj2.value == 999, "struct value: obj2.value should be 999")
     
     // Test 10: Sum slice elements
     data := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}

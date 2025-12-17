@@ -147,9 +147,15 @@ impl<'a> Lookup<'a> {
                     }
                 }
 
+                // For pointer types, dereference to get the underlying struct
+                let deref_ty = match &search_ty {
+                    Type::Pointer(inner) => inner.as_ref(),
+                    other => other,
+                };
+                
                 // Search in the underlying type
-                match &search_ty {
-                    Type::Struct(s) | Type::Obx(s) => {
+                match deref_ty {
+                    Type::Struct(s) => {
                         for (i, field) in s.fields.iter().enumerate() {
                             // Check if field name matches
                             if field.name == Some(name) {
@@ -171,9 +177,9 @@ impl<'a> Lookup<'a> {
                             // Only if we haven't found a target yet
                             if target.is_none() && field.embedded {
                                 let embedded_ty = &field.ty;
-                                // Only traverse Named, Struct, Interface types
+                                // Only traverse Named, Struct, Pointer, Interface types
                                 match embedded_ty {
-                                    Type::Named(_) | Type::Struct(_) | Type::Obx(_) | Type::Interface(_) => {
+                                    Type::Named(_) | Type::Struct(_) | Type::Pointer(_) | Type::Interface(_) => {
                                         let mut indices = et.indices.clone();
                                         indices.push(i);
                                         next.push(EmbeddedType::new(
@@ -269,8 +275,14 @@ impl<'a> Lookup<'a> {
                     }
                 }
 
-                match &search_ty {
-                    Type::Struct(s) | Type::Obx(s) => {
+                // For pointer types, dereference to get the underlying struct
+                let deref_ty = match &search_ty {
+                    Type::Pointer(inner) => inner.as_ref(),
+                    other => other,
+                };
+                
+                match deref_ty {
+                    Type::Struct(s) => {
                         for (i, field) in s.fields.iter().enumerate() {
                             // Track field names for collision with methods
                             if let Some(name) = field.name {
@@ -283,7 +295,7 @@ impl<'a> Lookup<'a> {
                             // Collect embedded fields for next depth
                             if field.embedded {
                                 match &field.ty {
-                                    Type::Named(_) | Type::Struct(_) | Type::Obx(_) | Type::Interface(_) => {
+                                    Type::Named(_) | Type::Struct(_) | Type::Pointer(_) | Type::Interface(_) => {
                                         let mut indices = et.indices.clone();
                                         indices.push(i);
                                         next.push(EmbeddedType::new(

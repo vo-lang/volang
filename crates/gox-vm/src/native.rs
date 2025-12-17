@@ -223,7 +223,7 @@ impl<'a> NativeCtx<'a> {
             TypeTag::Array => "[...]".into(),
             TypeTag::Map => "map[...]".into(),
             TypeTag::Struct => "{...}".into(),
-            TypeTag::Obx => "object{...}".into(),
+            TypeTag::Pointer => "*struct{...}".into(),
             TypeTag::Interface => "<interface>".into(),
             TypeTag::Channel => "<chan>".into(),
             TypeTag::Closure => "<closure>".into(),

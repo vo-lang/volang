@@ -20,7 +20,7 @@ pub enum GoxValue {
     Slice(GcRef),
     Map(GcRef),
     Struct(GcRef),
-    Obx(GcRef),
+    Pointer(GcRef),
     Interface { type_id: u32, value: u64 },
 }
 
@@ -46,7 +46,7 @@ impl GoxValue {
             TypeTag::Slice => GoxValue::Slice(raw as GcRef),
             TypeTag::Map => GoxValue::Map(raw as GcRef),
             TypeTag::Struct => GoxValue::Struct(raw as GcRef),
-            TypeTag::Obx => GoxValue::Obx(raw as GcRef),
+            TypeTag::Pointer => GoxValue::Pointer(raw as GcRef),
             TypeTag::Interface => GoxValue::Interface {
                 type_id: 0,
                 value: raw,
@@ -75,7 +75,7 @@ impl GoxValue {
             GoxValue::Slice(ptr) => *ptr as u64,
             GoxValue::Map(ptr) => *ptr as u64,
             GoxValue::Struct(ptr) => *ptr as u64,
-            GoxValue::Obx(ptr) => *ptr as u64,
+            GoxValue::Pointer(ptr) => *ptr as u64,
             GoxValue::Interface { value, .. } => *value,
         }
     }
@@ -97,7 +97,7 @@ impl GoxValue {
             GoxValue::Slice(_) => "[...]".to_string(),
             GoxValue::Map(_) => "map[...]".to_string(),
             GoxValue::Struct(_) => "{...}".to_string(),
-            GoxValue::Obx(_) => "object{...}".to_string(),
+            GoxValue::Pointer(_) => "*struct{...}".to_string(),
             GoxValue::Interface { .. } => "<interface>".to_string(),
         }
     }

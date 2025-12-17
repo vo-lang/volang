@@ -255,8 +255,8 @@ pub enum TypeExprKind {
     Func(Box<FuncType>),
     /// A struct type: `struct { ... }`
     Struct(Box<StructType>),
-    /// An object type: `object { ... }` (named `Obx` to avoid Rust naming conflicts)
-    Obx(Box<StructType>),
+    /// A pointer type: `*T` (only valid for struct types)
+    Pointer(Box<TypeExpr>),
     /// An interface type: `interface { ... }`
     Interface(Box<InterfaceType>),
 }
@@ -803,6 +803,8 @@ pub enum UnaryOp {
     Neg,    // -
     Not,    // !
     BitNot, // ^
+    Addr,   // & (address-of)
+    Deref,  // * (dereference)
 }
 
 /// A call expression.
@@ -1194,10 +1196,13 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
                 visitor.visit_type_expr(r);
             }
         }
-        TypeExprKind::Struct(s) | TypeExprKind::Obx(s) => {
+        TypeExprKind::Struct(s) => {
             for field in &s.fields {
                 visitor.visit_type_expr(&field.ty);
             }
+        }
+        TypeExprKind::Pointer(inner) => {
+            visitor.visit_type_expr(inner);
         }
         TypeExprKind::Interface(i) => {
             for elem in &i.elems {

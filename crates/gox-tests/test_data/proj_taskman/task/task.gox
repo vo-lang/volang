@@ -27,12 +27,12 @@ type taskData struct {
     status   int
 }
 
-// TaskManager manages tasks using object semantics (reference type)
-// Object is used here because:
+// TaskManager manages tasks using pointer semantics (reference type)
+// Pointer is used here because:
 // - It needs mutable internal state
-// - Methods modify the object's state
+// - Methods modify the manager's state
 // - Reference semantics allow shared access
-type TaskManager object {
+type TaskManager struct {
     tasks  []taskData
     nextID int
     count  int

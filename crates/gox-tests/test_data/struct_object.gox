@@ -1,13 +1,8 @@
 package main
 
-// Test struct (value type) vs object (reference type) semantics
+// Test struct value semantics
 
 type S struct {
-    x int
-    y int
-}
-
-type O object {
     x int
     y int
 }
@@ -31,27 +26,20 @@ func main() {
     assert(s1.x == 10, "struct value semantics: s1.x should be 10, got ", s1.x)
     assert(s2.x == 100, "struct value semantics: s2.x should be 100, got ", s2.x)
     
-    // Test 2: Object reference semantics (share on assignment)
-    o1 := O{10, 20}
-    o2 := o1
-    o2.x = 100
-    assert(o1.x == 100, "object reference semantics: o1.x should be 100, got ", o1.x)
-    assert(o2.x == 100, "object reference semantics: o2.x should be 100, got ", o2.x)
-    
-    // Test 3: Multi-field struct
+    // Test 2: Multi-field struct
     p := Person{11, 22, 33}
     assert(p.age == 11, "multi-field struct: p.age should be 11")
     assert(p.height == 22, "multi-field struct: p.height should be 22")
     assert(p.score == 33, "multi-field struct: p.score should be 33")
     
-    // Test 4: Slice literal
+    // Test 3: Slice literal
     items := []int{1, 2, 3}
     assert(len(items) == 3, "slice literal: len should be 3")
     
-    // Test 5: Struct with string and slice fields
+    // Test 4: Struct with string and slice fields
     c := Container{"hello", items}
     assert(len(c.name) == 5, "container name len should be 5")
     assert(len(c.items) == 3, "container items len should be 3")
     
-    println("struct_object_test: ALL PASSED")
+    println("struct_test: ALL PASSED")
 }

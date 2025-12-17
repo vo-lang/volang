@@ -31,7 +31,7 @@ pub enum ValueKind {
     Slice = 15,
     Map = 16,
     Struct = 17,
-    Obx = 18,
+    Pointer = 18,
     Interface = 19,
     Array = 20,
     Channel = 21,
@@ -60,7 +60,7 @@ impl ValueKind {
             15 => ValueKind::Slice,
             16 => ValueKind::Map,
             17 => ValueKind::Struct,
-            18 => ValueKind::Obx,
+            18 => ValueKind::Pointer,
             19 => ValueKind::Interface,
             20 => ValueKind::Array,
             21 => ValueKind::Channel,
@@ -106,7 +106,7 @@ impl ValueKind {
                 | Self::Array
                 | Self::Channel
                 | Self::Closure
-                | Self::Obx
+                | Self::Pointer
         )
     }
 

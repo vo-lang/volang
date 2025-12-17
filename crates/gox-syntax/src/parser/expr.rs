@@ -132,13 +132,15 @@ impl<'a> Parser<'a> {
                     span: Span::new(start, self.current.span.start),
                 })
             }
-            TokenKind::Minus | TokenKind::Plus | TokenKind::Not | TokenKind::Caret => {
+            TokenKind::Minus | TokenKind::Plus | TokenKind::Not | TokenKind::Caret | TokenKind::Amp | TokenKind::Star => {
                 let op_token = self.advance();
                 let op = match op_token.kind {
                     TokenKind::Minus => UnaryOp::Neg,
                     TokenKind::Plus => UnaryOp::Pos,
                     TokenKind::Not => UnaryOp::Not,
                     TokenKind::Caret => UnaryOp::BitNot,
+                    TokenKind::Amp => UnaryOp::Addr,
+                    TokenKind::Star => UnaryOp::Deref,
                     _ => unreachable!(),
                 };
                 let operand = self.parse_expr_prec(Precedence::Prefix)?;
@@ -166,7 +168,7 @@ impl<'a> Parser<'a> {
                 })
             }
             // Type-starting tokens for composite literals
-            TokenKind::LBracket | TokenKind::Map | TokenKind::Struct | TokenKind::Obx => {
+            TokenKind::LBracket | TokenKind::Map | TokenKind::Struct => {
                 self.parse_composite_lit_with_type()
             }
             _ => {

@@ -835,6 +835,7 @@ impl<'a> TypeCollector<'a> {
                         UnaryOp::Not => v.not(),
                         UnaryOp::BitNot => v.bit_not(),
                         UnaryOp::Pos => Some(v),
+                        UnaryOp::Addr | UnaryOp::Deref => None, // Not valid in const context
                     };
                     if let Some(c) = result {
                         let kind = c.kind().unwrap_or(UntypedKind::Int);

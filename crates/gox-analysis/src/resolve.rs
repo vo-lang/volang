@@ -433,12 +433,12 @@ impl<'a> TypeResolver<'a> {
                 Type::Struct(StructType { fields })
             }
 
-            TypeExprKind::Obx(s) => {
+            TypeExprKind::Pointer(inner) => {
                 let was_indirect = self.in_indirect;
                 self.in_indirect = true;
-                let fields = self.resolve_fields(&s.fields);
+                let elem = self.resolve_type_expr(inner);
                 self.in_indirect = was_indirect;
-                Type::Obx(StructType { fields })
+                Type::Pointer(Box::new(elem))
             }
 
             TypeExprKind::Interface(iface) => {
@@ -631,7 +631,7 @@ impl<'a> TypeResolver<'a> {
             Type::Basic(_) => true,
             Type::Array(a) => self.is_comparable(&a.elem),
             Type::Struct(s) => s.fields.iter().all(|f| self.is_comparable(&f.ty)),
-            Type::Obx(_) => true, // reference comparison
+            Type::Pointer(_) => true, // reference comparison
             Type::Interface(_) => true,
             Type::Named(id) => {
                 let idx = id.0 as usize;
@@ -746,11 +746,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_object_type() {
-        let (result, diag, _) = resolve_source("package main\ntype Counter object { value int }");
+    fn test_resolve_pointer_type() {
+        let (result, diag, _) = resolve_source("package main\ntype Counter struct { value int }\ntype CounterRef *Counter");
 
         assert!(!diag.has_errors());
-        assert!(matches!(result.named_types[0].underlying, Type::Obx(_)));
+        assert!(matches!(result.named_types[1].underlying, Type::Pointer(_)));
     }
 
     #[test]
@@ -848,12 +848,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_object_self_reference_ok() {
-        let (result, diag, _) = resolve_source("package main\ntype Node object { next Node }");
+    fn test_resolve_pointer_self_reference_ok() {
+        let (result, diag, _) = resolve_source("package main\ntype Node struct { next *Node }");
 
-        // Object types allow self-reference (reference semantics)
+        // Pointer types allow self-reference (reference semantics)
         assert!(!diag.has_errors());
-        assert!(matches!(result.named_types[0].underlying, Type::Obx(_)));
+        assert!(matches!(result.named_types[0].underlying, Type::Struct(_)));
     }
 
     #[test]
@@ -1005,11 +1005,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_mutual_recursion_via_object() {
+    fn test_resolve_mutual_recursion_via_pointer() {
         let (result, diag, _) =
-            resolve_source("package main\ntype A object { b B }\ntype B object { a A }");
+            resolve_source("package main\ntype A struct { b *B }\ntype B struct { a *A }");
 
-        // Object types allow mutual recursion
+        // Pointer types allow mutual recursion
         assert!(!diag.has_errors());
         assert_eq!(result.named_types.len(), 2);
     }

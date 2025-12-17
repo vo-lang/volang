@@ -16,7 +16,7 @@ type Point struct {
     y int
 }
 
-type Counter object {
+type Counter struct {
     value int
 }
 
@@ -152,7 +152,7 @@ File {
       ],
     },
     Type { name: "Point", type: struct { x int; y int; } },
-    Type { name: "Counter", type: object { value int; } },
+    Type { name: "Counter", type: struct { value int; } },
     Interface {
       name: "Shape",
       methods: [

@@ -650,17 +650,15 @@ mod tests {
     }
 
     #[test]
-    fn test_type_decl_object() {
+    fn test_type_decl_pointer() {
         let file = parse_ok(
             r#"
-            type Counter object {
-                count int
-            }
+            type CounterRef *Counter
         "#,
         );
         match &file.decls[0] {
             Decl::Type(t) => {
-                assert!(matches!(t.ty.kind, TypeExprKind::Obx(_)));
+                assert!(matches!(t.ty.kind, TypeExprKind::Pointer(_)));
             }
             _ => panic!("expected type decl"),
         }

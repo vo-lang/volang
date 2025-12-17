@@ -518,7 +518,7 @@ pub fn value_kind_to_builtin_type(kind: ValueKind) -> u16 {
         ValueKind::Closure => builtin::CLOSURE as u16,
         ValueKind::Interface => builtin::INTERFACE as u16,
         ValueKind::Struct => builtin::INT64 as u16, // struct uses inline slots, not a type ID
-        ValueKind::Obx => builtin::INT64 as u16,    // object uses GcRef
+        ValueKind::Pointer => builtin::INT64 as u16,    // pointer uses GcRef
     }
 }
 
@@ -576,7 +576,7 @@ impl<'a> CodegenContext<'a> {
             Type::Map(_) => ValueKind::Map,
             Type::Interface(_) => ValueKind::Interface,
             Type::Struct(_) => ValueKind::Struct,
-            Type::Obx(_) => ValueKind::Obx,
+            Type::Pointer(_) => ValueKind::Pointer,
             Type::Array(_) => ValueKind::Array,
             Type::Chan(_) => ValueKind::Channel,
             Type::Func(_) => ValueKind::Closure,
@@ -857,7 +857,7 @@ pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &go
         TypeExprKind::Map(_) => TypeInfo::new(ValueKind::Map),
         TypeExprKind::Slice(_) => TypeInfo::new(ValueKind::Slice),
         TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
-        TypeExprKind::Obx(_) => TypeInfo::new(ValueKind::Obx),
+        TypeExprKind::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
         TypeExprKind::Ident(ident) => {
             // Check basic types first if we have an interner
             if let Some(interner) = interner {
@@ -886,7 +886,7 @@ pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &go
                 if named.name == ident.symbol {
                     match &named.underlying {
                         Type::Struct(s) => return TypeInfo::struct_type(s.fields.len() as u16, Some(ident.symbol)),
-                        Type::Obx(_) => return TypeInfo::with_sym(ValueKind::Obx, ident.symbol),
+                        Type::Pointer(_) => return TypeInfo::with_sym(ValueKind::Pointer, ident.symbol),
                         Type::Interface(_) => return TypeInfo::with_sym(ValueKind::Interface, ident.symbol),
                         _ => {}
                     }

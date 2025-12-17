@@ -18,7 +18,7 @@ type Color struct {
     b int
 }
 
-type ObjContainer object {
+type ObjContainer struct {
     id    int
     items []int
     meta  map[string]int
@@ -99,11 +99,11 @@ func main() {
     assert(container.meta["count"] == 5, "container.meta[count] should be 5")
     assert(container.meta["sum"] == 150, "container.meta[sum] should be 150")
     
-    // Object reference semantics
+    // Struct value semantics (copy on assignment)
     container2 := container
     container2.id = 99
-    assert(container.id == 99, "object reference: container.id should be 99")
-    assert(container2.id == 99, "object reference: container2.id should be 99")
+    assert(container.id == 42, "struct value: container.id should still be 42")
+    assert(container2.id == 99, "struct value: container2.id should be 99")
     
     // Test 4: Tree with slice and map
     tree := Tree{

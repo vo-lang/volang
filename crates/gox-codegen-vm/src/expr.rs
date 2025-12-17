@@ -44,7 +44,7 @@ fn type_to_tag(ty: &Type) -> TypeTag {
         Type::Nil => TypeTag::Nil,
         Type::Slice(_) => TypeTag::Slice,
         Type::Map(_) => TypeTag::Map,
-        Type::Struct(_) | Type::Obx(_) => TypeTag::Struct,
+        Type::Struct(_) | Type::Pointer(_) => TypeTag::Struct,
         Type::Interface(_) => TypeTag::Interface,
         _ => TypeTag::Int64,
     }
@@ -456,6 +456,14 @@ fn compile_unary(
         }
         UnaryOp::BitNot => {
             fctx.emit(Opcode::Bnot, dst, operand, 0);
+        }
+        UnaryOp::Addr => {
+            // For now, just copy the operand (reference semantics handled at type level)
+            fctx.emit(Opcode::Mov, dst, operand, 0);
+        }
+        UnaryOp::Deref => {
+            // For now, just copy the operand (dereference is implicit for field access)
+            fctx.emit(Opcode::Mov, dst, operand, 0);
         }
     }
 
@@ -912,8 +920,8 @@ fn get_type_name(ctx: &CodegenContext, ty: &Type) -> String {
                 String::new()
             }
         }
-        Type::Struct(_) | Type::Obx(_) => {
-            // Anonymous struct/obx - no method lookup
+        Type::Struct(_) | Type::Pointer(_) => {
+            // Anonymous struct/pointer - no method lookup
             String::new()
         }
         _ => String::new(),
@@ -1211,7 +1219,7 @@ fn is_embedded_type_access(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             for field in &s.fields {
                 if field.embedded {
                     // Check if the field name matches the embedded type name
@@ -1255,7 +1263,7 @@ fn find_flat_field_index_with_offset(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             // First pass: check all direct (non-embedded) fields for shadowing
             let mut current_offset = base_offset;
             for field in &s.fields {
@@ -1312,7 +1320,7 @@ fn get_embedded_field_slot_count(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             for field in &s.fields {
                 if field.embedded {
                     if let Type::Named(id) = &field.ty {
@@ -1345,7 +1353,7 @@ fn get_embedded_field_offset(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             let mut offset = 0u16;
             for field in &s.fields {
                 if field.embedded {
@@ -1456,7 +1464,7 @@ fn find_promoted_method(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             let mut offset = base_offset;
             for field in &s.fields {
                 if field.embedded {
@@ -1507,7 +1515,7 @@ pub fn get_type_slot_count(ctx: &CodegenContext, ty: &gox_analysis::Type) -> u16
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             let mut count = 0u16;
             for field in &s.fields {
                 if field.embedded {
@@ -1538,7 +1546,7 @@ fn find_field_index_in_type(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             // First, look for direct field
             for (idx, field) in s.fields.iter().enumerate() {
                 if field.name == Some(field_name) {
@@ -1579,7 +1587,7 @@ fn find_field_in_embedded(
     use gox_analysis::Type;
 
     match ty {
-        Type::Struct(s) | Type::Obx(s) => {
+        Type::Struct(s) => {
             for (idx, field) in s.fields.iter().enumerate() {
                 if field.name == Some(field_name) {
                     return Some(idx as u16);
@@ -1773,7 +1781,7 @@ fn compile_composite_lit(
                 fctx.emit_with_flags(Opcode::SliceNew, num_elems as u8, dst, arr_reg, 0);
             }
         }
-        TypeExprKind::Struct(_) | TypeExprKind::Obx(_) => {
+        TypeExprKind::Struct(_) | TypeExprKind::Pointer(_) => {
             // Allocate struct/object
             // For now, use type_id=0 and calculate slots from fields
             let num_fields = lit.elems.len();

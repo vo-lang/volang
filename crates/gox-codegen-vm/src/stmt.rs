@@ -222,8 +222,8 @@ fn compile_short_var(
                                 kind = ValueKind::Struct;
                                 type_sym = src_local.type_sym;
                                 Some(src_local.field_count)  // Need struct copy
-                            } else if src_local.kind == ValueKind::Obx {
-                                kind = ValueKind::Obx;
+                            } else if src_local.kind == ValueKind::Pointer {
+                                kind = ValueKind::Pointer;
                                 type_sym = src_local.type_sym;
                                 None  // No copy needed - reference semantics
                             } else {
@@ -247,8 +247,8 @@ fn compile_short_var(
                                                         let fc = s.fields.len() as u16;
                                                         return Ok(compile_index_struct_copy(ctx, fctx, name, idx, fc, elem_type_sym)?);
                                                     }
-                                                    Type::Obx(_) => {
-                                                        kind = ValueKind::Obx;
+                                                    Type::Pointer(_) => {
+                                                        kind = ValueKind::Pointer;
                                                         type_sym = Some(elem_type_sym);
                                                     }
                                                     Type::Map(_) => {
@@ -361,7 +361,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                     }
                 }
                 TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
-                TypeExprKind::Obx(_) => TypeInfo::new(ValueKind::Obx),
+                TypeExprKind::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
                 TypeExprKind::Ident(ident) => {
                     // Check local types first if fctx is provided
                     if let Some(fc) = fctx {
@@ -372,7 +372,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                     // Named type - look up in type check results
                     let field_count = lit.elems.len() as u16;
                     if is_named_type_object(ctx, ident.symbol) {
-                        TypeInfo::with_sym(ValueKind::Obx, ident.symbol)
+                        TypeInfo::with_sym(ValueKind::Pointer, ident.symbol)
                     } else {
                         TypeInfo::struct_type(field_count, Some(ident.symbol))
                     }
@@ -393,7 +393,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                 // Look up the struct's type and find the field type
                 for named in &ctx.result.named_types {
                     match &named.underlying {
-                        Type::Struct(s) | Type::Obx(s) => {
+                        Type::Struct(s) => {
                             for field in &s.fields {
                                 if field.name == Some(sel.sel.symbol) {
                                     // Found the field - check its type
@@ -401,7 +401,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
                                         Type::Map(_) => return TypeInfo::new(ValueKind::Map),
                                         Type::Slice(_) => return TypeInfo::new(ValueKind::Slice),
                                         Type::Struct(fs) => return TypeInfo::with_fields(ValueKind::Struct, fs.fields.len() as u16),
-                                        Type::Obx(_) => return TypeInfo::new(ValueKind::Obx),
+                                        Type::Pointer(_) => return TypeInfo::new(ValueKind::Pointer),
                                         _ => {}
                                     }
                                 }
@@ -439,7 +439,7 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
 }
 /// Check if a named type is an object type (reference semantics)
 fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
-    expr::lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Obx(_)))
+    expr::lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Pointer(_)))
 }
 
 /// Check if a named type is an interface type

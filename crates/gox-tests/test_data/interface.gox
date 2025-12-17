@@ -45,7 +45,7 @@ func testStructInterface() {
 }
 
 // ============ Test 3: Named interface with object ============
-type Counter object {
+type Counter struct {
     count int
 }
 

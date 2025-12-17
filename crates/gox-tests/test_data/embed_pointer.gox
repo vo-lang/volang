@@ -1,19 +1,19 @@
-// Test: GoX correctly rejects pointer syntax at parse stage
-// GoX doesn't have pointers - parser rejects *, &
+// Test: GoX pointer type declaration
+// GoX supports pointers only for struct types
 package main
 
-// 1. Pointer type in struct field
-type S1 struct {
-	*int
+type Point struct {
+    x int
+    y int
 }
 
-// 2. Pointer receiver
-func (t *T) Method() {}
+// Valid: pointer to struct type declaration
+type PointRef *Point
 
-// 3. Address-of expression
 func main() {
+    // Test pointer type declaration works
+    p := Point{1, 2}
+    assert(p.x == 1, "p.x should be 1")
+    assert(p.y == 2, "p.y should be 2")
+    println("pointer_type: ALL PASSED")
 }
-
-=== typecheck ===
-E1101
-E1101

@@ -882,7 +882,7 @@ mod tests {
     fn test_keywords() {
         assert_eq!(lex("func"), vec![TokenKind::Func, TokenKind::Eof]);
         assert_eq!(lex("struct"), vec![TokenKind::Struct, TokenKind::Eof]);
-        assert_eq!(lex("object"), vec![TokenKind::Obx, TokenKind::Eof]);
+        assert_eq!(lex("object"), vec![TokenKind::Ident, TokenKind::Eof]);  // object is no longer a keyword
         assert_eq!(lex("return"), vec![TokenKind::Return, TokenKind::Eof]);
     }
 

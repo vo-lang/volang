@@ -4,14 +4,26 @@ This document defines the syntax and semantics of the **GoX** programming langua
 
 GoX is a statically typed, Go-like language.
 
+## For Go Programmers
+
+**Most Go programs run directly on GoX** with minimal or no changes. The main differences are:
+
+- **No generics** – use `interface{}` or code generation
+- **Pointers only for structs** – `*int`, `*[]T` not supported; `*MyStruct` works as expected
+- **Some stdlib differences** – check GoX stdlib for available packages
+- **Minor omissions** – no complex numbers, no method expressions/values
+
+If your code compiles, it behaves the same as Go.
+
+---
+
 ## Differences from Go
 
 GoX aims to match the Go language specification as closely as possible, except for the following intentional differences:
 
 - **No generics**: GoX does not support type parameters.
-- **No pointers**: GoX does not support pointer types or pointer operators (no `*T`, `&x`, `*x`).
 - **No complex numbers**: GoX does not support `complex*` types, imaginary literals, or the `complex/real/imag` built-ins.
-- **Explicit reference types**: GoX introduces an `object` composite type with reference semantics and `nil` as the zero value. `object` and `struct` are parallel composite types; a `struct` never "becomes" an `object`.
+- **Limited pointer types**: GoX supports `*T` and `&`/`*` operators only for struct types. No pointer arithmetic. Semantics match Go exactly.
 - **No method expressions/values**: Go method expressions (`T.M`) and method values (`x.M` used as a function value) are not supported. Use `func` literals to create closures instead (see §9.3).
 
 ---
@@ -22,7 +34,7 @@ GoX aims to match the Go language specification as closely as possible, except f
 
 - Familiar syntax for Go programmers
 - Static, strong typing with local type inference
-- Simple memory model: **object types** (heap-allocated, reference semantics) vs **value types** (copied on assignment)
+- Simple memory model: **reference types** (heap-allocated, reference semantics) vs **value types** (copied on assignment)
 - Multiple backend targets (LLVM, WASM, VM)
 
 ### 1.2 Non-Goals
@@ -30,20 +42,21 @@ GoX aims to match the Go language specification as closely as possible, except f
 The following are explicitly out of scope:
 
 - Generics
-- Explicit pointer types (`*T`), address-of (`&x`)
+- Pointer arithmetic
+- Pointers to non-struct types (`*int`, `*[]T`, etc.)
 
 ---
 
 ## 2. Memory Model
 
-### 2.1 Value Types vs Object Types
+### 2.1 Value Types vs Reference Types
 
 GoX distinguishes two categories of types:
 
 | Category | Types | Assignment | Zero Value |
 |----------|-------|------------|------------|
-| **Value** | `int`, `int8`, `int16`, `int32`, `int64`, `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`, `float64`, `bool`, `string`, `byte`, `rune`, `[N]T`, `struct` | Copies data | Type-specific |
-| **Object** | `object { ... }`, `interface`, `[]T`, `map[K]V`, `chan T`, `func(...)` | Copies reference | `nil` |
+| **Value** | `int`, `int8`, ..., `string`, `byte`, `rune`, `[N]T`, `struct` | Copies data | Type-specific |
+| **Reference** | `*StructType`, `interface`, `[]T`, `map[K]V`, `chan T`, `func(...)` | Copies reference | `nil` |
 
 **Value type zero values**:
 - `int`, `int8`, ..., `uint64` → `0`
@@ -55,68 +68,71 @@ GoX distinguishes two categories of types:
 - `[N]T` → each element is zero value of `T`
 - `struct` → each field is zero value of its type
 
-**Object type zero values**: Always `nil`.
+**Reference type zero values**: Always `nil`.
 
 ### 2.2 Named Type Inheritance
 
 When declaring `type T U`:
-- `T` inherits the **category** (value or object) of `U`
+- `T` inherits the **category** (value or reference) of `U`
 - `T` inherits the **zero value** of `U`
 - `T` inherits the **comparability** of `U`
 
 ```gox
 type MyInt int       // value type, zero = 0, comparable
-type Users []User    // object type, zero = nil
-type Handler func()  // object type, zero = nil
+type Users []User    // reference type, zero = nil
+type Handler func()  // reference type, zero = nil
 ```
 
-### 2.3 Object Reference Semantics
+### 2.3 Pointers to Structs (`*T`)
 
-GoX provides an `object` composite type, parallel to `struct`.
+For any struct type `T`, the type `*T` is a **pointer type** with reference semantics. GoX pointers follow Go semantics exactly, except:
+- Only struct types can have pointers (`*int` is not allowed)
+- No pointer arithmetic
 
-`struct` and `object` share similar surface syntax (fields, composite literals, selection, methods), but they are different types with different runtime behavior. In particular, a `struct` value is never an `object` value.
+**Operators**:
 
-**Consequences**:
+| Operator | Syntax | Meaning |
+|----------|--------|---------|
+| Address-of | `&x` | Returns pointer to struct variable `x` |
+| Dereference | `*p` | Accesses the struct that `p` points to (alias, not copy) |
 
-1. Variables of object type initialize to `nil`
-2. Composite literals of object type (e.g., `T{...}` where `T` is an object type) allocate a new object
-3. `make(T)` allocates a new object when `T` is an object type
-4. Assignment of object values copies the reference: after `q := p`, both `q` and `p` refer to the same object
-5. Mutations through one reference are visible through the other
-6. Field access (`p.name`) or method calls (`p.Method()`) on `nil` are **runtime errors**
+**Example**:
 
 ```gox
-type User struct {
-    name string
-    age  int
-}
+type Point struct { x, y int }
 
-type UserRef object {
-    name string
-    age  int
-}
+var p Point = Point{1, 2}
+var ref *Point = &p         // ref points to p
 
-var u User            // zero-valued struct
+ref.x = 10                  // modify through pointer
+println(p.x)                // 10 (p was modified)
 
-var p UserRef         // p == nil
-p.name = "x"          // RUNTIME ERROR: nil dereference
+*ref = Point{3, 4}          // assign through pointer
+println(p.x)                // 3
 
-p = UserRef{}         // p != nil, new object created
-p.name = "Alice"      // OK
-
-r := make(UserRef)    // r != nil, new object created
-r.name = "Carol"
-
-q := p                // q and p refer to same object
-q.name = "Bob"        // p.name is now also "Bob"
+var ref2 *Point = &p
+println(ref == ref2)        // true (same address)
 ```
+
+**Nil pointers**:
+
+```gox
+var r *Point                // r == nil
+r.x = 1                     // RUNTIME ERROR: nil pointer dereference
+r = &Point{}                // r points to new zero-valued Point
+r = new(Point)              // equivalent to above
+```
+
+**Pointer comparison**:
+- `p == q`: true if both point to same struct (or both nil)
+- `p == nil`: true if p is nil
 
 ### 2.4 The `nil` Literal
 
-`nil` represents the absence of an object for object types.
+`nil` represents the absence of a value for reference types.
 
 **Static Rules**:
-- `nil` may be assigned to any object type
+- `nil` may be assigned to any reference type
 - `nil` cannot be assigned to value types (compile error)
 - `var x = nil` is invalid: type cannot be inferred
 - `x := nil` is invalid: type cannot be inferred (see §5.4)
@@ -140,28 +156,28 @@ Types are classified as **comparable** or **non-comparable**:
 | `[N]T` (if `T` comparable) | ✅ | Element-wise equality |
 | Named value type | ✅ (inherits) | Per underlying type |
 | `struct` | ✅ if all fields comparable | Field-wise equality |
-| `object` | ✅ | Reference identity (`==`/`!=`), or `nil` |
+| `*StructType` | ✅ | Pointer identity (`==`/`!=`), or `nil` |
 | `interface` | ✅ | Dynamic value equality (requires underlying comparable) or `nil` |
 | `[]T` | ❌ | Only `== nil` / `!= nil` |
 | `map[K]V` | ❌ | Only `== nil` / `!= nil` |
 | `func(...)` | ❌ | Only `== nil` / `!= nil` |
 
 **Rules**:
-- `==` and `!=` require both operands to be comparable, OR one operand to be `nil` and the other an object type
+- `==` and `!=` require both operands to be comparable, OR one operand to be `nil` and the other a reference type
 - `<`, `<=`, `>`, `>=` are only valid for numeric types (`int`, `int8`, ..., `float64`) and `string`
 
 ```gox
 1 == 2              // OK: int comparable
 "a" < "b"           // OK: string ordered
-p == nil            // OK: object vs nil
-p == q              // OK: object reference comparison
+p == nil            // OK: pointer vs nil
+p == q              // OK: pointer comparison
 s == nil            // OK: slice vs nil
 s == t              // ERROR: slices not comparable
 ```
 
 ### 2.6 Parameter Passing
 
-All parameters are passed by value. For object types, the "value" is a reference, so mutations inside a function affect the caller's object.
+All parameters are passed by value. For reference types, the "value" is a reference, so mutations inside a function affect the caller's data.
 
 ---
 
@@ -185,9 +201,9 @@ The following are reserved keywords:
  break     case      chan      const     continue
  default   defer     else      fallthrough
  for       func      go        goto      if
- import    interface map       object
- package   range     return    select    struct
- switch    type      var
+ import    interface map       package   range
+ return    select    struct    switch    type
+ var
 ```
 
 > **Note**: `panic` and `recover` are **built-in functions**, not keywords. See §10.
@@ -359,7 +375,7 @@ var (
 
 **Static Rules**:
 - If `Type` is omitted, `Expr` is required and type is inferred
-- If `Expr` is omitted, variable is initialized to zero value (which is `nil` for object types)
+- If `Expr` is omitted, variable is initialized to zero value (which is `nil` for reference types)
 - If `Expr` is `nil`, `Type` is required
 
 ```gox
@@ -589,7 +605,7 @@ x := nil          // ERROR: cannot infer type from nil
 TypeDecl ::= "type" Ident Type ";" ;
 ```
 
-The new type inherits the category (value/object), zero value, and comparability from the underlying type (see §2.2).
+The new type inherits the category (value/reference), zero value, and comparability from the underlying type (see §2.2).
 
 ```gox
 type User struct {
@@ -608,7 +624,7 @@ type User struct {
 
 ```ebnf
 Type ::= Ident
-       | ObjectType
+       | PointerType
        | ArrayType
        | SliceType
        | MapType
@@ -616,6 +632,8 @@ Type ::= Ident
        | FuncType
        | StructType
        | InterfaceType ;
+
+PointerType ::= "*" Type ;  // Only valid when Type is a struct type
 ```
 
 ```ebnf
@@ -655,7 +673,7 @@ var a [4]int  // [0, 0, 0, 0]
 SliceType ::= "[" "]" Type ;
 ```
 
-Slices are object types referencing a dynamic sequence.
+Slices are reference types referencing a dynamic sequence.
 
 ```gox
 var s []int         // s == nil
@@ -668,7 +686,7 @@ s = []int{1, 2, 3}  // s != nil
 MapType ::= "map" "[" Type "]" Type ;
 ```
 
-Maps are object types providing key-value storage.
+Maps are reference types providing key-value storage.
 
 **Key type restriction**: The key type must be **comparable**:
 
@@ -679,7 +697,7 @@ Maps are object types providing key-value storage.
 | `bool`, `string`, `byte`, `rune` | `func(...)` |
 | `[N]T` (array of comparable) | |
 | `struct` (if comparable) | |
-| `object` | |
+| `*StructType` | |
 | `interface` | |
 
 ```gox
@@ -696,7 +714,7 @@ var bad map[[]int]int     // ERROR: slices are not comparable
 ChanType ::= ( "chan" | "chan" "<-" | "<-" "chan" ) Type ;
 ```
 
-Channels are object types used for communication between goroutines. Zero value is `nil`.
+Channels are reference types used for communication between goroutines. Zero value is `nil`.
 
 **Channel directions**:
 - `chan T` — bidirectional (can send and receive)
@@ -737,7 +755,7 @@ ParamTypeList ::= Type ( "," Type )* ;
 ResultType    ::= Type | "(" Type ( "," Type )* ")" ;
 ```
 
-Function types are object types. Zero value is `nil`.
+Function types are reference types. Zero value is `nil`.
 
 ```gox
 var f func(int) int  // f == nil
@@ -796,35 +814,6 @@ e.name = "Alice"   // accesses User.name
 ```
 
 > **Note**: Tags use double-quoted strings with escaped inner quotes.
-
-### 6.10 Objects
-
-```ebnf
-ObjectType ::= "object" "{" FieldDecl* "}" ;
-```
-
-Objects are **object types** with reference semantics. The zero value is `nil`. Assignment copies the reference, not the data.
-
-`object` and `struct` share similar surface syntax (fields, composite literals, selection, methods), but they are different types with different runtime behavior.
-
-```gox
-type UserRef object {
-    id   int
-    name string
-}
-
-var p UserRef         // p == nil
-p = UserRef{}         // p != nil, new object allocated
-p.name = "Alice"
-
-r := make(UserRef)    // r != nil, new object allocated
-r.name = "Carol"
-
-q := p                // q and p refer to same object
-q.name = "Bob"        // p.name is now also "Bob"
-```
-
-**Anonymous fields** (embedding) work the same as in structs.
 
 ---
 
@@ -983,7 +972,7 @@ ExprList   ::= Expr ( "," Expr )* ;
 2. Results are stored in temporaries
 3. All LHS locations are assigned left-to-right from temporaries
 
-This guarantees that `a, b = b, a` swaps the values (or references, for object types).
+This guarantees that `a, b = b, a` swaps the values (or references, for reference types).
 
 ```gox
 x = 10
@@ -1110,7 +1099,7 @@ default:
 }
 ```
 
-**Type Rule**: If any case expression is `nil`, the switch expression must have an object type.
+**Type Rule**: If any case expression is `nil`, the switch expression must have a reference type.
 
 ```gox
 switch handler {
@@ -1386,7 +1375,7 @@ The following functions are **compiler built-ins**. Their signatures use meta-no
 | `append(s, elems...)` | Returns new slice with elements appended |
 | `copy(dst, src)` | Copies elements from src slice to dst slice, returns count copied |
 | `delete(m, key)` | Deletes the element with the specified key from a map |
-| `make(T, size?, cap?)` | Allocates and initializes slice, map, channel, or object |
+| `make(T, size?, cap?)` | Allocates and initializes slice, map, or channel |
 | `close(ch)` | Closes a channel (no more sends allowed) |
 | `panic(v)` | Stops normal execution and begins panicking |
 | `recover()` | Captures a panic value during deferred function execution |
@@ -1426,7 +1415,7 @@ result := safeCall(dangerous)  // result = "caught panic"
 
 ### 10.2 Make
 
-`make` creates and initializes slices, maps, channels, and objects:
+`make` creates and initializes slices, maps, and channels:
 
 ```gox
 s := make([]int, 10)         // slice with length 10, capacity 10
@@ -1435,11 +1424,8 @@ m := make(map[string]int)    // empty map
 ch := make(chan int)         // unbuffered channel
 ch := make(chan int, 10)     // buffered channel with capacity 10
 
-type UserRef object {
-    name string
-}
-p := make(UserRef)           // new object allocated
-p.name = "Alice"
+p := new(Point)              // equivalent to &Point{}
+p.x = 10
 ```
 
 ### 10.3 Assert

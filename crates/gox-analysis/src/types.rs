@@ -73,8 +73,8 @@ pub enum Type {
     /// Struct type: `struct { ... }`
     Struct(StructType),
 
-    /// Object type: `object { ... }` (named Obx in Rust code)
-    Obx(StructType),
+    /// Pointer type: `*T` (only valid for struct types)
+    Pointer(Box<Type>),
 
     /// Interface type: `interface { ... }`
     Interface(InterfaceType),
@@ -325,7 +325,7 @@ impl Type {
             Type::Map(_) => true,
             Type::Chan(_) => true,
             Type::Func(_) => true,
-            Type::Obx(_) => true,
+            Type::Pointer(_) => true,
             Type::Interface(_) => true,
             Type::Nil => true,
             // Named types inherit from underlying
@@ -340,7 +340,7 @@ impl Type {
             Type::Basic(_) => true,
             Type::Array(a) => a.elem.is_comparable(),
             Type::Struct(s) => s.fields.iter().all(|f| f.ty.is_comparable()),
-            Type::Obx(_) => true, // reference comparison
+            Type::Pointer(_) => true, // reference comparison
             Type::Interface(_) => true,
             Type::Untyped(_) => true,
             // Slice, Map, Func, Chan are only comparable to nil
@@ -543,10 +543,17 @@ impl<'a> TypeRegistry<'a> {
                             let iface_set = self.interface_method_set(iface);
                             set.merge(&iface_set);
                         }
-                        Type::Struct(s) | Type::Obx(s) => {
+                        Type::Struct(s) => {
                             // Add methods from embedded fields
                             let struct_set = self.struct_method_set(s);
                             set.merge(&struct_set);
+                        }
+                        Type::Pointer(inner) => {
+                            // Pointer to struct - get methods from pointed struct
+                            if let Type::Struct(s) = inner.as_ref() {
+                                let struct_set = self.struct_method_set(s);
+                                set.merge(&struct_set);
+                            }
                         }
                         _ => {}
                     }
@@ -556,9 +563,13 @@ impl<'a> TypeRegistry<'a> {
                 }
             }
             Type::Interface(iface) => self.interface_method_set(iface),
-            Type::Obx(s) => {
-                // Object types can have methods via embedded fields
-                self.struct_method_set(s)
+            Type::Pointer(inner) => {
+                // Pointer types - get methods from pointed struct
+                if let Type::Struct(s) = inner.as_ref() {
+                    self.struct_method_set(s)
+                } else {
+                    MethodSet::new()
+                }
             }
             Type::Struct(s) => self.struct_method_set(s),
             _ => MethodSet::new(),
