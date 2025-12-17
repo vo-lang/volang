@@ -8,12 +8,11 @@ use gox_vm::objects::{array, slice, string};
 use gox_vm::types::builtin;
 
 /// Register strings functions.
+/// Note: HasPrefix, HasSuffix are now implemented in GoX (stdlib/strings/strings.gox)
 pub fn register(registry: &mut NativeRegistry) {
-    // Search
+    // Search (native: need efficient string search algorithms)
     registry.register("strings.Contains", native_contains);
     registry.register("strings.ContainsAny", native_contains_any);
-    registry.register("strings.HasPrefix", native_has_prefix);
-    registry.register("strings.HasSuffix", native_has_suffix);
     registry.register("strings.Index", native_index);
     registry.register("strings.LastIndex", native_last_index);
     registry.register("strings.Count", native_count);

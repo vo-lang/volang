@@ -479,12 +479,19 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
     }
     
     /// Check if a function from an imported package is native.
-    pub fn is_native_func(&self, pkg_sym: Symbol, _func_sym: Symbol) -> bool {
-        // Get package name from symbol
+    /// Returns true only if the function is NOT already compiled (not in cross_pkg_funcs).
+    pub fn is_native_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
         if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
-            // For stdlib packages (no dots, not relative), treat all functions as native
-            if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
-                return true;
+            if let Some(func_name) = self.interner.resolve(func_sym) {
+                let qualified_name = format!("{}.{}", pkg_name, func_name);
+                // If it's in cross_pkg_funcs, it has a GoX body and was compiled
+                if self.cross_pkg_funcs.contains_key(&qualified_name) {
+                    return false;
+                }
+                // For stdlib packages (no dots, not relative), treat as native if not compiled
+                if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
+                    return true;
+                }
             }
         }
         false
@@ -781,12 +788,19 @@ impl<'a> CodegenContext<'a> {
     }
     
     /// Check if a function from an imported package is native.
-    pub fn is_native_func(&self, pkg_sym: Symbol, _func_sym: Symbol) -> bool {
-        // Get package name from symbol
+    /// Returns true only if the function is NOT already compiled (not in cross_pkg_funcs).
+    pub fn is_native_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
         if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
-            // For stdlib packages (no dots, not relative), treat all functions as native
-            if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
-                return true;
+            if let Some(func_name) = self.interner.resolve(func_sym) {
+                let qualified_name = format!("{}.{}", pkg_name, func_name);
+                // If it's in cross_pkg_funcs, it has a GoX body and was compiled
+                if self.cross_pkg_funcs.contains_key(&qualified_name) {
+                    return false;
+                }
+                // For stdlib packages (no dots, not relative), treat as native if not compiled
+                if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
+                    return true;
+                }
             }
         }
         false
