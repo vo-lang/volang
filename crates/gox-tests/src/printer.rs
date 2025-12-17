@@ -203,7 +203,8 @@ impl<'a> AstPrinter<'a> {
             self.write_indent();
             let recv_name = self.resolve_symbol(recv.name.symbol);
             let recv_ty = self.resolve_symbol(recv.ty.symbol);
-            writeln!(self.output, "receiver: ({} {}),", recv_name, recv_ty).unwrap();
+            let ptr_prefix = if recv.is_pointer { "*" } else { "" };
+            writeln!(self.output, "receiver: ({} {}{}),", recv_name, ptr_prefix, recv_ty).unwrap();
         }
 
         // Name

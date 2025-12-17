@@ -716,7 +716,13 @@ impl<'a> CodegenContext<'a> {
             fctx.param_slots += 1;
             // Define receiver with its type
             let type_sym = Some(receiver.ty.symbol);
-            fctx.define_local_with_type(receiver.name, 1, ValueKind::Int64, type_sym);
+            // Use Pointer kind for pointer receivers, Int64 for value receivers
+            let kind = if receiver.is_pointer {
+                ValueKind::Pointer
+            } else {
+                ValueKind::Int64
+            };
+            fctx.define_local_with_type(receiver.name, 1, kind, type_sym);
         }
         
         // Allocate registers for parameters with type info
