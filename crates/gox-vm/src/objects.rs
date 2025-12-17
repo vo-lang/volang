@@ -1,6 +1,6 @@
 //! Heap object operations: String, Array, Slice, Map, Channel, Closure.
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec, collections::VecDeque};
+use alloc::{boxed::Box, vec::Vec, collections::VecDeque};
 use crate::gc::{Gc, GcRef};
 use crate::types::TypeId;
 use indexmap::IndexMap;

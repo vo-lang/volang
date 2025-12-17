@@ -14,7 +14,6 @@
 extern crate alloc;
 
 // Re-export alloc types for internal use
-pub(crate) use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 pub mod gc;
 pub mod types;

@@ -8,7 +8,7 @@ use crate::native::{NativeCtx, NativeFn, NativeRegistry, NativeResult};
 use crate::objects::{self, array, channel, closure, interface, map, slice, string};
 use crate::types::{builtin, TypeId, TypeTable};
 
-use alloc::{format, string::{String, ToString}, vec, vec::Vec};
+use alloc::{format, string::{String, ToString}, vec::Vec};
 
 /// VM execution result.
 #[derive(Debug)]
