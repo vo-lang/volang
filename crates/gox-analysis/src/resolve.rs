@@ -239,6 +239,9 @@ impl<'a> TypeResolver<'a> {
                 let method_info = Method {
                     name: method.name,
                     sig,
+                    is_pointer_receiver: method.decl.receiver.as_ref()
+                        .map(|r| r.is_pointer)
+                        .unwrap_or(false),
                 };
 
                 // Add method to the type's method set
@@ -570,6 +573,8 @@ impl<'a> TypeResolver<'a> {
                             results,
                             variadic: m.sig.variadic,
                         },
+                        // Interface methods have no receiver, so is_pointer_receiver is false
+                        is_pointer_receiver: false,
                     });
                 }
                 ast::InterfaceElem::Embedded(ident) => {

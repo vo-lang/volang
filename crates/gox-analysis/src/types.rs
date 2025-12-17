@@ -302,6 +302,9 @@ pub struct InterfaceType {
 pub struct Method {
     pub name: Symbol,
     pub sig: FuncType,
+    /// True if this method has a pointer receiver (*T), false for value receiver (T).
+    /// This affects method set computation: pointer receiver methods only belong to *T's method set.
+    pub is_pointer_receiver: bool,
 }
 
 impl Type {
@@ -695,6 +698,7 @@ mod tests {
                 results: vec![Type::Basic(BasicType::Int); result_count],
                 variadic: false,
             },
+            is_pointer_receiver: false,
         }
     }
 

@@ -374,6 +374,8 @@ impl<'a> TypeChecker<'a> {
                             Some(crate::types::Method {
                                 name: m.name.symbol,
                                 sig,
+                                // Interface methods have no receiver
+                                is_pointer_receiver: false,
                             })
                         } else {
                             None

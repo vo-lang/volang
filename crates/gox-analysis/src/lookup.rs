@@ -57,7 +57,7 @@ impl EmbeddedType {
 /// Represents either a found method or a collision during method set computation.
 #[derive(Debug, Clone)]
 enum MethodOrCollision {
-    Method(FuncType),
+    Method { sig: FuncType, is_pointer_receiver: bool },
     Collision,
 }
 
@@ -235,6 +235,10 @@ impl<'a> Lookup<'a> {
 
     /// Computes the complete method set for a type.
     ///
+    /// This implements Go's method set rules:
+    /// - For value type T: only value receiver methods (is_pointer_receiver = false)
+    /// - For pointer type *T: both value and pointer receiver methods
+    ///
     /// This includes:
     /// - Methods declared directly on the type (for named types)
     /// - Methods from embedded fields (promoted methods)
@@ -242,6 +246,13 @@ impl<'a> Lookup<'a> {
     ///
     /// Handles ambiguity by excluding methods that appear multiple times at the same depth.
     pub fn method_set(&self, ty: &Type) -> MethodSet {
+        // Check if this is a pointer type - if so, include pointer receiver methods
+        let include_pointer_receivers = matches!(ty, Type::Pointer(_));
+        self.method_set_impl(ty, include_pointer_receivers)
+    }
+
+    /// Internal implementation of method_set with explicit pointer receiver control.
+    fn method_set_impl(&self, ty: &Type, include_pointer_receivers: bool) -> MethodSet {
         let mut result: HashMap<Symbol, MethodOrCollision> = HashMap::new();
 
         // Start with type at depth 0
@@ -256,8 +267,13 @@ impl<'a> Lookup<'a> {
             for et in &current {
                 let mut search_ty = et.ty.clone();
 
-                // Handle Named types
-                if let Type::Named(id) = &et.ty {
+                // First, dereference pointer types
+                if let Type::Pointer(inner) = &search_ty {
+                    search_ty = inner.as_ref().clone();
+                }
+
+                // Handle Named types (either directly or after pointer deref)
+                if let Type::Named(id) = &search_ty {
                     let idx = id.0 as usize;
                     if seen.contains(&(idx as u32)) {
                         continue;
@@ -268,7 +284,12 @@ impl<'a> Lookup<'a> {
                         let info = &self.named_types[idx];
 
                         // Add methods from this named type
+                        // Only include pointer receiver methods if include_pointer_receivers is true
                         for method in &info.methods {
+                            if method.is_pointer_receiver && !include_pointer_receivers {
+                                // Skip pointer receiver methods for value types
+                                continue;
+                            }
                             add_to_method_set(
                                 &mut depth_methods,
                                 method,
@@ -355,7 +376,7 @@ impl<'a> Lookup<'a> {
         let methods: Vec<Method> = result
             .into_iter()
             .filter_map(|(name, entry)| match entry {
-                MethodOrCollision::Method(sig) => Some(Method { name, sig }),
+                MethodOrCollision::Method { sig, is_pointer_receiver } => Some(Method { name, sig, is_pointer_receiver }),
                 MethodOrCollision::Collision => None,
             })
             .collect();
@@ -475,7 +496,10 @@ fn add_to_method_set(
             e.insert(MethodOrCollision::Collision);
         }
         std::collections::hash_map::Entry::Vacant(e) => {
-            e.insert(MethodOrCollision::Method(method.sig.clone()));
+            e.insert(MethodOrCollision::Method { 
+                sig: method.sig.clone(),
+                is_pointer_receiver: method.is_pointer_receiver,
+            });
         }
     }
 }
@@ -571,6 +595,105 @@ mod tests {
                 results: vec![Type::Basic(BasicType::Int)],
                 variadic: false,
             },
+            is_pointer_receiver: false,
+        };
+
+        let named_types = vec![NamedTypeInfo {
+            name: make_symbol(100),
+            underlying: Type::Struct(StructType { fields: vec![] }),
+            methods: vec![method.clone()],
+        }];
+
+        let lookup = Lookup::new(&named_types);
+        let ty = Type::Named(NamedTypeId(0));
+
+        // Value type should have value receiver methods
+        let set = lookup.method_set(&ty);
+        assert_eq!(set.methods.len(), 1);
+    }
+
+    #[test]
+    fn test_method_set_pointer_receiver_rules() {
+        // Create a value receiver method
+        let value_method = Method {
+            name: make_symbol(1), // "Sum"
+            sig: FuncType {
+                params: vec![],
+                results: vec![Type::Basic(BasicType::Int)],
+                variadic: false,
+            },
+            is_pointer_receiver: false,
+        };
+
+        // Create a pointer receiver method
+        let pointer_method = Method {
+            name: make_symbol(2), // "Move"
+            sig: FuncType {
+                params: vec![Type::Basic(BasicType::Int), Type::Basic(BasicType::Int)],
+                results: vec![],
+                variadic: false,
+            },
+            is_pointer_receiver: true,
+        };
+
+        let named_types = vec![NamedTypeInfo {
+            name: make_symbol(100), // "Point"
+            underlying: Type::Struct(StructType { fields: vec![] }),
+            methods: vec![value_method.clone(), pointer_method.clone()],
+        }];
+
+        let lookup = Lookup::new(&named_types);
+
+        // Test 1: Value type T should only have value receiver methods
+        let value_ty = Type::Named(NamedTypeId(0));
+        let value_set = lookup.method_set(&value_ty);
+        assert_eq!(value_set.methods.len(), 1, "Value type should only have 1 method (value receiver)");
+        assert!(!value_set.methods[0].is_pointer_receiver, "Method should be value receiver");
+
+        // Test 2: Pointer type *T should have both value and pointer receiver methods
+        let pointer_ty = Type::Pointer(Box::new(Type::Named(NamedTypeId(0))));
+        let pointer_set = lookup.method_set(&pointer_ty);
+        assert_eq!(pointer_set.methods.len(), 2, "Pointer type should have 2 methods (both receivers)");
+    }
+
+    #[test]
+    fn test_lookup_direct_field_on_pointer() {
+        let named_types = vec![];
+        let lookup = Lookup::new(&named_types);
+
+        // Create a pointer to struct
+        let struct_ty = Type::Struct(StructType {
+            fields: vec![
+                Field {
+                    name: Some(make_symbol(1)), // "x"
+                    ty: Type::Basic(BasicType::Int),
+                    embedded: false,
+                    tag: None,
+                },
+            ],
+        });
+        let pointer_ty = Type::Pointer(Box::new(struct_ty));
+
+        // Should be able to access field through pointer (auto-deref)
+        match lookup.lookup_field_or_method(&pointer_ty, make_symbol(1)) {
+            LookupResult::Field(ty, indices, _) => {
+                assert_eq!(ty, Type::Basic(BasicType::Int));
+                assert_eq!(indices, vec![0]);
+            }
+            _ => panic!("Expected Field result for pointer field access"),
+        }
+    }
+
+    #[test]
+    fn test_method_set_from_named_type_old() {
+        let method = Method {
+            name: make_symbol(1),
+            sig: FuncType {
+                params: vec![],
+                results: vec![Type::Basic(BasicType::Int)],
+                variadic: false,
+            },
+            is_pointer_receiver: false,
         };
 
         let named_types = vec![NamedTypeInfo {
