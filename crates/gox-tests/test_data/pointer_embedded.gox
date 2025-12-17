@@ -1,0 +1,95 @@
+package main
+
+// Test for pointer access to embedded structs
+
+// ============================================
+// Part 1: Embedded Struct Types
+// ============================================
+
+type Person struct {
+    name string
+    age  int
+}
+
+func (p Person) GetName() string {
+    return p.name
+}
+
+func (p *Person) SetAge(age int) {
+    p.age = age
+}
+
+type Employee struct {
+    Person  // embedded
+    title   string
+    salary  int
+}
+
+func (e *Employee) Promote(newTitle string, raise int) {
+    e.title = newTitle
+    e.salary = e.salary + raise
+}
+
+// ============================================
+// Part 2: Tests
+// ============================================
+
+func main() {
+    testEmbeddedFieldAccess()
+    testPromotedMethods()
+    testPointerToEmbedded()
+    
+    println("pointer_embedded: ALL PASSED")
+}
+
+// Test 1: Access embedded fields through pointer
+func testEmbeddedFieldAccess() {
+    emp := &Employee{
+        Person: Person{name: "Alice", age: 30},
+        title:  "Engineer",
+        salary: 50000,
+    }
+    
+    // Access embedded fields directly
+    assert(emp.name == "Alice", "testEmbeddedFieldAccess: name should be 'Alice'")
+    assert(emp.age == 30, "testEmbeddedFieldAccess: age should be 30")
+    
+    // Access direct fields
+    assert(emp.title == "Engineer", "testEmbeddedFieldAccess: title should be 'Engineer'")
+    assert(emp.salary == 50000, "testEmbeddedFieldAccess: salary should be 50000")
+}
+
+// Test 2: Call promoted methods through pointer
+func testPromotedMethods() {
+    emp := &Employee{
+        Person: Person{name: "Bob", age: 25},
+        title:  "Developer",
+        salary: 60000,
+    }
+    
+    // Call promoted value receiver method
+    name := emp.GetName()
+    assert(name == "Bob", "testPromotedMethods: GetName should return 'Bob'")
+    
+    // Call promoted pointer receiver method
+    emp.SetAge(26)
+    assert(emp.age == 26, "testPromotedMethods: age should be 26 after SetAge")
+}
+
+// Test 3: Pointer receiver on outer type with embedded struct
+func testPointerToEmbedded() {
+    emp := &Employee{
+        Person: Person{name: "Carol", age: 35},
+        title:  "Manager",
+        salary: 80000,
+    }
+    
+    // Call method on outer type
+    emp.Promote("Senior Manager", 10000)
+    
+    assert(emp.title == "Senior Manager", "testPointerToEmbedded: title should be 'Senior Manager'")
+    assert(emp.salary == 90000, "testPointerToEmbedded: salary should be 90000")
+    
+    // Embedded fields still accessible
+    assert(emp.name == "Carol", "testPointerToEmbedded: name should still be 'Carol'")
+}

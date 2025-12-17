@@ -1,0 +1,126 @@
+package main
+
+// Test for method calls on pointers and values
+
+// ============================================
+// Part 1: Type Definition with Multiple Methods
+// ============================================
+
+type Counter struct {
+    count int
+    name  string
+}
+
+// Pointer receiver - modifies the counter
+func (c *Counter) Increment() {
+    c.count = c.count + 1
+}
+
+// Pointer receiver - modifies the counter
+func (c *Counter) Add(n int) {
+    c.count = c.count + n
+}
+
+// Pointer receiver - resets the counter
+func (c *Counter) Reset() {
+    c.count = 0
+}
+
+// Value receiver - returns count
+func (c Counter) GetCount() int {
+    return c.count
+}
+
+// Value receiver - returns name
+func (c Counter) GetName() string {
+    return c.name
+}
+
+// ============================================
+// Part 2: Chain Method Calls
+// ============================================
+
+type Builder struct {
+    value int
+}
+
+func (b *Builder) Add(n int) *Builder {
+    b.value = b.value + n
+    return b
+}
+
+func (b *Builder) Multiply(n int) *Builder {
+    b.value = b.value * n
+    return b
+}
+
+func (b Builder) GetValue() int {
+    return b.value
+}
+
+// ============================================
+// Part 3: Tests
+// ============================================
+
+func main() {
+    testPointerReceiverModifies()
+    testValueReceiverReadsOnly()
+    testMethodChaining()
+    testMultiplePointerCalls()
+    
+    println("pointer_method_call: ALL PASSED")
+}
+
+// Test 1: Pointer receiver methods modify the struct
+func testPointerReceiverModifies() {
+    c := &Counter{count: 0, name: "test"}
+    
+    c.Increment()
+    assert(c.count == 1, "testPointerReceiverModifies: count should be 1 after Increment")
+    
+    c.Add(5)
+    assert(c.count == 6, "testPointerReceiverModifies: count should be 6 after Add(5)")
+    
+    c.Reset()
+    assert(c.count == 0, "testPointerReceiverModifies: count should be 0 after Reset")
+}
+
+// Test 2: Value receiver methods don't modify the struct
+func testValueReceiverReadsOnly() {
+    c := &Counter{count: 42, name: "myCounter"}
+    
+    count := c.GetCount()
+    assert(count == 42, "testValueReceiverReadsOnly: GetCount should return 42")
+    
+    name := c.GetName()
+    assert(name == "myCounter", "testValueReceiverReadsOnly: GetName should return 'myCounter'")
+    
+    // Original unchanged
+    assert(c.count == 42, "testValueReceiverReadsOnly: count should still be 42")
+}
+
+// Test 3: Sequential method calls (chaining not yet supported)
+func testMethodChaining() {
+    b := &Builder{value: 1}
+    
+    // Sequential calls instead of chaining
+    b.Add(2)
+    b.Multiply(3)
+    b.Add(1)
+    
+    result := b.GetValue()
+    assert(result == 10, "testMethodChaining: (1+2)*3+1 should equal 10")
+}
+
+// Test 4: Multiple pointer method calls
+func testMultiplePointerCalls() {
+    c := &Counter{count: 0, name: "multi"}
+    
+    // Multiple calls
+    c.Increment()
+    c.Increment()
+    c.Increment()
+    c.Add(7)
+    
+    assert(c.count == 10, "testMultiplePointerCalls: count should be 10")
+}
