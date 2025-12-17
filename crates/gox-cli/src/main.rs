@@ -43,6 +43,9 @@ enum Commands {
         /// Path to project directory (default: current directory)
         #[arg(default_value = ".")]
         path: String,
+        /// Std mode: core (no OS deps) or full (default)
+        #[arg(long, default_value = "full")]
+        std: String,
     },
 
     /// Type-check the current module without building
@@ -59,6 +62,9 @@ enum Commands {
     Run {
         /// Path to source file, bytecode file, or project directory
         file: String,
+        /// Std mode: core (no OS deps) or full (default)
+        #[arg(long, default_value = "full")]
+        std: String,
     },
     
     /// Dump a bytecode file to text format
@@ -90,10 +96,10 @@ fn main() {
     let result = match cli.command {
         Commands::Init { module_path } => cmd_init(&module_path),
         Commands::Get { module_version } => cmd_get(&module_version),
-        Commands::Build { path } => cmd_build(&path),
+        Commands::Build { path, std } => cmd_build(&path, &std),
         Commands::Check => cmd_check(),
         Commands::RunBytecode { test } => bytecode_tests::run_test(&test),
-        Commands::Run { file } => cmd_run(&file),
+        Commands::Run { file, std } => cmd_run(&file, &std),
         Commands::Dump { file } => cmd_dump(&file),
         Commands::Compile { file, output } => cmd_compile(&file, output),
         Commands::Test { dir } => cmd_test(&dir),
@@ -188,12 +194,14 @@ fn cmd_get(module_version: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Build a GoX project.
-fn cmd_build(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_build(path: &str, std_mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     use gox_common::vfs::{FileSet, RealFs};
     use gox_analysis::analyze_project;
     use gox_module::VfsConfig;
     use gox_codegen_vm::compile_project;
+    use gox_runtime_vm::natives::StdMode;
     
+    let std_mode = parse_std_mode(std_mode)?;
     let project_dir = std::path::Path::new(path).canonicalize()?;
     let mod_file_path = project_dir.join("gox.mod");
 
@@ -234,8 +242,8 @@ fn cmd_build(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     
     // During development: run directly without writing file
     use gox_vm::VmResult;
-    println!("Running module: {}", module.name);
-    let mut vm = gox_runtime_vm::create_vm();
+    println!("Running module: {} (std={})", module.name, if std_mode == StdMode::Core { "core" } else { "full" });
+    let mut vm = gox_runtime_vm::create_vm_with_mode(std_mode);
     vm.load_module(module);
     match vm.run() {
         VmResult::Done => println!("\n✓ Execution completed"),
@@ -264,10 +272,22 @@ fn cmd_check() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Parse std mode from CLI string.
+fn parse_std_mode(s: &str) -> Result<gox_runtime_vm::natives::StdMode, Box<dyn std::error::Error>> {
+    use gox_runtime_vm::natives::StdMode;
+    match s.to_lowercase().as_str() {
+        "core" => Ok(StdMode::Core),
+        "full" => Ok(StdMode::Full),
+        _ => Err(format!("invalid std mode '{}', expected 'core' or 'full'", s).into()),
+    }
+}
+
 /// Run a file (.gox source, .goxc/.goxb bytecode binary, or .goxt bytecode text).
-fn cmd_run(file: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_run(file: &str, std_mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     use gox_vm::{Module, VmResult};
+    use gox_runtime_vm::natives::StdMode;
     
+    let std_mode = parse_std_mode(std_mode)?;
     let path = std::path::Path::new(file);
     
     let module = if file.ends_with(".gox") {
@@ -284,14 +304,14 @@ fn cmd_run(file: &str) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Try to detect: if it's a directory, treat as project; otherwise try as source
         if path.is_dir() {
-            return cmd_build(file);
+            return cmd_build(file, if std_mode == StdMode::Core { "core" } else { "full" });
         } else {
             // Assume source file
             run_source_file(path)?
         }
     };
     
-    let mut vm = gox_runtime_vm::create_vm();
+    let mut vm = gox_runtime_vm::create_vm_with_mode(std_mode);
     vm.load_module(module);
     
     match vm.run() {
