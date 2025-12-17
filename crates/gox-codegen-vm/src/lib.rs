@@ -228,6 +228,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     ctx.const_indices = const_indices.clone();
                     ctx.method_table = method_table.clone();
                     ctx.func_interface_params = func_interface_params.clone();
+                    ctx.pkg_name = pkg.name.clone();
                     // Set closure_func_offset to current function count so closures get correct indices
                     ctx.closure_func_offset = module.functions.len() as u32;
                     // Share the module's constant pool
@@ -284,6 +285,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                 ctx.const_indices = const_indices.clone();
                 ctx.method_table = method_table.clone();
                 ctx.func_interface_params = func_interface_params.clone();
+                ctx.pkg_name = pkg.name.clone();
                 ctx.module.constants = module.constants.clone();
                 
                 let mut fctx = context::FuncContext::new(&format!("$var_init_{}", pkg.name));

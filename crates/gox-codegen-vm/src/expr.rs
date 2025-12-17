@@ -491,12 +491,18 @@ fn compile_call(
             "delete" => return compile_builtin_delete(ctx, fctx, call),
             "println" | "print" => return compile_builtin_print(ctx, fctx, call),
             "assert" => return compile_builtin_assert(ctx, fctx, call),
+            "panic" => return compile_builtin_panic(ctx, fctx, call),
             _ => {}
         }
 
         // User-defined function
         if let Some(func_idx) = ctx.lookup_func(ident.symbol) {
             return compile_func_call(ctx, fctx, func_idx, call);
+        }
+
+        // Same-package native function (e.g., Index called from Contains in strings package)
+        if let Some((native_idx, _)) = ctx.lookup_pkg_native(ident.symbol) {
+            return compile_native_call(ctx, fctx, native_idx, call);
         }
 
         // Check if it's a closure variable
@@ -674,6 +680,11 @@ fn compile_func_call(
                 fctx.emit(Opcode::BoxInterface, expected_reg, type_id, src_reg);
             }
             slot_offset += 2; // Interface takes 2 slots
+            // Ensure register allocator is past this argument slot
+            let next_expected = arg_start + slot_offset;
+            if fctx.regs.current() < next_expected {
+                fctx.regs.reset_to(next_expected);
+            }
             continue;
         }
 
@@ -704,6 +715,13 @@ fn compile_func_call(
             fctx.emit(Opcode::Mov, expected_reg, actual_reg, 0);
         }
         slot_offset += 1; // Non-interface takes 1 slot
+        
+        // Ensure register allocator is past this argument slot so subsequent
+        // argument compilations don't overwrite it
+        let next_expected = arg_start + slot_offset;
+        if fctx.regs.current() < next_expected {
+            fctx.regs.reset_to(next_expected);
+        }
     }
 
     // Calculate actual slot count (interface params take 2 slots)
@@ -717,7 +735,14 @@ fn compile_func_call(
     }
     fctx.emit_with_flags(Opcode::Call, 1, func_idx as u16, arg_start, slot_count);
 
-    Ok(arg_start)
+    // Allocate a fresh register for the return value and move it there.
+    // This ensures subsequent expressions don't overwrite the result.
+    let dst = fctx.regs.alloc(1);
+    if dst != arg_start {
+        fctx.emit(Opcode::Mov, dst, arg_start, 0);
+    }
+
+    Ok(dst)
 }
 
 /// Compile interface method call with dynamic dispatch.
@@ -982,7 +1007,14 @@ fn compile_native_call(
     let pair_count = call.args.len() as u16;
     fctx.emit(Opcode::CallNative, native_idx as u16, arg_start, pair_count);
 
-    Ok(arg_start)
+    // Allocate a fresh register for the return value and move it there.
+    // This ensures subsequent expressions don't overwrite the result.
+    let dst = fctx.regs.alloc(1);
+    if dst != arg_start {
+        fctx.emit(Opcode::Mov, dst, arg_start, 0);
+    }
+
+    Ok(dst)
 }
 
 fn compile_index(
@@ -2134,6 +2166,28 @@ fn compile_builtin_assert(
 
     // Emit AssertEnd: if failed, terminate program
     fctx.emit(Opcode::AssertEnd, 0, 0, 0);
+
+    let dst = fctx.regs.alloc(1);
+    fctx.emit(Opcode::LoadNil, dst, 0, 0);
+    Ok(dst)
+}
+
+fn compile_builtin_panic(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    call: &CallExpr,
+) -> Result<u16, CodegenError> {
+    // panic(msg) - compile the message and emit Panic opcode
+    if call.args.is_empty() {
+        // panic() with no message
+        let msg_reg = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadNil, msg_reg, 0, 0);
+        fctx.emit(Opcode::Panic, msg_reg, 0, 0);
+    } else {
+        // panic(msg) - compile the message
+        let msg_reg = compile_expr(ctx, fctx, &call.args[0])?;
+        fctx.emit(Opcode::Panic, msg_reg, 0, 0);
+    }
 
     let dst = fctx.regs.alloc(1);
     fctx.emit(Opcode::LoadNil, dst, 0, 0);

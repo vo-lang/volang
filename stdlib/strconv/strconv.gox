@@ -1,8 +1,6 @@
 // Package strconv implements conversions to and from string representations of basic data types.
 package strconv
 
-import "errors"
-
 // ============================================================
 // GoX implementations (pure logic)
 // ============================================================
@@ -16,15 +14,7 @@ func FormatBool(b bool) string {
 }
 
 // ParseBool returns the boolean value represented by the string.
-func ParseBool(s string) (bool, error) {
-    if s == "true" || s == "1" || s == "t" || s == "T" || s == "TRUE" || s == "True" {
-        return true, nil
-    }
-    if s == "false" || s == "0" || s == "f" || s == "F" || s == "FALSE" || s == "False" {
-        return false, nil
-    }
-    return false, errors.New("strconv.ParseBool: parsing \"" + s + "\": invalid syntax")
-}
+func ParseBool(s string) (bool, error)
 
 // ============================================================
 // Native functions (parsing/formatting algorithms)

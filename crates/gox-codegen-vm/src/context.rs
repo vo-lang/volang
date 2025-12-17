@@ -337,6 +337,8 @@ pub struct CodegenContext<'a> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
+    /// Current package name (for looking up same-package native functions)
+    pub pkg_name: String,
 }
 
 /// Codegen context that compiles into an existing module.
@@ -355,6 +357,8 @@ pub struct CodegenContextRef<'a, 'm> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
+    /// Current package name (for looking up same-package native functions)
+    pub pkg_name: String,
 }
 
 impl<'a, 'm> CodegenContextRef<'a, 'm> {
@@ -416,6 +420,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 closure_func_offset: self.module.functions.len() as u32,
                 method_table: self.method_table.clone(),
                 func_interface_params: self.func_interface_params.clone(),
+                pkg_name: self.pkg_name.clone(),
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
             // Merge back any new natives/constants
@@ -467,6 +472,18 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
     
     pub fn lookup_func(&self, sym: Symbol) -> Option<u32> {
         self.func_indices.get(&sym).copied()
+    }
+    
+    /// Look up a same-package native function by symbol.
+    /// Returns Some((native_idx, qualified_name)) if found.
+    pub fn lookup_pkg_native(&self, sym: Symbol) -> Option<(u32, String)> {
+        if let Some(func_name) = self.interner.resolve(sym) {
+            let qualified_name = format!("{}.{}", self.pkg_name, func_name);
+            if let Some(&idx) = self.native_indices.get(&qualified_name) {
+                return Some((idx, qualified_name));
+            }
+        }
+        None
     }
     
     /// Look up a cross-package function by qualified name (e.g., "math.Add").
@@ -535,6 +552,11 @@ impl<'a> CodegenContext<'a> {
         result: &'a TypeCheckResult,
         interner: &'a SymbolInterner,
     ) -> Self {
+        let pkg_name = file.package
+            .as_ref()
+            .and_then(|p| interner.resolve(p.symbol))
+            .unwrap_or("main")
+            .to_string();
         Self {
             file,
             result,
@@ -549,6 +571,7 @@ impl<'a> CodegenContext<'a> {
             closure_func_offset: 0,
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
+            pkg_name,
         }
     }
     
@@ -623,6 +646,11 @@ impl<'a> CodegenContext<'a> {
         interner: &'a SymbolInterner,
         module: &'a mut Module,
     ) -> CodegenContextRef<'a, 'a> {
+        let pkg_name = file.package
+            .as_ref()
+            .and_then(|p| interner.resolve(p.symbol))
+            .unwrap_or("main")
+            .to_string();
         CodegenContextRef {
             file,
             result,
@@ -636,6 +664,7 @@ impl<'a> CodegenContext<'a> {
             const_indices: HashMap::new(),
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
+            pkg_name,
         }
     }
     
@@ -777,6 +806,18 @@ impl<'a> CodegenContext<'a> {
     
     pub fn lookup_func(&self, sym: Symbol) -> Option<u32> {
         self.func_indices.get(&sym).copied()
+    }
+    
+    /// Look up a same-package native function by symbol.
+    /// Returns Some((native_idx, qualified_name)) if found.
+    pub fn lookup_pkg_native(&self, sym: Symbol) -> Option<(u32, String)> {
+        if let Some(func_name) = self.interner.resolve(sym) {
+            let qualified_name = format!("{}.{}", self.pkg_name, func_name);
+            if let Some(&idx) = self.native_indices.get(&qualified_name) {
+                return Some((idx, qualified_name));
+            }
+        }
+        None
     }
     
     pub fn lookup_cross_pkg_func(&self, name: &str) -> Option<u32> {
