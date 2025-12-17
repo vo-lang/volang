@@ -8,63 +8,37 @@ use gox_vm::objects::{array, slice, string};
 use gox_vm::types::builtin;
 
 /// Register strings functions.
-/// Note: HasPrefix, HasSuffix are now implemented in GoX (stdlib/strings/strings.gox)
+/// GoX implementations: HasPrefix, HasSuffix, TrimPrefix, TrimSuffix, Contains,
+///                      Repeat, Compare, ReplaceAll (in stdlib/strings/strings.gox)
 pub fn register(registry: &mut NativeRegistry) {
-    // Search (native: need efficient string search algorithms)
-    registry.register("strings.Contains", native_contains);
-    registry.register("strings.ContainsAny", native_contains_any);
+    // Search (native: string search algorithms)
     registry.register("strings.Index", native_index);
     registry.register("strings.LastIndex", native_last_index);
     registry.register("strings.Count", native_count);
+    registry.register("strings.ContainsAny", native_contains_any);
     
-    // Transform
+    // Transform (native: Unicode tables)
     registry.register("strings.ToLower", native_to_lower);
     registry.register("strings.ToUpper", native_to_upper);
     registry.register("strings.TrimSpace", native_trim_space);
     registry.register("strings.Trim", native_trim);
-    registry.register("strings.TrimPrefix", native_trim_prefix);
-    registry.register("strings.TrimSuffix", native_trim_suffix);
     registry.register("strings.Replace", native_replace);
-    registry.register("strings.ReplaceAll", native_replace_all);
     
-    // Split/Join
+    // Split/Join (native: slice allocation)
     registry.register("strings.Split", native_split);
     registry.register("strings.SplitN", native_split_n);
     registry.register("strings.Join", native_join);
-    registry.register("strings.Repeat", native_repeat);
     
-    // Compare
-    registry.register("strings.Compare", native_compare);
+    // Compare (native: Unicode case folding)
     registry.register("strings.EqualFold", native_equal_fold);
 }
 
 // ==================== Search Functions ====================
 
-fn native_contains(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0);
-    let substr = ctx.arg_str(1);
-    ctx.ret_bool(0, gox_runtime_core::stdlib::strings::contains(s, substr));
-    NativeResult::Ok(1)
-}
-
 fn native_contains_any(ctx: &mut NativeCtx) -> NativeResult {
     let s = ctx.arg_str(0);
     let chars = ctx.arg_str(1);
     ctx.ret_bool(0, gox_runtime_core::stdlib::strings::contains_any(s, chars));
-    NativeResult::Ok(1)
-}
-
-fn native_has_prefix(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0);
-    let prefix = ctx.arg_str(1);
-    ctx.ret_bool(0, gox_runtime_core::stdlib::strings::has_prefix(s, prefix));
-    NativeResult::Ok(1)
-}
-
-fn native_has_suffix(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0);
-    let suffix = ctx.arg_str(1);
-    ctx.ret_bool(0, gox_runtime_core::stdlib::strings::has_suffix(s, suffix));
     NativeResult::Ok(1)
 }
 
@@ -120,37 +94,12 @@ fn native_trim(ctx: &mut NativeCtx) -> NativeResult {
     NativeResult::Ok(1)
 }
 
-fn native_trim_prefix(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0).to_string();
-    let prefix = ctx.arg_str(1).to_string();
-    let result = gox_runtime_core::stdlib::strings::trim_prefix(&s, &prefix);
-    ctx.ret_string(0, result);
-    NativeResult::Ok(1)
-}
-
-fn native_trim_suffix(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0).to_string();
-    let suffix = ctx.arg_str(1).to_string();
-    let result = gox_runtime_core::stdlib::strings::trim_suffix(&s, &suffix);
-    ctx.ret_string(0, result);
-    NativeResult::Ok(1)
-}
-
 fn native_replace(ctx: &mut NativeCtx) -> NativeResult {
     let s = ctx.arg_str(0);
     let old = ctx.arg_str(1);
     let new = ctx.arg_str(2);
     let n = ctx.arg_i64(3);
     let result = gox_runtime_core::stdlib::strings::replace(s, old, new, n);
-    ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
-}
-
-fn native_replace_all(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0);
-    let old = ctx.arg_str(1);
-    let new = ctx.arg_str(2);
-    let result = gox_runtime_core::stdlib::strings::replace_all(s, old, new);
     ctx.ret_string(0, &result);
     NativeResult::Ok(1)
 }
@@ -220,25 +169,7 @@ fn native_join(ctx: &mut NativeCtx) -> NativeResult {
     NativeResult::Ok(1)
 }
 
-fn native_repeat(ctx: &mut NativeCtx) -> NativeResult {
-    let s = ctx.arg_str(0);
-    let count = ctx.arg_i64(1);
-    if count < 0 {
-        return NativeResult::Panic("strings.Repeat: negative count".to_string());
-    }
-    let result = gox_runtime_core::stdlib::strings::repeat(s, count as usize);
-    ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
-}
-
 // ==================== Compare Functions ====================
-
-fn native_compare(ctx: &mut NativeCtx) -> NativeResult {
-    let a = ctx.arg_str(0);
-    let b = ctx.arg_str(1);
-    ctx.ret_i64(0, gox_runtime_core::stdlib::strings::compare(a, b));
-    NativeResult::Ok(1)
-}
 
 fn native_equal_fold(ctx: &mut NativeCtx) -> NativeResult {
     let s = ctx.arg_str(0);
@@ -256,7 +187,8 @@ mod tests {
         let mut registry = NativeRegistry::new();
         register(&mut registry);
         
-        assert!(registry.get("strings.Contains").is_some());
+        // Native functions only (GoX implementations don't register here)
+        assert!(registry.get("strings.Index").is_some());
         assert!(registry.get("strings.Split").is_some());
         assert!(registry.get("strings.Join").is_some());
     }
