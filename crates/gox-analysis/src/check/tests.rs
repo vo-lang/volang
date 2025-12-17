@@ -8,6 +8,10 @@ use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_syntax::{ast, parse};
 
 fn check_source(source: &str) -> (DiagnosticSink, SymbolInterner) {
+    check_source_with_interner(source).0
+}
+
+fn check_source_with_interner(source: &str) -> ((DiagnosticSink, SymbolInterner), gox_syntax::ast::File) {
     let (file, _parse_diag, interner) = parse(source, 0);
 
     let mut collect_diag = DiagnosticSink::new();
@@ -19,7 +23,30 @@ fn check_source(source: &str) -> (DiagnosticSink, SymbolInterner) {
     let mut check_diag = DiagnosticSink::new();
     let _checker = check_types(&resolve_result, &interner, &mut check_diag);
 
+    ((check_diag, interner), file)
+}
+
+fn check_source_multi(source: &str) -> (DiagnosticSink, SymbolInterner) {
+    let (file, _parse_diag, interner) = parse(source, 0);
+
+    let mut collect_diag = DiagnosticSink::new();
+    let collect_result = crate::collect::collect_types_multi(&[&file], &interner, &mut collect_diag);
+
+    let mut resolve_diag = DiagnosticSink::new();
+    let resolve_result = resolve_types(collect_result, &interner, &mut resolve_diag);
+
+    let mut check_diag = DiagnosticSink::new();
+    let _checker = check_types(&resolve_result, &interner, &mut check_diag);
+
     (check_diag, interner)
+}
+
+// Test using the same function as typecheck_file (collect_types_multi)
+fn check_via_typecheck_file(source: &str) -> DiagnosticSink {
+    let (file, _parse_diag, interner) = parse(source, 0);
+    let mut diag = DiagnosticSink::new();
+    let _result = crate::typecheck_file(&file, &interner, &mut diag);
+    diag
 }
 
 fn check_expr_type(source: &str, expr_source: &str) -> Type {
@@ -604,4 +631,19 @@ var p = &S{10, 20}
 "#;
     let (diag, _) = check_source(source);
     assert!(!diag.has_errors(), "Address-of composite literal should work: {:?}", diag);
+}
+
+#[test]
+fn test_pointer_field_access_via_typecheck_file() {
+    // Test using typecheck_file (same as integration tests)
+    let source = r#"
+package main
+type S struct { x int; y int }
+func main() {
+    p := &S{10, 20}
+    var _ = p.x
+}
+"#;
+    let diag = check_via_typecheck_file(source);
+    assert!(!diag.has_errors(), "Pointer field access via typecheck_file should work: {:?}", diag);
 }

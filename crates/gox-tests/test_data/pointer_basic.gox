@@ -1,0 +1,19 @@
+package main
+
+// Test: Basic pointer type and address-of operator
+
+type Point struct {
+    x int
+    y int
+}
+
+func main() {
+    // Test 1: Create pointer to struct literal
+    p := &Point{10, 20}
+    
+    // Test 2: Access field through pointer (auto-deref)
+    assert(p.x == 10, "p.x should be 10")
+    assert(p.y == 20, "p.y should be 20")
+    
+    println("pointer_basic: ALL PASSED")
+}

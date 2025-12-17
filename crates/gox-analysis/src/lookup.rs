@@ -111,8 +111,13 @@ impl<'a> Lookup<'a> {
             for et in &current {
                 let mut search_ty = et.ty.clone();
 
-                // Handle Named types
-                if let Type::Named(id) = &et.ty {
+                // First, dereference pointer types
+                if let Type::Pointer(inner) = &search_ty {
+                    search_ty = inner.as_ref().clone();
+                }
+
+                // Handle Named types (either directly or after pointer deref)
+                if let Type::Named(id) = &search_ty {
                     let idx = id.0 as usize;
                     if seen.contains(&(idx as u32)) {
                         // Already seen at shallower depth, skip
@@ -147,7 +152,7 @@ impl<'a> Lookup<'a> {
                     }
                 }
 
-                // For pointer types, dereference to get the underlying struct
+                // For pointer types (in underlying), dereference again
                 let deref_ty = match &search_ty {
                     Type::Pointer(inner) => inner.as_ref(),
                     other => other,
