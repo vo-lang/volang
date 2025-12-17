@@ -1,15 +1,15 @@
 package os
 
 // Environment
-native func Getenv(key string) string
-native func Environ() []string
-native func LookupEnv(key string) (string, bool)
+func Getenv(key string) string
+func Environ() []string
+func LookupEnv(key string) (string, bool)
 
 // Process
-native func Exit(code int)
-native func Getpid() int
-native func Getuid() int
-native func Getgid() int
+func Exit(code int)
+func Getpid() int
+func Getuid() int
+func Getgid() int
 
 // Arguments (set at startup)
 var Args []string

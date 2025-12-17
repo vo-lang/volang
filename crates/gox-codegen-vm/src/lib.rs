@@ -99,7 +99,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     let func_name = project.interner.resolve(func.name.symbol).unwrap_or("");
                     
                     // Handle native functions separately - register them in native_indices
-                    if func.is_native {
+                    if func.is_native() {
                         // Register native function with qualified name
                         let qualified_name = format!("{}.{}", pkg.name, func_name);
                         let native_idx = module.add_native(&qualified_name, 1, 1);
@@ -215,7 +215,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
             for decl in &file.decls {
                 if let Decl::Func(func) = decl {
                     // Skip native functions - they have no body to compile
-                    if func.is_native {
+                    if func.is_native() {
                         continue;
                     }
                     

@@ -1,33 +1,33 @@
 package bytes
 
 // Comparison functions
-native func Equal(a, b []byte) bool
-native func Compare(a, b []byte) int
+func Equal(a, b []byte) bool
+func Compare(a, b []byte) int
 
 // Search functions
-native func Contains(b, subslice []byte) bool
-native func Index(b, sep []byte) int
-native func LastIndex(b, sep []byte) int
-native func Count(b, sep []byte) int
-native func HasPrefix(b, prefix []byte) bool
-native func HasSuffix(b, suffix []byte) bool
+func Contains(b, subslice []byte) bool
+func Index(b, sep []byte) int
+func LastIndex(b, sep []byte) int
+func Count(b, sep []byte) int
+func HasPrefix(b, prefix []byte) bool
+func HasSuffix(b, suffix []byte) bool
 
 // Transformation functions
-native func ToLower(b []byte) []byte
-native func ToUpper(b []byte) []byte
-native func TrimSpace(b []byte) []byte
-native func Trim(b []byte, cutset string) []byte
-native func TrimPrefix(b, prefix []byte) []byte
-native func TrimSuffix(b, suffix []byte) []byte
+func ToLower(b []byte) []byte
+func ToUpper(b []byte) []byte
+func TrimSpace(b []byte) []byte
+func Trim(b []byte, cutset string) []byte
+func TrimPrefix(b, prefix []byte) []byte
+func TrimSuffix(b, suffix []byte) []byte
 
 // Construction functions
-native func Repeat(b []byte, count int) []byte
-native func Join(s [][]byte, sep []byte) []byte
+func Repeat(b []byte, count int) []byte
+func Join(s [][]byte, sep []byte) []byte
 
 // Splitting functions
-native func Split(b, sep []byte) [][]byte
+func Split(b, sep []byte) [][]byte
 
 // Index of single byte
-native func IndexByte(b []byte, c byte) int
-native func LastIndexByte(b []byte, c byte) int
+func IndexByte(b []byte, c byte) int
+func LastIndexByte(b []byte, c byte) int
 

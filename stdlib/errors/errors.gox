@@ -1,5 +1,5 @@
 package errors
 
 // New creates an error with the given message
-native func New(text string) error
+func New(text string) error
 

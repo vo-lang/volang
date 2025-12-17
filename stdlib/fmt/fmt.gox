@@ -1,8 +1,8 @@
 package fmt
 
-native func Print(a ...interface{}) (n int, err error)
-native func Println(a ...interface{}) (n int, err error)
-native func Printf(format string, a ...interface{}) (n int, err error)
-native func Sprint(a ...interface{}) string
-native func Sprintln(a ...interface{}) string
-native func Sprintf(format string, a ...interface{}) string
+func Print(a ...interface{}) (n int, err error)
+func Println(a ...interface{}) (n int, err error)
+func Printf(format string, a ...interface{}) (n int, err error)
+func Sprint(a ...interface{}) string
+func Sprintln(a ...interface{}) string
+func Sprintf(format string, a ...interface{}) string

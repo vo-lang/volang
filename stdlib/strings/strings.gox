@@ -2,66 +2,66 @@
 package strings
 
 // Contains reports whether substr is within s.
-native func Contains(s, substr string) bool
+func Contains(s, substr string) bool
 
 // ContainsAny reports whether any Unicode code points in chars are within s.
-native func ContainsAny(s, chars string) bool
+func ContainsAny(s, chars string) bool
 
 // HasPrefix tests whether the string s begins with prefix.
-native func HasPrefix(s, prefix string) bool
+func HasPrefix(s, prefix string) bool
 
 // HasSuffix tests whether the string s ends with suffix.
-native func HasSuffix(s, suffix string) bool
+func HasSuffix(s, suffix string) bool
 
 // Index returns the index of the first instance of substr in s, or -1 if not present.
-native func Index(s, substr string) int
+func Index(s, substr string) int
 
 // LastIndex returns the index of the last instance of substr in s, or -1 if not present.
-native func LastIndex(s, substr string) int
+func LastIndex(s, substr string) int
 
 // Count counts the number of non-overlapping instances of substr in s.
-native func Count(s, substr string) int
+func Count(s, substr string) int
 
 // ToLower returns s with all Unicode letters mapped to their lower case.
-native func ToLower(s string) string
+func ToLower(s string) string
 
 // ToUpper returns s with all Unicode letters mapped to their upper case.
-native func ToUpper(s string) string
+func ToUpper(s string) string
 
 // TrimSpace returns s with all leading and trailing white space removed.
-native func TrimSpace(s string) string
+func TrimSpace(s string) string
 
 // Trim returns s with all leading and trailing Unicode code points in cutset removed.
-native func Trim(s, cutset string) string
+func Trim(s, cutset string) string
 
 // TrimPrefix returns s without the provided leading prefix string.
-native func TrimPrefix(s, prefix string) string
+func TrimPrefix(s, prefix string) string
 
 // TrimSuffix returns s without the provided trailing suffix string.
-native func TrimSuffix(s, suffix string) string
+func TrimSuffix(s, suffix string) string
 
 // Replace returns a copy of s with the first n non-overlapping instances of old replaced by new.
 // If n < 0, there is no limit on the number of replacements.
-native func Replace(s, old, new string, n int) string
+func Replace(s, old, new string, n int) string
 
 // ReplaceAll returns a copy of s with all non-overlapping instances of old replaced by new.
-native func ReplaceAll(s, old, new string) string
+func ReplaceAll(s, old, new string) string
 
 // Split slices s into all substrings separated by sep and returns a slice of substrings.
-native func Split(s, sep string) []string
+func Split(s, sep string) []string
 
 // SplitN slices s into substrings separated by sep and returns a slice of at most n substrings.
-native func SplitN(s, sep string, n int) []string
+func SplitN(s, sep string, n int) []string
 
 // Join concatenates elements of a to create a single string with separator sep.
-native func Join(elems []string, sep string) string
+func Join(elems []string, sep string) string
 
 // Repeat returns a new string consisting of count copies of s.
-native func Repeat(s string, count int) string
+func Repeat(s string, count int) string
 
 // Compare returns an integer comparing two strings lexicographically.
 // The result is 0 if a == b, -1 if a < b, and +1 if a > b.
-native func Compare(a, b string) int
+func Compare(a, b string) int
 
 // EqualFold reports whether s and t are equal under Unicode case-folding.
-native func EqualFold(s, t string) bool
+func EqualFold(s, t string) bool

@@ -2,16 +2,16 @@
 package strconv
 
 // Itoa is equivalent to FormatInt(int64(i), 10).
-native func Itoa(i int) string
+func Itoa(i int) string
 
 // FormatInt returns the string representation of i in the given base.
-native func FormatInt(i, base int) string
+func FormatInt(i, base int) string
 
 // FormatFloat converts the floating-point number f to a string.
-native func FormatFloat(f float64, fmt byte, prec, bitSize int) string
+func FormatFloat(f float64, fmt byte, prec, bitSize int) string
 
 // FormatBool returns "true" or "false" according to the value of b.
-native func FormatBool(b bool) string
+func FormatBool(b bool) string
 
 // Quote returns a double-quoted Go string literal representing s.
-native func Quote(s string) string
+func Quote(s string) string

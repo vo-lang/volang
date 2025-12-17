@@ -2,12 +2,12 @@ package path
 
 // Path manipulation functions (Unix-style paths)
 
-native func Base(path string) string
-native func Dir(path string) string
-native func Ext(path string) string
-native func Clean(path string) string
-native func Join(elem []string) string
-native func Split(path string) (string, string)
-native func IsAbs(path string) bool
-native func Match(pattern, name string) bool
+func Base(path string) string
+func Dir(path string) string
+func Ext(path string) string
+func Clean(path string) string
+func Join(elem []string) string
+func Split(path string) (string, string)
+func IsAbs(path string) bool
+func Match(pattern, name string) bool
 

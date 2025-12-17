@@ -3,14 +3,14 @@ package hex
 // Hexadecimal encoding/decoding
 
 // EncodeToString returns the hexadecimal encoding of src
-native func EncodeToString(src []byte) string
+func EncodeToString(src []byte) string
 
 // DecodeString returns the bytes represented by the hexadecimal string s
-native func DecodeString(s string) []byte
+func DecodeString(s string) []byte
 
 // EncodedLen returns the length of an encoding of n source bytes
-native func EncodedLen(n int) int
+func EncodedLen(n int) int
 
 // DecodedLen returns the length of a decoding of x source bytes
-native func DecodedLen(x int) int
+func DecodedLen(x int) int
 

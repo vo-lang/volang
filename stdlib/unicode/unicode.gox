@@ -1,23 +1,23 @@
 package unicode
 
 // Character classification functions
-native func IsLetter(r rune) bool
-native func IsDigit(r rune) bool
-native func IsSpace(r rune) bool
-native func IsUpper(r rune) bool
-native func IsLower(r rune) bool
-native func IsPrint(r rune) bool
-native func IsGraphic(r rune) bool
-native func IsControl(r rune) bool
-native func IsPunct(r rune) bool
-native func IsSymbol(r rune) bool
-native func IsNumber(r rune) bool
+func IsLetter(r rune) bool
+func IsDigit(r rune) bool
+func IsSpace(r rune) bool
+func IsUpper(r rune) bool
+func IsLower(r rune) bool
+func IsPrint(r rune) bool
+func IsGraphic(r rune) bool
+func IsControl(r rune) bool
+func IsPunct(r rune) bool
+func IsSymbol(r rune) bool
+func IsNumber(r rune) bool
 
 // Case conversion
-native func ToUpper(r rune) rune
-native func ToLower(r rune) rune
-native func ToTitle(r rune) rune
+func ToUpper(r rune) rune
+func ToLower(r rune) rune
+func ToTitle(r rune) rune
 
 // Special checks
-native func IsOneOf(ranges []rune, r rune) bool
+func IsOneOf(ranges []rune, r rune) bool
 

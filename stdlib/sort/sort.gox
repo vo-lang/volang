@@ -3,23 +3,23 @@ package sort
 // Sort functions for common types
 // Note: These modify the slice in place
 
-native func Ints(a []int)
-native func Float64s(a []float64)
-native func Strings(a []string)
+func Ints(a []int)
+func Float64s(a []float64)
+func Strings(a []string)
 
 // Check if slices are sorted
-native func IntsAreSorted(a []int) bool
-native func Float64sAreSorted(a []float64) bool
-native func StringsAreSorted(a []string) bool
+func IntsAreSorted(a []int) bool
+func Float64sAreSorted(a []float64) bool
+func StringsAreSorted(a []string) bool
 
 // Search functions (binary search in sorted slices)
 // Returns the index where x should be inserted to keep the slice sorted
-native func SearchInts(a []int, x int) int
-native func SearchFloat64s(a []float64, x float64) int
-native func SearchStrings(a []string, x string) int
+func SearchInts(a []int, x int) int
+func SearchFloat64s(a []float64, x float64) int
+func SearchStrings(a []string, x string) int
 
 // Reverse a slice
-native func Reverse(a []int)
-native func ReverseFloat64s(a []float64)
-native func ReverseStrings(a []string)
+func Reverse(a []int)
+func ReverseFloat64s(a []float64)
+func ReverseStrings(a []string)
 

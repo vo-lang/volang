@@ -1,14 +1,14 @@
 package time
 
 // Time functions
-native func Now() int64           // Returns Unix timestamp in nanoseconds
-native func Sleep(d int64)        // Sleep for duration (nanoseconds)
-native func Since(start int64) int64  // Duration since start time
+func Now() int64           // Returns Unix timestamp in nanoseconds
+func Sleep(d int64)        // Sleep for duration (nanoseconds)
+func Since(start int64) int64  // Duration since start time
 
 // Unix time functions
-native func Unix(sec, nsec int64) int64  // Create timestamp from seconds and nanoseconds
-native func UnixMilli(msec int64) int64  // Create timestamp from milliseconds
+func Unix(sec, nsec int64) int64  // Create timestamp from seconds and nanoseconds
+func UnixMilli(msec int64) int64  // Create timestamp from milliseconds
 
 // Parsing (simplified)
-native func ParseDuration(s string) int64
+func ParseDuration(s string) int64
 

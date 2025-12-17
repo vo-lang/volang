@@ -3,14 +3,14 @@ package base64
 // Standard base64 encoding/decoding
 
 // EncodeToString returns the base64 encoding of src
-native func EncodeToString(src []byte) string
+func EncodeToString(src []byte) string
 
 // DecodeString returns the bytes represented by the base64 string s
-native func DecodeString(s string) []byte
+func DecodeString(s string) []byte
 
 // StdEncoding's EncodedLen returns the length in bytes of the base64 encoding
-native func EncodedLen(n int) int
+func EncodedLen(n int) int
 
 // StdEncoding's DecodedLen returns the maximum length in bytes of the decoded data
-native func DecodedLen(n int) int
+func DecodedLen(n int) int
 

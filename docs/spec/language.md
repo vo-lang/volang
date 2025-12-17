@@ -901,8 +901,14 @@ Only **named types** can have methods. You cannot define methods on built-in typ
 ### 7.4 Method Declarations
 
 ```ebnf
-FuncDecl ::= "func" Receiver? Ident "(" ParamList? ")" ResultType? Block ;
+FuncDecl ::= "func" Receiver? Ident "(" ParamList? ")" ResultType? ( Block | ";" ) ;
 Receiver ::= "(" Ident Ident ")" ;
+```
+
+A function declaration may omit the body (using `;` instead of a block). Such a declaration provides the signature for a function implemented outside GoX, such as a native runtime function.
+
+```gox
+func Sqrt(x float64) float64;  // external implementation (native)
 ```
 
 The receiver consists of a name and a **named type**. Anonymous types (arrays, slices, maps, func) are not allowed as receivers.

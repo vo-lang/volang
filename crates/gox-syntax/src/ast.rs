@@ -127,18 +127,23 @@ pub struct TypeDecl {
 /// A function declaration.
 #[derive(Debug, Clone)]
 pub struct FuncDecl {
-    /// Whether this is a native function (implemented in Rust).
-    pub is_native: bool,
     /// The receiver, if this is a method.
     pub receiver: Option<Receiver>,
     /// The function name.
     pub name: Ident,
     /// The function signature.
     pub sig: FuncSig,
-    /// The function body, if present.
+    /// The function body. None means external implementation (native).
     pub body: Option<Block>,
     /// The span of the declaration.
     pub span: Span,
+}
+
+impl FuncDecl {
+    /// Returns true if this is a native function (no body).
+    pub fn is_native(&self) -> bool {
+        self.body.is_none()
+    }
 }
 
 /// A method receiver.
