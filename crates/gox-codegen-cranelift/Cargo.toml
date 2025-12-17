@@ -1,0 +1,18 @@
+[package]
+name = "gox-codegen-cranelift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared Cranelift code generation for GoX AOT and JIT compilation"
+
+[dependencies]
+gox-common = { path = "../gox-common" }
+gox-vm = { path = "../gox-vm" }
+gox-runtime-native = { path = "../gox-runtime-native" }
+
+# Cranelift dependencies
+cranelift-codegen = "0.113"
+cranelift-frontend = "0.113"
+cranelift-module = "0.113"
+
+anyhow = "1.0"
