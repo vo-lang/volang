@@ -1,0 +1,72 @@
+// Package sync provides basic synchronization primitives.
+package sync
+
+// Mutex is a mutual exclusion lock.
+type Mutex struct {
+    // internal state
+}
+
+// Lock locks m.
+func (m *Mutex) Lock()
+
+// Unlock unlocks m.
+func (m *Mutex) Unlock()
+
+// TryLock tries to lock m and reports whether it succeeded.
+func (m *Mutex) TryLock() bool
+
+// RWMutex is a reader/writer mutual exclusion lock.
+type RWMutex struct {
+    // internal state
+}
+
+// Lock locks rw for writing.
+func (rw *RWMutex) Lock()
+
+// Unlock unlocks rw for writing.
+func (rw *RWMutex) Unlock()
+
+// RLock locks rw for reading.
+func (rw *RWMutex) RLock()
+
+// RUnlock undoes a single RLock call.
+func (rw *RWMutex) RUnlock()
+
+// WaitGroup waits for a collection of goroutines to finish.
+type WaitGroup struct {
+    // internal state
+}
+
+// Add adds delta to the WaitGroup counter.
+func (wg *WaitGroup) Add(delta int)
+
+// Done decrements the WaitGroup counter by one.
+func (wg *WaitGroup) Done()
+
+// Wait blocks until the WaitGroup counter is zero.
+func (wg *WaitGroup) Wait()
+
+// Once is an object that will perform exactly one action.
+type Once struct {
+    // internal state
+}
+
+// Do calls the function f if and only if Do is being called for the first time.
+func (o *Once) Do(f func())
+
+// Map is a concurrent-safe map.
+type Map struct {
+    // internal state
+}
+
+// Load returns the value stored in the map for a key.
+func (m *Map) Load(key interface{}) (interface{}, bool)
+
+// Store sets the value for a key.
+func (m *Map) Store(key, value interface{})
+
+// Delete deletes the value for a key.
+func (m *Map) Delete(key interface{})
+
+// Range calls f for each key and value present in the map.
+func (m *Map) Range(f func(key, value interface{}) bool)

@@ -6,6 +6,7 @@ pub mod bytes;
 pub mod errors;
 pub mod fmt;
 pub mod hex;
+pub mod json;
 pub mod math;
 pub mod os;
 pub mod path;
@@ -27,6 +28,7 @@ pub fn register_all(registry: &mut NativeRegistry) {
     errors::register(registry);
     fmt::register(registry);
     hex::register(registry);
+    json::register(registry);
     math::register(registry);
     os::register(registry);
     path::register(registry);
