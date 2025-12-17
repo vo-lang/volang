@@ -514,7 +514,7 @@ impl Vm {
                 // SAFETY: We ensure fiber.stack is not reallocated during native call,
                 // and bp is stable within this call.
                 let regs = unsafe {
-                    std::slice::from_raw_parts_mut(stack_ptr.add(bp), stack_len - bp)
+                    core::slice::from_raw_parts_mut(stack_ptr.add(bp), stack_len - bp)
                 };
                 
                 // Create zero-copy native context

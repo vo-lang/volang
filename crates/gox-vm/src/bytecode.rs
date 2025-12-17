@@ -3,6 +3,8 @@
 use crate::instruction::Instruction;
 use crate::types::TypeMeta;
 use gox_common_core::ValueKind;
+
+#[cfg(feature = "std")]
 use std::io::{Read, Cursor};
 
 /// Magic bytes for bytecode files.
@@ -223,6 +225,7 @@ impl Module {
     }
     
     /// Deserialize module from bytes.
+    #[cfg(feature = "std")]
     pub fn from_bytes(data: &[u8]) -> Result<Self, BytecodeError> {
         let mut cursor = Cursor::new(data);
         
@@ -307,8 +310,8 @@ pub enum BytecodeError {
     Utf8Error,
 }
 
-impl std::fmt::Display for BytecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BytecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             BytecodeError::InvalidMagic => write!(f, "invalid magic bytes"),
             BytecodeError::UnsupportedVersion(v) => write!(f, "unsupported version: {}", v),
@@ -320,6 +323,7 @@ impl std::fmt::Display for BytecodeError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for BytecodeError {}
 
 // === Writer helpers ===
@@ -409,26 +413,30 @@ fn value_kind_to_u8(kind: ValueKind) -> u8 {
     kind as u8
 }
 
-// === Reader helpers ===
+// === Reader helpers (std feature only) ===
 
+#[cfg(feature = "std")]
 fn read_u16(cursor: &mut Cursor<&[u8]>) -> Result<u16, BytecodeError> {
     let mut buf = [0u8; 2];
     cursor.read_exact(&mut buf).map_err(|_| BytecodeError::UnexpectedEof)?;
     Ok(u16::from_le_bytes(buf))
 }
 
+#[cfg(feature = "std")]
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, BytecodeError> {
     let mut buf = [0u8; 4];
     cursor.read_exact(&mut buf).map_err(|_| BytecodeError::UnexpectedEof)?;
     Ok(u32::from_le_bytes(buf))
 }
 
+#[cfg(feature = "std")]
 fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, BytecodeError> {
     let mut buf = [0u8; 8];
     cursor.read_exact(&mut buf).map_err(|_| BytecodeError::UnexpectedEof)?;
     Ok(u64::from_le_bytes(buf))
 }
 
+#[cfg(feature = "std")]
 fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String, BytecodeError> {
     let len = read_u32(cursor)? as usize;
     let mut buf = vec![0u8; len];
@@ -436,6 +444,7 @@ fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String, BytecodeError> {
     String::from_utf8(buf).map_err(|_| BytecodeError::Utf8Error)
 }
 
+#[cfg(feature = "std")]
 fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<Constant, BytecodeError> {
     let mut tag = [0u8; 1];
     cursor.read_exact(&mut tag).map_err(|_| BytecodeError::UnexpectedEof)?;
@@ -463,6 +472,7 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<Constant, BytecodeError> 
     }
 }
 
+#[cfg(feature = "std")]
 fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError> {
     let id = read_u32(cursor)?;
     let mut kind_byte = [0u8; 1];
@@ -503,6 +513,7 @@ fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError>
     })
 }
 
+#[cfg(feature = "std")]
 fn read_function_def(cursor: &mut Cursor<&[u8]>) -> Result<FunctionDef, BytecodeError> {
     let name = read_string(cursor)?;
     let param_count = read_u16(cursor)?;

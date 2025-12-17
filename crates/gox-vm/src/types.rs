@@ -1,6 +1,6 @@
 //! Type metadata and type system.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use gox_common_core::ValueKind;
 
 /// Type ID (index into type table).

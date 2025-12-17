@@ -5,6 +5,13 @@
 //! - Fiber-based concurrency (goroutines)
 //! - Full Go-like type system support
 //! - Zero-copy native function interface
+//!
+//! # Features
+//! - `std` (default): Enable std features like bytecode loading from io::Read
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 pub mod gc;
 pub mod types;

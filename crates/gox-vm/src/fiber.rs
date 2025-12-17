@@ -298,7 +298,7 @@ impl Fiber {
 #[derive(Default)]
 pub struct Scheduler {
     fibers: Vec<Fiber>,
-    ready_queue: std::collections::VecDeque<FiberId>,
+    ready_queue: alloc::collections::VecDeque<FiberId>,
     pub current: Option<FiberId>,
     next_id: FiberId,
 }
@@ -307,7 +307,7 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             fibers: Vec::new(),
-            ready_queue: std::collections::VecDeque::new(),
+            ready_queue: alloc::collections::VecDeque::new(),
             current: None,
             next_id: 0,
         }

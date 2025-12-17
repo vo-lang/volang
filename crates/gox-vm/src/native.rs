@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::string;

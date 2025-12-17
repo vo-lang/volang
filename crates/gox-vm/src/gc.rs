@@ -3,7 +3,7 @@
 //! Phase 1: Simple stop-the-world mark-sweep.
 //! Data structures ready for incremental + generational (Phase 2-4).
 
-use std::alloc::{alloc, dealloc, Layout};
+use alloc::alloc::{alloc, dealloc, Layout};
 
 /// GC color for tri-color marking.
 #[repr(u8)]
@@ -66,7 +66,7 @@ pub struct GcObject {
 pub type GcRef = *mut GcObject;
 
 /// Null GC reference.
-pub const NULL_REF: GcRef = std::ptr::null_mut();
+pub const NULL_REF: GcRef = core::ptr::null_mut();
 
 /// Check if a u64 value is potentially a GC reference.
 #[inline]
@@ -126,7 +126,7 @@ impl Gc {
     
     /// Allocate a GC object with given number of data slots.
     pub fn alloc(&mut self, type_id: u32, size_slots: usize) -> GcRef {
-        let size_bytes = std::mem::size_of::<GcHeader>() + size_slots * 8;
+        let size_bytes = core::mem::size_of::<GcHeader>() + size_slots * 8;
         let layout = Layout::from_size_align(size_bytes, 8).unwrap();
         
         let ptr = unsafe {
@@ -153,7 +153,7 @@ impl Gc {
     #[inline]
     pub fn get_data_ptr(obj: GcRef) -> *mut u64 {
         unsafe {
-            (obj as *mut u8).add(std::mem::size_of::<GcHeader>()) as *mut u64
+            (obj as *mut u8).add(core::mem::size_of::<GcHeader>()) as *mut u64
         }
     }
     

@@ -2,8 +2,8 @@
 
 use crate::gc::{Gc, GcRef};
 use crate::types::TypeId;
+use alloc::collections::VecDeque;
 use indexmap::IndexMap;
-use std::collections::VecDeque;
 
 /// String object layout (after GcHeader):
 /// - slot 0: ptr to byte array (GcRef)
@@ -24,7 +24,7 @@ pub mod string {
         Gc::write_slot(array, 0, bytes.len() as u64);
         let data_ptr = unsafe { Gc::get_data_ptr(array).add(1) as *mut u8 };
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
         }
         
         // Create string object
@@ -50,11 +50,11 @@ pub mod string {
         let len = Gc::read_slot(str_ref, LEN_SLOT) as usize;
         
         let data_ptr = unsafe { Gc::get_data_ptr(array).add(1) as *const u8 };
-        unsafe { std::slice::from_raw_parts(data_ptr.add(start), len) }
+        unsafe { core::slice::from_raw_parts(data_ptr.add(start), len) }
     }
     
     pub fn as_str(str_ref: GcRef) -> &'static str {
-        unsafe { std::str::from_utf8_unchecked(as_bytes(str_ref)) }
+        unsafe { core::str::from_utf8_unchecked(as_bytes(str_ref)) }
     }
     
     pub fn index(str_ref: GcRef, idx: usize) -> u8 {
@@ -291,15 +291,14 @@ pub mod slice {
 
 /// Compute hash for a struct value (based on field values, not pointer)
 pub fn struct_hash(obj: GcRef, field_count: usize) -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    
-    let mut hasher = DefaultHasher::new();
+    // Simple FNV-1a hash for no_std compatibility
+    let mut hash: u64 = 0xcbf29ce484222325;
     for i in 0..field_count {
         let val = Gc::read_slot(obj, i);
-        val.hash(&mut hasher);
+        hash ^= val;
+        hash = hash.wrapping_mul(0x100000001b3);
     }
-    hasher.finish()
+    hash
 }
 
 /// Map object - uses Rust IndexMap internally.
