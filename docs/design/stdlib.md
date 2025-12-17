@@ -17,9 +17,9 @@ Packages that require deep runtime integration. They are imported like normal pa
 
 **Why special?** These packages need direct access to VM internals (type metadata, goroutine scheduler, GC state) that cannot be exposed through the normal native function interface.
 
-### Category B: Core Packages (11)
+### Category B: Core Packages (10)
 
-Pure computation packages with no OS dependencies. Can be used in embedded/WASM environments.
+Pure computation packages with no OS dependencies. Can be used in embedded/WASM environments (`#![no_std]` compatible).
 
 | Package | Description | Status |
 |---------|-------------|--------|
@@ -30,14 +30,13 @@ Pure computation packages with no OS dependencies. Can be used in embedded/WASM 
 | `unicode` | Character classification | ✅ |
 | `math` | Mathematical functions | ✅ |
 | `sort` | Sorting algorithms | ✅ |
-| `regexp` | Regular expressions | ✅ |
 | `encoding/json` | JSON encoding/decoding | ✅ |
 | `encoding/base64` | Base64 encoding | ✅ |
 | `encoding/hex` | Hexadecimal encoding | ✅ |
 
-### Category C: Standard Packages (13)
+### Category C: Standard Packages (14)
 
-Packages that require OS/system support.
+Packages that require OS/system support or external dependencies.
 
 | Package | Description | Status |
 |---------|-------------|--------|
@@ -49,6 +48,7 @@ Packages that require OS/system support.
 | `bufio` | Buffered I/O | Declared |
 | `rand` | Random numbers | ✅ |
 | `time` | Time operations | ✅ |
+| `regexp` | Regular expressions | ✅ |
 | `sync` | Synchronization primitives | Declared |
 | `context` | Context propagation | Planned |
 | `net` | Networking | Declared |

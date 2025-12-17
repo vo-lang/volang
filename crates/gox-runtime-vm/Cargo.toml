@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "VM runtime implementation for GoX"
 
+[features]
+default = ["std"]
+std = []  # Include std packages (os, fmt, time, etc.)
+
 [dependencies]
 gox-common = { path = "../gox-common" }
 gox-runtime-core = { path = "../gox-runtime-core" }

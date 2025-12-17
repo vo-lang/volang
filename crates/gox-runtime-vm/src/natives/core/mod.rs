@@ -7,7 +7,6 @@ pub mod errors;
 pub mod hex;
 pub mod json;
 pub mod math;
-pub mod regexp;
 pub mod sort;
 pub mod strconv;
 pub mod strings;
@@ -23,7 +22,6 @@ pub fn register_all(registry: &mut NativeRegistry) {
     hex::register(registry);
     json::register(registry);
     math::register(registry);
-    regexp::register(registry);
     sort::register(registry);
     strconv::register(registry);
     strings::register(registry);

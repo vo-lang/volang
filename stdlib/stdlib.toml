@@ -42,8 +42,9 @@ layer = "core"
 status = "complete"
 
 [packages.regexp]
-layer = "core"
+layer = "std"
 status = "complete"
+note = "requires regex crate (not no_std compatible)"
 
 [packages."encoding/json"]
 layer = "core"

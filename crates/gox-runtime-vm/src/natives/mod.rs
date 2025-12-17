@@ -3,10 +3,16 @@
 //! Organized into layers:
 //! - `builtin`: Language built-in functions (always loaded)
 //! - `core`: Core packages with no OS dependency
-//! - `std`: Standard packages requiring OS support
+//! - `std`: Standard packages requiring OS support (feature-gated)
+//!
+//! # Features
+//! - `std` (default): Include std packages (os, fmt, time, etc.)
+//!   Disable with `default-features = false` for embedded/WASM.
 
 pub mod builtin;
 pub mod core;
+
+#[cfg(feature = "std")]
 pub mod std;
 
 use gox_vm::NativeRegistry;
@@ -34,8 +40,12 @@ pub fn register_with_mode(registry: &mut NativeRegistry, mode: StdMode) {
     // Always register core packages
     core::register_all(registry);
     
-    // Register std packages only in Full mode
+    // Register std packages only in Full mode (and only if compiled with std feature)
+    #[cfg(feature = "std")]
     if mode == StdMode::Full {
         std::register_all(registry);
     }
+    
+    #[cfg(not(feature = "std"))]
+    let _ = mode; // Suppress unused warning
 }
