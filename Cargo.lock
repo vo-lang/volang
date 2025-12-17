@@ -695,10 +695,12 @@ dependencies = [
 name = "gox-vm"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-deque",
  "gox-common-core",
  "gox-runtime-core",
  "hashbrown 0.14.5",
  "indexmap",
+ "parking_lot",
 ]
 
 [[package]]

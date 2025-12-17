@@ -8,11 +8,16 @@ description = "Custom virtual machine runtime for GoX"
 [features]
 default = ["std"]
 std = []  # Enable std features (bytecode loading from files, etc.)
+multithread = ["parking_lot", "crossbeam-deque"]
 
 [dependencies]
 gox-common-core = { path = "../gox-common-core" }
 gox-runtime-core = { path = "../gox-runtime-core" }
 hashbrown = "0.14"
 indexmap = "2"
+
+# Multi-threaded M:N scheduler (optional)
+parking_lot = { version = "0.12", optional = true }
+crossbeam-deque = { version = "0.8", optional = true }
 
 [dev-dependencies]

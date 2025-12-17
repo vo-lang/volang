@@ -25,6 +25,9 @@ pub mod vm;
 pub mod native;
 pub mod value;
 
+#[cfg(feature = "multithread")]
+pub mod scheduler;
+
 pub use gc::{Gc, GcRef, GcHeader, GcColor, NULL_REF};
 pub use types::{TypeId, TypeMeta, TypeTable, builtin};
 pub use instruction::{Instruction, Opcode};
