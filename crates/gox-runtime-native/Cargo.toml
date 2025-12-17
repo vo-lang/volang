@@ -1,0 +1,9 @@
+[package]
+name = "gox-runtime-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native runtime support for GoX AOT and JIT compilation"
+
+[dependencies]
+gox-runtime-core = { path = "../gox-runtime-core" }

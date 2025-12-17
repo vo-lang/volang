@@ -12,18 +12,22 @@ members = [
   
   # Code Generation
   "crates/gox-codegen-vm",
+  "crates/gox-codegen-cranelift",
   
   # VM
   "crates/gox-vm",
   
-  # Cranelift Backends
+  # Native Backends (Cranelift)
   "crates/gox-jit",
   "crates/gox-aot",
-  "crates/gox-wasm",
   
   # Runtime
   "crates/gox-runtime-core",
+  "crates/gox-runtime-native",
   "crates/gox-runtime-vm",
+  
+  # Web (WASM)
+  "crates/gox-web",
   
   # Tools
   "crates/gox-cli",

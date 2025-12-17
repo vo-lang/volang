@@ -29,18 +29,22 @@ gox/
 │   │
 │   │  # ─────────── Code Generation ───────────
 │   ├── gox-codegen-vm/       # VM bytecode generation
+│   ├── gox-codegen-cranelift/# Shared Cranelift IR translation
 │   │
 │   │  # ─────────── VM ───────────
-│   ├── gox-vm/               # VM core (interpreter, GC)
+│   ├── gox-vm/               # VM core (interpreter, bytecode)
 │   │
-│   │  # ─────────── Cranelift Backends ───────────
-│   ├── gox-jit/              # JIT compilation
-│   ├── gox-aot/              # AOT → native executable
-│   ├── gox-wasm/             # AOT → WebAssembly
+│   │  # ─────────── Native Backends ───────────
+│   ├── gox-jit/              # JIT compilation (Cranelift)
+│   ├── gox-aot/              # AOT → native object files
 │   │
 │   │  # ─────────── Runtime ───────────
-│   ├── gox-runtime-core/     # Runtime API definitions (shared)
+│   ├── gox-runtime-core/     # Core runtime (GC, objects, FFI)
+│   ├── gox-runtime-native/   # Native runtime symbols (AOT/JIT)
 │   ├── gox-runtime-vm/       # VM runtime + native functions
+│   │
+│   │  # ─────────── Web ───────────
+│   ├── gox-web/              # WASM bindings (run GoX in browsers)
 │   │
 │   │  # ─────────── Tools ───────────
 │   ├── gox-cli/              # Command-line interface
@@ -69,26 +73,27 @@ gox/
             ┌────────────────────┼────────────────────┐
             │                    │                    │
             ▼                    ▼                    ▼
-     gox-codegen-vm         gox-jit              gox-aot/wasm
+     gox-codegen-vm         gox-jit              gox-aot
             │                    │                    │
-            │                    │                    │
-            ▼                    ▼                    ▼
-         gox-vm ◄────────────────┴────────────────────┘
-            │                         (Cranelift)
-            ▼
-    gox-runtime-vm
-            │
-            ▼
-    gox-runtime-core
-            │
-            ▼
-      gox-analysis ◄──────── gox-module
-            │
-            ▼
-       gox-syntax
-            │
-            ▼
-       gox-common
+            │                    └────────┬───────────┘
+            ▼                             ▼
+         gox-vm              gox-codegen-cranelift (shared)
+            │                             │
+            ▼                             ▼
+    gox-runtime-vm              gox-runtime-native
+            │                             │
+            └──────────┬──────────────────┘
+                       ▼
+               gox-runtime-core
+                       │
+                       ▼
+                 gox-analysis ◄──────── gox-module
+                       │
+                       ▼
+                  gox-syntax
+                       │
+                       ▼
+                  gox-common
 ```
 
 ## Building
@@ -108,9 +113,20 @@ gox run --jit program.gox
 
 # Compile to native executable (planned)
 gox build program.gox
+```
 
-# Compile to WebAssembly (planned)
-gox build --wasm program.gox
+### Web (WASM)
+
+GoX can run in browsers via WebAssembly using `gox-web`:
+
+```javascript
+import init, { GoxVM, compile_and_run } from 'gox-web';
+
+await init();
+const output = compile_and_run(`
+    package main
+    func main() { println("Hello from GoX!") }
+`);
 ```
 
 ## Language Example

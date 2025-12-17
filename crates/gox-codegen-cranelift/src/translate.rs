@@ -1,0 +1,900 @@
+//! Bytecode to Cranelift IR translation.
+//!
+//! Translates GoX bytecode to Cranelift IR with support for:
+//! - Control flow (jumps, branches)
+//! - Function calls (GoX and runtime functions)
+//! - Memory operations (GC allocation, field access)
+//! - Composite types (arrays, slices, maps)
+
+use anyhow::{Result, bail};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::types::{F64, I64};
+use cranelift_codegen::ir::{Block, Function, FuncRef, InstBuilder};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_module::Module;
+use std::collections::{HashMap, HashSet};
+
+use gox_vm::bytecode::Constant;
+use gox_vm::instruction::{Instruction, Opcode};
+
+use crate::context::CompileContext;
+use crate::runtime::RuntimeFunc;
+
+/// Translates a single function's bytecode to Cranelift IR.
+pub struct FunctionTranslator {
+    /// Variables for local slots
+    variables: Vec<Variable>,
+    /// Number of local slots
+    local_count: usize,
+    /// Block map: bytecode PC -> Cranelift Block
+    blocks: HashMap<usize, Block>,
+    /// Declared function references for calls
+    func_refs: HashMap<u32, FuncRef>,
+    /// Runtime function references
+    runtime_refs: HashMap<RuntimeFunc, FuncRef>,
+}
+
+impl FunctionTranslator {
+    /// Create a new translator.
+    /// 
+    /// Note: local_slots from FunctionDef may not include return value registers.
+    /// We scan the bytecode to find the actual max register used.
+    pub fn new(local_slots: usize, code: &[Instruction]) -> Self {
+        // Scan bytecode to find max register index used
+        let mut max_reg = local_slots;
+        for inst in code {
+            max_reg = max_reg.max(inst.a as usize + 1);
+            max_reg = max_reg.max(inst.b as usize + 1);
+            max_reg = max_reg.max(inst.c as usize + 1);
+        }
+        
+        Self {
+            variables: Vec::new(),
+            local_count: max_reg,
+            blocks: HashMap::new(),
+            func_refs: HashMap::new(),
+            runtime_refs: HashMap::new(),
+        }
+    }
+
+    /// Translate bytecode to Cranelift IR.
+    pub fn translate<M: Module>(
+        &mut self,
+        func: &mut Function,
+        code: &[Instruction],
+        ctx: &mut CompileContext,
+        module: &mut M,
+    ) -> Result<()> {
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(func, &mut builder_ctx);
+
+        // Phase 1: Find all jump targets and create blocks
+        self.create_blocks(&mut builder, code);
+
+        // Phase 2: Declare variables
+        self.declare_variables(&mut builder);
+
+        // Phase 3: Start with entry block
+        // Check if we have a separate entry block (for back-edge to PC 0 case)
+        let has_separate_entry = self.blocks.contains_key(&usize::MAX);
+        let entry_block = if has_separate_entry {
+            *self.blocks.get(&usize::MAX).unwrap()
+        } else {
+            *self.blocks.get(&0).unwrap()
+        };
+        
+        builder.switch_to_block(entry_block);
+        builder.append_block_params_for_function_params(entry_block);
+
+        // Initialize params from block params
+        let param_count = builder.func.signature.params.len();
+        for i in 0..param_count {
+            let param_val = builder.block_params(entry_block)[i];
+            builder.def_var(self.variables[i], param_val);
+        }
+
+        // Initialize remaining locals to 0
+        let zero = builder.ins().iconst(I64, 0);
+        for i in param_count..self.local_count {
+            builder.def_var(self.variables[i], zero);
+        }
+        
+        // If we have a separate entry, jump to PC 0 block
+        if has_separate_entry {
+            let pc0_block = *self.blocks.get(&0).unwrap();
+            builder.ins().jump(pc0_block, &[]);
+            builder.switch_to_block(pc0_block);
+        }
+
+        // Phase 4: Translate instructions
+        let mut block_terminated = false;
+        for (pc, inst) in code.iter().enumerate() {
+            // Switch to new block if this PC is a jump target
+            if let Some(&block) = self.blocks.get(&pc) {
+                if pc > 0 {
+                    // Add fallthrough jump if previous block wasn't terminated
+                    if !block_terminated {
+                        builder.ins().jump(block, &[]);
+                    }
+                    builder.switch_to_block(block);
+                }
+                block_terminated = false;
+            } else if block_terminated {
+                // Skip dead code (unreachable instructions after terminator)
+                continue;
+            }
+
+            // Check if this instruction is a terminator
+            block_terminated = matches!(
+                inst.opcode(),
+                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::Return
+            );
+
+            self.translate_instruction(&mut builder, inst, pc, code, ctx, module)?;
+        }
+
+        // Seal all blocks
+        for &block in self.blocks.values() {
+            builder.seal_block(block);
+        }
+
+        builder.finalize();
+        Ok(())
+    }
+
+    /// Find all jump targets and create blocks.
+    fn create_blocks(&mut self, builder: &mut FunctionBuilder, code: &[Instruction]) {
+        self.blocks.clear();
+
+        // Find jump targets first
+        let mut targets = HashSet::new();
+        let mut has_back_edge_to_zero = false;
+        
+        for (pc, inst) in code.iter().enumerate() {
+            match inst.opcode() {
+                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
+                    // VM does: pc = pc + offset - 1, then pc++, so target = pc + offset
+                    let offset = inst.imm32();
+                    let target = (pc as i32 + offset) as usize;
+                    targets.insert(target);
+                    
+                    // Check for back-edge to PC 0
+                    if target == 0 && pc > 0 {
+                        has_back_edge_to_zero = true;
+                    }
+                    
+                    // Also need block after conditional jump for fall-through
+                    if inst.opcode() != Opcode::Jump {
+                        targets.insert(pc + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Entry block - Cranelift doesn't allow back-edges to entry block
+        // If there's a back-edge to PC 0, we need a separate entry that jumps to PC 0 block
+        if has_back_edge_to_zero {
+            // Create real entry block (no predecessors)
+            let entry = builder.create_block();
+            self.blocks.insert(usize::MAX, entry); // Special marker for real entry
+            
+            // Create PC 0 block (can have back-edges)
+            let pc0_block = builder.create_block();
+            self.blocks.insert(0, pc0_block);
+        } else {
+            // Normal case: entry block at PC 0
+            let entry = builder.create_block();
+            self.blocks.insert(0, entry);
+        }
+
+        // Create blocks for other targets
+        for target in targets {
+            if !self.blocks.contains_key(&target) {
+                let block = builder.create_block();
+                self.blocks.insert(target, block);
+            }
+        }
+    }
+
+    /// Declare variables for all local slots.
+    fn declare_variables(&mut self, builder: &mut FunctionBuilder) {
+        self.variables.clear();
+        for i in 0..self.local_count {
+            let var = Variable::from_u32(i as u32);
+            builder.declare_var(var, I64);
+            self.variables.push(var);
+        }
+    }
+
+    /// Get or import a GoX function reference.
+    fn get_gox_func_ref<M: Module>(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        module: &mut M,
+        ctx: &CompileContext,
+        func_idx: u32,
+    ) -> Result<FuncRef> {
+        if let Some(&func_ref) = self.func_refs.get(&func_idx) {
+            return Ok(func_ref);
+        }
+
+        let func_id = ctx.get_gox_func(func_idx)
+            .ok_or_else(|| anyhow::anyhow!("Function {} not declared", func_idx))?;
+        let func_ref = module.declare_func_in_func(func_id, builder.func);
+        self.func_refs.insert(func_idx, func_ref);
+        Ok(func_ref)
+    }
+
+    /// Get or import a runtime function reference.
+    fn get_runtime_func_ref<M: Module>(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        module: &mut M,
+        ctx: &mut CompileContext,
+        rt_func: RuntimeFunc,
+    ) -> Result<FuncRef> {
+        if let Some(&func_ref) = self.runtime_refs.get(&rt_func) {
+            return Ok(func_ref);
+        }
+
+        let func_id = ctx.get_or_declare_runtime(module, rt_func)?;
+        let func_ref = module.declare_func_in_func(func_id, builder.func);
+        self.runtime_refs.insert(rt_func, func_ref);
+        Ok(func_ref)
+    }
+
+    /// Translate a single instruction.
+    fn translate_instruction<M: Module>(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        inst: &Instruction,
+        pc: usize,
+        _code: &[Instruction],
+        ctx: &mut CompileContext,
+        module: &mut M,
+    ) -> Result<()> {
+
+        match inst.opcode() {
+            // ==================== Load/Store ====================
+            Opcode::Nop => {}
+
+            Opcode::LoadNil | Opcode::LoadFalse => {
+                let zero = builder.ins().iconst(I64, 0);
+                builder.def_var(self.variables[inst.a as usize], zero);
+            }
+
+            Opcode::LoadTrue => {
+                let one = builder.ins().iconst(I64, 1);
+                builder.def_var(self.variables[inst.a as usize], one);
+            }
+
+            Opcode::LoadInt => {
+                let imm = inst.imm32() as i64;
+                let val = builder.ins().iconst(I64, imm);
+                builder.def_var(self.variables[inst.a as usize], val);
+            }
+
+            Opcode::LoadConst => {
+                let const_idx = inst.b;
+                match ctx.get_constant(const_idx) {
+                    Some(Constant::Int(v)) => {
+                        let val = builder.ins().iconst(I64, *v);
+                        builder.def_var(self.variables[inst.a as usize], val);
+                    }
+                    Some(Constant::Float(v)) => {
+                        let val = builder.ins().f64const(*v);
+                        let bits = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), val);
+                        builder.def_var(self.variables[inst.a as usize], bits);
+                    }
+                    Some(Constant::Bool(v)) => {
+                        let val = builder.ins().iconst(I64, if *v { 1 } else { 0 });
+                        builder.def_var(self.variables[inst.a as usize], val);
+                    }
+                    Some(Constant::Nil) => {
+                        let val = builder.ins().iconst(I64, 0);
+                        builder.def_var(self.variables[inst.a as usize], val);
+                    }
+                    Some(Constant::String(_s)) => {
+                        // TODO: String constants need special handling
+                        // For now, store 0 (null)
+                        let val = builder.ins().iconst(I64, 0);
+                        builder.def_var(self.variables[inst.a as usize], val);
+                    }
+                    None => bail!("Constant {} not found", const_idx),
+                }
+            }
+
+            Opcode::Mov => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                builder.def_var(self.variables[inst.a as usize], val);
+            }
+
+            Opcode::MovN => {
+                for i in 0..inst.c {
+                    let val = builder.use_var(self.variables[(inst.b + i) as usize]);
+                    builder.def_var(self.variables[(inst.a + i) as usize], val);
+                }
+            }
+
+            // ==================== Arithmetic (i64) ====================
+            Opcode::AddI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().iadd(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SubI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().isub(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::MulI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().imul(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::DivI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().sdiv(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ModI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().srem(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::NegI64 => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let result = builder.ins().ineg(val);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Arithmetic (f64) ====================
+            Opcode::AddF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let result = builder.ins().fadd(lhs_f, rhs_f);
+                let result_i = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), result);
+                builder.def_var(self.variables[inst.a as usize], result_i);
+            }
+
+            Opcode::SubF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let result = builder.ins().fsub(lhs_f, rhs_f);
+                let result_i = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), result);
+                builder.def_var(self.variables[inst.a as usize], result_i);
+            }
+
+            Opcode::MulF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let result = builder.ins().fmul(lhs_f, rhs_f);
+                let result_i = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), result);
+                builder.def_var(self.variables[inst.a as usize], result_i);
+            }
+
+            Opcode::DivF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let result = builder.ins().fdiv(lhs_f, rhs_f);
+                let result_i = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), result);
+                builder.def_var(self.variables[inst.a as usize], result_i);
+            }
+
+            Opcode::NegF64 => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let val_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), val);
+                let result = builder.ins().fneg(val_f);
+                let result_i = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), result);
+                builder.def_var(self.variables[inst.a as usize], result_i);
+            }
+
+            // ==================== Comparison (i64) ====================
+            Opcode::EqI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::NeI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::LtI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::SignedLessThan, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::LeI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::GtI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::GeI64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Comparison (f64) ====================
+            Opcode::EqF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::Equal, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::NeF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::NotEqual, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::LtF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::LessThan, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::LeF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::LessThanOrEqual, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::GtF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::GreaterThan, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::GeF64 => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let lhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), lhs);
+                let rhs_f = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), rhs);
+                let cmp = builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lhs_f, rhs_f);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Reference comparison ====================
+            Opcode::EqRef => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::NeRef => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let cmp = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::IsNil => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let zero = builder.ins().iconst(I64, 0);
+                let cmp = builder.ins().icmp(IntCC::Equal, val, zero);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Bitwise ====================
+            Opcode::Band => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().band(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Bor => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().bor(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Bxor => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().bxor(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Bnot => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let result = builder.ins().bnot(val);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Shl => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().ishl(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Shr => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().sshr(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::Ushr => {
+                let lhs = builder.use_var(self.variables[inst.b as usize]);
+                let rhs = builder.use_var(self.variables[inst.c as usize]);
+                let result = builder.ins().ushr(lhs, rhs);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Logical ====================
+            Opcode::Not => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let zero = builder.ins().iconst(I64, 0);
+                let cmp = builder.ins().icmp(IntCC::Equal, val, zero);
+                let result = builder.ins().uextend(I64, cmp);
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Control flow ====================
+            Opcode::Jump => {
+                let offset = inst.imm32();
+                let target_pc = (pc as i32 + offset) as usize;
+                let target_block = self.blocks.get(&target_pc)
+                    .ok_or_else(|| anyhow::anyhow!("Jump target block not found: {}", target_pc))?;
+                builder.ins().jump(*target_block, &[]);
+            }
+
+            Opcode::JumpIf => {
+                let cond = builder.use_var(self.variables[inst.a as usize]);
+                let offset = inst.imm32();
+                let target_pc = (pc as i32 + offset) as usize;
+                let fallthrough_pc = pc + 1;
+
+                let target_block = *self.blocks.get(&target_pc)
+                    .ok_or_else(|| anyhow::anyhow!("JumpIf target block not found"))?;
+                let fallthrough_block = *self.blocks.get(&fallthrough_pc)
+                    .ok_or_else(|| anyhow::anyhow!("JumpIf fallthrough block not found"))?;
+
+                let zero = builder.ins().iconst(I64, 0);
+                let cmp = builder.ins().icmp(IntCC::NotEqual, cond, zero);
+                builder.ins().brif(cmp, target_block, &[], fallthrough_block, &[]);
+            }
+
+            Opcode::JumpIfNot => {
+                let cond = builder.use_var(self.variables[inst.a as usize]);
+                let offset = inst.imm32();
+                let target_pc = (pc as i32 + offset) as usize;
+                let fallthrough_pc = pc + 1;
+
+                let target_block = *self.blocks.get(&target_pc)
+                    .ok_or_else(|| anyhow::anyhow!("JumpIfNot target block not found"))?;
+                let fallthrough_block = *self.blocks.get(&fallthrough_pc)
+                    .ok_or_else(|| anyhow::anyhow!("JumpIfNot fallthrough block not found"))?;
+
+                let zero = builder.ins().iconst(I64, 0);
+                let cmp = builder.ins().icmp(IntCC::Equal, cond, zero);
+                builder.ins().brif(cmp, target_block, &[], fallthrough_block, &[]);
+            }
+
+            // ==================== Function call ====================
+            Opcode::Call => {
+                let func_idx = inst.a as u32;
+                let arg_start = inst.b;
+                let arg_count = inst.c as usize;
+                let ret_count = inst.flags as usize;
+
+                let func_ref = self.get_gox_func_ref(builder, module, ctx, func_idx)?;
+
+                // Collect arguments
+                let mut args = Vec::with_capacity(arg_count);
+                for i in 0..arg_count {
+                    args.push(builder.use_var(self.variables[(arg_start as usize) + i]));
+                }
+
+                // Call
+                let call = builder.ins().call(func_ref, &args);
+
+                // Store return values - copy to avoid borrow conflict
+                let results: Vec<_> = builder.inst_results(call).to_vec();
+                for (i, result) in results.into_iter().enumerate().take(ret_count) {
+                    builder.def_var(self.variables[(arg_start as usize) + i], result);
+                }
+            }
+
+            Opcode::Return => {
+                let ret_count = inst.b as usize;
+                if ret_count == 0 {
+                    builder.ins().return_(&[]);
+                } else {
+                    let mut rets = Vec::with_capacity(ret_count);
+                    for i in 0..ret_count {
+                        rets.push(builder.use_var(self.variables[(inst.a + i as u16) as usize]));
+                    }
+                    builder.ins().return_(&rets);
+                }
+            }
+
+            // ==================== Object operations ====================
+            Opcode::Alloc => {
+                let type_id = inst.b as i64;
+                let extra_slots = inst.c as i64;
+                
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcAlloc)?;
+                let type_id_val = builder.ins().iconst(cranelift_codegen::ir::types::I32, type_id);
+                let slots_val = builder.ins().iconst(I64, extra_slots);
+                
+                let call = builder.ins().call(func_ref, &[type_id_val, slots_val]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::GetField => {
+                let obj = builder.use_var(self.variables[inst.b as usize]);
+                let field_idx = inst.c as i64;
+                
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcReadSlot)?;
+                let idx_val = builder.ins().iconst(I64, field_idx);
+                
+                let call = builder.ins().call(func_ref, &[obj, idx_val]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SetField => {
+                let obj = builder.use_var(self.variables[inst.a as usize]);
+                let field_idx = inst.b as i64;
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcWriteSlot)?;
+                let idx_val = builder.ins().iconst(I64, field_idx);
+                
+                builder.ins().call(func_ref, &[obj, idx_val, val]);
+            }
+
+            // ==================== Slice operations ====================
+            Opcode::SliceLen => {
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceLen)?;
+                let call = builder.ins().call(func_ref, &[slice]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SliceCap => {
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceCap)?;
+                let call = builder.ins().call(func_ref, &[slice]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SliceGet => {
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let idx = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceGet)?;
+                let call = builder.ins().call(func_ref, &[slice, idx]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SliceSet => {
+                let slice = builder.use_var(self.variables[inst.a as usize]);
+                let idx = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceSet)?;
+                builder.ins().call(func_ref, &[slice, idx, val]);
+            }
+
+            Opcode::SliceAppend => {
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceAppend)?;
+                let call = builder.ins().call(func_ref, &[slice, val]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            // ==================== Array operations ====================
+            Opcode::ArrayLen => {
+                let arr = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayLen)?;
+                let call = builder.ins().call(func_ref, &[arr]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ArrayGet => {
+                let arr = builder.use_var(self.variables[inst.b as usize]);
+                let idx = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayGet)?;
+                let call = builder.ins().call(func_ref, &[arr, idx]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ArraySet => {
+                let arr = builder.use_var(self.variables[inst.a as usize]);
+                let idx = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArraySet)?;
+                builder.ins().call(func_ref, &[arr, idx, val]);
+            }
+
+            // ==================== Map operations ====================
+            Opcode::MapNew => {
+                let key_type = inst.b as i64;
+                let val_type = inst.c as i64;
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::MapCreate)?;
+                let kt = builder.ins().iconst(cranelift_codegen::ir::types::I32, key_type);
+                let vt = builder.ins().iconst(cranelift_codegen::ir::types::I32, val_type);
+                let call = builder.ins().call(func_ref, &[kt, vt]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::MapLen => {
+                let m = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::MapLen)?;
+                let call = builder.ins().call(func_ref, &[m]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::MapGet => {
+                let m = builder.use_var(self.variables[inst.a as usize]);
+                let key = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::MapGet)?;
+                let call = builder.ins().call(func_ref, &[m, key]);
+                // Copy results to avoid borrow conflict
+                let results: Vec<_> = builder.inst_results(call).to_vec();
+                builder.def_var(self.variables[inst.a as usize], results[0]); // value
+                // ok stored at inst.c if needed
+                if inst.c > 0 {
+                    let ok = builder.ins().uextend(I64, results[1]);
+                    builder.def_var(self.variables[inst.c as usize], ok);
+                }
+            }
+
+            Opcode::MapSet => {
+                let m = builder.use_var(self.variables[inst.a as usize]);
+                let key = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::MapSet)?;
+                builder.ins().call(func_ref, &[m, key, val]);
+            }
+
+            Opcode::MapDelete => {
+                let m = builder.use_var(self.variables[inst.a as usize]);
+                let key = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::MapDelete)?;
+                builder.ins().call(func_ref, &[m, key]);
+            }
+
+            // ==================== String operations ====================
+            Opcode::StrLen => {
+                let s = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringLen)?;
+                let call = builder.ins().call(func_ref, &[s]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::StrConcat => {
+                let a = builder.use_var(self.variables[inst.b as usize]);
+                let b = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringConcat)?;
+                let call = builder.ins().call(func_ref, &[a, b]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::StrEq => {
+                let a = builder.use_var(self.variables[inst.b as usize]);
+                let b = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringEq)?;
+                let call = builder.ins().call(func_ref, &[a, b]);
+                let result = builder.inst_results(call)[0];
+                let result_i64 = builder.ins().uextend(I64, result);
+                builder.def_var(self.variables[inst.a as usize], result_i64);
+            }
+
+            Opcode::StrNe => {
+                let a = builder.use_var(self.variables[inst.b as usize]);
+                let b = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringNe)?;
+                let call = builder.ins().call(func_ref, &[a, b]);
+                let result = builder.inst_results(call)[0];
+                let result_i64 = builder.ins().uextend(I64, result);
+                builder.def_var(self.variables[inst.a as usize], result_i64);
+            }
+
+            // ==================== Type conversion ====================
+            Opcode::I64ToF64 => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let float_val = builder.ins().fcvt_from_sint(F64, val);
+                let bits = builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), float_val);
+                builder.def_var(self.variables[inst.a as usize], bits);
+            }
+
+            Opcode::F64ToI64 => {
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let float_val = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), val);
+                let int_val = builder.ins().fcvt_to_sint(I64, float_val);
+                builder.def_var(self.variables[inst.a as usize], int_val);
+            }
+
+            // ==================== Not yet implemented ====================
+            _ => {
+                bail!("Opcode {:?} not yet implemented in AOT compiler", inst.opcode());
+            }
+        }
+
+        Ok(())
+    }
+}
