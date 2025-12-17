@@ -115,6 +115,39 @@ impl DeferEntry {
     }
 }
 
+/// State for executing pending defers during return.
+#[derive(Clone, Debug)]
+pub struct DeferState {
+    /// Pending defers to execute (in order).
+    pub pending: Vec<DeferEntry>,
+    /// Return values to pass to caller after all defers complete.
+    pub ret_vals: Vec<u64>,
+    /// Caller's return register.
+    pub caller_ret_reg: u16,
+    /// Caller's expected return count.
+    pub caller_ret_count: usize,
+    /// Whether this is an error return (for errdefer filtering).
+    pub is_error_return: bool,
+}
+
+impl DeferState {
+    pub fn new(
+        pending: Vec<DeferEntry>,
+        ret_vals: Vec<u64>,
+        caller_ret_reg: u16,
+        caller_ret_count: usize,
+        is_error_return: bool,
+    ) -> Self {
+        Self {
+            pending,
+            ret_vals,
+            caller_ret_reg,
+            caller_ret_count,
+            is_error_return,
+        }
+    }
+}
+
 /// A fiber (lightweight thread / goroutine).
 pub struct Fiber {
     pub id: FiberId,
@@ -130,6 +163,9 @@ pub struct Fiber {
     
     // Defer stack
     pub defer_stack: Vec<DeferEntry>,
+    
+    // Pending defer execution state (for multi-defer returns)
+    pub defer_state: Option<DeferState>,
     
     // Panic state
     pub panic_value: Option<u64>,
@@ -150,6 +186,7 @@ impl Fiber {
             frames: Vec::new(),
             iter_stack: Vec::new(),
             defer_stack: Vec::new(),
+            defer_state: None,
             panic_value: None,
             recovering: false,
             assert_failed: false,
