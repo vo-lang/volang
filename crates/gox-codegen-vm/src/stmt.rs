@@ -1,6 +1,6 @@
 //! Statement compilation.
 
-use gox_syntax::ast::{Stmt, StmtKind, Block, IfStmt, ForStmt, ForClause, ReturnStmt, AssignStmt, AssignOp, ShortVarDecl, ExprKind, SwitchStmt, DeferStmt, ErrDeferStmt, FailStmt, GoStmt, SendStmt};
+use gox_syntax::ast::{Stmt, StmtKind, Block, IfStmt, ForStmt, ForClause, ReturnStmt, AssignStmt, AssignOp, ShortVarDecl, ExprKind, SwitchStmt, DeferStmt, ErrDeferStmt, FailStmt, GoStmt, SendStmt, SelectStmt, CommClause};
 use gox_vm::instruction::Opcode;
 use gox_analysis::Type;
 
@@ -137,7 +137,7 @@ pub fn compile_stmt(
         StmtKind::ErrDefer(errdefer_stmt) => compile_errdefer(ctx, fctx, errdefer_stmt),
         StmtKind::Fail(fail_stmt) => compile_fail(ctx, fctx, fail_stmt),
         StmtKind::Send(send) => compile_send(ctx, fctx, send),
-        StmtKind::Select(_) => Err(CodegenError::Unsupported("select statement".to_string())),
+        StmtKind::Select(sel) => compile_select(ctx, fctx, sel),
         StmtKind::Switch(sw) => compile_switch(ctx, fctx, sw),
         StmtKind::TypeSwitch(_) => Err(CodegenError::Unsupported("type switch".to_string())),
         StmtKind::Break(_) => {
@@ -1217,6 +1217,123 @@ fn compile_fail(
     // Return with the error value (interface = 2 slots)
     // This allows the VM to detect it as an error return
     fctx.emit(Opcode::Return, error_reg, 2, 0);
+    
+    Ok(())
+}
+
+/// Compile select statement.
+fn compile_select(
+    ctx: &mut CodegenContext,
+    fctx: &mut FuncContext,
+    sel: &SelectStmt,
+) -> Result<(), CodegenError> {
+    // Count cases (excluding default)
+    let has_default = sel.cases.iter().any(|c| c.comm.is_none());
+    let case_count = sel.cases.iter().filter(|c| c.comm.is_some()).count();
+    
+    // Emit SelectStart
+    fctx.emit(Opcode::SelectStart, case_count as u16, has_default as u16, 0);
+    
+    // Emit each case's communication clause
+    for case in &sel.cases {
+        if let Some(ref comm) = case.comm {
+            match comm {
+                CommClause::Send(send) => {
+                    // Compile channel and value expressions
+                    let chan_reg = expr::compile_expr(ctx, fctx, &send.chan)?;
+                    let val_reg = expr::compile_expr(ctx, fctx, &send.value)?;
+                    fctx.emit(Opcode::SelectSend, chan_reg, val_reg, 0);
+                }
+                CommClause::Recv(recv) => {
+                    // Compile channel expression
+                    let chan_reg = expr::compile_expr(ctx, fctx, &recv.expr)?;
+                    
+                    // Allocate registers for result
+                    let dest_reg = if !recv.lhs.is_empty() {
+                        if recv.define {
+                            fctx.define_local(recv.lhs[0], 1)
+                        } else {
+                            fctx.lookup_local(recv.lhs[0].symbol)
+                                .map(|v| v.reg)
+                                .unwrap_or_else(|| fctx.regs.alloc(1))
+                        }
+                    } else {
+                        fctx.regs.alloc(1) // Discard result
+                    };
+                    
+                    let ok_reg = if recv.lhs.len() > 1 {
+                        if recv.define {
+                            fctx.define_local(recv.lhs[1], 1)
+                        } else {
+                            fctx.lookup_local(recv.lhs[1].symbol)
+                                .map(|v| v.reg)
+                                .unwrap_or_else(|| fctx.regs.alloc(1))
+                        }
+                    } else {
+                        0
+                    };
+                    
+                    fctx.emit(Opcode::SelectRecv, dest_reg, chan_reg, ok_reg);
+                }
+            }
+        }
+    }
+    
+    // Emit SelectEnd - result goes to a temp register
+    let result_reg = fctx.regs.alloc(1);
+    fctx.emit(Opcode::SelectEnd, result_reg, 0, 0);
+    
+    // Generate code for case bodies using switch-like structure
+    let mut case_jumps: Vec<usize> = Vec::new();
+    let mut end_jumps: Vec<usize> = Vec::new();
+    
+    for (i, case) in sel.cases.iter().enumerate() {
+        let case_idx = if case.comm.is_some() {
+            sel.cases.iter().take(i).filter(|c| c.comm.is_some()).count()
+        } else {
+            case_count // default case index
+        };
+        
+        // Jump if not this case
+        let cmp_reg = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadInt, cmp_reg, case_idx as u16, 0);
+        
+        let ne_reg = fctx.regs.alloc(1);
+        fctx.emit(Opcode::NeI64, ne_reg, result_reg, cmp_reg);
+        
+        let jump_pc = fctx.pc();
+        fctx.emit(Opcode::JumpIf, ne_reg, 0, 0); // Will patch
+        case_jumps.push(jump_pc);
+        
+        // Compile case body
+        for stmt in &case.body {
+            compile_stmt(ctx, fctx, stmt)?;
+        }
+        
+        // Jump to end
+        let end_pc = fctx.pc();
+        fctx.emit(Opcode::Jump, 0, 0, 0);
+        end_jumps.push(end_pc);
+    }
+    
+    // Patch case jumps to skip to next case
+    for (i, jump_pc) in case_jumps.iter().enumerate() {
+        let next_case_pc = if i + 1 < case_jumps.len() {
+            // Find start of next case comparison
+            case_jumps[i + 1] - 2 // Back up before LoadInt
+        } else {
+            fctx.pc()
+        };
+        let offset = (next_case_pc as i32) - (*jump_pc as i32);
+        fctx.patch_jump(*jump_pc, offset);
+    }
+    
+    // Patch end jumps
+    let end_pc = fctx.pc();
+    for jump_pc in end_jumps {
+        let offset = (end_pc as i32) - (jump_pc as i32);
+        fctx.patch_jump(jump_pc, offset);
+    }
     
     Ok(())
 }

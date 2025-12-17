@@ -615,12 +615,17 @@ impl<'a> TypeChecker<'a> {
     /// Checks a select statement.
     fn check_select(&mut self, sel: &ast::SelectStmt) {
         for case in &sel.cases {
+            // Each case has its own scope for variables declared in comm clause
+            self.push_scope(ScopeKind::Block);
+            
             if let Some(ref comm) = case.comm {
                 self.check_comm_clause(comm);
             }
             for stmt in &case.body {
                 self.check_stmt(stmt);
             }
+            
+            self.pop_scope();
         }
     }
 
@@ -630,14 +635,48 @@ impl<'a> TypeChecker<'a> {
             ast::CommClause::Send(send) => self.check_send(send),
             ast::CommClause::Recv(recv) => {
                 let chan_ty = self.check_expr(&recv.expr);
-                match self.underlying_type(&chan_ty) {
+                let elem_ty = match self.underlying_type(&chan_ty) {
                     Type::Chan(c) => {
                         if c.dir == crate::types::ChanDir::SendOnly {
                             self.error(TypeError::ReceiveFromSendOnly, recv.expr.span);
                         }
+                        (*c.elem).clone()
                     }
                     _ => {
                         self.error(TypeError::ReceiveNonChannel, recv.expr.span);
+                        Type::Invalid
+                    }
+                };
+                
+                // Handle variable declarations: v := <-ch or v, ok := <-ch
+                if !recv.lhs.is_empty() {
+                    if recv.define {
+                        // Short variable declaration
+                        for (i, ident) in recv.lhs.iter().enumerate() {
+                            let ty = if i == 0 {
+                                elem_ty.clone()
+                            } else {
+                                // Second variable is the 'ok' bool
+                                Type::Basic(BasicType::Bool)
+                            };
+                            self.define_var(ident.symbol, ty, ident.span);
+                        }
+                    } else {
+                        // Assignment - check that variables exist and types match
+                        for (i, ident) in recv.lhs.iter().enumerate() {
+                            let expected_ty = if i == 0 {
+                                elem_ty.clone()
+                            } else {
+                                Type::Basic(BasicType::Bool)
+                            };
+                            if let Some(Entity::Var(var)) = self.lookup(ident.symbol) {
+                                if !self.is_assignable(&expected_ty, &var.ty) {
+                                    self.error(TypeError::ArgTypeMismatch, ident.span);
+                                }
+                            } else {
+                                self.error(TypeError::Undefined, ident.span);
+                            }
+                        }
                     }
                 }
             }

@@ -104,6 +104,22 @@ impl IterState {
 unsafe impl Send for IterState {}
 unsafe impl Sync for IterState {}
 
+/// A select case (send or recv).
+#[derive(Clone, Debug)]
+pub enum SelectCase {
+    /// Send case: channel ref, value to send
+    Send { chan: GcRef, value: u64 },
+    /// Recv case: channel ref, dest register, ok register
+    Recv { chan: GcRef, dest: u16, ok_dest: u16 },
+}
+
+/// State for building a select statement.
+#[derive(Clone, Debug, Default)]
+pub struct SelectState {
+    pub cases: Vec<SelectCase>,
+    pub has_default: bool,
+}
+
 /// Defer entry.
 #[derive(Clone, Debug)]
 pub struct DeferEntry {
@@ -186,6 +202,9 @@ pub struct Fiber {
     // Assert state
     pub assert_failed: bool,
     pub assert_line: u16,
+    
+    // Select state (for building select statement)
+    pub select_state: Option<SelectState>,
 }
 
 impl Fiber {
@@ -203,6 +222,7 @@ impl Fiber {
             recovering: false,
             assert_failed: false,
             assert_line: 0,
+            select_state: None,
         }
     }
     

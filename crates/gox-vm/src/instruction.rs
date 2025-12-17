@@ -152,6 +152,12 @@ pub enum Opcode {
     ChanRecv,         // a = <-b, ok at c
     ChanClose,        // close(a)
     
+    // ============ Select ============
+    SelectStart = 165,  // a=case_count, b=has_default; start building select
+    SelectSend,         // a=chan, b=value; add send case
+    SelectRecv,         // a=dest, b=chan, c=ok_dest; add recv case
+    SelectEnd,          // a=dest (chosen case index); execute select and jump
+    
     // ============ Iterator (range) ============
     IterBegin = 170,  // begin iteration over a, type=b
     IterNext,         // a,b = next from iter, c=done_offset
@@ -300,6 +306,11 @@ impl Opcode {
             161 => Self::ChanSend,
             162 => Self::ChanRecv,
             163 => Self::ChanClose,
+            
+            165 => Self::SelectStart,
+            166 => Self::SelectSend,
+            167 => Self::SelectRecv,
+            168 => Self::SelectEnd,
             
             170 => Self::IterBegin,
             171 => Self::IterNext,

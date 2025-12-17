@@ -1,7 +1,7 @@
 //! Virtual machine implementation.
 
 use crate::bytecode::{Constant, Module};
-use crate::fiber::{BlockReason, DeferEntry, FiberId, FiberStatus, IterState, Scheduler};
+use crate::fiber::{BlockReason, DeferEntry, FiberId, FiberStatus, IterState, Scheduler, SelectCase, SelectState};
 use crate::gc::{Gc, GcRef, NULL_REF};
 use crate::instruction::{Instruction, Opcode};
 use crate::native::{NativeCtx, NativeFn, NativeRegistry, NativeResult};
@@ -872,6 +872,127 @@ impl Vm {
                 let receivers: Vec<_> = state.waiting_receivers.drain(..).collect();
                 for recv_id in receivers {
                     self.scheduler.unblock(recv_id);
+                }
+            }
+            
+            // ============ Select ============
+            Opcode::SelectStart => {
+                // a=case_count, b=has_default
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                fiber.select_state = Some(SelectState {
+                    cases: Vec::with_capacity(a as usize),
+                    has_default: b != 0,
+                });
+            }
+            
+            Opcode::SelectSend => {
+                // a=chan, b=value; add send case
+                let ch = self.read_reg(fiber_id, a) as GcRef;
+                let val = self.read_reg(fiber_id, b);
+                
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                if let Some(ref mut state) = fiber.select_state {
+                    state.cases.push(SelectCase::Send { chan: ch, value: val });
+                }
+            }
+            
+            Opcode::SelectRecv => {
+                // a=dest, b=chan, c=ok_dest; add recv case
+                let ch = self.read_reg(fiber_id, b) as GcRef;
+                
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                if let Some(ref mut state) = fiber.select_state {
+                    state.cases.push(SelectCase::Recv { chan: ch, dest: a, ok_dest: c });
+                }
+            }
+            
+            Opcode::SelectEnd => {
+                // a=dest (chosen case index); execute select
+                let select_state = {
+                    let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                    fiber.select_state.take()
+                };
+                
+                if let Some(state) = select_state {
+                    // Try each case to find a ready one
+                    let mut ready_cases: Vec<usize> = Vec::new();
+                    
+                    for (i, case) in state.cases.iter().enumerate() {
+                        match case {
+                            SelectCase::Send { chan, .. } => {
+                                if !chan.is_null() {
+                                    let ch_state = channel::get_state(*chan);
+                                    let cap = channel::capacity(*chan);
+                                    // Ready if buffer not full or has waiting receiver
+                                    if ch_state.buffer.len() < cap || !ch_state.waiting_receivers.is_empty() {
+                                        ready_cases.push(i);
+                                    }
+                                }
+                            }
+                            SelectCase::Recv { chan, .. } => {
+                                if !chan.is_null() {
+                                    let ch_state = channel::get_state(*chan);
+                                    // Ready if buffer not empty or has waiting sender or closed
+                                    if !ch_state.buffer.is_empty() || !ch_state.waiting_senders.is_empty() || ch_state.closed {
+                                        ready_cases.push(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    let chosen = if !ready_cases.is_empty() {
+                        // Pick a random ready case (for fairness, use simple selection)
+                        let idx = ready_cases[0]; // TODO: use random selection
+                        
+                        // Execute the chosen case
+                        match &state.cases[idx] {
+                            SelectCase::Send { chan, value } => {
+                                let ch_state = channel::get_state(*chan);
+                                if let Some(recv_id) = ch_state.waiting_receivers.pop_front() {
+                                    // Send directly to waiting receiver
+                                    self.scheduler.unblock(recv_id);
+                                } else {
+                                    // Buffer the value
+                                    ch_state.buffer.push_back(*value);
+                                }
+                            }
+                            SelectCase::Recv { chan, dest, ok_dest } => {
+                                let ch_state = channel::get_state(*chan);
+                                let (val, ok) = if let Some(v) = ch_state.buffer.pop_front() {
+                                    // Wake a waiting sender if any
+                                    if let Some((sender_id, send_val)) = ch_state.waiting_senders.pop_front() {
+                                        ch_state.buffer.push_back(send_val);
+                                        self.scheduler.unblock(sender_id);
+                                    }
+                                    (v, 1u64)
+                                } else if let Some((sender_id, v)) = ch_state.waiting_senders.pop_front() {
+                                    self.scheduler.unblock(sender_id);
+                                    (v, 1u64)
+                                } else if ch_state.closed {
+                                    (0, 0u64)
+                                } else {
+                                    (0, 0u64)
+                                };
+                                
+                                self.write_reg(fiber_id, *dest, val);
+                                if *ok_dest != 0 {
+                                    self.write_reg(fiber_id, *ok_dest, ok);
+                                }
+                            }
+                        }
+                        
+                        idx as u64
+                    } else if state.has_default {
+                        // No ready case, execute default
+                        state.cases.len() as u64 // default case index
+                    } else {
+                        // No ready case and no default - block
+                        // For now, just return 0 (TODO: implement blocking select)
+                        0
+                    };
+                    
+                    self.write_reg(fiber_id, a, chosen);
                 }
             }
             

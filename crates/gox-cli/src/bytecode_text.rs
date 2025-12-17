@@ -223,6 +223,11 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::I32ToI64 => format!("I32ToI64 r{}, r{}", a, b),
         Opcode::I64ToI32 => format!("I64ToI32 r{}, r{}", a, b),
         
+        Opcode::SelectStart => format!("SelectStart {}, {}", a, b),
+        Opcode::SelectSend => format!("SelectSend r{}, r{}", a, b),
+        Opcode::SelectRecv => format!("SelectRecv r{}, r{}, r{}", a, b, c),
+        Opcode::SelectEnd => format!("SelectEnd r{}", a),
+        
         Opcode::DebugPrint => format!("DebugPrint r{}", a),
         Opcode::AssertBegin => format!("AssertBegin r{}, {}, {}", a, b, c),
         Opcode::AssertArg => format!("AssertArg r{}, {}", a, b),
