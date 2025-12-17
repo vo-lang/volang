@@ -92,6 +92,12 @@ pub enum RuntimeFunc {
     ChanSend,
     ChanRecv,
     ChanClose,
+
+    // === Defer/Panic/Recover (4) ===
+    DeferPush,
+    DeferPop,
+    Panic,
+    Recover,
 }
 
 impl RuntimeFunc {
@@ -163,6 +169,11 @@ impl RuntimeFunc {
             RuntimeFunc::ChanSend => "gox_chan_send",
             RuntimeFunc::ChanRecv => "gox_chan_recv",
             RuntimeFunc::ChanClose => "gox_chan_close",
+            // Defer/Panic/Recover
+            RuntimeFunc::DeferPush => "gox_defer_push",
+            RuntimeFunc::DeferPop => "gox_defer_pop",
+            RuntimeFunc::Panic => "gox_panic",
+            RuntimeFunc::Recover => "gox_recover",
         }
     }
 
@@ -416,6 +427,22 @@ impl RuntimeFunc {
             }
             RuntimeFunc::ChanClose => {
                 sig.params.push(AbiParam::new(I64));  // chan_ref
+            }
+
+            // === Defer/Panic/Recover ===
+            RuntimeFunc::DeferPush => {
+                sig.params.push(AbiParam::new(I64));  // func_ptr
+                sig.params.push(AbiParam::new(I64));  // args_ptr
+                sig.params.push(AbiParam::new(I64));  // arg_count
+            }
+            RuntimeFunc::DeferPop => {
+                // No params - pops and executes defers for current frame
+            }
+            RuntimeFunc::Panic => {
+                sig.params.push(AbiParam::new(I64));  // panic_value
+            }
+            RuntimeFunc::Recover => {
+                sig.returns.push(AbiParam::new(I64)); // recovered_value (0 if not panicking)
             }
         }
         

@@ -67,6 +67,12 @@ impl RuntimeSymbols {
             RuntimeSymbol { name: "gox_chan_send", ptr: crate::goroutine::gox_chan_send as *const u8 },
             RuntimeSymbol { name: "gox_chan_recv", ptr: crate::goroutine::gox_chan_recv as *const u8 },
             RuntimeSymbol { name: "gox_chan_close", ptr: crate::goroutine::gox_chan_close as *const u8 },
+            
+            // Defer/Panic/Recover functions
+            RuntimeSymbol { name: "gox_defer_push", ptr: crate::goroutine::gox_defer_push as *const u8 },
+            RuntimeSymbol { name: "gox_defer_pop", ptr: crate::goroutine::gox_defer_pop as *const u8 },
+            RuntimeSymbol { name: "gox_panic", ptr: crate::goroutine::gox_panic as *const u8 },
+            RuntimeSymbol { name: "gox_recover", ptr: crate::goroutine::gox_recover as *const u8 },
         ];
         
         Self { symbols }

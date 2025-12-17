@@ -31,4 +31,8 @@ pub use goroutine::{
     gox_chan_send,
     gox_chan_recv,
     gox_chan_close,
+    gox_defer_push,
+    gox_defer_pop,
+    gox_panic,
+    gox_recover,
 };

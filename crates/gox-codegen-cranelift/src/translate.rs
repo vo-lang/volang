@@ -970,6 +970,99 @@ impl FunctionTranslator {
                 builder.ins().call(func_ref, &[]);
             }
 
+            // ==================== Defer/Panic/Recover ====================
+            Opcode::DeferPush => {
+                // a=func_id, b=arg_start, c=arg_count
+                let func_idx = inst.a as u32;
+                let arg_start = inst.b;
+                let arg_count = inst.c as usize;
+                
+                // Get function address
+                let target_func_ref = self.get_gox_func_ref(builder, module, ctx, func_idx)?;
+                let func_addr = builder.ins().func_addr(I64, target_func_ref);
+                
+                // Allocate stack space for arguments
+                let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    ((arg_count.max(1)) * 8) as u32,
+                    8,
+                ));
+                let args_ptr = builder.ins().stack_addr(I64, slot, 0);
+                
+                // Store arguments to stack
+                for i in 0..arg_count {
+                    let arg = builder.use_var(self.variables[(arg_start as usize) + i]);
+                    let offset = (i * 8) as i32;
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg,
+                        args_ptr,
+                        offset,
+                    );
+                }
+                
+                // Call runtime to push defer
+                let defer_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::DeferPush)?;
+                let count = builder.ins().iconst(I64, arg_count as i64);
+                builder.ins().call(defer_ref, &[func_addr, args_ptr, count]);
+            }
+
+            Opcode::DeferPop => {
+                // Execute all defers for current frame
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::DeferPop)?;
+                builder.ins().call(func_ref, &[]);
+            }
+
+            Opcode::ErrDeferPush => {
+                // For now, treat errdefer same as defer
+                // TODO: Add is_errdefer flag to runtime
+                let func_idx = inst.a as u32;
+                let arg_start = inst.b;
+                let arg_count = inst.c as usize;
+                
+                let target_func_ref = self.get_gox_func_ref(builder, module, ctx, func_idx)?;
+                let func_addr = builder.ins().func_addr(I64, target_func_ref);
+                
+                let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    ((arg_count.max(1)) * 8) as u32,
+                    8,
+                ));
+                let args_ptr = builder.ins().stack_addr(I64, slot, 0);
+                
+                for i in 0..arg_count {
+                    let arg = builder.use_var(self.variables[(arg_start as usize) + i]);
+                    let offset = (i * 8) as i32;
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg,
+                        args_ptr,
+                        offset,
+                    );
+                }
+                
+                let defer_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::DeferPush)?;
+                let count = builder.ins().iconst(I64, arg_count as i64);
+                builder.ins().call(defer_ref, &[func_addr, args_ptr, count]);
+            }
+
+            Opcode::Panic => {
+                // a=value
+                let val = builder.use_var(self.variables[inst.a as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::Panic)?;
+                builder.ins().call(func_ref, &[val]);
+                // Panic doesn't return, but Cranelift needs control flow
+                // The runtime will longjmp or abort
+            }
+
+            Opcode::Recover => {
+                // a=dest
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::Recover)?;
+                let call = builder.ins().call(func_ref, &[]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
             // ==================== Not yet implemented ====================
             _ => {
                 bail!("Opcode {:?} not yet implemented in AOT compiler", inst.opcode());

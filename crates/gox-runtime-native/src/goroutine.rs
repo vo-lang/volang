@@ -712,6 +712,142 @@ pub unsafe extern "C" fn gox_go_spawn(func_ptr: u64, args_ptr: *const u64, arg_c
     });
 }
 
+// =============================================================================
+// Defer/Panic/Recover
+// =============================================================================
+
+/// A deferred function call entry.
+#[derive(Clone)]
+struct DeferEntry {
+    func_ptr: u64,
+    args: Vec<u64>,
+}
+
+thread_local! {
+    /// Stack of deferred function calls for current thread.
+    static DEFER_STACK: UnsafeCell<Vec<DeferEntry>> = UnsafeCell::new(Vec::new());
+    /// Current panic value (if panicking).
+    static PANIC_VALUE: UnsafeCell<Option<u64>> = UnsafeCell::new(None);
+    /// Whether recover() was called during panic unwinding.
+    static RECOVERING: UnsafeCell<bool> = UnsafeCell::new(false);
+}
+
+/// Push a deferred function call.
+#[no_mangle]
+pub unsafe extern "C" fn gox_defer_push(func_ptr: u64, args_ptr: *const u64, arg_count: u64) {
+    let args: Vec<u64> = if !args_ptr.is_null() && arg_count > 0 {
+        std::slice::from_raw_parts(args_ptr, arg_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    DEFER_STACK.with(|stack| {
+        (*stack.get()).push(DeferEntry { func_ptr, args });
+    });
+}
+
+/// Pop and execute all deferred functions (LIFO order).
+#[no_mangle]
+pub unsafe extern "C" fn gox_defer_pop() {
+    // Pop all defers and execute in reverse order
+    let defers: Vec<DeferEntry> = DEFER_STACK.with(|stack| {
+        std::mem::take(&mut *stack.get())
+    });
+    
+    for entry in defers.into_iter().rev() {
+        execute_deferred_call(entry.func_ptr, &entry.args);
+    }
+}
+
+/// Execute a deferred function call using libffi.
+unsafe fn execute_deferred_call(func_ptr: u64, args: &[u64]) {
+    use libffi::low::{ffi_cif, ffi_type, ffi_abi_FFI_DEFAULT_ABI, prep_cif, call, CodePtr};
+    
+    let arg_count = args.len();
+    
+    // Build argument types array (all u64/i64)
+    let mut arg_types: Vec<*mut ffi_type> = Vec::with_capacity(arg_count);
+    for _ in 0..arg_count {
+        arg_types.push(std::ptr::addr_of_mut!(libffi::low::types::sint64));
+    }
+    
+    // Prepare CIF
+    let mut cif: ffi_cif = std::mem::zeroed();
+    prep_cif(
+        &mut cif,
+        ffi_abi_FFI_DEFAULT_ABI,
+        arg_count,
+        std::ptr::addr_of_mut!(libffi::low::types::void),
+        if arg_count > 0 { arg_types.as_mut_ptr() } else { std::ptr::null_mut() },
+    ).expect("defer: libffi prep_cif failed");
+    
+    // Build argument values array
+    let mut arg_values: Vec<*mut std::ffi::c_void> = Vec::with_capacity(arg_count);
+    let mut arg_storage = args.to_vec();
+    for i in 0..arg_count {
+        arg_values.push(&mut arg_storage[i] as *mut u64 as *mut _);
+    }
+    
+    // Call the function
+    let code_ptr = CodePtr::from_ptr(func_ptr as *const _);
+    call::<()>(
+        &mut cif,
+        code_ptr,
+        if arg_count > 0 { arg_values.as_mut_ptr() } else { std::ptr::null_mut() },
+    );
+}
+
+/// Panic with a value. This executes defers and then aborts if not recovered.
+#[no_mangle]
+pub unsafe extern "C" fn gox_panic(value: u64) {
+    // Set panic value
+    PANIC_VALUE.with(|pv| {
+        *pv.get() = Some(value);
+    });
+    
+    // Execute all defers
+    let defers: Vec<DeferEntry> = DEFER_STACK.with(|stack| {
+        std::mem::take(&mut *stack.get())
+    });
+    
+    for entry in defers.into_iter().rev() {
+        // Check if recovered
+        let recovered = RECOVERING.with(|r| *r.get());
+        if recovered {
+            RECOVERING.with(|r| *r.get() = false);
+            PANIC_VALUE.with(|pv| *pv.get() = None);
+            return;
+        }
+        
+        execute_deferred_call(entry.func_ptr, &entry.args);
+    }
+    
+    // Check if recovered after all defers
+    let recovered = RECOVERING.with(|r| *r.get());
+    if recovered {
+        RECOVERING.with(|r| *r.get() = false);
+        PANIC_VALUE.with(|pv| *pv.get() = None);
+        return;
+    }
+    
+    // Not recovered - abort
+    eprintln!("panic: {}", value);
+    std::process::abort();
+}
+
+/// Recover from panic. Returns panic value if panicking, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn gox_recover() -> u64 {
+    PANIC_VALUE.with(|pv| {
+        if let Some(val) = (*pv.get()).take() {
+            RECOVERING.with(|r| *r.get() = true);
+            val
+        } else {
+            0
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +946,92 @@ mod tests {
         
         // Send to closed channel fails
         assert!(channel.try_send(100).is_err());
+    }
+    
+    #[test]
+    fn test_defer_basic() {
+        use std::sync::atomic::AtomicU64;
+        
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_clone = counter.clone();
+        
+        // Simulate a deferred increment function
+        extern "C" fn increment(ptr: u64) {
+            unsafe {
+                let counter = &*(ptr as *const AtomicU64);
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        
+        unsafe {
+            // Push a defer
+            let counter_ptr = Arc::as_ptr(&counter_clone) as u64;
+            let args = [counter_ptr];
+            gox_defer_push(increment as u64, args.as_ptr(), 1);
+            
+            // Counter should still be 0
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+            
+            // Pop defers - should execute increment
+            gox_defer_pop();
+            
+            // Counter should now be 1
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        }
+    }
+    
+    #[test]
+    fn test_defer_lifo_order() {
+        use std::sync::atomic::AtomicU64;
+        
+        let value = Arc::new(AtomicU64::new(0));
+        
+        // Functions that multiply/add to track order
+        extern "C" fn mul_10(ptr: u64) {
+            unsafe {
+                let v = &*(ptr as *const AtomicU64);
+                let old = v.load(Ordering::SeqCst);
+                v.store(old * 10, Ordering::SeqCst);
+            }
+        }
+        
+        extern "C" fn add_1(ptr: u64) {
+            unsafe {
+                let v = &*(ptr as *const AtomicU64);
+                v.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        
+        extern "C" fn add_2(ptr: u64) {
+            unsafe {
+                let v = &*(ptr as *const AtomicU64);
+                v.fetch_add(2, Ordering::SeqCst);
+            }
+        }
+        
+        unsafe {
+            let ptr = Arc::as_ptr(&value) as u64;
+            let args = [ptr];
+            
+            // Push: mul_10, add_1, add_2
+            // LIFO execution: add_2, add_1, mul_10
+            // Result: ((0 + 2) + 1) * 10 = 30
+            gox_defer_push(mul_10 as u64, args.as_ptr(), 1);
+            gox_defer_push(add_1 as u64, args.as_ptr(), 1);
+            gox_defer_push(add_2 as u64, args.as_ptr(), 1);
+            
+            gox_defer_pop();
+            
+            assert_eq!(value.load(Ordering::SeqCst), 30);
+        }
+    }
+    
+    #[test]
+    fn test_recover_no_panic() {
+        unsafe {
+            // Recover when not panicking should return 0
+            let val = gox_recover();
+            assert_eq!(val, 0);
+        }
     }
 }
