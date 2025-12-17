@@ -753,7 +753,7 @@ impl<'a> TypeCollector<'a> {
             ast::ExprKind::StringLit(lit) => {
                 let s = self.interner.resolve(lit.raw).unwrap_or("");
                 // Remove quotes and unescape
-                let value = parse_string_literal(s);
+                let value = parse_string_literal(s, lit.is_raw);
                 (
                     Type::Untyped(UntypedKind::String),
                     Some(Constant::String(value)),
@@ -851,16 +851,20 @@ impl<'a> TypeCollector<'a> {
 }
 
 /// Parses a string literal, removing quotes and handling escapes.
-fn parse_string_literal(s: &str) -> String {
+pub fn parse_string_literal(s: &str, is_raw: bool) -> String {
     // Remove surrounding quotes
-    let s = if s.starts_with('"') && s.ends_with('"') {
+    let s = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
         &s[1..s.len() - 1]
-    } else if s.starts_with('`') && s.ends_with('`') {
-        // Raw string - no escape processing
-        return s[1..s.len() - 1].to_string();
+    } else if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
+        &s[1..s.len() - 1]
     } else {
         s
     };
+    
+    // Raw strings don't process escapes
+    if is_raw {
+        return s.to_string();
+    }
 
     let mut result = String::new();
     let mut chars = s.chars().peekable();
@@ -868,10 +872,15 @@ fn parse_string_literal(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.next() {
+                Some('a') => result.push('\x07'),
+                Some('b') => result.push('\x08'),
+                Some('f') => result.push('\x0C'),
                 Some('n') => result.push('\n'),
                 Some('r') => result.push('\r'),
                 Some('t') => result.push('\t'),
+                Some('v') => result.push('\x0B'),
                 Some('\\') => result.push('\\'),
+                Some('\'') => result.push('\''),
                 Some('"') => result.push('"'),
                 Some('0') => result.push('\0'),
                 Some('x') => {
@@ -882,6 +891,14 @@ fn parse_string_literal(s: &str) -> String {
                 }
                 Some('u') => {
                     let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(v) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(v) {
+                            result.push(c);
+                        }
+                    }
+                }
+                Some('U') => {
+                    let hex: String = chars.by_ref().take(8).collect();
                     if let Ok(v) = u32::from_str_radix(&hex, 16) {
                         if let Some(c) = char::from_u32(v) {
                             result.push(c);

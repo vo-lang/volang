@@ -239,14 +239,8 @@ fn compile_string_lit(
 ) -> Result<u16, CodegenError> {
     let dst = fctx.regs.alloc(1);
     let raw = ctx.interner.resolve(lit.raw).unwrap_or("\"\"");
-    // Remove quotes
-    let s = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        raw[1..raw.len() - 1].to_string()
-    } else if raw.starts_with('`') && raw.ends_with('`') && raw.len() >= 2 {
-        raw[1..raw.len() - 1].to_string()
-    } else {
-        raw.to_string()
-    };
+    // Parse string with escape sequence handling
+    let s = gox_analysis::parse_string_literal(raw, lit.is_raw);
     let idx = ctx.add_constant(Constant::String(s));
     fctx.emit(Opcode::LoadConst, dst, idx, 0);
     Ok(dst)

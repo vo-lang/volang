@@ -82,7 +82,7 @@ use gox_syntax::ast::{Decl, File};
 pub use types::{Type, BasicType, UntypedKind, NamedTypeId, NamedTypeInfo, MethodSet, TypeRegistry};
 pub use scope::{Scope, ScopeKind, Entity, BuiltinKind};
 pub use constant::Constant;
-pub use collect::{collect_types, collect_types_multi, parse_rune_literal, CollectResult};
+pub use collect::{collect_types, collect_types_multi, parse_rune_literal, parse_string_literal, CollectResult};
 pub use resolve::{resolve_types, resolve_types_with_imports, ResolveResult};
 pub use check::{check_types, TypeChecker};
 pub use project::{analyze_project, Project, TypedPackage, ProjectError};
