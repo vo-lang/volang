@@ -308,4 +308,6 @@ mod tests {
         
         assert_eq!(count, 10);
     }
+    
+    // Multi-threaded integration tests are in tests/multithread.rs
 }

@@ -65,10 +65,21 @@ pub struct GcObject {
 }
 
 /// Pointer to a GC object.
+/// 
+/// GcRef is a raw pointer that is safe to send between threads because:
+/// 1. The pointer itself is just a number (address)
+/// 2. Actual access to GC objects must go through proper synchronization
+/// 3. The GC system ensures objects aren't freed while referenced
 pub type GcRef = *mut GcObject;
 
 /// Null GC reference.
 pub const NULL_REF: GcRef = core::ptr::null_mut();
+
+// SAFETY: GcRef is just a pointer value. Thread safety is ensured by:
+// - GC operations are synchronized at a higher level
+// - Object access goes through Gc methods that handle synchronization
+unsafe impl Send for GcObject {}
+unsafe impl Sync for GcObject {}
 
 /// Type ID alias.
 pub type TypeId = u32;

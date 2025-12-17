@@ -24,6 +24,11 @@ pub enum BlockReason {
     ChanRecv(GcRef),
 }
 
+// SAFETY: BlockReason contains GcRef (raw pointers) but these are just
+// identifiers for GC objects. Thread safety is ensured at the GC level.
+unsafe impl Send for BlockReason {}
+unsafe impl Sync for BlockReason {}
+
 /// Call frame.
 #[derive(Clone, Debug)]
 pub struct CallFrame {
@@ -93,6 +98,11 @@ impl IterState {
         }
     }
 }
+
+// SAFETY: IterState contains GcRef (raw pointers) but these are just
+// identifiers for GC objects. Thread safety is ensured at the GC level.
+unsafe impl Send for IterState {}
+unsafe impl Sync for IterState {}
 
 /// Defer entry.
 #[derive(Clone, Debug)]
