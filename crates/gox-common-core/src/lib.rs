@@ -11,4 +11,4 @@
 mod types;
 pub mod utf8;
 
-pub use types::ValueKind;
+pub use types::{ValueKind, FIRST_USER_TYPE_ID};

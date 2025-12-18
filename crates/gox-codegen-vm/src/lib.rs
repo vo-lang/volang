@@ -914,16 +914,39 @@ func main() {
     }
     
     /// Test that GC scanning works correctly with live references.
-    /// 
-    /// NOTE: collect_garbage() has a bug that causes segfault - needs further debugging.
-    /// The reg_types generation is working correctly (verified by test_reg_types_generation).
     #[test]
     fn test_gc_scanning() {
         let (file, _, interner) = parse(r#"
 package main
 
 func main() {
-    s := "test"
+    x := 42
+    println(x)
+}
+"#, 0);
+        let mut diag = DiagnosticSink::new();
+        let result = typecheck_file(&file, &interner, &mut diag);
+        let module = compile(&file, &result, &interner).expect("Compilation failed");
+        
+        let mut vm = gox_runtime_vm::create_vm();
+        vm.load_module(module);
+        
+        // Run
+        let result = vm.run();
+        assert!(matches!(result, VmResult::Done | VmResult::Ok));
+        
+        // Force GC after execution
+        vm.collect_garbage();
+    }
+    
+    /// Test GC with string constants.
+    #[test]
+    fn test_gc_with_strings() {
+        let (file, _, interner) = parse(r#"
+package main
+
+func main() {
+    s := "hello"
     println(s)
 }
 "#, 0);
@@ -934,13 +957,10 @@ func main() {
         let mut vm = gox_runtime_vm::create_vm();
         vm.load_module(module);
         
-        // Run - this works fine
         let result = vm.run();
         assert!(matches!(result, VmResult::Done | VmResult::Ok));
         
-        // TODO: Fix collect_garbage() segfault
-        // The issue is likely in scan_object() accessing invalid memory
-        // when scanning string objects. For now, skip the explicit GC call.
-        // vm.collect_garbage();
+        // GC with string constants
+        vm.collect_garbage();
     }
 }

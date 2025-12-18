@@ -22,10 +22,13 @@ pub mod string {
     const LEN_SLOT: usize = 2;
     pub const SIZE_SLOTS: usize = 3;
     
+    /// Array type_id (ValueKind::Array = 20)
+    const ARRAY_TYPE_ID: TypeId = 20;
+    
     pub fn create(gc: &mut Gc, type_id: TypeId, bytes: &[u8]) -> GcRef {
-        // Create byte array
+        // Create byte array (use Array type_id, not String)
         let array_slots = (bytes.len() + 7) / 8;
-        let array = gc.alloc(type_id, 1 + array_slots); // len + data
+        let array = gc.alloc(ARRAY_TYPE_ID, 1 + array_slots); // len + data
         Gc::write_slot(array, 0, bytes.len() as u64);
         let data_ptr = unsafe { Gc::get_data_ptr(array).add(1) as *mut u8 };
         unsafe {

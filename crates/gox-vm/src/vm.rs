@@ -1783,28 +1783,34 @@ fn scan_object(gc: &mut Gc, obj: GcRef, types: &TypeTable) {
     let type_id = unsafe { (*obj).header.type_id };
     
     // Get type metadata for ptr_bitmap (user-defined struct types)
-    if let Some(meta) = types.get(type_id) {
-        // Scan fields using ptr_bitmap
-        for (i, is_ptr) in meta.ptr_bitmap.iter().enumerate() {
-            if *is_ptr {
-                let child = Gc::read_slot(obj, i);
-                if child != 0 {
-                    gc.mark_gray(child as GcRef);
+    // Skip builtin types - they are handled in fallback by ValueKind
+    if type_id >= gox_common_core::FIRST_USER_TYPE_ID {
+        if let Some(meta) = types.get(type_id) {
+            // Scan fields using ptr_bitmap
+            for (i, is_ptr) in meta.ptr_bitmap.iter().enumerate() {
+                if *is_ptr {
+                    let child = Gc::read_slot(obj, i);
+                    if child != 0 {
+                        gc.mark_gray(child as GcRef);
+                    }
                 }
             }
+            return;
         }
-        return;
     }
     
     // Fallback: handle builtin types by ValueKind
-    // Note: Most builtin types (String, Array) don't have nested GC refs that need scanning
-    // because their internal data is either:
-    // - Inline byte data (not a GcRef)
-    // - Already tracked separately by the GC
     let kind = ValueKind::from_u8(type_id as u8);
     match kind {
+        ValueKind::String => {
+            // String: [array_ref, start, len] - scan the underlying byte array
+            let array_ref = Gc::read_slot(obj, 0);
+            if array_ref != 0 {
+                gc.mark_gray(array_ref as GcRef);
+            }
+        }
         ValueKind::Slice => {
-            // Slice contains a reference to the underlying array
+            // Slice: [array_ref, start, len, cap] - scan the underlying array
             let array_ref = Gc::read_slot(obj, 0);
             if array_ref != 0 {
                 gc.mark_gray(array_ref as GcRef);
@@ -1812,7 +1818,6 @@ fn scan_object(gc: &mut Gc, obj: GcRef, types: &TypeTable) {
         }
         ValueKind::Closure => {
             // Closure: [func_id, upvalue_count, upvalues...]
-            // Upvalue count is limited to prevent overflow
             let upval_count = (Gc::read_slot(obj, 1) as usize).min(256);
             for i in 0..upval_count {
                 let upval = Gc::read_slot(obj, 2 + i);
@@ -1822,8 +1827,8 @@ fn scan_object(gc: &mut Gc, obj: GcRef, types: &TypeTable) {
             }
         }
         _ => {
-            // String, Array, Map, Channel, etc.: 
-            // These either have no nested GC refs or are handled specially
+            // Array, Map, Channel: no nested GC refs to scan
+            // (Array elements are values, not tracked here)
         }
     }
 }

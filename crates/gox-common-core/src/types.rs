@@ -38,6 +38,10 @@ pub enum ValueKind {
     Closure = 22,
 }
 
+/// First type_id reserved for user-defined types.
+/// Type IDs below this are builtin types (ValueKind enum values).
+pub const FIRST_USER_TYPE_ID: u32 = 32;
+
 impl ValueKind {
     /// Create a ValueKind from its u8 representation.
     pub fn from_u8(v: u8) -> Self {
