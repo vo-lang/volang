@@ -70,20 +70,25 @@ pub struct TestResult {
     pub path: String,
     pub passed: bool,
     pub skipped: bool,
+    pub ignored: bool,  // mode mismatch - not counted in stats
     pub error: Option<String>,
 }
 
 impl TestResult {
     fn pass(path: impl Into<String>) -> Self {
-        Self { path: path.into(), passed: true, skipped: false, error: None }
+        Self { path: path.into(), passed: true, skipped: false, ignored: false, error: None }
     }
     
     fn fail(path: impl Into<String>, error: impl Into<String>) -> Self {
-        Self { path: path.into(), passed: false, skipped: false, error: Some(error.into()) }
+        Self { path: path.into(), passed: false, skipped: false, ignored: false, error: Some(error.into()) }
     }
     
     fn skip(path: impl Into<String>, reason: Option<String>) -> Self {
-        Self { path: path.into(), passed: true, skipped: true, error: reason }
+        Self { path: path.into(), passed: true, skipped: true, ignored: false, error: reason }
+    }
+    
+    fn ignored(path: impl Into<String>) -> Self {
+        Self { path: path.into(), passed: true, skipped: false, ignored: true, error: None }
     }
 }
 
@@ -254,9 +259,9 @@ pub fn run_single_file_with_mode(path: &Path, mode: RunMode) -> TestResult {
         return TestResult::skip(&path_str, tags.skip_reason);
     }
     
-    // Check if should run in this mode
+    // Check if should run in this mode (silently ignore if mode mismatch)
     if !tags.should_run(mode) {
-        return TestResult::skip(&path_str, Some(format!("not enabled for {} mode", mode)));
+        return TestResult::ignored(&path_str);
     }
     
     let test = parse_test_file(&content);
@@ -456,7 +461,7 @@ pub fn run_multi_file_with_mode(dir: &Path, mode: RunMode) -> TestResult {
             }
             
             if !tags.should_run(mode) {
-                return TestResult::skip(&path_str, Some(format!("not enabled for {} mode", mode)));
+                return TestResult::ignored(&path_str);
             }
         }
     }
@@ -589,7 +594,9 @@ fn collect_and_run(dir: &Path, mode: RunMode, summary: &mut TestSummary) {
             
             if dir_name.starts_with("proj_") {
                 let result = run_multi_file_with_mode(&path, mode);
-                if result.skipped {
+                if result.ignored {
+                    // Mode mismatch - don't count
+                } else if result.skipped {
                     summary.skipped += 1;
                 } else {
                     summary.total += 1;
@@ -607,7 +614,9 @@ fn collect_and_run(dir: &Path, mode: RunMode, summary: &mut TestSummary) {
         } else if path.extension().map_or(false, |e| e == "gox") {
             // Single-file test
             let result = run_single_file_with_mode(&path, mode);
-            if result.skipped {
+            if result.ignored {
+                // Mode mismatch - don't count
+            } else if result.skipped {
                 summary.skipped += 1;
             } else {
                 summary.total += 1;
