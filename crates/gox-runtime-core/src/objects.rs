@@ -847,3 +847,230 @@ pub unsafe extern "C" fn gox_interface_unbox_data(slot1: u64) -> u64 {
 pub unsafe extern "C" fn gox_interface_is_nil(slot0: u64, slot1: u64) -> bool {
     interface::is_nil(slot0, slot1)
 }
+
+// =============================================================================
+// Channel Operations
+// =============================================================================
+
+#[cfg(feature = "std")]
+pub mod channel {
+    use super::*;
+    use alloc::collections::VecDeque;
+    
+    /// GC object layout:
+    /// - slot 0: Box<ChannelState> ptr
+    /// - slot 1: elem_type
+    /// - slot 2: capacity
+    const CHAN_PTR_SLOT: usize = 0;
+    const ELEM_TYPE_SLOT: usize = 1;
+    const CAP_SLOT: usize = 2;
+    pub const SIZE_SLOTS: usize = 3;
+    
+    /// Goroutine ID type (compatible with VM's u32 and JIT's u64).
+    pub type GoId = u64;
+    
+    /// Channel state (pure data, no locking).
+    /// Caller is responsible for synchronization.
+    #[derive(Default)]
+    pub struct ChannelState {
+        pub buffer: VecDeque<u64>,
+        pub closed: bool,
+        pub waiting_senders: VecDeque<(GoId, u64)>,
+        pub waiting_receivers: VecDeque<GoId>,
+    }
+    
+    /// Result of try_send operation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SendResult {
+        /// Sent directly to waiting receiver, returns receiver's GoId.
+        DirectSend(GoId),
+        /// Buffered successfully.
+        Buffered,
+        /// Would block (buffer full, no waiting receiver).
+        WouldBlock,
+        /// Channel is closed.
+        Closed,
+    }
+    
+    /// Result of try_recv operation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RecvResult {
+        /// Received value, optionally with sender to wake.
+        Success(u64, Option<GoId>),
+        /// Would block (buffer empty, no waiting sender).
+        WouldBlock,
+        /// Channel is closed and empty.
+        Closed,
+    }
+    
+    impl ChannelState {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                buffer: VecDeque::with_capacity(capacity),
+                closed: false,
+                waiting_senders: VecDeque::new(),
+                waiting_receivers: VecDeque::new(),
+            }
+        }
+        
+        /// Try to send a value. Caller provides capacity.
+        pub fn try_send(&mut self, value: u64, capacity: usize) -> SendResult {
+            if self.closed {
+                return SendResult::Closed;
+            }
+            
+            // Check for waiting receiver first
+            if let Some(receiver_id) = self.waiting_receivers.pop_front() {
+                self.buffer.push_back(value);
+                return SendResult::DirectSend(receiver_id);
+            }
+            
+            // Try to buffer
+            if self.buffer.len() < capacity {
+                self.buffer.push_back(value);
+                return SendResult::Buffered;
+            }
+            
+            SendResult::WouldBlock
+        }
+        
+        /// Try to receive a value.
+        pub fn try_recv(&mut self) -> RecvResult {
+            // Check buffer first
+            if let Some(value) = self.buffer.pop_front() {
+                // If there's a waiting sender, move their value to buffer
+                let woke_sender = if let Some((sender_id, sender_value)) = self.waiting_senders.pop_front() {
+                    self.buffer.push_back(sender_value);
+                    Some(sender_id)
+                } else {
+                    None
+                };
+                return RecvResult::Success(value, woke_sender);
+            }
+            
+            // Check for waiting sender (unbuffered case)
+            if let Some((sender_id, value)) = self.waiting_senders.pop_front() {
+                return RecvResult::Success(value, Some(sender_id));
+            }
+            
+            // Channel empty
+            if self.closed {
+                RecvResult::Closed
+            } else {
+                RecvResult::WouldBlock
+            }
+        }
+        
+        /// Register as waiting sender.
+        pub fn register_sender(&mut self, go_id: GoId, value: u64) {
+            self.waiting_senders.push_back((go_id, value));
+        }
+        
+        /// Register as waiting receiver.
+        pub fn register_receiver(&mut self, go_id: GoId) {
+            self.waiting_receivers.push_back(go_id);
+        }
+        
+        /// Close the channel.
+        pub fn close(&mut self) {
+            self.closed = true;
+        }
+        
+        /// Check if closed.
+        pub fn is_closed(&self) -> bool {
+            self.closed
+        }
+        
+        /// Get buffer length.
+        pub fn len(&self) -> usize {
+            self.buffer.len()
+        }
+        
+        /// Take all waiting receivers (for waking on close).
+        pub fn take_waiting_receivers(&mut self) -> Vec<GoId> {
+            self.waiting_receivers.drain(..).collect()
+        }
+        
+        /// Take all waiting senders (for waking on close).
+        pub fn take_waiting_senders(&mut self) -> Vec<(GoId, u64)> {
+            self.waiting_senders.drain(..).collect()
+        }
+    }
+    
+    // =========================================================================
+    // GC Object Functions
+    // =========================================================================
+    
+    /// Create a channel GC object.
+    pub fn create(gc: &mut Gc, type_id: TypeId, elem_type: TypeId, capacity: usize) -> GcRef {
+        let chan = gc.alloc(type_id, SIZE_SLOTS);
+        let state = Box::new(ChannelState::new(capacity));
+        Gc::write_slot(chan, CHAN_PTR_SLOT, Box::into_raw(state) as u64);
+        Gc::write_slot(chan, ELEM_TYPE_SLOT, elem_type as u64);
+        Gc::write_slot(chan, CAP_SLOT, capacity as u64);
+        chan
+    }
+    
+    /// Get channel state (mutable access, caller ensures synchronization).
+    pub fn get_state(chan: GcRef) -> &'static mut ChannelState {
+        let ptr = Gc::read_slot(chan, CHAN_PTR_SLOT) as *mut ChannelState;
+        unsafe { &mut *ptr }
+    }
+    
+    /// Get element type.
+    pub fn elem_type(chan: GcRef) -> TypeId {
+        Gc::read_slot(chan, ELEM_TYPE_SLOT) as TypeId
+    }
+    
+    /// Get capacity.
+    pub fn capacity(chan: GcRef) -> usize {
+        Gc::read_slot(chan, CAP_SLOT) as usize
+    }
+    
+    /// Get buffer length.
+    pub fn len(chan: GcRef) -> usize {
+        get_state(chan).len()
+    }
+    
+    /// Check if closed.
+    pub fn is_closed(chan: GcRef) -> bool {
+        get_state(chan).is_closed()
+    }
+    
+    /// Close the channel.
+    pub fn close(chan: GcRef) {
+        get_state(chan).close();
+    }
+    
+    /// Scan channel for GC references.
+    /// `elem_is_ref` indicates whether elem_type is a reference type.
+    pub fn scan_refs<F>(chan: GcRef, elem_is_ref: bool, mut mark: F)
+    where
+        F: FnMut(GcRef),
+    {
+        if elem_is_ref {
+            let state = get_state(chan);
+            // Scan buffer
+            for &val in &state.buffer {
+                if val != 0 {
+                    mark(val as GcRef);
+                }
+            }
+            // Scan waiting_senders values
+            for &(_, val) in &state.waiting_senders {
+                if val != 0 {
+                    mark(val as GcRef);
+                }
+            }
+        }
+    }
+    
+    /// Drop channel inner state.
+    pub unsafe fn drop_inner(chan: GcRef) {
+        let ptr = Gc::read_slot(chan, CHAN_PTR_SLOT) as *mut ChannelState;
+        if !ptr.is_null() {
+            drop(Box::from_raw(ptr));
+            Gc::write_slot(chan, CHAN_PTR_SLOT, 0);
+        }
+    }
+}

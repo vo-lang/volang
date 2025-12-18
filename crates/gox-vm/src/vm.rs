@@ -838,24 +838,25 @@ impl Vm {
                     return VmResult::Yield;
                 }
                 let val = self.read_reg(fiber_id, b);
+                let cap = channel::capacity(ch);
+                let state = channel::get_state(ch);
                 
-                match channel::try_send(ch, val) {
-                    Ok(Some(receiver_id)) => {
+                match state.try_send(val, cap) {
+                    channel::SendResult::DirectSend(receiver_id) => {
                         // Directly sent to a waiting receiver
-                        // Store value in receiver's register (they're blocked on ChanRecv)
-                        // and unblock them
-                        // Note: The receiver fiber will handle picking up the value
-                        self.scheduler.unblock(receiver_id);
+                        self.scheduler.unblock(receiver_id as FiberId);
                     }
-                    Ok(None) => {
+                    channel::SendResult::Buffered => {
                         // Buffered successfully
                     }
-                    Err(_) => {
+                    channel::SendResult::WouldBlock => {
                         // Would block - add to waiting senders
-                        let state = channel::get_state(ch);
-                        state.waiting_senders.push_back((fiber_id, val));
+                        state.register_sender(fiber_id as u64, val);
                         self.scheduler.block_current(BlockReason::ChanSend(ch));
                         return VmResult::Yield;
+                    }
+                    channel::SendResult::Closed => {
+                        return VmResult::Panic("send on closed channel".to_string());
                     }
                 }
             }
@@ -869,31 +870,30 @@ impl Vm {
                     return VmResult::Yield;
                 }
                 
-                match channel::try_recv(ch) {
-                    Ok(Some(val)) => {
+                let state = channel::get_state(ch);
+                match state.try_recv() {
+                    channel::RecvResult::Success(val, woke_sender) => {
                         self.write_reg(fiber_id, a, val);
                         self.write_reg(fiber_id, c, 1); // ok = true
                         
-                        // Unblock a waiting sender if any
-                        let state = channel::get_state(ch);
-                        if let Some((sender_id, _)) = state.waiting_senders.pop_front() {
-                            self.scheduler.unblock(sender_id);
+                        // Unblock the sender if any
+                        if let Some(sender_id) = woke_sender {
+                            self.scheduler.unblock(sender_id as FiberId);
                         }
                     }
-                    Ok(None) => {
+                    channel::RecvResult::Closed => {
                         // Channel closed
                         self.write_reg(fiber_id, a, 0);
                         self.write_reg(fiber_id, c, 0); // ok = false
                     }
-                    Err(()) => {
+                    channel::RecvResult::WouldBlock => {
                         // Would block - decrement PC so we retry this instruction when unblocked
                         if let Some(fiber) = self.scheduler.get_mut(fiber_id) {
                             if let Some(frame) = fiber.frame_mut() {
                                 frame.pc -= 1;
                             }
                         }
-                        let state = channel::get_state(ch);
-                        state.waiting_receivers.push_back(fiber_id);
+                        state.register_receiver(fiber_id as u64);
                         self.scheduler.block_current(BlockReason::ChanRecv(ch));
                         return VmResult::Yield;
                     }
@@ -903,13 +903,13 @@ impl Vm {
             Opcode::ChanClose => {
                 // a=chan
                 let ch = self.read_reg(fiber_id, a) as GcRef;
-                channel::close(ch);
+                let state = channel::get_state(ch);
+                state.close();
                 
                 // Unblock all waiting receivers
-                let state = channel::get_state(ch);
-                let receivers: Vec<_> = state.waiting_receivers.drain(..).collect();
+                let receivers = state.take_waiting_receivers();
                 for recv_id in receivers {
-                    self.scheduler.unblock(recv_id);
+                    self.scheduler.unblock(recv_id as FiberId);
                 }
             }
             
@@ -989,7 +989,7 @@ impl Vm {
                                 let ch_state = channel::get_state(*chan);
                                 if let Some(recv_id) = ch_state.waiting_receivers.pop_front() {
                                     // Send directly to waiting receiver
-                                    self.scheduler.unblock(recv_id);
+                                    self.scheduler.unblock(recv_id as FiberId);
                                 } else {
                                     // Buffer the value
                                     ch_state.buffer.push_back(*value);
@@ -1001,11 +1001,11 @@ impl Vm {
                                     // Wake a waiting sender if any
                                     if let Some((sender_id, send_val)) = ch_state.waiting_senders.pop_front() {
                                         ch_state.buffer.push_back(send_val);
-                                        self.scheduler.unblock(sender_id);
+                                        self.scheduler.unblock(sender_id as FiberId);
                                     }
                                     (v, 1u64)
                                 } else if let Some((sender_id, v)) = ch_state.waiting_senders.pop_front() {
-                                    self.scheduler.unblock(sender_id);
+                                    self.scheduler.unblock(sender_id as FiberId);
                                     (v, 1u64)
                                 } else if ch_state.closed {
                                     (0, 0u64)

@@ -15,15 +15,17 @@ extern crate alloc;
 
 // Re-export alloc types for internal use
 
-pub mod gc;
 pub mod types;
 pub mod instruction;
 pub mod fiber;
-pub mod objects;
 pub mod bytecode;
 pub mod vm;
 pub mod extern_fn;
 pub mod value;
+
+// Re-export from gox-runtime-core
+pub use gox_runtime_core::gc;
+pub use gox_runtime_core::objects;
 
 #[cfg(feature = "multithread")]
 pub mod scheduler;

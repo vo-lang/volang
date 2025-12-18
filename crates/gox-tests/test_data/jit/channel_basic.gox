@@ -1,0 +1,11 @@
+// +jit
+// Test: JIT channel send/receive
+package main
+
+func main() {
+	ch := make(chan int, 1)
+	ch <- 42
+	val := <-ch
+	assert(val == 42, "channel value should be 42")
+	println("JIT channel test passed")
+}

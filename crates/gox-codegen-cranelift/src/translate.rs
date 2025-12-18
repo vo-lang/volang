@@ -1125,12 +1125,10 @@ impl FunctionTranslator {
             // ==================== Channel operations ====================
             Opcode::ChanNew => {
                 // a=dest, b=elem_type, c=capacity
-                // For AOT, we create the channel via runtime
-                // Channel is stored as GcRef, capacity in c
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcAlloc)?;
-                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, inst.b as i64);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ChanNew)?;
+                let elem_type = builder.ins().iconst(cranelift_codegen::ir::types::I32, inst.b as i64);
                 let cap = builder.ins().iconst(I64, inst.c as i64);
-                let call = builder.ins().call(func_ref, &[type_id, cap]);
+                let call = builder.ins().call(func_ref, &[elem_type, cap]);
                 let result = builder.inst_results(call)[0];
                 builder.def_var(self.variables[inst.a as usize], result);
             }

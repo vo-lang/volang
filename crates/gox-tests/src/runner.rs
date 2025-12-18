@@ -555,6 +555,10 @@ fn run_module_jit(module: gox_vm::Module) -> Result<(), String> {
             .ok_or_else(|| "entry function not found".to_string())?
     };
     
+    // Initialize scheduler for channel/goroutine support
+    let scheduler = gox_runtime_native::goroutine::Scheduler::new();
+    gox_runtime_native::goroutine::set_current_scheduler(&scheduler);
+    
     entry_fn();
     Ok(())
 }

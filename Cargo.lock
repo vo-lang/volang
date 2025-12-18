@@ -701,6 +701,7 @@ dependencies = [
  "gox-common",
  "gox-jit",
  "gox-module",
+ "gox-runtime-native",
  "gox-runtime-vm",
  "gox-syntax",
  "gox-vm",

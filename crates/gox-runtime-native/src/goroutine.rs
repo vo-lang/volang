@@ -27,7 +27,6 @@
 //! ```
 
 use std::boxed::Box;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::vec::Vec;
 use std::cell::UnsafeCell;
@@ -118,26 +117,15 @@ impl Goroutine {
 }
 
 // =============================================================================
-// Channel
+// Channel (wraps core::ChannelState with Mutex for thread safety)
 // =============================================================================
 
-/// Channel state.
-struct ChannelInner {
-    /// Buffered values.
-    buffer: VecDeque<u64>,
-    /// Buffer capacity (0 = unbuffered).
-    capacity: usize,
-    /// Is channel closed?
-    closed: bool,
-    /// Goroutines waiting to send (id, value).
-    waiting_senders: VecDeque<(GoroutineId, u64)>,
-    /// Goroutines waiting to receive.
-    waiting_receivers: VecDeque<GoroutineId>,
-}
+use gox_runtime_core::objects::channel::{ChannelState, SendResult, RecvResult};
 
-/// A Go-style channel.
+/// A Go-style channel with thread-safe access.
 pub struct Channel {
-    inner: Mutex<ChannelInner>,
+    inner: Mutex<ChannelState>,
+    capacity: usize,
     /// Notify when channel state changes.
     notify: Condvar,
 }
@@ -146,109 +134,58 @@ impl Channel {
     /// Create a new channel with given capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(ChannelInner {
-                buffer: VecDeque::with_capacity(capacity),
-                capacity,
-                closed: false,
-                waiting_senders: VecDeque::new(),
-                waiting_receivers: VecDeque::new(),
-            }),
+            inner: Mutex::new(ChannelState::new(capacity)),
+            capacity,
             notify: Condvar::new(),
         }
     }
     
-    /// Try to send without blocking. Returns:
-    /// - Ok(Some(receiver_id)) - sent directly to waiting receiver
-    /// - Ok(None) - buffered successfully
-    /// - Err(()) - would block or channel closed
-    pub fn try_send(&self, value: u64) -> Result<Option<GoroutineId>, ()> {
+    /// Try to send without blocking.
+    pub fn try_send(&self, value: u64) -> SendResult {
         let mut inner = self.inner.lock();
-        
-        if inner.closed {
-            return Err(());
-        }
-        
-        // Check for waiting receiver first
-        if let Some(receiver_id) = inner.waiting_receivers.pop_front() {
-            return Ok(Some(receiver_id));
-        }
-        
-        // Try to buffer
-        if inner.buffer.len() < inner.capacity {
-            inner.buffer.push_back(value);
-            return Ok(None);
-        }
-        
-        Err(())
+        inner.try_send(value, self.capacity)
     }
     
     /// Register as waiting sender.
     pub fn register_sender(&self, goroutine_id: GoroutineId, value: u64) {
         let mut inner = self.inner.lock();
-        inner.waiting_senders.push_back((goroutine_id, value));
+        inner.register_sender(goroutine_id, value);
     }
     
-    /// Try to receive without blocking. Returns:
-    /// - Ok((value, Some(sender_id))) - received from buffer, woke up sender
-    /// - Ok((value, None)) - received from buffer
-    /// - Err(true) - channel closed
-    /// - Err(false) - would block
-    pub fn try_recv(&self) -> Result<(u64, Option<GoroutineId>), bool> {
+    /// Try to receive without blocking.
+    pub fn try_recv(&self) -> RecvResult {
         let mut inner = self.inner.lock();
-        
-        // Check buffer first
-        if let Some(value) = inner.buffer.pop_front() {
-            // If there's a waiting sender, move their value to buffer
-            let woke_sender = if let Some((sender_id, sender_value)) = inner.waiting_senders.pop_front() {
-                inner.buffer.push_back(sender_value);
-                Some(sender_id)
-            } else {
-                None
-            };
-            return Ok((value, woke_sender));
-        }
-        
-        // Check for waiting sender (unbuffered case)
-        if let Some((sender_id, value)) = inner.waiting_senders.pop_front() {
-            return Ok((value, Some(sender_id)));
-        }
-        
-        // Channel empty
-        if inner.closed {
-            Err(true)
-        } else {
-            Err(false)
-        }
+        inner.try_recv()
     }
     
     /// Register as waiting receiver.
     pub fn register_receiver(&self, goroutine_id: GoroutineId) {
         let mut inner = self.inner.lock();
-        inner.waiting_receivers.push_back(goroutine_id);
+        inner.register_receiver(goroutine_id);
     }
     
     /// Close the channel.
     pub fn close(&self) {
         let mut inner = self.inner.lock();
-        inner.closed = true;
+        inner.close();
         self.notify.notify_all();
     }
     
     /// Check if closed.
     pub fn is_closed(&self) -> bool {
-        self.inner.lock().closed
+        self.inner.lock().is_closed()
     }
     
     /// Get all waiting receivers (for waking on close).
     pub fn take_waiting_receivers(&self) -> Vec<GoroutineId> {
         let mut inner = self.inner.lock();
-        inner.waiting_receivers.drain(..).collect()
+        inner.take_waiting_receivers()
     }
     
     /// Get all waiting senders (for waking on close).
     pub fn take_waiting_senders(&self) -> Vec<(GoroutineId, u64)> {
         let mut inner = self.inner.lock();
-        inner.waiting_senders.drain(..).collect()
+        inner.take_waiting_senders()
     }
 }
 
@@ -527,6 +464,29 @@ pub extern "C" fn gox_yield() {
     }
 }
 
+/// Create a new channel. Returns GcRef to the channel.
+#[no_mangle]
+pub unsafe extern "C" fn gox_chan_new(elem_type: u32, capacity: u64) -> GcRef {
+    use gox_runtime_core::objects::channel;
+    use gox_runtime_core::gc::TypeId;
+    use gox_common_core::ValueKind;
+    
+    let scheduler = match current_scheduler() {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    
+    // Create channel GC object using global GC
+    let chan_ref = crate::gc_global::with_gc(|gc| {
+        channel::create(gc, ValueKind::Channel as TypeId, elem_type as TypeId, capacity as usize)
+    });
+    
+    // Register channel in scheduler
+    scheduler.get_or_create_channel(chan_ref, capacity as usize);
+    
+    chan_ref
+}
+
 /// Send value to channel. Returns 1 on success, 0 if channel closed.
 #[no_mangle]
 pub unsafe extern "C" fn gox_chan_send(chan_ref: GcRef, value: u64) -> u8 {
@@ -546,16 +506,20 @@ pub unsafe extern "C" fn gox_chan_send(chan_ref: GcRef, value: u64) -> u8 {
     
     // Try non-blocking send first
     match channel.try_send(value) {
-        Ok(Some(receiver_id)) => {
+        SendResult::DirectSend(receiver_id) => {
             // Sent directly to waiting receiver
             scheduler.unblock_goroutine(receiver_id, ResumeInput::ChanValue(value));
             return 1;
         }
-        Ok(None) => {
+        SendResult::Buffered => {
             // Buffered successfully
             return 1;
         }
-        Err(()) => {
+        SendResult::Closed => {
+            // Channel closed
+            return 0;
+        }
+        SendResult::WouldBlock => {
             // Need to block
         }
     }
@@ -593,19 +557,19 @@ pub unsafe extern "C" fn gox_chan_recv(chan_ref: GcRef, ok: *mut u8) -> u64 {
     
     // Try non-blocking receive
     match channel.try_recv() {
-        Ok((value, woke_sender)) => {
+        RecvResult::Success(value, woke_sender) => {
             if let Some(sender_id) = woke_sender {
                 scheduler.unblock_goroutine(sender_id, ResumeInput::ChanSendOk);
             }
             if !ok.is_null() { *ok = 1; }
             return value;
         }
-        Err(true) => {
+        RecvResult::Closed => {
             // Channel closed
             if !ok.is_null() { *ok = 0; }
             return 0;
         }
-        Err(false) => {
+        RecvResult::WouldBlock => {
             // Need to block
         }
     }

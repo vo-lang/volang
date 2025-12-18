@@ -96,9 +96,10 @@ pub enum RuntimeFunc {
     FmtFormatValue,
     FmtPrintln,
 
-    // === Goroutine (5) ===
+    // === Goroutine (6) ===
     GoSpawn,
     GoYield,
+    ChanNew,
     ChanSend,
     ChanRecv,
     ChanClose,
@@ -208,6 +209,7 @@ impl RuntimeFunc {
             // Goroutine
             RuntimeFunc::GoSpawn => "gox_go_spawn",
             RuntimeFunc::GoYield => "gox_yield",
+            RuntimeFunc::ChanNew => "gox_chan_new",
             RuntimeFunc::ChanSend => "gox_chan_send",
             RuntimeFunc::ChanRecv => "gox_chan_recv",
             RuntimeFunc::ChanClose => "gox_chan_close",
@@ -517,6 +519,11 @@ impl RuntimeFunc {
             }
             RuntimeFunc::GoYield => {
                 // No params, no return
+            }
+            RuntimeFunc::ChanNew => {
+                sig.params.push(AbiParam::new(I32));  // elem_type
+                sig.params.push(AbiParam::new(I64));  // capacity
+                sig.returns.push(AbiParam::new(I64)); // chan_ref
             }
             RuntimeFunc::ChanSend => {
                 sig.params.push(AbiParam::new(I64));  // chan_ref
