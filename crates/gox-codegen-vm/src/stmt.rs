@@ -588,8 +588,9 @@ fn compile_assign(
                                         fctx.emit(Opcode::Alloc, dst, 0, local_field_count);
                                         for f in 0..local_field_count {
                                             let tmp = fctx.regs.alloc(1);
-                                            fctx.emit(Opcode::GetField, tmp, src, f);
-                                            fctx.emit(Opcode::SetField, dst, f, tmp);
+                                            let byte_offset = (f * 8) as u16;
+                                            fctx.emit_with_flags(Opcode::GetField, 0b11, tmp, src, byte_offset);
+                                            fctx.emit_with_flags(Opcode::SetField, 0b11, dst, byte_offset, tmp);
                                         }
                                     } else {
                                         // Reference type or primitive - just copy reference
@@ -710,8 +711,29 @@ fn compile_assign(
                 // Handle struct/object field assignment: s.x = v
                 let obj = expr::compile_expr(ctx, fctx, &sel.expr)?;
                 let value = expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
-                let field_idx = expr::resolve_flat_field_index(ctx, fctx, &sel.expr, sel.sel.symbol);
-                fctx.emit(Opcode::SetField, obj, field_idx, value);
+                
+                // First check local types
+                if let ExprKind::Ident(ident) = &sel.expr.kind {
+                    if let Some(local) = fctx.lookup_local(ident.symbol) {
+                        if let Some(type_sym) = local.type_sym {
+                            if let Some(field_idx) = fctx.get_local_type_field_index(type_sym, sel.sel.symbol) {
+                                let byte_offset = (field_idx * 8) as u16;
+                                fctx.emit_with_flags(Opcode::SetField, 0b11, obj, byte_offset, value);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                
+                // Get field access info with byte offset
+                if let Some(ty) = expr::get_expr_type(ctx, fctx, &sel.expr) {
+                    if let Some(access) = expr::get_field_access_by_name(ctx, &ty, sel.sel.symbol) {
+                        fctx.emit_with_flags(Opcode::SetField, access.flags(), obj, access.byte_offset as u16, value);
+                        continue;
+                    }
+                }
+                let field_name = ctx.interner.resolve(sel.sel.symbol).unwrap_or("<unknown>");
+                panic!("compile_assign_stmt: cannot resolve field '{}' - missing type info", field_name);
             }
             _ => {
                 return Err(CodegenError::Unsupported("complex assignment target".to_string()));

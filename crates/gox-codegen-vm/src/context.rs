@@ -985,14 +985,15 @@ pub fn emit_deep_struct_copy(
     
     for (f, field_type_sym) in field_info.iter().enumerate() {
         let tmp = fctx.regs.alloc(1);
-        fctx.emit(Opcode::GetField, tmp, src, f as u16);
+        let byte_offset = (f * 8) as u16;
+        fctx.emit_with_flags(Opcode::GetField, 0b11, tmp, src, byte_offset);
         
         if let Some(nested_sym) = field_type_sym {
             let nested_dst = fctx.regs.alloc(1);
             emit_deep_struct_copy(result, fctx, nested_dst, tmp, Some(*nested_sym));
-            fctx.emit(Opcode::SetField, dst, f as u16, nested_dst);
+            fctx.emit_with_flags(Opcode::SetField, 0b11, dst, byte_offset, nested_dst);
         } else {
-            fctx.emit(Opcode::SetField, dst, f as u16, tmp);
+            fctx.emit_with_flags(Opcode::SetField, 0b11, dst, byte_offset, tmp);
         }
     }
 }

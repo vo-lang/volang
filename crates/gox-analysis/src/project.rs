@@ -6,7 +6,7 @@
 //! - Package exports (capitalized names)
 //! - Package init: implicit (var decls) + explicit (init funcs)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gox_common::vfs::FileSet;

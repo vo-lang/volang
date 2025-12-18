@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use gox_runtime_core::gc::GcRef;
 
 /// Extern function type for JIT dispatch.
 /// Takes args array and writes to rets array.

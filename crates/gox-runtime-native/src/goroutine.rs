@@ -1108,39 +1108,39 @@ mod tests {
         let channel = Channel::new(2);
         
         // Send to buffered channel (non-blocking)
-        assert!(channel.try_send(42).is_ok());
-        assert!(channel.try_send(100).is_ok());
+        assert!(matches!(channel.try_send(42), SendResult::Buffered));
+        assert!(matches!(channel.try_send(100), SendResult::Buffered));
         
         // Buffer full, should fail
-        assert!(channel.try_send(200).is_err());
+        assert!(matches!(channel.try_send(200), SendResult::WouldBlock));
         
         // Receive
-        let (val, _) = channel.try_recv().unwrap();
-        assert_eq!(val, 42);
+        let recv1 = channel.try_recv();
+        assert!(matches!(recv1, RecvResult::Success(42, _)));
         
-        let (val, _) = channel.try_recv().unwrap();
-        assert_eq!(val, 100);
+        let recv2 = channel.try_recv();
+        assert!(matches!(recv2, RecvResult::Success(100, _)));
         
         // Empty, should fail
-        assert!(channel.try_recv().is_err());
+        assert!(matches!(channel.try_recv(), RecvResult::WouldBlock));
     }
     
     #[test]
     fn test_channel_close() {
         let channel = Channel::new(1);
         
-        channel.try_send(42).unwrap();
+        assert!(matches!(channel.try_send(42), SendResult::Buffered));
         channel.close();
         
         // Can still receive from closed channel
-        let (val, _) = channel.try_recv().unwrap();
-        assert_eq!(val, 42);
+        let recv = channel.try_recv();
+        assert!(matches!(recv, RecvResult::Success(42, _)));
         
         // Empty closed channel returns closed error
-        assert!(matches!(channel.try_recv(), Err(true)));
+        assert!(matches!(channel.try_recv(), RecvResult::Closed));
         
         // Send to closed channel fails
-        assert!(channel.try_send(100).is_err());
+        assert!(matches!(channel.try_send(100), SendResult::Closed));
     }
     
     #[test]

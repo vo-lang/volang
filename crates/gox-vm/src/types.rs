@@ -10,17 +10,58 @@ pub type TypeId = u32;
 /// First user-defined type ID (builtin types use ValueKind values 0-22).
 pub const FIRST_USER_TYPE: TypeId = 100;
 
+/// Field layout info for compact struct representation.
+#[derive(Clone, Debug, Default)]
+pub struct FieldLayout {
+    /// Byte offset from start of struct data.
+    pub byte_offset: u32,
+    /// Size in bytes (1, 2, 4, or 8).
+    pub size: u8,
+    /// Whether this field is signed (for sign extension on read).
+    pub signed: bool,
+}
+
+impl FieldLayout {
+    pub fn new(byte_offset: u32, size: u8, signed: bool) -> Self {
+        Self { byte_offset, size, signed }
+    }
+    
+    /// Encode size as 2-bit code: 0=1, 1=2, 2=4, 3=8 bytes.
+    pub fn size_code(&self) -> u8 {
+        match self.size {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            _ => 3, // Default to 8
+        }
+    }
+    
+    /// Get flags for GetField/SetField instruction.
+    /// flags[1:0] = size_code, flags[2] = signed
+    pub fn flags(&self) -> u8 {
+        self.size_code() | (if self.signed { 0b100 } else { 0 })
+    }
+}
+
 /// Type metadata.
 #[derive(Clone, Debug)]
 pub struct TypeMeta {
     /// Type ID for user-defined types. None for builtin types (use kind as id).
     pub id: Option<TypeId>,
     pub kind: ValueKind,
+    /// Size in 8-byte slots (for GC allocation, backward compat).
     pub size_slots: usize,
+    /// Size in bytes (compact layout).
+    pub size_bytes: usize,
+    /// Pointer bitmap: one bit per 8-byte word, true if contains pointer.
     pub ptr_bitmap: Vec<bool>,
     pub name: String,
     
-    // For struct/object: field offsets (in slots)
+    // For struct/object: field layouts (compact)
+    pub field_layouts: Vec<FieldLayout>,
+    
+    // Legacy: field offsets in slots (for backward compat during transition)
     pub field_offsets: Vec<usize>,
     
     // For array/slice/channel: element type and size
@@ -44,8 +85,10 @@ impl TypeMeta {
             id: None,
             kind,
             size_slots,
+            size_bytes: size_slots * 8,
             ptr_bitmap,
             name: name.to_string(),
+            field_layouts: vec![],
             field_offsets: vec![],
             elem_type: None,
             elem_size: None,
@@ -67,8 +110,10 @@ impl TypeMeta {
             id: Some(id),
             kind: ValueKind::Struct,
             size_slots,
+            size_bytes: size_slots * 8,
             ptr_bitmap,
             name: name.to_string(),
+            field_layouts: vec![],
             field_offsets: vec![],
             elem_type: None,
             elem_size: None,
@@ -82,8 +127,10 @@ impl TypeMeta {
             id: Some(id),
             kind: ValueKind::Pointer,
             size_slots,
+            size_bytes: size_slots * 8,
             ptr_bitmap,
             name: name.to_string(),
+            field_layouts: vec![],
             field_offsets: vec![],
             elem_type: None,
             elem_size: None,
@@ -98,6 +145,11 @@ impl TypeMeta {
     
     pub fn is_primitive(&self) -> bool {
         matches!(self.kind, ValueKind::Nil | ValueKind::Bool) || self.kind.is_numeric()
+    }
+    
+    /// Get field layout by index.
+    pub fn get_field_layout(&self, idx: usize) -> Option<&FieldLayout> {
+        self.field_layouts.get(idx)
     }
 }
 
@@ -148,8 +200,10 @@ impl TypeTable {
             id: None,
             kind: ValueKind::String,
             size_slots: 1,
+            size_bytes: 8,
             ptr_bitmap: vec![true],
             name: "string".to_string(),
+            field_layouts: vec![],
             field_offsets: vec![],
             elem_type: Some(ValueKind::Uint8 as TypeId),
             elem_size: Some(1),

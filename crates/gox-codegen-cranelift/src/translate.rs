@@ -9,7 +9,7 @@
 use anyhow::{Result, bail};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I64};
-use cranelift_codegen::ir::{Block, Function, FuncRef, InstBuilder};
+use cranelift_codegen::ir::{Block, Function, FuncRef, InstBuilder, MemFlags};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 use std::collections::{HashMap, HashSet};
@@ -743,26 +743,82 @@ impl FunctionTranslator {
             }
 
             Opcode::GetField => {
+                // a=dest, b=obj, c=byte_offset
+                // flags[1:0]=size_code (0=1,1=2,2=4,3=8), flags[2]=signed
                 let obj = builder.use_var(self.variables[inst.b as usize]);
-                let field_idx = inst.c as i64;
+                let byte_offset = inst.c as i32;
+                let size_code = inst.flags & 0b11;
+                let signed = (inst.flags >> 2) & 1 != 0;
                 
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcReadSlot)?;
-                let idx_val = builder.ins().iconst(I64, field_idx);
+                // Calculate data pointer: obj + 8 (GcHeader) + byte_offset
+                let header_size = builder.ins().iconst(I64, 8);
+                let data_base = builder.ins().iadd(obj, header_size);
+                let offset_val = builder.ins().iconst(I64, byte_offset as i64);
+                let ptr = builder.ins().iadd(data_base, offset_val);
                 
-                let call = builder.ins().call(func_ref, &[obj, idx_val]);
-                let result = builder.inst_results(call)[0];
+                // Load based on size
+                let result = match size_code {
+                    0 => {
+                        let v = builder.ins().load(cranelift_codegen::ir::types::I8, MemFlags::trusted(), ptr, 0);
+                        if signed {
+                            builder.ins().sextend(I64, v)
+                        } else {
+                            builder.ins().uextend(I64, v)
+                        }
+                    }
+                    1 => {
+                        let v = builder.ins().load(cranelift_codegen::ir::types::I16, MemFlags::trusted(), ptr, 0);
+                        if signed {
+                            builder.ins().sextend(I64, v)
+                        } else {
+                            builder.ins().uextend(I64, v)
+                        }
+                    }
+                    2 => {
+                        let v = builder.ins().load(cranelift_codegen::ir::types::I32, MemFlags::trusted(), ptr, 0);
+                        if signed {
+                            builder.ins().sextend(I64, v)
+                        } else {
+                            builder.ins().uextend(I64, v)
+                        }
+                    }
+                    _ => builder.ins().load(I64, MemFlags::trusted(), ptr, 0),
+                };
                 builder.def_var(self.variables[inst.a as usize], result);
             }
 
             Opcode::SetField => {
+                // a=obj, b=byte_offset, c=value
+                // flags[1:0]=size_code (0=1,1=2,2=4,3=8)
                 let obj = builder.use_var(self.variables[inst.a as usize]);
-                let field_idx = inst.b as i64;
+                let byte_offset = inst.b as i32;
                 let val = builder.use_var(self.variables[inst.c as usize]);
+                let size_code = inst.flags & 0b11;
                 
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcWriteSlot)?;
-                let idx_val = builder.ins().iconst(I64, field_idx);
+                // Calculate data pointer: obj + 8 (GcHeader) + byte_offset
+                let header_size = builder.ins().iconst(I64, 8);
+                let data_base = builder.ins().iadd(obj, header_size);
+                let offset_val = builder.ins().iconst(I64, byte_offset as i64);
+                let ptr = builder.ins().iadd(data_base, offset_val);
                 
-                builder.ins().call(func_ref, &[obj, idx_val, val]);
+                // Store based on size
+                match size_code {
+                    0 => {
+                        let v = builder.ins().ireduce(cranelift_codegen::ir::types::I8, val);
+                        builder.ins().store(MemFlags::trusted(), v, ptr, 0);
+                    }
+                    1 => {
+                        let v = builder.ins().ireduce(cranelift_codegen::ir::types::I16, val);
+                        builder.ins().store(MemFlags::trusted(), v, ptr, 0);
+                    }
+                    2 => {
+                        let v = builder.ins().ireduce(cranelift_codegen::ir::types::I32, val);
+                        builder.ins().store(MemFlags::trusted(), v, ptr, 0);
+                    }
+                    _ => {
+                        builder.ins().store(MemFlags::trusted(), val, ptr, 0);
+                    }
+                }
             }
 
             Opcode::GetFieldN => {

@@ -558,17 +558,53 @@ impl Vm {
             }
             
             Opcode::GetField => {
-                // a=dest, b=obj, c=field_idx
+                // a=dest, b=obj, c=byte_offset
+                // flags[1:0]=size_code (0=1,1=2,2=4,3=8), flags[2]=signed
                 let obj = self.read_reg(fiber_id, b) as GcRef;
-                let val = Gc::read_slot(obj, c as usize);
+                let byte_offset = c as usize;
+                let size_code = flags & 0b11;
+                let signed = (flags >> 2) & 1 != 0;
+                
+                let val = unsafe {
+                    let data_ptr = Gc::get_data_ptr(obj) as *const u8;
+                    let ptr = data_ptr.add(byte_offset);
+                    match size_code {
+                        0 => {
+                            let v = *(ptr as *const u8);
+                            if signed { v as i8 as i64 as u64 } else { v as u64 }
+                        }
+                        1 => {
+                            let v = *(ptr as *const u16);
+                            if signed { v as i16 as i64 as u64 } else { v as u64 }
+                        }
+                        2 => {
+                            let v = *(ptr as *const u32);
+                            if signed { v as i32 as i64 as u64 } else { v as u64 }
+                        }
+                        _ => *(ptr as *const u64),
+                    }
+                };
                 self.write_reg(fiber_id, a, val);
             }
             
             Opcode::SetField => {
-                // a=obj, b=field_idx, c=value
+                // a=obj, b=byte_offset, c=value
+                // flags[1:0]=size_code (0=1,1=2,2=4,3=8)
                 let obj = self.read_reg(fiber_id, a) as GcRef;
+                let byte_offset = b as usize;
                 let val = self.read_reg(fiber_id, c);
-                Gc::write_slot(obj, b as usize, val);
+                let size_code = flags & 0b11;
+                
+                unsafe {
+                    let data_ptr = Gc::get_data_ptr(obj) as *mut u8;
+                    let ptr = data_ptr.add(byte_offset);
+                    match size_code {
+                        0 => *(ptr as *mut u8) = val as u8,
+                        1 => *(ptr as *mut u16) = val as u16,
+                        2 => *(ptr as *mut u32) = val as u32,
+                        _ => *(ptr as *mut u64) = val,
+                    }
+                }
             }
             
             Opcode::GetFieldN => {
