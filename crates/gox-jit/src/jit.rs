@@ -59,6 +59,11 @@ impl JitCompiler {
 
     /// Compile all functions in a bytecode module.
     pub fn compile_module(&mut self, bytecode: &BytecodeModule) -> Result<()> {
+        // Initialize global runtime state
+        gox_runtime_native::init_gc();
+        let total_global_slots: usize = bytecode.globals.iter().map(|g| g.slots as usize).sum();
+        gox_runtime_native::init_globals(total_global_slots);
+        
         let mut compile_ctx = CompileContext::new(bytecode, self.call_conv);
         
         // Phase 1: Declare all functions

@@ -22,7 +22,7 @@ pub mod debug;
 pub mod gc_global;
 
 pub use symbols::{RuntimeSymbols, RuntimeSymbol};
-pub use gc_global::{init_gc, with_gc};
+pub use gc_global::{init_gc, init_globals, with_gc};
 
 // Re-export core runtime types that native code might need
 pub use gox_runtime_core::ffi::*;

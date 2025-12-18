@@ -23,6 +23,10 @@ pub enum RuntimeFunc {
     GcWriteBarrier,
     GcMarkGray,
 
+    // === Globals (2) ===
+    GetGlobal,     // gox_rt_get_global
+    SetGlobal,     // gox_rt_set_global
+
     // === String (6) ===
     StringLen,
     StringIndex,
@@ -128,6 +132,9 @@ impl RuntimeFunc {
             RuntimeFunc::GcWriteSlot => "gox_gc_write_slot",
             RuntimeFunc::GcWriteBarrier => "gox_gc_write_barrier",
             RuntimeFunc::GcMarkGray => "gox_gc_mark_gray",
+            // Globals
+            RuntimeFunc::GetGlobal => "gox_rt_get_global",
+            RuntimeFunc::SetGlobal => "gox_rt_set_global",
             // String
             RuntimeFunc::StringLen => "gox_string_len",
             RuntimeFunc::StringIndex => "gox_string_index",
@@ -221,6 +228,14 @@ impl RuntimeFunc {
                 sig.params.push(AbiParam::new(I32));  // type_id
                 sig.params.push(AbiParam::new(I64));  // slots
                 sig.returns.push(AbiParam::new(I64)); // GcRef
+            }
+            RuntimeFunc::GetGlobal => {
+                sig.params.push(AbiParam::new(I64));  // idx
+                sig.returns.push(AbiParam::new(I64)); // value
+            }
+            RuntimeFunc::SetGlobal => {
+                sig.params.push(AbiParam::new(I64));  // idx
+                sig.params.push(AbiParam::new(I64));  // value
             }
             RuntimeFunc::GcReadSlot => {
                 sig.params.push(AbiParam::new(I64));

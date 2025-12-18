@@ -325,6 +325,24 @@ impl FunctionTranslator {
                 }
             }
 
+            // ==================== Globals ====================
+            Opcode::GetGlobal => {
+                // a = globals[b]
+                let idx = builder.ins().iconst(I64, inst.b as i64);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GetGlobal)?;
+                let call = builder.ins().call(func_ref, &[idx]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SetGlobal => {
+                // globals[a] = b
+                let idx = builder.ins().iconst(I64, inst.a as i64);
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SetGlobal)?;
+                builder.ins().call(func_ref, &[idx, val]);
+            }
+
             // ==================== Arithmetic (i64) ====================
             Opcode::AddI64 => {
                 let lhs = builder.use_var(self.variables[inst.b as usize]);

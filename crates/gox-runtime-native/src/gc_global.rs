@@ -1,13 +1,14 @@
-//! Global GC instance for AOT/JIT runtime.
+//! Global GC and runtime state for AOT/JIT.
 //!
-//! Provides a thread-local GC that runtime functions can access
-//! without needing an explicit GC pointer parameter.
+//! Provides thread-local GC and global variable storage that runtime
+//! functions can access without explicit pointer parameters.
 
 use std::cell::RefCell;
 use gox_runtime_core::gc::{Gc, GcRef, TypeId};
 
 thread_local! {
     static GLOBAL_GC: RefCell<Gc> = RefCell::new(Gc::new());
+    static GLOBALS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
 }
 
 /// Initialize or reset the global GC.
@@ -15,6 +16,31 @@ pub fn init_gc() {
     GLOBAL_GC.with(|gc| {
         *gc.borrow_mut() = Gc::new();
     });
+}
+
+/// Initialize globals storage with the given size.
+pub fn init_globals(size: usize) {
+    GLOBALS.with(|g| {
+        let mut globals = g.borrow_mut();
+        globals.clear();
+        globals.resize(size, 0);
+    });
+}
+
+// =============================================================================
+// Global variable access functions for AOT/JIT
+// =============================================================================
+
+/// Get a global variable by index.
+#[no_mangle]
+pub extern "C" fn gox_rt_get_global(idx: usize) -> u64 {
+    GLOBALS.with(|g| g.borrow()[idx])
+}
+
+/// Set a global variable by index.
+#[no_mangle]
+pub extern "C" fn gox_rt_set_global(idx: usize, value: u64) {
+    GLOBALS.with(|g| g.borrow_mut()[idx] = value);
 }
 
 /// Access the global GC for operations.

@@ -27,6 +27,10 @@ impl RuntimeSymbols {
             RuntimeSymbol { name: "gox_gc_write_barrier", ptr: ffi::gox_gc_write_barrier as *const u8 },
             RuntimeSymbol { name: "gox_gc_mark_gray", ptr: ffi::gox_gc_mark_gray as *const u8 },
             
+            // Global variable functions
+            RuntimeSymbol { name: "gox_rt_get_global", ptr: crate::gc_global::gox_rt_get_global as *const u8 },
+            RuntimeSymbol { name: "gox_rt_set_global", ptr: crate::gc_global::gox_rt_set_global as *const u8 },
+            
             // String functions (some using global GC wrappers)
             RuntimeSymbol { name: "gox_string_len", ptr: ffi::gox_string_len as *const u8 },
             RuntimeSymbol { name: "gox_string_index", ptr: ffi::gox_string_index as *const u8 },
