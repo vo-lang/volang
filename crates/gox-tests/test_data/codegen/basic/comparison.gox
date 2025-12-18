@@ -55,47 +55,47 @@ func main
   3: Mov r2, r3
   4: LtI64 r4, r0, r2
   5: LoadConst r5, $0
-  6: AssertBegin r4, 1, 114
+  6: AssertBegin r4, 1, 121
   7: AssertArg r5, 14
   8: AssertEnd
   9: LoadNil r6
   10: LtI64 r4, r2, r0
   11: Not r5, r4
   12: LoadConst r6, $1
-  13: AssertBegin r5, 1, 157
+  13: AssertBegin r5, 1, 164
   14: AssertArg r6, 14
   15: AssertEnd
   16: LoadNil r7
   17: GtI64 r4, r2, r0
   18: LoadConst r5, $2
-  19: AssertBegin r4, 1, 229
+  19: AssertBegin r4, 1, 236
   20: AssertArg r5, 14
   21: AssertEnd
   22: LoadNil r6
   23: GtI64 r4, r0, r2
   24: Not r5, r4
   25: LoadConst r6, $3
-  26: AssertBegin r5, 1, 272
+  26: AssertBegin r5, 1, 279
   27: AssertArg r6, 14
   28: AssertEnd
   29: LoadNil r7
   30: LoadInt r4, 5
   31: EqI64 r5, r0, r4
   32: LoadConst r6, $4
-  33: AssertBegin r5, 1, 337
+  33: AssertBegin r5, 1, 344
   34: AssertArg r6, 14
   35: AssertEnd
   36: LoadNil r7
   37: EqI64 r4, r0, r2
   38: Not r5, r4
   39: LoadConst r6, $5
-  40: AssertBegin r5, 1, 381
+  40: AssertBegin r5, 1, 388
   41: AssertArg r6, 14
   42: AssertEnd
   43: LoadNil r7
   44: NeI64 r4, r0, r2
   45: LoadConst r5, $6
-  46: AssertBegin r4, 1, 452
+  46: AssertBegin r4, 1, 459
   47: AssertArg r5, 14
   48: AssertEnd
   49: LoadNil r6
@@ -103,33 +103,33 @@ func main
   51: NeI64 r5, r0, r4
   52: Not r6, r5
   53: LoadConst r7, $7
-  54: AssertBegin r6, 1, 497
+  54: AssertBegin r6, 1, 504
   55: AssertArg r7, 14
   56: AssertEnd
   57: LoadNil r8
   58: LeI64 r4, r0, r2
   59: LoadConst r5, $8
-  60: AssertBegin r4, 1, 576
+  60: AssertBegin r4, 1, 583
   61: AssertArg r5, 14
   62: AssertEnd
   63: LoadNil r6
   64: LoadInt r4, 5
   65: LeI64 r5, r0, r4
   66: LoadConst r6, $9
-  67: AssertBegin r5, 1, 621
+  67: AssertBegin r5, 1, 628
   68: AssertArg r6, 14
   69: AssertEnd
   70: LoadNil r7
   71: GeI64 r4, r2, r0
   72: LoadConst r5, $10
-  73: AssertBegin r4, 1, 699
+  73: AssertBegin r4, 1, 706
   74: AssertArg r5, 14
   75: AssertEnd
   76: LoadNil r6
   77: LoadInt r4, 10
   78: GeI64 r5, r2, r4
   79: LoadConst r6, $11
-  80: AssertBegin r5, 1, 744
+  80: AssertBegin r5, 1, 751
   81: AssertArg r6, 14
   82: AssertEnd
   83: LoadNil r7

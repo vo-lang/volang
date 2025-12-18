@@ -441,6 +441,26 @@ pub fn run_multi_file(dir: &Path) -> TestResult {
 pub fn run_multi_file_with_mode(dir: &Path, mode: RunMode) -> TestResult {
     let path_str = dir.display().to_string();
     
+    // Check tags from main.gox
+    let main_file = dir.join("main.gox");
+    if main_file.exists() {
+        if let Ok(content) = fs::read_to_string(&main_file) {
+            let tags = parse_tags(&content);
+            
+            if !tags.has_any() {
+                return TestResult::fail(&path_str, "test file must have at least one tag: +vm, +native, or +skip");
+            }
+            
+            if tags.skip {
+                return TestResult::skip(&path_str, tags.skip_reason);
+            }
+            
+            if !tags.should_run(mode) {
+                return TestResult::skip(&path_str, Some(format!("not enabled for {} mode", mode)));
+            }
+        }
+    }
+    
     match compile_and_run(dir, mode) {
         Ok(_) => TestResult::pass(&path_str),
         Err(e) => TestResult::fail(&path_str, e),

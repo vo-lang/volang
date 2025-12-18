@@ -44,7 +44,7 @@ func main
   6: LoadInt r6, 7
   7: EqI64 r7, r0, r6
   8: LoadConst r8, $0
-  9: AssertBegin r7, 1, 113
+  9: AssertBegin r7, 1, 120
   10: AssertArg r8, 14
   11: AssertEnd
   12: LoadNil r9
@@ -55,7 +55,7 @@ func main
   17: LoadInt r10, 7
   18: EqI64 r11, r6, r10
   19: LoadConst r12, $1
-  20: AssertBegin r11, 1, 202
+  20: AssertBegin r11, 1, 209
   21: AssertArg r12, 14
   22: AssertEnd
   23: LoadNil r13
@@ -66,7 +66,7 @@ func main
   28: LoadInt r14, 5
   29: EqI64 r15, r10, r14
   30: LoadConst r16, $2
-  31: AssertBegin r15, 1, 284
+  31: AssertBegin r15, 1, 291
   32: AssertArg r16, 14
   33: AssertEnd
   34: LoadNil r17
@@ -77,7 +77,7 @@ func main
   39: LoadInt r18, 2
   40: EqI64 r19, r14, r18
   41: LoadConst r20, $3
-  42: AssertBegin r19, 1, 364
+  42: AssertBegin r19, 1, 371
   43: AssertArg r20, 14
   44: AssertEnd
   45: LoadNil r21
@@ -88,7 +88,7 @@ func main
   50: NegI64 r22, r21
   51: EqI64 r23, r18, r22
   52: LoadConst r24, $4
-  53: AssertBegin r23, 1, 442
+  53: AssertBegin r23, 1, 449
   54: AssertArg r24, 14
   55: AssertEnd
   56: LoadNil r25
