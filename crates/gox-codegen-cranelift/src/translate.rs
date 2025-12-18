@@ -1436,6 +1436,18 @@ impl FunctionTranslator {
                 builder.ins().call(func_ref, &[]);
             }
 
+            // ==================== Native calls ====================
+            Opcode::CallNative => {
+                // a=native_id, b=arg_start, c=pair_count
+                // Native functions use NativeCtx in VM, need C ABI wrappers for JIT
+                // TODO: Implement native function dispatch table
+                let native_id = inst.a as u32;
+                let native_name = ctx.bytecode.get_native(native_id)
+                    .map(|n| n.name.as_str())
+                    .unwrap_or("unknown");
+                bail!("CallNative not yet implemented for: {} (id={})", native_name, native_id);
+            }
+
             // ==================== Not yet implemented ====================
             _ => {
                 bail!("Opcode {:?} not yet implemented in AOT compiler", inst.opcode());
