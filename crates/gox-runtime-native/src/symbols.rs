@@ -104,6 +104,10 @@ impl RuntimeSymbols {
             RuntimeSymbol { name: "gox_assert_begin", ptr: crate::debug::gox_assert_begin as *const u8 },
             RuntimeSymbol { name: "gox_assert_arg", ptr: crate::debug::gox_assert_arg as *const u8 },
             RuntimeSymbol { name: "gox_assert_end", ptr: crate::debug::gox_assert_end as *const u8 },
+            
+            // Note: Stdlib extern functions (math.Sqrt, strings.Index, etc.) are NOT registered here.
+            // Both JIT and AOT use CallExtern opcode -> gox_extern_call -> extern_dispatch.
+            // See extern_fns/mod.rs register_all() for the actual stdlib function registration.
         ];
         
         Self { symbols }

@@ -1482,6 +1482,74 @@ impl FunctionTranslator {
                 let extern_name = &extern_def.name;
                 let ret_count = extern_def.ret_slots as usize;
                 
+                // Try to inline math functions directly using Cranelift instructions
+                // Note: variables are I64, need bitcast to/from F64 for float ops
+                let arg0_slot = arg_start + 1;
+                let arg1_slot = arg_start + 3;
+                let inlined = match extern_name.as_str() {
+                    "math.Sqrt" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let r = builder.ins().sqrt(x);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Floor" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let r = builder.ins().floor(x);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Ceil" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let r = builder.ins().ceil(x);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Trunc" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let r = builder.ins().trunc(x);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Abs" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let r = builder.ins().fabs(x);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    // Note: math.Round uses "round half away from zero", not "round to nearest even"
+                    // Cranelift's nearest uses banker's rounding, so we can't inline it
+                    "math.Min" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let y_i64 = builder.use_var(self.variables[arg1_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let y = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), y_i64);
+                        let r = builder.ins().fmin(x, y);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Max" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let y_i64 = builder.use_var(self.variables[arg1_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let y = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), y_i64);
+                        let r = builder.ins().fmax(x, y);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    "math.Copysign" => {
+                        let x_i64 = builder.use_var(self.variables[arg0_slot]);
+                        let y_i64 = builder.use_var(self.variables[arg1_slot]);
+                        let x = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), x_i64);
+                        let y = builder.ins().bitcast(F64, cranelift_codegen::ir::MemFlags::new(), y_i64);
+                        let r = builder.ins().fcopysign(x, y);
+                        Some(builder.ins().bitcast(I64, cranelift_codegen::ir::MemFlags::new(), r))
+                    }
+                    _ => None,
+                };
+                
+                if let Some(result) = inlined {
+                    builder.def_var(self.variables[arg_start], result);
+                } else {
+                
                 // Get the native function name as a string constant (cached)
                 let name_data_id = ctx.get_or_create_extern_name_data(module, extern_id, extern_name)?;
                 let name_gv = module.declare_data_in_func(name_data_id, builder.func);
@@ -1527,6 +1595,7 @@ impl FunctionTranslator {
                     let ret_val = builder.ins().stack_load(I64, rets_slot, (i * 8) as i32);
                     builder.def_var(self.variables[arg_start + i], ret_val);
                 }
+                } // end else (extern dispatch)
             }
 
             // ==================== Not yet implemented ====================
