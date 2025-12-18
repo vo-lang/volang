@@ -1,16 +1,30 @@
 package base64
 
-// Standard base64 encoding/decoding
+// Standard encoding
+var StdEncoding = &Encoding{std: true, padding: true}
 
-// EncodeToString returns the base64 encoding of src
-func EncodeToString(src []byte) string
+// URL encoding
+var URLEncoding = &Encoding{std: false, padding: true}
 
-// DecodeString returns the bytes represented by the base64 string s
-func DecodeString(s string) []byte
+// Raw standard encoding (no padding)
+var RawStdEncoding = &Encoding{std: true, padding: false}
 
-// StdEncoding's EncodedLen returns the length in bytes of the base64 encoding
-func EncodedLen(n int) int
+// Raw URL encoding (no padding)
+var RawURLEncoding = &Encoding{std: false, padding: false}
 
-// StdEncoding's DecodedLen returns the maximum length in bytes of the decoded data
-func DecodedLen(n int) int
+type Encoding struct {
+    std     bool
+    padding bool
+}
 
+// EncodeToString returns the base64 encoding of src.
+func (enc *Encoding) EncodeToString(src []byte) string {
+    // TODO: dispatch to correct extern function based on encoding type
+    return ""
+}
+
+// DecodeString returns the bytes represented by the base64 string s.
+func (enc *Encoding) DecodeString(s string) ([]byte, error) {
+    // TODO: dispatch to correct extern function based on encoding type
+    return nil, nil
+}

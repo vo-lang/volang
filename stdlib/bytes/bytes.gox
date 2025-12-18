@@ -1,92 +1,41 @@
 package bytes
 
-// ============================================================
-// GoX implementations (pure logic)
-// ============================================================
+// Extern functions (implemented in Rust)
+extern func Index(s, sep []byte) int
+extern func LastIndex(s, sep []byte) int
+extern func Count(s, sep []byte) int
+extern func Compare(a, b []byte) int
+extern func Equal(a, b []byte) bool
 
-// Equal reports whether a and b are the same length and contain the same bytes.
-func Equal(a, b []byte) bool {
-    if len(a) != len(b) {
-        return false
-    }
-    for i := 0; i < len(a); i += 1 {
-        if a[i] != b[i] {
-            return false
-        }
-    }
-    return true
+// GoX-implemented functions
+
+// HasPrefix tests whether the byte slice s begins with prefix.
+func HasPrefix(s, prefix []byte) bool {
+    return len(s) >= len(prefix) && Equal(s[:len(prefix)], prefix)
 }
 
-// Compare returns an integer comparing two byte slices lexicographically.
-func Compare(a, b []byte) int {
-    minLen := len(a)
-    if len(b) < minLen {
-        minLen = len(b)
-    }
-    for i := 0; i < minLen; i += 1 {
-        if a[i] < b[i] {
-            return -1
-        }
-        if a[i] > b[i] {
-            return 1
-        }
-    }
-    if len(a) < len(b) {
-        return -1
-    }
-    if len(a) > len(b) {
-        return 1
-    }
-    return 0
+// HasSuffix tests whether the byte slice s ends with suffix.
+func HasSuffix(s, suffix []byte) bool {
+    return len(s) >= len(suffix) && Equal(s[len(s)-len(suffix):], suffix)
 }
 
-// HasPrefix tests whether the byte slice b begins with prefix.
-func HasPrefix(b, prefix []byte) bool {
-    return len(b) >= len(prefix) && Equal(b[:len(prefix)], prefix)
+// Contains reports whether subslice is within s.
+func Contains(s, subslice []byte) bool {
+    return Index(s, subslice) >= 0
 }
 
-// HasSuffix tests whether the byte slice b ends with suffix.
-func HasSuffix(b, suffix []byte) bool {
-    return len(b) >= len(suffix) && Equal(b[len(b)-len(suffix):], suffix)
-}
-
-// Contains reports whether subslice is within b.
-func Contains(b, subslice []byte) bool {
-    return Index(b, subslice) >= 0
-}
-
-// TrimPrefix returns b without the provided leading prefix.
-func TrimPrefix(b, prefix []byte) []byte {
-    if HasPrefix(b, prefix) {
-        return b[len(prefix):]
+// TrimPrefix returns s without the provided leading prefix byte slice.
+func TrimPrefix(s, prefix []byte) []byte {
+    if HasPrefix(s, prefix) {
+        return s[len(prefix):]
     }
-    return b
+    return s
 }
 
-// TrimSuffix returns b without the provided trailing suffix.
-func TrimSuffix(b, suffix []byte) []byte {
-    if HasSuffix(b, suffix) {
-        return b[:len(b)-len(suffix)]
+// TrimSuffix returns s without the provided trailing suffix byte slice.
+func TrimSuffix(s, suffix []byte) []byte {
+    if HasSuffix(s, suffix) {
+        return s[:len(s)-len(suffix)]
     }
-    return b
+    return s
 }
-
-// ============================================================
-// Native functions (search algorithms, Unicode, allocation)
-// ============================================================
-
-func Index(b, sep []byte) int          // native: search algorithm
-func LastIndex(b, sep []byte) int      // native: search algorithm
-func Count(b, sep []byte) int          // native: search algorithm
-func IndexByte(b []byte, c byte) int   // native: optimized search
-func LastIndexByte(b []byte, c byte) int // native: optimized search
-
-func ToLower(b []byte) []byte          // native: Unicode + allocation
-func ToUpper(b []byte) []byte          // native: Unicode + allocation
-func TrimSpace(b []byte) []byte        // native: Unicode whitespace
-func Trim(b []byte, cutset string) []byte // native: Unicode charset
-
-func Repeat(b []byte, count int) []byte   // native: allocation
-func Join(s [][]byte, sep []byte) []byte  // native: allocation
-func Split(b, sep []byte) [][]byte        // native: allocation
-

@@ -1,23 +1,10 @@
 package unicode
 
-// Character classification functions
-func IsLetter(r rune) bool
-func IsDigit(r rune) bool
-func IsSpace(r rune) bool
-func IsUpper(r rune) bool
-func IsLower(r rune) bool
-func IsPrint(r rune) bool
-func IsGraphic(r rune) bool
-func IsControl(r rune) bool
-func IsPunct(r rune) bool
-func IsSymbol(r rune) bool
-func IsNumber(r rune) bool
-
-// Case conversion
-func ToUpper(r rune) rune
-func ToLower(r rune) rune
-func ToTitle(r rune) rune
-
-// Special checks
-func IsOneOf(ranges []rune, r rune) bool
-
+// Extern functions (implemented in Rust)
+extern func IsLetter(r rune) bool
+extern func IsDigit(r rune) bool
+extern func IsSpace(r rune) bool
+extern func IsUpper(r rune) bool
+extern func IsLower(r rune) bool
+extern func ToLower(r rune) rune
+extern func ToUpper(r rune) rune

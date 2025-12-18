@@ -528,7 +528,7 @@ fn run_module(module: gox_vm::Module, mode: RunMode) -> Result<(), String> {
 fn run_module_vm(module: gox_vm::Module) -> Result<(), String> {
     // Create native function registry with stdlib externs
     let mut natives = gox_vm::ExternRegistry::new();
-    gox_runtime_vm::stdlib::register_all(&mut natives);
+    gox_runtime_vm::extern_fn::register_all(&mut natives);
     
     let mut vm = gox_vm::Vm::with_externs(natives);
     vm.load_module(module);

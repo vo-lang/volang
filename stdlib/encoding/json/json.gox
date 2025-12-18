@@ -1,38 +1,17 @@
-// Package json implements encoding and decoding of JSON.
 package json
 
+// Extern functions (implemented in Rust)
+extern func Valid(data []byte) bool
+
 // Marshal returns the JSON encoding of v.
-func Marshal(v interface{}) ([]byte, error)
+func Marshal(v interface{}) ([]byte, error) {
+    // TODO: implement marshaling
+    return nil, nil
+}
 
-// MarshalIndent is like Marshal but with indentation.
-func MarshalIndent(v interface{}, prefix, indent string) ([]byte, error)
-
-// Unmarshal parses the JSON-encoded data and stores the result in v.
-func Unmarshal(data []byte, v interface{}) error
-
-// Valid reports whether data is a valid JSON encoding.
-func Valid(data []byte) bool
-
-// Compact appends to dst the JSON-encoded src with insignificant space removed.
-func Compact(dst *[]byte, src []byte) error
-
-// Indent appends to dst an indented form of the JSON-encoded src.
-func Indent(dst *[]byte, src []byte, prefix, indent string) error
-
-// HTMLEscape appends to dst the JSON-encoded src with HTML-unsafe characters escaped.
-func HTMLEscape(dst *[]byte, src []byte)
-
-// RawMessage is a raw encoded JSON value.
-type RawMessage []byte
-
-// Number represents a JSON number literal.
-type Number string
-
-// Float64 returns the number as a float64.
-func (n Number) Float64() (float64, error)
-
-// Int64 returns the number as an int64.
-func (n Number) Int64() (int64, error)
-
-// String returns the literal text of the number.
-func (n Number) String() string
+// Unmarshal parses the JSON-encoded data and stores the result
+// in the value pointed to by v.
+func Unmarshal(data []byte, v interface{}) error {
+    // TODO: implement unmarshaling
+    return nil
+}

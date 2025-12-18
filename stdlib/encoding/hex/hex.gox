@@ -1,16 +1,17 @@
 package hex
 
-// Hexadecimal encoding/decoding
+// Extern functions (implemented in Rust)
+extern func EncodeToString(src []byte) string
+extern func DecodeString(s string) ([]byte, error)
 
-// EncodeToString returns the hexadecimal encoding of src
-func EncodeToString(src []byte) string
+// GoX-implemented functions
 
-// DecodeString returns the bytes represented by the hexadecimal string s
-func DecodeString(s string) []byte
+// EncodedLen returns the length of an encoding of n source bytes.
+func EncodedLen(n int) int {
+    return n * 2
+}
 
-// EncodedLen returns the length of an encoding of n source bytes
-func EncodedLen(n int) int
-
-// DecodedLen returns the length of a decoding of x source bytes
-func DecodedLen(x int) int
-
+// DecodedLen returns the length of a decoding of n source bytes.
+func DecodedLen(n int) int {
+    return n / 2
+}

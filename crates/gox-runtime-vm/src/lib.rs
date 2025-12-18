@@ -4,10 +4,10 @@
 //! including extern function implementations and Value/FFI conversion.
 
 pub mod context;
-pub mod stdlib;
+pub mod extern_fn;
 
 use gox_vm::{Vm, ExternRegistry};
-pub use stdlib::StdMode;
+pub use extern_fn::StdMode;
 
 /// Create a VM with all extern functions registered (full std mode).
 pub fn create_vm() -> Vm {
@@ -17,6 +17,6 @@ pub fn create_vm() -> Vm {
 /// Create a VM with specified std mode.
 pub fn create_vm_with_mode(mode: StdMode) -> Vm {
     let mut registry = ExternRegistry::new();
-    stdlib::register_with_mode(&mut registry, mode);
+    extern_fn::register_with_mode(&mut registry, mode);
     Vm::with_externs(registry)
 }

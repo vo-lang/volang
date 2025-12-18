@@ -1,42 +1,23 @@
-// Package strconv implements conversions to and from string representations of basic data types.
 package strconv
 
-// ============================================================
-// GoX implementations (pure logic)
-// ============================================================
+// Extern functions (implemented in Rust)
+extern func Atoi(s string) (int, error)
+extern func Itoa(i int) string
+extern func ParseInt(s string, base int) (int, error)
+extern func ParseFloat(s string) (float64, error)
+extern func FormatInt(i int, base int) string
+extern func FormatFloat(f float64, fmt string, prec int) string
+extern func FormatBool(b bool) string
+extern func ParseBool(s string) (bool, error)
+extern func Quote(s string) string
 
-// FormatBool returns "true" or "false" according to the value of b.
-func FormatBool(b bool) string {
-    if b {
-        return "true"
+// GoX-implemented functions
+
+// AppendInt appends the string form of the integer i to dst.
+func AppendInt(dst []byte, i int, base int) []byte {
+    s := FormatInt(i, base)
+    for j := 0; j < len(s); j += 1 {
+        dst = append(dst, s[j])
     }
-    return "false"
+    return dst
 }
-
-// ParseBool returns the boolean value represented by the string.
-func ParseBool(s string) (bool, error)
-
-// ============================================================
-// Native functions (parsing/formatting algorithms)
-// ============================================================
-
-// Atoi is equivalent to ParseInt(s, 10, 0), converted to type int.
-func Atoi(s string) (int, error)  // native: number parsing
-
-// ParseInt interprets a string s in the given base and bit size.
-func ParseInt(s string, base, bitSize int) (int64, error)  // native: number parsing
-
-// ParseFloat converts the string s to a floating-point number.
-func ParseFloat(s string, bitSize int) (float64, error)  // native: float parsing
-
-// Itoa is equivalent to FormatInt(int64(i), 10).
-func Itoa(i int) string  // native: number formatting
-
-// FormatInt returns the string representation of i in the given base.
-func FormatInt(i, base int) string  // native: number formatting
-
-// FormatFloat converts the floating-point number f to a string.
-func FormatFloat(f float64, fmt byte, prec, bitSize int) string  // native: float formatting
-
-// Quote returns a double-quoted Go string literal representing s.
-func Quote(s string) string  // native: escape handling

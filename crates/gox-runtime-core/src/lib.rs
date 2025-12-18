@@ -19,4 +19,4 @@ pub mod gc;
 pub mod objects;
 
 #[cfg(feature = "std")]
-pub mod stdlib;
+pub mod builtins;

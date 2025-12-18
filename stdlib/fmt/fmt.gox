@@ -1,8 +1,0 @@
-package fmt
-
-func Print(a ...interface{}) (n int, err error)
-func Println(a ...interface{}) (n int, err error)
-func Printf(format string, a ...interface{}) (n int, err error)
-func Sprint(a ...interface{}) string
-func Sprintln(a ...interface{}) string
-func Sprintf(format string, a ...interface{}) string

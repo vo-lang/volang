@@ -199,7 +199,7 @@ fn cmd_build(path: &str, std_mode: &str) -> Result<(), Box<dyn std::error::Error
     use gox_analysis::analyze_project;
     use gox_module::VfsConfig;
     use gox_codegen_vm::compile_project;
-    use gox_runtime_vm::stdlib::StdMode;
+    use gox_runtime_vm::extern_fn::StdMode;
     
     let std_mode = parse_std_mode(std_mode)?;
     let project_dir = std::path::Path::new(path).canonicalize()?;
@@ -273,8 +273,8 @@ fn cmd_check() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Parse std mode from CLI string.
-fn parse_std_mode(s: &str) -> Result<gox_runtime_vm::stdlib::StdMode, Box<dyn std::error::Error>> {
-    use gox_runtime_vm::stdlib::StdMode;
+fn parse_std_mode(s: &str) -> Result<gox_runtime_vm::extern_fn::StdMode, Box<dyn std::error::Error>> {
+    use gox_runtime_vm::extern_fn::StdMode;
     match s.to_lowercase().as_str() {
         "core" => Ok(StdMode::Core),
         "full" => Ok(StdMode::Full),
@@ -285,7 +285,7 @@ fn parse_std_mode(s: &str) -> Result<gox_runtime_vm::stdlib::StdMode, Box<dyn st
 /// Run a file (.gox source, .goxc/.goxb bytecode binary, or .goxt bytecode text).
 fn cmd_run(file: &str, std_mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     use gox_vm::{Module, VmResult};
-    use gox_runtime_vm::stdlib::StdMode;
+    use gox_runtime_vm::extern_fn::StdMode;
     
     let std_mode = parse_std_mode(std_mode)?;
     let path = std::path::Path::new(file);

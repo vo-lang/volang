@@ -7,11 +7,15 @@ description = "Core runtime API definitions for GoX (shared across all backends)
 
 [features]
 default = ["std"]
-std = []
+std = ["base64", "serde_json", "regex"]
 
 [dependencies]
 gox-common = { path = "../gox-common" }
 gox-common-core = { path = "../gox-common-core" }
 indexmap = "2"
+base64 = { version = "0.22", optional = true }
+serde_json = { version = "1.0", optional = true }
+regex = { version = "1.10", optional = true }
+libm = "0.2"
 
 [dev-dependencies]

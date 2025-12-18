@@ -1,121 +1,32 @@
-# GoX Standard Library Package Registry
-# This file defines the official stdlib packages and their layer classification.
+# GoX Standard Library Configuration
 
 [meta]
-version = "1.0"
-total_packages = 26
+version = "0.1.0"
 
-# Layer definitions:
-# - core: No OS dependency, usable in embedded/WASM
-# - std: Requires OS support
-# - runtime: Requires deep VM integration
+# Core packages (no OS dependency, no_std compatible)
+[packages.core]
+errors = { path = "errors" }
+strings = { path = "strings" }
+strconv = { path = "strconv" }
+bytes = { path = "bytes" }
+unicode = { path = "unicode" }
+math = { path = "math" }
+sort = { path = "sort" }
+regexp = { path = "regexp" }
+"encoding/hex" = { path = "encoding/hex" }
+"encoding/base64" = { path = "encoding/base64" }
+"encoding/json" = { path = "encoding/json" }
 
-[packages]
+# Standard packages (requires OS support)
+[packages.std]
+# fmt = { path = "fmt" }
+# io = { path = "io" }
+# os = { path = "os" }
+# time = { path = "time" }
+# rand = { path = "rand" }
+# path = { path = "path" }
 
-# ============ Core Layer (11 packages) ============
-[packages.errors]
-layer = "core"
-status = "complete"
-
-[packages.strings]
-layer = "core"
-status = "complete"
-
-[packages.strconv]
-layer = "core"
-status = "complete"
-
-[packages.bytes]
-layer = "core"
-status = "complete"
-
-[packages.unicode]
-layer = "core"
-status = "complete"
-
-[packages.math]
-layer = "core"
-status = "complete"
-
-[packages.sort]
-layer = "core"
-status = "complete"
-
-[packages.regexp]
-layer = "std"
-status = "complete"
-note = "requires regex crate (not no_std compatible)"
-
-[packages."encoding/json"]
-layer = "core"
-status = "complete"
-
-[packages."encoding/base64"]
-layer = "core"
-status = "complete"
-
-[packages."encoding/hex"]
-layer = "core"
-status = "complete"
-
-# ============ Std Layer (13 packages) ============
-[packages.fmt]
-layer = "std"
-status = "complete"
-
-[packages.io]
-layer = "std"
-status = "complete"
-
-[packages.os]
-layer = "std"
-status = "complete"
-
-[packages.path]
-layer = "std"
-status = "complete"
-
-[packages.filepath]
-layer = "std"
-status = "declared"
-
-[packages.bufio]
-layer = "std"
-status = "declared"
-
-[packages.rand]
-layer = "std"
-status = "complete"
-
-[packages.time]
-layer = "std"
-status = "complete"
-
-[packages.sync]
-layer = "std"
-status = "declared"
-
-[packages.context]
-layer = "std"
-status = "declared"
-
-[packages.net]
-layer = "std"
-status = "declared"
-
-[packages.log]
-layer = "std"
-status = "declared"
-
-[packages.flag]
-layer = "std"
-status = "declared"
-
-# ============ Runtime Layer (2 packages) ============
-[packages.reflect]
-layer = "runtime"
-status = "declared"
-
+# Runtime packages (deep VM integration)
 [packages.runtime]
-layer = "runtime"
-status = "declared"
+# reflect = { path = "reflect" }
+# runtime = { path = "runtime" }

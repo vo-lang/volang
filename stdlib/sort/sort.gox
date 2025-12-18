@@ -1,25 +1,53 @@
 package sort
 
-// Sort functions for common types
-// Note: These modify the slice in place
+// Extern functions (implemented in Rust)
+extern func Ints(x []int)
+extern func Float64s(x []float64)
+extern func Strings(x []string)
 
-func Ints(a []int)
-func Float64s(a []float64)
-func Strings(a []string)
+// GoX-implemented functions
 
-// Check if slices are sorted
-func IntsAreSorted(a []int) bool
-func Float64sAreSorted(a []float64) bool
-func StringsAreSorted(a []string) bool
+// IntsAreSorted reports whether the slice x is sorted in increasing order.
+func IntsAreSorted(x []int) bool {
+    for i := 1; i < len(x); i += 1 {
+        if x[i] < x[i-1] {
+            return false
+        }
+    }
+    return true
+}
 
-// Search functions (binary search in sorted slices)
-// Returns the index where x should be inserted to keep the slice sorted
-func SearchInts(a []int, x int) int
-func SearchFloat64s(a []float64, x float64) int
-func SearchStrings(a []string, x string) int
+// Float64sAreSorted reports whether the slice x is sorted in increasing order.
+func Float64sAreSorted(x []float64) bool {
+    for i := 1; i < len(x); i += 1 {
+        if x[i] < x[i-1] {
+            return false
+        }
+    }
+    return true
+}
 
-// Reverse a slice
-func Reverse(a []int)
-func ReverseFloat64s(a []float64)
-func ReverseStrings(a []string)
+// StringsAreSorted reports whether the slice x is sorted in increasing order.
+func StringsAreSorted(x []string) bool {
+    for i := 1; i < len(x); i += 1 {
+        if x[i] < x[i-1] {
+            return false
+        }
+    }
+    return true
+}
 
+// SearchInts searches for x in a sorted slice of ints and returns the index.
+func SearchInts(a []int, x int) int {
+    lo := 0
+    hi := len(a)
+    for lo < hi {
+        mid := (lo + hi) / 2
+        if a[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}

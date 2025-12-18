@@ -1,18 +1,24 @@
-//! Extern function implementations for JIT/AOT.
+//! Extern function C ABI wrappers for AOT/JIT.
 //!
-//! Each stdlib package has its own module with extern function implementations.
+//! These are `extern "C"` functions that Cranelift-generated code calls directly.
 
+pub mod errors;
 pub mod strings;
-pub mod math;
 pub mod strconv;
-pub mod fmt;
+pub mod bytes;
+pub mod unicode;
+pub mod math;
+pub mod sort;
+pub mod hex;
+pub mod base64;
+pub mod json;
+pub mod regexp;
 
 use crate::extern_dispatch::ExternDispatchFn;
 
-/// Register all extern functions from all packages.
+/// Register all extern functions for JIT dispatch.
 pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
-    strings::register(register);
-    math::register(register);
-    strconv::register(register);
-    fmt::register(register);
+    // TODO: Register dispatch functions as needed
+    // For now, most functions are called directly via C ABI
+    let _ = register;
 }

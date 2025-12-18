@@ -120,13 +120,13 @@ pub use crate::objects::{
 #[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn gox_builtin_len(type_tag: u8, ptr: GcRef) -> usize {
-    crate::stdlib::builtin::len_impl(type_tag, ptr)
+    crate::builtins::builtin::len_impl(type_tag, ptr)
 }
 
 #[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn gox_builtin_cap(type_tag: u8, ptr: GcRef) -> usize {
-    crate::stdlib::builtin::cap_impl(type_tag, ptr)
+    crate::builtins::builtin::cap_impl(type_tag, ptr)
 }
 
 // =============================================================================
@@ -138,21 +138,21 @@ pub unsafe extern "C" fn gox_builtin_cap(type_tag: u8, ptr: GcRef) -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn gox_strings_index(s: GcRef, substr: GcRef) -> i64 {
     use crate::objects::string;
-    crate::stdlib::strings::index(string::as_str(s), string::as_str(substr))
+    crate::builtins::strings::index(string::as_str(s), string::as_str(substr))
 }
 
 #[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn gox_strings_count(s: GcRef, substr: GcRef) -> usize {
     use crate::objects::string;
-    crate::stdlib::strings::count(string::as_str(s), string::as_str(substr))
+    crate::builtins::strings::count(string::as_str(s), string::as_str(substr)) as usize
 }
 
 #[cfg(feature = "std")]
 #[no_mangle]
 pub unsafe extern "C" fn gox_strings_to_lower(gc: *mut Gc, s: GcRef, type_id: TypeId) -> GcRef {
     use crate::objects::string;
-    let result = crate::stdlib::strings::to_lower(string::as_str(s));
+    let result = crate::builtins::strings::to_lower(string::as_str(s));
     string::from_rust_str(&mut *gc, type_id, &result)
 }
 
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn gox_strings_to_lower(gc: *mut Gc, s: GcRef, type_id: Ty
 #[no_mangle]
 pub unsafe extern "C" fn gox_strings_to_upper(gc: *mut Gc, s: GcRef, type_id: TypeId) -> GcRef {
     use crate::objects::string;
-    let result = crate::stdlib::strings::to_upper(string::as_str(s));
+    let result = crate::builtins::strings::to_upper(string::as_str(s));
     string::from_rust_str(&mut *gc, type_id, &result)
 }
 
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn gox_strings_to_upper(gc: *mut Gc, s: GcRef, type_id: Ty
 #[no_mangle]
 pub unsafe extern "C" fn gox_strings_equal_fold(s: GcRef, t: GcRef) -> bool {
     use crate::objects::string;
-    crate::stdlib::strings::equal_fold(string::as_str(s), string::as_str(t))
+    crate::builtins::strings::equal_fold(string::as_str(s), string::as_str(t))
 }
 
 // =============================================================================
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn gox_fmt_format_value(
     gc: *mut Gc, val: u64, type_tag: u8, type_id: TypeId
 ) -> GcRef {
     use crate::objects::string;
-    let result = crate::stdlib::fmt::format_value(val, type_tag);
+    let result = crate::builtins::fmt::format_value(val, type_tag);
     string::from_rust_str(&mut *gc, type_id, &result)
 }
 
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn gox_fmt_println(args: *const u64, tags: *const u8, argc
     let tags_slice = core::slice::from_raw_parts(tags, argc);
     let pairs: Vec<(u64, u8)> = args_slice.iter().zip(tags_slice.iter())
         .map(|(&v, &t)| (v, t)).collect();
-    let output = crate::stdlib::fmt::format_args(&pairs);
+    let output = crate::builtins::fmt::format_args(&pairs);
     #[cfg(feature = "std")]
     println!("{}", output);
     output.len() + 1
