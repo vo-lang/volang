@@ -1364,7 +1364,10 @@ impl FunctionTranslator {
                 let ret_count = inst.flags as usize;
                 
                 // 1. Get func_id from closure (inline load from slot 0)
-                let func_id = builder.ins().load(I64, cranelift_codegen::ir::MemFlags::trusted(), closure, 0);
+                // GcRef points to object start, data is at offset 8 (after GcHeader)
+                // Slot 0 = offset 8, each slot is 8 bytes
+                const GC_HEADER_SIZE: i32 = 8;
+                let func_id = builder.ins().load(I64, cranelift_codegen::ir::MemFlags::trusted(), closure, GC_HEADER_SIZE);
                 
                 // 2. Get function table pointer
                 let table_func = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::FuncTablePtr)?;

@@ -1,5 +1,4 @@
 // +jit
-// +skip: ClosureCall implementation in progress - debugging segfault
 // Closure indirect call test
 package main
 
