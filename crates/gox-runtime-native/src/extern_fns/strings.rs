@@ -77,3 +77,64 @@ pub unsafe extern "C" fn gox_strings_replace(
     let result = core::replace(string::as_str(s), string::as_str(old), string::as_str(new), n);
     string::from_rust_str(&mut *gc, type_id, &result)
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn gox_strings_split(
+    gc: *mut Gc, s: GcRef, sep: GcRef, slice_type_id: TypeId, arr_type_id: TypeId, str_type_id: TypeId
+) -> GcRef {
+    use gox_runtime_core::objects::{array, slice};
+    
+    let parts = core::split(string::as_str(s), string::as_str(sep));
+    let len = parts.len();
+    
+    // Create array to hold strings (elem_size = 8 for GcRef pointers)
+    let arr = array::create(&mut *gc, arr_type_id, str_type_id, 8, len);
+    
+    // Fill array with string GcRefs
+    for (i, part) in parts.iter().enumerate() {
+        let str_ref = string::from_rust_str(&mut *gc, str_type_id, part);
+        array::set(arr, i, str_ref as u64);
+    }
+    
+    // Create slice pointing to array
+    slice::create(&mut *gc, slice_type_id, arr, 0, len, len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gox_strings_split_n(
+    gc: *mut Gc, s: GcRef, sep: GcRef, n: i64, slice_type_id: TypeId, arr_type_id: TypeId, str_type_id: TypeId
+) -> GcRef {
+    use gox_runtime_core::objects::{array, slice};
+    
+    let parts = core::split_n(string::as_str(s), string::as_str(sep), n);
+    let len = parts.len();
+    
+    let arr = array::create(&mut *gc, arr_type_id, str_type_id, 8, len);
+    
+    for (i, part) in parts.iter().enumerate() {
+        let str_ref = string::from_rust_str(&mut *gc, str_type_id, part);
+        array::set(arr, i, str_ref as u64);
+    }
+    
+    slice::create(&mut *gc, slice_type_id, arr, 0, len, len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gox_strings_join(
+    gc: *mut Gc, parts: GcRef, sep: GcRef, str_type_id: TypeId
+) -> GcRef {
+    use gox_runtime_core::objects::slice;
+    
+    let len = slice::len(parts);
+    let sep_str = string::as_str(sep);
+    
+    // Collect string parts
+    let mut strs: Vec<&str> = Vec::with_capacity(len);
+    for i in 0..len {
+        let str_ref = slice::get(parts, i) as GcRef;
+        strs.push(string::as_str(str_ref));
+    }
+    
+    let result = core::join(&strs, sep_str);
+    string::from_rust_str(&mut *gc, str_type_id, &result)
+}

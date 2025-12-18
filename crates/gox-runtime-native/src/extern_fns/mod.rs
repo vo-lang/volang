@@ -244,6 +244,32 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         });
         Ok(())
     });
+    register("strings.Split", |args, rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        let sep = args[1] as gox_runtime_core::gc::GcRef;
+        crate::gc_global::with_gc(|gc| {
+            // Use placeholder type IDs - actual types handled by codegen
+            rets[0] = unsafe { strings::gox_strings_split(gc, s, sep, 0, 0, ValueKind::String as TypeId) } as u64;
+        });
+        Ok(())
+    });
+    register("strings.SplitN", |args, rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        let sep = args[1] as gox_runtime_core::gc::GcRef;
+        let n = args[2] as i64;
+        crate::gc_global::with_gc(|gc| {
+            rets[0] = unsafe { strings::gox_strings_split_n(gc, s, sep, n, 0, 0, ValueKind::String as TypeId) } as u64;
+        });
+        Ok(())
+    });
+    register("strings.Join", |args, rets| {
+        let parts = args[0] as gox_runtime_core::gc::GcRef;
+        let sep = args[1] as gox_runtime_core::gc::GcRef;
+        crate::gc_global::with_gc(|gc| {
+            rets[0] = unsafe { strings::gox_strings_join(gc, parts, sep, ValueKind::String as TypeId) } as u64;
+        });
+        Ok(())
+    });
     
     // strconv package
     register("strconv.Atoi", |args, rets| {
