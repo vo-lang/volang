@@ -1082,9 +1082,10 @@ impl Vm {
                                 (true, 0, 0)
                             } else {
                                 let pos = *byte_pos;
-                                let byte = bytes[pos];
-                                *byte_pos += 1;
-                                (false, pos as u64, byte as u64)
+                                // Decode UTF-8 to get rune and width
+                                let (rune, width) = gox_common_core::utf8::decode_rune(&bytes[pos..]);
+                                *byte_pos += width;
+                                (false, pos as u64, rune as u64)
                             }
                         }
                         IterState::IntRange { current, end, step } => {
