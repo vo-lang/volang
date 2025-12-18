@@ -358,6 +358,11 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         rets[0] = unsafe { unicode::gox_unicode_to_upper(r) } as u64;
         Ok(())
     });
+    register("unicode.IsControl", |args, rets| {
+        let r = args[0] as i32;
+        rets[0] = if unsafe { unicode::gox_unicode_is_control(r) } { 1 } else { 0 };
+        Ok(())
+    });
     
     // hex package
     register("hex.EncodeToString", |args, rets| {

@@ -36,3 +36,8 @@ pub extern "C" fn gox_unicode_to_lower(r: i32) -> i32 {
 pub extern "C" fn gox_unicode_to_upper(r: i32) -> i32 {
     char::from_u32(r as u32).map(|c| core::to_upper(c) as i32).unwrap_or(r)
 }
+
+#[no_mangle]
+pub extern "C" fn gox_unicode_is_control(r: i32) -> bool {
+    char::from_u32(r as u32).map(|c| core::is_control(c)).unwrap_or(false)
+}
