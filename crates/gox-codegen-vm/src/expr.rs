@@ -1026,12 +1026,16 @@ fn compile_index(
     let idx = compile_expr(ctx, fctx, &index.index)?;
     let dst = fctx.regs.alloc(2); // Map returns value + ok flag
 
-    // Check if this is a map type (using ctx for Selector support)
+    // Check container type: map, string, or slice
     if is_map_expr_with_ctx(ctx, fctx, &index.expr) {
         // Check if key is a struct - need to compute hash
         let key = get_struct_key_hash(fctx, &index.index, idx);
         fctx.emit(Opcode::MapGet, dst, container, key);
+    } else if is_string_expr(ctx, fctx, &index.expr) {
+        // String indexing returns a byte
+        fctx.emit(Opcode::StrIndex, dst, container, idx);
     } else {
+        // Slice/array indexing
         fctx.emit(Opcode::SliceGet, dst, container, idx);
     }
     Ok(dst)
