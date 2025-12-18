@@ -517,33 +517,9 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
 }
 
 /// Convert ValueKind to runtime builtin type ID.
+/// ValueKind values directly equal TypeId values for builtin types.
 pub fn value_kind_to_builtin_type(kind: ValueKind) -> u16 {
-    use gox_vm::types::builtin;
-    match kind {
-        ValueKind::Nil => builtin::NIL as u16,
-        ValueKind::Bool => builtin::BOOL as u16,
-        ValueKind::Int => builtin::INT as u16,
-        ValueKind::Int8 => builtin::INT8 as u16,
-        ValueKind::Int16 => builtin::INT16 as u16,
-        ValueKind::Int32 => builtin::INT32 as u16,
-        ValueKind::Int64 => builtin::INT64 as u16,
-        ValueKind::Uint => builtin::UINT as u16,
-        ValueKind::Uint8 => builtin::UINT8 as u16,
-        ValueKind::Uint16 => builtin::UINT16 as u16,
-        ValueKind::Uint32 => builtin::UINT32 as u16,
-        ValueKind::Uint64 => builtin::UINT64 as u16,
-        ValueKind::Float32 => builtin::FLOAT32 as u16,
-        ValueKind::Float64 => builtin::FLOAT64 as u16,
-        ValueKind::String => builtin::STRING as u16,
-        ValueKind::Array => builtin::ARRAY as u16,
-        ValueKind::Slice => builtin::SLICE as u16,
-        ValueKind::Map => builtin::MAP as u16,
-        ValueKind::Channel => builtin::CHANNEL as u16,
-        ValueKind::Closure => builtin::CLOSURE as u16,
-        ValueKind::Interface => builtin::INTERFACE as u16,
-        ValueKind::Struct => builtin::INT64 as u16, // struct uses inline slots, not a type ID
-        ValueKind::Pointer => builtin::INT64 as u16,    // pointer uses GcRef
-    }
+    kind as u16
 }
 
 impl<'a> CodegenContext<'a> {

@@ -16,9 +16,7 @@ pub mod regexp;
 
 use crate::extern_dispatch::ExternDispatchFn;
 use gox_runtime_core::gc::TypeId;
-
-// Type ID constants for runtime object creation
-const STRING_TYPE_ID: TypeId = 3; // Same as gox_vm::types::builtin::STRING
+use gox_common_core::ValueKind;
 
 /// Register all extern functions for JIT dispatch.
 pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
@@ -202,21 +200,21 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("strings.ToLower", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_to_lower(gc, s, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_to_lower(gc, s, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("strings.ToUpper", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_to_upper(gc, s, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_to_upper(gc, s, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("strings.TrimSpace", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_trim_space(gc, s, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_trim_space(gc, s, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -224,7 +222,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         let cutset = args[1] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_trim(gc, s, cutset, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_trim(gc, s, cutset, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -232,7 +230,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         let n = args[1] as i64;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_repeat(gc, s, n, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_repeat(gc, s, n, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -242,7 +240,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let new = args[2] as gox_runtime_core::gc::GcRef;
         let n = args[3] as i64;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strings::gox_strings_replace(gc, s, old, new, n, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strings::gox_strings_replace(gc, s, old, new, n, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -251,7 +249,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("strconv.Atoi", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { strconv::gox_strconv_atoi(gc, s, STRING_TYPE_ID) };
+            let result = unsafe { strconv::gox_strconv_atoi(gc, s, ValueKind::String as TypeId) };
             rets[0] = result.0 as u64;  // value
             rets[1] = result.1 as u64;  // error
         });
@@ -260,7 +258,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("strconv.Itoa", |args, rets| {
         let n = args[0] as i64;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strconv::gox_strconv_itoa(gc, n, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strconv::gox_strconv_itoa(gc, n, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -268,7 +266,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         let base = args[1] as i64;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { strconv::gox_strconv_parse_int(gc, s, base, STRING_TYPE_ID) };
+            let result = unsafe { strconv::gox_strconv_parse_int(gc, s, base, ValueKind::String as TypeId) };
             rets[0] = result.0 as u64;
             rets[1] = result.1 as u64;
         });
@@ -277,7 +275,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("strconv.ParseFloat", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { strconv::gox_strconv_parse_float(gc, s, STRING_TYPE_ID) };
+            let result = unsafe { strconv::gox_strconv_parse_float(gc, s, ValueKind::String as TypeId) };
             rets[0] = f64::to_bits(result.0);
             rets[1] = result.1 as u64;
         });
@@ -287,7 +285,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let n = args[0] as i64;
         let base = args[1] as i64;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strconv::gox_strconv_format_int(gc, n, base, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strconv::gox_strconv_format_int(gc, n, base, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -296,21 +294,21 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let fmt = args[1] as u8 as char;
         let prec = args[2] as i64;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strconv::gox_strconv_format_float(gc, f, fmt as u8, prec, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strconv::gox_strconv_format_float(gc, f, fmt as u8, prec, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("strconv.FormatBool", |args, rets| {
         let b = args[0] != 0;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strconv::gox_strconv_format_bool(gc, b, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strconv::gox_strconv_format_bool(gc, b, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("strconv.ParseBool", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { strconv::gox_strconv_parse_bool(gc, s, STRING_TYPE_ID) };
+            let result = unsafe { strconv::gox_strconv_parse_bool(gc, s, ValueKind::String as TypeId) };
             rets[0] = if result.0 { 1 } else { 0 };
             rets[1] = result.1 as u64;
         });
@@ -319,7 +317,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("strconv.Quote", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { strconv::gox_strconv_quote(gc, s, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { strconv::gox_strconv_quote(gc, s, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -365,14 +363,14 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("hex.EncodeToString", |args, rets| {
         let src = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { hex::gox_hex_encode_to_string(gc, src, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { hex::gox_hex_encode_to_string(gc, src, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("hex.DecodeString", |args, rets| {
         let s = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { hex::gox_hex_decode_string(gc, s, STRING_TYPE_ID) };
+            let result = unsafe { hex::gox_hex_decode_string(gc, s, ValueKind::String as TypeId) };
             rets[0] = result.0 as u64;  // bytes slice
             rets[1] = result.1 as u64;  // error string
         });
@@ -383,14 +381,14 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     register("base64.EncodeToString", |args, rets| {
         let src = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { base64::gox_base64_std_encode(gc, src, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { base64::gox_base64_std_encode(gc, src, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
     register("base64.URLEncodeToString", |args, rets| {
         let src = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            rets[0] = unsafe { base64::gox_base64_url_encode(gc, src, STRING_TYPE_ID) } as u64;
+            rets[0] = unsafe { base64::gox_base64_url_encode(gc, src, ValueKind::String as TypeId) } as u64;
         });
         Ok(())
     });
@@ -400,7 +398,7 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         let pattern = args[0] as gox_runtime_core::gc::GcRef;
         let s = args[1] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
-            let result = unsafe { regexp::gox_regexp_match_string(gc, pattern, s, STRING_TYPE_ID) };
+            let result = unsafe { regexp::gox_regexp_match_string(gc, pattern, s, ValueKind::String as TypeId) };
             rets[0] = if result.0 { 1 } else { 0 };
             rets[1] = result.1 as u64;  // error
         });

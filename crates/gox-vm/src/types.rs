@@ -7,39 +7,14 @@ use gox_common_core::ValueKind;
 /// Type ID (index into type table).
 pub type TypeId = u32;
 
-/// Built-in type IDs.
-pub mod builtin {
-    use super::TypeId;
-    
-    pub const NIL: TypeId = 0;
-    pub const BOOL: TypeId = 1;
-    pub const INT: TypeId = 2;
-    pub const INT8: TypeId = 3;
-    pub const INT16: TypeId = 4;
-    pub const INT32: TypeId = 5;
-    pub const INT64: TypeId = 6;
-    pub const UINT: TypeId = 7;
-    pub const UINT8: TypeId = 8;
-    pub const UINT16: TypeId = 9;
-    pub const UINT32: TypeId = 10;
-    pub const UINT64: TypeId = 11;
-    pub const FLOAT32: TypeId = 12;
-    pub const FLOAT64: TypeId = 13;
-    pub const STRING: TypeId = 14;
-    pub const ARRAY: TypeId = 15;
-    pub const SLICE: TypeId = 16;
-    pub const MAP: TypeId = 17;
-    pub const CHANNEL: TypeId = 18;
-    pub const CLOSURE: TypeId = 19;
-    pub const INTERFACE: TypeId = 20;
-    
-    pub const FIRST_USER_TYPE: TypeId = 100;
-}
+/// First user-defined type ID (builtin types use ValueKind values 0-22).
+pub const FIRST_USER_TYPE: TypeId = 100;
 
 /// Type metadata.
 #[derive(Clone, Debug)]
 pub struct TypeMeta {
-    pub id: TypeId,
+    /// Type ID for user-defined types. None for builtin types (use kind as id).
+    pub id: Option<TypeId>,
     pub kind: ValueKind,
     pub size_slots: usize,
     pub ptr_bitmap: Vec<bool>,
@@ -58,27 +33,18 @@ pub struct TypeMeta {
 }
 
 impl TypeMeta {
-    pub fn nil() -> Self {
-        Self {
-            id: builtin::NIL,
-            kind: ValueKind::Nil,
-            size_slots: 0,
-            ptr_bitmap: vec![],
-            name: "nil".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        }
+    /// Get the actual type ID. For builtin types, returns kind as TypeId.
+    pub fn type_id(&self) -> TypeId {
+        self.id.unwrap_or(self.kind as TypeId)
     }
     
-    pub fn primitive(id: TypeId, name: &str, kind: ValueKind) -> Self {
+    /// Create a builtin type (id = None, uses kind as id).
+    pub fn builtin(kind: ValueKind, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
-            id,
+            id: None,
             kind,
-            size_slots: 1,
-            ptr_bitmap: vec![false],
+            size_slots,
+            ptr_bitmap,
             name: name.to_string(),
             field_offsets: vec![],
             elem_type: None,
@@ -88,9 +54,17 @@ impl TypeMeta {
         }
     }
     
+    pub fn nil() -> Self {
+        Self::builtin(ValueKind::Nil, "nil", 0, vec![])
+    }
+    
+    pub fn primitive(kind: ValueKind, name: &str) -> Self {
+        Self::builtin(kind, name, 1, vec![false])
+    }
+    
     pub fn struct_(id: TypeId, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
-            id,
+            id: Some(id),
             kind: ValueKind::Struct,
             size_slots,
             ptr_bitmap,
@@ -105,7 +79,7 @@ impl TypeMeta {
     
     pub fn object(id: TypeId, name: &str, size_slots: usize, ptr_bitmap: Vec<bool>) -> Self {
         Self {
-            id,
+            id: Some(id),
             kind: ValueKind::Pointer,
             size_slots,
             ptr_bitmap,
@@ -145,123 +119,61 @@ impl TypeTable {
     }
     
     fn init_builtins(&mut self) {
-        use builtin::*;
-        
         // Reserve space for builtin types
         self.types.resize(FIRST_USER_TYPE as usize, TypeMeta::nil());
         
-        self.set(NIL, TypeMeta::nil());
-        self.set(BOOL, TypeMeta::primitive(BOOL, "bool", ValueKind::Bool));
-        self.set(INT, TypeMeta::primitive(INT, "int", ValueKind::Int));
-        self.set(INT8, TypeMeta::primitive(INT8, "int8", ValueKind::Int8));
-        self.set(INT16, TypeMeta::primitive(INT16, "int16", ValueKind::Int16));
-        self.set(INT32, TypeMeta::primitive(INT32, "int32", ValueKind::Int32));
-        self.set(INT64, TypeMeta::primitive(INT64, "int64", ValueKind::Int64));
-        self.set(UINT, TypeMeta::primitive(UINT, "uint", ValueKind::Uint));
-        self.set(UINT8, TypeMeta::primitive(UINT8, "uint8", ValueKind::Uint8));
-        self.set(UINT16, TypeMeta::primitive(UINT16, "uint16", ValueKind::Uint16));
-        self.set(UINT32, TypeMeta::primitive(UINT32, "uint32", ValueKind::Uint32));
-        self.set(UINT64, TypeMeta::primitive(UINT64, "uint64", ValueKind::Uint64));
-        self.set(FLOAT32, TypeMeta::primitive(FLOAT32, "float32", ValueKind::Float32));
-        self.set(FLOAT64, TypeMeta::primitive(FLOAT64, "float64", ValueKind::Float64));
+        // Helper to set builtin type at its ValueKind index
+        let mut set_builtin = |meta: TypeMeta| {
+            self.set(meta.type_id(), meta);
+        };
+        
+        // Primitives
+        set_builtin(TypeMeta::nil());
+        set_builtin(TypeMeta::primitive(ValueKind::Bool, "bool"));
+        set_builtin(TypeMeta::primitive(ValueKind::Int, "int"));
+        set_builtin(TypeMeta::primitive(ValueKind::Int8, "int8"));
+        set_builtin(TypeMeta::primitive(ValueKind::Int16, "int16"));
+        set_builtin(TypeMeta::primitive(ValueKind::Int32, "int32"));
+        set_builtin(TypeMeta::primitive(ValueKind::Int64, "int64"));
+        set_builtin(TypeMeta::primitive(ValueKind::Uint, "uint"));
+        set_builtin(TypeMeta::primitive(ValueKind::Uint8, "uint8"));
+        set_builtin(TypeMeta::primitive(ValueKind::Uint16, "uint16"));
+        set_builtin(TypeMeta::primitive(ValueKind::Uint32, "uint32"));
+        set_builtin(TypeMeta::primitive(ValueKind::Uint64, "uint64"));
+        set_builtin(TypeMeta::primitive(ValueKind::Float32, "float32"));
+        set_builtin(TypeMeta::primitive(ValueKind::Float64, "float64"));
         
         // String: GcRef (1 slot, is pointer)
-        self.set(STRING, TypeMeta {
-            id: STRING,
+        set_builtin(TypeMeta {
+            id: None,
             kind: ValueKind::String,
             size_slots: 1,
             ptr_bitmap: vec![true],
             name: "string".to_string(),
             field_offsets: vec![],
-            elem_type: Some(UINT8),
+            elem_type: Some(ValueKind::Uint8 as TypeId),
             elem_size: Some(1),
             key_type: None,
             value_type: None,
         });
         
         // Array: GcRef (1 slot)
-        self.set(ARRAY, TypeMeta {
-            id: ARRAY,
-            kind: ValueKind::Array,
-            size_slots: 1,
-            ptr_bitmap: vec![true],
-            name: "array".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Array, "array", 1, vec![true]));
         
         // Slice: GcRef (1 slot)
-        self.set(SLICE, TypeMeta {
-            id: SLICE,
-            kind: ValueKind::Slice,
-            size_slots: 1,
-            ptr_bitmap: vec![true],
-            name: "slice".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Slice, "slice", 1, vec![true]));
         
         // Map: GcRef (1 slot)
-        self.set(MAP, TypeMeta {
-            id: MAP,
-            kind: ValueKind::Map,
-            size_slots: 1,
-            ptr_bitmap: vec![true],
-            name: "map".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Map, "map", 1, vec![true]));
         
         // Channel: GcRef (1 slot)
-        self.set(CHANNEL, TypeMeta {
-            id: CHANNEL,
-            kind: ValueKind::Channel,
-            size_slots: 1,
-            ptr_bitmap: vec![true],
-            name: "channel".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Channel, "channel", 1, vec![true]));
         
         // Closure: GcRef (1 slot)
-        self.set(CLOSURE, TypeMeta {
-            id: CLOSURE,
-            kind: ValueKind::Closure,
-            size_slots: 1,
-            ptr_bitmap: vec![true],
-            name: "closure".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Closure, "closure", 1, vec![true]));
         
         // Interface: 2 slots (type_id, data)
-        self.set(INTERFACE, TypeMeta {
-            id: INTERFACE,
-            kind: ValueKind::Interface,
-            size_slots: 2,
-            ptr_bitmap: vec![false, false], // data slot depends on actual type
-            name: "interface{}".to_string(),
-            field_offsets: vec![],
-            elem_type: None,
-            elem_size: None,
-            key_type: None,
-            value_type: None,
-        });
+        set_builtin(TypeMeta::builtin(ValueKind::Interface, "interface{}", 2, vec![false, false]));
     }
     
     fn set(&mut self, id: TypeId, meta: TypeMeta) {
@@ -273,10 +185,10 @@ impl TypeTable {
         self.types[idx] = meta;
     }
     
-    /// Register a new type.
+    /// Register a new user-defined type.
     pub fn register(&mut self, mut meta: TypeMeta) -> TypeId {
         let id = self.types.len() as TypeId;
-        meta.id = id;
+        meta.id = Some(id);
         self.by_name.insert(meta.name.clone(), id);
         self.types.push(meta);
         id

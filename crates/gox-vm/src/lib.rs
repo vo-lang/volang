@@ -29,7 +29,7 @@ pub mod value;
 pub mod scheduler;
 
 pub use gc::{Gc, GcRef, GcHeader, GcColor, NULL_REF};
-pub use types::{TypeId, TypeMeta, TypeTable, builtin};
+pub use types::{TypeId, TypeMeta, TypeTable};
 pub use instruction::{Instruction, Opcode};
 pub use fiber::{Fiber, FiberId, FiberStatus, CallFrame, Scheduler};
 pub use bytecode::{Module, FunctionDef, Constant, BytecodeError};

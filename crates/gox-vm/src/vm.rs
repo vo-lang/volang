@@ -6,7 +6,8 @@ use crate::gc::{Gc, GcRef, NULL_REF};
 use crate::instruction::{Instruction, Opcode};
 use crate::extern_fn::{ExternCtx, ExternFn, ExternRegistry, ExternResult};
 use crate::objects::{self, array, channel, closure, interface, map, slice, string};
-use crate::types::{builtin, TypeId, TypeTable};
+use crate::types::{TypeId, TypeTable};
+use gox_common_core::ValueKind;
 
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
@@ -72,7 +73,7 @@ impl Vm {
         self.string_constants.clear();
         for c in &module.constants {
             if let Constant::String(s) = c {
-                let str_ref = string::from_rust_str(&mut self.gc, builtin::STRING, s);
+                let str_ref = string::from_rust_str(&mut self.gc, ValueKind::String as TypeId, s);
                 self.string_constants.push(str_ref);
             } else {
                 self.string_constants.push(NULL_REF);
@@ -601,7 +602,7 @@ impl Vm {
                 let elem_type = b as TypeId;
                 let elem_size = self.types.get_unchecked(elem_type).size_slots;
                 let len = c as usize;
-                let arr = array::create(&mut self.gc, builtin::ARRAY, elem_type, elem_size, len);
+                let arr = array::create(&mut self.gc, ValueKind::Array as TypeId, elem_type, elem_size, len);
                 self.write_reg(fiber_id, a, arr as u64);
             }
             
@@ -640,7 +641,7 @@ impl Vm {
                 let start = c as usize;
                 let end = flags as usize;
                 let cap = array::len(arr) - start;
-                let sl = slice::create(&mut self.gc, builtin::SLICE, arr, start, end - start, cap);
+                let sl = slice::create(&mut self.gc, ValueKind::Slice as TypeId, arr, start, end - start, cap);
                 self.write_reg(fiber_id, a, sl as u64);
             }
             
@@ -685,7 +686,7 @@ impl Vm {
                 let sl = self.read_reg(fiber_id, b) as GcRef;
                 let start = self.read_reg(fiber_id, c) as usize;
                 let end = self.read_reg(fiber_id, flags as u16) as usize;
-                let new_sl = slice::slice_of(&mut self.gc, builtin::SLICE, sl, start, end);
+                let new_sl = slice::slice_of(&mut self.gc, ValueKind::Slice as TypeId, sl, start, end);
                 self.write_reg(fiber_id, a, new_sl as u64);
             }
             
@@ -693,7 +694,7 @@ impl Vm {
                 // a=dest, b=slice, c=value
                 let sl = self.read_reg(fiber_id, b) as GcRef;
                 let val = self.read_reg(fiber_id, c);
-                let new_sl = slice::append(&mut self.gc, builtin::SLICE, builtin::ARRAY, sl, val);
+                let new_sl = slice::append(&mut self.gc, ValueKind::Slice as TypeId, ValueKind::Array as TypeId, sl, val);
                 self.write_reg(fiber_id, a, new_sl as u64);
             }
             
@@ -708,7 +709,7 @@ impl Vm {
                 // a=dest, b=str1, c=str2
                 let s1 = self.read_reg(fiber_id, b) as GcRef;
                 let s2 = self.read_reg(fiber_id, c) as GcRef;
-                let result = string::concat(&mut self.gc, builtin::STRING, s1, s2);
+                let result = string::concat(&mut self.gc, ValueKind::String as TypeId, s1, s2);
                 self.write_reg(fiber_id, a, result as u64);
             }
             
@@ -745,7 +746,7 @@ impl Vm {
             // ============ Map ============
             Opcode::MapNew => {
                 // a=dest, b=key_type, c=val_type
-                let m = map::create(&mut self.gc, builtin::MAP, b as TypeId, c as TypeId);
+                let m = map::create(&mut self.gc, ValueKind::Map as TypeId, b as TypeId, c as TypeId);
                 self.write_reg(fiber_id, a, m as u64);
             }
             
@@ -789,7 +790,7 @@ impl Vm {
             // ============ Channel ============
             Opcode::ChanNew => {
                 // a=dest, b=elem_type, c=capacity
-                let ch = channel::create(&mut self.gc, builtin::CHANNEL, b as TypeId, c as usize);
+                let ch = channel::create(&mut self.gc, ValueKind::Channel as TypeId, b as TypeId, c as usize);
                 self.write_reg(fiber_id, a, ch as u64);
             }
             
@@ -1116,7 +1117,7 @@ impl Vm {
             // ============ Closure ============
             Opcode::ClosureNew => {
                 // a=dest, b=func_id, c=upvalue_count
-                let cl = closure::create(&mut self.gc, builtin::CLOSURE, b as u32, c as usize);
+                let cl = closure::create(&mut self.gc, ValueKind::Closure as TypeId, b as u32, c as usize);
                 self.write_reg(fiber_id, a, cl as u64);
             }
             
@@ -1159,7 +1160,7 @@ impl Vm {
             
             Opcode::UpvalNew => {
                 // a=dest: create new upval_box for reference capture
-                let uv = closure::create_upval_box(&mut self.gc, builtin::CLOSURE);
+                let uv = closure::create_upval_box(&mut self.gc, ValueKind::Closure as TypeId);
                 self.write_reg(fiber_id, a, uv as u64);
             }
             
@@ -1627,15 +1628,14 @@ fn format_value(val: u64, type_tag: crate::value::TypeTag) -> String {
 
 /// Convert boxed type_id to TypeTag for formatting.
 fn type_id_to_tag(type_id: u32) -> crate::value::TypeTag {
-    use crate::types::builtin;
     match type_id {
         0 => crate::value::TypeTag::Nil,
-        t if t == builtin::INT64 => crate::value::TypeTag::Int64,
-        t if t == builtin::INT32 => crate::value::TypeTag::Int32,
-        t if t == builtin::FLOAT64 => crate::value::TypeTag::Float64,
-        t if t == builtin::FLOAT32 => crate::value::TypeTag::Float32,
-        t if t == builtin::STRING => crate::value::TypeTag::String,
-        t if t == builtin::BOOL => crate::value::TypeTag::Bool,
+        t if t == ValueKind::Int64 as TypeId => crate::value::TypeTag::Int64,
+        t if t == ValueKind::Int32 as TypeId => crate::value::TypeTag::Int32,
+        t if t == ValueKind::Float64 as TypeId => crate::value::TypeTag::Float64,
+        t if t == ValueKind::Float32 as TypeId => crate::value::TypeTag::Float32,
+        t if t == ValueKind::String as TypeId => crate::value::TypeTag::String,
+        t if t == ValueKind::Bool as TypeId => crate::value::TypeTag::Bool,
         _ => crate::value::TypeTag::Int64, // default
     }
 }

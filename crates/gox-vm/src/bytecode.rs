@@ -369,7 +369,7 @@ fn write_constant(buf: &mut Vec<u8>, c: &Constant) {
 }
 
 fn write_type_meta(buf: &mut Vec<u8>, ty: &TypeMeta) {
-    write_u32(buf, ty.id);
+    write_u32(buf, ty.type_id());
     buf.push(value_kind_to_u8(ty.kind));
     write_u16(buf, ty.size_slots as u16);
     write_string(buf, &ty.name);
@@ -500,8 +500,11 @@ fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError>
     let key_type = read_u32(cursor)?;
     let value_type = read_u32(cursor)?;
     
+    // id is None for builtin types (id == kind), Some for user-defined types
+    let id_opt = if id < crate::types::FIRST_USER_TYPE { None } else { Some(id) };
+    
     Ok(TypeMeta {
-        id,
+        id: id_opt,
         kind,
         size_slots,
         ptr_bitmap,

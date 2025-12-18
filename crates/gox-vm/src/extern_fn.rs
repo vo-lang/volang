@@ -23,7 +23,8 @@ use hashbrown::HashMap;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::string;
-use crate::types::builtin;
+use crate::types::TypeId;
+use gox_common_core::ValueKind;
 
 // Re-export TypeTag for native function implementations
 pub use gox_common_core::ValueKind as TypeTag;
@@ -162,7 +163,7 @@ impl<'a> ExternCtx<'a> {
     /// Return a new string (requires GC allocation).
     #[inline]
     pub fn ret_string(&mut self, idx: usize, s: &str) {
-        let str_ref = string::from_rust_str(self.gc, builtin::STRING, s);
+        let str_ref = string::from_rust_str(self.gc, ValueKind::String as TypeId, s);
         self.ret_raw(idx, str_ref as u64);
     }
 
@@ -189,7 +190,7 @@ impl<'a> ExternCtx<'a> {
     /// Allocate a new string.
     #[inline]
     pub fn new_string(&mut self, s: &str) -> GcRef {
-        string::from_rust_str(self.gc, builtin::STRING, s)
+        string::from_rust_str(self.gc, ValueKind::String as TypeId, s)
     }
 
     /// Get string content from GcRef.
@@ -214,16 +215,16 @@ impl<'a> ExternCtx<'a> {
         }
         
         // Create array to hold string pointers (elem_size=1 for GcRef)
-        let arr = array::create(self.gc, builtin::ARRAY, builtin::STRING, 1, len);
+        let arr = array::create(self.gc, ValueKind::Array as TypeId, ValueKind::String as TypeId, 1, len);
         
         // Allocate each string and store in array
         for (i, s) in strings.iter().enumerate() {
-            let str_ref = string::from_rust_str(self.gc, builtin::STRING, s);
+            let str_ref = string::from_rust_str(self.gc, ValueKind::String as TypeId, s);
             array::set(arr, i, str_ref as u64);
         }
         
         // Create slice wrapping the array
-        let sl = slice::create(self.gc, builtin::SLICE, arr, 0, len, len);
+        let sl = slice::create(self.gc, ValueKind::Slice as TypeId, arr, 0, len, len);
         self.ret_raw(idx, sl as u64);
     }
 
@@ -291,14 +292,14 @@ impl<'a> ExternCtx<'a> {
         }
         
         // Create array with one slot per byte
-        let arr = array::create(self.gc, builtin::ARRAY, builtin::INT64, 1, len);
+        let arr = array::create(self.gc, ValueKind::Array as TypeId, ValueKind::Int64 as TypeId, 1, len);
         
         // Store each byte as a u64 slot
         for (i, &b) in bytes.iter().enumerate() {
             array::set(arr, i, b as u64);
         }
         
-        let sl = slice::create(self.gc, builtin::SLICE, arr, 0, len, len);
+        let sl = slice::create(self.gc, ValueKind::Slice as TypeId, arr, 0, len, len);
         self.ret_raw(idx, sl as u64);
     }
 

@@ -468,13 +468,12 @@ fn is_interface_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax
 /// Infer runtime type ID for boxing into interface
 pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
     use gox_syntax::ast::ExprKind;
-    use gox_vm::types::builtin;
     
     match &expr.kind {
-        ExprKind::IntLit(_) => builtin::INT64 as u16,
-        ExprKind::FloatLit(_) => builtin::FLOAT64 as u16,
-        ExprKind::StringLit(_) => builtin::STRING as u16,
-        ExprKind::RuneLit(_) => builtin::INT32 as u16,
+        ExprKind::IntLit(_) => ValueKind::Int64 as u16,
+        ExprKind::FloatLit(_) => ValueKind::Float64 as u16,
+        ExprKind::StringLit(_) => ValueKind::String as u16,
+        ExprKind::RuneLit(_) => ValueKind::Int32 as u16,
         ExprKind::Ident(ident) => {
             // Check local variable type
             if let Some(local) = fctx.lookup_local(ident.symbol) {
@@ -484,26 +483,19 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
                         return type_id;
                     }
                 }
-                match local.kind {
-                    ValueKind::Int64 => builtin::INT64 as u16,
-                    ValueKind::Float64 => builtin::FLOAT64 as u16,
-                    ValueKind::String => builtin::STRING as u16,
-                    ValueKind::Slice => builtin::SLICE as u16,
-                    ValueKind::Map => builtin::MAP as u16,
-                    _ => builtin::INT64 as u16, // default
-                }
+                local.kind as u16
             } else {
-                builtin::INT64 as u16
+                ValueKind::Int64 as u16
             }
         }
         ExprKind::Binary(_) => {
             // Check if float or string expression
             if expr::is_float_expr(ctx, fctx, expr) {
-                builtin::FLOAT64 as u16
+                ValueKind::Float64 as u16
             } else if expr::is_string_expr(ctx, fctx, expr) {
-                builtin::STRING as u16
+                ValueKind::String as u16
             } else {
-                builtin::INT64 as u16
+                ValueKind::Int64 as u16
             }
         }
         ExprKind::Call(_) => {
@@ -511,16 +503,16 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
             if let Some(kind) = ctx.lookup_call_return_type(expr) {
                 return crate::context::value_kind_to_builtin_type(kind);
             }
-            builtin::INT64 as u16
+            ValueKind::Int64 as u16
         }
-        _ => builtin::INT64 as u16,
+        _ => ValueKind::Int64 as u16,
     }
 }
 
 /// Get runtime type_id for a named type by symbol.
 /// Skips interface types in the count since they don't have runtime type_ids.
 fn get_named_type_id(ctx: &CodegenContext, type_sym: gox_common::Symbol) -> Option<u16> {
-    use gox_vm::types::builtin;
+    use gox_vm::types::FIRST_USER_TYPE;
     
     let type_name = ctx.interner.resolve(type_sym)?;
     let mut concrete_idx = 0u32;
@@ -532,7 +524,7 @@ fn get_named_type_id(ctx: &CodegenContext, type_sym: gox_common::Symbol) -> Opti
         
         let name = ctx.interner.resolve(info.name).unwrap_or("");
         if name == type_name {
-            return Some((builtin::FIRST_USER_TYPE + concrete_idx) as u16);
+            return Some((FIRST_USER_TYPE + concrete_idx) as u16);
         }
         concrete_idx += 1;
     }
