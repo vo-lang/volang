@@ -1,14 +1,5 @@
 package errors
 
 // New returns an error that formats as the given text.
-func New(text string) error {
-    return &errorString{text}
-}
-
-type errorString struct {
-    s string
-}
-
-func (e *errorString) Error() string {
-    return e.s
-}
+// Implemented as extern function for now due to interface limitations.
+func New(text string) error
