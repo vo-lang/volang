@@ -76,6 +76,22 @@ pub extern "C" fn gox_rt_string_concat(type_id: TypeId, a: GcRef, b: GcRef) -> G
     with_gc(|gc| gox_runtime_core::objects::string::concat(gc, type_id, a, b))
 }
 
+// =============================================================================
+// Closure wrapper functions for AOT/JIT
+// =============================================================================
+
+/// Create a closure using the global GC.
+#[no_mangle]
+pub extern "C" fn gox_rt_closure_create(type_id: TypeId, func_id: u32, upvalue_count: usize) -> GcRef {
+    with_gc(|gc| gox_runtime_core::objects::closure::create(gc, type_id, func_id, upvalue_count))
+}
+
+/// Create an upval box using the global GC.
+#[no_mangle]
+pub extern "C" fn gox_rt_upval_box_create(type_id: TypeId) -> GcRef {
+    with_gc(|gc| gox_runtime_core::objects::closure::create_upval_box(gc, type_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

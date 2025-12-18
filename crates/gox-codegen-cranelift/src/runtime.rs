@@ -165,12 +165,12 @@ impl RuntimeFunc {
             RuntimeFunc::MapDelete => "gox_map_delete",
             RuntimeFunc::MapContains => "gox_map_contains",
             // Closure
-            RuntimeFunc::ClosureCreate => "gox_closure_create",
+            RuntimeFunc::ClosureCreate => "gox_rt_closure_create",  // Uses global GC
             RuntimeFunc::ClosureFuncId => "gox_closure_func_id",
             RuntimeFunc::ClosureUpvalueCount => "gox_closure_upvalue_count",
             RuntimeFunc::ClosureGetUpvalue => "gox_closure_get_upvalue",
             RuntimeFunc::ClosureSetUpvalue => "gox_closure_set_upvalue",
-            RuntimeFunc::UpvalBoxCreate => "gox_upval_box_create",
+            RuntimeFunc::UpvalBoxCreate => "gox_rt_upval_box_create",  // Uses global GC
             RuntimeFunc::UpvalBoxGet => "gox_upval_box_get",
             RuntimeFunc::UpvalBoxSet => "gox_upval_box_set",
             // Interface
@@ -380,9 +380,11 @@ impl RuntimeFunc {
 
             // === Closure ===
             RuntimeFunc::ClosureCreate => {
-                sig.params.push(AbiParam::new(I32));
-                sig.params.push(AbiParam::new(I64));
-                sig.returns.push(AbiParam::new(I64));
+                // gox_rt_closure_create(type_id, func_id, upvalue_count) - uses global GC
+                sig.params.push(AbiParam::new(I32));  // type_id
+                sig.params.push(AbiParam::new(I32));  // func_id
+                sig.params.push(AbiParam::new(I64));  // upvalue_count
+                sig.returns.push(AbiParam::new(I64)); // GcRef
             }
             RuntimeFunc::ClosureFuncId => {
                 sig.params.push(AbiParam::new(I64));
@@ -403,7 +405,9 @@ impl RuntimeFunc {
                 sig.params.push(AbiParam::new(I64));
             }
             RuntimeFunc::UpvalBoxCreate => {
-                sig.returns.push(AbiParam::new(I64));
+                // gox_rt_upval_box_create(type_id) - uses global GC
+                sig.params.push(AbiParam::new(I32));  // type_id
+                sig.returns.push(AbiParam::new(I64)); // GcRef
             }
             RuntimeFunc::UpvalBoxGet => {
                 sig.params.push(AbiParam::new(I64));

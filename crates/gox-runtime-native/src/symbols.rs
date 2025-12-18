@@ -54,12 +54,15 @@ impl RuntimeSymbols {
             RuntimeSymbol { name: "gox_slice_append", ptr: ffi::gox_slice_append as *const u8 },
             RuntimeSymbol { name: "gox_slice_slice", ptr: ffi::gox_slice_slice as *const u8 },
             
-            // Closure functions
-            RuntimeSymbol { name: "gox_closure_create", ptr: ffi::gox_closure_create as *const u8 },
+            // Closure functions (some using global GC wrappers)
+            RuntimeSymbol { name: "gox_rt_closure_create", ptr: crate::gc_global::gox_rt_closure_create as *const u8 },
             RuntimeSymbol { name: "gox_closure_func_id", ptr: ffi::gox_closure_func_id as *const u8 },
             RuntimeSymbol { name: "gox_closure_upvalue_count", ptr: ffi::gox_closure_upvalue_count as *const u8 },
             RuntimeSymbol { name: "gox_closure_get_upvalue", ptr: ffi::gox_closure_get_upvalue as *const u8 },
             RuntimeSymbol { name: "gox_closure_set_upvalue", ptr: ffi::gox_closure_set_upvalue as *const u8 },
+            RuntimeSymbol { name: "gox_rt_upval_box_create", ptr: crate::gc_global::gox_rt_upval_box_create as *const u8 },
+            RuntimeSymbol { name: "gox_upval_box_get", ptr: ffi::gox_upval_box_get as *const u8 },
+            RuntimeSymbol { name: "gox_upval_box_set", ptr: ffi::gox_upval_box_set as *const u8 },
             
             // Interface functions
             RuntimeSymbol { name: "gox_interface_unbox_type", ptr: ffi::gox_interface_unbox_type as *const u8 },

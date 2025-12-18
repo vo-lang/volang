@@ -1223,6 +1223,80 @@ impl FunctionTranslator {
                 builder.ins().call(func_ref, &[handle]);
             }
 
+            // ==================== Closure ====================
+            Opcode::ClosureNew => {
+                // a=dest, b=func_id, c=upvalue_count
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // CLOSURE type_id
+                let func_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, inst.b as i64);
+                let upval_count = builder.ins().iconst(I64, inst.c as i64);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ClosureCreate)?;
+                let call = builder.ins().call(func_ref, &[type_id, func_id, upval_count]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ClosureGet => {
+                // a=dest, b=closure, c=upval_idx
+                let closure = builder.use_var(self.variables[inst.b as usize]);
+                let idx = builder.ins().iconst(I64, inst.c as i64);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ClosureGetUpvalue)?;
+                let call = builder.ins().call(func_ref, &[closure, idx]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ClosureSet => {
+                // a=closure, b=upval_idx, c=value
+                let closure = builder.use_var(self.variables[inst.a as usize]);
+                let idx = builder.ins().iconst(I64, inst.b as i64);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ClosureSetUpvalue)?;
+                builder.ins().call(func_ref, &[closure, idx, val]);
+            }
+
+            Opcode::ClosureCall => {
+                // a=closure_reg, b=arg_start, c=arg_count, flags=ret_count
+                // Get the function ID from the closure
+                let closure = builder.use_var(self.variables[inst.a as usize]);
+                let func_ref_get = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ClosureFuncId)?;
+                let call = builder.ins().call(func_ref_get, &[closure]);
+                let func_id_val = builder.inst_results(call)[0];
+                
+                // For now, closure calls are complex - we'd need indirect calls
+                // Just store the closure for later use (simplified)
+                // TODO: Implement proper indirect function calls for closures
+                let _ = func_id_val;
+                
+                // For basic support, we skip the actual call implementation
+                // This would need indirect_call support in Cranelift
+            }
+
+            Opcode::UpvalNew => {
+                // a=dest: create new upval_box for reference capture
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // CLOSURE type_id
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::UpvalBoxCreate)?;
+                let call = builder.ins().call(func_ref, &[type_id]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::UpvalGet => {
+                // a=dest, b=upval_box: read value from upval_box
+                let uv = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::UpvalBoxGet)?;
+                let call = builder.ins().call(func_ref, &[uv]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::UpvalSet => {
+                // a=upval_box, b=value: write value to upval_box
+                let uv = builder.use_var(self.variables[inst.a as usize]);
+                let val = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::UpvalBoxSet)?;
+                builder.ins().call(func_ref, &[uv, val]);
+            }
+
             // ==================== Debug/Assert ====================
             Opcode::DebugPrint => {
                 // a=value_reg, b=type_tag
