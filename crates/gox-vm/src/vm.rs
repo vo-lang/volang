@@ -669,13 +669,15 @@ impl Vm {
             Opcode::SliceLen => {
                 // a=dest, b=slice
                 let sl = self.read_reg(fiber_id, b) as GcRef;
-                self.write_reg(fiber_id, a, slice::len(sl) as u64);
+                let len = if sl.is_null() { 0 } else { slice::len(sl) };
+                self.write_reg(fiber_id, a, len as u64);
             }
             
             Opcode::SliceCap => {
                 // a=dest, b=slice
                 let sl = self.read_reg(fiber_id, b) as GcRef;
-                self.write_reg(fiber_id, a, slice::cap(sl) as u64);
+                let cap = if sl.is_null() { 0 } else { slice::cap(sl) };
+                self.write_reg(fiber_id, a, cap as u64);
             }
             
             Opcode::SliceSlice => {

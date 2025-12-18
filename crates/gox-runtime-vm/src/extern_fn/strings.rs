@@ -14,6 +14,7 @@ pub fn register(registry: &mut ExternRegistry) {
     registry.register("strings.TrimLeft", extern_trim_left);
     registry.register("strings.TrimRight", extern_trim_right);
     registry.register("strings.Split", extern_split);
+    registry.register("strings.SplitN", extern_split_n);
     registry.register("strings.Replace", extern_replace);
     registry.register("strings.EqualFold", extern_equal_fold);
 }
@@ -87,6 +88,15 @@ fn extern_split(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0).to_string();
     let sep = ctx.arg_str(1).to_string();
     let parts = core::split(&s, &sep);
+    ctx.ret_string_slice(0, &parts);
+    ExternResult::Ok(1)
+}
+
+fn extern_split_n(ctx: &mut ExternCtx) -> ExternResult {
+    let s = ctx.arg_str(0).to_string();
+    let sep = ctx.arg_str(1).to_string();
+    let n = ctx.arg_i64(2);
+    let parts = core::split_n(&s, &sep, n);
     ctx.ret_string_slice(0, &parts);
     ExternResult::Ok(1)
 }
