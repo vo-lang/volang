@@ -1,5 +1,15 @@
 //! Byte slice operations (pure logic).
 
+/// Find the index of byte in slice, or -1 if not found.
+pub fn index_byte(s: &[u8], c: u8) -> i64 {
+    s.iter().position(|&b| b == c).map(|i| i as i64).unwrap_or(-1)
+}
+
+/// Find the last index of byte in slice, or -1 if not found.
+pub fn last_index_byte(s: &[u8], c: u8) -> i64 {
+    s.iter().rposition(|&b| b == c).map(|i| i as i64).unwrap_or(-1)
+}
+
 /// Find the index of subslice in slice, or -1 if not found.
 pub fn index(s: &[u8], sep: &[u8]) -> i64 {
     if sep.is_empty() {

@@ -259,6 +259,49 @@ impl<'a> ExternCtx<'a> {
         slice::set(slice_ref, idx, val.to_bits());
     }
 
+    /// Get byte slice as Vec<u8> from a []byte argument.
+    /// Each byte is stored as a u64 slot in GoX.
+    pub fn arg_bytes(&self, idx: usize) -> Vec<u8> {
+        use crate::objects::slice;
+        let slice_ref = self.arg_ref(idx);
+        if slice_ref.is_null() {
+            return Vec::new();
+        }
+        let len = slice::len(slice_ref);
+        if len == 0 {
+            return Vec::new();
+        }
+        // Each element is stored as u64, extract as bytes
+        let mut result = Vec::with_capacity(len);
+        for i in 0..len {
+            result.push(slice::get(slice_ref, i) as u8);
+        }
+        result
+    }
+
+    /// Return a byte slice ([]byte).
+    /// Each byte is stored as a u64 slot in GoX.
+    pub fn ret_byte_slice(&mut self, idx: usize, bytes: &[u8]) {
+        use crate::objects::{array, slice};
+        
+        let len = bytes.len();
+        if len == 0 {
+            self.ret_nil(idx);
+            return;
+        }
+        
+        // Create array with one slot per byte
+        let arr = array::create(self.gc, builtin::ARRAY, builtin::INT64, 1, len);
+        
+        // Store each byte as a u64 slot
+        for (i, &b) in bytes.iter().enumerate() {
+            array::set(arr, i, b as u64);
+        }
+        
+        let sl = slice::create(self.gc, builtin::SLICE, arr, 0, len, len);
+        self.ret_raw(idx, sl as u64);
+    }
+
     // ==================== High-Level API (On-Demand Conversion) ====================
 
     /// Format a single argument as string.
