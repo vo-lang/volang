@@ -588,13 +588,17 @@ fn collect_and_run(dir: &Path, mode: RunMode, summary: &mut TestSummary) {
                 .unwrap_or("");
             
             if dir_name.starts_with("proj_") {
-                summary.total += 1;
                 let result = run_multi_file_with_mode(&path, mode);
-                if result.passed {
-                    summary.passed += 1;
+                if result.skipped {
+                    summary.skipped += 1;
                 } else {
-                    summary.failed += 1;
-                    summary.failures.push(result);
+                    summary.total += 1;
+                    if result.passed {
+                        summary.passed += 1;
+                    } else {
+                        summary.failed += 1;
+                        summary.failures.push(result);
+                    }
                 }
             } else {
                 // Recurse into subdirectory
