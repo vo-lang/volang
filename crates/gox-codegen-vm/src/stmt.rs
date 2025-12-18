@@ -191,7 +191,7 @@ fn compile_short_var(
     
     for (i, name) in sv.names.iter().enumerate() {
         // Check if this is the blank identifier
-        let is_blank = ctx.interner.resolve(name.symbol) == Some("_");
+        let is_blank = ctx.symbols.is(name.symbol, ctx.symbols.sym_blank);
         
         if is_blank {
             // Just compile the RHS and discard
@@ -546,7 +546,7 @@ fn compile_assign(
         match &lhs.kind {
             ExprKind::Ident(ident) => {
                 // Check for blank identifier
-                if ctx.interner.resolve(ident.symbol) == Some("_") {
+                if ctx.symbols.is(ident.symbol, ctx.symbols.sym_blank) {
                     // Just compile RHS and discard
                     expr::compile_expr(ctx, fctx, &assign.rhs[i])?;
                     continue;

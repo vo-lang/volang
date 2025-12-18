@@ -97,105 +97,104 @@ fn compile_ident(
     fctx: &mut FuncContext,
     ident: &Ident,
 ) -> Result<u16, CodegenError> {
-    let name_str = ctx.interner.resolve(ident.symbol).unwrap_or("");
+    let sym = ident.symbol;
+    let syms = &ctx.symbols;
 
-    match name_str {
-        "true" => {
+    if syms.is(sym, syms.sym_true) {
+        let dst = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadTrue, dst, 0, 0);
+        return Ok(dst);
+    }
+    if syms.is(sym, syms.sym_false) {
+        let dst = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadFalse, dst, 0, 0);
+        return Ok(dst);
+    }
+    if syms.is(sym, syms.sym_nil) {
+        let dst = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadNil, dst, 0, 0);
+        return Ok(dst);
+    }
+    if syms.is(sym, syms.sym_blank) {
+        // Blank identifier - allocate a dummy register
+        let dst = fctx.regs.alloc(1);
+        fctx.emit(Opcode::LoadNil, dst, 0, 0);
+        return Ok(dst);
+    }
+
+    // First check local variables
+    if let Some(local) = fctx.lookup_local(sym) {
+        let reg = local.reg;
+        let is_captured = local.is_captured;
+        if is_captured {
+            // Variable is in upval_box - need to read through it
             let dst = fctx.regs.alloc(1);
-            fctx.emit(Opcode::LoadTrue, dst, 0, 0);
-            Ok(dst)
+            fctx.emit(Opcode::UpvalGet, dst, reg, 0);
+            return Ok(dst);
+        } else {
+            return Ok(reg);
         }
-        "false" => {
-            let dst = fctx.regs.alloc(1);
-            fctx.emit(Opcode::LoadFalse, dst, 0, 0);
-            Ok(dst)
-        }
-        "nil" => {
-            let dst = fctx.regs.alloc(1);
-            fctx.emit(Opcode::LoadNil, dst, 0, 0);
-            Ok(dst)
-        }
-        "_" => {
-            // Blank identifier - allocate a dummy register
-            let dst = fctx.regs.alloc(1);
-            fctx.emit(Opcode::LoadNil, dst, 0, 0);
-            Ok(dst)
-        }
-        _ => {
-            // First check local variables
-            if let Some(local) = fctx.lookup_local(ident.symbol) {
-                let reg = local.reg;
-                let is_captured = local.is_captured;
-                if is_captured {
-                    // Variable is in upval_box - need to read through it
+    }
+    // Check upvalues (for closures)
+    if let Some(location) = fctx.resolve_var(sym) {
+        use crate::context::VarLocation;
+        match location {
+            VarLocation::Local(reg) => return Ok(reg),
+            VarLocation::Upvalue(idx) => {
+                // Check if this upvalue is boxed (needs UpvalGet dereference)
+                let is_boxed = fctx
+                    .upvalues
+                    .get(idx as usize)
+                    .map(|u| u.is_boxed)
+                    .unwrap_or(false);
+
+                let upval_reg = fctx.regs.alloc(1);
+                fctx.emit(Opcode::ClosureGet, upval_reg, 0, idx);
+
+                if is_boxed {
+                    // Dereference the upval_box to get the actual value
                     let dst = fctx.regs.alloc(1);
-                    fctx.emit(Opcode::UpvalGet, dst, reg, 0);
-                    Ok(dst)
+                    fctx.emit(Opcode::UpvalGet, dst, upval_reg, 0);
+                    return Ok(dst);
                 } else {
-                    Ok(reg)
+                    // Direct value, no dereference needed
+                    return Ok(upval_reg);
                 }
-            }
-            // Check upvalues (for closures)
-            else if let Some(location) = fctx.resolve_var(ident.symbol) {
-                use crate::context::VarLocation;
-                match location {
-                    VarLocation::Local(reg) => Ok(reg),
-                    VarLocation::Upvalue(idx) => {
-                        // Check if this upvalue is boxed (needs UpvalGet dereference)
-                        let is_boxed = fctx
-                            .upvalues
-                            .get(idx as usize)
-                            .map(|u| u.is_boxed)
-                            .unwrap_or(false);
-
-                        let upval_reg = fctx.regs.alloc(1);
-                        fctx.emit(Opcode::ClosureGet, upval_reg, 0, idx);
-
-                        if is_boxed {
-                            // Dereference the upval_box to get the actual value
-                            let dst = fctx.regs.alloc(1);
-                            fctx.emit(Opcode::UpvalGet, dst, upval_reg, 0);
-                            Ok(dst)
-                        } else {
-                            // Direct value, no dereference needed
-                            Ok(upval_reg)
-                        }
-                    }
-                }
-            }
-            // Then check constants (inline their values)
-            else if let Some(const_val) = ctx.const_values.get(&ident.symbol) {
-                let dst = fctx.regs.alloc(1);
-                match const_val {
-                    crate::ConstValue::Int(v) => {
-                        let val = *v;
-                        // Check if value fits in i32 for LoadInt
-                        if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
-                            let u = val as u32;
-                            fctx.emit(Opcode::LoadInt, dst, u as u16, (u >> 16) as u16);
-                        } else {
-                            // Large integer - store in constant pool
-                            let idx = ctx.add_constant(Constant::Int(val));
-                            fctx.emit(Opcode::LoadConst, dst, idx, 0);
-                        }
-                    }
-                    crate::ConstValue::FloatIdx(idx) => {
-                        // Load float from constant pool
-                        fctx.emit(Opcode::LoadConst, dst, *idx, 0);
-                    }
-                }
-                Ok(dst)
-            }
-            // Then check global variables
-            else if let Some(&global_idx) = ctx.global_indices.get(&ident.symbol) {
-                let dst = fctx.regs.alloc(1);
-                fctx.emit(Opcode::GetGlobal, dst, global_idx as u16, 0);
-                Ok(dst)
-            } else {
-                Err(CodegenError::Internal(format!("undefined: {}", name_str)))
             }
         }
     }
+    // Then check constants (inline their values)
+    if let Some(const_val) = ctx.const_values.get(&sym) {
+        let dst = fctx.regs.alloc(1);
+        match const_val {
+            crate::ConstValue::Int(v) => {
+                let val = *v;
+                // Check if value fits in i32 for LoadInt
+                if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+                    let u = val as u32;
+                    fctx.emit(Opcode::LoadInt, dst, u as u16, (u >> 16) as u16);
+                } else {
+                    // Large integer - store in constant pool
+                    let idx = ctx.add_constant(Constant::Int(val));
+                    fctx.emit(Opcode::LoadConst, dst, idx, 0);
+                }
+            }
+            crate::ConstValue::FloatIdx(idx) => {
+                // Load float from constant pool
+                fctx.emit(Opcode::LoadConst, dst, *idx, 0);
+            }
+        }
+        return Ok(dst);
+    }
+    // Then check global variables
+    if let Some(&global_idx) = ctx.global_indices.get(&sym) {
+        let dst = fctx.regs.alloc(1);
+        fctx.emit(Opcode::GetGlobal, dst, global_idx as u16, 0);
+        return Ok(dst);
+    }
+
+    let name_str = ctx.interner.resolve(sym).unwrap_or("<unknown>");
+    Err(CodegenError::Internal(format!("undefined: {}", name_str)))
 }
 
 /// Compile integer literal.
@@ -490,25 +489,40 @@ fn compile_call(
 ) -> Result<u16, CodegenError> {
     // Check for builtin calls
     if let ExprKind::Ident(ident) = &call.func.kind {
-        let name = ctx.interner.resolve(ident.symbol).unwrap_or("");
+        let sym = ident.symbol;
+        let syms = &ctx.symbols;
 
         // Go spec: init functions cannot be called explicitly
-        if name == "init" {
+        if syms.is(sym, syms.sym_init) {
             return Err(CodegenError::Internal(
                 "init function cannot be called".to_string(),
             ));
         }
 
-        match name {
-            "len" => return compile_builtin_len(ctx, fctx, call),
-            "cap" => return compile_builtin_cap(ctx, fctx, call),
-            "make" => return compile_builtin_make(ctx, fctx, call),
-            "append" => return compile_builtin_append(ctx, fctx, call),
-            "delete" => return compile_builtin_delete(ctx, fctx, call),
-            "println" | "print" => return compile_builtin_print(ctx, fctx, call),
-            "assert" => return compile_builtin_assert(ctx, fctx, call),
-            "panic" => return compile_builtin_panic(ctx, fctx, call),
-            _ => {}
+        // Builtin functions
+        if syms.is(sym, syms.sym_len) {
+            return compile_builtin_len(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_cap) {
+            return compile_builtin_cap(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_make) {
+            return compile_builtin_make(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_append) {
+            return compile_builtin_append(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_delete) {
+            return compile_builtin_delete(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_println) || syms.is(sym, syms.sym_print) {
+            return compile_builtin_print(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_assert) {
+            return compile_builtin_assert(ctx, fctx, call);
+        }
+        if syms.is(sym, syms.sym_panic) {
+            return compile_builtin_panic(ctx, fctx, call);
         }
 
         // User-defined function
@@ -2274,20 +2288,19 @@ fn compile_type_assert(
 
     match &ty.kind {
         TypeExprKind::Ident(type_ident) => {
-            let type_name = ctx.interner.resolve(type_ident.symbol).unwrap_or("");
-            let type_tag = match type_name {
-                "int" | "int64" => TypeTag::Int64,
-                "float64" => TypeTag::Float64,
-                "string" => TypeTag::String,
-                "bool" => TypeTag::Bool,
-                _ => {
-                    // Named type - try to get info
-                    if let Some(_info) = ctx.get_named_type_info(type_ident.symbol) {
-                        TypeTag::Struct
-                    } else {
-                        TypeTag::Struct
-                    }
-                }
+            let sym = type_ident.symbol;
+            let syms = &ctx.symbols;
+            let type_tag = if syms.is(sym, syms.sym_int) || syms.is(sym, syms.sym_int64) {
+                TypeTag::Int64
+            } else if syms.is(sym, syms.sym_float64) {
+                TypeTag::Float64
+            } else if syms.is(sym, syms.sym_string) {
+                TypeTag::String
+            } else if syms.is(sym, syms.sym_bool) {
+                TypeTag::Bool
+            } else {
+                // Named type
+                TypeTag::Struct
             };
             fctx.emit(Opcode::UnboxInterface, dst, type_tag as u16, iface_reg);
         }
@@ -2319,46 +2332,45 @@ fn compile_conversion_expr(
     // Get the target type from TypeExpr
     match &conv.ty.kind {
         TypeExprKind::Ident(type_ident) => {
-            let type_name = ctx.interner.resolve(type_ident.symbol).unwrap_or("");
-            match type_name {
-                "int" | "int64" => {
-                    let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
-                    if src_tag == TypeTag::Float64 {
+            let sym = type_ident.symbol;
+            let syms = &ctx.symbols;
+
+            if syms.is(sym, syms.sym_int) || syms.is(sym, syms.sym_int64) {
+                let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
+                if src_tag == TypeTag::Float64 {
+                    let dst = fctx.regs.alloc(1);
+                    fctx.emit(Opcode::F64ToI64, dst, src, 0);
+                    return Ok(dst);
+                }
+                return Ok(src);
+            }
+            if syms.is(sym, syms.sym_float64) {
+                let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
+                if src_tag == TypeTag::Int64 {
+                    let dst = fctx.regs.alloc(1);
+                    fctx.emit(Opcode::I64ToF64, dst, src, 0);
+                    return Ok(dst);
+                }
+                return Ok(src);
+            }
+            if syms.is(sym, syms.sym_string) {
+                // int -> string (rune to string) or []byte -> string
+                return Ok(src);
+            }
+
+            // Named type conversion - use existing logic
+            if let Some(info) = ctx.get_named_type_info(type_ident.symbol) {
+                match &info.underlying {
+                    Type::Interface(_) => {
                         let dst = fctx.regs.alloc(1);
-                        fctx.emit(Opcode::F64ToI64, dst, src, 0);
+                        let type_tag = infer_type_tag(ctx, fctx, &conv.expr);
+                        fctx.emit(Opcode::BoxInterface, dst, type_tag as u16, src);
                         return Ok(dst);
                     }
-                    Ok(src)
+                    _ => Ok(src),
                 }
-                "float64" => {
-                    let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
-                    if src_tag == TypeTag::Int64 {
-                        let dst = fctx.regs.alloc(1);
-                        fctx.emit(Opcode::I64ToF64, dst, src, 0);
-                        return Ok(dst);
-                    }
-                    Ok(src)
-                }
-                "string" => {
-                    // int -> string (rune to string) or []byte -> string
-                    Ok(src)
-                }
-                _ => {
-                    // Named type conversion - use existing logic
-                    if let Some(info) = ctx.get_named_type_info(type_ident.symbol) {
-                        match &info.underlying {
-                            Type::Interface(_) => {
-                                let dst = fctx.regs.alloc(1);
-                                let type_tag = infer_type_tag(ctx, fctx, &conv.expr);
-                                fctx.emit(Opcode::BoxInterface, dst, type_tag as u16, src);
-                                return Ok(dst);
-                            }
-                            _ => Ok(src),
-                        }
-                    } else {
-                        Ok(src)
-                    }
-                }
+            } else {
+                Ok(src)
             }
         }
         _ => {
@@ -2386,39 +2398,46 @@ fn compile_type_conversion(
     // Compile the source expression
     let src = compile_expr(ctx, fctx, &call.args[0])?;
 
-    // Check for basic type conversions first
-    if let Some(type_name) = ctx.interner.resolve(type_sym) {
-        match type_name {
-            "string" => {
-                // For int -> string, we pass through and let runtime handle it
-                // The println function can handle int values directly
-                return Ok(src);
-            }
-            "int" | "int64" => {
-                let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-                if src_tag == gox_vm::value::TypeTag::Float64 {
-                    let dst = fctx.regs.alloc(1);
-                    fctx.emit(Opcode::F64ToI64, dst, src, 0);
-                    return Ok(dst);
-                }
-                return Ok(src);
-            }
-            "float64" => {
-                let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-                if src_tag == gox_vm::value::TypeTag::Int64 {
-                    let dst = fctx.regs.alloc(1);
-                    fctx.emit(Opcode::I64ToF64, dst, src, 0);
-                    return Ok(dst);
-                }
-                return Ok(src);
-            }
-            "bool" | "int8" | "int16" | "int32" | "uint" | "uint8" | "uint16" | "uint32"
-            | "uint64" | "byte" | "float32" | "rune" => {
-                // For these basic types, just pass through (same or compatible representation)
-                return Ok(src);
-            }
-            _ => {}
+    // Check for basic type conversions first using symbol comparison
+    let syms = &ctx.symbols;
+
+    if syms.is(type_sym, syms.sym_string) {
+        // For int -> string, we pass through and let runtime handle it
+        return Ok(src);
+    }
+    if syms.is(type_sym, syms.sym_int) || syms.is(type_sym, syms.sym_int64) {
+        let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
+        if src_tag == gox_vm::value::TypeTag::Float64 {
+            let dst = fctx.regs.alloc(1);
+            fctx.emit(Opcode::F64ToI64, dst, src, 0);
+            return Ok(dst);
         }
+        return Ok(src);
+    }
+    if syms.is(type_sym, syms.sym_float64) {
+        let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
+        if src_tag == gox_vm::value::TypeTag::Int64 {
+            let dst = fctx.regs.alloc(1);
+            fctx.emit(Opcode::I64ToF64, dst, src, 0);
+            return Ok(dst);
+        }
+        return Ok(src);
+    }
+    // For these basic types, just pass through (same or compatible representation)
+    if syms.is(type_sym, syms.sym_bool)
+        || syms.is(type_sym, syms.sym_int8)
+        || syms.is(type_sym, syms.sym_int16)
+        || syms.is(type_sym, syms.sym_int32)
+        || syms.is(type_sym, syms.sym_uint)
+        || syms.is(type_sym, syms.sym_uint8)
+        || syms.is(type_sym, syms.sym_uint16)
+        || syms.is(type_sym, syms.sym_uint32)
+        || syms.is(type_sym, syms.sym_uint64)
+        || syms.is(type_sym, syms.sym_byte)
+        || syms.is(type_sym, syms.sym_float32)
+        || syms.is(type_sym, syms.sym_rune)
+    {
+        return Ok(src);
     }
 
     // Get target type info for named types
@@ -2514,29 +2533,42 @@ fn compile_try_unwrap(
 fn type_expr_to_elem_type(ctx: &CodegenContext, type_expr: &gox_syntax::ast::TypeExpr) -> u16 {
     use gox_syntax::ast::TypeExprKind;
     use gox_common_core::ValueKind;
-    
+
     match &type_expr.kind {
         TypeExprKind::Ident(ident) => {
-            if let Some(name) = ctx.interner.resolve(ident.symbol) {
-                match name {
-                    "bool" => ValueKind::Bool as u16,
-                    "int" => ValueKind::Int as u16,
-                    "int8" => ValueKind::Int8 as u16,
-                    "int16" => ValueKind::Int16 as u16,
-                    "int32" | "rune" => ValueKind::Int32 as u16,
-                    "int64" => ValueKind::Int64 as u16,
-                    "uint" => ValueKind::Uint as u16,
-                    "uint8" | "byte" => ValueKind::Uint8 as u16,
-                    "uint16" => ValueKind::Uint16 as u16,
-                    "uint32" => ValueKind::Uint32 as u16,
-                    "uint64" => ValueKind::Uint64 as u16,
-                    "float32" => ValueKind::Float32 as u16,
-                    "float64" => ValueKind::Float64 as u16,
-                    "string" => ValueKind::String as u16,
-                    // User-defined types (structs) - return Struct kind
-                    _ => ValueKind::Struct as u16,
-                }
+            let sym = ident.symbol;
+            let syms = &ctx.symbols;
+
+            if syms.is(sym, syms.sym_bool) {
+                ValueKind::Bool as u16
+            } else if syms.is(sym, syms.sym_int) {
+                ValueKind::Int as u16
+            } else if syms.is(sym, syms.sym_int8) {
+                ValueKind::Int8 as u16
+            } else if syms.is(sym, syms.sym_int16) {
+                ValueKind::Int16 as u16
+            } else if syms.is(sym, syms.sym_int32) || syms.is(sym, syms.sym_rune) {
+                ValueKind::Int32 as u16
+            } else if syms.is(sym, syms.sym_int64) {
+                ValueKind::Int64 as u16
+            } else if syms.is(sym, syms.sym_uint) {
+                ValueKind::Uint as u16
+            } else if syms.is(sym, syms.sym_uint8) || syms.is(sym, syms.sym_byte) {
+                ValueKind::Uint8 as u16
+            } else if syms.is(sym, syms.sym_uint16) {
+                ValueKind::Uint16 as u16
+            } else if syms.is(sym, syms.sym_uint32) {
+                ValueKind::Uint32 as u16
+            } else if syms.is(sym, syms.sym_uint64) {
+                ValueKind::Uint64 as u16
+            } else if syms.is(sym, syms.sym_float32) {
+                ValueKind::Float32 as u16
+            } else if syms.is(sym, syms.sym_float64) {
+                ValueKind::Float64 as u16
+            } else if syms.is(sym, syms.sym_string) {
+                ValueKind::String as u16
             } else {
+                // User-defined types (structs) - return Struct kind
                 ValueKind::Struct as u16
             }
         }

@@ -3,13 +3,101 @@
 use std::collections::HashMap;
 
 use gox_analysis::TypeCheckResult;
-use gox_common::symbol::{Ident, Symbol};
+use gox_common::symbol::{builtin_consts, builtin_funcs, builtin_types, Ident, Symbol, BLANK};
 use gox_common::SymbolInterner;
 use gox_syntax::ast::{File, Decl, FuncDecl};
 use gox_vm::bytecode::{Module, FunctionDef, Constant};
 use gox_vm::instruction::{Instruction, Opcode};
 
 use crate::CodegenError;
+
+/// Well-known symbols cached from the interner for fast comparison.
+/// These are looked up once during context creation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WellKnownSymbols {
+    // Builtin constants
+    pub sym_true: Option<Symbol>,
+    pub sym_false: Option<Symbol>,
+    pub sym_nil: Option<Symbol>,
+    pub sym_blank: Option<Symbol>,
+    // Builtin functions
+    pub sym_len: Option<Symbol>,
+    pub sym_cap: Option<Symbol>,
+    pub sym_make: Option<Symbol>,
+    pub sym_append: Option<Symbol>,
+    pub sym_delete: Option<Symbol>,
+    pub sym_println: Option<Symbol>,
+    pub sym_print: Option<Symbol>,
+    pub sym_panic: Option<Symbol>,
+    pub sym_assert: Option<Symbol>,
+    pub sym_init: Option<Symbol>,
+    pub sym_main: Option<Symbol>,
+    // Builtin types
+    pub sym_int: Option<Symbol>,
+    pub sym_int8: Option<Symbol>,
+    pub sym_int16: Option<Symbol>,
+    pub sym_int32: Option<Symbol>,
+    pub sym_int64: Option<Symbol>,
+    pub sym_uint: Option<Symbol>,
+    pub sym_uint8: Option<Symbol>,
+    pub sym_uint16: Option<Symbol>,
+    pub sym_uint32: Option<Symbol>,
+    pub sym_uint64: Option<Symbol>,
+    pub sym_float32: Option<Symbol>,
+    pub sym_float64: Option<Symbol>,
+    pub sym_bool: Option<Symbol>,
+    pub sym_string: Option<Symbol>,
+    pub sym_byte: Option<Symbol>,
+    pub sym_rune: Option<Symbol>,
+}
+
+impl WellKnownSymbols {
+    /// Create well-known symbols by looking them up in the interner.
+    pub fn new(interner: &SymbolInterner) -> Self {
+        Self {
+            // Builtin constants
+            sym_true: interner.get(builtin_consts::TRUE),
+            sym_false: interner.get(builtin_consts::FALSE),
+            sym_nil: interner.get(builtin_consts::NIL),
+            sym_blank: interner.get(BLANK),
+            // Builtin functions
+            sym_len: interner.get(builtin_funcs::LEN),
+            sym_cap: interner.get(builtin_funcs::CAP),
+            sym_make: interner.get(builtin_funcs::MAKE),
+            sym_append: interner.get(builtin_funcs::APPEND),
+            sym_delete: interner.get(builtin_funcs::DELETE),
+            sym_println: interner.get(builtin_funcs::PRINTLN),
+            sym_print: interner.get(builtin_funcs::PRINT),
+            sym_panic: interner.get(builtin_funcs::PANIC),
+            sym_assert: interner.get("assert"),
+            sym_init: interner.get("init"),
+            sym_main: interner.get("main"),
+            // Builtin types
+            sym_int: interner.get(builtin_types::INT),
+            sym_int8: interner.get(builtin_types::INT8),
+            sym_int16: interner.get(builtin_types::INT16),
+            sym_int32: interner.get(builtin_types::INT32),
+            sym_int64: interner.get(builtin_types::INT64),
+            sym_uint: interner.get(builtin_types::UINT),
+            sym_uint8: interner.get(builtin_types::UINT8),
+            sym_uint16: interner.get(builtin_types::UINT16),
+            sym_uint32: interner.get(builtin_types::UINT32),
+            sym_uint64: interner.get(builtin_types::UINT64),
+            sym_float32: interner.get(builtin_types::FLOAT32),
+            sym_float64: interner.get(builtin_types::FLOAT64),
+            sym_bool: interner.get(builtin_types::BOOL),
+            sym_string: interner.get(builtin_types::STRING),
+            sym_byte: interner.get(builtin_types::BYTE),
+            sym_rune: interner.get(builtin_types::RUNE),
+        }
+    }
+
+    /// Check if a symbol matches a well-known symbol.
+    #[inline]
+    pub fn is(&self, sym: Symbol, well_known: Option<Symbol>) -> bool {
+        well_known.map_or(false, |wk| sym == wk)
+    }
+}
 
 /// Register allocation state.
 #[derive(Debug, Default)]
@@ -321,6 +409,7 @@ pub struct CodegenContext<'a> {
     pub file: &'a File,
     pub result: &'a TypeCheckResult,
     pub interner: &'a SymbolInterner,
+    pub symbols: WellKnownSymbols,
     pub module: Module,
     pub func_indices: HashMap<Symbol, u32>,
     /// Cross-package function index: "pkg.Func" -> func_idx
@@ -346,6 +435,7 @@ pub struct CodegenContextRef<'a, 'm> {
     pub file: &'a File,
     pub result: &'a TypeCheckResult,
     pub interner: &'a SymbolInterner,
+    pub symbols: WellKnownSymbols,
     pub module: &'m mut Module,
     pub func_indices: HashMap<Symbol, u32>,
     pub cross_pkg_funcs: HashMap<String, u32>,
@@ -392,7 +482,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         
         for param in &func.sig.params {
             // Infer type info from parameter type
-            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
+            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(&self.symbols));
             let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
                 fctx.param_count += 1;
@@ -410,6 +500,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 file: self.file,
                 result: self.result,
                 interner: self.interner,
+                symbols: self.symbols,
                 module: Module::new(""),
                 func_indices: self.func_indices.clone(),
                 cross_pkg_funcs: self.cross_pkg_funcs.clone(),
@@ -537,6 +628,7 @@ impl<'a> CodegenContext<'a> {
             file,
             result,
             interner,
+            symbols: WellKnownSymbols::new(interner),
             module: Module::new(""),
             func_indices: HashMap::new(),
             cross_pkg_funcs: HashMap::new(),
@@ -631,6 +723,7 @@ impl<'a> CodegenContext<'a> {
             file,
             result,
             interner,
+            symbols: WellKnownSymbols::new(interner),
             module,
             func_indices: HashMap::new(),
             cross_pkg_funcs: HashMap::new(),
@@ -671,10 +764,10 @@ impl<'a> CodegenContext<'a> {
         }
         
         // Set entry point to main
-        // Find main function by checking resolved names
+        // Find main function by symbol comparison
         for decl in &self.file.decls {
             if let Decl::Func(func) = decl {
-                if self.interner.resolve(func.name.symbol) == Some("main") {
+                if self.symbols.is(func.name.symbol, self.symbols.sym_main) {
                     if let Some(&idx) = self.func_indices.get(&func.name.symbol) {
                         self.module.entry_func = idx;
                         break;
@@ -739,7 +832,7 @@ impl<'a> CodegenContext<'a> {
         
         // Allocate registers for parameters with type info
         for param in &func.sig.params {
-            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(self.interner));
+            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(&self.symbols));
             let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
                 fctx.param_count += 1;
@@ -825,14 +918,26 @@ impl<'a> CodegenContext<'a> {
     
     /// Check if a symbol is a type name (for type conversions).
     pub fn is_type_name(&self, sym: Symbol) -> bool {
-        // Check basic types first
-        if let Some(name) = self.interner.resolve(sym) {
-            match name {
-                "bool" | "int" | "int8" | "int16" | "int32" | "int64" |
-                "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "byte" |
-                "float32" | "float64" | "string" | "rune" => return true,
-                _ => {}
-            }
+        // Check basic types first using symbol comparison
+        let syms = &self.symbols;
+        if syms.is(sym, syms.sym_bool)
+            || syms.is(sym, syms.sym_int)
+            || syms.is(sym, syms.sym_int8)
+            || syms.is(sym, syms.sym_int16)
+            || syms.is(sym, syms.sym_int32)
+            || syms.is(sym, syms.sym_int64)
+            || syms.is(sym, syms.sym_uint)
+            || syms.is(sym, syms.sym_uint8)
+            || syms.is(sym, syms.sym_uint16)
+            || syms.is(sym, syms.sym_uint32)
+            || syms.is(sym, syms.sym_uint64)
+            || syms.is(sym, syms.sym_byte)
+            || syms.is(sym, syms.sym_float32)
+            || syms.is(sym, syms.sym_float64)
+            || syms.is(sym, syms.sym_string)
+            || syms.is(sym, syms.sym_rune)
+        {
+            return true;
         }
         // Then check named types
         for named in &self.result.named_types {
@@ -885,8 +990,8 @@ pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast:
     infer_type_from_type_expr_with_interner(result, ty, None)
 }
 
-/// Infer type info from a parameter type expression, with optional interner for basic type checking
-pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr, interner: Option<&gox_common::SymbolInterner>) -> TypeInfo {
+/// Infer type info from a parameter type expression, with optional symbols for basic type checking
+pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr, symbols: Option<&WellKnownSymbols>) -> TypeInfo {
     use gox_syntax::ast::TypeExprKind;
     use gox_analysis::Type;
     
@@ -896,26 +1001,37 @@ pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &go
         TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
         TypeExprKind::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
         TypeExprKind::Ident(ident) => {
-            // Check basic types first if we have an interner
-            if let Some(interner) = interner {
-                if let Some(name) = interner.resolve(ident.symbol) {
-                    match name {
-                        "bool" => return TypeInfo::new(ValueKind::Bool),
-                        "string" => return TypeInfo::new(ValueKind::String),
-                        "float64" => return TypeInfo::new(ValueKind::Float64),
-                        "float32" => return TypeInfo::new(ValueKind::Float32),
-                        "int" => return TypeInfo::new(ValueKind::Int),
-                        "int64" => return TypeInfo::new(ValueKind::Int64),
-                        "int32" => return TypeInfo::new(ValueKind::Int32),
-                        "int16" => return TypeInfo::new(ValueKind::Int16),
-                        "int8" => return TypeInfo::new(ValueKind::Int8),
-                        "uint" => return TypeInfo::new(ValueKind::Uint),
-                        "uint64" => return TypeInfo::new(ValueKind::Uint64),
-                        "uint32" => return TypeInfo::new(ValueKind::Uint32),
-                        "uint16" => return TypeInfo::new(ValueKind::Uint16),
-                        "uint8" | "byte" => return TypeInfo::new(ValueKind::Uint8),
-                        _ => {}
-                    }
+            // Check basic types first using symbol comparison
+            if let Some(syms) = symbols {
+                let sym = ident.symbol;
+                if syms.is(sym, syms.sym_bool) {
+                    return TypeInfo::new(ValueKind::Bool);
+                } else if syms.is(sym, syms.sym_string) {
+                    return TypeInfo::new(ValueKind::String);
+                } else if syms.is(sym, syms.sym_float64) {
+                    return TypeInfo::new(ValueKind::Float64);
+                } else if syms.is(sym, syms.sym_float32) {
+                    return TypeInfo::new(ValueKind::Float32);
+                } else if syms.is(sym, syms.sym_int) {
+                    return TypeInfo::new(ValueKind::Int);
+                } else if syms.is(sym, syms.sym_int64) {
+                    return TypeInfo::new(ValueKind::Int64);
+                } else if syms.is(sym, syms.sym_int32) {
+                    return TypeInfo::new(ValueKind::Int32);
+                } else if syms.is(sym, syms.sym_int16) {
+                    return TypeInfo::new(ValueKind::Int16);
+                } else if syms.is(sym, syms.sym_int8) {
+                    return TypeInfo::new(ValueKind::Int8);
+                } else if syms.is(sym, syms.sym_uint) {
+                    return TypeInfo::new(ValueKind::Uint);
+                } else if syms.is(sym, syms.sym_uint64) {
+                    return TypeInfo::new(ValueKind::Uint64);
+                } else if syms.is(sym, syms.sym_uint32) {
+                    return TypeInfo::new(ValueKind::Uint32);
+                } else if syms.is(sym, syms.sym_uint16) {
+                    return TypeInfo::new(ValueKind::Uint16);
+                } else if syms.is(sym, syms.sym_uint8) || syms.is(sym, syms.sym_byte) {
+                    return TypeInfo::new(ValueKind::Uint8);
                 }
             }
             // Named type - check if struct, object, or interface

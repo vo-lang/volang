@@ -54,6 +54,9 @@ pub fn compile(
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let mut module = Module::new(&project.main_package);
     
+    // Pre-lookup well-known symbols for fast comparison
+    let sym_init = project.interner.get("init");
+    
     // Build cross-package function index: "pkg.Func" -> func_idx
     let mut cross_pkg_funcs: HashMap<String, u32> = HashMap::new();
     
@@ -137,7 +140,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                         let method_key = format!("{}.{}", type_name, func_name);
                         method_table.insert(method_key, idx);
                         // Don't add methods to func_indices - they're looked up via method_table
-                    } else if func_name == "init" {
+                    } else if sym_init.map_or(false, |s| func.name.symbol == s) {
                         // Register init functions with unique names (pkg.$init_0, pkg.$init_1, etc.)
                         // Don't add to func_indices since they can't be called directly
                         let init_count = cross_pkg_funcs.keys()
@@ -247,7 +250,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                         let type_name = project.interner.resolve(receiver.ty.symbol).unwrap_or("");
                         let method_key = format!("{}.{}", type_name, func_name);
                         *method_table.get(&method_key).unwrap() as usize
-                    } else if func_name == "init" {
+                    } else if sym_init.map_or(false, |s| func.name.symbol == s) {
                         // Use init_counter to find the correct init function index
                         let init_name = format!("{}.$init_{}", pkg.name, init_counter);
                         init_counter += 1;
