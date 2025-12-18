@@ -19,12 +19,12 @@ type Encoding struct {
 
 // EncodeToString returns the base64 encoding of src.
 func (enc *Encoding) EncodeToString(src []byte) string {
-    // TODO: dispatch to correct extern function based on encoding type
+    // TODO: dispatch to correct function based on encoding type
     return ""
 }
 
 // DecodeString returns the bytes represented by the base64 string s.
 func (enc *Encoding) DecodeString(s string) ([]byte, error) {
-    // TODO: dispatch to correct extern function based on encoding type
+    // TODO: dispatch to correct function based on encoding type
     return nil, nil
 }

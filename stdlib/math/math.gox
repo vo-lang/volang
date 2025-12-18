@@ -8,48 +8,48 @@ const (
 )
 
 // Extern functions (implemented in Rust)
-extern func Abs(x float64) float64
-extern func Floor(x float64) float64
-extern func Ceil(x float64) float64
-extern func Round(x float64) float64
-extern func Trunc(x float64) float64
-extern func Max(x, y float64) float64
-extern func Min(x, y float64) float64
-extern func Dim(x, y float64) float64
+func Abs(x float64) float64
+func Floor(x float64) float64
+func Ceil(x float64) float64
+func Round(x float64) float64
+func Trunc(x float64) float64
+func Max(x, y float64) float64
+func Min(x, y float64) float64
+func Dim(x, y float64) float64
 
-extern func Sqrt(x float64) float64
-extern func Cbrt(x float64) float64
-extern func Pow(x, y float64) float64
-extern func Pow10(n int) float64
-extern func Hypot(x, y float64) float64
+func Sqrt(x float64) float64
+func Cbrt(x float64) float64
+func Pow(x, y float64) float64
+func Pow10(n int) float64
+func Hypot(x, y float64) float64
 
-extern func Exp(x float64) float64
-extern func Log(x float64) float64
-extern func Log2(x float64) float64
-extern func Log10(x float64) float64
+func Exp(x float64) float64
+func Log(x float64) float64
+func Log2(x float64) float64
+func Log10(x float64) float64
 
-extern func Sin(x float64) float64
-extern func Cos(x float64) float64
-extern func Tan(x float64) float64
-extern func Asin(x float64) float64
-extern func Acos(x float64) float64
-extern func Atan(x float64) float64
-extern func Atan2(y, x float64) float64
+func Sin(x float64) float64
+func Cos(x float64) float64
+func Tan(x float64) float64
+func Asin(x float64) float64
+func Acos(x float64) float64
+func Atan(x float64) float64
+func Atan2(y, x float64) float64
 
-extern func Sinh(x float64) float64
-extern func Cosh(x float64) float64
-extern func Tanh(x float64) float64
+func Sinh(x float64) float64
+func Cosh(x float64) float64
+func Tanh(x float64) float64
 
-extern func Mod(x, y float64) float64
-extern func Copysign(x, y float64) float64
-extern func IsNaN(x float64) bool
-extern func IsInf(x float64, sign int) bool
-extern func Inf(sign int) float64
-extern func NaN() float64
+func Mod(x, y float64) float64
+func Copysign(x, y float64) float64
+func IsNaN(x float64) bool
+func IsInf(x float64, sign int) bool
+func Inf(sign int) float64
+func NaN() float64
 
 // GoX-implemented functions
 
 // Signbit reports whether x is negative or negative zero.
 func Signbit(x float64) bool {
-    return x < 0 || (x == 0 && 1/x < 0)
+    return x < 0.0 || (x == 0.0 && 1.0/x < 0.0)
 }

@@ -1,15 +1,15 @@
 package strconv
 
 // Extern functions (implemented in Rust)
-extern func Atoi(s string) (int, error)
-extern func Itoa(i int) string
-extern func ParseInt(s string, base int) (int, error)
-extern func ParseFloat(s string) (float64, error)
-extern func FormatInt(i int, base int) string
-extern func FormatFloat(f float64, fmt string, prec int) string
-extern func FormatBool(b bool) string
-extern func ParseBool(s string) (bool, error)
-extern func Quote(s string) string
+func Atoi(s string) (int, error)
+func Itoa(i int) string
+func ParseInt(s string, base int) (int, error)
+func ParseFloat(s string) (float64, error)
+func FormatInt(i int, base int) string
+func FormatFloat(f float64, fmt string, prec int) string
+func FormatBool(b bool) string
+func ParseBool(s string) (bool, error)
+func Quote(s string) string
 
 // GoX-implemented functions
 

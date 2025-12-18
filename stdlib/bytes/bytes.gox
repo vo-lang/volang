@@ -1,11 +1,11 @@
 package bytes
 
 // Extern functions (implemented in Rust)
-extern func Index(s, sep []byte) int
-extern func LastIndex(s, sep []byte) int
-extern func Count(s, sep []byte) int
-extern func Compare(a, b []byte) int
-extern func Equal(a, b []byte) bool
+func Index(s, sep []byte) int
+func LastIndex(s, sep []byte) int
+func Count(s, sep []byte) int
+func Compare(a, b []byte) int
+func Equal(a, b []byte) bool
 
 // GoX-implemented functions
 

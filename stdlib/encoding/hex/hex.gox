@@ -1,8 +1,8 @@
 package hex
 
 // Extern functions (implemented in Rust)
-extern func EncodeToString(src []byte) string
-extern func DecodeString(s string) ([]byte, error)
+func EncodeToString(src []byte) string
+func DecodeString(s string) ([]byte, error)
 
 // GoX-implemented functions
 

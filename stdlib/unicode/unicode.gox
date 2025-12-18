@@ -1,10 +1,10 @@
 package unicode
 
 // Extern functions (implemented in Rust)
-extern func IsLetter(r rune) bool
-extern func IsDigit(r rune) bool
-extern func IsSpace(r rune) bool
-extern func IsUpper(r rune) bool
-extern func IsLower(r rune) bool
-extern func ToLower(r rune) rune
-extern func ToUpper(r rune) rune
+func IsLetter(r rune) bool
+func IsDigit(r rune) bool
+func IsSpace(r rune) bool
+func IsUpper(r rune) bool
+func IsLower(r rune) bool
+func ToLower(r rune) rune
+func ToUpper(r rune) rune

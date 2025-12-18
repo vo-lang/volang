@@ -57,6 +57,21 @@ pub fn split(s: &str, sep: &str) -> Vec<String> {
     }
 }
 
+/// Split string by separator with limit.
+pub fn split_n(s: &str, sep: &str, n: i64) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n < 0 {
+        return split(s, sep);
+    }
+    if sep.is_empty() {
+        s.chars().take(n as usize).map(|c| c.to_string()).collect()
+    } else {
+        s.splitn(n as usize, sep).map(|p| p.to_string()).collect()
+    }
+}
+
 /// Join strings with separator.
 pub fn join(parts: &[&str], sep: &str) -> String {
     parts.join(sep)

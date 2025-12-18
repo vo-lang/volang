@@ -1,9 +1,9 @@
 package sort
 
 // Extern functions (implemented in Rust)
-extern func Ints(x []int)
-extern func Float64s(x []float64)
-extern func Strings(x []string)
+func Ints(x []int)
+func Float64s(x []float64)
+func Strings(x []string)
 
 // GoX-implemented functions
 

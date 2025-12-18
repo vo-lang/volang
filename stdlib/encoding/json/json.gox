@@ -1,7 +1,7 @@
 package json
 
 // Extern functions (implemented in Rust)
-extern func Valid(data []byte) bool
+func Valid(data []byte) bool
 
 // Marshal returns the JSON encoding of v.
 func Marshal(v interface{}) ([]byte, error) {

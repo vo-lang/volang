@@ -1,7 +1,7 @@
 package regexp
 
 // Extern functions (implemented in Rust)
-extern func MatchString(pattern, s string) (bool, error)
+func MatchString(pattern, s string) (bool, error)
 
 // Regexp is the representation of a compiled regular expression.
 type Regexp struct {

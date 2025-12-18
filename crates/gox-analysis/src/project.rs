@@ -279,9 +279,16 @@ fn parse_packages(
             
             // Take ownership temporarily, then put it back
             let interner_owned = std::mem::take(shared_interner);
-            let (ast, _diag, interner) = parse_with_interner(&content, base_offset, interner_owned);
+            let (ast, diag, interner) = parse_with_interner(&content, base_offset, interner_owned);
             *shared_interner = interner;
             base_offset += content.len() as u32 + 1; // Add 1 for gap between files
+            
+            // Check for parse errors
+            if diag.has_errors() {
+                let emitter = DiagnosticEmitter::new(&source_map);
+                let error_details = emitter.emit_all_to_string(&diag);
+                return Err(ProjectError::Parse(error_details));
+            }
             
             // Extract imports with kind and alias info from AST
             for imp in &ast.imports {
@@ -451,10 +458,19 @@ fn load_stdlib_packages(
             for vfs_file in &vfs_pkg.files {
                 let content = &vfs_file.content;
                 let file_name = vfs_file.path.to_string_lossy().to_string();
-                source_map.add_file(file_name, content.clone());
-                let (ast, _diag, new_interner) = parse_with_interner(content, stdlib_base, current_interner);
+                source_map.add_file(file_name.clone(), content.clone());
+                let (ast, diag, new_interner) = parse_with_interner(content, stdlib_base, current_interner);
                 current_interner = new_interner;
                 stdlib_base += content.len() as u32 + 1;
+                
+                // Check for parse errors in stdlib
+                if diag.has_errors() {
+                    *shared_interner = current_interner;
+                    let emitter = DiagnosticEmitter::new(&source_map);
+                    let error_details = emitter.emit_all_to_string(&diag);
+                    return Err(ProjectError::Parse(format!("in stdlib/{}: {}", pkg_name, error_details)));
+                }
+                
                 files.push((vfs_file.path.clone(), ast));
             }
             
