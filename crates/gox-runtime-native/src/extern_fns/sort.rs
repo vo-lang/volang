@@ -50,6 +50,35 @@ pub unsafe extern "C" fn gox_sort_float64s(s: GcRef) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gox_sort_strings(s: GcRef) {
+    use gox_runtime_core::objects::string;
+    
+    let len = slice::len(s);
+    let arr = slice::array_ref(s);
+    let start = slice::start(s);
+    
+    // Collect string refs and their string values
+    let mut pairs: Vec<(usize, &str)> = Vec::with_capacity(len);
+    for i in 0..len {
+        let str_ref = Gc::read_slot(arr, 3 + start + i) as GcRef;
+        pairs.push((i, string::as_str(str_ref)));
+    }
+    
+    // Sort by string content
+    pairs.sort_by(|a, b| a.1.cmp(b.1));
+    
+    // Collect sorted refs
+    let sorted_refs: Vec<u64> = pairs.iter().map(|(idx, _)| {
+        Gc::read_slot(arr, 3 + start + idx)
+    }).collect();
+    
+    // Write back sorted refs
+    for (i, &ref_val) in sorted_refs.iter().enumerate() {
+        Gc::write_slot(arr, 3 + start + i, ref_val);
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gox_sort_ints_are_sorted(s: GcRef) -> bool {
     get_i64_slice(s).windows(2).all(|w| w[0] <= w[1])
 }

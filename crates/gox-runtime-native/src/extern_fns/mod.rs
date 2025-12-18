@@ -416,6 +416,11 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         unsafe { sort::gox_sort_float64s(s) };
         Ok(())
     });
+    register("sort.Strings", |args, _rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        unsafe { sort::gox_sort_strings(s) };
+        Ok(())
+    });
     
     // bytes package
     register("bytes.Index", |args, rets| {
