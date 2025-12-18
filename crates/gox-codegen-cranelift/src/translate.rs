@@ -1358,19 +1358,50 @@ impl FunctionTranslator {
 
             Opcode::ClosureCall => {
                 // a=closure_reg, b=arg_start, c=arg_count, flags=ret_count
-                // Get the function ID from the closure
                 let closure = builder.use_var(self.variables[inst.a as usize]);
-                let func_ref_get = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ClosureFuncId)?;
-                let call = builder.ins().call(func_ref_get, &[closure]);
-                let func_id_val = builder.inst_results(call)[0];
+                let arg_start = inst.b as usize;
+                let arg_count = inst.c as usize;
+                let ret_count = inst.flags as usize;
                 
-                // For now, closure calls are complex - we'd need indirect calls
-                // Just store the closure for later use (simplified)
-                // TODO: Implement proper indirect function calls for closures
-                let _ = func_id_val;
+                // 1. Get func_id from closure (inline load from slot 0)
+                let func_id = builder.ins().load(I64, cranelift_codegen::ir::MemFlags::trusted(), closure, 0);
                 
-                // For basic support, we skip the actual call implementation
-                // This would need indirect_call support in Cranelift
+                // 2. Get function table pointer
+                let table_func = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::FuncTablePtr)?;
+                let table_call = builder.ins().call(table_func, &[]);
+                let table_ptr = builder.inst_results(table_call)[0];
+                
+                // 3. Calculate address: table_ptr + func_id * 8
+                let offset = builder.ins().imul_imm(func_id, 8);
+                let addr = builder.ins().iadd(table_ptr, offset);
+                let func_ptr = builder.ins().load(I64, cranelift_codegen::ir::MemFlags::trusted(), addr, 0);
+                
+                // 4. Prepare arguments (closure is implicit first arg for upvalue access)
+                let mut args = Vec::with_capacity(arg_count + 1);
+                args.push(closure);  // closure as first arg (r0 in callee)
+                for i in 0..arg_count {
+                    args.push(builder.use_var(self.variables[arg_start + i]));
+                }
+                
+                // 5. Create signature for indirect call (closure + args, all i64)
+                let mut sig = module.make_signature();
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(I64));  // closure
+                for _ in 0..arg_count {
+                    sig.params.push(cranelift_codegen::ir::AbiParam::new(I64));
+                }
+                for _ in 0..ret_count {
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(I64));
+                }
+                let sig_ref = builder.import_signature(sig);
+                
+                // 6. Indirect call
+                let call = builder.ins().call_indirect(sig_ref, func_ptr, &args);
+                
+                // 7. Store return values
+                let results: Vec<_> = builder.inst_results(call).to_vec();
+                for (i, result) in results.into_iter().enumerate() {
+                    builder.def_var(self.variables[arg_start + i], result);
+                }
             }
 
             Opcode::UpvalNew => {

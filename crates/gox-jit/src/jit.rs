@@ -64,6 +64,9 @@ impl JitCompiler {
         let total_global_slots: usize = bytecode.globals.iter().map(|g| g.slots as usize).sum();
         gox_runtime_native::init_globals(total_global_slots);
         
+        // Initialize function pointer table for indirect calls (closures)
+        gox_runtime_native::init_func_table(bytecode.functions.len());
+        
         let mut compile_ctx = CompileContext::new(bytecode, self.call_conv);
         
         // Phase 1: Declare all functions
@@ -90,11 +93,14 @@ impl JitCompiler {
         // Phase 3: Finalize all definitions
         self.module.finalize_definitions()?;
         
-        // Phase 4: Store function pointers
+        // Phase 4: Store function pointers and populate function table
         for (idx, func_def) in bytecode.functions.iter().enumerate() {
             let func_id = compile_ctx.get_gox_func(idx as u32).unwrap();
             let code_ptr = self.module.get_finalized_function(func_id);
             self.functions.insert(func_def.name.clone(), code_ptr);
+            
+            // Also populate the function table for indirect calls
+            gox_runtime_native::set_func_ptr(idx as u32, code_ptr);
         }
         
         Ok(())

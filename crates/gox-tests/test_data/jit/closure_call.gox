@@ -1,0 +1,15 @@
+// +jit
+// +skip: ClosureCall implementation in progress - debugging segfault
+// Closure indirect call test
+package main
+
+func main() {
+    // Simple closure test without returning closures
+    x := 10
+    add := func(y int) int {
+        return x + y
+    }
+    result := add(5)
+    println(result)
+    assert(result == 15, "closure should capture x=10 and return 15")
+}

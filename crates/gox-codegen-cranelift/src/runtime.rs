@@ -120,6 +120,9 @@ pub enum RuntimeFunc {
     AssertBegin,
     AssertArg,
     AssertEnd,
+
+    // === Function Table (1) ===
+    FuncTablePtr,
 }
 
 impl RuntimeFunc {
@@ -214,6 +217,8 @@ impl RuntimeFunc {
             RuntimeFunc::AssertBegin => "gox_assert_begin",
             RuntimeFunc::AssertArg => "gox_assert_arg",
             RuntimeFunc::AssertEnd => "gox_assert_end",
+            // Function table
+            RuntimeFunc::FuncTablePtr => "gox_func_table_ptr",
         }
     }
 
@@ -569,6 +574,12 @@ impl RuntimeFunc {
             }
             RuntimeFunc::AssertEnd => {
                 // No params - checks if assert failed and terminates if so
+            }
+            
+            // === Function Table ===
+            RuntimeFunc::FuncTablePtr => {
+                // () -> ptr
+                sig.returns.push(AbiParam::new(I64));  // table pointer
             }
         }
         

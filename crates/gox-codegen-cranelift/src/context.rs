@@ -66,8 +66,16 @@ impl<'a> CompileContext<'a> {
     ) -> Result<FuncId> {
         let mut sig = module.make_signature();
         
+        // Closure functions have an implicit closure parameter in r0
+        let is_closure = func_def.name.contains("$closure");
+        let param_count = if is_closure {
+            func_def.param_slots + 1  // +1 for implicit closure arg
+        } else {
+            func_def.param_slots
+        };
+        
         // All params are i64 (one slot each for now)
-        for _ in 0..func_def.param_slots {
+        for _ in 0..param_count {
             sig.params.push(AbiParam::new(I64));
         }
         

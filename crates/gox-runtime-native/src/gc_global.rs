@@ -9,7 +9,11 @@ use gox_runtime_core::gc::{Gc, GcRef, TypeId};
 thread_local! {
     static GLOBAL_GC: RefCell<Gc> = RefCell::new(Gc::new());
     static GLOBALS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static FUNC_TABLE: RefCell<Vec<*const u8>> = RefCell::new(Vec::new());
 }
+
+// Global pointer to function table for Cranelift symbol access
+static mut FUNC_TABLE_PTR: *const *const u8 = std::ptr::null();
 
 /// Initialize or reset the global GC.
 pub fn init_gc() {
@@ -25,6 +29,34 @@ pub fn init_globals(size: usize) {
         globals.clear();
         globals.resize(size, 0);
     });
+}
+
+/// Initialize function pointer table with the given size.
+pub fn init_func_table(size: usize) {
+    FUNC_TABLE.with(|t| {
+        let mut table = t.borrow_mut();
+        table.clear();
+        table.resize(size, std::ptr::null());
+        // Update global pointer for Cranelift access
+        unsafe {
+            FUNC_TABLE_PTR = table.as_ptr();
+        }
+    });
+}
+
+/// Set a function pointer in the table.
+pub fn set_func_ptr(func_id: u32, ptr: *const u8) {
+    FUNC_TABLE.with(|t| {
+        let mut table = t.borrow_mut();
+        debug_assert!((func_id as usize) < table.len());
+        table[func_id as usize] = ptr;
+    });
+}
+
+/// Get the function table pointer (for JIT symbol registration).
+#[no_mangle]
+pub extern "C" fn gox_func_table_ptr() -> *const *const u8 {
+    unsafe { FUNC_TABLE_PTR }
 }
 
 // =============================================================================
