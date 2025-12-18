@@ -743,7 +743,107 @@ impl FunctionTranslator {
                 builder.ins().call(func_ref, &[obj, idx_val, val]);
             }
 
+            Opcode::GetFieldN => {
+                // a=dest_start, b=obj, c=count, flags=field_idx
+                let obj = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcReadSlot)?;
+                for i in 0..inst.c {
+                    let idx = builder.ins().iconst(I64, (inst.flags + i as u8) as i64);
+                    let call = builder.ins().call(func_ref, &[obj, idx]);
+                    let val = builder.inst_results(call)[0];
+                    builder.def_var(self.variables[(inst.a + i) as usize], val);
+                }
+            }
+
+            Opcode::SetFieldN => {
+                // a=obj, b=src_start, c=count, flags=field_idx
+                let obj = builder.use_var(self.variables[inst.a as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::GcWriteSlot)?;
+                for i in 0..inst.c {
+                    let val = builder.use_var(self.variables[(inst.b + i) as usize]);
+                    let idx = builder.ins().iconst(I64, (inst.flags + i as u8) as i64);
+                    builder.ins().call(func_ref, &[obj, idx, val]);
+                }
+            }
+
+            // ==================== Array operations ====================
+            Opcode::ArrayNew => {
+                // a=dest, b=elem_type, c=len
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // ARRAY type_id
+                let elem_type = builder.ins().iconst(cranelift_codegen::ir::types::I32, inst.b as i64);
+                let elem_size = builder.ins().iconst(I64, 1); // Default elem_size=1
+                let len = builder.ins().iconst(I64, inst.c as i64);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayCreate)?;
+                let call = builder.ins().call(func_ref, &[type_id, elem_type, elem_size, len]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ArrayGet => {
+                let arr = builder.use_var(self.variables[inst.b as usize]);
+                let idx = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayGet)?;
+                let call = builder.ins().call(func_ref, &[arr, idx]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::ArraySet => {
+                let arr = builder.use_var(self.variables[inst.a as usize]);
+                let idx = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArraySet)?;
+                builder.ins().call(func_ref, &[arr, idx, val]);
+            }
+
+            Opcode::ArrayLen => {
+                let arr = builder.use_var(self.variables[inst.b as usize]);
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayLen)?;
+                let call = builder.ins().call(func_ref, &[arr]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
             // ==================== Slice operations ====================
+            Opcode::SliceNew => {
+                // a=dest, b=array, c=start, flags=end
+                let arr = builder.use_var(self.variables[inst.b as usize]);
+                let start = builder.ins().iconst(I64, inst.c as i64);
+                let end = inst.flags as i64;
+                let len = builder.ins().iconst(I64, end - inst.c as i64);
+                // Cap = array_len - start (simplified, using end - start for now)
+                let cap = builder.ins().iconst(I64, end - inst.c as i64);
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // SLICE type_id
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceCreate)?;
+                let call = builder.ins().call(func_ref, &[type_id, arr, start, len, cap]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SliceSlice => {
+                // a=dest, b=slice, c=start_reg, flags=end_reg
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let start = builder.use_var(self.variables[inst.c as usize]);
+                let end = builder.use_var(self.variables[inst.flags as usize]);
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // SLICE type_id
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceSlice)?;
+                let call = builder.ins().call(func_ref, &[type_id, slice, start, end]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
+            Opcode::SliceAppend => {
+                // a=dest, b=slice, c=value
+                let slice = builder.use_var(self.variables[inst.b as usize]);
+                let val = builder.use_var(self.variables[inst.c as usize]);
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // SLICE type_id
+                let arr_type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // ARRAY type_id
+                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceAppend)?;
+                let call = builder.ins().call(func_ref, &[type_id, arr_type_id, slice, val]);
+                let result = builder.inst_results(call)[0];
+                builder.def_var(self.variables[inst.a as usize], result);
+            }
+
             Opcode::SliceLen => {
                 let slice = builder.use_var(self.variables[inst.b as usize]);
                 let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceLen)?;
@@ -775,41 +875,6 @@ impl FunctionTranslator {
                 let val = builder.use_var(self.variables[inst.c as usize]);
                 let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceSet)?;
                 builder.ins().call(func_ref, &[slice, idx, val]);
-            }
-
-            Opcode::SliceAppend => {
-                let slice = builder.use_var(self.variables[inst.b as usize]);
-                let val = builder.use_var(self.variables[inst.c as usize]);
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::SliceAppend)?;
-                let call = builder.ins().call(func_ref, &[slice, val]);
-                let result = builder.inst_results(call)[0];
-                builder.def_var(self.variables[inst.a as usize], result);
-            }
-
-            // ==================== Array operations ====================
-            Opcode::ArrayLen => {
-                let arr = builder.use_var(self.variables[inst.b as usize]);
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayLen)?;
-                let call = builder.ins().call(func_ref, &[arr]);
-                let result = builder.inst_results(call)[0];
-                builder.def_var(self.variables[inst.a as usize], result);
-            }
-
-            Opcode::ArrayGet => {
-                let arr = builder.use_var(self.variables[inst.b as usize]);
-                let idx = builder.use_var(self.variables[inst.c as usize]);
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArrayGet)?;
-                let call = builder.ins().call(func_ref, &[arr, idx]);
-                let result = builder.inst_results(call)[0];
-                builder.def_var(self.variables[inst.a as usize], result);
-            }
-
-            Opcode::ArraySet => {
-                let arr = builder.use_var(self.variables[inst.a as usize]);
-                let idx = builder.use_var(self.variables[inst.b as usize]);
-                let val = builder.use_var(self.variables[inst.c as usize]);
-                let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::ArraySet)?;
-                builder.ins().call(func_ref, &[arr, idx, val]);
             }
 
             // ==================== Map operations ====================
