@@ -9,7 +9,7 @@
 //! ```text
 //! stdlib/           <- Core logic (this module)
 //!    │
-//!    ├── VM Binding (gox-runtime-vm/stdlib, NativeCtx)
+//!    ├── VM Binding (gox-runtime-vm/stdlib, ExternCtx)
 //!    ├── C ABI Binding (gox-runtime-core/ffi.rs, extern "C")
 //!    └── WASI Binding (future)
 //! ```

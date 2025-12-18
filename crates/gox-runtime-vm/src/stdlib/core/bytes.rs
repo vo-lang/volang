@@ -4,12 +4,12 @@
 //! GoX implementations: Equal, Compare, HasPrefix, HasSuffix, Contains, TrimPrefix, TrimSuffix
 
 use gox_vm::gc::{Gc, GcRef};
-use gox_vm::native::{NativeCtx, NativeResult, NativeRegistry};
+use gox_vm::extern_fn::{ExternCtx, ExternResult, ExternRegistry};
 use gox_vm::objects::{array, slice};
 use gox_vm::types::builtin;
 use gox_runtime_core::stdlib::bytes;
 
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     registry.register("bytes.Index", native_index);
     registry.register("bytes.LastIndex", native_last_index);
     registry.register("bytes.Count", native_count);
@@ -40,89 +40,89 @@ fn create_byte_slice(gc: &mut Gc, data: &[u8]) -> GcRef {
     slice::from_array(gc, builtin::SLICE, arr)
 }
 
-fn native_index(ctx: &mut NativeCtx) -> NativeResult {
+fn native_index(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let sep = read_bytes(ctx.arg_ref(1));
     ctx.ret_i64(0, bytes::index(&b, &sep));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_last_index(ctx: &mut NativeCtx) -> NativeResult {
+fn native_last_index(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let sep = read_bytes(ctx.arg_ref(1));
     ctx.ret_i64(0, bytes::last_index(&b, &sep));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_count(ctx: &mut NativeCtx) -> NativeResult {
+fn native_count(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let sep = read_bytes(ctx.arg_ref(1));
     ctx.ret_i64(0, bytes::count(&b, &sep) as i64);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_index_byte(ctx: &mut NativeCtx) -> NativeResult {
+fn native_index_byte(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     ctx.ret_i64(0, bytes::index_byte(&b, ctx.arg_i64(1) as u8));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_last_index_byte(ctx: &mut NativeCtx) -> NativeResult {
+fn native_last_index_byte(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     ctx.ret_i64(0, bytes::last_index_byte(&b, ctx.arg_i64(1) as u8));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_to_lower(ctx: &mut NativeCtx) -> NativeResult {
+fn native_to_lower(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let result = bytes::to_lower(&b);
     let slice_ref = create_byte_slice(ctx.gc(), &result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_to_upper(ctx: &mut NativeCtx) -> NativeResult {
+fn native_to_upper(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let result = bytes::to_upper(&b);
     let slice_ref = create_byte_slice(ctx.gc(), &result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_trim_space(ctx: &mut NativeCtx) -> NativeResult {
+fn native_trim_space(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let result = bytes::trim_space(&b);
     let slice_ref = create_byte_slice(ctx.gc(), result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_trim(ctx: &mut NativeCtx) -> NativeResult {
+fn native_trim(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let cutset_str = ctx.arg_str(1).to_string();
     let result = bytes::trim(&b, cutset_str.as_bytes());
     let slice_ref = create_byte_slice(ctx.gc(), result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_repeat(ctx: &mut NativeCtx) -> NativeResult {
+fn native_repeat(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let count = ctx.arg_i64(1) as usize;
     let result = bytes::repeat(&b, count);
     let slice_ref = create_byte_slice(ctx.gc(), &result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_join(ctx: &mut NativeCtx) -> NativeResult {
+fn native_join(ctx: &mut ExternCtx) -> ExternResult {
     let s_slice = ctx.arg_ref(0);
     let sep = read_bytes(ctx.arg_ref(1));
     
     if s_slice.is_null() || slice::len(s_slice) == 0 {
         let slice_ref = create_byte_slice(ctx.gc(), &[]);
         ctx.ret_ref(0, slice_ref);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let s_len = slice::len(s_slice);
@@ -133,10 +133,10 @@ fn native_join(ctx: &mut NativeCtx) -> NativeResult {
     let result = bytes::join(&refs, &sep);
     let slice_ref = create_byte_slice(ctx.gc(), &result);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_split(ctx: &mut NativeCtx) -> NativeResult {
+fn native_split(ctx: &mut ExternCtx) -> ExternResult {
     let b = read_bytes(ctx.arg_ref(0));
     let sep = read_bytes(ctx.arg_ref(1));
     let parts = bytes::split(&b, &sep);
@@ -149,6 +149,6 @@ fn native_split(ctx: &mut NativeCtx) -> NativeResult {
     }
     let result = slice::from_array(gc, builtin::SLICE, arr);
     ctx.ret_ref(0, result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 

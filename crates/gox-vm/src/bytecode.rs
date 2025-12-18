@@ -81,9 +81,9 @@ impl FunctionDef {
     }
 }
 
-/// Native function definition.
+/// Extern function definition (functions called from GoX to outside).
 #[derive(Clone, Debug)]
-pub struct NativeDef {
+pub struct ExternDef {
     pub name: String,
     pub param_slots: u16,
     pub ret_slots: u16,
@@ -104,7 +104,7 @@ pub struct Module {
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
-    pub natives: Vec<NativeDef>,
+    pub externs: Vec<ExternDef>,
     pub entry_func: u32,
 }
 
@@ -116,7 +116,7 @@ impl Module {
             constants: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),
-            natives: Vec::new(),
+            externs: Vec::new(),
             entry_func: 0,
         }
     }
@@ -145,10 +145,10 @@ impl Module {
         idx as u32
     }
     
-    /// Add a native function reference and return its index.
-    pub fn add_native(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
-        let idx = self.natives.len();
-        self.natives.push(NativeDef {
+    /// Add an extern function reference and return its index.
+    pub fn add_extern(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
+        let idx = self.externs.len();
+        self.externs.push(ExternDef {
             name: name.to_string(),
             param_slots,
             ret_slots,
@@ -161,9 +161,9 @@ impl Module {
         self.functions.get(id as usize)
     }
     
-    /// Get native by ID.
-    pub fn get_native(&self, id: u32) -> Option<&NativeDef> {
-        self.natives.get(id as usize)
+    /// Get extern by ID.
+    pub fn get_extern(&self, id: u32) -> Option<&ExternDef> {
+        self.externs.get(id as usize)
     }
     
     /// Find function by name.
@@ -171,9 +171,9 @@ impl Module {
         self.functions.iter().position(|f| f.name == name).map(|i| i as u32)
     }
     
-    /// Find native by name.
-    pub fn find_native(&self, name: &str) -> Option<u32> {
-        self.natives.iter().position(|n| n.name == name).map(|i| i as u32)
+    /// Find extern by name.
+    pub fn find_extern(&self, name: &str) -> Option<u32> {
+        self.externs.iter().position(|n| n.name == name).map(|i| i as u32)
     }
     
     /// Serialize module to bytes.
@@ -208,9 +208,9 @@ impl Module {
             write_u16(&mut buf, g.slots);
         }
         
-        // Natives section
-        write_u32(&mut buf, self.natives.len() as u32);
-        for n in &self.natives {
+        // Externs section
+        write_u32(&mut buf, self.externs.len() as u32);
+        for n in &self.externs {
             write_string(&mut buf, &n.name);
             write_u16(&mut buf, n.param_slots);
             write_u16(&mut buf, n.ret_slots);
@@ -271,14 +271,14 @@ impl Module {
             globals.push(GlobalDef { name: g_name, slots });
         }
         
-        // Natives section
-        let native_count = read_u32(&mut cursor)?;
-        let mut natives = Vec::with_capacity(native_count as usize);
-        for _ in 0..native_count {
+        // Externs section
+        let extern_count = read_u32(&mut cursor)?;
+        let mut externs = Vec::with_capacity(extern_count as usize);
+        for _ in 0..extern_count {
             let n_name = read_string(&mut cursor)?;
             let param_slots = read_u16(&mut cursor)?;
             let ret_slots = read_u16(&mut cursor)?;
-            natives.push(NativeDef { name: n_name, param_slots, ret_slots });
+            externs.push(ExternDef { name: n_name, param_slots, ret_slots });
         }
         
         // Functions section
@@ -294,7 +294,7 @@ impl Module {
             constants,
             globals,
             functions,
-            natives,
+            externs,
             entry_func,
         })
     }
@@ -565,7 +565,7 @@ mod tests {
         let mut module = Module::new("test");
         module.add_constant(Constant::Int(42));
         module.add_constant(Constant::String("hello".to_string()));
-        module.add_native("println", 1, 0);
+        module.add_extern("println", 1, 0);
         
         let mut func = FunctionDef::new("main");
         func.local_slots = 10;
@@ -578,7 +578,7 @@ mod tests {
         
         assert_eq!(decoded.name, "test");
         assert_eq!(decoded.constants.len(), 2);
-        assert_eq!(decoded.natives.len(), 1);
+        assert_eq!(decoded.externs.len(), 1);
         assert_eq!(decoded.functions.len(), 1);
         assert_eq!(decoded.functions[0].code.len(), 2);
     }

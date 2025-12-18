@@ -1,11 +1,11 @@
 //! Native implementations for the regexp package.
 
-use gox_vm::native::{NativeCtx, NativeResult, NativeRegistry};
+use gox_vm::extern_fn::{ExternCtx, ExternResult, ExternRegistry};
 use gox_vm::objects::{array, slice, string};
 use gox_vm::types::builtin;
 use regex::Regex;
 
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     registry.register("regexp.Match", native_match);
     registry.register("regexp.QuoteMeta", native_quote_meta);
     registry.register("regexp.MatchString", native_match_string);
@@ -16,7 +16,7 @@ pub fn register(registry: &mut NativeRegistry) {
 }
 
 /// regexp.Match(pattern, s string) (bool, error)
-fn native_match(ctx: &mut NativeCtx) -> NativeResult {
+fn native_match(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let s = ctx.arg_str(1).to_string();
     
@@ -30,19 +30,19 @@ fn native_match(ctx: &mut NativeCtx) -> NativeResult {
             ctx.ret_string(1, &e.to_string());
         }
     }
-    NativeResult::Ok(2)
+    ExternResult::Ok(2)
 }
 
 /// regexp.QuoteMeta(s string) string
-fn native_quote_meta(ctx: &mut NativeCtx) -> NativeResult {
+fn native_quote_meta(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let result = regex::escape(s);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// (re *Regexp) MatchString(s string) bool
-fn native_match_string(ctx: &mut NativeCtx) -> NativeResult {
+fn native_match_string(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let s = ctx.arg_str(1).to_string();
     
@@ -51,11 +51,11 @@ fn native_match_string(ctx: &mut NativeCtx) -> NativeResult {
         .unwrap_or(false);
     
     ctx.ret_bool(0, matched);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// (re *Regexp) FindString(s string) string
-fn native_find_string(ctx: &mut NativeCtx) -> NativeResult {
+fn native_find_string(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let s = ctx.arg_str(1).to_string();
     
@@ -66,11 +66,11 @@ fn native_find_string(ctx: &mut NativeCtx) -> NativeResult {
         .unwrap_or_default();
     
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// (re *Regexp) FindAllString(s string, n int) []string
-fn native_find_all_string(ctx: &mut NativeCtx) -> NativeResult {
+fn native_find_all_string(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let s = ctx.arg_str(1).to_string();
     let n = ctx.arg_i64(2);
@@ -94,11 +94,11 @@ fn native_find_all_string(ctx: &mut NativeCtx) -> NativeResult {
     }
     let result = slice::from_array(gc, builtin::SLICE, arr);
     ctx.ret_ref(0, result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// (re *Regexp) ReplaceAllString(src, repl string) string
-fn native_replace_all_string(ctx: &mut NativeCtx) -> NativeResult {
+fn native_replace_all_string(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let src = ctx.arg_str(1).to_string();
     let repl = ctx.arg_str(2).to_string();
@@ -108,11 +108,11 @@ fn native_replace_all_string(ctx: &mut NativeCtx) -> NativeResult {
         .unwrap_or(src);
     
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// (re *Regexp) Split(s string, n int) []string
-fn native_split(ctx: &mut NativeCtx) -> NativeResult {
+fn native_split(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let s = ctx.arg_str(1).to_string();
     let n = ctx.arg_i64(2);
@@ -138,5 +138,5 @@ fn native_split(ctx: &mut NativeCtx) -> NativeResult {
     }
     let result = slice::from_array(gc, builtin::SLICE, arr);
     ctx.ret_ref(0, result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }

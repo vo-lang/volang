@@ -22,7 +22,7 @@ pub mod fiber;
 pub mod objects;
 pub mod bytecode;
 pub mod vm;
-pub mod native;
+pub mod extern_fn;
 pub mod value;
 
 #[cfg(feature = "multithread")]
@@ -35,10 +35,10 @@ pub use fiber::{Fiber, FiberId, FiberStatus, CallFrame, Scheduler};
 pub use bytecode::{Module, FunctionDef, Constant, BytecodeError};
 pub use vm::{Vm, VmResult};
 
-// New zero-copy native API
-pub use native::{NativeFn, NativeCtx, NativeResult, NativeRegistry, TypeTag};
+// Zero-copy extern API (extern = calls from GoX to outside)
+pub use extern_fn::{ExternFn, ExternCtx, ExternResult, ExternRegistry, TypeTag};
 
-// Typed value for native functions
+// Typed value for extern functions
 pub use value::GoxValue;
 
 // Re-export ValueKind from common

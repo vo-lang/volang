@@ -1,18 +1,20 @@
-//! Zero-copy native function interface.
+//! Zero-copy extern function interface.
 //!
-//! This module provides a high-performance FFI for native functions that:
+//! This module provides a high-performance FFI for extern functions that:
 //! - Directly accesses VM registers (no Vec allocation)
 //! - Supports zero-copy string borrowing
 //! - Converts types only when needed
 //!
+//! "Extern" means any function called from GoX to outside (native runtime).
+//!
 //! # Example
 //!
 //! ```ignore
-//! fn native_println(ctx: &mut NativeCtx) -> NativeResult {
+//! fn extern_println(ctx: &mut ExternCtx) -> ExternResult {
 //!     let output = ctx.format_all();
 //!     println!("{}", output);
 //!     ctx.ret_i64(0, output.len() as i64);
-//!     NativeResult::Ok(1)
+//!     ExternResult::Ok(1)
 //! }
 //! ```
 
@@ -26,23 +28,23 @@ use crate::types::builtin;
 // Re-export TypeTag for native function implementations
 pub use gox_common_core::ValueKind as TypeTag;
 
-/// Native function signature - direct register access.
-pub type NativeFn = fn(ctx: &mut NativeCtx) -> NativeResult;
+/// Extern function signature - direct register access.
+pub type ExternFn = fn(ctx: &mut ExternCtx) -> ExternResult;
 
-/// Native function execution result.
+/// Extern function execution result.
 #[derive(Debug)]
-pub enum NativeResult {
+pub enum ExternResult {
     /// Success with number of return values written.
     Ok(u8),
     /// Panic with error message.
     Panic(String),
 }
 
-/// Native function context - provides type-safe register access.
+/// Extern function context - provides type-safe register access.
 ///
 /// Arguments are laid out as pairs: [type0, val0, type1, val1, ...]
 /// Return values are written starting at ret_base.
-pub struct NativeCtx<'a> {
+pub struct ExternCtx<'a> {
     /// GC for allocations
     gc: &'a mut Gc,
     /// Register file (borrowed from fiber)
@@ -55,8 +57,8 @@ pub struct NativeCtx<'a> {
     ret_base: usize,
 }
 
-impl<'a> NativeCtx<'a> {
-    /// Create a new native context.
+impl<'a> ExternCtx<'a> {
+    /// Create a new extern context.
     #[inline]
     pub fn new(
         gc: &'a mut Gc,
@@ -252,13 +254,13 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
-/// Native function registry.
+/// Extern function registry.
 #[derive(Default)]
-pub struct NativeRegistry {
-    funcs: HashMap<String, NativeFn>,
+pub struct ExternRegistry {
+    funcs: HashMap<String, ExternFn>,
 }
 
-impl NativeRegistry {
+impl ExternRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -266,13 +268,13 @@ impl NativeRegistry {
         }
     }
 
-    /// Register a native function.
-    pub fn register(&mut self, name: &str, func: NativeFn) {
+    /// Register an extern function.
+    pub fn register(&mut self, name: &str, func: ExternFn) {
         self.funcs.insert(name.to_string(), func);
     }
 
-    /// Get a native function by name.
-    pub fn get(&self, name: &str) -> Option<NativeFn> {
+    /// Get an extern function by name.
+    pub fn get(&self, name: &str) -> Option<ExternFn> {
         self.funcs.get(name).copied()
     }
 
@@ -300,11 +302,11 @@ mod tests {
 
     #[test]
     fn test_registry() {
-        fn dummy(_ctx: &mut NativeCtx) -> NativeResult {
-            NativeResult::Ok(0)
+        fn dummy(_ctx: &mut ExternCtx) -> ExternResult {
+            ExternResult::Ok(0)
         }
 
-        let mut registry = NativeRegistry::new();
+        let mut registry = ExternRegistry::new();
         registry.register("test.Dummy", dummy);
 
         assert!(registry.get("test.Dummy").is_some());

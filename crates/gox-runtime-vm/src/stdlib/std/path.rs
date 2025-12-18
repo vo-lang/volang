@@ -1,11 +1,11 @@
 //! Native implementations for the path package.
 
 use gox_vm::gc::GcRef;
-use gox_vm::native::{NativeCtx, NativeResult, NativeRegistry};
+use gox_vm::extern_fn::{ExternCtx, ExternResult, ExternRegistry};
 use gox_vm::objects::{slice, string};
 use std::path::Path;
 
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     registry.register("path.Base", native_base);
     registry.register("path.Dir", native_dir);
     registry.register("path.Ext", native_ext);
@@ -16,42 +16,42 @@ pub fn register(registry: &mut NativeRegistry) {
     registry.register("path.Match", native_match);
 }
 
-fn native_base(ctx: &mut NativeCtx) -> NativeResult {
+fn native_base(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0).to_string();
     let base = Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
     ctx.ret_string(0, &base);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_dir(ctx: &mut NativeCtx) -> NativeResult {
+fn native_dir(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0).to_string();
     let dir = Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
     ctx.ret_string(0, &dir);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_ext(ctx: &mut NativeCtx) -> NativeResult {
+fn native_ext(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0).to_string();
     let ext = Path::new(&path)
         .extension()
         .map(|s| format!(".{}", s.to_string_lossy()))
         .unwrap_or_default();
     ctx.ret_string(0, &ext);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_clean(ctx: &mut NativeCtx) -> NativeResult {
+fn native_clean(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0).to_string();
     // Simple path cleaning (normalize separators, remove redundant ..)
     let cleaned = clean_path(&path);
     ctx.ret_string(0, &cleaned);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 fn clean_path(path: &str) -> String {
@@ -85,12 +85,12 @@ fn clean_path(path: &str) -> String {
     }
 }
 
-fn native_join(ctx: &mut NativeCtx) -> NativeResult {
+fn native_join(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     
     if slice_ref.is_null() {
         ctx.ret_string(0, "");
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
@@ -109,10 +109,10 @@ fn native_join(ctx: &mut NativeCtx) -> NativeResult {
     let joined = parts.join("/");
     let cleaned = clean_path(&joined);
     ctx.ret_string(0, &cleaned);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_split(ctx: &mut NativeCtx) -> NativeResult {
+fn native_split(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0).to_string();
     let p = Path::new(&path);
     
@@ -129,23 +129,23 @@ fn native_split(ctx: &mut NativeCtx) -> NativeResult {
     
     ctx.ret_string(0, &dir);
     ctx.ret_string(1, &file);
-    NativeResult::Ok(2)
+    ExternResult::Ok(2)
 }
 
-fn native_is_abs(ctx: &mut NativeCtx) -> NativeResult {
+fn native_is_abs(ctx: &mut ExternCtx) -> ExternResult {
     let path = ctx.arg_str(0);
     ctx.ret_bool(0, path.starts_with('/'));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_match(ctx: &mut NativeCtx) -> NativeResult {
+fn native_match(ctx: &mut ExternCtx) -> ExternResult {
     let pattern = ctx.arg_str(0).to_string();
     let name = ctx.arg_str(1).to_string();
     
     // Simple glob matching
     let matched = glob_match(&pattern, &name);
     ctx.ret_bool(0, matched);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 fn glob_match(pattern: &str, name: &str) -> bool {

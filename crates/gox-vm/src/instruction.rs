@@ -194,8 +194,8 @@ pub enum Opcode {
     I32ToI64,
     I64ToI32,
     
-    // ============ Native call ============
-    CallNative = 230, // call native func a, args at b, c=arg_count, flags=ret_count
+    // ============ Extern call ============
+    CallExtern = 230, // call extern func a, args at b, c=arg_count, flags=ret_count
     
     // ============ Debug ============
     DebugPrint = 250,
@@ -342,7 +342,7 @@ impl Opcode {
             222 => Self::I32ToI64,
             223 => Self::I64ToI32,
             
-            230 => Self::CallNative,
+            230 => Self::CallExtern,
             
             250 => Self::DebugPrint,
             251 => Self::AssertBegin,

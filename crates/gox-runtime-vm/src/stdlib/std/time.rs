@@ -2,9 +2,9 @@
 //!
 //! All logic is in gox-runtime-core/src/stdlib/time.rs
 
-use gox_vm::native::{NativeCtx, NativeResult, NativeRegistry};
+use gox_vm::extern_fn::{ExternCtx, ExternResult, ExternRegistry};
 
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     registry.register("time.Now", native_now);
     registry.register("time.Sleep", native_sleep);
     registry.register("time.Since", native_since);
@@ -13,34 +13,34 @@ pub fn register(registry: &mut NativeRegistry) {
     registry.register("time.ParseDuration", native_parse_duration);
 }
 
-fn native_now(ctx: &mut NativeCtx) -> NativeResult {
+fn native_now(ctx: &mut ExternCtx) -> ExternResult {
     ctx.ret_i64(0, gox_runtime_core::stdlib::time::now());
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_sleep(ctx: &mut NativeCtx) -> NativeResult {
+fn native_sleep(ctx: &mut ExternCtx) -> ExternResult {
     gox_runtime_core::stdlib::time::sleep(ctx.arg_i64(0));
-    NativeResult::Ok(0)
+    ExternResult::Ok(0)
 }
 
-fn native_since(ctx: &mut NativeCtx) -> NativeResult {
+fn native_since(ctx: &mut ExternCtx) -> ExternResult {
     ctx.ret_i64(0, gox_runtime_core::stdlib::time::since(ctx.arg_i64(0)));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_unix(ctx: &mut NativeCtx) -> NativeResult {
+fn native_unix(ctx: &mut ExternCtx) -> ExternResult {
     ctx.ret_i64(0, gox_runtime_core::stdlib::time::unix(ctx.arg_i64(0), ctx.arg_i64(1)));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_unix_milli(ctx: &mut NativeCtx) -> NativeResult {
+fn native_unix_milli(ctx: &mut ExternCtx) -> ExternResult {
     ctx.ret_i64(0, gox_runtime_core::stdlib::time::unix_milli(ctx.arg_i64(0)));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_parse_duration(ctx: &mut NativeCtx) -> NativeResult {
+fn native_parse_duration(ctx: &mut ExternCtx) -> ExternResult {
     ctx.ret_i64(0, gox_runtime_core::stdlib::time::parse_duration(ctx.arg_str(0)));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 #[cfg(test)]

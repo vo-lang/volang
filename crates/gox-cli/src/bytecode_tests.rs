@@ -144,7 +144,7 @@ fn test_ffi() -> Result<(), Box<dyn std::error::Error>> {
     let hello_idx = module.add_constant(Constant::String("Hello from VM!".to_string()));
     
     // Add native function reference
-    let println_id = module.add_native("fmt.Println", 1, 1);
+    let println_id = module.add_extern("fmt.Println", 1, 1);
     
     // main function
     let mut main_fn = FunctionDef::new("main");
@@ -153,7 +153,7 @@ fn test_ffi() -> Result<(), Box<dyn std::error::Error>> {
     // r0 = "Hello from VM!"
     main_fn.code.push(Instruction::new(Opcode::LoadConst, 0, hello_idx, 0));
     // call fmt.Println(r0)
-    main_fn.code.push(Instruction::with_flags(Opcode::CallNative, 1, println_id as u16, 0, 1));
+    main_fn.code.push(Instruction::with_flags(Opcode::CallExtern, 1, println_id as u16, 0, 1));
     // return
     main_fn.code.push(Instruction::new(Opcode::Return, 0, 0, 0));
     

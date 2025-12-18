@@ -1,6 +1,6 @@
-//! Typed value representation for native function calls.
+//! Typed value representation for extern function calls.
 //!
-//! Native functions receive arguments as typed values (GoxValue),
+//! Extern functions receive arguments as typed values (GoxValue),
 //! allowing proper formatting and type-safe operations.
 
 use alloc::{format, string::{String, ToString}};
@@ -104,7 +104,7 @@ impl GoxValue {
     }
 }
 
-/// Argument offset for native calls.
+/// Argument offset for extern calls.
 /// Contains the register index and type tag for each argument.
 #[derive(Debug, Clone, Copy)]
 pub struct ArgOffset {
@@ -112,7 +112,7 @@ pub struct ArgOffset {
     pub type_tag: TypeTag,
 }
 
-/// Arguments wrapper for native function calls.
+/// Arguments wrapper for extern function calls.
 pub struct GoxArgs<'a> {
     /// Raw register values.
     raw: &'a [u64],

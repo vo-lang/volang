@@ -84,8 +84,8 @@ pub struct TypeEntity {
 pub struct FuncEntity {
     /// The function's signature.
     pub sig: FuncType,
-    /// Whether this is a native function (implemented in Rust).
-    pub is_native: bool,
+    /// Whether this is an extern function (implemented outside GoX).
+    pub is_extern: bool,
     /// The declaration span.
     pub span: Span,
 }

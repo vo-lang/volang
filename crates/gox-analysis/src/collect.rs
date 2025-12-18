@@ -655,7 +655,7 @@ impl<'a> TypeCollector<'a> {
             sym,
             Entity::Func(FuncEntity {
                 sig,
-                is_native: decl.is_native(),
+                is_extern: decl.is_extern(),
                 span: decl.name.span,
             }),
         );

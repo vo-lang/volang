@@ -2,7 +2,7 @@
 //!
 //! Provides string manipulation functions using zero-copy native API.
 
-use gox_vm::{NativeCtx, NativeRegistry, NativeResult};
+use gox_vm::{ExternCtx, ExternRegistry, ExternResult};
 use gox_vm::gc::GcRef;
 use gox_vm::objects::{array, slice, string};
 use gox_vm::types::builtin;
@@ -10,7 +10,7 @@ use gox_vm::types::builtin;
 /// Register strings functions.
 /// GoX implementations: HasPrefix, HasSuffix, TrimPrefix, TrimSuffix, Contains,
 ///                      Repeat, Compare, ReplaceAll (in stdlib/strings/strings.gox)
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     // Search (native: string search algorithms)
     registry.register("strings.Index", native_index);
     registry.register("strings.LastIndex", native_last_index);
@@ -35,79 +35,79 @@ pub fn register(registry: &mut NativeRegistry) {
 
 // ==================== Search Functions ====================
 
-fn native_contains_any(ctx: &mut NativeCtx) -> NativeResult {
+fn native_contains_any(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let chars = ctx.arg_str(1);
     ctx.ret_bool(0, gox_runtime_core::stdlib::strings::contains_any(s, chars));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_index(ctx: &mut NativeCtx) -> NativeResult {
+fn native_index(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let substr = ctx.arg_str(1);
     ctx.ret_i64(0, gox_runtime_core::stdlib::strings::index(s, substr));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_last_index(ctx: &mut NativeCtx) -> NativeResult {
+fn native_last_index(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let substr = ctx.arg_str(1);
     ctx.ret_i64(0, gox_runtime_core::stdlib::strings::last_index(s, substr));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_count(ctx: &mut NativeCtx) -> NativeResult {
+fn native_count(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let substr = ctx.arg_str(1);
     ctx.ret_i64(0, gox_runtime_core::stdlib::strings::count(s, substr) as i64);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 // ==================== Transform Functions ====================
 
-fn native_to_lower(ctx: &mut NativeCtx) -> NativeResult {
+fn native_to_lower(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let result = gox_runtime_core::stdlib::strings::to_lower(s);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_to_upper(ctx: &mut NativeCtx) -> NativeResult {
+fn native_to_upper(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let result = gox_runtime_core::stdlib::strings::to_upper(s);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_trim_space(ctx: &mut NativeCtx) -> NativeResult {
+fn native_trim_space(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0).to_string();
     let result = gox_runtime_core::stdlib::strings::trim_space(&s);
     ctx.ret_string(0, result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_trim(ctx: &mut NativeCtx) -> NativeResult {
+fn native_trim(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let cutset = ctx.arg_str(1);
     let result = gox_runtime_core::stdlib::strings::trim(s, cutset);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_replace(ctx: &mut NativeCtx) -> NativeResult {
+fn native_replace(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let old = ctx.arg_str(1);
     let new = ctx.arg_str(2);
     let n = ctx.arg_i64(3);
     let result = gox_runtime_core::stdlib::strings::replace(s, old, new, n);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 // ==================== Split/Join Functions ====================
 
 /// Helper to create a GoX string slice from owned Rust strings
-fn create_string_slice_owned(ctx: &mut NativeCtx, strings: Vec<String>) -> GcRef {
+fn create_string_slice_owned(ctx: &mut ExternCtx, strings: Vec<String>) -> GcRef {
     let gc = ctx.gc();
     
     // Create array to hold string references
@@ -123,32 +123,32 @@ fn create_string_slice_owned(ctx: &mut NativeCtx, strings: Vec<String>) -> GcRef
     slice::from_array(gc, builtin::SLICE, arr)
 }
 
-fn native_split(ctx: &mut NativeCtx) -> NativeResult {
+fn native_split(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let sep = ctx.arg_str(1);
     let parts = gox_runtime_core::stdlib::strings::split(s, sep);
     let slice_ref = create_string_slice_owned(ctx, parts);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_split_n(ctx: &mut NativeCtx) -> NativeResult {
+fn native_split_n(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let sep = ctx.arg_str(1);
     let n = ctx.arg_i64(2) as usize;
     let parts = gox_runtime_core::stdlib::strings::split_n(s, sep, n);
     let slice_ref = create_string_slice_owned(ctx, parts);
     ctx.ret_ref(0, slice_ref);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_join(ctx: &mut NativeCtx) -> NativeResult {
+fn native_join(ctx: &mut ExternCtx) -> ExternResult {
     let elems_ref = ctx.arg_ref(0);
     let sep = ctx.arg_str(1);
     
     if elems_ref.is_null() {
         ctx.ret_string(0, "");
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     // Read strings from slice
@@ -166,16 +166,16 @@ fn native_join(ctx: &mut NativeCtx) -> NativeResult {
     
     let result = parts.join(sep);
     ctx.ret_string(0, &result);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 // ==================== Compare Functions ====================
 
-fn native_equal_fold(ctx: &mut NativeCtx) -> NativeResult {
+fn native_equal_fold(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let t = ctx.arg_str(1);
     ctx.ret_bool(0, gox_runtime_core::stdlib::strings::equal_fold(s, t));
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 #[cfg(test)]
@@ -184,7 +184,7 @@ mod tests {
     
     #[test]
     fn test_register() {
-        let mut registry = NativeRegistry::new();
+        let mut registry = ExternRegistry::new();
         register(&mut registry);
         
         // Native functions only (GoX implementations don't register here)

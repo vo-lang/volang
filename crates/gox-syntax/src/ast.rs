@@ -133,15 +133,15 @@ pub struct FuncDecl {
     pub name: Ident,
     /// The function signature.
     pub sig: FuncSig,
-    /// The function body. None means external implementation (native).
+    /// The function body. None means extern function (implemented outside GoX).
     pub body: Option<Block>,
     /// The span of the declaration.
     pub span: Span,
 }
 
 impl FuncDecl {
-    /// Returns true if this is a native function (no body).
-    pub fn is_native(&self) -> bool {
+    /// Returns true if this is an extern function (no body, implemented outside GoX).
+    pub fn is_extern(&self) -> bool {
         self.body.is_none()
     }
 }

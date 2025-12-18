@@ -500,9 +500,9 @@ fn compile_call(
             return compile_func_call(ctx, fctx, func_idx, call);
         }
 
-        // Same-package native function (e.g., Index called from Contains in strings package)
-        if let Some((native_idx, _)) = ctx.lookup_pkg_native(ident.symbol) {
-            return compile_native_call(ctx, fctx, native_idx, call);
+        // Same-package extern function (e.g., Index called from Contains in strings package)
+        if let Some((extern_idx, _)) = ctx.lookup_pkg_extern(ident.symbol) {
+            return compile_extern_call(ctx, fctx, extern_idx, call);
         }
 
         // Check if it's a closure variable
@@ -576,15 +576,15 @@ fn compile_call(
                 return compile_func_call(ctx, fctx, func_idx, call);
             }
 
-            // Try native functions (already registered or register now)
-            if let Some(native_idx) = ctx.lookup_native(&full_name) {
-                return compile_native_call(ctx, fctx, native_idx, call);
+            // Try extern functions (already registered or register now)
+            if let Some(extern_idx) = ctx.lookup_extern(&full_name) {
+                return compile_extern_call(ctx, fctx, extern_idx, call);
             }
 
-            // Check if this is a native function from imported package
-            if ctx.is_native_func(pkg_ident.symbol, sel.sel.symbol) {
-                let native_idx = ctx.register_native(&full_name, 1, 1);
-                return compile_native_call(ctx, fctx, native_idx, call);
+            // Check if this is a extern function from imported package
+            if ctx.is_extern_func(pkg_ident.symbol, sel.sel.symbol) {
+                let extern_idx = ctx.register_extern(&full_name, 1, 1);
+                return compile_extern_call(ctx, fctx, extern_idx, call);
             }
         }
 
@@ -973,10 +973,10 @@ fn compile_closure_call(
     Ok(arg_start)
 }
 
-fn compile_native_call(
+fn compile_extern_call(
     ctx: &mut CodegenContext,
     fctx: &mut FuncContext,
-    native_idx: u32,
+    extern_idx: u32,
     call: &CallExpr,
 ) -> Result<u16, CodegenError> {
     // First, compile all arguments and collect their values and types
@@ -1005,7 +1005,7 @@ fn compile_native_call(
     }
 
     let pair_count = call.args.len() as u16;
-    fctx.emit(Opcode::CallNative, native_idx as u16, arg_start, pair_count);
+    fctx.emit(Opcode::CallExtern, extern_idx as u16, arg_start, pair_count);
 
     // Allocate a fresh register for the return value and move it there.
     // This ensures subsequent expressions don't overwrite the result.

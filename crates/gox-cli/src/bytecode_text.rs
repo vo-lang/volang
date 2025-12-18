@@ -12,7 +12,7 @@
 //! func main
 //!   locals 10
 //!   0: LoadInt r0, 5
-//!   1: CallNative 0, r0, 1, 1
+//!   1: CallExtern 0, r0, 1, 1
 //!   2: Return r0, 0
 //! end
 //! 
@@ -44,10 +44,10 @@ pub fn format_text(module: &Module) -> String {
     }
     
     // Natives
-    for (i, n) in module.natives.iter().enumerate() {
+    for (i, n) in module.externs.iter().enumerate() {
         out.push_str(&format!("native {} \"{}\" {} {}\n", i, n.name, n.param_slots, n.ret_slots));
     }
-    if !module.natives.is_empty() {
+    if !module.externs.is_empty() {
         out.push('\n');
     }
     
@@ -153,7 +153,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::Call => format!("Call {}, r{}, {}, {}", a, b, c, flags),
         Opcode::Return => format!("Return r{}, {}", a, b),
         
-        Opcode::CallNative => format!("CallNative {}, r{}, {}, {}", a, b, c, flags),
+        Opcode::CallExtern => format!("CallExtern {}, r{}, {}, {}", a, b, c, flags),
         
         Opcode::Alloc => format!("Alloc r{}, {}, {}", a, b, c),
         Opcode::GetField => format!("GetField r{}, r{}, {}", a, b, c),
@@ -351,7 +351,7 @@ impl<'a> TextParser<'a> {
         let param_slots: u16 = parts[3].parse().map_err(|_| "invalid param_slots")?;
         let ret_slots: u16 = parts[4].parse().map_err(|_| "invalid ret_slots")?;
         
-        self.module.add_native(&name, param_slots, ret_slots);
+        self.module.add_extern(&name, param_slots, ret_slots);
         Ok(())
     }
     
@@ -533,7 +533,7 @@ fn parse_instruction(line: &str) -> Result<Instruction, String> {
         
         "Call" => (Opcode::Call, get_arg(&args, 0)?, get_arg(&args, 1)?, get_arg(&args, 2)?, get_arg(&args, 3)? as i64),
         "Return" => (Opcode::Return, get_arg(&args, 0)?, get_arg(&args, 1)?, 0, 0),
-        "CallNative" => (Opcode::CallNative, get_arg(&args, 0)?, get_arg(&args, 1)?, get_arg(&args, 2)?, get_arg(&args, 3)? as i64),
+        "CallExtern" => (Opcode::CallExtern, get_arg(&args, 0)?, get_arg(&args, 1)?, get_arg(&args, 2)?, get_arg(&args, 3)? as i64),
         
         "Alloc" => (Opcode::Alloc, get_arg(&args, 0)?, get_arg(&args, 1)?, get_arg(&args, 2)?, 0),
         "GetField" => (Opcode::GetField, get_arg(&args, 0)?, get_arg(&args, 1)?, get_arg(&args, 2)?, 0),

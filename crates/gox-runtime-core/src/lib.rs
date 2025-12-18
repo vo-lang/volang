@@ -4,7 +4,7 @@
 //! (VM interpreter, JIT, AOT native) use. The core principle is:
 //!
 //! - All runtime operations are implemented as `extern "C"` functions
-//! - VM wraps these in `NativeCtx` methods
+//! - VM wraps these in `ExternCtx` methods
 //! - Cranelift-generated code calls them directly
 //!
 //! This ensures code is written once and shared across all backends.

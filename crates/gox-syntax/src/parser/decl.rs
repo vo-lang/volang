@@ -135,7 +135,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a function declaration.
-    /// A function without body (ending with `;`) is a native function.
+    /// A function without body (ending with `;`) is an extern function.
     pub fn parse_func_decl(&mut self) -> ParseResult<FuncDecl> {
         let start = self.current.span.start;
         self.expect(TokenKind::Func)?;
@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
         let name = self.parse_ident()?;
         let sig = self.parse_func_sig()?;
         
-        // Body is optional - no body means native/external implementation
+        // Body is optional - no body means extern function (implemented outside GoX)
         let body = if self.at(TokenKind::LBrace) {
             Some(self.parse_block()?)
         } else {

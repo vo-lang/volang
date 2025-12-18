@@ -1471,22 +1471,22 @@ impl FunctionTranslator {
             }
 
             // ==================== Native calls ====================
-            Opcode::CallNative => {
-                // a=native_id, b=arg_start, c=pair_count
-                let native_id = inst.a as u32;
+            Opcode::CallExtern => {
+                // a=extern_id, b=arg_start, c=pair_count
+                let extern_id = inst.a as u32;
                 let arg_start = inst.b as usize;
                 let pair_count = inst.c as usize;
                 
-                let native_def = ctx.bytecode.get_native(native_id)
-                    .ok_or_else(|| anyhow::anyhow!("native function {} not found", native_id))?;
-                let native_name = &native_def.name;
-                let ret_count = native_def.ret_slots as usize;
+                let extern_def = ctx.bytecode.get_extern(extern_id)
+                    .ok_or_else(|| anyhow::anyhow!("native function {} not found", extern_id))?;
+                let extern_name = &extern_def.name;
+                let ret_count = extern_def.ret_slots as usize;
                 
                 // Get the native function name as a string constant (cached)
-                let name_data_id = ctx.get_or_create_native_name_data(module, native_id, native_name)?;
+                let name_data_id = ctx.get_or_create_extern_name_data(module, extern_id, extern_name)?;
                 let name_gv = module.declare_data_in_func(name_data_id, builder.func);
                 let name_ptr = builder.ins().global_value(I64, name_gv);
-                let name_len = builder.ins().iconst(I64, native_name.len() as i64);
+                let name_len = builder.ins().iconst(I64, extern_name.len() as i64);
                 
                 // Create stack slots for args and rets
                 let args_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(

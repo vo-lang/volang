@@ -15,7 +15,7 @@ pub mod core;
 #[cfg(feature = "std")]
 pub mod std;
 
-use gox_vm::NativeRegistry;
+use gox_vm::ExternRegistry;
 
 /// Std mode for selective package loading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,12 +28,12 @@ pub enum StdMode {
 }
 
 /// Register native functions based on std mode.
-pub fn register_all(registry: &mut NativeRegistry) {
+pub fn register_all(registry: &mut ExternRegistry) {
     register_with_mode(registry, StdMode::Full);
 }
 
 /// Register native functions with specified std mode.
-pub fn register_with_mode(registry: &mut NativeRegistry, mode: StdMode) {
+pub fn register_with_mode(registry: &mut ExternRegistry, mode: StdMode) {
     // Always register builtin functions
     builtin::register(registry);
     

@@ -37,7 +37,7 @@ pub struct CallFrame {
     pub bp: usize,
     pub ret_reg: u16,
     pub ret_count: u8,
-    pub is_native: bool,
+    pub is_extern: bool,
 }
 
 impl CallFrame {
@@ -48,18 +48,18 @@ impl CallFrame {
             bp,
             ret_reg,
             ret_count,
-            is_native: false,
+            is_extern: false,
         }
     }
     
-    pub fn native(func_id: u32, bp: usize, ret_reg: u16, ret_count: u8) -> Self {
+    pub fn extern_call(func_id: u32, bp: usize, ret_reg: u16, ret_count: u8) -> Self {
         Self {
             func_id,
             pc: 0,
             bp,
             ret_reg,
             ret_count,
-            is_native: true,
+            is_extern: true,
         }
     }
 }
@@ -285,10 +285,10 @@ impl Fiber {
         self.frames.push(CallFrame::new(func_id, new_bp, ret_reg, ret_count));
     }
     
-    /// Push a call frame for a native function.
-    pub fn push_native_frame(&mut self, func_id: u32, arg_start: u16, ret_reg: u16, ret_count: u8) {
+    /// Push a call frame for an extern function.
+    pub fn push_extern_frame(&mut self, func_id: u32, arg_start: u16, ret_reg: u16, ret_count: u8) {
         let new_bp = self.bp() + arg_start as usize;
-        self.frames.push(CallFrame::native(func_id, new_bp, ret_reg, ret_count));
+        self.frames.push(CallFrame::extern_call(func_id, new_bp, ret_reg, ret_count));
     }
     
     /// Pop a call frame.

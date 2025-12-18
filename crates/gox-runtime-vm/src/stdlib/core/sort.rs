@@ -1,10 +1,10 @@
 //! Native implementations for the sort package.
 
 use gox_vm::gc::GcRef;
-use gox_vm::native::{NativeCtx, NativeResult, NativeRegistry};
+use gox_vm::extern_fn::{ExternCtx, ExternResult, ExternRegistry};
 use gox_vm::objects::{slice, string};
 
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     // Sort functions
     registry.register("sort.Ints", native_sort_ints);
     registry.register("sort.Float64s", native_sort_float64s);
@@ -28,15 +28,15 @@ pub fn register(registry: &mut NativeRegistry) {
 
 // ============ Sort functions ============
 
-fn native_sort_ints(ctx: &mut NativeCtx) -> NativeResult {
+fn native_sort_ints(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     // Read all values
@@ -52,18 +52,18 @@ fn native_sort_ints(ctx: &mut NativeCtx) -> NativeResult {
         slice::set(slice_ref, i, v as u64);
     }
     
-    NativeResult::Ok(0)
+    ExternResult::Ok(0)
 }
 
-fn native_sort_float64s(ctx: &mut NativeCtx) -> NativeResult {
+fn native_sort_float64s(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     // Read all values
@@ -79,18 +79,18 @@ fn native_sort_float64s(ctx: &mut NativeCtx) -> NativeResult {
         slice::set(slice_ref, i, v.to_bits());
     }
     
-    NativeResult::Ok(0)
+    ExternResult::Ok(0)
 }
 
-fn native_sort_strings(ctx: &mut NativeCtx) -> NativeResult {
+fn native_sort_strings(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     // Read all string refs and their values
@@ -110,22 +110,22 @@ fn native_sort_strings(ctx: &mut NativeCtx) -> NativeResult {
         slice::set(slice_ref, i, ref_ as u64);
     }
     
-    NativeResult::Ok(0)
+    ExternResult::Ok(0)
 }
 
 // ============ IsSorted functions ============
 
-fn native_ints_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
+fn native_ints_are_sorted(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let mut prev = slice::get(slice_ref, 0) as i64;
@@ -133,26 +133,26 @@ fn native_ints_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
         let curr = slice::get(slice_ref, i) as i64;
         if curr < prev {
             ctx.ret_bool(0, false);
-            return NativeResult::Ok(1);
+            return ExternResult::Ok(1);
         }
         prev = curr;
     }
     
     ctx.ret_bool(0, true);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_float64s_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
+fn native_float64s_are_sorted(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let mut prev = f64::from_bits(slice::get(slice_ref, 0));
@@ -160,26 +160,26 @@ fn native_float64s_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
         let curr = f64::from_bits(slice::get(slice_ref, i));
         if curr < prev {
             ctx.ret_bool(0, false);
-            return NativeResult::Ok(1);
+            return ExternResult::Ok(1);
         }
         prev = curr;
     }
     
     ctx.ret_bool(0, true);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_strings_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
+fn native_strings_are_sorted(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
         ctx.ret_bool(0, true);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let mut prev_ref = slice::get(slice_ref, 0) as GcRef;
@@ -189,30 +189,30 @@ fn native_strings_are_sorted(ctx: &mut NativeCtx) -> NativeResult {
         let curr_str = if curr_ref.is_null() { "" } else { string::as_str(curr_ref) };
         if curr_str < prev_str {
             ctx.ret_bool(0, false);
-            return NativeResult::Ok(1);
+            return ExternResult::Ok(1);
         }
         prev_ref = curr_ref;
     }
     
     ctx.ret_bool(0, true);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 // ============ Search functions ============
 
-fn native_search_ints(ctx: &mut NativeCtx) -> NativeResult {
+fn native_search_ints(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     let x = ctx.arg_i64(1);
     
     if slice_ref.is_null() {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len == 0 {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     // Binary search
@@ -229,22 +229,22 @@ fn native_search_ints(ctx: &mut NativeCtx) -> NativeResult {
     }
     
     ctx.ret_i64(0, lo);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_search_float64s(ctx: &mut NativeCtx) -> NativeResult {
+fn native_search_float64s(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     let x = ctx.arg_f64(1);
     
     if slice_ref.is_null() {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len == 0 {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     // Binary search
@@ -261,22 +261,22 @@ fn native_search_float64s(ctx: &mut NativeCtx) -> NativeResult {
     }
     
     ctx.ret_i64(0, lo);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
-fn native_search_strings(ctx: &mut NativeCtx) -> NativeResult {
+fn native_search_strings(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     let x = ctx.arg_str(1);
     
     if slice_ref.is_null() {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let len = slice::len(slice_ref);
     if len == 0 {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     // Binary search
@@ -294,20 +294,20 @@ fn native_search_strings(ctx: &mut NativeCtx) -> NativeResult {
     }
     
     ctx.ret_i64(0, lo);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 // ============ Reverse functions ============
 
-fn native_reverse_ints(ctx: &mut NativeCtx) -> NativeResult {
+fn native_reverse_ints(ctx: &mut ExternCtx) -> ExternResult {
     let slice_ref = ctx.arg_ref(0);
     if slice_ref.is_null() {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     let len = slice::len(slice_ref);
     if len <= 1 {
-        return NativeResult::Ok(0);
+        return ExternResult::Ok(0);
     }
     
     let mut i = 0;
@@ -321,14 +321,14 @@ fn native_reverse_ints(ctx: &mut NativeCtx) -> NativeResult {
         j -= 1;
     }
     
-    NativeResult::Ok(0)
+    ExternResult::Ok(0)
 }
 
-fn native_reverse_float64s(ctx: &mut NativeCtx) -> NativeResult {
+fn native_reverse_float64s(ctx: &mut ExternCtx) -> ExternResult {
     native_reverse_ints(ctx) // Same logic, just different type interpretation
 }
 
-fn native_reverse_strings(ctx: &mut NativeCtx) -> NativeResult {
+fn native_reverse_strings(ctx: &mut ExternCtx) -> ExternResult {
     native_reverse_ints(ctx) // Same logic, refs are just u64
 }
 

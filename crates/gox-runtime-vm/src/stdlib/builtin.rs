@@ -2,21 +2,21 @@
 //!
 //! These use the zero-copy native API for maximum performance.
 
-use gox_vm::{NativeCtx, NativeRegistry, NativeResult, TypeTag};
+use gox_vm::{ExternCtx, ExternRegistry, ExternResult, TypeTag};
 use gox_vm::objects::{array, slice, string, map, channel};
 
 /// Register builtin functions.
-pub fn register(registry: &mut NativeRegistry) {
+pub fn register(registry: &mut ExternRegistry) {
     registry.register("len", native_len);
     registry.register("cap", native_cap);
     registry.register("panic", native_panic);
 }
 
 /// len(x) - returns length of string, slice, array, map, or channel.
-fn native_len(ctx: &mut NativeCtx) -> NativeResult {
+fn native_len(ctx: &mut ExternCtx) -> ExternResult {
     if ctx.argc() < 1 {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let tag = ctx.arg_type(0);
@@ -36,14 +36,14 @@ fn native_len(ctx: &mut NativeCtx) -> NativeResult {
     };
     
     ctx.ret_i64(0, len as i64);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// cap(x) - returns capacity of slice, array, or channel.
-fn native_cap(ctx: &mut NativeCtx) -> NativeResult {
+fn native_cap(ctx: &mut ExternCtx) -> ExternResult {
     if ctx.argc() < 1 {
         ctx.ret_i64(0, 0);
-        return NativeResult::Ok(1);
+        return ExternResult::Ok(1);
     }
     
     let tag = ctx.arg_type(0);
@@ -61,11 +61,11 @@ fn native_cap(ctx: &mut NativeCtx) -> NativeResult {
     };
     
     ctx.ret_i64(0, cap as i64);
-    NativeResult::Ok(1)
+    ExternResult::Ok(1)
 }
 
 /// panic(msg) - triggers a panic.
-fn native_panic(ctx: &mut NativeCtx) -> NativeResult {
+fn native_panic(ctx: &mut ExternCtx) -> ExternResult {
     let msg = if ctx.argc() > 0 && ctx.arg_type(0) == TypeTag::String {
         ctx.arg_str(0).to_string()
     } else if ctx.argc() > 0 {
@@ -74,7 +74,7 @@ fn native_panic(ctx: &mut NativeCtx) -> NativeResult {
         "panic".to_string()
     };
     
-    NativeResult::Panic(msg)
+    ExternResult::Panic(msg)
 }
 
 #[cfg(test)]
@@ -83,7 +83,7 @@ mod tests {
     
     #[test]
     fn test_register() {
-        let mut registry = NativeRegistry::new();
+        let mut registry = ExternRegistry::new();
         register(&mut registry);
         
         assert!(registry.get("len").is_some());

@@ -34,8 +34,8 @@ pub struct CompileContext<'a> {
     /// String constant data IDs (const_idx -> DataId)
     string_data: HashMap<u16, DataId>,
     
-    /// Native function name data IDs (native_id -> DataId)
-    native_name_data: HashMap<u32, DataId>,
+    /// Native function name data IDs (extern_id -> DataId)
+    extern_name_data: HashMap<u32, DataId>,
 }
 
 impl<'a> CompileContext<'a> {
@@ -47,7 +47,7 @@ impl<'a> CompileContext<'a> {
             bytecode,
             call_conv,
             string_data: HashMap::new(),
-            native_name_data: HashMap::new(),
+            extern_name_data: HashMap::new(),
         }
     }
 
@@ -151,24 +151,24 @@ impl<'a> CompileContext<'a> {
         Some((*data_id, len))
     }
 
-    /// Get or create a data object for a native function name.
-    pub fn get_or_create_native_name_data<M: Module>(
+    /// Get or create a data object for a extern function name.
+    pub fn get_or_create_extern_name_data<M: Module>(
         &mut self,
         module: &mut M,
-        native_id: u32,
-        native_name: &str,
+        extern_id: u32,
+        extern_name: &str,
     ) -> Result<DataId> {
-        if let Some(&data_id) = self.native_name_data.get(&native_id) {
+        if let Some(&data_id) = self.extern_name_data.get(&extern_id) {
             return Ok(data_id);
         }
         
-        let name = format!("native_name_{}", native_id);
+        let name = format!("extern_name_{}", extern_id);
         let data_id = module.declare_data(&name, Linkage::Local, false, false)?;
         let mut desc = DataDescription::new();
-        desc.define(native_name.as_bytes().into());
+        desc.define(extern_name.as_bytes().into());
         module.define_data(data_id, &desc)?;
         
-        self.native_name_data.insert(native_id, data_id);
+        self.extern_name_data.insert(extern_id, data_id);
         Ok(data_id)
     }
 

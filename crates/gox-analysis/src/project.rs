@@ -404,7 +404,7 @@ fn resolve_imports(packages: &mut HashMap<String, ParsedPackage>) -> Result<(), 
                 }
                 ImportPath::Stdlib(pkg_name) => {
                     // Standard library: use package name directly
-                    // The actual implementation is via native functions
+                    // The actual implementation is via extern functions
                     import.package_name = pkg_name;
                 }
                 ImportPath::External { .. } => {
@@ -474,7 +474,7 @@ fn load_stdlib_packages(
                 packages.insert(pkg_name, parsed);
             }
         }
-        // If VFS can't resolve, that's OK - natives don't need source files
+        // If VFS can't resolve, that's OK - externs don't need source files
     }
     
     Ok(())

@@ -4,7 +4,7 @@ use crate::bytecode::{Constant, Module};
 use crate::fiber::{BlockReason, DeferEntry, FiberId, FiberStatus, IterState, Scheduler, SelectCase, SelectState};
 use crate::gc::{Gc, GcRef, NULL_REF};
 use crate::instruction::{Instruction, Opcode};
-use crate::native::{NativeCtx, NativeFn, NativeRegistry, NativeResult};
+use crate::extern_fn::{ExternCtx, ExternFn, ExternRegistry, ExternResult};
 use crate::objects::{self, array, channel, closure, interface, map, slice, string};
 use crate::types::{builtin, TypeId, TypeTable};
 
@@ -24,7 +24,7 @@ pub struct Vm {
     pub gc: Gc,
     pub types: TypeTable,
     pub scheduler: Scheduler,
-    pub natives: NativeRegistry,
+    pub externs: ExternRegistry,
     
     // Current module
     module: Option<Module>,
@@ -32,8 +32,8 @@ pub struct Vm {
     // Preloaded string constants (GcRefs)
     string_constants: Vec<GcRef>,
     
-    // Resolved native function pointers
-    native_ptrs: Vec<Option<NativeFn>>,
+    // Resolved extern function pointers
+    extern_ptrs: Vec<Option<ExternFn>>,
     
     // Global variables storage
     globals: Vec<u64>,
@@ -45,23 +45,23 @@ impl Vm {
             gc: Gc::new(),
             types: TypeTable::new(),
             scheduler: Scheduler::new(),
-            natives: NativeRegistry::new(),
+            externs: ExternRegistry::new(),
             module: None,
             string_constants: Vec::new(),
-            native_ptrs: Vec::new(),
+            extern_ptrs: Vec::new(),
             globals: Vec::new(),
         }
     }
     
-    pub fn with_natives(natives: NativeRegistry) -> Self {
+    pub fn with_externs(externs: ExternRegistry) -> Self {
         Self {
             gc: Gc::new(),
             types: TypeTable::new(),
             scheduler: Scheduler::new(),
-            natives,
+            externs,
             module: None,
             string_constants: Vec::new(),
-            native_ptrs: Vec::new(),
+            extern_ptrs: Vec::new(),
             globals: Vec::new(),
         }
     }
@@ -79,11 +79,11 @@ impl Vm {
             }
         }
         
-        // Resolve native functions
-        self.native_ptrs.clear();
-        for native in &module.natives {
-            let ptr = self.natives.get(&native.name);
-            self.native_ptrs.push(ptr);
+        // Resolve extern functions
+        self.extern_ptrs.clear();
+        for ext in &module.externs {
+            let ptr = self.externs.get(&ext.name);
+            self.extern_ptrs.push(ptr);
         }
         
         // Allocate global variables
@@ -489,21 +489,21 @@ impl Vm {
                 return self.do_return(fiber_id, a, b as usize);
             }
             
-            // ============ Native call (zero-copy) ============
-            Opcode::CallNative => {
-                // a=native_id, b=arg_start, c=pair_count (each arg is type,value pair)
+            // ============ Extern call (zero-copy) ============
+            Opcode::CallExtern => {
+                // a=extern_id, b=arg_start, c=pair_count (each arg is type,value pair)
                 // Args layout: [type0, val0, type1, val1, ...]
-                let native_fn = match self.native_ptrs.get(a as usize) {
+                let extern_fn = match self.extern_ptrs.get(a as usize) {
                     Some(Some(f)) => *f,
                     _ => {
                         let module = self.module.as_ref().unwrap();
-                        let name = &module.natives[a as usize].name;
-                        return VmResult::Panic(format!("native function not found: {}", name));
+                        let name = &module.externs[a as usize].name;
+                        return VmResult::Panic(format!("extern function not found: {}", name));
                     }
                 };
                 
                 
-                // Pause GC during native call
+                // Pause GC during extern call
                 self.gc.pause_gc();
                 
                 // Get fiber stack info for zero-copy register access
@@ -512,15 +512,15 @@ impl Vm {
                 let stack_ptr = fiber.stack.as_mut_ptr();
                 let stack_len = fiber.stack.len();
                 
-                // Create a slice view of registers (safe: no reallocation during native call)
-                // SAFETY: We ensure fiber.stack is not reallocated during native call,
+                // Create a slice view of registers (safe: no reallocation during extern call)
+                // SAFETY: We ensure fiber.stack is not reallocated during extern call,
                 // and bp is stable within this call.
                 let regs = unsafe {
                     core::slice::from_raw_parts_mut(stack_ptr.add(bp), stack_len - bp)
                 };
                 
-                // Create zero-copy native context
-                let mut ctx = NativeCtx::new(
+                // Create zero-copy extern context
+                let mut ctx = ExternCtx::new(
                     &mut self.gc,
                     regs,
                     b as usize,     // arg_base
@@ -528,16 +528,16 @@ impl Vm {
                     b as usize,     // ret_base (return values overwrite args)
                 );
                 
-                // Call native function
-                let result = native_fn(&mut ctx);
+                // Call extern function
+                let result = extern_fn(&mut ctx);
                 
                 // Resume GC
                 self.gc.resume_gc();
                 
                 // Handle result
                 match result {
-                    NativeResult::Ok(_) => {}
-                    NativeResult::Panic(msg) => return VmResult::Panic(msg),
+                    ExternResult::Ok(_) => {}
+                    ExternResult::Panic(msg) => return VmResult::Panic(msg),
                 }
             }
             

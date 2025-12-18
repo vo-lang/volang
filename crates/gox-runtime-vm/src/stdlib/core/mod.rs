@@ -12,10 +12,10 @@ pub mod strconv;
 pub mod strings;
 pub mod unicode;
 
-use gox_vm::NativeRegistry;
+use gox_vm::ExternRegistry;
 
 /// Register all core package native functions.
-pub fn register_all(registry: &mut NativeRegistry) {
+pub fn register_all(registry: &mut ExternRegistry) {
     base64::register(registry);
     bytes::register(registry);
     errors::register(registry);

@@ -329,7 +329,7 @@ pub struct CodegenContext<'a> {
     pub global_indices: HashMap<Symbol, u32>,
     /// Constant values: const_symbol -> value (for inlining)
     pub const_values: HashMap<Symbol, crate::ConstValue>,
-    pub native_indices: HashMap<String, u32>,
+    pub extern_indices: HashMap<String, u32>,
     pub const_indices: HashMap<String, u16>,
     /// Offset for closure function indices (used when temp context has empty module)
     pub closure_func_offset: u32,
@@ -337,7 +337,7 @@ pub struct CodegenContext<'a> {
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
-    /// Current package name (for looking up same-package native functions)
+    /// Current package name (for looking up same-package extern functions)
     pub pkg_name: String,
 }
 
@@ -351,13 +351,13 @@ pub struct CodegenContextRef<'a, 'm> {
     pub cross_pkg_funcs: HashMap<String, u32>,
     pub global_indices: HashMap<Symbol, u32>,
     pub const_values: HashMap<Symbol, crate::ConstValue>,
-    pub native_indices: HashMap<String, u32>,
+    pub extern_indices: HashMap<String, u32>,
     pub const_indices: HashMap<String, u16>,
     /// Method table: "TypeName.MethodName" -> func_idx
     pub method_table: HashMap<String, u32>,
     /// Interface parameter positions for functions: func_idx -> Vec<param_index>
     pub func_interface_params: HashMap<u32, Vec<u16>>,
-    /// Current package name (for looking up same-package native functions)
+    /// Current package name (for looking up same-package extern functions)
     pub pkg_name: String,
 }
 
@@ -415,7 +415,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 cross_pkg_funcs: self.cross_pkg_funcs.clone(),
                 global_indices: self.global_indices.clone(),
                 const_values: self.const_values.clone(),
-                native_indices: self.native_indices.clone(),
+                extern_indices: self.extern_indices.clone(),
                 const_indices: self.const_indices.clone(),
                 closure_func_offset: self.module.functions.len() as u32,
                 method_table: self.method_table.clone(),
@@ -423,9 +423,9 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 pkg_name: self.pkg_name.clone(),
             };
             crate::stmt::compile_block(&mut temp_ctx, &mut fctx, body)?;
-            // Merge back any new natives/constants
-            for (k, v) in temp_ctx.native_indices {
-                self.native_indices.insert(k, v);
+            // Merge back any new externs/constants
+            for (k, v) in temp_ctx.extern_indices {
+                self.extern_indices.insert(k, v);
             }
             for (k, v) in temp_ctx.const_indices {
                 self.const_indices.insert(k, v);
@@ -443,12 +443,12 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         Ok(fctx.build())
     }
     
-    pub fn register_native(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
-        if let Some(&idx) = self.native_indices.get(name) {
+    pub fn register_extern(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
+        if let Some(&idx) = self.extern_indices.get(name) {
             return idx;
         }
-        let idx = self.module.add_native(name, param_slots, ret_slots);
-        self.native_indices.insert(name.to_string(), idx);
+        let idx = self.module.add_extern(name, param_slots, ret_slots);
+        self.extern_indices.insert(name.to_string(), idx);
         idx
     }
     
@@ -474,12 +474,12 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         self.func_indices.get(&sym).copied()
     }
     
-    /// Look up a same-package native function by symbol.
-    /// Returns Some((native_idx, qualified_name)) if found.
-    pub fn lookup_pkg_native(&self, sym: Symbol) -> Option<(u32, String)> {
+    /// Look up a same-package extern function by symbol.
+    /// Returns Some((extern_idx, qualified_name)) if found.
+    pub fn lookup_pkg_extern(&self, sym: Symbol) -> Option<(u32, String)> {
         if let Some(func_name) = self.interner.resolve(sym) {
             let qualified_name = format!("{}.{}", self.pkg_name, func_name);
-            if let Some(&idx) = self.native_indices.get(&qualified_name) {
+            if let Some(&idx) = self.extern_indices.get(&qualified_name) {
                 return Some((idx, qualified_name));
             }
         }
@@ -491,13 +491,13 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         self.cross_pkg_funcs.get(name).copied()
     }
     
-    pub fn lookup_native(&self, name: &str) -> Option<u32> {
-        self.native_indices.get(name).copied()
+    pub fn lookup_extern(&self, name: &str) -> Option<u32> {
+        self.extern_indices.get(name).copied()
     }
     
     /// Check if a function from an imported package is native.
     /// Returns true only if the function is NOT already compiled (not in cross_pkg_funcs).
-    pub fn is_native_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
+    pub fn is_extern_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
         if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
             if let Some(func_name) = self.interner.resolve(func_sym) {
                 let qualified_name = format!("{}.{}", pkg_name, func_name);
@@ -505,7 +505,7 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
                 if self.cross_pkg_funcs.contains_key(&qualified_name) {
                     return false;
                 }
-                // For stdlib packages (no dots, not relative), treat as native if not compiled
+                // For stdlib packages (no dots, not relative), treat as extern if not compiled
                 if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
                     return true;
                 }
@@ -566,7 +566,7 @@ impl<'a> CodegenContext<'a> {
             cross_pkg_funcs: HashMap::new(),
             global_indices: HashMap::new(),
             const_values: HashMap::new(),
-            native_indices: HashMap::new(),
+            extern_indices: HashMap::new(),
             const_indices: HashMap::new(),
             closure_func_offset: 0,
             method_table: HashMap::new(),
@@ -660,7 +660,7 @@ impl<'a> CodegenContext<'a> {
             cross_pkg_funcs: HashMap::new(),
             global_indices: HashMap::new(),
             const_values: HashMap::new(),
-            native_indices: HashMap::new(),
+            extern_indices: HashMap::new(),
             const_indices: HashMap::new(),
             method_table: HashMap::new(),
             func_interface_params: HashMap::new(),
@@ -710,12 +710,12 @@ impl<'a> CodegenContext<'a> {
         Ok(std::mem::take(&mut self.module))
     }
     
-    pub fn register_native(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
-        if let Some(&idx) = self.native_indices.get(name) {
+    pub fn register_extern(&mut self, name: &str, param_slots: u16, ret_slots: u16) -> u32 {
+        if let Some(&idx) = self.extern_indices.get(name) {
             return idx;
         }
-        let idx = self.module.add_native(name, param_slots, ret_slots);
-        self.native_indices.insert(name.to_string(), idx);
+        let idx = self.module.add_extern(name, param_slots, ret_slots);
+        self.extern_indices.insert(name.to_string(), idx);
         idx
     }
     
@@ -808,12 +808,12 @@ impl<'a> CodegenContext<'a> {
         self.func_indices.get(&sym).copied()
     }
     
-    /// Look up a same-package native function by symbol.
-    /// Returns Some((native_idx, qualified_name)) if found.
-    pub fn lookup_pkg_native(&self, sym: Symbol) -> Option<(u32, String)> {
+    /// Look up a same-package extern function by symbol.
+    /// Returns Some((extern_idx, qualified_name)) if found.
+    pub fn lookup_pkg_extern(&self, sym: Symbol) -> Option<(u32, String)> {
         if let Some(func_name) = self.interner.resolve(sym) {
             let qualified_name = format!("{}.{}", self.pkg_name, func_name);
-            if let Some(&idx) = self.native_indices.get(&qualified_name) {
+            if let Some(&idx) = self.extern_indices.get(&qualified_name) {
                 return Some((idx, qualified_name));
             }
         }
@@ -824,13 +824,13 @@ impl<'a> CodegenContext<'a> {
         self.cross_pkg_funcs.get(name).copied()
     }
     
-    pub fn lookup_native(&self, name: &str) -> Option<u32> {
-        self.native_indices.get(name).copied()
+    pub fn lookup_extern(&self, name: &str) -> Option<u32> {
+        self.extern_indices.get(name).copied()
     }
     
     /// Check if a function from an imported package is native.
     /// Returns true only if the function is NOT already compiled (not in cross_pkg_funcs).
-    pub fn is_native_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
+    pub fn is_extern_func(&self, pkg_sym: Symbol, func_sym: Symbol) -> bool {
         if let Some(pkg_name) = self.interner.resolve(pkg_sym) {
             if let Some(func_name) = self.interner.resolve(func_sym) {
                 let qualified_name = format!("{}.{}", pkg_name, func_name);
@@ -838,7 +838,7 @@ impl<'a> CodegenContext<'a> {
                 if self.cross_pkg_funcs.contains_key(&qualified_name) {
                     return false;
                 }
-                // For stdlib packages (no dots, not relative), treat as native if not compiled
+                // For stdlib packages (no dots, not relative), treat as extern if not compiled
                 if !pkg_name.contains('.') && !pkg_name.starts_with("./") && !pkg_name.starts_with("..") {
                     return true;
                 }

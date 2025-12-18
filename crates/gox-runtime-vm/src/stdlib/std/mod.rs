@@ -8,10 +8,10 @@ pub mod rand;
 pub mod regexp;
 pub mod time;
 
-use gox_vm::NativeRegistry;
+use gox_vm::ExternRegistry;
 
 /// Register all std package native functions.
-pub fn register_all(registry: &mut NativeRegistry) {
+pub fn register_all(registry: &mut ExternRegistry) {
     fmt::register(registry);
     os::register(registry);
     path::register(registry);
