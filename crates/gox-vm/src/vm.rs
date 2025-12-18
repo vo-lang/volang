@@ -1769,6 +1769,16 @@ impl Vm {
             scan_object(gc, obj, types);
         });
     }
+    
+    /// Get the number of live GC objects.
+    pub fn gc_object_count(&self) -> usize {
+        self.gc.object_count()
+    }
+    
+    /// Get the total bytes used by GC objects.
+    pub fn gc_total_bytes(&self) -> usize {
+        self.gc.total_bytes()
+    }
 }
 
 /// Scan a GC object's fields for references.

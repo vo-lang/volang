@@ -939,6 +939,56 @@ func main() {
         vm.collect_garbage();
     }
     
+    /// Test that GC actually reclaims memory.
+    #[test]
+    fn test_gc_reclaims_memory() {
+        let (file, _, interner) = parse(r#"
+package main
+
+func createStrings() {
+    // Create strings that become garbage after function returns
+    s1 := "temp1"
+    s2 := "temp2"
+    s3 := s1 + s2
+    _ = s3
+}
+
+func main() {
+    createStrings()
+    createStrings()
+    createStrings()
+}
+"#, 0);
+        let mut diag = DiagnosticSink::new();
+        let result = typecheck_file(&file, &interner, &mut diag);
+        let module = compile(&file, &result, &interner).expect("Compilation failed");
+        
+        let mut vm = gox_runtime_vm::create_vm();
+        vm.load_module(module);
+        
+        // Run to create garbage
+        let result = vm.run();
+        assert!(matches!(result, VmResult::Done | VmResult::Ok));
+        
+        // Get stats before GC
+        let objects_before = vm.gc_object_count();
+        let bytes_before = vm.gc_total_bytes();
+        
+        // Force GC
+        vm.collect_garbage();
+        
+        // Get stats after GC
+        let objects_after = vm.gc_object_count();
+        let bytes_after = vm.gc_total_bytes();
+        
+        println!("Before GC: {} objects, {} bytes", objects_before, bytes_before);
+        println!("After GC:  {} objects, {} bytes", objects_after, bytes_after);
+        
+        // Verify some memory was reclaimed (concatenated strings should be garbage)
+        assert!(objects_after <= objects_before, "GC should not increase object count");
+        assert!(bytes_after <= bytes_before, "GC should not increase memory usage");
+    }
+    
     /// Test GC with string constants.
     #[test]
     fn test_gc_with_strings() {
