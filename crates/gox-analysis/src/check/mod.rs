@@ -396,6 +396,23 @@ impl<'a> TypeChecker<'a> {
                 let elem = self.resolve_type_expr(inner);
                 Type::Pointer(Box::new(elem))
             }
+            ast::TypeExprKind::Func(func_ty) => {
+                let params: Vec<Type> = func_ty
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_expr(p))
+                    .collect();
+                let results: Vec<Type> = func_ty
+                    .results
+                    .iter()
+                    .map(|r| self.resolve_type_expr(r))
+                    .collect();
+                Type::Func(crate::types::FuncType {
+                    params,
+                    results,
+                    variadic: false,
+                })
+            }
             _ => Type::Invalid,
         }
     }
