@@ -365,6 +365,16 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
     });
     
     // hex package
+    register("hex.EncodedLen", |args, rets| {
+        let n = args[0] as i64;
+        rets[0] = (n * 2) as u64;
+        Ok(())
+    });
+    register("hex.DecodedLen", |args, rets| {
+        let n = args[0] as i64;
+        rets[0] = (n / 2) as u64;
+        Ok(())
+    });
     register("hex.EncodeToString", |args, rets| {
         let src = args[0] as gox_runtime_core::gc::GcRef;
         crate::gc_global::with_gc(|gc| {
