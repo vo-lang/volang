@@ -41,11 +41,22 @@ unsafe fn get_f64_slice(s: GcRef) -> &'static [f64] {
 
 #[no_mangle]
 pub unsafe extern "C" fn gox_sort_ints(s: GcRef) {
+    if s.is_null() {
+        return;
+    }
+    let len = slice::len(s);
+    if len == 0 {
+        return;
+    }
     get_i64_slice_mut(s).sort();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn gox_sort_float64s(s: GcRef) {
+    let len = slice::len(s);
+    if len == 0 {
+        return;
+    }
     get_f64_slice_mut(s).sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 }
 
@@ -54,6 +65,9 @@ pub unsafe extern "C" fn gox_sort_strings(s: GcRef) {
     use gox_runtime_core::objects::string;
     
     let len = slice::len(s);
+    if len == 0 {
+        return;
+    }
     let arr = slice::array_ref(s);
     let start = slice::start(s);
     

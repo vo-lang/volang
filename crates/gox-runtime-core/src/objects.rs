@@ -507,11 +507,17 @@ pub unsafe extern "C" fn gox_slice_create(
 
 #[no_mangle]
 pub unsafe extern "C" fn gox_slice_len(slice_ref: GcRef) -> usize {
+    if slice_ref.is_null() {
+        return 0;
+    }
     slice::len(slice_ref)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn gox_slice_cap(slice_ref: GcRef) -> usize {
+    if slice_ref.is_null() {
+        return 0;
+    }
     slice::cap(slice_ref)
 }
 
