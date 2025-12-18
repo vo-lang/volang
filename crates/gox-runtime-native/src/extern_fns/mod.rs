@@ -460,6 +460,28 @@ pub fn register_all(register: &mut dyn FnMut(&str, ExternDispatchFn)) {
         rets[0] = if unsafe { bytes::gox_bytes_equal(a, b) } { 1 } else { 0 };
         Ok(())
     });
+    register("bytes.ToLower", |args, rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        crate::gc_global::with_gc(|gc| {
+            rets[0] = unsafe { bytes::gox_bytes_to_lower(gc, s) } as u64;
+        });
+        Ok(())
+    });
+    register("bytes.ToUpper", |args, rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        crate::gc_global::with_gc(|gc| {
+            rets[0] = unsafe { bytes::gox_bytes_to_upper(gc, s) } as u64;
+        });
+        Ok(())
+    });
+    register("bytes.Repeat", |args, rets| {
+        let s = args[0] as gox_runtime_core::gc::GcRef;
+        let count = args[1] as i64;
+        crate::gc_global::with_gc(|gc| {
+            rets[0] = unsafe { bytes::gox_bytes_repeat(gc, s, count) } as u64;
+        });
+        Ok(())
+    });
     
     // json package
     register("json.Valid", |args, rets| {
