@@ -280,3 +280,52 @@ func main() {
     assert_eq!(fn_ptr(21), 42);
     println!("✓ test_e2e_println passed");
 }
+
+#[test]
+fn test_e2e_string_len() {
+    let source = r#"
+package main
+
+func get_len() int {
+    s := "hello"
+    return len(s)
+}
+
+func main() {
+}
+"#;
+    
+    let bytecode = source_to_bytecode(source);
+    let (fn_ptr, _jit): (fn() -> i64, _) = compile_to_jit(&bytecode, "get_len");
+    
+    assert_eq!(fn_ptr(), 5);
+    println!("✓ test_e2e_string_len passed");
+}
+
+#[test]
+fn test_e2e_string_eq() {
+    let source = r#"
+package main
+
+func compare_strings() int {
+    a := "hello"
+    b := "hello"
+    c := "world"
+    if a == b {
+        if a != c {
+            return 1
+        }
+    }
+    return 0
+}
+
+func main() {
+}
+"#;
+    
+    let bytecode = source_to_bytecode(source);
+    let (fn_ptr, _jit): (fn() -> i64, _) = compile_to_jit(&bytecode, "compare_strings");
+    
+    assert_eq!(fn_ptr(), 1);
+    println!("✓ test_e2e_string_eq passed");
+}

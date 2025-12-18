@@ -19,8 +19,10 @@
 mod symbols;
 pub mod goroutine;
 pub mod debug;
+pub mod gc_global;
 
 pub use symbols::{RuntimeSymbols, RuntimeSymbol};
+pub use gc_global::{init_gc, with_gc};
 
 // Re-export core runtime types that native code might need
 pub use gox_runtime_core::ffi::*;

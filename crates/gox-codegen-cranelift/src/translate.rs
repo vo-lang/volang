@@ -295,11 +295,19 @@ impl FunctionTranslator {
                         let val = builder.ins().iconst(I64, 0);
                         builder.def_var(self.variables[inst.a as usize], val);
                     }
-                    Some(Constant::String(_s)) => {
-                        // TODO: String constants need special handling
-                        // For now, store 0 (null)
-                        let val = builder.ins().iconst(I64, 0);
-                        builder.def_var(self.variables[inst.a as usize], val);
+                    Some(Constant::String(s)) => {
+                        // Create string data and call runtime to create string object
+                        let str_len = s.len();
+                        let data_id = ctx.get_or_create_string_data(module, const_idx)?;
+                        let gv = module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().global_value(I64, gv);
+                        let len = builder.ins().iconst(I64, str_len as i64);
+                        let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // STRING type_id
+                        
+                        let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringFromPtr)?;
+                        let call = builder.ins().call(func_ref, &[ptr, len, type_id]);
+                        let result = builder.inst_results(call)[0];
+                        builder.def_var(self.variables[inst.a as usize], result);
                     }
                     None => bail!("Constant {} not found", const_idx),
                 }
@@ -846,10 +854,12 @@ impl FunctionTranslator {
             }
 
             Opcode::StrConcat => {
+                // gox_rt_string_concat(type_id, a, b) -> GcRef
                 let a = builder.use_var(self.variables[inst.b as usize]);
                 let b = builder.use_var(self.variables[inst.c as usize]);
+                let type_id = builder.ins().iconst(cranelift_codegen::ir::types::I32, 1); // STRING type_id
                 let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::StringConcat)?;
-                let call = builder.ins().call(func_ref, &[a, b]);
+                let call = builder.ins().call(func_ref, &[type_id, a, b]);
                 let result = builder.inst_results(call)[0];
                 builder.def_var(self.variables[inst.a as usize], result);
             }

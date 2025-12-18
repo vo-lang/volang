@@ -20,19 +20,20 @@ impl RuntimeSymbols {
     /// Create a new symbol table with all runtime functions.
     pub fn new() -> Self {
         let symbols = vec![
-            // GC functions
-            RuntimeSymbol { name: "gox_gc_alloc", ptr: ffi::gox_gc_alloc as *const u8 },
+            // GC functions (using global GC wrappers)
+            RuntimeSymbol { name: "gox_rt_alloc", ptr: crate::gc_global::gox_rt_alloc as *const u8 },
             RuntimeSymbol { name: "gox_gc_read_slot", ptr: ffi::gox_gc_read_slot as *const u8 },
             RuntimeSymbol { name: "gox_gc_write_slot", ptr: ffi::gox_gc_write_slot as *const u8 },
             RuntimeSymbol { name: "gox_gc_write_barrier", ptr: ffi::gox_gc_write_barrier as *const u8 },
             RuntimeSymbol { name: "gox_gc_mark_gray", ptr: ffi::gox_gc_mark_gray as *const u8 },
             
-            // String functions
+            // String functions (some using global GC wrappers)
             RuntimeSymbol { name: "gox_string_len", ptr: ffi::gox_string_len as *const u8 },
             RuntimeSymbol { name: "gox_string_index", ptr: ffi::gox_string_index as *const u8 },
-            RuntimeSymbol { name: "gox_string_concat", ptr: ffi::gox_string_concat as *const u8 },
+            RuntimeSymbol { name: "gox_rt_string_concat", ptr: crate::gc_global::gox_rt_string_concat as *const u8 },
             RuntimeSymbol { name: "gox_string_eq", ptr: ffi::gox_string_eq as *const u8 },
             RuntimeSymbol { name: "gox_string_ne", ptr: ffi::gox_string_ne as *const u8 },
+            RuntimeSymbol { name: "gox_rt_string_from_ptr", ptr: crate::gc_global::gox_rt_string_from_ptr as *const u8 },
             
             // Array functions
             RuntimeSymbol { name: "gox_array_create", ptr: ffi::gox_array_create as *const u8 },

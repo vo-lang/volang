@@ -17,18 +17,19 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeFunc {
     // === GC (5) ===
-    GcAlloc,
+    GcAlloc,       // gox_rt_alloc (uses global GC)
     GcReadSlot,
     GcWriteSlot,
     GcWriteBarrier,
     GcMarkGray,
 
-    // === String (5) ===
+    // === String (6) ===
     StringLen,
     StringIndex,
     StringConcat,
     StringEq,
     StringNe,
+    StringFromPtr,
 
     // === Array (4) ===
     ArrayCreate,
@@ -122,7 +123,7 @@ impl RuntimeFunc {
     pub fn symbol_name(&self) -> &'static str {
         match self {
             // GC
-            RuntimeFunc::GcAlloc => "gox_gc_alloc",
+            RuntimeFunc::GcAlloc => "gox_rt_alloc",  // Uses global GC
             RuntimeFunc::GcReadSlot => "gox_gc_read_slot",
             RuntimeFunc::GcWriteSlot => "gox_gc_write_slot",
             RuntimeFunc::GcWriteBarrier => "gox_gc_write_barrier",
@@ -130,9 +131,10 @@ impl RuntimeFunc {
             // String
             RuntimeFunc::StringLen => "gox_string_len",
             RuntimeFunc::StringIndex => "gox_string_index",
-            RuntimeFunc::StringConcat => "gox_string_concat",
+            RuntimeFunc::StringConcat => "gox_rt_string_concat",  // Uses global GC
             RuntimeFunc::StringEq => "gox_string_eq",
             RuntimeFunc::StringNe => "gox_string_ne",
+            RuntimeFunc::StringFromPtr => "gox_rt_string_from_ptr",  // Uses global GC
             // Array
             RuntimeFunc::ArrayCreate => "gox_array_create",
             RuntimeFunc::ArrayLen => "gox_array_len",
@@ -215,6 +217,7 @@ impl RuntimeFunc {
         match self {
             // === GC ===
             RuntimeFunc::GcAlloc => {
+                // gox_rt_alloc uses global GC, no GC pointer needed
                 sig.params.push(AbiParam::new(I32));  // type_id
                 sig.params.push(AbiParam::new(I64));  // slots
                 sig.returns.push(AbiParam::new(I64)); // GcRef
@@ -249,14 +252,23 @@ impl RuntimeFunc {
                 sig.returns.push(AbiParam::new(I8));
             }
             RuntimeFunc::StringConcat => {
-                sig.params.push(AbiParam::new(I64));
-                sig.params.push(AbiParam::new(I64));
-                sig.returns.push(AbiParam::new(I64));
+                // gox_rt_string_concat(type_id, a, b) uses global GC
+                sig.params.push(AbiParam::new(I32));  // type_id
+                sig.params.push(AbiParam::new(I64));  // a
+                sig.params.push(AbiParam::new(I64));  // b
+                sig.returns.push(AbiParam::new(I64)); // GcRef
             }
             RuntimeFunc::StringEq | RuntimeFunc::StringNe => {
                 sig.params.push(AbiParam::new(I64));
                 sig.params.push(AbiParam::new(I64));
                 sig.returns.push(AbiParam::new(I8));
+            }
+            RuntimeFunc::StringFromPtr => {
+                // gox_rt_string_from_ptr(ptr, len, type_id) uses global GC
+                sig.params.push(AbiParam::new(I64));  // data ptr
+                sig.params.push(AbiParam::new(I64));  // len
+                sig.params.push(AbiParam::new(I32));  // type_id
+                sig.returns.push(AbiParam::new(I64)); // GcRef
             }
 
             // === Array ===

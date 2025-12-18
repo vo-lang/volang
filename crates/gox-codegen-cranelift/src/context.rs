@@ -9,7 +9,7 @@ use anyhow::Result;
 use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::AbiParam;
 use cranelift_codegen::isa::CallConv;
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use gox_vm::bytecode::{Constant, FunctionDef, Module as BytecodeModule};
@@ -30,6 +30,9 @@ pub struct CompileContext<'a> {
     
     /// Call convention
     call_conv: CallConv,
+    
+    /// String constant data IDs (const_idx -> DataId)
+    string_data: HashMap<u16, DataId>,
 }
 
 impl<'a> CompileContext<'a> {
@@ -40,6 +43,7 @@ impl<'a> CompileContext<'a> {
             runtime: RuntimeFuncs::new(call_conv),
             bytecode,
             call_conv,
+            string_data: HashMap::new(),
         }
     }
 
@@ -96,6 +100,43 @@ impl<'a> CompileContext<'a> {
     /// Get a constant by index.
     pub fn get_constant(&self, idx: u16) -> Option<&Constant> {
         self.bytecode.constants.get(idx as usize)
+    }
+
+    /// Get or create a data object for a string constant.
+    pub fn get_or_create_string_data<M: Module>(
+        &mut self,
+        module: &mut M,
+        const_idx: u16,
+    ) -> Result<DataId> {
+        if let Some(&data_id) = self.string_data.get(&const_idx) {
+            return Ok(data_id);
+        }
+
+        let s = match self.bytecode.constants.get(const_idx as usize) {
+            Some(Constant::String(s)) => s,
+            _ => anyhow::bail!("Constant {} is not a string", const_idx),
+        };
+
+        // Create a data object for the string bytes
+        let name = format!("str_const_{}", const_idx);
+        let data_id = module.declare_data(&name, Linkage::Local, false, false)?;
+        
+        let mut desc = DataDescription::new();
+        desc.define(s.as_bytes().into());
+        module.define_data(data_id, &desc)?;
+
+        self.string_data.insert(const_idx, data_id);
+        Ok(data_id)
+    }
+
+    /// Get string data info (data_id, length) for a constant.
+    pub fn get_string_info(&self, const_idx: u16) -> Option<(DataId, usize)> {
+        let data_id = self.string_data.get(&const_idx)?;
+        let len = match self.bytecode.constants.get(const_idx as usize) {
+            Some(Constant::String(s)) => s.len(),
+            _ => return None,
+        };
+        Some((*data_id, len))
     }
 
     /// Get type metadata by ID.

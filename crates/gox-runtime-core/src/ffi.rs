@@ -27,7 +27,7 @@ pub use crate::gc::{
 };
 
 // =============================================================================
-// String C ABI (5 functions)
+// String C ABI (6 functions)
 // =============================================================================
 pub use crate::objects::{
     gox_string_len,
@@ -36,6 +36,19 @@ pub use crate::objects::{
     gox_string_eq,
     gox_string_ne,
 };
+
+/// Create a string from a raw pointer and length.
+/// Used by AOT/JIT for string constants stored in data sections.
+#[no_mangle]
+pub unsafe extern "C" fn gox_string_from_ptr(
+    gc: *mut Gc,
+    ptr: *const u8,
+    len: usize,
+    type_id: TypeId,
+) -> GcRef {
+    let bytes = core::slice::from_raw_parts(ptr, len);
+    crate::objects::string::create(&mut *gc, type_id, bytes)
+}
 
 // =============================================================================
 // Array C ABI (4 functions)
