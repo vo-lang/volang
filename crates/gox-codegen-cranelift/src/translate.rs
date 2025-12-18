@@ -141,7 +141,7 @@ impl FunctionTranslator {
             // Check if this instruction is a terminator
             block_terminated = matches!(
                 inst.opcode(),
-                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::Return
+                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::Return | Opcode::IterNext
             );
 
             self.translate_instruction(&mut builder, inst, pc, code, ctx, module)?;
@@ -181,6 +181,14 @@ impl FunctionTranslator {
                     if inst.opcode() != Opcode::Jump {
                         targets.insert(pc + 1);
                     }
+                }
+                Opcode::IterNext => {
+                    // IterNext has a done_offset in inst.c for when iteration completes
+                    let done_offset = inst.c as i16 as i32;
+                    let target = (pc as i32 + done_offset) as usize;
+                    targets.insert(target);
+                    // Also need fall-through block for continue case
+                    targets.insert(pc + 1);
                 }
                 _ => {}
             }
@@ -1301,12 +1309,21 @@ impl FunctionTranslator {
                     builder.ins().iconst(I64, 0)
                 };
                 
+                // Create stack slot for output (3 x u64 = 24 bytes)
+                let out_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    24,
+                    8,
+                ));
+                let out_ptr = builder.ins().stack_addr(I64, out_slot, 0);
+                
                 let func_ref = self.get_runtime_func_ref(builder, module, ctx, RuntimeFunc::IterNext)?;
-                let call = builder.ins().call(func_ref, &[handle]);
-                let results = builder.inst_results(call);
-                let done = results[0];
-                let key = results[1];
-                let value = results[2];
+                builder.ins().call(func_ref, &[handle, out_ptr]);
+                
+                // Load results from stack slot
+                let done = builder.ins().stack_load(I64, out_slot, 0);
+                let key = builder.ins().stack_load(I64, out_slot, 8);
+                let value = builder.ins().stack_load(I64, out_slot, 16);
                 
                 // Store key and value
                 builder.def_var(self.variables[inst.a as usize], key);
@@ -1321,10 +1338,14 @@ impl FunctionTranslator {
                 let done_offset = inst.c as i16 as i32;
                 let target_pc = (pc as i32 + done_offset) as usize;
                 
-                if let Some(&target_block) = self.blocks.get(&target_pc) {
-                    let continue_block = builder.create_block();
+                // Use the pre-created fallthrough block (pc+1) as continue block
+                let continue_pc = pc + 1;
+                if let (Some(&target_block), Some(&continue_block)) = 
+                    (self.blocks.get(&target_pc), self.blocks.get(&continue_pc)) 
+                {
                     builder.ins().brif(is_done, target_block, &[], continue_block, &[]);
-                    builder.switch_to_block(continue_block);
+                    // Don't switch_to_block here - block_terminated is true,
+                    // so next iteration will switch to continue_block
                 }
             }
 

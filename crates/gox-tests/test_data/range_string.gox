@@ -1,4 +1,4 @@
-// +vm
+// +vm +jit
 package main
 
 func main() {

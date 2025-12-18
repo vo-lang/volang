@@ -990,15 +990,15 @@ pub unsafe extern "C" fn gox_iter_begin(container: u64, iter_type: u64) -> u64 {
 }
 
 /// Get next element from iterator.
-/// Returns (done, key, value) where done=1 means iteration complete.
+/// Writes to out: [done, key, value] where done=1 means iteration complete.
 #[no_mangle]
-pub unsafe extern "C" fn gox_iter_next(_handle: u64) -> (u64, u64, u64) {
+pub unsafe extern "C" fn gox_iter_next(_handle: u64, out: *mut u64) {
     use gox_runtime_core::gc::Gc;
     
-    ITER_STACK.with(|stack| {
+    let (done, key, value) = ITER_STACK.with(|stack| {
         let stack = &mut *stack.get();
         let Some(state) = stack.last_mut() else {
-            return (1, 0, 0); // done
+            return (1u64, 0u64, 0u64); // done
         };
         
         match state {
@@ -1048,23 +1048,26 @@ pub unsafe extern "C" fn gox_iter_next(_handle: u64) -> (u64, u64, u64) {
                 if *str_ref == 0 {
                     return (1, 0, 0);
                 }
-                // Read string data
-                let str_ptr = Gc::read_slot(*str_ref as *mut _, 0) as *const u8;
-                let str_len = Gc::read_slot(*str_ref as *mut _, 1) as usize;
+                // Use objects::string for correct memory layout
+                use gox_runtime_core::objects::string;
+                let str_gcref = *str_ref as gox_runtime_core::gc::GcRef;
+                let bytes = string::as_bytes(str_gcref);
                 
-                if *byte_pos >= str_len || str_ptr.is_null() {
+                if *byte_pos >= bytes.len() {
                     (1, 0, 0) // done
                 } else {
                     let pos = *byte_pos;
                     // Decode UTF-8 to get rune and width
-                    let bytes = std::slice::from_raw_parts(str_ptr.add(pos), str_len - pos);
-                    let (rune, width) = gox_common_core::utf8::decode_rune(bytes);
+                    let (rune, width) = gox_common_core::utf8::decode_rune(&bytes[pos..]);
                     *byte_pos += width;
                     (0, pos as u64, rune as u64)
                 }
             }
         }
-    })
+    });
+    *out = done;
+    *out.add(1) = key;
+    *out.add(2) = value;
 }
 
 /// End iteration and clean up.

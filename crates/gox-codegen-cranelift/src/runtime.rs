@@ -554,9 +554,7 @@ impl RuntimeFunc {
             }
             RuntimeFunc::IterNext => {
                 sig.params.push(AbiParam::new(I64));  // iterator_handle
-                sig.returns.push(AbiParam::new(I64)); // done (0=continue, 1=done)
-                sig.returns.push(AbiParam::new(I64)); // key/index
-                sig.returns.push(AbiParam::new(I64)); // value
+                sig.params.push(AbiParam::new(I64));  // out: *mut u64 (writes done, key, value)
             }
             RuntimeFunc::IterEnd => {
                 sig.params.push(AbiParam::new(I64));  // iterator_handle
