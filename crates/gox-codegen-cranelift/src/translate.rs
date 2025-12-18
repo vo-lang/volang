@@ -673,7 +673,6 @@ impl FunctionTranslator {
                 let func_idx = inst.a as u32;
                 let arg_start = inst.b;
                 let arg_count = inst.c as usize;
-                let ret_count = inst.flags as usize;
 
                 let func_ref = self.get_gox_func_ref(builder, module, ctx, func_idx)?;
 
@@ -686,9 +685,10 @@ impl FunctionTranslator {
                 // Call
                 let call = builder.ins().call(func_ref, &args);
 
-                // Store return values - copy to avoid borrow conflict
+                // Store ALL return values from the callee (based on Cranelift's actual returns)
+                // This matches VM behavior where return values are copied based on callee's Return
                 let results: Vec<_> = builder.inst_results(call).to_vec();
-                for (i, result) in results.into_iter().enumerate().take(ret_count) {
+                for (i, result) in results.into_iter().enumerate() {
                     builder.def_var(self.variables[(arg_start as usize) + i], result);
                 }
             }
