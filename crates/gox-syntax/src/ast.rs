@@ -5,6 +5,7 @@
 
 use gox_common::span::Span;
 use gox_common::symbol::{Ident, Symbol};
+use gox_common_core::ExprId;
 
 /// A source file.
 #[derive(Debug, Clone)]
@@ -688,6 +689,8 @@ pub struct LabeledStmt {
 /// An expression.
 #[derive(Debug, Clone)]
 pub struct Expr {
+    /// Unique ID for this expression (for type lookup).
+    pub id: ExprId,
     /// The kind of expression.
     pub kind: ExprKind,
     /// The span of the expression.

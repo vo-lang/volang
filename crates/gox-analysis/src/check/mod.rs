@@ -42,11 +42,13 @@ mod stmt;
 mod tests;
 
 use gox_common::{DiagnosticSink, Span, Symbol, SymbolInterner};
+use gox_common_core::TypeId;
 use gox_syntax::ast::{self, Expr};
 
 use crate::errors::TypeError;
 use crate::resolve::ResolveResult;
 use crate::scope::{Entity, Scope, ScopeKind, VarEntity};
+use crate::type_interner::TypeInterner;
 use crate::types::{BasicType, FuncType, NamedTypeInfo, Type, TypeRegistry};
 
 /// Offset for local type IDs to distinguish from package-level types.
@@ -58,6 +60,8 @@ pub struct TypeChecker<'a> {
     pub(crate) interner: &'a SymbolInterner,
     /// Diagnostics sink.
     pub(crate) diagnostics: &'a mut DiagnosticSink,
+    /// Type interner for type deduplication and expr→type binding.
+    pub(crate) types: &'a mut TypeInterner,
     /// Package-level scope from Phase 2 (for fallback lookups).
     pub(crate) package_scope: &'a Scope,
     /// Current local scope stack (owned, for function bodies).
@@ -82,9 +86,6 @@ pub struct TypeChecker<'a> {
     >,
     /// Local type declarations (function-scoped types).
     pub(crate) local_types: Vec<NamedTypeInfo>,
-    /// Expression types: (span_start, span_end) -> Type (for codegen to look up any expression's type)
-    /// Uses full span as key to distinguish nested expressions with same start position.
-    pub expr_types: std::collections::HashMap<(u32, u32), Type>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -93,10 +94,12 @@ impl<'a> TypeChecker<'a> {
         resolve_result: &'a ResolveResult,
         interner: &'a SymbolInterner,
         diagnostics: &'a mut DiagnosticSink,
+        types: &'a mut TypeInterner,
     ) -> Self {
         Self {
             interner,
             diagnostics,
+            types,
             package_scope: &resolve_result.scope,
             local_scope: None,
             named_types: &resolve_result.named_types,
@@ -107,15 +110,14 @@ impl<'a> TypeChecker<'a> {
             package_exports: std::collections::HashMap::new(),
             package_exported_types: std::collections::HashMap::new(),
             local_types: Vec::new(),
-            expr_types: std::collections::HashMap::new(),
         }
     }
 
     /// Records the type of an expression for later use by codegen.
-    /// Uses (start, end) as key to distinguish nested expressions (e.g., `m` vs `m[1]`).
+    /// Interns the type and binds it to the expression's ID.
     pub(crate) fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
-        self.expr_types
-            .insert((expr.span.start.0, expr.span.end.0), ty);
+        let type_id = self.types.intern(ty);
+        self.types.bind_expr(expr.id, type_id);
     }
 
     /// Sets imported packages for cross-package call resolution.
@@ -562,6 +564,7 @@ pub fn check_types<'a>(
     resolve_result: &'a ResolveResult,
     interner: &'a SymbolInterner,
     diagnostics: &'a mut DiagnosticSink,
+    types: &'a mut TypeInterner,
 ) -> TypeChecker<'a> {
-    TypeChecker::new(resolve_result, interner, diagnostics)
+    TypeChecker::new(resolve_result, interner, diagnostics, types)
 }

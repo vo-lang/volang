@@ -3,6 +3,7 @@
 use super::*;
 use crate::collect::collect_types;
 use crate::resolve::resolve_types;
+use crate::type_interner::TypeInterner;
 use crate::types::{BasicType, Type, UntypedKind};
 use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_syntax::{ast, parse};
@@ -21,7 +22,8 @@ fn check_source_with_interner(source: &str) -> ((DiagnosticSink, SymbolInterner)
     let resolve_result = resolve_types(collect_result, &interner, &mut resolve_diag);
 
     let mut check_diag = DiagnosticSink::new();
-    let _checker = check_types(&resolve_result, &interner, &mut check_diag);
+    let mut types = TypeInterner::new();
+    let _checker = check_types(&resolve_result, &interner, &mut check_diag, &mut types);
 
     ((check_diag, interner), file)
 }
@@ -36,7 +38,8 @@ fn check_source_multi(source: &str) -> (DiagnosticSink, SymbolInterner) {
     let resolve_result = resolve_types(collect_result, &interner, &mut resolve_diag);
 
     let mut check_diag = DiagnosticSink::new();
-    let _checker = check_types(&resolve_result, &interner, &mut check_diag);
+    let mut types = TypeInterner::new();
+    let _checker = check_types(&resolve_result, &interner, &mut check_diag, &mut types);
 
     (check_diag, interner)
 }
@@ -60,7 +63,8 @@ fn check_expr_type(source: &str, expr_source: &str) -> Type {
     let resolve_result = resolve_types(collect_result, &interner, &mut resolve_diag);
 
     let mut check_diag = DiagnosticSink::new();
-    let mut checker = check_types(&resolve_result, &interner, &mut check_diag);
+    let mut types = TypeInterner::new();
+    let mut checker = check_types(&resolve_result, &interner, &mut check_diag, &mut types);
 
     // Find the var declaration and check its init expression
     for decl in &file.decls {

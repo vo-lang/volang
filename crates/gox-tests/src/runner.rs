@@ -310,7 +310,6 @@ pub fn run_single_file_with_mode(path: &Path, mode: RunMode) -> TestResult {
     if !has_imports {
         let mut typecheck_diag = DiagnosticSink::new();
         let _typecheck_result = gox_analysis::typecheck_file(&file, &interner, &mut typecheck_diag);
-        
         // Combine parse errors and typecheck errors for checking
         let mut all_errors = format_diagnostics(&parse_diag);
         let typecheck_errors = format_diagnostics(&typecheck_diag);
@@ -350,7 +349,6 @@ pub fn run_single_file_with_mode(path: &Path, mode: RunMode) -> TestResult {
             "parse error: {}", format_diagnostics(&parse_diag)
         ));
     }
-    
     // 3. Compile & Run (using temp directory)
     let name = path.file_stem()
         .map(|s| s.to_string_lossy().to_string())

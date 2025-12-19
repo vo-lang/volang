@@ -15,6 +15,7 @@ mod types;
 use gox_common::diagnostics::DiagnosticSink;
 use gox_common::span::{BytePos, Span};
 use gox_common::symbol::{Ident, SymbolInterner};
+use gox_common_core::ExprId;
 
 use crate::ast::*;
 use crate::errors::SyntaxError;
@@ -42,6 +43,8 @@ pub struct Parser<'a> {
     diagnostics: DiagnosticSink,
     /// Whether composite literals are allowed (disabled in if/for/switch conditions).
     allow_composite_lit: bool,
+    /// Next expression ID to allocate.
+    next_expr_id: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -63,6 +66,7 @@ impl<'a> Parser<'a> {
             interner: SymbolInterner::new(),
             diagnostics: DiagnosticSink::new(),
             allow_composite_lit: true,
+            next_expr_id: 0,
         }
     }
 
@@ -81,6 +85,7 @@ impl<'a> Parser<'a> {
             interner,
             diagnostics: DiagnosticSink::new(),
             allow_composite_lit: true,
+            next_expr_id: 0,
         }
     }
 
@@ -102,6 +107,22 @@ impl<'a> Parser<'a> {
     /// Takes the symbol interner.
     pub fn take_interner(self) -> SymbolInterner {
         self.interner
+    }
+
+    /// Allocates a new ExprId.
+    pub(crate) fn alloc_expr_id(&mut self) -> ExprId {
+        let id = ExprId(self.next_expr_id);
+        self.next_expr_id += 1;
+        id
+    }
+
+    /// Creates an Expr with an auto-allocated ID.
+    pub(crate) fn make_expr(&mut self, kind: ExprKind, span: Span) -> Expr {
+        Expr {
+            id: self.alloc_expr_id(),
+            kind,
+            span,
+        }
     }
 
     /// Parses a complete source file.

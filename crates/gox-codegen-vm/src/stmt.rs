@@ -1,5 +1,6 @@
 //! Statement compilation.
 
+use gox_common_core::ExprId;
 use gox_syntax::ast::{Stmt, StmtKind, Block, IfStmt, ForStmt, ForClause, ReturnStmt, AssignStmt, AssignOp, ShortVarDecl, ExprKind, SwitchStmt, DeferStmt, ErrDeferStmt, FailStmt, GoStmt, SendStmt, SelectStmt, CommClause};
 use gox_vm::instruction::Opcode;
 use gox_analysis::Type;
@@ -355,6 +356,7 @@ fn compile_index_struct_copy(
     
     // Compile the index expression to get the struct pointer
     let ptr = expr::compile_expr(ctx, fctx, &gox_syntax::ast::Expr {
+        id: ExprId::DUMMY,
         kind: ExprKind::Index(Box::new(idx.clone())),
         span: idx.expr.span,
     })?;

@@ -75,6 +75,7 @@ pub mod collect;
 pub mod resolve;
 pub mod check;
 pub mod project;
+pub mod type_interner;
 
 use gox_common::{DiagnosticSink, SymbolInterner};
 use gox_syntax::ast::{Decl, File};
@@ -86,6 +87,7 @@ pub use collect::{collect_types, collect_types_multi, parse_rune_literal, parse_
 pub use resolve::{resolve_types, resolve_types_with_imports, ResolveResult};
 pub use check::{check_types, TypeChecker};
 pub use project::{analyze_project, Project, TypedPackage, ProjectError};
+pub use type_interner::TypeInterner;
 
 /// The result of type checking a file.
 #[derive(Debug, Default)]
@@ -94,9 +96,8 @@ pub struct TypeCheckResult {
     pub scope: Scope,
     /// The resolved named types.
     pub named_types: Vec<NamedTypeInfo>,
-    /// Expression types: (span_start, span_end) -> Type
-    /// Uses full span as key to distinguish nested expressions with same start position.
-    pub expr_types: std::collections::HashMap<(u32, u32), Type>,
+    /// Type interner with expr→type bindings.
+    pub types: TypeInterner,
 }
 
 /// Type-checks a GoX source file.
@@ -131,7 +132,8 @@ pub fn typecheck_files(
     let resolve_result = resolve_types(collect_result, interner, diagnostics);
 
     // Phase 3: Check declarations from all files
-    let mut checker = check_types(&resolve_result, interner, diagnostics);
+    let mut types = TypeInterner::new();
+    let mut checker = check_types(&resolve_result, interner, diagnostics, &mut types);
 
     for file in files {
         for decl in &file.decls {
@@ -143,14 +145,13 @@ pub fn typecheck_files(
         }
     }
     
-    // Extract expr_types before dropping checker (which borrows resolve_result)
-    let expr_types = std::mem::take(&mut checker.expr_types);
+    // Drop checker before moving types (checker borrows types)
     drop(checker);
 
     TypeCheckResult {
         scope: resolve_result.scope,
         named_types: resolve_result.named_types,
-        expr_types,
+        types,
     }
 }
 
@@ -214,7 +215,8 @@ pub fn typecheck_files_with_imports(
     let resolve_result = resolve_types_with_imports(collect_result, interner, diagnostics, imported_types_map);
 
     // Phase 3: Check declarations from all files
-    let mut checker = check_types(&resolve_result, interner, diagnostics);
+    let mut types = TypeInterner::new();
+    let mut checker = check_types(&resolve_result, interner, diagnostics, &mut types);
     
     // Set imported packages for cross-package call checking
     checker.set_imported_packages(imports, package_exports, package_exported_types);
@@ -229,14 +231,13 @@ pub fn typecheck_files_with_imports(
         }
     }
     
-    // Extract expr_types before dropping checker (which borrows resolve_result)
-    let expr_types = std::mem::take(&mut checker.expr_types);
+    // Drop checker before moving types (checker borrows types)
     drop(checker);
 
     TypeCheckResult {
         scope: resolve_result.scope,
         named_types: resolve_result.named_types,
-        expr_types,
+        types,
     }
 }
 

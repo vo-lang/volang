@@ -686,9 +686,11 @@ impl<'a> CodegenContext<'a> {
         }
     }
     
-    /// Look up the type of an expression using the type checker's expr_types map.
+    /// Look up the type of an expression using the TypeInterner.
     pub fn lookup_expr_type(&self, expr: &gox_syntax::ast::Expr) -> Option<gox_analysis::Type> {
-        self.result.expr_types.get(&(expr.span.start.0, expr.span.end.0)).cloned()
+        self.result.types.get_expr_type(expr.id)
+            .and_then(|type_id| self.result.types.try_resolve(type_id))
+            .cloned()
     }
     
     /// Convert a Type to ValueKind for codegen purposes.

@@ -567,6 +567,7 @@ name = "gox-analysis"
 version = "0.1.0"
 dependencies = [
  "gox-common",
+ "gox-common-core",
  "gox-module",
  "gox-syntax",
  "num-bigint",
@@ -726,6 +727,7 @@ name = "gox-syntax"
 version = "0.1.0"
 dependencies = [
  "gox-common",
+ "gox-common-core",
  "logos",
  "num-bigint",
  "num-rational",

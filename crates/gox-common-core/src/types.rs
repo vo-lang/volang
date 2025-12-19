@@ -2,6 +2,32 @@
 
 use num_enum::TryFromPrimitive;
 
+// =============================================================================
+// Compiler IDs (for type system refactoring)
+// =============================================================================
+
+/// Expression unique ID (assigned by Parser).
+/// Used as key for expression → type mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ExprId(pub u32);
+
+impl ExprId {
+    pub const DUMMY: ExprId = ExprId(u32::MAX);
+}
+
+/// Type unique ID (assigned by TypeInterner).
+/// Structurally equal types share the same TypeId.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TypeId(pub u32);
+
+impl TypeId {
+    pub const INVALID: TypeId = TypeId(u32::MAX);
+}
+
+// =============================================================================
+// Runtime Types
+// =============================================================================
+
 /// Value kind - the runtime classification of GoX values.
 ///
 /// This is a simplified type tag used for:

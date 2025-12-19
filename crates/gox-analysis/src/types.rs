@@ -47,7 +47,7 @@
 use gox_common::Symbol;
 
 /// Represents all types in GoX.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// Basic types: int, int8, ..., float64, bool, string
     Basic(BasicType),
@@ -224,27 +224,27 @@ impl UntypedKind {
 pub struct NamedTypeId(pub u32);
 
 /// Array type: `[N]T`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayType {
     pub len: u64,
     pub elem: Box<Type>,
 }
 
 /// Slice type: `[]T`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SliceType {
     pub elem: Box<Type>,
 }
 
 /// Map type: `map[K]V`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MapType {
     pub key: Box<Type>,
     pub value: Box<Type>,
 }
 
 /// Channel type: `chan T`, `chan<- T`, `<-chan T`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChanType {
     pub dir: ChanDir,
     pub elem: Box<Type>,
@@ -262,7 +262,7 @@ pub enum ChanDir {
 }
 
 /// Function type: `func(T) R`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FuncType {
     pub params: Vec<Type>,
     pub results: Vec<Type>,
@@ -270,13 +270,13 @@ pub struct FuncType {
 }
 
 /// Struct or object type: `struct { ... }` or `object { ... }`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructType {
     pub fields: Vec<Field>,
 }
 
 /// A struct/object field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
     /// Field name (None for embedded fields).
     pub name: Option<Symbol>,
@@ -289,7 +289,7 @@ pub struct Field {
 }
 
 /// Interface type: `interface { ... }`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InterfaceType {
     /// Methods in this interface.
     pub methods: Vec<Method>,
@@ -298,7 +298,7 @@ pub struct InterfaceType {
 }
 
 /// A method signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Method {
     pub name: Symbol,
     pub sig: FuncType,
