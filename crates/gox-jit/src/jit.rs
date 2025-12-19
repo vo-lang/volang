@@ -14,27 +14,19 @@
 //! 4. Stack maps are registered with `gox_runtime_native::stack_map::register_stack_map()`
 //!
 //! 5. During GC, `scan_native_stack()` uses these maps to find live GC refs
-//!
-//! ### TODO: Stack Map Extraction
-//!
-//! Currently, `module.define_function()` compiles internally and doesn't expose
-//! stack maps. To extract them, we need to:
-//!
-//! 1. Use `ctx.compile(isa)` directly to get `CompiledCode`
-//! 2. Extract `user_stack_maps()` before calling `define_function_bytes()`
-//! 3. Register each (code_ptr + offset, entry) with the stack map registry
-//!
-//! This requires refactoring to use the lower-level compilation API.
 
 use anyhow::Result;
-use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::{CallConv, TargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::control::ControlPlane;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Module;
+use cranelift_module::{FuncId, Module};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gox_vm::bytecode::Module as BytecodeModule;
 use gox_runtime_native::RuntimeSymbols;
+use gox_runtime_native::stack_map::{StackMapEntry, register_stack_map};
 use gox_codegen_cranelift::{CompileContext, FunctionTranslator};
 
 /// A compiled function with its code pointer.
@@ -45,12 +37,21 @@ pub struct CompiledFunction {
     pub name: String,
 }
 
+/// Pending stack maps for a function (before finalization).
+struct PendingStackMaps {
+    /// List of (offset_in_function, stack_map_entry)
+    entries: Vec<(u32, StackMapEntry)>,
+}
+
 /// JIT Compiler using Cranelift to compile bytecode to native code in memory.
 pub struct JitCompiler {
     module: JITModule,
+    isa: Arc<dyn TargetIsa>,
     call_conv: CallConv,
     /// Mapping from function name to code pointer.
     functions: HashMap<String, *const u8>,
+    /// Pending stack maps before finalization (func_id -> maps)
+    pending_stack_maps: HashMap<u32, PendingStackMaps>,
 }
 
 impl JitCompiler {
@@ -66,7 +67,17 @@ impl JitCompiler {
         let call_conv = isa.default_call_conv();
         
         // Create JIT builder with runtime symbols
-        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        // Clone ISA for the builder (it takes ownership)
+        let isa_for_builder = {
+            let isa_builder = cranelift_native::builder()
+                .map_err(|e| anyhow::anyhow!("Failed to create ISA builder: {}", e))?;
+            let mut flag_builder = settings::builder();
+            flag_builder.set("use_colocated_libcalls", "false")?;
+            flag_builder.set("is_pic", "false")?;
+            isa_builder.finish(settings::Flags::new(flag_builder))?
+        };
+        
+        let mut builder = JITBuilder::with_isa(isa_for_builder, cranelift_module::default_libcall_names());
         
         // Register runtime symbols for linking
         let symbols = RuntimeSymbols::new();
@@ -78,8 +89,10 @@ impl JitCompiler {
         
         Ok(Self {
             module,
+            isa,
             call_conv,
             functions: HashMap::new(),
+            pending_stack_maps: HashMap::new(),
         })
     }
 
@@ -105,7 +118,7 @@ impl JitCompiler {
         // Phase 1: Declare all functions
         compile_ctx.declare_all_functions(&mut self.module)?;
         
-        // Phase 2: Compile each function
+        // Phase 2: Compile each function and extract stack maps
         for (idx, func_def) in bytecode.functions.iter().enumerate() {
             let func_id = compile_ctx.get_gox_func(idx as u32)
                 .ok_or_else(|| anyhow::anyhow!("Function {} not declared", idx))?;
@@ -118,23 +131,68 @@ impl JitCompiler {
             let mut translator = FunctionTranslator::new(func_def.local_slots as usize, &func_def.code);
             translator.translate(&mut ctx.func, &func_def.code, &mut compile_ctx, &mut self.module, &func_def.reg_types)?;
             
-            // Define the function
-            self.module.define_function(func_id, &mut ctx)?;
+            // Compile and extract stack maps
+            self.compile_and_define_function(func_id, &mut ctx)?;
             self.module.clear_context(&mut ctx);
         }
         
         // Phase 3: Finalize all definitions
         self.module.finalize_definitions()?;
         
-        // Phase 4: Store function pointers and populate function table
+        // Phase 4: Store function pointers, register stack maps, and populate function table
         for (idx, func_def) in bytecode.functions.iter().enumerate() {
             let func_id = compile_ctx.get_gox_func(idx as u32).unwrap();
             let code_ptr = self.module.get_finalized_function(func_id);
             self.functions.insert(func_def.name.clone(), code_ptr);
             
+            // Register stack maps with actual code addresses
+            if let Some(pending) = self.pending_stack_maps.remove(&func_id.as_u32()) {
+                for (offset, entry) in pending.entries {
+                    let return_addr = code_ptr as usize + offset as usize;
+                    register_stack_map(return_addr, entry);
+                }
+            }
+            
             // Also populate the function table for indirect calls
             gox_runtime_native::set_func_ptr(idx as u32, code_ptr);
         }
+        
+        Ok(())
+    }
+    
+    /// Compile a function and extract stack maps before defining it.
+    fn compile_and_define_function(&mut self, func_id: FuncId, ctx: &mut cranelift_codegen::Context) -> Result<()> {
+        // Compile to get access to stack maps
+        let mut ctrl_plane = ControlPlane::default();
+        let compiled = ctx.compile(self.isa.as_ref(), &mut ctrl_plane)
+            .map_err(|e| anyhow::anyhow!("Compilation failed: {:?}", e))?;
+        
+        // Extract stack maps from compiled code
+        let stack_maps = compiled.buffer.user_stack_maps();
+        if !stack_maps.is_empty() {
+            let entries: Vec<(u32, StackMapEntry)> = stack_maps
+                .iter()
+                .filter_map(|(offset, _size, user_map)| {
+                    // Convert Cranelift's UserStackMap to our StackMapEntry
+                    // user_map.entries() returns (Type, offset) tuples
+                    let offsets: Vec<i32> = user_map.entries()
+                        .map(|(_ty, slot_offset)| slot_offset as i32)
+                        .collect();
+                    if offsets.is_empty() {
+                        None
+                    } else {
+                        Some((*offset, StackMapEntry::new(offsets)))
+                    }
+                })
+                .collect();
+            
+            if !entries.is_empty() {
+                self.pending_stack_maps.insert(func_id.as_u32(), PendingStackMaps { entries });
+            }
+        }
+        
+        // Define the function using the compiled code
+        self.module.define_function(func_id, ctx)?;
         
         Ok(())
     }
