@@ -294,6 +294,31 @@ pub fn is_string_expr(
     })
 }
 
+/// Check if expression is nil literal
+fn is_nil_expr(ctx: &CodegenContext, expr: &gox_syntax::ast::Expr) -> bool {
+    use gox_syntax::ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Ident(ident) => ctx.symbols.is(ident.symbol, ctx.symbols.sym_nil),
+        ExprKind::Paren(inner) => is_nil_expr(ctx, inner),
+        _ => false,
+    }
+}
+
+/// Check if expression is an interface variable
+fn is_interface_expr_local(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> bool {
+    use gox_syntax::ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if let Some(local) = fctx.lookup_local(ident.symbol) {
+                return local.kind == ValueKind::Interface;
+            }
+            false
+        }
+        ExprKind::Paren(inner) => is_interface_expr_local(ctx, fctx, inner),
+        _ => false,
+    }
+}
+
 /// Compile binary expression.
 fn compile_binary(
     ctx: &mut CodegenContext,
@@ -303,6 +328,68 @@ fn compile_binary(
     // Short-circuit for && and ||
     if binary.op == BinaryOp::LogAnd || binary.op == BinaryOp::LogOr {
         return compile_short_circuit(ctx, fctx, binary);
+    }
+
+    // Handle interface == nil comparison specially
+    let left_is_iface = is_interface_expr_local(ctx, fctx, &binary.left);
+    let right_is_iface = is_interface_expr_local(ctx, fctx, &binary.right);
+    let left_is_nil = is_nil_expr(ctx, &binary.left);
+    let right_is_nil = is_nil_expr(ctx, &binary.right);
+    
+    if binary.op == BinaryOp::Eq || binary.op == BinaryOp::NotEq {
+        if left_is_iface && right_is_nil {
+            // interface == nil: check value_type (low 32 bits of slot0) == 0
+            let iface_reg = compile_expr(ctx, fctx, &binary.left)?;
+            let dst = fctx.regs.alloc(1);
+            let tmp = fctx.regs.alloc(1);
+            fctx.emit(Opcode::I64ToI32, tmp, iface_reg, 0);  // tmp = value_type
+            let zero = fctx.regs.alloc(1);
+            fctx.emit(Opcode::LoadInt, zero, 0, 0);
+            if binary.op == BinaryOp::Eq {
+                fctx.emit(Opcode::EqI64, dst, tmp, zero);
+            } else {
+                fctx.emit(Opcode::NeI64, dst, tmp, zero);
+            }
+            return Ok(dst);
+        } else if left_is_nil && right_is_iface {
+            // nil == interface
+            let iface_reg = compile_expr(ctx, fctx, &binary.right)?;
+            let dst = fctx.regs.alloc(1);
+            let tmp = fctx.regs.alloc(1);
+            fctx.emit(Opcode::I64ToI32, tmp, iface_reg, 0);
+            let zero = fctx.regs.alloc(1);
+            fctx.emit(Opcode::LoadInt, zero, 0, 0);
+            if binary.op == BinaryOp::Eq {
+                fctx.emit(Opcode::EqI64, dst, tmp, zero);
+            } else {
+                fctx.emit(Opcode::NeI64, dst, tmp, zero);
+            }
+            return Ok(dst);
+        } else if left_is_iface && right_is_iface {
+            // interface == interface: compare value_type AND data
+            let left_reg = compile_expr(ctx, fctx, &binary.left)?;
+            let right_reg = compile_expr(ctx, fctx, &binary.right)?;
+            let dst = fctx.regs.alloc(1);
+            // Compare value_type (low 32 bits)
+            let left_vt = fctx.regs.alloc(1);
+            let right_vt = fctx.regs.alloc(1);
+            fctx.emit(Opcode::I64ToI32, left_vt, left_reg, 0);
+            fctx.emit(Opcode::I64ToI32, right_vt, right_reg, 0);
+            let vt_eq = fctx.regs.alloc(1);
+            fctx.emit(Opcode::EqI64, vt_eq, left_vt, right_vt);
+            // Compare data (slot1)
+            let data_eq = fctx.regs.alloc(1);
+            fctx.emit(Opcode::EqI64, data_eq, left_reg + 1, right_reg + 1);
+            // Result: vt_eq AND data_eq
+            fctx.emit(Opcode::Band, dst, vt_eq, data_eq);
+            if binary.op == BinaryOp::NotEq {
+                // Negate: dst = 1 - dst
+                let one = fctx.regs.alloc(1);
+                fctx.emit(Opcode::LoadInt, one, 1, 0);
+                fctx.emit(Opcode::SubI64, dst, one, dst);
+            }
+            return Ok(dst);
+        }
     }
 
     let left = compile_expr(ctx, fctx, &binary.left)?;
@@ -805,10 +892,11 @@ fn compile_interface_method_call(
         )));
     }
 
-    // Unbox interface: get type_id and data
+    // Unbox interface: get value_type (low 32 bits of slot0) and data
     let type_id_reg = fctx.regs.alloc(1);
     let data_reg = fctx.regs.alloc(1);
-    fctx.emit(Opcode::Mov, type_id_reg, iface_reg, 0); // type_id = slot 0
+    // slot0 = (iface_type << 32) | value_type, extract value_type
+    fctx.emit(Opcode::I64ToI32, type_id_reg, iface_reg, 0); // type_id = value_type (low 32 bits)
     fctx.emit(Opcode::Mov, data_reg, iface_reg + 1, 0); // data = slot 1
 
     // Pre-compile arguments ONCE (before dispatch loop)

@@ -239,6 +239,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::Panic => format!("Panic r{}", a),
         Opcode::Recover => format!("Recover r{}", a),
         
+        Opcode::InitInterface => format!("InitInterface r{}, {}", a, b),
         Opcode::BoxInterface => format!("BoxInterface r{}, {}, r{}", a, b, c),
         Opcode::UnboxInterface => format!("UnboxInterface r{}, r{}, r{}", a, b, c),
         Opcode::TypeAssert => format!("TypeAssert r{}, r{}, {}, {}", a, b, c, flags),

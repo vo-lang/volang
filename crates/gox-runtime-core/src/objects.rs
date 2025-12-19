@@ -817,20 +817,44 @@ pub mod interface {
     
     pub const SIZE_SLOTS: usize = 2;
     
+    /// Pack iface_type and value_type into slot0.
+    /// slot0 = (iface_type << 32) | value_type
+    pub fn pack_types(iface_type: u32, value_type: u32) -> u64 {
+        ((iface_type as u64) << 32) | (value_type as u64)
+    }
+    
+    /// Unpack iface_type from slot0 (high 32 bits).
+    pub fn unpack_iface_type(slot0: u64) -> u32 {
+        (slot0 >> 32) as u32
+    }
+    
+    /// Unpack value_type from slot0 (low 32 bits).
+    pub fn unpack_value_type(slot0: u64) -> u32 {
+        slot0 as u32
+    }
+    
+    /// Update value_type in slot0, preserving iface_type.
+    pub fn update_value_type(slot0: u64, value_type: u32) -> u64 {
+        (slot0 & 0xFFFF_FFFF_0000_0000) | (value_type as u64)
+    }
+    
+    /// Box a value into interface (legacy, for backward compatibility).
     pub fn box_value(type_id: TypeId, data: u64) -> (u64, u64) {
         (type_id as u64, data)
     }
     
+    /// Unbox type (returns value_type, low 32 bits).
     pub fn unbox_type(slot0: u64) -> TypeId {
-        slot0 as TypeId
+        unpack_value_type(slot0)
     }
     
     pub fn unbox_data(slot1: u64) -> u64 {
         slot1
     }
     
-    pub fn is_nil(slot0: u64, slot1: u64) -> bool {
-        slot0 == 0 && slot1 == 0
+    pub fn is_nil(slot0: u64, _slot1: u64) -> bool {
+        // nil interface: value_type (low 32 bits) == 0
+        unpack_value_type(slot0) == 0
     }
 }
 

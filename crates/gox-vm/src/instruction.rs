@@ -189,7 +189,8 @@ pub enum Opcode {
     Recover,          // a = recover()
     
     // ============ Interface ============
-    BoxInterface = 175,   // a = box(type=b, value=c) into interface
+    InitInterface = 175,  // init interface at a with iface_type=b (slot0 high 32 bits)
+    BoxInterface,         // a[slot0] = (a[slot0] & 0xFFFF_FFFF_0000_0000) | b, a[slot1] = c
     UnboxInterface,       // a = unbox(b), type at c
     TypeAssert,           // a = b.(type c), ok at flags
     
@@ -343,9 +344,10 @@ impl Opcode {
             168 => Self::Panic,
             169 => Self::Recover,
             
-            175 => Self::BoxInterface,
-            176 => Self::UnboxInterface,
-            177 => Self::TypeAssert,
+            175 => Self::InitInterface,
+            176 => Self::BoxInterface,
+            177 => Self::UnboxInterface,
+            178 => Self::TypeAssert,
             
             180 => Self::I64ToF64,
             181 => Self::F64ToI64,

@@ -1359,13 +1359,22 @@ impl Vm {
             }
             
             // ============ Interface ============
-            Opcode::BoxInterface => {
-                // a=dest (2 slots), b=type_id, c=value
-                let type_id = b as TypeId;
-                let val = self.read_reg(fiber_id, c);
-                let (slot0, slot1) = interface::box_value(type_id, val);
+            Opcode::InitInterface => {
+                // a=dest (2 slots), b=iface_type
+                // Initialize interface with iface_type in high 32 bits, value_type=0, data=0
+                let slot0 = interface::pack_types(b as u32, 0);
                 self.write_reg(fiber_id, a, slot0);
-                self.write_reg(fiber_id, a + 1, slot1);
+                self.write_reg(fiber_id, a + 1, 0);
+            }
+            
+            Opcode::BoxInterface => {
+                // a=dest (2 slots), b=value_type, c=value
+                // Preserve iface_type (high 32 bits), update value_type and data
+                let old_slot0 = self.read_reg(fiber_id, a);
+                let slot0 = interface::update_value_type(old_slot0, b as u32);
+                let val = self.read_reg(fiber_id, c);
+                self.write_reg(fiber_id, a, slot0);
+                self.write_reg(fiber_id, a + 1, val);
             }
             
             Opcode::UnboxInterface => {
@@ -1411,8 +1420,10 @@ impl Vm {
             }
             
             Opcode::I64ToI32 => {
-                let v = self.read_reg(fiber_id, b) as i64;
-                self.write_reg(fiber_id, a, v as i32 as u64);
+                // Zero-extend truncation (mask low 32 bits)
+                let v = self.read_reg(fiber_id, b);
+                let result = v & 0xFFFF_FFFF;
+                self.write_reg(fiber_id, a, result);
             }
             
             // ============ Debug ============
@@ -1420,9 +1431,10 @@ impl Vm {
                 let type_tag = crate::value::TypeTag::from_u8(b as u8);
                 
                 let (val, inner_tag, is_iface) = if type_tag == crate::value::TypeTag::Interface {
-                    let type_id = self.read_reg(fiber_id, a) as u32;
+                    let slot0 = self.read_reg(fiber_id, a);
+                    let value_type = interface::unpack_value_type(slot0);
                     let data = self.read_reg(fiber_id, a + 1);
-                    (data, type_id_to_tag(type_id), true)
+                    (data, type_id_to_tag(value_type), true)
                 } else {
                     (self.read_reg(fiber_id, a), type_tag, false)
                 };

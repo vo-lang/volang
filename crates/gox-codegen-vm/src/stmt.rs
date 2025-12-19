@@ -54,20 +54,26 @@ pub fn compile_stmt(
                     }
                 });
                 
+                // Get iface_type for interface declarations
+                let iface_type = if is_interface {
+                    get_interface_type_id(ctx, spec.ty.as_ref())
+                } else {
+                    0
+                };
+                
                 for (i, name) in spec.names.iter().enumerate() {
                     if is_interface {
                         // Interface needs 2 slots (type_id + data)
                         let dst = fctx.define_local_with_kind(*name, 2, ValueKind::Interface);
+                        // Initialize interface with iface_type
+                        fctx.emit(Opcode::InitInterface, dst, iface_type, 0);
                         if i < spec.values.len() {
                             // Box the value into interface
                             let src = expr::compile_expr(ctx, fctx, &spec.values[i])?;
-                            let type_id = infer_runtime_type_id(ctx, fctx, &spec.values[i]);
-                            fctx.emit(Opcode::BoxInterface, dst, type_id, src);
-                        } else {
-                            // nil interface (type=0, data=0)
-                            fctx.emit(Opcode::LoadInt, dst, 0, 0);
-                            fctx.emit(Opcode::LoadInt, dst + 1, 0, 0);
+                            let value_type = infer_runtime_type_id(ctx, fctx, &spec.values[i]);
+                            fctx.emit(Opcode::BoxInterface, dst, value_type, src);
                         }
+                        // else: nil interface already initialized by InitInterface
                     } else {
                         // Check if this is a struct type that needs allocation
                         let struct_slot_count = spec.ty.as_ref().and_then(|ty| {
@@ -282,6 +288,25 @@ fn compile_short_var(
             // Check if this variable will be captured by a closure
             let is_captured = fctx.is_captured(name.symbol);
             
+            // Handle interface type specially (needs 2 slots)
+            // Note: := only infers interface type when RHS is interface, so just copy
+            if kind == ValueKind::Interface {
+                let dst = fctx.define_local_with_kind(*name, 2, ValueKind::Interface);
+                if i < sv.values.len() {
+                    // RHS is interface - copy both slots (including iface_type)
+                    let src = expr::compile_expr(ctx, fctx, &sv.values[i])?;
+                    if src != dst {
+                        fctx.emit(Opcode::MovN, dst, src, 2);
+                    }
+                } else {
+                    // No RHS but inferred as interface? This shouldn't happen with :=
+                    return Err(CodegenError::Internal(
+                        "short var decl inferred interface type without RHS".to_string()
+                    ));
+                }
+                continue;
+            }
+            
             let dst = fctx.define_local_full(*name, 1, kind, field_count, type_sym, is_captured);
             
             if i < sv.values.len() {
@@ -345,7 +370,7 @@ fn compile_index_struct_copy(
 fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, expr: &gox_syntax::ast::Expr) -> TypeInfo {
     use gox_syntax::ast::{ExprKind, TypeExprKind};
     
-    match &expr.kind {
+    let result = match &expr.kind {
         ExprKind::CompositeLit(lit) => {
             match &lit.ty.kind {
                 TypeExprKind::Map(map_ty) => {
@@ -437,7 +462,8 @@ fn infer_var_kind_and_type(ctx: &CodegenContext, fctx: Option<&FuncContext>, exp
         }
         ExprKind::Paren(inner) => infer_var_kind_and_type(ctx, fctx, inner),
         _ => TypeInfo::new(ValueKind::Int64),
-    }
+    };
+    result
 }
 /// Check if a named type is an object type (reference semantics)
 fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
@@ -447,6 +473,40 @@ fn is_named_type_object(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
 /// Check if a named type is an interface type
 fn is_named_interface_type(ctx: &CodegenContext, sym: gox_common::Symbol) -> bool {
     expr::lookup_named_type(ctx, sym).map_or(false, |ty| matches!(ty, Type::Interface(_)))
+}
+
+/// Get interface type ID from type expression.
+/// Returns index into the interface type table (0 = interface{}, 1+ = named interfaces).
+fn get_interface_type_id(ctx: &CodegenContext, ty: Option<&gox_syntax::ast::TypeExpr>) -> u16 {
+    use gox_syntax::ast::TypeExprKind;
+    
+    let ty = match ty {
+        Some(t) => t,
+        None => return 0, // Default to interface{}
+    };
+    
+    match &ty.kind {
+        TypeExprKind::Interface(_) => 0, // Anonymous interface{} 
+        TypeExprKind::Ident(ident) => {
+            // Named interface - find its index
+            get_named_interface_id(ctx, ident.symbol)
+        }
+        _ => 0,
+    }
+}
+
+/// Get interface type ID for a named interface type.
+fn get_named_interface_id(ctx: &CodegenContext, sym: gox_common::Symbol) -> u16 {
+    let mut iface_idx = 1u16; // Start from 1 (0 = interface{})
+    for info in ctx.result.named_types.iter() {
+        if matches!(info.underlying, Type::Interface(_)) {
+            if info.name == sym {
+                return iface_idx;
+            }
+            iface_idx += 1;
+        }
+    }
+    0 // Not found, fallback to interface{}
 }
 
 /// Check if an expression is an interface variable
@@ -465,31 +525,33 @@ fn is_interface_expr(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax
     }
 }
 
-/// Infer runtime type ID for boxing into interface
+/// Infer runtime type ID for boxing into interface.
+/// Returns FIRST_USER_TYPE + idx for named types, or ValueKind as u16 for builtins.
 pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &gox_syntax::ast::Expr) -> u16 {
-    use gox_syntax::ast::ExprKind;
+    use gox_syntax::ast::{ExprKind, TypeExprKind};
     
     match &expr.kind {
         ExprKind::IntLit(_) => ValueKind::Int64 as u16,
         ExprKind::FloatLit(_) => ValueKind::Float64 as u16,
         ExprKind::StringLit(_) => ValueKind::String as u16,
         ExprKind::RuneLit(_) => ValueKind::Int32 as u16,
+        ExprKind::CompositeLit(lit) => {
+            if let TypeExprKind::Ident(ident) = &lit.ty.kind {
+                get_named_type_id(ctx, ident.symbol).unwrap_or(ValueKind::Struct as u16)
+            } else {
+                ValueKind::Struct as u16
+            }
+        }
         ExprKind::Ident(ident) => {
-            // Check local variable type
             if let Some(local) = fctx.lookup_local(ident.symbol) {
-                // If it's a named type (struct/object), look up its type_id
-                if let Some(type_sym) = local.type_sym {
-                    if let Some(type_id) = get_named_type_id(ctx, type_sym) {
-                        return type_id;
-                    }
-                }
-                local.kind as u16
+                local.type_sym
+                    .and_then(|sym| get_named_type_id(ctx, sym))
+                    .unwrap_or(local.kind as u16)
             } else {
                 ValueKind::Int64 as u16
             }
         }
         ExprKind::Binary(_) => {
-            // Check if float or string expression
             if expr::is_float_expr(ctx, fctx, expr) {
                 ValueKind::Float64 as u16
             } else if expr::is_string_expr(ctx, fctx, expr) {
@@ -499,11 +561,9 @@ pub fn infer_runtime_type_id(ctx: &CodegenContext, fctx: &FuncContext, expr: &go
             }
         }
         ExprKind::Call(_) => {
-            // Use unified lookup for all function calls
-            if let Some(kind) = ctx.lookup_call_return_type(expr) {
-                return crate::context::value_kind_to_builtin_type(kind);
-            }
-            ValueKind::Int64 as u16
+            ctx.lookup_call_return_type(expr)
+                .map(crate::context::value_kind_to_builtin_type)
+                .unwrap_or(ValueKind::Int64 as u16)
         }
         _ => ValueKind::Int64 as u16,
     }

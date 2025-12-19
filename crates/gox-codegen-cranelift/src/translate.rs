@@ -1184,12 +1184,27 @@ impl FunctionTranslator {
             }
 
             // ==================== Interface ====================
+            Opcode::InitInterface => {
+                // a=dest (2 slots), b=iface_type
+                // Initialize interface with iface_type in high 32 bits, value_type=0, data=0
+                // slot0 = (iface_type << 32) | 0
+                let iface_type = builder.ins().iconst(I64, inst.b as i64);
+                let slot0 = builder.ins().ishl_imm(iface_type, 32);
+                let zero = builder.ins().iconst(I64, 0);
+                builder.def_var(self.variables[inst.a as usize], slot0);
+                builder.def_var(self.variables[(inst.a + 1) as usize], zero);
+            }
+
             Opcode::BoxInterface => {
-                // a=dest (2 slots), b=type_id, c=value
-                // Interface is stored as 2 i64 slots: [type_id, data]
-                let type_id = builder.ins().iconst(I64, inst.b as i64);
+                // a=dest (2 slots), b=value_type, c=value
+                // Preserve iface_type (high 32 bits), update value_type (low 32 bits) and data
+                let old_slot0 = builder.use_var(self.variables[inst.a as usize]);
+                let mask = builder.ins().iconst(I64, 0xFFFF_FFFF_0000_0000u64 as i64);
+                let iface_type_part = builder.ins().band(old_slot0, mask);
+                let value_type = builder.ins().iconst(I64, inst.b as i64);
+                let slot0 = builder.ins().bor(iface_type_part, value_type);
                 let val = builder.use_var(self.variables[inst.c as usize]);
-                builder.def_var(self.variables[inst.a as usize], type_id);
+                builder.def_var(self.variables[inst.a as usize], slot0);
                 builder.def_var(self.variables[(inst.a + 1) as usize], val);
             }
 
