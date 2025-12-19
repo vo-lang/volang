@@ -278,10 +278,7 @@ impl<'a> Parser<'a> {
                         });
                     } else {
                         // First was actually the type (identifier type like `int`)
-                        let ty = TypeExpr {
-                            kind: TypeExprKind::Ident(first),
-                            span: first.span,
-                        };
+                        let ty = self.make_type_expr(TypeExprKind::Ident(first), first.span);
                         results.push(ResultParam {
                             name: None,
                             ty,

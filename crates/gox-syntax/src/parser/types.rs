@@ -93,10 +93,7 @@ impl<'a> Parser<'a> {
             }
         };
         
-        Ok(TypeExpr {
-            kind,
-            span: Span::new(start, self.current.span.start),
-        })
+        Ok(self.make_type_expr(kind, Span::new(start, self.current.span.start)))
     }
 
     fn parse_func_type_sig(&mut self) -> ParseResult<FuncType> {

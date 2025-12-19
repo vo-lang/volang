@@ -524,10 +524,13 @@ impl<'a, 'm> CodegenContextRef<'a, 'm> {
         let mut fctx = FuncContext::new(name);
         
         for param in &func.sig.params {
-            // Infer type info from parameter type
-            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(&self.symbols));
-            let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
+                // Look up type bound by TypeChecker
+                let ty = self.result.types.get_symbol_type(name.symbol)
+                    .and_then(|type_id| self.result.types.try_resolve(type_id))
+                    .expect("parameter type not bound by TypeChecker");
+                let info = type_to_type_info(ty, &self.result.named_types);
+                let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
                 fctx.param_count += 1;
                 fctx.param_slots += slots;
                 fctx.define_local_full(*name, slots, info.kind, info.field_count, info.type_sym, false);
@@ -689,6 +692,13 @@ impl<'a> CodegenContext<'a> {
     /// Look up the type of an expression using the TypeInterner.
     pub fn lookup_expr_type(&self, expr: &gox_syntax::ast::Expr) -> Option<gox_analysis::Type> {
         self.result.types.get_expr_type(expr.id)
+            .and_then(|type_id| self.result.types.try_resolve(type_id))
+            .cloned()
+    }
+    
+    /// Look up the type of a symbol (variable/parameter) using the TypeInterner.
+    pub fn lookup_symbol_type(&self, sym: Symbol) -> Option<gox_analysis::Type> {
+        self.result.types.get_symbol_type(sym)
             .and_then(|type_id| self.result.types.try_resolve(type_id))
             .cloned()
     }
@@ -877,9 +887,12 @@ impl<'a> CodegenContext<'a> {
         
         // Allocate registers for parameters with type info
         for param in &func.sig.params {
-            let info = infer_type_from_type_expr_with_interner(self.result, &param.ty, Some(&self.symbols));
-            let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
             for name in &param.names {
+                // Look up type bound by TypeChecker
+                let ty = self.lookup_symbol_type(name.symbol)
+                    .expect("parameter type not bound by TypeChecker");
+                let info = self.type_to_type_info(&ty);
+                let slots = if info.kind == ValueKind::Interface { 2 } else { 1 };
                 fctx.param_count += 1;
                 fctx.param_slots += slots;
                 fctx.define_local_full(*name, slots, info.kind, info.field_count, info.type_sym, false);
@@ -1002,6 +1015,11 @@ impl<'a> CodegenContext<'a> {
         }
         None
     }
+    
+    /// Convert a Type to TypeInfo for codegen.
+    pub fn type_to_type_info(&self, ty: &gox_analysis::Type) -> TypeInfo {
+        type_to_type_info(ty, &self.result.named_types)
+    }
 }
 
 /// Type inference result for a type expression.
@@ -1030,73 +1048,73 @@ impl TypeInfo {
     }
 }
 
-/// Infer type info from a parameter type expression
+/// Infer type info from a TypeExpr.
 pub fn infer_type_from_type_expr(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr) -> TypeInfo {
-    infer_type_from_type_expr_with_interner(result, ty, None)
-}
-
-/// Infer type info from a parameter type expression, with optional symbols for basic type checking
-pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &gox_syntax::ast::TypeExpr, symbols: Option<&WellKnownSymbols>) -> TypeInfo {
     use gox_syntax::ast::TypeExprKind;
     use gox_analysis::Type;
     
     match &ty.kind {
         TypeExprKind::Map(_) => TypeInfo::new(ValueKind::Map),
         TypeExprKind::Slice(_) => TypeInfo::new(ValueKind::Slice),
-        TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
-        TypeExprKind::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
-        TypeExprKind::Ident(ident) => {
-            // Check basic types first using symbol comparison
-            if let Some(syms) = symbols {
-                let sym = ident.symbol;
-                if syms.is(sym, syms.sym_bool) {
-                    return TypeInfo::new(ValueKind::Bool);
-                } else if syms.is(sym, syms.sym_string) {
-                    return TypeInfo::new(ValueKind::String);
-                } else if syms.is(sym, syms.sym_float64) {
-                    return TypeInfo::new(ValueKind::Float64);
-                } else if syms.is(sym, syms.sym_float32) {
-                    return TypeInfo::new(ValueKind::Float32);
-                } else if syms.is(sym, syms.sym_int) {
-                    return TypeInfo::new(ValueKind::Int);
-                } else if syms.is(sym, syms.sym_int64) {
-                    return TypeInfo::new(ValueKind::Int64);
-                } else if syms.is(sym, syms.sym_int32) {
-                    return TypeInfo::new(ValueKind::Int32);
-                } else if syms.is(sym, syms.sym_int16) {
-                    return TypeInfo::new(ValueKind::Int16);
-                } else if syms.is(sym, syms.sym_int8) {
-                    return TypeInfo::new(ValueKind::Int8);
-                } else if syms.is(sym, syms.sym_uint) {
-                    return TypeInfo::new(ValueKind::Uint);
-                } else if syms.is(sym, syms.sym_uint64) {
-                    return TypeInfo::new(ValueKind::Uint64);
-                } else if syms.is(sym, syms.sym_uint32) {
-                    return TypeInfo::new(ValueKind::Uint32);
-                } else if syms.is(sym, syms.sym_uint16) {
-                    return TypeInfo::new(ValueKind::Uint16);
-                } else if syms.is(sym, syms.sym_uint8) || syms.is(sym, syms.sym_byte) {
-                    return TypeInfo::new(ValueKind::Uint8);
-                }
-            }
-            // Named type - check if struct, object, or interface
-            for named in &result.named_types {
-                if named.name == ident.symbol {
-                    match &named.underlying {
-                        Type::Struct(s) => return TypeInfo::struct_type(s.fields.len() as u16, Some(ident.symbol)),
-                        Type::Pointer(_) => return TypeInfo::with_sym(ValueKind::Pointer, ident.symbol),
-                        Type::Interface(_) => return TypeInfo::with_sym(ValueKind::Interface, ident.symbol),
-                        _ => {}
-                    }
-                }
-            }
-            TypeInfo::new(ValueKind::Int64)
-        }
-        TypeExprKind::Interface(_) => TypeInfo::new(ValueKind::Interface),
         TypeExprKind::Array(_) => TypeInfo::new(ValueKind::Array),
         TypeExprKind::Chan(_) => TypeInfo::new(ValueKind::Channel),
+        TypeExprKind::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
         TypeExprKind::Func(_) => TypeInfo::new(ValueKind::Closure),
+        TypeExprKind::Interface(_) => TypeInfo::new(ValueKind::Interface),
+        TypeExprKind::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
+        TypeExprKind::Ident(ident) => {
+            // Look up named type
+            for named in &result.named_types {
+                if named.name == ident.symbol {
+                    return match &named.underlying {
+                        Type::Interface(_) => TypeInfo::with_sym(ValueKind::Interface, ident.symbol),
+                        Type::Struct(s) => TypeInfo::struct_type(s.fields.len() as u16, Some(ident.symbol)),
+                        Type::Pointer(_) => TypeInfo::with_sym(ValueKind::Pointer, ident.symbol),
+                        _ => type_to_type_info(&named.underlying, &result.named_types),
+                    };
+                }
+            }
+            // Basic type - default to Int64
+            TypeInfo::new(ValueKind::Int64)
+        }
         _ => TypeInfo::new(ValueKind::Int64),
+    }
+}
+
+/// Convert a Type to TypeInfo for codegen (standalone function).
+pub fn type_to_type_info(ty: &gox_analysis::Type, named_types: &[gox_analysis::NamedTypeInfo]) -> TypeInfo {
+    use gox_analysis::types::{Type, BasicType};
+    
+    match ty {
+        Type::Basic(BasicType::Bool) => TypeInfo::new(ValueKind::Bool),
+        Type::Basic(BasicType::String) => TypeInfo::new(ValueKind::String),
+        Type::Basic(BasicType::Float64) => TypeInfo::new(ValueKind::Float64),
+        Type::Basic(BasicType::Float32) => TypeInfo::new(ValueKind::Float32),
+        Type::Basic(BasicType::Int) => TypeInfo::new(ValueKind::Int),
+        Type::Basic(BasicType::Int64) => TypeInfo::new(ValueKind::Int64),
+        Type::Basic(BasicType::Int32) => TypeInfo::new(ValueKind::Int32),
+        Type::Basic(BasicType::Int16) => TypeInfo::new(ValueKind::Int16),
+        Type::Basic(BasicType::Int8) => TypeInfo::new(ValueKind::Int8),
+        Type::Basic(BasicType::Uint) => TypeInfo::new(ValueKind::Uint),
+        Type::Basic(BasicType::Uint64) => TypeInfo::new(ValueKind::Uint64),
+        Type::Basic(BasicType::Uint32) => TypeInfo::new(ValueKind::Uint32),
+        Type::Basic(BasicType::Uint16) => TypeInfo::new(ValueKind::Uint16),
+        Type::Basic(BasicType::Uint8) => TypeInfo::new(ValueKind::Uint8),
+        Type::Map(_) => TypeInfo::new(ValueKind::Map),
+        Type::Slice(_) => TypeInfo::new(ValueKind::Slice),
+        Type::Array(_) => TypeInfo::new(ValueKind::Array),
+        Type::Chan(_) => TypeInfo::new(ValueKind::Channel),
+        Type::Pointer(_) => TypeInfo::new(ValueKind::Pointer),
+        Type::Func(_) => TypeInfo::new(ValueKind::Closure),
+        Type::Interface(_) => TypeInfo::new(ValueKind::Interface),
+        Type::Struct(s) => TypeInfo::with_fields(ValueKind::Struct, s.fields.len() as u16),
+        Type::Named(id) => {
+            let named = &named_types[id.0 as usize];
+            let mut info = type_to_type_info(&named.underlying, named_types);
+            info.type_sym = Some(named.name);
+            info
+        }
+        _ => unreachable!("unexpected type in type_to_type_info"),
     }
 }
 
@@ -1105,25 +1123,23 @@ pub fn infer_type_from_type_expr_with_interner(result: &TypeCheckResult, ty: &go
 pub fn get_struct_field_info(result: &TypeCheckResult, type_sym: Option<Symbol>) -> Vec<Option<Symbol>> {
     use gox_analysis::Type;
     
-    if let Some(sym) = type_sym {
-        for named in &result.named_types {
-            if named.name == sym {
-                if let Type::Struct(s) = &named.underlying {
-                    return s.fields.iter().map(|field| {
-                        if let Type::Named(id) = &field.ty {
-                            if let Some(named_info) = result.named_types.get(id.0 as usize) {
-                                if matches!(named_info.underlying, Type::Struct(_)) {
-                                    return Some(named_info.name);
-                                }
-                            }
-                        }
-                        None
-                    }).collect();
-                }
+    let sym = type_sym.expect("get_struct_field_info called without type_sym");
+    let named = result.named_types.iter()
+        .find(|n| n.name == sym)
+        .expect("type not found in named_types");
+    let Type::Struct(s) = &named.underlying else {
+        unreachable!("expected struct type");
+    };
+    
+    s.fields.iter().map(|field| {
+        if let Type::Named(id) = &field.ty {
+            let field_named = &result.named_types[id.0 as usize];
+            if matches!(field_named.underlying, Type::Struct(_)) {
+                return Some(field_named.name);
             }
         }
-    }
-    Vec::new()
+        None
+    }).collect()
 }
 
 /// Emit deep copy of a struct, handling nested structs recursively

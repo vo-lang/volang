@@ -32,6 +32,7 @@
 //! ```
 
 use gox_common::{DiagnosticSink, Label, Span, Symbol, SymbolInterner};
+use gox_common_core::TypeExprId;
 use gox_syntax::ast::{self, BinaryOp, Decl, File, UnaryOp};
 
 use crate::constant::Constant;
@@ -697,6 +698,7 @@ impl<'a> TypeCollector<'a> {
 
         // Create a placeholder AST type for the interface
         let ast_type = ast::TypeExpr {
+            id: TypeExprId::DUMMY,
             kind: ast::TypeExprKind::Interface(Box::new(ast::InterfaceType {
                 elems: decl.elems.clone(),
             })),

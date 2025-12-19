@@ -15,6 +15,15 @@ impl ExprId {
     pub const DUMMY: ExprId = ExprId(u32::MAX);
 }
 
+/// Type expression unique ID (assigned by Parser).
+/// Used as key for type expression → TypeId mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TypeExprId(pub u32);
+
+impl TypeExprId {
+    pub const DUMMY: TypeExprId = TypeExprId(u32::MAX);
+}
+
 /// Type unique ID (assigned by TypeInterner).
 /// Structurally equal types share the same TypeId.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

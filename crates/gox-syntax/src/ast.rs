@@ -5,7 +5,7 @@
 
 use gox_common::span::Span;
 use gox_common::symbol::{Ident, Symbol};
-use gox_common_core::ExprId;
+use gox_common_core::{ExprId, TypeExprId};
 
 /// A source file.
 #[derive(Debug, Clone)]
@@ -233,6 +233,8 @@ pub struct MethodSpec {
 /// A type expression.
 #[derive(Debug, Clone)]
 pub struct TypeExpr {
+    /// Unique ID for this type expression (for type lookup).
+    pub id: TypeExprId,
     /// The kind of type.
     pub kind: TypeExprKind,
     /// The span of the type expression.

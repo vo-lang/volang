@@ -15,7 +15,7 @@ mod types;
 use gox_common::diagnostics::DiagnosticSink;
 use gox_common::span::{BytePos, Span};
 use gox_common::symbol::{Ident, SymbolInterner};
-use gox_common_core::ExprId;
+use gox_common_core::{ExprId, TypeExprId};
 
 use crate::ast::*;
 use crate::errors::SyntaxError;
@@ -45,6 +45,8 @@ pub struct Parser<'a> {
     allow_composite_lit: bool,
     /// Next expression ID to allocate.
     next_expr_id: u32,
+    /// Next type expression ID to allocate.
+    next_type_expr_id: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -67,6 +69,7 @@ impl<'a> Parser<'a> {
             diagnostics: DiagnosticSink::new(),
             allow_composite_lit: true,
             next_expr_id: 0,
+            next_type_expr_id: 0,
         }
     }
 
@@ -86,6 +89,7 @@ impl<'a> Parser<'a> {
             diagnostics: DiagnosticSink::new(),
             allow_composite_lit: true,
             next_expr_id: 0,
+            next_type_expr_id: 0,
         }
     }
 
@@ -120,6 +124,22 @@ impl<'a> Parser<'a> {
     pub(crate) fn make_expr(&mut self, kind: ExprKind, span: Span) -> Expr {
         Expr {
             id: self.alloc_expr_id(),
+            kind,
+            span,
+        }
+    }
+
+    /// Allocates a new TypeExprId.
+    pub(crate) fn alloc_type_expr_id(&mut self) -> TypeExprId {
+        let id = TypeExprId(self.next_type_expr_id);
+        self.next_type_expr_id += 1;
+        id
+    }
+
+    /// Creates a TypeExpr with an auto-allocated ID.
+    pub(crate) fn make_type_expr(&mut self, kind: TypeExprKind, span: Span) -> TypeExpr {
+        TypeExpr {
+            id: self.alloc_type_expr_id(),
             kind,
             span,
         }

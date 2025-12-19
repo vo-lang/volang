@@ -42,7 +42,6 @@ mod stmt;
 mod tests;
 
 use gox_common::{DiagnosticSink, Span, Symbol, SymbolInterner};
-use gox_common_core::TypeId;
 use gox_syntax::ast::{self, Expr};
 
 use crate::errors::TypeError;
@@ -203,7 +202,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Defines a variable in the current local scope.
+    /// Also binds the symbol to its type for codegen lookup.
     pub(crate) fn define_var(&mut self, symbol: Symbol, ty: Type, span: Span) {
+        // Bind symbol → type for codegen lookup
+        let type_id = self.types.intern(ty.clone());
+        self.types.bind_symbol(symbol, type_id);
+        
         if let Some(ref mut scope) = self.local_scope {
             scope.insert(
                 symbol,
@@ -302,8 +306,17 @@ impl<'a> TypeChecker<'a> {
 }
 
 impl<'a> TypeChecker<'a> {
-    /// Resolves a type expression to a Type.
-    pub(crate) fn resolve_type_expr(&self, ty_expr: &ast::TypeExpr) -> Type {
+    /// Resolves a type expression to a Type and binds it to the TypeExprId.
+    pub(crate) fn resolve_type_expr(&mut self, ty_expr: &ast::TypeExpr) -> Type {
+        let ty = self.resolve_type_expr_inner(ty_expr);
+        // Bind TypeExprId → TypeId
+        let type_id = self.types.intern(ty.clone());
+        self.types.bind_type_expr(ty_expr.id, type_id);
+        ty
+    }
+
+    /// Internal type expression resolution (without binding).
+    fn resolve_type_expr_inner(&mut self, ty_expr: &ast::TypeExpr) -> Type {
         match &ty_expr.kind {
             ast::TypeExprKind::Ident(name) => {
                 // Look up the type name - check local scope first
@@ -420,7 +433,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Resolves struct fields for local type declarations.
-    fn resolve_struct_fields(&self, ast_fields: &[ast::Field]) -> Vec<crate::types::Field> {
+    fn resolve_struct_fields(&mut self, ast_fields: &[ast::Field]) -> Vec<crate::types::Field> {
         let mut fields = Vec::new();
         for ast_field in ast_fields {
             let ty = self.resolve_type_expr(&ast_field.ty);
@@ -532,23 +545,20 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Resolves a function signature to a FuncType.
-    fn resolve_func_sig(&self, sig: &ast::FuncSig) -> FuncType {
-        let params: Vec<Type> = sig
-            .params
-            .iter()
-            .flat_map(|p| {
-                let ty = self.resolve_type_expr(&p.ty);
-                // Repeat the type for each name (or once if no names)
-                let count = if p.names.is_empty() { 1 } else { p.names.len() };
-                std::iter::repeat_n(ty, count)
-            })
-            .collect();
+    fn resolve_func_sig(&mut self, sig: &ast::FuncSig) -> FuncType {
+        let mut params = Vec::new();
+        for p in &sig.params {
+            let ty = self.resolve_type_expr(&p.ty);
+            let count = if p.names.is_empty() { 1 } else { p.names.len() };
+            for _ in 0..count {
+                params.push(ty.clone());
+            }
+        }
 
-        let results: Vec<Type> = sig
-            .results
-            .iter()
-            .map(|r| self.resolve_type_expr(&r.ty))
-            .collect();
+        let mut results = Vec::new();
+        for r in &sig.results {
+            results.push(self.resolve_type_expr(&r.ty));
+        }
 
         FuncType {
             params,

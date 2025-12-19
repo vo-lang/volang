@@ -161,10 +161,7 @@ impl<'a> Parser<'a> {
         
         // Check for composite literal: Type{...}
         if self.allow_composite_lit && self.at(TokenKind::LBrace) {
-            let ty = TypeExpr {
-                kind: TypeExprKind::Ident(ident),
-                span,
-            };
+            let ty = self.make_type_expr(TypeExprKind::Ident(ident), span);
             self.parse_composite_lit_body(ty)
         } else {
             Ok(self.make_expr(ExprKind::Ident(ident), span))
@@ -301,10 +298,7 @@ impl<'a> Parser<'a> {
                 // This handles cases like: Type{...} where Type was parsed as an expression
                 // We need to convert the left expression to a type
                 if let ExprKind::Ident(ident) = left.kind {
-                    let ty = TypeExpr {
-                        kind: TypeExprKind::Ident(ident),
-                        span: left.span,
-                    };
+                    let ty = self.make_type_expr(TypeExprKind::Ident(ident), left.span);
                     self.parse_composite_lit_body(ty)
                 } else {
                     self.error("expected type for composite literal");

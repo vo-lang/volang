@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use gox_common::Symbol;
-use gox_common_core::{ExprId, TypeId};
+use gox_common_core::{ExprId, TypeExprId, TypeId};
 
 use crate::types::Type;
 
@@ -29,6 +29,9 @@ pub struct TypeInterner {
 
     /// Symbol → TypeId (variable/parameter → type)
     symbol_types: HashMap<Symbol, TypeId>,
+
+    /// TypeExprId → TypeId (type expression → resolved type)
+    type_expr_types: HashMap<TypeExprId, TypeId>,
 }
 
 
@@ -40,6 +43,7 @@ impl TypeInterner {
             type_to_id: HashMap::new(),
             expr_types: HashMap::new(),
             symbol_types: HashMap::new(),
+            type_expr_types: HashMap::new(),
         }
     }
 
@@ -91,6 +95,16 @@ impl TypeInterner {
     /// Binds a symbol to a type.
     pub fn bind_symbol(&mut self, sym: Symbol, type_id: TypeId) {
         self.symbol_types.insert(sym, type_id);
+    }
+
+    /// Gets the TypeId for a type expression.
+    pub fn get_type_expr_type(&self, id: TypeExprId) -> Option<TypeId> {
+        self.type_expr_types.get(&id).copied()
+    }
+
+    /// Binds a type expression to a type.
+    pub fn bind_type_expr(&mut self, id: TypeExprId, type_id: TypeId) {
+        self.type_expr_types.insert(id, type_id);
     }
 
     /// Returns the number of interned types.
