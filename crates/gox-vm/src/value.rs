@@ -7,8 +7,7 @@ use alloc::{format, string::{String, ToString}};
 use crate::gc::GcRef;
 use crate::objects::string;
 
-// Re-export ValueKind as TypeTag for backward compatibility
-pub use gox_common_core::ValueKind as TypeTag;
+pub use gox_common_core::ValueKind;
 
 /// A typed value for FFI.
 #[derive(Debug, Clone)]
@@ -27,35 +26,35 @@ pub enum GoxValue {
 
 impl GoxValue {
     /// Create a GoxValue from a raw u64 and type tag.
-    pub fn from_raw(raw: u64, tag: TypeTag) -> Self {
+    pub fn from_raw(raw: u64, tag: ValueKind) -> Self {
         match tag {
-            TypeTag::Nil => GoxValue::Nil,
-            TypeTag::Bool => GoxValue::Bool(raw != 0),
-            TypeTag::Int
-            | TypeTag::Int8
-            | TypeTag::Int16
-            | TypeTag::Int32
-            | TypeTag::Int64
-            | TypeTag::Uint
-            | TypeTag::Uint8
-            | TypeTag::Uint16
-            | TypeTag::Uint32
-            | TypeTag::Uint64 => GoxValue::Int(raw as i64),
-            TypeTag::Float32 => GoxValue::Float(f32::from_bits(raw as u32) as f64),
-            TypeTag::Float64 => GoxValue::Float(f64::from_bits(raw)),
-            TypeTag::String => GoxValue::String(raw as GcRef),
-            TypeTag::Slice => GoxValue::Slice(raw as GcRef),
-            TypeTag::Map => GoxValue::Map(raw as GcRef),
-            TypeTag::Struct => GoxValue::Struct(raw as GcRef),
-            TypeTag::Pointer => GoxValue::Pointer(raw as GcRef),
-            TypeTag::Interface => GoxValue::Interface {
+            ValueKind::Nil => GoxValue::Nil,
+            ValueKind::Bool => GoxValue::Bool(raw != 0),
+            ValueKind::Int
+            | ValueKind::Int8
+            | ValueKind::Int16
+            | ValueKind::Int32
+            | ValueKind::Int64
+            | ValueKind::Uint
+            | ValueKind::Uint8
+            | ValueKind::Uint16
+            | ValueKind::Uint32
+            | ValueKind::Uint64 => GoxValue::Int(raw as i64),
+            ValueKind::Float32 => GoxValue::Float(f32::from_bits(raw as u32) as f64),
+            ValueKind::Float64 => GoxValue::Float(f64::from_bits(raw)),
+            ValueKind::String => GoxValue::String(raw as GcRef),
+            ValueKind::Slice => GoxValue::Slice(raw as GcRef),
+            ValueKind::Map => GoxValue::Map(raw as GcRef),
+            ValueKind::Struct => GoxValue::Struct(raw as GcRef),
+            ValueKind::Pointer => GoxValue::Pointer(raw as GcRef),
+            ValueKind::Interface => GoxValue::Interface {
                 type_id: 0,
                 value: raw,
             },
             // New types added to ValueKind
-            TypeTag::Array => GoxValue::Slice(raw as GcRef), // Arrays are similar to slices at runtime
-            TypeTag::Channel => GoxValue::Int(raw as i64),   // Channel handle
-            TypeTag::Closure => GoxValue::Int(raw as i64),   // Closure reference
+            ValueKind::Array => GoxValue::Slice(raw as GcRef), // Arrays are similar to slices at runtime
+            ValueKind::Channel => GoxValue::Int(raw as i64),   // Channel handle
+            ValueKind::Closure => GoxValue::Int(raw as i64),   // Closure reference
         }
     }
 
@@ -109,7 +108,7 @@ impl GoxValue {
 #[derive(Debug, Clone, Copy)]
 pub struct ArgOffset {
     pub reg: u16,
-    pub type_tag: TypeTag,
+    pub type_tag: ValueKind,
 }
 
 /// Arguments wrapper for extern function calls.

@@ -24,10 +24,7 @@ use hashbrown::HashMap;
 use crate::gc::{Gc, GcRef};
 use crate::objects::string;
 use crate::types::TypeId;
-use gox_common_core::ValueKind;
-
-// Re-export TypeTag for native function implementations
-pub use gox_common_core::ValueKind as TypeTag;
+pub use gox_common_core::ValueKind;
 
 /// Extern function signature - direct register access.
 pub type ExternFn = fn(ctx: &mut ExternCtx) -> ExternResult;
@@ -87,9 +84,9 @@ impl<'a> ExternCtx<'a> {
 
     /// Get the type tag of an argument.
     #[inline]
-    pub fn arg_type(&self, idx: usize) -> TypeTag {
+    pub fn arg_type(&self, idx: usize) -> ValueKind {
         debug_assert!(idx < self.arg_count, "arg index out of bounds");
-        TypeTag::from_u8(self.regs[self.arg_base + idx * 2] as u8)
+        ValueKind::from_u8(self.regs[self.arg_base + idx * 2] as u8)
     }
 
     /// Read raw u64 value (fastest, use when type is known).
@@ -309,29 +306,29 @@ impl<'a> ExternCtx<'a> {
     /// Format a single argument as string.
     pub fn format_arg(&self, idx: usize) -> String {
         match self.arg_type(idx) {
-            TypeTag::Nil => "nil".into(),
-            TypeTag::Bool => if self.arg_bool(idx) { "true" } else { "false" }.into(),
-            TypeTag::Int
-            | TypeTag::Int8
-            | TypeTag::Int16
-            | TypeTag::Int32
-            | TypeTag::Int64
-            | TypeTag::Uint
-            | TypeTag::Uint8
-            | TypeTag::Uint16
-            | TypeTag::Uint32
-            | TypeTag::Uint64 => self.arg_i64(idx).to_string(),
-            TypeTag::Float32 => (f32::from_bits(self.arg_raw(idx) as u32)).to_string(),
-            TypeTag::Float64 => self.arg_f64(idx).to_string(),
-            TypeTag::String => self.arg_str(idx).to_string(),
-            TypeTag::Slice => "[...]".into(),
-            TypeTag::Array => "[...]".into(),
-            TypeTag::Map => "map[...]".into(),
-            TypeTag::Struct => "{...}".into(),
-            TypeTag::Pointer => "*struct{...}".into(),
-            TypeTag::Interface => "<interface>".into(),
-            TypeTag::Channel => "<chan>".into(),
-            TypeTag::Closure => "<closure>".into(),
+            ValueKind::Nil => "nil".into(),
+            ValueKind::Bool => if self.arg_bool(idx) { "true" } else { "false" }.into(),
+            ValueKind::Int
+            | ValueKind::Int8
+            | ValueKind::Int16
+            | ValueKind::Int32
+            | ValueKind::Int64
+            | ValueKind::Uint
+            | ValueKind::Uint8
+            | ValueKind::Uint16
+            | ValueKind::Uint32
+            | ValueKind::Uint64 => self.arg_i64(idx).to_string(),
+            ValueKind::Float32 => (f32::from_bits(self.arg_raw(idx) as u32)).to_string(),
+            ValueKind::Float64 => self.arg_f64(idx).to_string(),
+            ValueKind::String => self.arg_str(idx).to_string(),
+            ValueKind::Slice => "[...]".into(),
+            ValueKind::Array => "[...]".into(),
+            ValueKind::Map => "map[...]".into(),
+            ValueKind::Struct => "{...}".into(),
+            ValueKind::Pointer => "*struct{...}".into(),
+            ValueKind::Interface => "<interface>".into(),
+            ValueKind::Channel => "<chan>".into(),
+            ValueKind::Closure => "<closure>".into(),
         }
     }
 
@@ -352,7 +349,7 @@ impl<'a> ExternCtx<'a> {
     /// Check if argument at idx is nil.
     #[inline]
     pub fn is_nil(&self, idx: usize) -> bool {
-        self.arg_type(idx) == TypeTag::Nil || self.arg_raw(idx) == 0
+        self.arg_type(idx) == ValueKind::Nil || self.arg_raw(idx) == 0
     }
 }
 
@@ -397,9 +394,9 @@ mod tests {
 
     #[test]
     fn test_type_tag_conversion() {
-        assert_eq!(TypeTag::from_u8(0), TypeTag::Nil);
-        assert_eq!(TypeTag::from_u8(1), TypeTag::Bool);
-        assert_eq!(TypeTag::from_u8(14), TypeTag::String);
+        assert_eq!(ValueKind::from_u8(0), ValueKind::Nil);
+        assert_eq!(ValueKind::from_u8(1), ValueKind::Bool);
+        assert_eq!(ValueKind::from_u8(14), ValueKind::String);
     }
 
     #[test]

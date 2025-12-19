@@ -6,47 +6,47 @@ use gox_syntax::ast::{
     BinaryOp, CallExpr, ConversionExpr, Expr, ExprKind, SelectorExpr, TypeAssertExpr, UnaryOp,
 };
 use gox_vm::bytecode::Constant;
-use gox_vm::value::TypeTag;
+use gox_common_core::ValueKind;
 use gox_vm::instruction::Opcode;
 
-use crate::context::{FuncContext, ValueKind};
+use crate::context::FuncContext;
 use crate::{CodegenContext, CodegenError};
 
 /// Infer the type tag of an expression for FFI purposes.
 /// Uses the type checker's expr_types for a single source of truth.
-pub fn infer_type_tag(ctx: &CodegenContext, _fctx: &FuncContext, expr: &Expr) -> TypeTag {
+pub fn infer_type_tag(ctx: &CodegenContext, _fctx: &FuncContext, expr: &Expr) -> ValueKind {
     ctx.lookup_expr_type(expr)
-        .map_or(TypeTag::Int64, |ty| type_to_tag(&ty))
+        .map_or(ValueKind::Int64, |ty| type_to_tag(&ty))
 }
 
-/// Convert analysis Type to FFI TypeTag.
-fn type_to_tag(ty: &Type) -> TypeTag {
+/// Convert analysis Type to FFI ValueKind.
+fn type_to_tag(ty: &Type) -> ValueKind {
     use gox_analysis::types::UntypedKind;
     match ty {
-        Type::Basic(BasicType::Bool) => TypeTag::Bool,
-        Type::Basic(BasicType::Int) => TypeTag::Int,
-        Type::Basic(BasicType::Int8) => TypeTag::Int8,
-        Type::Basic(BasicType::Int16) => TypeTag::Int16,
-        Type::Basic(BasicType::Int32) => TypeTag::Int32,
-        Type::Basic(BasicType::Int64) => TypeTag::Int64,
-        Type::Basic(BasicType::Uint) => TypeTag::Uint,
-        Type::Basic(BasicType::Uint8) => TypeTag::Uint8,
-        Type::Basic(BasicType::Uint16) => TypeTag::Uint16,
-        Type::Basic(BasicType::Uint32) => TypeTag::Uint32,
-        Type::Basic(BasicType::Uint64) => TypeTag::Uint64,
-        Type::Basic(BasicType::Float32) => TypeTag::Float32,
-        Type::Basic(BasicType::Float64) => TypeTag::Float64,
-        Type::Basic(BasicType::String) => TypeTag::String,
-        Type::Untyped(UntypedKind::Bool) => TypeTag::Bool,
-        Type::Untyped(UntypedKind::Int) | Type::Untyped(UntypedKind::Rune) => TypeTag::Int64,
-        Type::Untyped(UntypedKind::Float) => TypeTag::Float64,
-        Type::Untyped(UntypedKind::String) => TypeTag::String,
-        Type::Nil => TypeTag::Nil,
-        Type::Slice(_) => TypeTag::Slice,
-        Type::Map(_) => TypeTag::Map,
-        Type::Struct(_) | Type::Pointer(_) => TypeTag::Struct,
-        Type::Interface(_) => TypeTag::Interface,
-        _ => TypeTag::Int64,
+        Type::Basic(BasicType::Bool) => ValueKind::Bool,
+        Type::Basic(BasicType::Int) => ValueKind::Int,
+        Type::Basic(BasicType::Int8) => ValueKind::Int8,
+        Type::Basic(BasicType::Int16) => ValueKind::Int16,
+        Type::Basic(BasicType::Int32) => ValueKind::Int32,
+        Type::Basic(BasicType::Int64) => ValueKind::Int64,
+        Type::Basic(BasicType::Uint) => ValueKind::Uint,
+        Type::Basic(BasicType::Uint8) => ValueKind::Uint8,
+        Type::Basic(BasicType::Uint16) => ValueKind::Uint16,
+        Type::Basic(BasicType::Uint32) => ValueKind::Uint32,
+        Type::Basic(BasicType::Uint64) => ValueKind::Uint64,
+        Type::Basic(BasicType::Float32) => ValueKind::Float32,
+        Type::Basic(BasicType::Float64) => ValueKind::Float64,
+        Type::Basic(BasicType::String) => ValueKind::String,
+        Type::Untyped(UntypedKind::Bool) => ValueKind::Bool,
+        Type::Untyped(UntypedKind::Int) | Type::Untyped(UntypedKind::Rune) => ValueKind::Int64,
+        Type::Untyped(UntypedKind::Float) => ValueKind::Float64,
+        Type::Untyped(UntypedKind::String) => ValueKind::String,
+        Type::Nil => ValueKind::Nil,
+        Type::Slice(_) => ValueKind::Slice,
+        Type::Map(_) => ValueKind::Map,
+        Type::Struct(_) | Type::Pointer(_) => ValueKind::Struct,
+        Type::Interface(_) => ValueKind::Interface,
+        _ => ValueKind::Int64,
     }
 }
 
@@ -2394,7 +2394,7 @@ fn compile_builtin_print(
         if is_interface {
             // For interface, emit special print that reads type from slot 0
             let reg = compile_expr(ctx, fctx, arg)?;
-            // Use TypeTag::Interface (19) to signal interface printing
+            // Use ValueKind::Interface (19) to signal interface printing
             fctx.emit(Opcode::DebugPrint, reg, 19, 0);
         } else {
             let type_tag = infer_type_tag(ctx, fctx, arg);
@@ -2504,16 +2504,16 @@ fn compile_type_assert(
             let sym = type_ident.symbol;
             let syms = &ctx.symbols;
             let type_tag = if syms.is(sym, syms.sym_int) || syms.is(sym, syms.sym_int64) {
-                TypeTag::Int64
+                ValueKind::Int64
             } else if syms.is(sym, syms.sym_float64) {
-                TypeTag::Float64
+                ValueKind::Float64
             } else if syms.is(sym, syms.sym_string) {
-                TypeTag::String
+                ValueKind::String
             } else if syms.is(sym, syms.sym_bool) {
-                TypeTag::Bool
+                ValueKind::Bool
             } else {
                 // Named type
-                TypeTag::Struct
+                ValueKind::Struct
             };
             fctx.emit(Opcode::UnboxInterface, dst, type_tag as u16, iface_reg);
         }
@@ -2522,7 +2522,7 @@ fn compile_type_assert(
             fctx.emit(
                 Opcode::UnboxInterface,
                 dst,
-                TypeTag::Struct as u16,
+                ValueKind::Struct as u16,
                 iface_reg,
             );
         }
@@ -2550,7 +2550,7 @@ fn compile_conversion_expr(
 
             if syms.is(sym, syms.sym_int) || syms.is(sym, syms.sym_int64) {
                 let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
-                if src_tag == TypeTag::Float64 {
+                if src_tag == ValueKind::Float64 {
                     let dst = fctx.regs.alloc(1);
                     fctx.emit(Opcode::F64ToI64, dst, src, 0);
                     return Ok(dst);
@@ -2559,7 +2559,7 @@ fn compile_conversion_expr(
             }
             if syms.is(sym, syms.sym_float64) {
                 let src_tag = infer_type_tag(ctx, fctx, &conv.expr);
-                if src_tag == TypeTag::Int64 {
+                if src_tag == ValueKind::Int64 {
                     let dst = fctx.regs.alloc(1);
                     fctx.emit(Opcode::I64ToF64, dst, src, 0);
                     return Ok(dst);
@@ -2620,7 +2620,7 @@ fn compile_type_conversion(
     }
     if syms.is(type_sym, syms.sym_int) || syms.is(type_sym, syms.sym_int64) {
         let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-        if src_tag == gox_vm::value::TypeTag::Float64 {
+        if src_tag == gox_common_core::ValueKind::Float64 {
             let dst = fctx.regs.alloc(1);
             fctx.emit(Opcode::F64ToI64, dst, src, 0);
             return Ok(dst);
@@ -2629,7 +2629,7 @@ fn compile_type_conversion(
     }
     if syms.is(type_sym, syms.sym_float64) {
         let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-        if src_tag == gox_vm::value::TypeTag::Int64 {
+        if src_tag == gox_common_core::ValueKind::Int64 {
             let dst = fctx.regs.alloc(1);
             fctx.emit(Opcode::I64ToF64, dst, src, 0);
             return Ok(dst);
@@ -2677,7 +2677,7 @@ fn compile_type_conversion(
             Type::Basic(BasicType::Int | BasicType::Int64) => {
                 // Source might be float -> int
                 let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-                if src_tag == gox_vm::value::TypeTag::Float64 {
+                if src_tag == gox_common_core::ValueKind::Float64 {
                     let dst = fctx.regs.alloc(1);
                     fctx.emit(Opcode::F64ToI64, dst, src, 0);
                     return Ok(dst);
@@ -2687,7 +2687,7 @@ fn compile_type_conversion(
             Type::Basic(BasicType::Float64) => {
                 // Source might be int -> float
                 let src_tag = infer_type_tag(ctx, fctx, &call.args[0]);
-                if src_tag == gox_vm::value::TypeTag::Int64 {
+                if src_tag == gox_common_core::ValueKind::Int64 {
                     let dst = fctx.regs.alloc(1);
                     fctx.emit(Opcode::I64ToF64, dst, src, 0);
                     return Ok(dst);

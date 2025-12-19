@@ -38,10 +38,7 @@ pub use bytecode::{Module, FunctionDef, Constant, BytecodeError};
 pub use vm::{Vm, VmResult};
 
 // Zero-copy extern API (extern = calls from GoX to outside)
-pub use extern_fn::{ExternFn, ExternCtx, ExternResult, ExternRegistry, TypeTag};
+pub use extern_fn::{ExternFn, ExternCtx, ExternResult, ExternRegistry, ValueKind};
 
 // Typed value for extern functions
 pub use value::GoxValue;
-
-// Re-export ValueKind from common
-pub use gox_common_core::ValueKind;

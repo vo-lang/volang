@@ -1428,13 +1428,13 @@ impl Vm {
             
             // ============ Debug ============
             Opcode::DebugPrint => {
-                let type_tag = crate::value::TypeTag::from_u8(b as u8);
+                let type_tag = ValueKind::from_u8(b as u8);
                 
-                let (val, inner_tag, is_iface) = if type_tag == crate::value::TypeTag::Interface {
+                let (val, inner_tag, is_iface) = if type_tag == ValueKind::Interface {
                     let slot0 = self.read_reg(fiber_id, a);
                     let value_type = interface::unpack_value_type(slot0);
                     let data = self.read_reg(fiber_id, a + 1);
-                    (data, type_id_to_tag(value_type), true)
+                    (data, ValueKind::from_u8(value_type as u8), true)
                 } else {
                     (self.read_reg(fiber_id, a), type_tag, false)
                 };
@@ -1481,12 +1481,12 @@ impl Vm {
             Opcode::AssertArg => {
                 let fiber = self.scheduler.get(fiber_id).unwrap();
                 if fiber.assert_failed {
-                    let type_tag = crate::value::TypeTag::from_u8(b as u8);
+                    let type_tag = ValueKind::from_u8(b as u8);
                     
-                    let (val, inner_tag, is_iface) = if type_tag == crate::value::TypeTag::Interface {
+                    let (val, inner_tag, is_iface) = if type_tag == ValueKind::Interface {
                         let type_id = self.read_reg(fiber_id, a) as u32;
                         let data = self.read_reg(fiber_id, a + 1);
-                        (data, type_id_to_tag(type_id), true)
+                        (data, ValueKind::from_u8(type_id as u8), true)
                     } else {
                         (self.read_reg(fiber_id, a), type_tag, false)
                     };
@@ -1814,13 +1814,13 @@ impl Default for Vm {
 }
 
 /// Format a value for printing based on its type tag.
-fn format_value(val: u64, type_tag: crate::value::TypeTag) -> String {
+fn format_value(val: u64, type_tag: ValueKind) -> String {
     match type_tag {
-        crate::value::TypeTag::Float32 => {
+        ValueKind::Float32 => {
             let f = f32::from_bits(val as u32);
             format!("{}", f)
         }
-        crate::value::TypeTag::Float64 => {
+        ValueKind::Float64 => {
             let f = f64::from_bits(val);
             if f.abs() >= 1e10 || (f != 0.0 && f.abs() < 1e-4) {
                 format!("{:e}", f)
@@ -1828,10 +1828,10 @@ fn format_value(val: u64, type_tag: crate::value::TypeTag) -> String {
                 format!("{}", f)
             }
         }
-        crate::value::TypeTag::Bool => {
+        ValueKind::Bool => {
             if val != 0 { "true".to_string() } else { "false".to_string() }
         }
-        crate::value::TypeTag::String => {
+        ValueKind::String => {
             let ptr = val as crate::gc::GcRef;
             if ptr.is_null() {
                 String::new()
@@ -1842,19 +1842,5 @@ fn format_value(val: u64, type_tag: crate::value::TypeTag) -> String {
         _ => {
             format!("{}", val as i64)
         }
-    }
-}
-
-/// Convert boxed type_id to TypeTag for formatting.
-fn type_id_to_tag(type_id: u32) -> crate::value::TypeTag {
-    match type_id {
-        0 => crate::value::TypeTag::Nil,
-        t if t == ValueKind::Int64 as TypeId => crate::value::TypeTag::Int64,
-        t if t == ValueKind::Int32 as TypeId => crate::value::TypeTag::Int32,
-        t if t == ValueKind::Float64 as TypeId => crate::value::TypeTag::Float64,
-        t if t == ValueKind::Float32 as TypeId => crate::value::TypeTag::Float32,
-        t if t == ValueKind::String as TypeId => crate::value::TypeTag::String,
-        t if t == ValueKind::Bool as TypeId => crate::value::TypeTag::Bool,
-        _ => crate::value::TypeTag::Int64, // default
     }
 }
