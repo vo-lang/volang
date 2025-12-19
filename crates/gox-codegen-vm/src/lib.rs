@@ -30,7 +30,7 @@ mod stmt;
 
 use std::collections::HashMap;
 use gox_analysis::{Project, TypeCheckResult};
-use gox_analysis::types::{Type, BasicType};
+use gox_analysis::types::{Type, BasicType, StructType, InterfaceType};
 use gox_common::{Symbol, SymbolInterner};
 use gox_common_core::SlotType;
 use gox_syntax::ast::{Decl, File};
@@ -39,8 +39,143 @@ use gox_vm::instruction::Opcode;
 
 use gox_common_core::RuntimeTypeId;
 
+/// Registry for allocating type IDs during codegen.
+/// - Each struct definition gets a unique ID (FirstStruct + idx)
+/// - Interfaces are deduplicated by method set (FirstInterface + idx)
+#[derive(Default)]
+pub struct TypeRegistry {
+    /// All struct types, each gets FirstStruct + index
+    struct_types: Vec<StructType>,
+    /// Interface types deduplicated by method set, each gets FirstInterface + index
+    interface_types: Vec<InterfaceType>,
+    /// Mapping from NamedTypeId to allocated type_id
+    named_type_ids: HashMap<u32, u32>,
+}
+
+impl TypeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Register a struct type and return its type_id.
+    /// Each struct definition gets a new ID (no deduplication).
+    pub fn register_struct(&mut self, st: &StructType) -> u32 {
+        let idx = self.struct_types.len() as u32;
+        self.struct_types.push(st.clone());
+        RuntimeTypeId::FirstStruct as u32 + idx
+    }
+    
+    /// Register an interface type and return its type_id.
+    /// Interfaces with identical method sets share the same ID.
+    pub fn register_interface(&mut self, iface: &InterfaceType) -> u32 {
+        // Check if we already have an interface with the same method set
+        for (idx, existing) in self.interface_types.iter().enumerate() {
+            if Self::same_method_set(existing, iface) {
+                return RuntimeTypeId::FirstInterface as u32 + idx as u32;
+            }
+        }
+        // New unique interface
+        let idx = self.interface_types.len() as u32;
+        self.interface_types.push(iface.clone());
+        RuntimeTypeId::FirstInterface as u32 + idx
+    }
+    
+    /// Check if two interfaces have the same method set.
+    fn same_method_set(a: &InterfaceType, b: &InterfaceType) -> bool {
+        if a.methods.len() != b.methods.len() {
+            return false;
+        }
+        // Sort methods by name for comparison
+        let mut a_methods: Vec<_> = a.methods.iter().collect();
+        let mut b_methods: Vec<_> = b.methods.iter().collect();
+        a_methods.sort_by_key(|m| m.name);
+        b_methods.sort_by_key(|m| m.name);
+        
+        for (ma, mb) in a_methods.iter().zip(b_methods.iter()) {
+            if ma.name != mb.name || ma.sig != mb.sig {
+                return false;
+            }
+        }
+        true
+    }
+    
+    /// Get all struct slot_types for GC scanning.
+    pub fn get_struct_slot_types(&self, named_types: &[gox_analysis::NamedTypeInfo]) -> Vec<Vec<SlotType>> {
+        self.struct_types.iter().map(|st| {
+            struct_to_slot_types(st, named_types)
+        }).collect()
+    }
+    
+    /// Get struct count.
+    pub fn struct_count(&self) -> usize {
+        self.struct_types.len()
+    }
+    
+    /// Get interface count.
+    pub fn interface_count(&self) -> usize {
+        self.interface_types.len()
+    }
+    
+    /// Register a named type (struct or interface) and store the mapping.
+    pub fn register_named_type(&mut self, named_id: u32, ty: &Type) -> Option<u32> {
+        match ty {
+            Type::Struct(st) => {
+                let type_id = self.register_struct(st);
+                self.named_type_ids.insert(named_id, type_id);
+                Some(type_id)
+            }
+            Type::Interface(iface) => {
+                let type_id = self.register_interface(iface);
+                self.named_type_ids.insert(named_id, type_id);
+                Some(type_id)
+            }
+            _ => None,
+        }
+    }
+    
+    /// Get the type_id for a named type.
+    pub fn get_named_type_id(&self, named_id: u32) -> Option<u32> {
+        self.named_type_ids.get(&named_id).copied()
+    }
+}
+
+/// Convert a StructType to slot_types for GC scanning.
+fn struct_to_slot_types(st: &StructType, named_types: &[gox_analysis::NamedTypeInfo]) -> Vec<SlotType> {
+    let mut slot_types = Vec::new();
+    for field in &st.fields {
+        let field_slots = field_to_slot_types(&field.ty, named_types);
+        slot_types.extend(field_slots);
+    }
+    slot_types
+}
+
+/// Convert a field type to slot_types.
+fn field_to_slot_types(ty: &Type, named_types: &[gox_analysis::NamedTypeInfo]) -> Vec<SlotType> {
+    match ty {
+        Type::Basic(BasicType::String) => vec![SlotType::GcRef],
+        Type::Basic(_) => vec![SlotType::Value],
+        Type::Slice(_) | Type::Array(_) | Type::Map(_) | Type::Chan(_) | Type::Func(_) => vec![SlotType::GcRef],
+        Type::Pointer(_) => vec![SlotType::GcRef],
+        Type::Interface(_) => vec![SlotType::Interface0, SlotType::Interface1],
+        Type::Struct(st) => struct_to_slot_types(st, named_types),
+        Type::Named(id) => {
+            if let Some(info) = named_types.get(id.0 as usize) {
+                field_to_slot_types(&info.underlying, named_types)
+            } else {
+                vec![SlotType::Value]
+            }
+        }
+        _ => vec![SlotType::Value],
+    }
+}
+
 /// Convert analysis Type to RuntimeTypeId and slot count for GC scanning.
-fn type_to_type_id_and_slots(ty: &Type, named_types: &[gox_analysis::NamedTypeInfo]) -> (u32, u16) {
+/// Uses TypeRegistry to look up Named struct/interface type IDs.
+fn type_to_type_id_and_slots_with_registry(
+    ty: &Type, 
+    named_types: &[gox_analysis::NamedTypeInfo],
+    registry: &TypeRegistry,
+) -> (u32, u16) {
     match ty {
         // Value types (1 slot, no GC)
         Type::Basic(BasicType::Bool) => (RuntimeTypeId::Bool as u32, 1),
@@ -65,7 +200,7 @@ fn type_to_type_id_and_slots(ty: &Type, named_types: &[gox_analysis::NamedTypeIn
         Type::Map(_) => (RuntimeTypeId::Map as u32, 1),
         Type::Pointer(inner) => {
             // Pointer to struct - use the struct's type_id
-            type_to_type_id_and_slots(inner, named_types)
+            type_to_type_id_and_slots_with_registry(inner, named_types, registry)
         }
         Type::Func(_) => (RuntimeTypeId::Closure as u32, 1),
         Type::Chan(_) => (RuntimeTypeId::Channel as u32, 1),
@@ -79,10 +214,16 @@ fn type_to_type_id_and_slots(ty: &Type, named_types: &[gox_analysis::NamedTypeIn
         // Struct - use FirstStruct as placeholder (actual ID assigned elsewhere)
         Type::Struct(_) => (RuntimeTypeId::FirstStruct as u32, 1),
         
-        // Named type - resolve to underlying
+        // Named type - look up in registry
         Type::Named(id) => {
-            if let Some(info) = named_types.get(id.0 as usize) {
-                type_to_type_id_and_slots(&info.underlying, named_types)
+            // First check if we have a registered type_id for this named type
+            if let Some(type_id) = registry.get_named_type_id(id.0) {
+                // For struct: 1 slot, for interface: 2 slots
+                let slots = if RuntimeTypeId::is_interface(type_id) { 2 } else { 1 };
+                (type_id, slots)
+            } else if let Some(info) = named_types.get(id.0 as usize) {
+                // Fallback: resolve to underlying type
+                type_to_type_id_and_slots_with_registry(&info.underlying, named_types, registry)
             } else {
                 (RuntimeTypeId::Int as u32, 1)
             }
@@ -121,6 +262,16 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     // Global variable indices: (pkg_name, var_name) -> global_idx
     let mut global_indices: HashMap<(String, Symbol), u32> = HashMap::new();
     
+    // Type registry for allocating struct/interface type IDs
+    let mut type_registry = TypeRegistry::new();
+    
+    // Pass 0: collect all struct and interface types from named_types
+    for pkg in &project.packages {
+        for (idx, info) in pkg.types.named_types.iter().enumerate() {
+            type_registry.register_named_type(idx as u32, &info.underlying);
+        }
+    }
+    
     // First pass: collect all global variables from ALL packages
     for pkg in &project.packages {
         for file in &pkg.files {
@@ -133,7 +284,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                             let (type_id, slots) = pkg.types.scope.lookup(name.symbol)
                                 .map(|e| match e {
                                     gox_analysis::scope::Entity::Var(v) => {
-                                        type_to_type_id_and_slots(&v.ty, &pkg.types.named_types)
+                                        type_to_type_id_and_slots_with_registry(&v.ty, &pkg.types.named_types, &type_registry)
                                     }
                                     _ => (RuntimeTypeId::Int as u32, 1),
                                 })
