@@ -1761,7 +1761,21 @@ impl Vm {
             }
         }
         
-        // TODO: Mark globals when we have type info for them
+        // Mark globals that are GC references
+        if let Some(ref module) = self.module {
+            let mut slot_idx = 0usize;
+            for g in &module.globals {
+                if g.is_ref {
+                    for i in 0..g.slots as usize {
+                        let val = self.globals.get(slot_idx + i).copied().unwrap_or(0);
+                        if val != 0 {
+                            self.gc.mark_gray(val as GcRef);
+                        }
+                    }
+                }
+                slot_idx += g.slots as usize;
+            }
+        }
         
         // Perform collection with object scanner
         let types = &self.types;

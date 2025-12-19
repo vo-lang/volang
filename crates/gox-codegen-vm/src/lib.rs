@@ -71,7 +71,17 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
                     for spec in &var.specs {
                         for name in &spec.names {
                             let var_name = project.interner.resolve(name.symbol).unwrap_or("");
-                            let idx = module.add_global(var_name, 1);
+                            // GC ref = anything except non-string basic types
+                            let is_ref = pkg.types.scope.lookup(name.symbol)
+                                .map(|e| match e {
+                                    gox_analysis::scope::Entity::Var(v) => {
+                                        !matches!(v.ty, gox_analysis::types::Type::Basic(b) 
+                                            if b != gox_analysis::types::BasicType::String)
+                                    }
+                                    _ => false,
+                                })
+                                .unwrap_or(false);
+                            let idx = module.add_global(var_name, 1, is_ref);
                             global_indices.insert((pkg.name.clone(), name.symbol), idx);
                         }
                     }

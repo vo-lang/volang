@@ -61,8 +61,15 @@ impl JitCompiler {
     pub fn compile_module(&mut self, bytecode: &BytecodeModule) -> Result<()> {
         // Initialize global runtime state
         gox_runtime_native::init_gc();
-        let total_global_slots: usize = bytecode.globals.iter().map(|g| g.slots as usize).sum();
-        gox_runtime_native::init_globals(total_global_slots);
+        
+        // Build globals metadata: expand each GlobalDef into per-slot is_ref flags
+        let mut globals_is_ref = Vec::new();
+        for g in &bytecode.globals {
+            for _ in 0..g.slots {
+                globals_is_ref.push(g.is_ref);
+            }
+        }
+        gox_runtime_native::init_globals(globals_is_ref.len(), globals_is_ref);
         
         // Initialize function pointer table for indirect calls (closures)
         gox_runtime_native::init_func_table(bytecode.functions.len());

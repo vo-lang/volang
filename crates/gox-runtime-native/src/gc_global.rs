@@ -9,6 +9,7 @@ use gox_runtime_core::gc::{Gc, GcRef, TypeId};
 thread_local! {
     static GLOBAL_GC: RefCell<Gc> = RefCell::new(Gc::new());
     static GLOBALS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static GLOBALS_IS_REF: RefCell<Vec<bool>> = RefCell::new(Vec::new());
     static FUNC_TABLE: RefCell<Vec<*const u8>> = RefCell::new(Vec::new());
 }
 
@@ -22,12 +23,15 @@ pub fn init_gc() {
     });
 }
 
-/// Initialize globals storage with the given size.
-pub fn init_globals(size: usize) {
+/// Initialize globals storage with the given size and type metadata.
+pub fn init_globals(size: usize, is_ref: Vec<bool>) {
     GLOBALS.with(|g| {
         let mut globals = g.borrow_mut();
         globals.clear();
         globals.resize(size, 0);
+    });
+    GLOBALS_IS_REF.with(|r| {
+        *r.borrow_mut() = is_ref;
     });
 }
 
@@ -98,18 +102,19 @@ pub fn gc_total_bytes() -> usize {
 /// Note: JIT GC currently only scans globals, not the native stack.
 /// Full stack scanning requires Cranelift stack maps (TODO).
 pub fn collect_garbage() {
-    // Mark roots from globals
+    // Mark roots from globals (only slots marked as GC refs)
     GLOBALS.with(|g| {
-        let globals = g.borrow();
-        with_gc(|gc| {
-            for &val in globals.iter() {
-                // Conservatively mark all non-zero values as potential refs
-                // TODO: Use type info to know which globals are GC refs
-                if val != 0 && val > 0x1000 {
-                    // Heuristic: valid pointers are > 0x1000
-                    gc.mark_gray(val as GcRef);
+        GLOBALS_IS_REF.with(|r| {
+            let globals = g.borrow();
+            let is_ref = r.borrow();
+            debug_assert_eq!(globals.len(), is_ref.len(), "globals and is_ref length mismatch");
+            with_gc(|gc| {
+                for (&val, &is_gc_ref) in globals.iter().zip(is_ref.iter()) {
+                    if is_gc_ref && val != 0 {
+                        gc.mark_gray(val as GcRef);
+                    }
                 }
-            }
+            });
         });
     });
     

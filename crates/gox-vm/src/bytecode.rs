@@ -134,6 +134,8 @@ pub struct ExternDef {
 pub struct GlobalDef {
     pub name: String,
     pub slots: u16,
+    /// Whether this global contains a GC reference.
+    pub is_ref: bool,
 }
 
 /// Bytecode module.
@@ -162,11 +164,12 @@ impl Module {
     }
     
     /// Add a global variable and return its index.
-    pub fn add_global(&mut self, name: &str, slots: u16) -> u32 {
+    pub fn add_global(&mut self, name: &str, slots: u16, is_ref: bool) -> u32 {
         let idx = self.globals.len();
         self.globals.push(GlobalDef {
             name: name.to_string(),
             slots,
+            is_ref,
         });
         idx as u32
     }
@@ -246,6 +249,7 @@ impl Module {
         for g in &self.globals {
             write_string(&mut buf, &g.name);
             write_u16(&mut buf, g.slots);
+            buf.push(g.is_ref as u8);
         }
         
         // Externs section
@@ -308,7 +312,8 @@ impl Module {
         for _ in 0..global_count {
             let g_name = read_string(&mut cursor)?;
             let slots = read_u16(&mut cursor)?;
-            globals.push(GlobalDef { name: g_name, slots });
+            let is_ref = read_u8(&mut cursor)? != 0;
+            globals.push(GlobalDef { name: g_name, slots, is_ref });
         }
         
         // Externs section
@@ -461,6 +466,13 @@ fn value_kind_to_u8(kind: ValueKind) -> u8 {
 }
 
 // === Reader helpers (std feature only) ===
+
+#[cfg(feature = "std")]
+fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, BytecodeError> {
+    let mut buf = [0u8; 1];
+    cursor.read_exact(&mut buf).map_err(|_| BytecodeError::UnexpectedEof)?;
+    Ok(buf[0])
+}
 
 #[cfg(feature = "std")]
 fn read_u16(cursor: &mut Cursor<&[u8]>) -> Result<u16, BytecodeError> {
