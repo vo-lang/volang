@@ -2,13 +2,10 @@
 
 use alloc::{string::{String, ToString}, vec, vec::Vec};
 use hashbrown::HashMap;
-use gox_common_core::ValueKind;
+use gox_common_core::{ValueKind, FIRST_USER_TYPE_ID};
 
 /// Type ID (index into type table).
 pub type TypeId = u32;
-
-/// First user-defined type ID (builtin types use ValueKind values 0-22).
-pub const FIRST_USER_TYPE: TypeId = 100;
 
 /// Field layout info for compact struct representation.
 #[derive(Clone, Debug, Default)]
@@ -61,9 +58,6 @@ pub struct TypeMeta {
     // For struct/object: field layouts (compact)
     pub field_layouts: Vec<FieldLayout>,
     
-    // Legacy: field offsets in slots (for backward compat during transition)
-    pub field_offsets: Vec<usize>,
-    
     // For array/slice/channel: element type and size
     pub elem_type: Option<TypeId>,
     pub elem_size: Option<usize>,
@@ -89,7 +83,6 @@ impl TypeMeta {
             ptr_bitmap,
             name: name.to_string(),
             field_layouts: vec![],
-            field_offsets: vec![],
             elem_type: None,
             elem_size: None,
             key_type: None,
@@ -114,7 +107,6 @@ impl TypeMeta {
             ptr_bitmap,
             name: name.to_string(),
             field_layouts: vec![],
-            field_offsets: vec![],
             elem_type: None,
             elem_size: None,
             key_type: None,
@@ -131,7 +123,6 @@ impl TypeMeta {
             ptr_bitmap,
             name: name.to_string(),
             field_layouts: vec![],
-            field_offsets: vec![],
             elem_type: None,
             elem_size: None,
             key_type: None,
@@ -172,7 +163,7 @@ impl TypeTable {
     
     fn init_builtins(&mut self) {
         // Reserve space for builtin types
-        self.types.resize(FIRST_USER_TYPE as usize, TypeMeta::nil());
+        self.types.resize(FIRST_USER_TYPE_ID as usize, TypeMeta::nil());
         
         // Helper to set builtin type at its ValueKind index
         let mut set_builtin = |meta: TypeMeta| {
@@ -204,7 +195,6 @@ impl TypeTable {
             ptr_bitmap: vec![true],
             name: "string".to_string(),
             field_layouts: vec![],
-            field_offsets: vec![],
             elem_type: Some(ValueKind::Uint8 as TypeId),
             elem_size: Some(1),
             key_type: None,

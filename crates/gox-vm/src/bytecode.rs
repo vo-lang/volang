@@ -525,7 +525,7 @@ fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError>
     let value_type = read_u32(cursor)?;
     
     // id is None for builtin types (id == kind), Some for user-defined types
-    let id_opt = if id < crate::types::FIRST_USER_TYPE { None } else { Some(id) };
+    let id_opt = if id < gox_common_core::FIRST_USER_TYPE_ID { None } else { Some(id) };
     
     Ok(TypeMeta {
         id: id_opt,
@@ -535,7 +535,6 @@ fn read_type_meta(cursor: &mut Cursor<&[u8]>) -> Result<TypeMeta, BytecodeError>
         ptr_bitmap,
         name,
         field_layouts: Vec::new(),
-        field_offsets: Vec::new(),
         elem_type: if elem_type == 0xFFFFFFFF { None } else { Some(elem_type) },
         elem_size: None,
         key_type: if key_type == 0xFFFFFFFF { None } else { Some(key_type) },
