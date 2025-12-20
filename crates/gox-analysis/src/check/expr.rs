@@ -950,31 +950,68 @@ impl<F: FileSystem> Checker<F> {
                 if x.invalid() {
                     return;
                 }
-                // TODO: Full index expression handling
-                let base_type = x.typ.unwrap();
-                let utype = typ::underlying_type(base_type, &self.tc_objs);
-                let elem_type = match self.otype(utype) {
-                    Type::Array(arr) => Some(arr.elem()),
-                    Type::Slice(sl) => Some(sl.elem()),
-                    Type::Map(m) => {
-                        x.mode = OperandMode::MapIndex;
-                        Some(m.elem())
-                    }
-                    Type::Basic(b) if typ::is_string(utype, &self.tc_objs) => {
+
+                let utype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let utype_val = self.otype(utype).clone();
+                let (valid, length) = match &utype_val {
+                    Type::Basic(_) if typ::is_string(utype, &self.tc_objs) => {
+                        // String indexing yields byte
+                        let len = if let OperandMode::Constant(v) = &x.mode {
+                            Some(v.str_as_string().len() as u64)
+                        } else {
+                            None
+                        };
                         x.mode = OperandMode::Value;
-                        Some(self.basic_type(BasicType::Byte))
+                        x.typ = Some(self.universe().byte());
+                        (true, len)
                     }
-                    _ => {
-                        self.invalid_op(Span::default(), "cannot index expression");
-                        None
+                    Type::Array(arr) => {
+                        if x.mode != OperandMode::Variable {
+                            x.mode = OperandMode::Value;
+                        }
+                        x.typ = Some(arr.elem());
+                        (true, arr.len())
                     }
-                };
-                if let Some(et) = elem_type {
-                    x.typ = Some(et);
-                    if x.mode != OperandMode::MapIndex {
+                    Type::Pointer(ptr) => {
+                        // Pointer to array
+                        if let Some(arr) = self.otype(ptr.base()).underlying_val(&self.tc_objs).try_as_array() {
+                            x.mode = OperandMode::Variable;
+                            x.typ = Some(arr.elem());
+                            (true, arr.len())
+                        } else {
+                            (false, None)
+                        }
+                    }
+                    Type::Slice(sl) => {
                         x.mode = OperandMode::Variable;
+                        x.typ = Some(sl.elem());
+                        (true, None)
                     }
+                    Type::Map(m) => {
+                        let key = m.key();
+                        let elem = m.elem();
+                        // Check index type
+                        let mut xkey = Operand::new();
+                        self.expr(&mut xkey, &idx.index, fctx);
+                        self.assignment(&mut xkey, Some(key), "map index", fctx);
+                        if xkey.invalid() {
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
+                        x.mode = OperandMode::MapIndex;
+                        x.typ = Some(elem);
+                        return;
+                    }
+                    _ => (false, None),
+                };
+
+                if !valid {
+                    self.invalid_op(Span::default(), "cannot index expression");
+                    x.mode = OperandMode::Invalid;
+                    return;
                 }
+                // Check index
+                let _ = self.index(&idx.index, length, fctx);
             }
             ExprKind::Slice(sl) => {
                 self.expr(x, &sl.expr, fctx);
