@@ -543,8 +543,7 @@ pub fn missing_method<F: FileSystem>(
                 if !checker.tc_objs.lobjs[okey].entity_type().is_func() {
                     return Some((fkey, false)); // not a method
                 }
-                // Ensure method signature is fully set up
-                checker.obj_decl(okey);
+                // Method signature should already be set up during type checking
                 let y_type = checker.tc_objs.lobjs[okey].typ();
                 if !typ::identical_o(x_type, y_type, &checker.tc_objs) {
                     return Some((fkey, true)); // wrong type

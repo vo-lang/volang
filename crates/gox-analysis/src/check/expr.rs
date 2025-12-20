@@ -49,9 +49,9 @@ impl<F: FileSystem> Checker<F> {
             ExprKind::Conversion(conv) => self.check_conversion(&conv.ty, &conv.expr),
             ExprKind::Receive(recv) => self.check_receive(recv),
             ExprKind::Paren(inner) => self.check_expr_impl(inner),
-            ExprKind::TypeAsExpr(ty) => {
-                let typ = self.resolve_type(ty);
-                (OperandMode::TypeExpr, typ)
+            ExprKind::TypeAsExpr(_ty) => {
+                // TODO: use type_expr with fctx
+                (OperandMode::TypeExpr, self.invalid_type())
             }
             ExprKind::TryUnwrap(inner) => self.check_try_unwrap(inner),
         }
@@ -250,9 +250,9 @@ impl<F: FileSystem> Checker<F> {
         ty: Option<&gox_syntax::ast::TypeExpr>,
     ) -> (OperandMode, TypeKey) {
         let _base_typ = self.check_expr(expr);
-        if let Some(t) = ty {
-            let target = self.resolve_type(t);
-            return (OperandMode::Value, target);
+        if let Some(_t) = ty {
+            // TODO: use type_expr with fctx
+            return (OperandMode::Value, self.invalid_type());
         }
         // Type switch case - return invalid
         let invalid = self.universe().lookup_type(BasicType::Invalid).unwrap();
@@ -265,7 +265,8 @@ impl<F: FileSystem> Checker<F> {
         ty: &gox_syntax::ast::TypeExpr,
         elems: &[gox_syntax::ast::CompositeLitElem],
     ) -> (OperandMode, TypeKey) {
-        let typ = self.resolve_type(ty);
+        // TODO: use type_expr with fctx
+        let typ = self.invalid_type();
         for elem in elems {
             self.check_expr(&elem.value);
         }
@@ -289,7 +290,8 @@ impl<F: FileSystem> Checker<F> {
         ty: &gox_syntax::ast::TypeExpr,
         expr: &Expr,
     ) -> (OperandMode, TypeKey) {
-        let target = self.resolve_type(ty);
+        // TODO: use type_expr with fctx
+        let target = self.invalid_type();
         self.check_expr(expr);
         (OperandMode::Value, target)
     }
@@ -316,6 +318,11 @@ impl<F: FileSystem> Checker<F> {
     /// Type-checks an expression and returns its type.
     /// This is the main entry point for expression type checking.
     pub fn expr(&mut self, x: &mut crate::operand::Operand, e: &Expr) {
+        self.raw_expr(x, e, None);
+    }
+
+    /// Type-checks an expression with fctx.
+    pub fn expr_with_fctx(&mut self, x: &mut crate::operand::Operand, e: &Expr, _fctx: &mut super::checker::FilesContext<F>) {
         self.raw_expr(x, e, None);
     }
 

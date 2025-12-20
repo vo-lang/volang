@@ -322,23 +322,7 @@ impl<F: FileSystem> Checker<F> {
         &mut self.tc_objs.decls[key]
     }
 
-    // =========================================================================
-    // Declaration helpers (used by resolver)
-    // =========================================================================
-
-    /// Reports an alternative declaration location.
-    pub fn report_alt_decl(&self, obj_key: ObjKey) {
-        let obj = &self.tc_objs.lobjs[obj_key];
-        // TODO: Report the other declaration location
-        let _ = obj;
-    }
-
-    // Note: has_cycle is in util.rs, init_order is in initorder.rs
-
-    /// Adds method declarations to a type.
-    pub fn add_method_decls(&mut self, _obj: ObjKey, _fctx: &mut FilesContext<F>) {
-        // TODO: Implement in decl.rs
-    }
+    // Note: report_alt_decl and add_method_decls are in decl.rs
 
     // =========================================================================
     // Expression checking stubs (to be implemented in expr.rs)

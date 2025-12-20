@@ -1,181 +1,462 @@
 //! Declaration type checking.
 //!
-//! This module type-checks top-level declarations including:
-//! - Variable declarations (var)
+//! This module type-checks package-level and local declarations including:
 //! - Constant declarations (const)
+//! - Variable declarations (var)
 //! - Type declarations (type)
 //! - Function declarations (func)
-//! - Interface declarations (interface)
+//!
+//! Adapted from goscript with GoX-specific modifications.
 
 #![allow(dead_code)]
 
+use gox_common::span::Span;
 use gox_common::vfs::FileSystem;
-use gox_syntax::ast::{Decl, File, FuncDecl};
+use gox_syntax::ast::{Expr, TypeExpr};
 
-use crate::obj::{EntityType, LangObj};
-use crate::objects::{ObjKey, ScopeKey};
+use crate::constant::Value as ConstValue;
+use crate::obj::{EntityType, ObjColor};
+use crate::objects::{DeclInfoKey, ObjKey, ScopeKey, TypeKey};
+use crate::operand::Operand;
 use crate::scope::Scope;
+use crate::typ;
 
-use super::checker::Checker;
+use super::checker::{Checker, FilesContext, ObjContext};
+use super::resolver::DeclInfo;
 
 impl<F: FileSystem> Checker<F> {
-    /// Type-checks an object's declaration to ensure its type is fully set up.
-    /// This is called before comparing method signatures to ensure they are complete.
-    pub fn obj_decl(&mut self, okey: ObjKey) {
-        let lobj = &self.tc_objs.lobjs[okey];
-        // If the object already has a type, it's fully checked
-        if lobj.typ().is_some() {
-            return;
-        }
-        // TODO: Full implementation requires DeclInfo and color-based cycle detection.
-        // For now, this is a no-op - methods should have their types set during
-        // the normal type-checking pass before assignable_to is called.
+    /// Reports the location of an alternative declaration.
+    pub fn report_alt_decl(&self, okey: ObjKey) {
+        let lobj = self.lobj(okey);
+        self.error(Span::default(), format!("\tother declaration of {}", lobj.name()));
     }
 
     /// Declares an object in a scope.
     /// Returns error if name already exists (except for blank identifier "_").
-    pub fn declare(&mut self, scope_key: ScopeKey, obj_key: ObjKey) {
-        let name = self.tc_objs.lobjs[obj_key].name().to_string();
-        
-        // Blank identifier doesn't introduce a binding
-        if name == "_" {
+    pub fn declare(&mut self, skey: ScopeKey, okey: ObjKey) {
+        // spec: "The blank identifier, represented by the underscore
+        // character _, may be used in a declaration like any other
+        // identifier but the declaration does not introduce a new binding."
+        if self.lobj(okey).name() != "_" {
+            let alt = Scope::insert(skey, okey, &mut self.tc_objs);
+            if let Some(o) = alt {
+                let lobj = self.lobj(okey);
+                self.error(
+                    Span::default(),
+                    format!("{} redeclared in this block", lobj.name()),
+                );
+                self.report_alt_decl(o);
+                return;
+            }
+        }
+    }
+
+    /// Type-checks an object declaration.
+    /// Uses color-based cycle detection (White -> Gray -> Black).
+    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>, fctx: &mut FilesContext<F>) {
+        // During type-checking, white objects may be assigned a type without
+        // traversing through obj_decl. Update colors of those objects here.
+        let lobj = &mut self.tc_objs.lobjs[okey];
+        if lobj.color() == ObjColor::White && lobj.typ().is_some() {
+            lobj.set_color(ObjColor::Black);
             return;
         }
-        
-        // Try to insert into scope using static method
-        if let Some(existing) = Scope::insert(scope_key, obj_key, &mut self.tc_objs) {
-            // Name already declared - report error
-            let _ = existing;
-            self.error(
-                gox_common::span::Span::default(),
-                format!("{} redeclared in this block", name),
-            );
-        }
-    }
 
-    /// Type-checks a source file.
-    pub fn check_file(&mut self, file: &File) {
-        // First pass: collect all declarations
-        for decl in &file.decls {
-            self.collect_decl(decl);
-        }
+        match lobj.color() {
+            ObjColor::White => {
+                debug_assert!(lobj.typ().is_none());
+                lobj.set_color(ObjColor::Gray(fctx.push(okey)));
 
-        // Second pass: type-check all declarations
-        for decl in &file.decls {
-            self.check_decl(decl);
-        }
-    }
-
-    /// Collects a declaration (first pass - creates objects).
-    fn collect_decl(&mut self, decl: &Decl) {
-        match decl {
-            Decl::Var(var) => self.collect_var_decl(var),
-            Decl::Const(cons) => self.collect_const_decl(cons),
-            Decl::Type(ty) => self.collect_type_decl(ty),
-            Decl::Func(func) => self.collect_func_decl(func),
-            Decl::Interface(iface) => self.collect_interface_decl(iface),
-        }
-    }
-
-    /// Type-checks a declaration (second pass).
-    fn check_decl(&mut self, decl: &Decl) {
-        match decl {
-            Decl::Var(var) => self.check_var_decl(var),
-            Decl::Const(cons) => self.check_const_decl(cons),
-            Decl::Type(ty) => self.check_type_decl(ty),
-            Decl::Func(func) => self.check_func_decl(func),
-            Decl::Interface(iface) => self.check_interface_decl(iface),
-        }
-    }
-
-    // ========== Collection (first pass) ==========
-
-    fn collect_var_decl(&mut self, _var: &gox_syntax::ast::VarDecl) {
-        // TODO: Create variable objects
-    }
-
-    fn collect_const_decl(&mut self, _cons: &gox_syntax::ast::ConstDecl) {
-        // TODO: Create constant objects
-    }
-
-    fn collect_type_decl(&mut self, _ty: &gox_syntax::ast::TypeDecl) {
-        // TODO: Create type objects
-    }
-
-    fn collect_func_decl(&mut self, _func: &FuncDecl) {
-        // TODO: Create function objects
-    }
-
-    fn collect_interface_decl(&mut self, _iface: &gox_syntax::ast::InterfaceDecl) {
-        // TODO: Create interface objects
-    }
-
-    // ========== Type checking (second pass) ==========
-
-    fn check_var_decl(&mut self, var: &gox_syntax::ast::VarDecl) {
-        for spec in &var.specs {
-            if let Some(ty) = &spec.ty {
-                let _typ = self.resolve_type(ty);
-            }
-            for val in &spec.values {
-                self.check_expr(val);
-            }
-        }
-    }
-
-    fn check_const_decl(&mut self, cons: &gox_syntax::ast::ConstDecl) {
-        for spec in &cons.specs {
-            if let Some(ty) = &spec.ty {
-                let _typ = self.resolve_type(ty);
-            }
-            for val in &spec.values {
-                self.check_expr(val);
-            }
-        }
-    }
-
-    fn check_type_decl(&mut self, ty: &gox_syntax::ast::TypeDecl) {
-        let _typ = self.resolve_type(&ty.ty);
-    }
-
-    fn check_func_decl(&mut self, func: &FuncDecl) {
-        // Check receiver type
-        if let Some(recv) = &func.receiver {
-            // TODO: Resolve receiver type
-            let _ = recv;
-        }
-
-        // Check parameter types
-        for param in &func.sig.params {
-            let _typ = self.resolve_type(&param.ty);
-        }
-
-        // Check result types
-        for result in &func.sig.results {
-            let _typ = self.resolve_type(&result.ty);
-        }
-
-        // Check function body if present
-        if let Some(body) = &func.body {
-            self.check_block(body);
-        }
-    }
-
-    fn check_interface_decl(&mut self, iface: &gox_syntax::ast::InterfaceDecl) {
-        for elem in &iface.elems {
-            match elem {
-                gox_syntax::ast::InterfaceElem::Method(method) => {
-                    for param in &method.sig.params {
-                        let _typ = self.resolve_type(&param.ty);
+                let dkey = match self.obj_map.get(&okey) {
+                    Some(&k) => k,
+                    None => {
+                        // Object not in obj_map - predeclared or imported
+                        self.lobj_mut(fctx.pop()).set_color(ObjColor::Black);
+                        return;
                     }
-                    for result in &method.sig.results {
-                        let _typ = self.resolve_type(&result.ty);
+                };
+
+                let d = self.decl_info(dkey);
+                // Create a new octx for the checker
+                let mut octx = ObjContext::new();
+                octx.scope = Some(d.file_scope());
+                std::mem::swap(&mut self.octx, &mut octx);
+
+                let lobj = &self.tc_objs.lobjs[okey];
+                match lobj.entity_type() {
+                    EntityType::Const { .. } => {
+                        self.octx.decl = Some(dkey);
+                        if let DeclInfo::Const(cd) = self.decl_info(dkey) {
+                            let (typ, init) = (cd.typ.clone(), cd.init.clone());
+                            self.const_decl(okey, &typ, &init, fctx);
+                        }
+                    }
+                    EntityType::Var { .. } => {
+                        self.octx.decl = Some(dkey);
+                        if let DeclInfo::Var(vd) = self.decl_info(dkey) {
+                            let (lhs, typ, init) = (vd.lhs.clone(), vd.typ.clone(), vd.init.clone());
+                            self.var_decl(okey, lhs.as_ref(), &typ, &init, fctx);
+                        }
+                    }
+                    EntityType::TypeName => {
+                        if let DeclInfo::Type(td) = self.decl_info(dkey) {
+                            let (typ, alias) = (td.typ.clone(), td.alias);
+                            self.type_decl(okey, &typ, def, alias, fctx);
+                        }
+                    }
+                    EntityType::Func { .. } => {
+                        self.func_decl(okey, dkey, fctx);
+                    }
+                    _ => {}
+                }
+
+                // Restore octx
+                std::mem::swap(&mut self.octx, &mut octx);
+                self.lobj_mut(fctx.pop()).set_color(ObjColor::Black);
+            }
+            ObjColor::Black => {
+                debug_assert!(lobj.typ().is_some());
+            }
+            ObjColor::Gray(_) => {
+                // We have a cycle.
+                let invalid_type = self.invalid_type();
+                let lobj = &self.tc_objs.lobjs[okey];
+                match lobj.entity_type() {
+                    EntityType::Const { .. } | EntityType::Var { .. } => {
+                        if self.invalid_type_cycle(okey, fctx) || lobj.typ().is_none() {
+                            self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                        }
+                    }
+                    EntityType::TypeName => {
+                        if self.invalid_type_cycle(okey, fctx) {
+                            self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                        }
+                    }
+                    EntityType::Func { .. } => {
+                        // Don't set obj.typ to Invalid here - functions need a Signature type
+                        let _ = self.invalid_type_cycle(okey, fctx);
+                    }
+                    _ => {}
+                }
+                debug_assert!(self.lobj(okey).typ().is_some());
+            }
+        }
+    }
+
+    /// Returns true if the cycle starting with obj is invalid and reports an error.
+    pub fn invalid_type_cycle(&self, okey: ObjKey, fctx: &FilesContext<F>) -> bool {
+        let lobj = self.lobj(okey);
+        let mut has_indir = false;
+        let mut has_type_def = false;
+        let mut nval = 0;
+
+        let start = match lobj.color() {
+            ObjColor::Gray(v) => v,
+            _ => return false,
+        };
+
+        let cycle = &fctx.obj_path[start..];
+        let mut ncycle = cycle.len();
+
+        for o in cycle {
+            let oval = self.lobj(*o);
+            match oval.entity_type() {
+                EntityType::Const { .. } | EntityType::Var { .. } => {
+                    nval += 1;
+                }
+                EntityType::TypeName => {
+                    // Check if it's the indirection marker
+                    if self.tc_objs.universe().indir() == *o {
+                        ncycle -= 1;
+                        has_indir = true;
+                    } else {
+                        // Check if it's an alias
+                        let alias = if let Some(&d) = self.obj_map.get(o) {
+                            if let DeclInfo::Type(td) = self.decl_info(d) {
+                                td.alias
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !alias {
+                            has_type_def = true;
+                        }
                     }
                 }
-                gox_syntax::ast::InterfaceElem::Embedded(_) => {
-                    // TODO: Resolve embedded interface
+                EntityType::Func { .. } => {} // ignored for now
+                _ => {}
+            }
+        }
+
+        // A cycle involving only constants and variables is invalid but we
+        // ignore them here because they are reported via the initialization
+        // cycle check.
+        if nval == ncycle {
+            return false;
+        }
+
+        // A cycle involving only types (and possibly functions) must have at
+        // least one indirection and one type definition to be permitted.
+        if nval == 0 && has_indir && has_type_def {
+            return false; // cycle is permitted
+        }
+
+        // Report error
+        self.error(
+            Span::default(),
+            format!("illegal cycle in declaration of {}", lobj.name()),
+        );
+        for o in cycle {
+            if self.tc_objs.universe().indir() == *o {
+                continue;
+            }
+            self.error(Span::default(), format!("\t{} refers to", self.lobj(*o).name()));
+        }
+        self.error(Span::default(), format!("\t{}", lobj.name()));
+
+        true
+    }
+
+    /// Type-checks a constant declaration.
+    pub fn const_decl(
+        &mut self,
+        okey: ObjKey,
+        typ: &Option<TypeExpr>,
+        init: &Option<Expr>,
+        fctx: &mut FilesContext<F>,
+    ) {
+        debug_assert!(self.lobj(okey).typ().is_none());
+
+        // Set iota value
+        let iota_val = self.lobj(okey).const_val().clone();
+        self.octx.iota = Some(iota_val);
+
+        // Provide valid constant value under all circumstances
+        self.lobj_mut(okey).set_const_val(ConstValue::Unknown);
+
+        // Determine type, if any
+        if let Some(e) = typ {
+            let t = self.type_expr(e, fctx);
+            let tval = &self.tc_objs.types[t];
+            if !tval.is_const_type(&self.tc_objs) {
+                let invalid_type = self.invalid_type();
+                if tval.underlying().unwrap_or(t) != invalid_type {
+                    self.error(Span::default(), "invalid constant type".to_string());
+                }
+                self.lobj_mut(okey).set_type(Some(invalid_type));
+                self.octx.iota = None;
+                return;
+            }
+            self.lobj_mut(okey).set_type(Some(t));
+        }
+
+        let mut x = Operand::new();
+        if let Some(expr) = init {
+            self.expr(&mut x, expr);
+        }
+        self.init_const(okey, &mut x);
+
+        // Clear iota
+        self.octx.iota = None;
+    }
+
+    /// Type-checks a variable declaration.
+    pub fn var_decl(
+        &mut self,
+        okey: ObjKey,
+        lhs: Option<&Vec<ObjKey>>,
+        typ: &Option<TypeExpr>,
+        init: &Option<Expr>,
+        fctx: &mut FilesContext<F>,
+    ) {
+        debug_assert!(self.lobj(okey).typ().is_none());
+
+        // Determine type, if any
+        if let Some(texpr) = typ {
+            let t = self.type_expr(texpr, fctx);
+            self.lobj_mut(okey).set_type(Some(t));
+        }
+
+        // Check initialization
+        if init.is_none() {
+            if typ.is_none() {
+                let invalid = self.invalid_type();
+                self.lobj_mut(okey).set_type(Some(invalid));
+            }
+            return;
+        }
+
+        if lhs.is_none() || lhs.as_ref().unwrap().len() == 1 {
+            let mut x = Operand::new();
+            self.expr(&mut x, init.as_ref().unwrap());
+            self.init_var(okey, &mut x, "variable declaration");
+            return;
+        }
+
+        // Multiple variables on LHS with one init expr
+        if typ.is_some() {
+            let t = self.lobj(okey).typ();
+            for o in lhs.as_ref().unwrap().iter() {
+                self.lobj_mut(*o).set_type(t);
+            }
+        }
+
+        self.init_vars(lhs.as_ref().unwrap(), &[init.clone().unwrap()]);
+    }
+
+    /// Type-checks a type declaration.
+    pub fn type_decl(
+        &mut self,
+        okey: ObjKey,
+        typ: &TypeExpr,
+        def: Option<TypeKey>,
+        alias: bool,
+        fctx: &mut FilesContext<F>,
+    ) {
+        debug_assert!(self.lobj(okey).typ().is_none());
+
+        if alias {
+            let invalid = self.invalid_type();
+            self.lobj_mut(okey).set_type(Some(invalid));
+            let t = self.type_expr(typ, fctx);
+            self.lobj_mut(okey).set_type(Some(t));
+        } else {
+            let named_key = self.tc_objs.new_t_named(Some(okey), None, vec![]);
+            if let Some(d) = def {
+                if let Some(named) = self.tc_objs.types[d].try_as_named_mut() {
+                    named.set_underlying(named_key);
                 }
             }
+            // Make sure recursive type declarations terminate
+            self.lobj_mut(okey).set_type(Some(named_key));
+
+            // Determine underlying type of named
+            self.defined_type(typ, Some(named_key), fctx);
+
+            // Resolve forward chain to final unnamed underlying type
+            let underlying = typ::deep_underlying_type(named_key, &self.tc_objs);
+            if let Some(named) = self.tc_objs.types[named_key].try_as_named_mut() {
+                named.set_underlying(underlying);
+            }
+        }
+
+        self.add_method_decls(okey, fctx);
+    }
+
+    /// Type-checks a function declaration.
+    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey, fctx: &mut FilesContext<F>) {
+        debug_assert!(self.lobj(okey).typ().is_none());
+        debug_assert!(self.octx.iota.is_none());
+
+        // Set guard signature to prevent infinite recursion
+        let guard_sig = self.tc_objs.universe().guard_sig();
+        self.lobj_mut(okey).set_type(Some(guard_sig));
+
+        // Get function declaration info
+        let d = self.decl_info(dkey);
+        if let DeclInfo::Func(fd) = d {
+            let fdecl = fd.fdecl.clone();
+
+            // Type-check function signature
+            let sig_key = self.func_type_from_sig(&fdecl.sig, fctx);
+            self.lobj_mut(okey).set_type(Some(sig_key));
+
+            // Check for 'init' func
+            let sig = self.tc_objs.types[sig_key].try_as_signature().unwrap();
+            let lobj = &self.tc_objs.lobjs[okey];
+            if sig.recv().is_none()
+                && lobj.name() == "init"
+                && (sig.params_count(&self.tc_objs) > 0 || sig.results_count(&self.tc_objs) > 0)
+            {
+                self.error(
+                    Span::default(),
+                    "func init must have no arguments and no return values".to_string(),
+                );
+            }
+
+            // Queue function body for later checking
+            if fdecl.body.is_some() {
+                let name = lobj.name().to_string();
+                let body = fdecl.body.clone();
+                fctx.later(Box::new(move |checker: &mut Checker<F>, fctx: &mut FilesContext<F>| {
+                    if let Some(b) = &body {
+                        checker.check_func_body(&name, sig_key, b, fctx);
+                    }
+                }));
+            }
+        }
+    }
+
+    /// Adds method declarations to a type.
+    pub fn add_method_decls(&mut self, okey: ObjKey, fctx: &mut FilesContext<F>) {
+        // Get associated methods
+        if !fctx.methods.contains_key(&okey) {
+            return;
+        }
+        let methods = fctx.methods.remove(&okey).unwrap();
+
+        let type_key = match self.lobj(okey).typ() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Collect existing field names and methods to check for duplicates
+        let mut mset: std::collections::HashMap<String, ObjKey> = std::collections::HashMap::new();
+
+        if let Some(named) = self.otype(type_key).try_as_named() {
+            // Add struct fields if underlying is a struct
+            if let Some(struc) = self.otype(named.underlying()).try_as_struct() {
+                for f in struc.fields().iter() {
+                    let fname = self.lobj(*f).name();
+                    if fname != "_" {
+                        mset.insert(fname.to_string(), *f);
+                    }
+                }
+            }
+            // Add existing methods
+            for m in named.methods().iter() {
+                let mname = self.lobj(*m).name();
+                debug_assert!(mname != "_");
+                mset.insert(mname.to_string(), *m);
+            }
+        }
+
+        // Filter valid methods and check for duplicates
+        let mut valids: Vec<ObjKey> = Vec::new();
+        for m in methods {
+            let mobj = self.lobj(m);
+            let mname = mobj.name().to_string();
+            debug_assert!(mname != "_");
+
+            if let Some(&alt) = mset.get(&mname) {
+                let alt_obj = self.lobj(alt);
+                match alt_obj.entity_type() {
+                    EntityType::Var { .. } => {
+                        self.error(
+                            Span::default(),
+                            format!("field and method with the same name {}", mname),
+                        );
+                    }
+                    EntityType::Func { .. } => {
+                        self.error(
+                            Span::default(),
+                            format!("method {} already declared", mname),
+                        );
+                    }
+                    _ => {}
+                }
+                self.report_alt_decl(alt);
+            } else {
+                mset.insert(mname, m);
+                valids.push(m);
+            }
+        }
+
+        // Append valid methods to the named type
+        if let Some(named) = self.tc_objs.types[type_key].try_as_named_mut() {
+            named.methods_mut().append(&mut valids);
         }
     }
 }

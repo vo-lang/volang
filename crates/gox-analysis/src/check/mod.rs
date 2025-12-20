@@ -6,7 +6,7 @@
 mod assignment;
 mod builtin;
 mod call;
-mod checker;
+pub(crate) mod checker;
 mod conversion;
 mod decl;
 mod expr;

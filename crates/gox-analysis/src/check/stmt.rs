@@ -68,6 +68,17 @@ impl StmtContext {
 // =============================================================================
 
 impl<F: FileSystem> Checker<F> {
+    /// Type-checks a function body.
+    pub fn check_func_body(
+        &mut self,
+        _name: &str,
+        _sig: crate::objects::TypeKey,
+        body: &Block,
+        _fctx: &mut super::checker::FilesContext<F>,
+    ) {
+        self.check_block(body);
+    }
+
     /// Type-checks a block of statements with a new scope.
     pub fn check_block(&mut self, block: &Block) {
         self.check_block_with_context(block, &StmtContext::new());
@@ -121,7 +132,7 @@ impl<F: FileSystem> Checker<F> {
     fn check_var_decl_stmt(&mut self, var: &gox_syntax::ast::VarDecl) {
         for spec in &var.specs {
             if let Some(ty) = &spec.ty {
-                let _typ = self.resolve_type(ty);
+                let _typ = self.invalid_type(); // TODO: use type_expr with fctx
             }
             for val in &spec.values {
                 self.check_expr(val);
@@ -132,7 +143,7 @@ impl<F: FileSystem> Checker<F> {
     fn check_const_decl_stmt(&mut self, cons: &gox_syntax::ast::ConstDecl) {
         for spec in &cons.specs {
             if let Some(ty) = &spec.ty {
-                let _typ = self.resolve_type(ty);
+                let _typ = self.invalid_type(); // TODO: use type_expr with fctx
             }
             for val in &spec.values {
                 self.check_expr(val);
@@ -141,7 +152,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     fn check_type_decl_stmt(&mut self, ty: &gox_syntax::ast::TypeDecl) {
-        let _typ = self.resolve_type(&ty.ty);
+        let _typ = self.invalid_type(); // TODO: use type_expr with fctx
     }
 
     fn check_short_var_decl(&mut self, sv: &gox_syntax::ast::ShortVarDecl) {
@@ -230,7 +241,7 @@ impl<F: FileSystem> Checker<F> {
         for case in &ts.cases {
             for ty in &case.types {
                 if let Some(t) = ty {
-                    let _typ = self.resolve_type(t);
+                    let _typ = self.invalid_type(); // TODO: use type_expr with fctx
                 }
             }
             for stmt in &case.body {

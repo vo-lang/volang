@@ -29,19 +29,14 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks the type expression and returns its type, or Invalid Type.
-    pub fn type_expr(&mut self, ty: &TypeExpr) -> TypeKey {
-        self.defined_type(ty, None)
-    }
-
-    /// Resolves a type expression to a TypeKey (alias for type_expr).
-    pub fn resolve_type(&mut self, ty: &TypeExpr) -> TypeKey {
-        self.type_expr(ty)
+    pub fn type_expr(&mut self, ty: &TypeExpr, fctx: &mut FilesContext<F>) -> TypeKey {
+        self.defined_type(ty, None, fctx)
     }
 
     /// Like type_expr but also accepts a type name def.
     /// If def is Some, ty is the type specification for the defined type def.
-    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>) -> TypeKey {
-        let t = self.type_internal(ty, def);
+    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
+        let t = self.type_internal(ty, def, fctx);
         debug_assert!(typ::is_typed(t, &self.tc_objs));
         self.result.record_type_and_value(ExprId(ty.id.0), OperandMode::TypeExpr, t);
         t
@@ -49,8 +44,11 @@ impl<F: FileSystem> Checker<F> {
 
     /// Like type_expr but breaks infinite size of recursive types.
     /// Used for pointer base types, slice/map element types, function params, etc.
-    pub fn indirect_type(&mut self, ty: &TypeExpr) -> TypeKey {
-        self.defined_type(ty, None)
+    pub fn indirect_type(&mut self, ty: &TypeExpr, fctx: &mut FilesContext<F>) -> TypeKey {
+        fctx.push(self.tc_objs.universe().indir());
+        let t = self.defined_type(ty, None, fctx);
+        fctx.pop();
+        t
     }
 
     // =========================================================================
@@ -58,7 +56,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Drives type checking of types. Must only be called by defined_type.
-    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>) -> TypeKey {
+    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
         let set_underlying = |typ: Option<TypeKey>, tc_objs: &mut crate::objects::TCObjects| {
             if let Some(d) = def {
                 if let Some(named) = tc_objs.types[d].try_as_named_mut() {
@@ -72,7 +70,7 @@ impl<F: FileSystem> Checker<F> {
         let result_t: Option<TypeKey> = match &ty.kind {
             TypeExprKind::Ident(ident) => {
                 let mut x = Operand::new();
-                self.ident(&mut x, ident, def, true);
+                self.ident(&mut x, ident, def, true, fctx);
                 match x.mode {
                     OperandMode::TypeExpr => {
                         set_underlying(x.typ, &mut self.tc_objs);
@@ -118,21 +116,21 @@ impl<F: FileSystem> Checker<F> {
                 None
             }
             TypeExprKind::Array(arr) => {
-                let len = self.array_len(&arr.len);
-                let elem = self.type_expr(&arr.elem);
+                let len = self.array_len(&arr.len, fctx);
+                let elem = self.type_expr(&arr.elem, fctx);
                 let t = self.tc_objs.new_t_array(elem, len);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Slice(elem) => {
-                let elem_type = self.indirect_type(elem);
+                let elem_type = self.indirect_type(elem, fctx);
                 let t = self.tc_objs.new_t_slice(elem_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Map(map) => {
-                let key = self.indirect_type(&map.key);
-                let value = self.indirect_type(&map.value);
+                let key = self.indirect_type(&map.key, fctx);
+                let value = self.indirect_type(&map.value, fctx);
                 let t = self.tc_objs.new_t_map(key, value);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
@@ -143,29 +141,29 @@ impl<F: FileSystem> Checker<F> {
                     ast::ChanDir::Send => ChanDir::SendOnly,
                     ast::ChanDir::Recv => ChanDir::RecvOnly,
                 };
-                let elem = self.indirect_type(&chan.elem);
+                let elem = self.indirect_type(&chan.elem, fctx);
                 let t = self.tc_objs.new_t_chan(dir, elem);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Func(func) => {
-                let t = self.func_type_ast(func);
+                let t = self.func_type_ast(func, fctx);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Struct(s) => {
-                let t = self.struct_type(s);
+                let t = self.struct_type(s, fctx);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Pointer(base) => {
-                let base_type = self.indirect_type(base);
+                let base_type = self.indirect_type(base, fctx);
                 let t = self.tc_objs.new_t_pointer(base_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Interface(iface) => {
-                let t = self.interface_type(iface, def);
+                let t = self.interface_type(iface, def, fctx);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
@@ -192,6 +190,7 @@ impl<F: FileSystem> Checker<F> {
         ident: &Ident,
         def: Option<TypeKey>,
         want_type: bool,
+        fctx: &mut FilesContext<F>,
     ) {
         x.mode = OperandMode::Invalid;
         x.expr_id = None;
@@ -207,7 +206,7 @@ impl<F: FileSystem> Checker<F> {
                 let obj = &self.tc_objs.lobjs[okey];
                 let mut otype = obj.typ();
                 if otype.is_none() || (obj.entity_type().is_type_name() && want_type) {
-                    self.obj_decl(okey);
+                    self.obj_decl(okey, None, fctx);
                     otype = self.tc_objs.lobjs[okey].typ();
                 }
 
@@ -287,9 +286,9 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Evaluates an array length expression and returns the length.
-    fn array_len(&mut self, e: &Expr) -> Option<u64> {
+    fn array_len(&mut self, e: &Expr, fctx: &mut FilesContext<F>) -> Option<u64> {
         let mut x = Operand::new();
-        self.expr(&mut x, e);
+        self.expr_with_fctx(&mut x, e, fctx);
         if let OperandMode::Constant(v) = &x.mode {
             if let Some(t) = x.typ {
                 if typ::is_untyped(t, &self.tc_objs) || typ::is_integer(t, &self.tc_objs) {
@@ -310,7 +309,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks a function type from AST.
-    fn func_type_ast(&mut self, func: &ast::FuncType) -> TypeKey {
+    fn func_type_ast(&mut self, func: &ast::FuncType, fctx: &mut FilesContext<F>) -> TypeKey {
         // Create a new scope for the function
         let scope_key = self.tc_objs.new_scope(
             self.octx.scope,
@@ -323,7 +322,7 @@ impl<F: FileSystem> Checker<F> {
         // Collect parameters - FuncType has Vec<TypeExpr>, not Vec<Param>
         let mut params = Vec::new();
         for param_type in &func.params {
-            let ty = self.indirect_type(param_type);
+            let ty = self.indirect_type(param_type, fctx);
             let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             params.push(var);
         }
@@ -332,7 +331,7 @@ impl<F: FileSystem> Checker<F> {
         // Collect results
         let mut results = Vec::new();
         for result_type in &func.results {
-            let ty = self.indirect_type(result_type);
+            let ty = self.indirect_type(result_type, fctx);
             let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             results.push(var);
         }
@@ -344,7 +343,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-checks a function signature and returns its type.
-    pub fn func_type_from_sig(&mut self, sig: &FuncSig) -> TypeKey {
+    pub fn func_type_from_sig(&mut self, sig: &FuncSig, fctx: &mut FilesContext<F>) -> TypeKey {
         // Create a new scope for the function
         let scope_key = self.tc_objs.new_scope(
             self.octx.scope,
@@ -359,7 +358,7 @@ impl<F: FileSystem> Checker<F> {
         let variadic = sig.variadic;
 
         for (i, param) in sig.params.iter().enumerate() {
-            let param_type = self.indirect_type(&param.ty);
+            let param_type = self.indirect_type(&param.ty, fctx);
             
             // For variadic, wrap the last param type in slice
             let final_type = if variadic && i == sig.params.len() - 1 {
@@ -385,7 +384,7 @@ impl<F: FileSystem> Checker<F> {
         // Collect result types
         let mut result_vars = Vec::new();
         for result in &sig.results {
-            let result_type = self.indirect_type(&result.ty);
+            let result_type = self.indirect_type(&result.ty, fctx);
             if let Some(name) = &result.name {
                 let name_str = self.resolve_ident(name).to_string();
                 let var = self.tc_objs.new_param_var(0, Some(self.pkg), name_str.clone(), Some(result_type));
@@ -409,12 +408,13 @@ impl<F: FileSystem> Checker<F> {
         scope_key: ScopeKey,
         params: &[Param],
         variadic: bool,
+        fctx: &mut FilesContext<F>,
     ) -> Vec<ObjKey> {
         let mut vars = Vec::new();
 
         for (i, param) in params.iter().enumerate() {
             let is_last = i == params.len() - 1;
-            let param_type = self.indirect_type(&param.ty);
+            let param_type = self.indirect_type(&param.ty, fctx);
             
             // Wrap last param in slice if variadic
             let final_type = if variadic && is_last {
@@ -473,7 +473,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks a struct type.
-    fn struct_type(&mut self, s: &ast::StructType) -> TypeKey {
+    fn struct_type(&mut self, s: &ast::StructType, fctx: &mut FilesContext<F>) -> TypeKey {
         if s.fields.is_empty() {
             return self.tc_objs.new_t_struct(Vec::new(), None);
         }
@@ -483,7 +483,7 @@ impl<F: FileSystem> Checker<F> {
         let mut field_set: std::collections::HashMap<String, ObjKey> = std::collections::HashMap::new();
 
         for field in &s.fields {
-            let field_type = self.type_expr(&field.ty);
+            let field_type = self.type_expr(&field.ty, fctx);
             let tag = field.tag.as_ref().map(|t| t.value.clone());
 
             if field.names.is_empty() {
@@ -595,7 +595,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks an interface type.
-    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>) -> TypeKey {
+    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
         if iface.elems.is_empty() {
             return self.tc_objs.new_t_empty_interface();
         }
@@ -633,7 +633,7 @@ impl<F: FileSystem> Checker<F> {
                     let recv_var = self.tc_objs.new_var(0, Some(self.pkg), String::new(), Some(recv_type));
                     
                     // Type-check the method signature
-                    let sig_type = self.func_type_from_sig(&method.sig);
+                    let sig_type = self.func_type_from_sig(&method.sig, fctx);
                     
                     // Update signature with receiver
                     if let Type::Signature(sig) = &mut self.tc_objs.types[sig_type] {
@@ -649,7 +649,7 @@ impl<F: FileSystem> Checker<F> {
                 InterfaceElem::Embedded(ident) => {
                     // Look up the embedded interface type
                     let mut x = Operand::new();
-                    self.ident(&mut x, ident, None, true);
+                    self.ident(&mut x, ident, None, true, fctx);
                     
                     if let Some(typ) = x.typ {
                         let invalid_type = self.invalid_type();

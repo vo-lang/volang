@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use gox_common::span::Span;
 use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
-use gox_syntax::ast::{Decl, File};
+use gox_syntax::ast::{Decl, Expr, File, FuncDecl, InterfaceDecl, TypeExpr};
 
 use crate::constant::Value;
 use crate::obj::LangObj;
@@ -18,42 +18,46 @@ use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::{Checker, FilesContext};
 
-/// NodeId for referencing AST nodes - uses u32 to be compatible with both ExprId and TypeExprId.
-pub type NodeId = u32;
-
 /// DeclInfo for const declarations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeclInfoConst {
     pub file_scope: ScopeKey,
-    pub typ_node: Option<NodeId>,
-    pub init_node: Option<NodeId>,
+    pub typ: Option<TypeExpr>,
+    pub init: Option<Expr>,
     pub deps: HashSet<ObjKey>,
 }
 
 /// DeclInfo for var declarations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeclInfoVar {
     pub file_scope: ScopeKey,
     pub lhs: Option<Vec<ObjKey>>,
-    pub typ_node: Option<NodeId>,
-    pub init_node: Option<NodeId>,
+    pub typ: Option<TypeExpr>,
+    pub init: Option<Expr>,
     pub deps: HashSet<ObjKey>,
 }
 
 /// DeclInfo for type declarations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeclInfoType {
     pub file_scope: ScopeKey,
-    pub typ_node: NodeId,
+    pub typ: TypeExpr,
     pub alias: bool,
 }
 
 /// DeclInfo for func declarations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeclInfoFunc {
     pub file_scope: ScopeKey,
-    pub func_node: NodeId,
+    pub fdecl: FuncDecl,
     pub deps: HashSet<ObjKey>,
+}
+
+/// DeclInfo for interface declarations.
+#[derive(Debug, Clone)]
+pub struct DeclInfoInterface {
+    pub file_scope: ScopeKey,
+    pub iface: InterfaceDecl,
 }
 
 /// DeclInfo describes a package-level const, type, var, or func declaration.
@@ -63,18 +67,19 @@ pub enum DeclInfo {
     Var(DeclInfoVar),
     Type(DeclInfoType),
     Func(DeclInfoFunc),
+    Interface(DeclInfoInterface),
 }
 
 impl DeclInfo {
     pub fn new_const(
         file_scope: ScopeKey,
-        typ_node: Option<NodeId>,
-        init_node: Option<NodeId>,
+        typ: Option<TypeExpr>,
+        init: Option<Expr>,
     ) -> DeclInfo {
         DeclInfo::Const(DeclInfoConst {
             file_scope,
-            typ_node,
-            init_node,
+            typ,
+            init,
             deps: HashSet::new(),
         })
     }
@@ -82,31 +87,38 @@ impl DeclInfo {
     pub fn new_var(
         file_scope: ScopeKey,
         lhs: Option<Vec<ObjKey>>,
-        typ_node: Option<NodeId>,
-        init_node: Option<NodeId>,
+        typ: Option<TypeExpr>,
+        init: Option<Expr>,
     ) -> DeclInfo {
         DeclInfo::Var(DeclInfoVar {
             file_scope,
             lhs,
-            typ_node,
-            init_node,
+            typ,
+            init,
             deps: HashSet::new(),
         })
     }
 
-    pub fn new_type(file_scope: ScopeKey, typ_node: NodeId, alias: bool) -> DeclInfo {
+    pub fn new_type(file_scope: ScopeKey, typ: TypeExpr, alias: bool) -> DeclInfo {
         DeclInfo::Type(DeclInfoType {
             file_scope,
-            typ_node,
+            typ,
             alias,
         })
     }
 
-    pub fn new_func(file_scope: ScopeKey, func_node: NodeId) -> DeclInfo {
+    pub fn new_func(file_scope: ScopeKey, fdecl: FuncDecl) -> DeclInfo {
         DeclInfo::Func(DeclInfoFunc {
             file_scope,
-            func_node,
+            fdecl,
             deps: HashSet::new(),
+        })
+    }
+
+    pub fn new_interface(file_scope: ScopeKey, iface: InterfaceDecl) -> DeclInfo {
+        DeclInfo::Interface(DeclInfoInterface {
+            file_scope,
+            iface,
         })
     }
 
@@ -144,6 +156,7 @@ impl DeclInfo {
             DeclInfo::Var(v) => v.file_scope,
             DeclInfo::Type(t) => t.file_scope,
             DeclInfo::Func(f) => f.file_scope,
+            DeclInfo::Interface(i) => i.file_scope,
         }
     }
 
@@ -345,13 +358,13 @@ impl<F: FileSystem> Checker<F> {
     ) {
         match decl {
             Decl::Const(const_decl) => {
-                let mut last_typ: Option<NodeId> = None;
-                let mut last_values: &[gox_syntax::ast::Expr] = &[];
+                let mut last_typ_expr: Option<TypeExpr> = None;
+                let mut last_values: &[Expr] = &[];
 
                 for (iota, spec) in const_decl.specs.iter().enumerate() {
                     // Update last type and values if this spec has them
                     if spec.ty.is_some() || !spec.values.is_empty() {
-                        last_typ = spec.ty.as_ref().map(|t| t.id.0 as NodeId);
+                        last_typ_expr = spec.ty.clone();
                         last_values = &spec.values;
                     }
 
@@ -365,11 +378,11 @@ impl<F: FileSystem> Checker<F> {
                             Value::with_i64(iota as i64),
                         );
 
-                        let init_node = last_values.get(i).map(|e| e.id.0 as NodeId);
+                        let init_expr = last_values.get(i).cloned();
                         let di = self.tc_objs.decls.insert(DeclInfo::new_const(
                             file_scope,
-                            last_typ,
-                            init_node,
+                            last_typ_expr.clone(),
+                            init_expr,
                         ));
 
                         self.declare_pkg_obj(name, okey, di);
@@ -393,15 +406,15 @@ impl<F: FileSystem> Checker<F> {
                         .collect();
 
                     let n_to_1 = spec.values.len() == 1 && spec.names.len() > 1;
-                    let typ_node = spec.ty.as_ref().map(|t| t.id.0 as NodeId);
+                    let typ_expr = spec.ty.clone();
 
                     if n_to_1 {
                         // n:1 assignment
                         let di = self.tc_objs.decls.insert(DeclInfo::new_var(
                             file_scope,
                             Some(lhs.clone()),
-                            typ_node,
-                            Some(spec.values[0].id.0 as NodeId),
+                            typ_expr.clone(),
+                            Some(spec.values[0].clone()),
                         ));
                         for (name, &okey) in spec.names.iter().zip(&lhs) {
                             self.declare_pkg_obj(name, okey, di);
@@ -409,12 +422,12 @@ impl<F: FileSystem> Checker<F> {
                     } else {
                         // 1:1 or n:n assignment
                         for (i, (name, &okey)) in spec.names.iter().zip(&lhs).enumerate() {
-                            let init_node = spec.values.get(i).map(|e| e.id.0 as NodeId);
+                            let init_expr = spec.values.get(i).cloned();
                             let di = self.tc_objs.decls.insert(DeclInfo::new_var(
                                 file_scope,
                                 None,
-                                typ_node,
-                                init_node,
+                                typ_expr.clone(),
+                                init_expr,
                             ));
                             self.declare_pkg_obj(name, okey, di);
                         }
@@ -432,7 +445,7 @@ impl<F: FileSystem> Checker<F> {
 
                 let di = self.tc_objs.decls.insert(DeclInfo::new_type(
                     file_scope,
-                    type_decl.ty.id.0 as NodeId,
+                    type_decl.ty.clone(),
                     false, // GoX doesn't have type aliases with =
                 ));
 
@@ -474,7 +487,7 @@ impl<F: FileSystem> Checker<F> {
 
                 let di = self.tc_objs.decls.insert(DeclInfo::new_func(
                     file_scope,
-                    func_decl.span.start.0, // Use span as node id
+                    func_decl.clone(),
                 ));
                 self.obj_map.insert(okey, di);
                 let order = self.obj_map.len() as u32;
@@ -489,10 +502,9 @@ impl<F: FileSystem> Checker<F> {
                     None,
                 );
 
-                let di = self.tc_objs.decls.insert(DeclInfo::new_type(
+                let di = self.tc_objs.decls.insert(DeclInfo::new_interface(
                     file_scope,
-                    iface_decl.span.start.0,
-                    false,
+                    iface_decl.clone(),
                 ));
 
                 self.declare_pkg_obj(&iface_decl.name, okey, di);
@@ -745,14 +757,14 @@ impl<F: FileSystem> Checker<F> {
                     }
                 }
                 // Phase 1: type-check non-alias
-                self.obj_decl(o);
+                self.obj_decl(o, None, fctx);
                 false
             })
             .collect();
 
         // Third pass: type-check alias declarations
         for o in alias_list {
-            self.obj_decl(o);
+            self.obj_decl(o, None, fctx);
         }
 
         // Clear methods map
