@@ -9,7 +9,8 @@ use gox_vm::instruction::{Instruction, Opcode};
 #[derive(Clone)]
 pub struct LoopContext {
     pub break_patches: Vec<usize>,
-    pub continue_target: usize,
+    pub continue_patches: Vec<usize>,
+    pub continue_target: Option<usize>,
 }
 
 /// Local variable info.
@@ -115,11 +116,18 @@ impl FuncBuilder {
 
     // === Loop management ===
 
-    pub fn push_loop(&mut self, continue_target: usize) {
+    pub fn push_loop(&mut self, continue_target: Option<usize>) {
         self.loop_stack.push(LoopContext {
             break_patches: Vec::new(),
+            continue_patches: Vec::new(),
             continue_target,
         });
+    }
+
+    pub fn set_continue_target(&mut self, target: usize) {
+        if let Some(loop_ctx) = self.loop_stack.last_mut() {
+            loop_ctx.continue_target = Some(target);
+        }
     }
 
     pub fn pop_loop(&mut self) -> Option<LoopContext> {

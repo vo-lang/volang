@@ -193,7 +193,7 @@ fn compile_for(
     match clause {
         ForClause::Cond(cond) => {
             let loop_start = func.code_pos();
-            func.push_loop(loop_start);
+            func.push_loop(Some(loop_start));
 
             let mut exit_jump = None;
             if let Some(cond) = cond {
@@ -218,7 +218,9 @@ fn compile_for(
             }
 
             let loop_start = func.code_pos();
-            func.push_loop(loop_start);
+            // For three-part for loop, continue should jump to post, not cond
+            // So we use None here and set it later
+            func.push_loop(None);
 
             let mut exit_jump = None;
             if let Some(cond) = cond {
@@ -228,6 +230,14 @@ fn compile_for(
 
             for stmt in body {
                 compile_stmt(stmt, ctx, func, info)?;
+            }
+
+            // Patch continue jumps to here (before post statement)
+            let post_pos = func.code_pos();
+            if let Some(loop_ctx) = func.current_loop_mut() {
+                for patch_pos in std::mem::take(&mut loop_ctx.continue_patches) {
+                    func.patch_jump_to(patch_pos, post_pos);
+                }
             }
 
             if let Some(post) = post {
@@ -281,10 +291,15 @@ fn compile_break(func: &mut FuncBuilder) -> Result<()> {
 
 fn compile_continue(func: &mut FuncBuilder) -> Result<()> {
     if let Some(loop_ctx) = func.current_loop() {
-        let target = loop_ctx.continue_target;
-        let current = func.code_pos();
-        let offset = target as i32 - current as i32;
-        func.emit_op(Opcode::Jump, 0, offset as u16, (offset >> 16) as u16);
+        if let Some(target) = loop_ctx.continue_target {
+            let current = func.code_pos();
+            let offset = target as i32 - current as i32;
+            func.emit_op(Opcode::Jump, 0, offset as u16, (offset >> 16) as u16);
+        } else {
+            // Deferred patching - target not yet known
+            let pos = func.emit_op(Opcode::Jump, 0, 0, 0);
+            func.current_loop_mut().unwrap().continue_patches.push(pos);
+        }
     }
     Ok(())
 }

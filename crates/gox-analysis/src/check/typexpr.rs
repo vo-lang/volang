@@ -237,6 +237,13 @@ impl Checker {
                         x.mode = OperandMode::TypeExpr;
                     }
                     EntityType::Var(_) => {
+                        // It's ok to mark non-local variables, but ignore variables
+                        // from other packages to avoid potential race conditions with
+                        // dot-imported variables.
+                        let obj_pkg = self.tc_objs.lobjs[okey].pkg();
+                        if obj_pkg == Some(self.pkg) {
+                            self.tc_objs.lobjs[okey].set_var_used(true);
+                        }
                         self.add_decl_dep(okey);
                         if otype == Some(invalid_type) {
                             return;
