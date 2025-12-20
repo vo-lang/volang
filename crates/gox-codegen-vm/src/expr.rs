@@ -3,7 +3,7 @@
 use gox_analysis::{Builtin, Type, BasicType};
 use gox_common::Span;
 use gox_common_core::SlotType;
-use gox_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
+use gox_syntax::ast::{BinaryOp, CompositeLitElem, Expr, ExprKind, TypeExpr, TypeExprKind, UnaryOp};
 use gox_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -46,6 +46,7 @@ pub fn compile_expr(
         ExprKind::Index(idx) => compile_index(&idx.expr, &idx.index, ctx, func, info),
         ExprKind::Selector(sel) => compile_selector(&sel.expr, sel.sel.symbol, ctx, func, info),
         ExprKind::Receive(inner) => compile_receive(inner, ctx, func, info),
+        ExprKind::CompositeLit(lit) => compile_composite_lit(&lit.ty, &lit.elems, expr, ctx, func, info),
         _ => todo!("expr {:?}", std::mem::discriminant(&expr.kind)),
     }
 }
@@ -524,7 +525,8 @@ fn compile_selector(
         _ => None,
     };
 
-    func.emit_op(Opcode::GetField, dst, base, field_idx.unwrap_or(0) as u16);
+    let byte_offset = (field_idx.unwrap_or(0) * 8) as u16;
+    func.emit_with_flags(Opcode::GetField, 3, dst, base, byte_offset);
     Ok(dst)
 }
 
@@ -577,5 +579,87 @@ fn is_string_type(ty: Option<&Type>) -> bool {
     match ty {
         Some(Type::Basic(b)) => b.typ() == BasicType::Str,
         _ => false,
+    }
+}
+
+fn compile_composite_lit(
+    _ty: &TypeExpr,
+    elems: &[CompositeLitElem],
+    expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16> {
+    let lit_type = info.expr_type(expr);
+    
+    // Get underlying type for named types
+    let underlying: Option<&Type> = match lit_type {
+        Some(Type::Named(n)) => Some(info.query.get_type(n.underlying())),
+        Some(other) => Some(other),
+        None => None,
+    };
+    
+    match underlying {
+        Some(Type::Struct(s)) => {
+            // Struct literal: S{a, b, c} or S{x: a, y: b}
+            // Use type_id=0 for anonymous struct allocation, field_count as slots
+            let field_count = s.fields().len() as u16;
+            let dst = func.alloc_temp(1);
+            func.emit_op(Opcode::Alloc, dst, 0, field_count);
+            
+            // Set each field (byte_offset = i * 8, size_code = 3 for 8-byte slots)
+            for (i, elem) in elems.iter().enumerate() {
+                let val = compile_expr(&elem.value, ctx, func, info)?;
+                let byte_offset = (i * 8) as u16;
+                func.emit_with_flags(Opcode::SetField, 3, dst, byte_offset, val);
+            }
+            
+            Ok(dst)
+        }
+        Some(Type::Slice(slice_info)) => {
+            // Slice literal: []int{1, 2, 3}
+            let elem_type = info.query.get_type(slice_info.elem());
+            let elem_type_id = info.runtime_type_id(elem_type);
+            let len = elems.len();
+            
+            // Create array first
+            let arr = func.alloc_temp(1);
+            func.emit_op(Opcode::ArrayNew, arr, elem_type_id as u16, len as u16);
+            
+            // Set each element
+            for (i, elem) in elems.iter().enumerate() {
+                let val = compile_expr(&elem.value, ctx, func, info)?;
+                let idx = func.alloc_temp(1);
+                func.emit_op(Opcode::LoadInt, idx, i as u16, 0);
+                func.emit_op(Opcode::ArraySet, arr, idx, val);
+            }
+            
+            // Create slice from array
+            let dst = func.alloc_temp(1);
+            func.emit_op(Opcode::SliceNew, dst, arr, 0);
+            func.emit_with_flags(Opcode::SliceNew, len as u8, dst, arr, 0);
+            
+            Ok(dst)
+        }
+        Some(Type::Array(arr_info)) => {
+            // Array literal: [3]int{1, 2, 3}
+            let elem_type = info.query.get_type(arr_info.elem());
+            let elem_type_id = info.runtime_type_id(elem_type);
+            let len = arr_info.len().unwrap_or(elems.len() as u64) as u16;
+            
+            let dst = func.alloc_temp(1);
+            func.emit_op(Opcode::ArrayNew, dst, elem_type_id as u16, len);
+            
+            // Set each element
+            for (i, elem) in elems.iter().enumerate() {
+                let val = compile_expr(&elem.value, ctx, func, info)?;
+                let idx = func.alloc_temp(1);
+                func.emit_op(Opcode::LoadInt, idx, i as u16, 0);
+                func.emit_op(Opcode::ArraySet, dst, idx, val);
+            }
+            
+            Ok(dst)
+        }
+        _ => todo!("composite literal for type {:?}", underlying),
     }
 }

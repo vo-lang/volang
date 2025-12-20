@@ -93,7 +93,25 @@ fn compile_assign(
             }
             ExprKind::Selector(sel) => {
                 let base = compile_expr(&sel.expr, ctx, func, info)?;
-                func.emit_op(Opcode::SetField, base, 0, src);
+                // Get field index from type info
+                let ty = info.expr_type(&sel.expr);
+                let field_idx = match ty {
+                    Some(Type::Named(named)) => {
+                        if let Some(underlying) = info.query.named_underlying(named) {
+                            if let Type::Struct(s) = underlying {
+                                info.query.struct_field_index(s, sel.sel.symbol)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    Some(Type::Struct(s)) => info.query.struct_field_index(s, sel.sel.symbol),
+                    _ => None,
+                };
+                let byte_offset = (field_idx.unwrap_or(0) * 8) as u16;
+                func.emit_with_flags(Opcode::SetField, 3, base, byte_offset, src);
             }
             _ => {}
         }
