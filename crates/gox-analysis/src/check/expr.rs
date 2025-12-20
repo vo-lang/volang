@@ -308,4 +308,25 @@ impl<F: FileSystem> Checker<F> {
         // TODO: Handle error unwrapping
         (OperandMode::Value, typ)
     }
+
+    // =========================================================================
+    // Expression checking stubs for typexpr.rs
+    // =========================================================================
+
+    /// Type-checks an expression and returns its type.
+    /// This is the main entry point for expression type checking.
+    pub fn expr(&mut self, x: &mut crate::operand::Operand, e: &Expr) {
+        self.raw_expr(x, e, None);
+    }
+
+    /// Type-checks a selector expression (e.g., x.f).
+    pub fn selector(
+        &mut self,
+        x: &mut crate::operand::Operand,
+        sel: &gox_syntax::ast::SelectorExpr,
+    ) {
+        // TODO: Implement selector expression checking
+        x.mode = OperandMode::Invalid;
+        x.typ = Some(self.invalid_type());
+    }
 }

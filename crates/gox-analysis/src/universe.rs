@@ -171,6 +171,30 @@ impl Universe {
         self.types.get(&basic).copied()
     }
 
+    /// Looks up a predeclared type by name string.
+    pub fn lookup_type_by_name(&self, name: &str) -> Option<TypeKey> {
+        let basic = match name {
+            "bool" => BasicType::Bool,
+            "int" => BasicType::Int,
+            "int8" => BasicType::Int8,
+            "int16" => BasicType::Int16,
+            "int32" => BasicType::Int32,
+            "int64" => BasicType::Int64,
+            "uint" => BasicType::Uint,
+            "uint8" => BasicType::Uint8,
+            "uint16" => BasicType::Uint16,
+            "uint32" => BasicType::Uint32,
+            "uint64" => BasicType::Uint64,
+            "float32" => BasicType::Float32,
+            "float64" => BasicType::Float64,
+            "string" => BasicType::Str,
+            "byte" => BasicType::Byte,
+            "rune" => BasicType::Rune,
+            _ => return None,
+        };
+        self.types.get(&basic).copied()
+    }
+
     fn create_universe_scope(objs: &mut TCObjects) -> (ScopeKey, PackageKey) {
         let universe_scope = objs.scopes.insert(Scope::new(None, 0, 0, "universe"));
         let unsafe_scope = objs

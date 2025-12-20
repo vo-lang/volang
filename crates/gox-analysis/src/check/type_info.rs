@@ -71,6 +71,11 @@ impl TypeInfo {
         self.types.insert(expr_id, TypeAndValue::new(mode, typ));
     }
 
+    /// Records a type and value for an expression (alias for record_type).
+    pub fn record_type_and_value(&mut self, expr_id: ExprId, mode: OperandMode, typ: TypeKey) {
+        self.record_type(expr_id, mode, typ);
+    }
+
     /// Records a definition.
     pub fn record_def(&mut self, ident: Ident, obj: Option<ObjKey>) {
         self.defs.insert(ident, obj);
