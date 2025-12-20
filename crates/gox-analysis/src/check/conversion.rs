@@ -8,7 +8,6 @@
 #![allow(dead_code)]
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 
 use crate::obj::ConstValue;
 use crate::objects::TypeKey;
@@ -17,9 +16,9 @@ use crate::typ::{self, BasicType, Type};
 
 use super::checker::{Checker, FilesContext};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Performs explicit type conversion of x to type t.
-    pub fn conversion(&mut self, x: &mut Operand, t: TypeKey, fctx: &mut FilesContext<F>) {
+    pub fn conversion(&mut self, x: &mut Operand, t: TypeKey, fctx: &mut FilesContext) {
         let constv = match &mut x.mode {
             OperandMode::Constant(v) => Some(v),
             _ => None,

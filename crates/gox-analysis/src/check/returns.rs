@@ -4,13 +4,11 @@
 //! always terminates (e.g., returns, panics, infinite loops, etc.).
 
 #![allow(dead_code)]
-
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{CaseClause, ExprKind, SelectCase, Stmt, StmtKind, TypeCaseClause};
 
 use super::checker::Checker;
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Returns true if the statement is a terminating statement.
     /// A terminating statement prevents execution from reaching the end of a function.
     pub fn is_terminating(&self, stmt: &Stmt) -> bool {

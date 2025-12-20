@@ -16,7 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{InterfaceElem, InterfaceType};
 
 use crate::obj::EntityType;
@@ -113,7 +112,7 @@ impl IfaceInfo {
     }
 }
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Computes method set for an interface from its InterfaceDetail.
     /// This is used for interfaces that have already been type-checked.
     pub fn info_from_interface_detail(&self, iface: &InterfaceDetail) -> RcIfaceInfo {
@@ -177,7 +176,7 @@ impl<F: FileSystem> Checker<F> {
         iface: &InterfaceType,
         tname: Option<ObjKey>,
         path: &Vec<ObjKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> Option<RcIfaceInfo> {
         // If the interface is named, check if we computed info already.
         // This prevents stack overflow with recursive interface declarations.
@@ -255,7 +254,7 @@ impl<F: FileSystem> Checker<F> {
         scope: ScopeKey,
         name: &str,
         path: &Vec<ObjKey>,
-        _fctx: &mut FilesContext<F>,
+        _fctx: &mut FilesContext,
     ) -> Option<RcIfaceInfo> {
         let start = path.len();
         let mut cur_path = path.clone();

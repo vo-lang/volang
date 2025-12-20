@@ -10,7 +10,6 @@
 use std::cmp::Ordering;
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{CallExpr, Expr};
 
 use crate::constant::Value;
@@ -21,7 +20,7 @@ use crate::typ::{self, BasicInfo, BasicType, Type};
 
 use super::checker::{Checker, FilesContext};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Type-checks a call to the built-in function specified by id.
     /// Returns true if the call is valid, with *x holding the result.
     /// x.expr_id is not set. If the call is invalid, returns false and *x is undefined.
@@ -31,7 +30,7 @@ impl<F: FileSystem> Checker<F> {
         call: &CallExpr,
         call_span: Span,
         id: Builtin,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let binfo = self.tc_objs.universe().builtins()[&id];
 
@@ -136,7 +135,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let slice = match x.typ {
             Some(t) => t,
@@ -292,7 +291,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         // dst element type
         let dst = match self.otype(x.typ.unwrap()).underlying_val(&self.tc_objs) {
@@ -337,7 +336,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let mtype = x.typ.unwrap();
         match self.otype(mtype).underlying_val(&self.tc_objs) {
@@ -373,7 +372,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let nargs = call.args.len();
         
@@ -431,7 +430,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         _call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let arg0t = self.type_expr_from_expr(&call.args[0], fctx);
         let invalid_type = self.invalid_type();
@@ -450,7 +449,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         _call: &CallExpr,
         _call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         // Record panic call if inside a function with result parameters
         if let Some(sig) = self.octx.sig {
@@ -482,7 +481,7 @@ impl<F: FileSystem> Checker<F> {
         call: &CallExpr,
         _call_span: Span,
         id: Builtin,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> bool {
         let name = if id == Builtin::Print { "print" } else { "println" };
         let nargs = call.args.len();
@@ -539,7 +538,7 @@ impl<F: FileSystem> Checker<F> {
     // index function moved to expr.rs
 
     /// Type-checks a type expression from an Expr AST node.
-    fn type_expr_from_expr(&mut self, e: &Expr, fctx: &mut FilesContext<F>) -> TypeKey {
+    fn type_expr_from_expr(&mut self, e: &Expr, fctx: &mut FilesContext) -> TypeKey {
         // For now, delegate to a simplified type checking
         // Full implementation would parse the TypeExpr from Expr
         let mut x = Operand::new();

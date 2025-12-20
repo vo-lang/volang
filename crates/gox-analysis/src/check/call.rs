@@ -7,7 +7,6 @@
 #![allow(dead_code)]
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::CallExpr;
 
 use crate::objects::TypeKey;
@@ -18,7 +17,7 @@ use crate::universe::ExprKind;
 use super::checker::{Checker, FilesContext};
 use super::util::{UnpackResult, UnpackedResultLeftovers};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Type-checks a call expression.
     /// Returns the expression kind (Statement, Conversion, or Expression).
     pub fn call(
@@ -26,7 +25,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> ExprKind {
         // Evaluate the function expression
         self.raw_expr(x, &call.func, None, fctx);
@@ -126,7 +125,7 @@ impl<F: FileSystem> Checker<F> {
         sig: TypeKey,
         re: &UnpackedResultLeftovers,
         n: usize,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let sig_val = self.otype(sig).try_as_signature().unwrap();
         let variadic = sig_val.variadic();
@@ -173,7 +172,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         ellipsis: bool,
         note: &str,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         self.single_value(x);
         if x.invalid() {

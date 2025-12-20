@@ -5,8 +5,9 @@
 //! - LocalVfs: Local packages (relative paths)
 //! - ModVfs: External module dependencies
 
-use std::fs;
 use std::path::{Path, PathBuf};
+
+use gox_common::vfs::{FileSystem, RealFs};
 
 /// VFS configuration with three root paths.
 #[derive(Debug, Clone)]
@@ -117,22 +118,29 @@ pub trait PackageSource: Send + Sync {
 }
 
 /// Standard library VFS.
-pub struct StdVfs {
+pub struct StdVfs<F: FileSystem = RealFs> {
     root: PathBuf,
+    fs: F,
 }
 
-impl StdVfs {
+impl StdVfs<RealFs> {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, fs: RealFs }
+    }
+}
+
+impl<F: FileSystem> StdVfs<F> {
+    pub fn with_fs(root: PathBuf, fs: F) -> Self {
+        Self { root, fs }
     }
     
     fn load_package(&self, import_path: &str) -> Option<VfsPackage> {
         let pkg_dir = self.root.join(import_path);
-        if !pkg_dir.is_dir() {
+        if !self.fs.is_dir(&pkg_dir) {
             return None;
         }
         
-        let files = load_gox_files(&pkg_dir)?;
+        let files = load_gox_files(&self.fs, &pkg_dir)?;
         let name = import_path.rsplit('/').next().unwrap_or(import_path).to_string();
         
         Some(VfsPackage {
@@ -141,39 +149,42 @@ impl StdVfs {
             files,
         })
     }
-}
-
-impl PackageSource for StdVfs {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+    
+    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         self.load_package(import_path)
     }
     
-    fn can_handle(&self, import_path: &str) -> bool {
+    pub fn can_handle(&self, import_path: &str) -> bool {
         // Stdlib: no dots (domain names have dots)
         !import_path.contains('.')
     }
 }
 
 /// Local package VFS (relative paths).
-pub struct LocalVfs {
+pub struct LocalVfs<F: FileSystem = RealFs> {
     root: PathBuf,
+    fs: F,
 }
 
-impl LocalVfs {
+impl LocalVfs<RealFs> {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, fs: RealFs }
     }
 }
 
-impl PackageSource for LocalVfs {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+impl<F: FileSystem> LocalVfs<F> {
+    pub fn with_fs(root: PathBuf, fs: F) -> Self {
+        Self { root, fs }
+    }
+    
+    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         let rel_path = import_path.trim_start_matches("./");
         let pkg_dir = self.root.join(rel_path);
-        if !pkg_dir.is_dir() {
+        if !self.fs.is_dir(&pkg_dir) {
             return None;
         }
         
-        let files = load_gox_files(&pkg_dir)?;
+        let files = load_gox_files(&self.fs, &pkg_dir)?;
         let name = rel_path.rsplit('/').next().unwrap_or(rel_path).to_string();
         
         Some(VfsPackage {
@@ -183,31 +194,36 @@ impl PackageSource for LocalVfs {
         })
     }
     
-    fn can_handle(&self, import_path: &str) -> bool {
+    pub fn can_handle(&self, import_path: &str) -> bool {
         import_path.starts_with("./") || import_path.starts_with("../")
     }
 }
 
 /// External module VFS (module cache).
-pub struct ModVfs {
+pub struct ModVfs<F: FileSystem = RealFs> {
     root: PathBuf,
+    fs: F,
 }
 
-impl ModVfs {
+impl ModVfs<RealFs> {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, fs: RealFs }
     }
 }
 
-impl PackageSource for ModVfs {
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
+impl<F: FileSystem> ModVfs<F> {
+    pub fn with_fs(root: PathBuf, fs: F) -> Self {
+        Self { root, fs }
+    }
+    
+    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         // e.g., "github.com/user/pkg" -> {mod_root}/github.com/user/pkg
         let pkg_dir = self.root.join(import_path);
-        if !pkg_dir.is_dir() {
+        if !self.fs.is_dir(&pkg_dir) {
             return None;
         }
         
-        let files = load_gox_files(&pkg_dir)?;
+        let files = load_gox_files(&self.fs, &pkg_dir)?;
         let name = import_path.rsplit('/').next().unwrap_or(import_path).to_string();
         
         Some(VfsPackage {
@@ -217,7 +233,7 @@ impl PackageSource for ModVfs {
         })
     }
     
-    fn can_handle(&self, import_path: &str) -> bool {
+    pub fn can_handle(&self, import_path: &str) -> bool {
         // External: has dots in domain (not relative paths)
         // e.g., "github.com/user/pkg" but not "./mylib"
         !import_path.starts_with("./") 
@@ -227,14 +243,14 @@ impl PackageSource for ModVfs {
 }
 
 /// Combined VFS that delegates to the appropriate source.
-pub struct Vfs {
-    pub std_vfs: StdVfs,
-    pub local_vfs: LocalVfs,
-    pub mod_vfs: ModVfs,
+pub struct Vfs<F: FileSystem = RealFs> {
+    pub std_vfs: StdVfs<F>,
+    pub local_vfs: LocalVfs<F>,
+    pub mod_vfs: ModVfs<F>,
 }
 
-impl Vfs {
-    /// Create a VFS with three filesystem root paths.
+impl Vfs<RealFs> {
+    /// Create a VFS with three filesystem root paths using real filesystem.
     ///
     /// # Arguments
     /// * `std_root` - Root path for standard library (e.g., "/usr/local/gox/std")
@@ -247,7 +263,20 @@ impl Vfs {
             mod_vfs: ModVfs::new(mod_root),
         }
     }
-    
+}
+
+impl<F: FileSystem + Clone> Vfs<F> {
+    /// Create a VFS with three filesystem root paths using custom filesystem.
+    pub fn with_fs(std_root: PathBuf, local_root: PathBuf, mod_root: PathBuf, fs: F) -> Self {
+        Self {
+            std_vfs: StdVfs::with_fs(std_root, fs.clone()),
+            local_vfs: LocalVfs::with_fs(local_root, fs.clone()),
+            mod_vfs: ModVfs::with_fs(mod_root, fs),
+        }
+    }
+}
+
+impl<F: FileSystem> Vfs<F> {
     /// Resolve a package by import path.
     pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
         if self.local_vfs.can_handle(import_path) {
@@ -263,14 +292,13 @@ impl Vfs {
 }
 
 /// Helper to load all .gox files from a directory.
-fn load_gox_files(dir: &Path) -> Option<Vec<VfsFile>> {
+fn load_gox_files<F: FileSystem>(fs: &F, dir: &Path) -> Option<Vec<VfsFile>> {
     let mut files = Vec::new();
     
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let entries = fs.read_dir(dir).ok()?;
+    for path in entries {
         if path.extension().map(|e| e == "gox").unwrap_or(false) {
-            if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(content) = fs.read_file(&path) {
                 files.push(VfsFile {
                     path: path.file_name().unwrap().into(),
                     content,

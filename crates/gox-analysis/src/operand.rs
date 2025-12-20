@@ -10,7 +10,6 @@ use crate::objects::{TCObjects, TypeKey};
 use crate::typ::{self, BasicType};
 use crate::universe::Universe;
 use gox_common::symbol::SymbolInterner;
-use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 use gox_syntax::ast::Expr;
 use std::fmt::{self, Display, Write};
@@ -225,12 +224,12 @@ impl Operand {
 
     /// Returns true if the operand is assignable to a variable of type t.
     /// If reason is provided and assignability fails, it will be set to the failure reason.
-    pub fn assignable_to<F: FileSystem>(
+    pub fn assignable_to(
         &self,
         t: TypeKey,
         reason: Option<&mut String>,
-        checker: &mut Checker<F>,
-        fctx: &mut FilesContext<F>,
+        checker: &mut Checker,
+        fctx: &mut FilesContext,
     ) -> bool {
         let objs = &checker.tc_objs;
         let u = checker.universe();

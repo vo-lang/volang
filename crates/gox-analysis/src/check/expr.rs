@@ -25,7 +25,6 @@
 #![allow(dead_code)]
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
 
@@ -36,7 +35,7 @@ use crate::typ::{self, BasicType, Type};
 
 use super::checker::{Checker, FilesContext};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     // =========================================================================
     // Part 1: Operator checking and unary expressions
     // =========================================================================
@@ -119,7 +118,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         e: Option<ExprId>,
         op: UnaryOp,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         match op {
             UnaryOp::Addr => {
@@ -202,7 +201,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Checks that a constant operand is representable in the given basic type.
-    pub fn representable(&mut self, x: &mut Operand, t: TypeKey, _fctx: &mut FilesContext<F>) {
+    pub fn representable(&mut self, x: &mut Operand, t: TypeKey, _fctx: &mut FilesContext) {
         let tval = self.otype(t);
         let tbasic = match tval.try_as_basic() {
             Some(b) => b,
@@ -248,7 +247,7 @@ impl<F: FileSystem> Checker<F> {
         expr_id: ExprId,
         t: TypeKey,
         final_: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let info = match fctx.untyped.get(&expr_id) {
             Some(i) => i.clone(),
@@ -342,7 +341,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Updates the value of x to val in the untyped map.
-    fn update_expr_val(expr_id: ExprId, val: Value, fctx: &mut FilesContext<F>) {
+    fn update_expr_val(expr_id: ExprId, val: Value, fctx: &mut FilesContext) {
         if let Some(info) = fctx.untyped.get_mut(&expr_id) {
             if let OperandMode::Constant(v) = &mut info.mode {
                 *v = val;
@@ -356,7 +355,7 @@ impl<F: FileSystem> Checker<F> {
         &mut self,
         x: &mut Operand,
         target: TypeKey,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         if x.invalid() || typ::is_typed(x.typ.unwrap(), &self.tc_objs) || target == self.invalid_type() {
             return;
@@ -467,7 +466,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         y: &Operand,
         op: BinaryOp,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         // spec: "In any comparison, the first operand must be assignable
         // to the type of the second operand, or vice versa."
@@ -537,7 +536,7 @@ impl<F: FileSystem> Checker<F> {
         y: &mut Operand,
         op: BinaryOp,
         e: Option<ExprId>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let xtval = self.otype(x.typ.unwrap());
         let xt_untyped = xtval.is_untyped(&self.tc_objs);
@@ -642,7 +641,7 @@ impl<F: FileSystem> Checker<F> {
         lhs: &Expr,
         rhs: &Expr,
         op: BinaryOp,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let mut y = Operand::new();
         self.expr(x, lhs, fctx);
@@ -732,7 +731,7 @@ impl<F: FileSystem> Checker<F> {
         &mut self,
         index: &Expr,
         max: Option<u64>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> Result<Option<u64>, ()> {
         let x = &mut Operand::new();
         self.expr(x, index, fctx);
@@ -777,7 +776,7 @@ impl<F: FileSystem> Checker<F> {
         elems: &[gox_syntax::ast::CompositeLitElem],
         t: TypeKey,
         length: Option<u64>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> u64 {
         use std::collections::HashSet;
         use gox_syntax::ast::CompositeLitKey;
@@ -844,7 +843,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         self.raw_expr(x, e, hint, fctx);
     }
@@ -862,7 +861,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         self.raw_internal(x, e, hint, fctx);
 
@@ -894,7 +893,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         // Make sure x has a valid state in case of bailout
         x.mode = OperandMode::Invalid;
@@ -1346,7 +1345,7 @@ impl<F: FileSystem> Checker<F> {
         xtype: TypeKey,
         t: TypeKey,
         span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         // Check that xtype is an interface type
         if self.otype(xtype).try_as_interface().is_none() {
@@ -1407,13 +1406,13 @@ impl<F: FileSystem> Checker<F> {
 
     /// Typechecks expression e and initializes x with the expression value.
     /// The result must be a single value.
-    pub fn expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext<F>) {
+    pub fn expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
         self.multi_expr(x, e, fctx);
         self.single_value(x);
     }
 
     /// Like expr but the result may be a multi-value.
-    pub fn multi_expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext<F>) {
+    pub fn multi_expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
         self.raw_expr(x, e, None, fctx);
         self.expr_value_err(x);
     }
@@ -1428,7 +1427,7 @@ impl<F: FileSystem> Checker<F> {
 
     /// Typechecks expression or type e and initializes x with the expression
     /// value or type. If an error occurred, x.mode is set to invalid.
-    pub fn expr_or_type(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext<F>) {
+    pub fn expr_or_type(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
         self.raw_expr(x, e, None, fctx);
         self.single_value(x);
         if x.mode == OperandMode::NoValue {
@@ -1442,7 +1441,7 @@ impl<F: FileSystem> Checker<F> {
         &mut self,
         x: &mut Operand,
         sel: &gox_syntax::ast::SelectorExpr,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         // If the identifier refers to a package, handle everything here
         // so we don't need a "package" mode for operands: package names

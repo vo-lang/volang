@@ -8,7 +8,6 @@
 use std::cmp::Ordering;
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{Expr, ExprKind};
 
@@ -44,12 +43,12 @@ pub enum UnpackResult<'a> {
 
 impl<'a> UnpackResult<'a> {
     /// Get the i-th value from the unpacked result.
-    pub fn get<F: FileSystem>(
+    pub fn get(
         &self,
-        checker: &mut Checker<F>,
+        checker: &mut Checker,
         x: &mut Operand,
         i: usize,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         match self {
             UnpackResult::Tuple(expr_id, types, _) => {
@@ -88,11 +87,11 @@ impl<'a> UnpackResult<'a> {
     }
 
     /// Use (type-check) remaining expressions starting from index `from`.
-    pub fn use_<F: FileSystem>(
+    pub fn use_(
         &self,
-        checker: &mut Checker<F>,
+        checker: &mut Checker,
         from: usize,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let exprs = match self {
             UnpackResult::Multiple(exprs, _) => exprs,
@@ -130,18 +129,18 @@ impl<'a> UnpackedResultLeftovers<'a> {
     }
 
     /// Use all remaining values.
-    pub fn use_all<F: FileSystem>(&self, checker: &mut Checker<F>, fctx: &mut FilesContext<F>) {
+    pub fn use_all(&self, checker: &mut Checker, fctx: &mut FilesContext) {
         let from = self.consumed.map_or(0, |c| c.len());
         self.leftovers.use_(checker, from, fctx);
     }
 
     /// Get the i-th value, considering already consumed operands.
-    pub fn get<F: FileSystem>(
+    pub fn get(
         &self,
-        checker: &mut Checker<F>,
+        checker: &mut Checker,
         x: &mut Operand,
         i: usize,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         if let Some(consumed) = self.consumed {
             if i < consumed.len() {
@@ -160,7 +159,7 @@ impl<'a> UnpackedResultLeftovers<'a> {
 // Checker utility methods
 // =============================================================================
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Remove parentheses from an expression.
     pub fn unparen(expr: &Expr) -> &Expr {
         match &expr.kind {
@@ -248,7 +247,7 @@ impl<F: FileSystem> Checker<F> {
         lhs_len: usize,
         allow_comma_ok: bool,
         variadic: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> UnpackResult<'b> {
         let do_match = |rhs_len: usize| {
             let order = rhs_len.cmp(&lhs_len);
@@ -291,7 +290,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-check a list of expressions (for side effects).
-    pub fn use_exprs(&mut self, exprs: &[Expr], fctx: &mut FilesContext<F>) {
+    pub fn use_exprs(&mut self, exprs: &[Expr], fctx: &mut FilesContext) {
         let mut x = Operand::new();
         for e in exprs.iter() {
             self.raw_expr(&mut x, e, None, fctx);
@@ -300,7 +299,7 @@ impl<F: FileSystem> Checker<F> {
 
     /// Like use_exprs, but doesn't "use" top-level identifiers.
     /// Used for LHS of assignments.
-    pub fn use_lhs(&mut self, lhs: &[Expr], fctx: &mut FilesContext<F>) {
+    pub fn use_lhs(&mut self, lhs: &[Expr], fctx: &mut FilesContext) {
         let mut x = Operand::new();
         for e in lhs.iter() {
             let v: Option<(ObjKey, bool)> = match Self::unparen(e) {

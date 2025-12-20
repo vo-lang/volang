@@ -6,7 +6,6 @@
 #![allow(dead_code)]
 
 use gox_common::symbol::{Ident, Symbol};
-use gox_common::vfs::FileSystem;
 
 use crate::obj::EntityType;
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
@@ -19,19 +18,19 @@ use gox_common_core::ExprId;
 
 use super::checker::{Checker, FilesContext};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     // =========================================================================
     // Main type expression entry points
     // =========================================================================
 
     /// Type-checks the type expression and returns its type, or Invalid Type.
-    pub fn type_expr(&mut self, ty: &TypeExpr, fctx: &mut FilesContext<F>) -> TypeKey {
+    pub fn type_expr(&mut self, ty: &TypeExpr, fctx: &mut FilesContext) -> TypeKey {
         self.defined_type(ty, None, fctx)
     }
 
     /// Like type_expr but also accepts a type name def.
     /// If def is Some, ty is the type specification for the defined type def.
-    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
+    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         let t = self.type_internal(ty, def, fctx);
         debug_assert!(typ::is_typed(t, &self.tc_objs));
         self.result.record_type_and_value(ExprId(ty.id.0), OperandMode::TypeExpr, t);
@@ -40,7 +39,7 @@ impl<F: FileSystem> Checker<F> {
 
     /// Like type_expr but breaks infinite size of recursive types.
     /// Used for pointer base types, slice/map element types, function params, etc.
-    pub fn indirect_type(&mut self, ty: &TypeExpr, fctx: &mut FilesContext<F>) -> TypeKey {
+    pub fn indirect_type(&mut self, ty: &TypeExpr, fctx: &mut FilesContext) -> TypeKey {
         fctx.push(self.tc_objs.universe().indir());
         let t = self.defined_type(ty, None, fctx);
         fctx.pop();
@@ -52,7 +51,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Drives type checking of types. Must only be called by defined_type.
-    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
+    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         let set_underlying = |typ: Option<TypeKey>, tc_objs: &mut crate::objects::TCObjects| {
             if let Some(d) = def {
                 if let Some(named) = tc_objs.types[d].try_as_named_mut() {
@@ -186,7 +185,7 @@ impl<F: FileSystem> Checker<F> {
         ident: &Ident,
         _def: Option<TypeKey>,
         want_type: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         x.mode = OperandMode::Invalid;
         x.expr_id = None;
@@ -282,7 +281,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Evaluates an array length expression and returns the length.
-    fn array_len(&mut self, e: &Expr, fctx: &mut FilesContext<F>) -> Option<u64> {
+    fn array_len(&mut self, e: &Expr, fctx: &mut FilesContext) -> Option<u64> {
         let mut x = Operand::new();
         self.expr(&mut x, e, fctx);
         if let OperandMode::Constant(v) = &x.mode {
@@ -305,7 +304,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks a function type from AST.
-    fn func_type_ast(&mut self, func: &ast::FuncType, fctx: &mut FilesContext<F>) -> TypeKey {
+    fn func_type_ast(&mut self, func: &ast::FuncType, fctx: &mut FilesContext) -> TypeKey {
         // Create a new scope for the function
         let scope_key = self.tc_objs.new_scope(
             self.octx.scope,
@@ -339,7 +338,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-checks a function signature and returns its type.
-    pub fn func_type_from_sig(&mut self, sig: &FuncSig, fctx: &mut FilesContext<F>) -> TypeKey {
+    pub fn func_type_from_sig(&mut self, sig: &FuncSig, fctx: &mut FilesContext) -> TypeKey {
         // Create a new scope for the function
         let scope_key = self.tc_objs.new_scope(
             self.octx.scope,
@@ -404,7 +403,7 @@ impl<F: FileSystem> Checker<F> {
         scope_key: ScopeKey,
         params: &[Param],
         variadic: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> Vec<ObjKey> {
         let mut vars = Vec::new();
 
@@ -442,7 +441,7 @@ impl<F: FileSystem> Checker<F> {
 
     /// Type-checks the type expression (or nil value) and returns the type, or None for nil.
     /// If e is neither a type nor nil, returns Invalid type.
-    pub fn type_or_nil(&mut self, e: &Expr, fctx: &mut FilesContext<F>) -> Option<TypeKey> {
+    pub fn type_or_nil(&mut self, e: &Expr, fctx: &mut FilesContext) -> Option<TypeKey> {
         let mut x = Operand::new();
         self.raw_expr(&mut x, e, None, fctx);
         let invalid_type = self.invalid_type();
@@ -469,7 +468,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks a struct type.
-    fn struct_type(&mut self, s: &ast::StructType, fctx: &mut FilesContext<F>) -> TypeKey {
+    fn struct_type(&mut self, s: &ast::StructType, fctx: &mut FilesContext) -> TypeKey {
         if s.fields.is_empty() {
             return self.tc_objs.new_t_struct(Vec::new(), None);
         }
@@ -591,7 +590,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Type-checks an interface type.
-    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext<F>) -> TypeKey {
+    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         if iface.elems.is_empty() {
             return self.tc_objs.new_t_empty_interface();
         }

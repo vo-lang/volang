@@ -8,7 +8,6 @@
 use std::collections::HashSet;
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{Decl, Expr, FuncDecl, TypeExpr};
 
 use crate::constant::Value;
@@ -170,10 +169,10 @@ impl DeclInfo {
 // Checker resolver methods
 // =============================================================================
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Collects all package-level declarations from the files.
     /// This is the first pass of type checking.
-    pub fn collect_objects(&mut self, fctx: &mut FilesContext<F>) {
+    pub fn collect_objects(&mut self, fctx: &mut FilesContext) {
         // Track all imported packages
         let mut all_imported: HashSet<PackageKey> = self
             .package(self.pkg)
@@ -264,7 +263,7 @@ impl<F: FileSystem> Checker<F> {
         import: &gox_syntax::ast::ImportDecl,
         file_scope: ScopeKey,
         all_imported: &mut HashSet<PackageKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let path = &import.path.value;
         
@@ -513,7 +512,7 @@ impl<F: FileSystem> Checker<F> {
         method_key: ObjKey,
         receiver_type_name: &str,
         is_pointer: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         // Look up the receiver base type in package scope
         let pkg_scope = *self.package(self.pkg).scope();
@@ -626,7 +625,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Returns the directory portion of a file path.
-    fn file_dir(&self, file_num: usize, fctx: &FilesContext<F>) -> String {
+    fn file_dir(&self, file_num: usize, fctx: &FilesContext) -> String {
         // Try to get the file path from the file
         if file_num < fctx.files.len() {
             // In a real implementation, we'd get the actual file path
@@ -695,7 +694,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-checks all package objects (but not function bodies).
-    pub fn package_objects(&mut self, fctx: &mut FilesContext<F>) {
+    pub fn package_objects(&mut self, fctx: &mut FilesContext) {
         // Process package objects in source order
         let mut obj_list: Vec<ObjKey> = self.obj_map.keys().copied().collect();
         obj_list.sort_by_key(|&o| self.lobj(o).order());
@@ -737,7 +736,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Checks for unused imports.
-    pub fn unused_imports(&mut self, fctx: &mut FilesContext<F>) {
+    pub fn unused_imports(&mut self, fctx: &mut FilesContext) {
         // Check regular imported packages
         let pkg_scope = *self.package(self.pkg).scope();
         for &child_scope in self.scope(pkg_scope).children() {

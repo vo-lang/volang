@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 
 use crate::objects::{DeclInfoKey, ObjKey, TCObjects};
@@ -48,7 +47,7 @@ struct GraphNode {
     pos: usize,
 }
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Computes and records the initialization order for package-level variables.
     pub fn init_order(&mut self) {
         let (mut nodes, edges) = self.dependency_graph();

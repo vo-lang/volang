@@ -11,7 +11,6 @@
 #![allow(dead_code)]
 
 use gox_common::span::Span;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{Expr, TypeExpr};
 
 use crate::constant::Value as ConstValue;
@@ -24,7 +23,7 @@ use crate::typ;
 use super::checker::{Checker, FilesContext, ObjContext};
 use super::resolver::DeclInfo;
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Reports the location of an alternative declaration.
     pub fn report_alt_decl(&self, okey: ObjKey) {
         let lobj = self.lobj(okey);
@@ -53,7 +52,7 @@ impl<F: FileSystem> Checker<F> {
 
     /// Type-checks an object declaration.
     /// Uses color-based cycle detection (White -> Gray -> Black).
-    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>, fctx: &mut FilesContext<F>) {
+    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>, fctx: &mut FilesContext) {
         // During type-checking, white objects may be assigned a type without
         // traversing through obj_decl. Update colors of those objects here.
         let lobj = &mut self.tc_objs.lobjs[okey];
@@ -144,7 +143,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Returns true if the cycle starting with obj is invalid and reports an error.
-    pub fn invalid_type_cycle(&self, okey: ObjKey, fctx: &FilesContext<F>) -> bool {
+    pub fn invalid_type_cycle(&self, okey: ObjKey, fctx: &FilesContext) -> bool {
         let lobj = self.lobj(okey);
         let mut has_indir = false;
         let mut has_type_def = false;
@@ -225,7 +224,7 @@ impl<F: FileSystem> Checker<F> {
         okey: ObjKey,
         typ: &Option<TypeExpr>,
         init: &Option<Expr>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
@@ -269,7 +268,7 @@ impl<F: FileSystem> Checker<F> {
         lhs: Option<&Vec<ObjKey>>,
         typ: &Option<TypeExpr>,
         init: &Option<Expr>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
@@ -313,7 +312,7 @@ impl<F: FileSystem> Checker<F> {
         typ: &TypeExpr,
         def: Option<TypeKey>,
         alias: bool,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
@@ -346,7 +345,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-checks a function declaration.
-    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey, fctx: &mut FilesContext<F>) {
+    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey, fctx: &mut FilesContext) {
         debug_assert!(self.lobj(okey).typ().is_none());
         debug_assert!(self.octx.iota.is_none());
 
@@ -380,7 +379,7 @@ impl<F: FileSystem> Checker<F> {
             if fdecl.body.is_some() {
                 let name = lobj.name().to_string();
                 let body = fdecl.body.clone();
-                fctx.later(Box::new(move |checker: &mut Checker<F>, fctx: &mut FilesContext<F>| {
+                fctx.later(Box::new(move |checker: &mut Checker, fctx: &mut FilesContext| {
                     if let Some(b) = &body {
                         checker.func_body(None, &name, sig_key, b, None, fctx);
                     }
@@ -390,7 +389,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Adds method declarations to a type.
-    pub fn add_method_decls(&mut self, okey: ObjKey, fctx: &mut FilesContext<F>) {
+    pub fn add_method_decls(&mut self, okey: ObjKey, fctx: &mut FilesContext) {
         // Get associated methods
         if !fctx.methods.contains_key(&okey) {
             return;
@@ -461,7 +460,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Type-checks a declaration statement (const, var, or type) inside a function.
-    pub fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl, fctx: &mut FilesContext<F>) {
+    pub fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl, fctx: &mut FilesContext) {
         use gox_syntax::ast::Decl;
 
         match decl {

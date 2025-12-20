@@ -10,7 +10,6 @@ use crate::obj::LangObj;
 use crate::objects::{ObjKey, PackageKey, TCObjects, TypeKey};
 use crate::selection::{Selection, SelectionKind};
 use crate::typ::{self, Type};
-use gox_common::vfs::FileSystem;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 
@@ -478,12 +477,12 @@ fn add_to_method_set(
 /// is an interface and static is not set), missing_method only checks
 /// that methods of 'intf' which are also present in 't' have matching
 /// types (e.g., for a type assertion x.(T) where x is of interface type 't').
-pub fn missing_method<F: FileSystem>(
+pub fn missing_method(
     t: TypeKey,
     intf: TypeKey,
     static_: bool,
-    checker: &mut Checker<F>,
-    fctx: &mut FilesContext<F>,
+    checker: &mut Checker,
+    fctx: &mut FilesContext,
 ) -> Option<(ObjKey, bool)> {
     // First, check if interface is empty
     {
@@ -559,11 +558,11 @@ pub fn missing_method<F: FileSystem>(
 
 /// assertable_to reports whether a value of type iface can be asserted to have type t.
 /// It returns None as affirmative answer. See docs for missing_method for more info.
-pub fn assertable_to<F: FileSystem>(
+pub fn assertable_to(
     iface: TypeKey,
     t: TypeKey,
-    checker: &mut Checker<F>,
-    fctx: &mut FilesContext<F>,
+    checker: &mut Checker,
+    fctx: &mut FilesContext,
 ) -> Option<(ObjKey, bool)> {
     let strict = true;
     if !strict && checker.tc_objs.types[t].is_interface(&checker.tc_objs) {

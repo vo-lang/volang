@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use gox_common::span::Span;
 use gox_common::symbol::Ident;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{Block, Stmt, StmtKind};
 
 use super::checker::Checker;
@@ -74,7 +73,7 @@ impl LabelBlock {
     }
 }
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Checks labels in a function body.
     pub fn check_labels(&mut self, body: &Block) {
         let mut block = LabelBlock::new(None);

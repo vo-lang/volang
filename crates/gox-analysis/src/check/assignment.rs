@@ -7,7 +7,6 @@
 
 use gox_common::span::{BytePos, Span};
 use gox_common::symbol::Ident;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::Expr;
 
 use crate::objects::{ObjKey, TypeKey};
@@ -19,12 +18,12 @@ const DEFAULT_SPAN: Span = Span { start: BytePos(0), end: BytePos(0) };
 
 use super::checker::{Checker, FilesContext};
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Reports whether x can be assigned to a variable of type t.
     /// If necessary, converts untyped values to the appropriate type.
     /// Use t == None to indicate assignment to an untyped blank identifier.
     /// x.mode is set to invalid if the assignment failed.
-    pub fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str, _fctx: &mut FilesContext<F>) {
+    pub fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str, _fctx: &mut FilesContext) {
         self.single_value(x);
         if x.invalid() {
             return;
@@ -84,7 +83,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Initializes a constant with value x.
-    pub fn init_const(&mut self, lhs: ObjKey, x: &mut Operand, fctx: &mut FilesContext<F>) {
+    pub fn init_const(&mut self, lhs: ObjKey, x: &mut Operand, fctx: &mut FilesContext) {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -116,7 +115,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Initializes a variable with value x.
-    pub fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str, fctx: &mut FilesContext<F>) -> Option<TypeKey> {
+    pub fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str, fctx: &mut FilesContext) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -161,7 +160,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Assigns x to the variable denoted by lhs expression.
-    pub fn assign_var(&mut self, lhs: &Expr, x: &mut Operand, fctx: &mut FilesContext<F>) -> Option<TypeKey> {
+    pub fn assign_var(&mut self, lhs: &Expr, x: &mut Operand, fctx: &mut FilesContext) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         if x.invalid() || x.typ == Some(invalid_type) {
             return None;
@@ -208,7 +207,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Initializes multiple variables from multiple values.
-    pub fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], fctx: &mut FilesContext<F>) {
+    pub fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], fctx: &mut FilesContext) {
         let invalid_type = self.invalid_type();
         
         // Simple case: same number of lhs and rhs
@@ -260,7 +259,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Assigns multiple values to multiple variables.
-    pub fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr], fctx: &mut FilesContext<F>) {
+    pub fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr], fctx: &mut FilesContext) {
         // Simple case: same number of lhs and rhs
         if lhs.len() == rhs.len() {
             for (i, l) in lhs.iter().enumerate() {
@@ -302,7 +301,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Handles short variable declarations (:=).
-    pub fn short_var_decl(&mut self, lhs: &[Expr], rhs: &[Expr], pos: Span, fctx: &mut FilesContext<F>) {
+    pub fn short_var_decl(&mut self, lhs: &[Expr], rhs: &[Expr], pos: Span, fctx: &mut FilesContext) {
         let scope_key = match self.octx.scope {
             Some(s) => s,
             None => return,

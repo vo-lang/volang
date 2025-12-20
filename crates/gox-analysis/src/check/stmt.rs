@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use gox_common::span::Span;
 use gox_common::symbol::Ident;
-use gox_common::vfs::FileSystem;
 use gox_syntax::ast::{AssignOp, Block, Expr, ForClause, Stmt, StmtKind};
 use ordered_float::OrderedFloat;
 
@@ -127,7 +126,7 @@ impl StmtContext {
 // Checker statement methods
 // =============================================================================
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     // =========================================================================
     // Scope management
     // =========================================================================
@@ -165,7 +164,7 @@ impl<F: FileSystem> Checker<F> {
         sig: TypeKey,
         body: &Block,
         iota: Option<Value>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let (pos, end) = (body.span.start.to_usize(), body.span.end.to_usize());
 
@@ -317,7 +316,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut Operand,
         exprs: &[Expr],
         seen: &mut ValueMap,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         for e in exprs {
             let v = &mut Operand::new();
@@ -369,7 +368,7 @@ impl<F: FileSystem> Checker<F> {
         _xtype: TypeKey,
         types: &[Option<gox_syntax::ast::TypeExpr>],
         seen: &mut HashMap<Option<TypeKey>, Span>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) -> Option<TypeKey> {
         let mut last_type: Option<TypeKey> = None;
         for ty_opt in types {
@@ -413,7 +412,7 @@ impl<F: FileSystem> Checker<F> {
     // =========================================================================
 
     /// Checks a simple (optional) statement.
-    fn simple_stmt(&mut self, s: Option<&Stmt>, fctx: &mut FilesContext<F>) {
+    fn simple_stmt(&mut self, s: Option<&Stmt>, fctx: &mut FilesContext) {
         if let Some(s) = s {
             let sctx = StmtContext::new();
             self.stmt(s, &sctx, fctx);
@@ -421,7 +420,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Checks a list of statements.
-    fn stmt_list(&mut self, list: &[Stmt], sctx: &StmtContext, fctx: &mut FilesContext<F>) {
+    fn stmt_list(&mut self, list: &[Stmt], sctx: &StmtContext, fctx: &mut FilesContext) {
         // Trailing empty statements are "invisible" to fallthrough analysis
         let index = list
             .iter()
@@ -441,7 +440,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Main statement checking wrapper - handles delayed actions.
-    fn stmt(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext<F>) {
+    fn stmt(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext) {
         let begin_scope = self.octx.scope;
         let begin_delayed_count = fctx.delayed_count();
 
@@ -452,7 +451,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Internal statement implementation.
-    fn stmt_impl(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext<F>) {
+    fn stmt_impl(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext) {
         let mut inner_ctx = *ctx;
         inner_ctx.fallthrough_ok = false;
         inner_ctx.final_switch_case = false;
@@ -1031,7 +1030,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Check a go/defer/errdefer call - must be a function call.
-    fn suspended_call(&mut self, kw: &str, call: &Expr, fctx: &mut FilesContext<F>) {
+    fn suspended_call(&mut self, kw: &str, call: &Expr, fctx: &mut FilesContext) {
         let x = &mut Operand::new();
         self.raw_expr(x, call, None, fctx);
         
@@ -1057,7 +1056,7 @@ impl<F: FileSystem> Checker<F> {
         names: &[Ident],
         values: &[Expr],
         span: Span,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         let scope_key = match self.octx.scope {
             Some(s) => s,

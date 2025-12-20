@@ -7,12 +7,10 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 use gox_common::span::Span;
 use gox_common::symbol::SymbolInterner;
-use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{Expr, File};
 
@@ -72,10 +70,10 @@ impl ObjContext {
 // =============================================================================
 
 /// Delayed action to be executed later during type checking.
-pub type DelayedAction<F> = Box<dyn FnOnce(&mut Checker<F>, &mut FilesContext<F>)>;
+pub type DelayedAction = Box<dyn FnOnce(&mut Checker, &mut FilesContext)>;
 
 /// Contains information collected during type-checking of a set of package files.
-pub struct FilesContext<'a, F: FileSystem> {
+pub struct FilesContext<'a> {
     /// Package files.
     pub files: &'a [File],
     /// Positions of unused dot-imported packages for each file scope.
@@ -87,15 +85,13 @@ pub struct FilesContext<'a, F: FileSystem> {
     /// Map of expressions without final type.
     pub untyped: HashMap<ExprId, ExprInfo>,
     /// Stack of delayed actions.
-    pub delayed: Vec<DelayedAction<F>>,
+    pub delayed: Vec<DelayedAction>,
     /// Path of object dependencies during type inference (for cycle reporting).
     pub obj_path: Vec<ObjKey>,
-    /// Phantom data for the file system type.
-    _phantom: PhantomData<F>,
 }
 
-impl<'a, F: FileSystem> FilesContext<'a, F> {
-    pub fn new(files: &'a [File]) -> FilesContext<'a, F> {
+impl<'a> FilesContext<'a> {
+    pub fn new(files: &'a [File]) -> FilesContext<'a> {
         FilesContext {
             files,
             unused_dot_imports: HashMap::new(),
@@ -104,7 +100,6 @@ impl<'a, F: FileSystem> FilesContext<'a, F> {
             untyped: HashMap::new(),
             delayed: Vec::new(),
             obj_path: Vec::new(),
-            _phantom: PhantomData,
         }
     }
 
@@ -122,7 +117,7 @@ impl<'a, F: FileSystem> FilesContext<'a, F> {
     }
 
     /// Push a delayed action onto the stack.
-    pub fn later(&mut self, action: DelayedAction<F>) {
+    pub fn later(&mut self, action: DelayedAction) {
         self.delayed.push(action);
     }
 
@@ -132,8 +127,8 @@ impl<'a, F: FileSystem> FilesContext<'a, F> {
     }
 
     /// Process delayed actions starting from index `top`.
-    pub fn process_delayed(&mut self, top: usize, checker: &mut Checker<F>) {
-        let actions: Vec<DelayedAction<F>> = self.delayed.drain(top..).collect();
+    pub fn process_delayed(&mut self, top: usize, checker: &mut Checker) {
+        let actions: Vec<DelayedAction> = self.delayed.drain(top..).collect();
         for action in actions {
             action(checker, self);
         }
@@ -172,7 +167,7 @@ impl ImportKey {
 }
 
 /// The main type checker.
-pub struct Checker<F: FileSystem> {
+pub struct Checker {
     /// Type checking objects container.
     pub tc_objs: TCObjects,
     /// Universe (predefined types and functions).
@@ -193,13 +188,11 @@ pub struct Checker<F: FileSystem> {
     pub result: TypeInfo,
     /// For debug tracing.
     pub indent: Rc<RefCell<usize>>,
-    /// Phantom data for the file system type.
-    _phantom: PhantomData<F>,
 }
 
-impl<F: FileSystem> Checker<F> {
+impl Checker {
     /// Creates a new type checker for the given package.
-    pub fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker<F> {
+    pub fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker {
         let mut tc_objs = TCObjects::new();
         let universe = Universe::new(&mut tc_objs);
         Checker {
@@ -213,7 +206,6 @@ impl<F: FileSystem> Checker<F> {
             octx: ObjContext::new(),
             result: TypeInfo::new(),
             indent: Rc::new(RefCell::new(0)),
-            _phantom: PhantomData,
         }
     }
 
@@ -335,7 +327,7 @@ impl<F: FileSystem> Checker<F> {
         x: &mut crate::operand::Operand,
         expr: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext,
     ) {
         self.raw_expr_impl(x, expr, hint, fctx);
     }
@@ -390,7 +382,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Record all untyped expressions in the result.
-    fn record_untyped(&mut self, fctx: &mut FilesContext<F>) {
+    fn record_untyped(&mut self, fctx: &mut FilesContext) {
         for (id, info) in fctx.untyped.iter() {
             if info.mode != OperandMode::Invalid {
                 if let Some(typ) = info.typ {
