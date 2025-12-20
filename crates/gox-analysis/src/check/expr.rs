@@ -865,7 +865,7 @@ impl<F: FileSystem> Checker<F> {
 
         let ty = match &x.mode {
             OperandMode::Invalid => self.invalid_type(),
-            OperandMode::NoValue => self.invalid_type(), // TODO: use no_value_tuple
+            OperandMode::NoValue => self.universe().no_value_tuple(),
             _ => x.typ.unwrap_or(self.invalid_type()),
         };
 
