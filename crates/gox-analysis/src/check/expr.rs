@@ -907,14 +907,16 @@ impl<F: FileSystem> Checker<F> {
             ExprKind::Ident(ident) => {
                 self.ident(x, ident, None, false, fctx);
             }
-            ExprKind::IntLit(_lit) => {
-                // TODO: Parse actual value from Symbol using interner
-                x.mode = OperandMode::Constant(Value::with_i64(0));
+            ExprKind::IntLit(lit) => {
+                let raw = self.resolve_symbol(lit.raw);
+                let val = raw.parse::<i64>().unwrap_or(0);
+                x.mode = OperandMode::Constant(Value::with_i64(val));
                 x.typ = Some(self.basic_type(BasicType::UntypedInt));
             }
-            ExprKind::FloatLit(_lit) => {
-                // TODO: Parse actual value from Symbol using interner
-                x.mode = OperandMode::Constant(Value::with_f64(0.0));
+            ExprKind::FloatLit(lit) => {
+                let raw = self.resolve_symbol(lit.raw);
+                let val = raw.parse::<f64>().unwrap_or(0.0);
+                x.mode = OperandMode::Constant(Value::with_f64(val));
                 x.typ = Some(self.basic_type(BasicType::UntypedFloat));
             }
             ExprKind::RuneLit(lit) => {
