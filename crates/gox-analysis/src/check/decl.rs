@@ -382,7 +382,7 @@ impl<F: FileSystem> Checker<F> {
                 let body = fdecl.body.clone();
                 fctx.later(Box::new(move |checker: &mut Checker<F>, fctx: &mut FilesContext<F>| {
                     if let Some(b) = &body {
-                        checker.check_func_body(&name, sig_key, b, fctx);
+                        checker.func_body(None, &name, sig_key, b, None, fctx);
                     }
                 }));
             }

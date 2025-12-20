@@ -211,9 +211,8 @@ impl<F: FileSystem> Checker<F> {
         }
     }
 
-    /// Gets the name of an identifier (placeholder - needs interner).
-    fn ident_name(&self, _ident: &Ident) -> String {
-        // TODO: Use interner to resolve symbol to string
-        String::from("label")
+    /// Gets the name of an identifier.
+    fn ident_name(&self, ident: &Ident) -> String {
+        self.resolve_symbol(ident.symbol).to_string()
     }
 }

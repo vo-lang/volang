@@ -90,7 +90,7 @@ impl<F: FileSystem> Checker<F> {
     }
 
     /// Returns true if the last non-empty statement in the list terminates.
-    fn is_terminating_list(&self, stmts: &[Stmt], label: Option<&str>) -> bool {
+    pub fn is_terminating_list(&self, stmts: &[Stmt], label: Option<&str>) -> bool {
         // Find the last non-empty statement
         let last_non_empty = stmts.iter().rev().find(|s| !matches!(s.kind, StmtKind::Empty));
 
