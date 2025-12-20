@@ -1027,9 +1027,64 @@ impl<F: FileSystem> Checker<F> {
                 x.typ = Some(t);
             }
             ExprKind::TryUnwrap(inner) => {
-                // GoX extension: ? operator
+                // GoX extension: ? operator for error propagation
+                // The inner expression must return a value where the last element is of type error.
+                // If error != nil, the function returns early with that error.
+                // If error == nil, the result is the value(s) without the error part.
                 self.expr(x, inner, fctx);
-                // TODO: Handle error unwrapping properly
+                if x.invalid() {
+                    return;
+                }
+
+                let error_type = self.universe().error_type();
+                let inner_type = x.typ.unwrap_or(self.invalid_type());
+
+                // Check if the type is a tuple with error as the last element
+                if let Some(tuple) = self.otype(inner_type).try_as_tuple() {
+                    let vars = tuple.vars();
+                    if vars.is_empty() {
+                        self.error(e.span, "? operator requires expression returning error".to_string());
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+
+                    // Check that the last element is error type
+                    let last_var = vars.last().unwrap();
+                    let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
+                    if !typ::identical(last_type, error_type, &self.tc_objs) {
+                        self.error(e.span, "? operator requires expression with error as last return value".to_string());
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+
+                    // Result type is the tuple without the last error element
+                    match vars.len() {
+                        1 => {
+                            // Just error -> NoValue after unwrap
+                            x.mode = OperandMode::NoValue;
+                            x.typ = None;
+                        }
+                        2 => {
+                            // (T, error) -> T
+                            x.mode = OperandMode::Value;
+                            x.typ = self.lobj(vars[0]).typ();
+                        }
+                        _ => {
+                            // (T1, T2, ..., error) -> (T1, T2, ...)
+                            let new_vars: Vec<_> = vars[..vars.len() - 1].to_vec();
+                            let new_tuple = self.tc_objs.new_t_tuple(new_vars);
+                            x.mode = OperandMode::Value;
+                            x.typ = Some(new_tuple);
+                        }
+                    }
+                } else if typ::identical(inner_type, error_type, &self.tc_objs) {
+                    // Single error type -> NoValue after unwrap
+                    x.mode = OperandMode::NoValue;
+                    x.typ = None;
+                } else {
+                    self.error(e.span, "? operator requires expression returning error type".to_string());
+                    x.mode = OperandMode::Invalid;
+                }
             }
         }
     }
