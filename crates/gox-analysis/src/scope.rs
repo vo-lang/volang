@@ -117,6 +117,11 @@ impl Scope {
         self.elems.values().copied()
     }
 
+    /// Returns a reference to the elements map.
+    pub fn elems(&self) -> &std::collections::HashMap<String, ObjKey> {
+        &self.elems
+    }
+
     /// Sets the end position.
     pub fn set_end(&mut self, end: Pos) {
         self.end = end;

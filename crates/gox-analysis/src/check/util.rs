@@ -392,22 +392,7 @@ impl<F: FileSystem> Checker<F> {
         self.otype_mut(key).try_as_signature_mut().unwrap()
     }
 
-    /// Get a package by key.
-    pub fn package(&self, key: PackageKey) -> &Package {
-        &self.tc_objs.pkgs[key]
-    }
-
-    /// Get a mutable package by key.
-    pub fn package_mut(&mut self, key: PackageKey) -> &mut Package {
-        &mut self.tc_objs.pkgs[key]
-    }
-
-    /// Get a scope by key.
-    pub fn scope(&self, key: ScopeKey) -> &Scope {
-        &self.tc_objs.scopes[key]
-    }
-
-    // Note: decl_info removed - DeclInfo is in resolver module, not objects
+    // Note: package, package_mut, scope are in checker.rs
 
     /// Get builtin function info.
     pub fn builtin_info(&self, id: Builtin) -> &BuiltinInfo {

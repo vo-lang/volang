@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use gox_common::span::Span;
+use gox_common::symbol::SymbolInterner;
 use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{Expr, File};
@@ -159,6 +160,8 @@ pub struct Checker<F: FileSystem> {
     pub tc_objs: TCObjects,
     /// Universe (predefined types and functions).
     universe: Universe,
+    /// Symbol interner for resolving identifiers.
+    pub interner: SymbolInterner,
     /// Error messages.
     errors: Vec<(Span, String)>,
     /// Current package being checked.
@@ -177,12 +180,13 @@ pub struct Checker<F: FileSystem> {
 
 impl<F: FileSystem> Checker<F> {
     /// Creates a new type checker for the given package.
-    pub fn new(pkg: PackageKey) -> Checker<F> {
+    pub fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker<F> {
         let mut tc_objs = TCObjects::new();
         let universe = Universe::new(&mut tc_objs);
         Checker {
             tc_objs,
             universe,
+            interner,
             errors: Vec::new(),
             pkg,
             obj_map: HashMap::new(),
@@ -191,6 +195,16 @@ impl<F: FileSystem> Checker<F> {
             indent: Rc::new(RefCell::new(0)),
             _phantom: PhantomData,
         }
+    }
+
+    /// Resolves a symbol to its string.
+    pub fn resolve_symbol(&self, symbol: gox_common::symbol::Symbol) -> &str {
+        self.interner.resolve(symbol).unwrap_or("<unknown>")
+    }
+
+    /// Resolves an identifier to its string.
+    pub fn resolve_ident(&self, ident: &gox_common::symbol::Ident) -> &str {
+        self.resolve_symbol(ident.symbol)
     }
 
     /// Returns the universe.
@@ -227,6 +241,59 @@ impl<F: FileSystem> Checker<F> {
     /// Report a soft error (warning-like).
     pub fn soft_error(&self, span: Span, msg: String) {
         eprintln!("warning at {:?}: {}", span, msg);
+    }
+
+    // =========================================================================
+    // Object/Scope accessors (used by resolver and other modules)
+    // =========================================================================
+
+    /// Returns a reference to a package.
+    pub fn package(&self, key: PackageKey) -> &crate::package::Package {
+        &self.tc_objs.pkgs[key]
+    }
+
+    /// Returns a mutable reference to a package.
+    pub fn package_mut(&mut self, key: PackageKey) -> &mut crate::package::Package {
+        &mut self.tc_objs.pkgs[key]
+    }
+
+    /// Returns a reference to a scope.
+    pub fn scope(&self, key: ScopeKey) -> &crate::scope::Scope {
+        &self.tc_objs.scopes[key]
+    }
+
+    /// Returns a mutable reference to a scope.
+    pub fn scope_mut(&mut self, key: ScopeKey) -> &mut crate::scope::Scope {
+        &mut self.tc_objs.scopes[key]
+    }
+
+
+    /// Returns a reference to a declaration info.
+    pub fn decl_info(&self, key: DeclInfoKey) -> &super::resolver::DeclInfo {
+        &self.tc_objs.decls[key]
+    }
+
+    /// Returns a mutable reference to a declaration info.
+    pub fn decl_info_mut(&mut self, key: DeclInfoKey) -> &mut super::resolver::DeclInfo {
+        &mut self.tc_objs.decls[key]
+    }
+
+    // =========================================================================
+    // Declaration helpers (used by resolver)
+    // =========================================================================
+
+    /// Reports an alternative declaration location.
+    pub fn report_alt_decl(&self, obj_key: ObjKey) {
+        let obj = &self.tc_objs.lobjs[obj_key];
+        // TODO: Report the other declaration location
+        let _ = obj;
+    }
+
+    // Note: has_cycle is in util.rs, init_order is in initorder.rs
+
+    /// Adds method declarations to a type.
+    pub fn add_method_decls(&mut self, _obj: ObjKey, _fctx: &mut FilesContext<F>) {
+        // TODO: Implement in decl.rs
     }
 
     // =========================================================================

@@ -4,6 +4,7 @@
 //! that holds all objects created during type checking.
 
 use crate::arena::Arena;
+use crate::check::resolver::DeclInfo;
 use crate::obj::LangObj;
 use crate::package::Package;
 use crate::scope::Scope;
@@ -27,13 +28,6 @@ crate::define_key! {
     
     /// Key for declaration info
     pub struct DeclInfoKey;
-}
-
-/// Declaration info for package-level declarations.
-#[derive(Debug)]
-pub struct DeclInfo {
-    // Will be expanded later
-    _placeholder: (),
 }
 
 /// Type aliases for arena containers

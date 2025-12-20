@@ -13,7 +13,7 @@ mod expr;
 mod initorder;
 mod interface;
 mod label;
-mod resolver;
+pub(crate) mod resolver;
 mod returns;
 mod stmt;
 mod type_info;
