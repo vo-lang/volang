@@ -128,13 +128,18 @@ impl<F: FileSystem> Checker<F> {
                 // spec: "As an exception to the addressability requirement
                 // x may also be a composite literal."
                 if let Some(expr_id) = x.expr_id {
-                    // Check if it's a composite literal (addressable)
-                    // For now, just check if it's a variable
                     if x.mode != OperandMode::Variable {
-                        // TODO: Check for composite literal case
-                        self.invalid_op(Span::default(), "cannot take address of expression");
-                        x.mode = OperandMode::Invalid;
-                        return;
+                        // Check if it's a composite literal (addressable)
+                        let is_composite_lit = fctx
+                            .untyped
+                            .get(&expr_id)
+                            .map(|info| matches!(info.expr.kind, ExprKind::CompositeLit(_)))
+                            .unwrap_or(false);
+                        if !is_composite_lit {
+                            self.invalid_op(Span::default(), "cannot take address of expression");
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
                     }
                 }
                 x.mode = OperandMode::Value;
