@@ -310,9 +310,20 @@ impl<F: FileSystem> Checker<F> {
                     if ident.symbol.is_dummy() {
                         continue;
                     }
-                    // TODO: Check if identifier is "_"
+                    let name = self.resolve_ident(ident);
+                    if name == "_" {
+                        continue;
+                    }
                     // Look up in scope and track used state
-                    None
+                    self.lookup(name).and_then(|okey| {
+                        let lobj = self.lobj(okey);
+                        if lobj.pkg() == Some(self.pkg) {
+                            if let Some(used) = lobj.var_used() {
+                                return Some((okey, used));
+                            }
+                        }
+                        None
+                    })
                 }
                 _ => None,
             };
@@ -320,8 +331,8 @@ impl<F: FileSystem> Checker<F> {
             self.raw_expr(&mut x, e, None, fctx);
 
             // Restore used state if needed
-            if let Some((_okey, _used)) = v {
-                // TODO: Restore used state
+            if let Some((okey, used)) = v {
+                self.lobj_mut(okey).set_var_used(used);
             }
         }
     }

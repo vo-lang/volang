@@ -491,6 +491,19 @@ impl LangObj {
         }
     }
 
+    pub fn var_used(&self) -> Option<bool> {
+        match &self.entity_type {
+            EntityType::Var(prop) => Some(prop.used),
+            _ => None,
+        }
+    }
+
+    pub fn set_var_used(&mut self, used: bool) {
+        if let EntityType::Var(prop) = &mut self.entity_type {
+            prop.used = used;
+        }
+    }
+
     pub fn func_fmt_name(&self, f: &mut std::fmt::Formatter<'_>, objs: &TCObjects) -> std::fmt::Result {
         match &self.entity_type {
             EntityType::Func { .. } => fmt_func_name(self, f, objs),
