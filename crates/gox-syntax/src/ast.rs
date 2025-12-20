@@ -49,12 +49,10 @@ pub enum Decl {
     Var(VarDecl),
     /// Constant declaration: `const x = 1`
     Const(ConstDecl),
-    /// Type declaration: `type T struct { ... }`
+    /// Type declaration: `type T struct { ... }` or `type I interface { ... }`
     Type(TypeDecl),
     /// Function declaration: `func f() { ... }`
     Func(FuncDecl),
-    /// Interface declaration: `interface I { ... }`
-    Interface(InterfaceDecl),
 }
 
 impl Decl {
@@ -65,7 +63,6 @@ impl Decl {
             Decl::Const(d) => d.span,
             Decl::Type(d) => d.span,
             Decl::Func(d) => d.span,
-            Decl::Interface(d) => d.span,
         }
     }
 }
@@ -192,17 +189,6 @@ pub struct Param {
     /// The parameter type.
     pub ty: TypeExpr,
     /// The span of the parameter.
-    pub span: Span,
-}
-
-/// An interface declaration.
-#[derive(Debug, Clone)]
-pub struct InterfaceDecl {
-    /// The interface name.
-    pub name: Ident,
-    /// The interface elements (methods and embedded interfaces).
-    pub elems: Vec<InterfaceElem>,
-    /// The span of the declaration.
     pub span: Span,
 }
 
@@ -1013,9 +999,6 @@ pub fn walk_decl<V: Visitor>(visitor: &mut V, decl: &Decl) {
                     visitor.visit_stmt(stmt);
                 }
             }
-        }
-        Decl::Interface(d) => {
-            visitor.visit_ident(&d.name);
         }
     }
 }

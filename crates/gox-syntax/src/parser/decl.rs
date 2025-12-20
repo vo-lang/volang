@@ -13,7 +13,6 @@ impl<'a> Parser<'a> {
             TokenKind::Const => self.parse_const_decl().map(Decl::Const),
             TokenKind::Type => self.parse_type_decl().map(Decl::Type),
             TokenKind::Func => self.parse_func_decl().map(Decl::Func),
-            TokenKind::Interface => self.parse_interface_decl().map(Decl::Interface),
             _ => {
                 self.error_expected("declaration");
                 Err(())
@@ -323,22 +322,6 @@ impl<'a> Parser<'a> {
             TokenKind::Map | TokenKind::Chan | TokenKind::Func |
             TokenKind::Struct | TokenKind::Interface
         )
-    }
-
-    /// Parses an interface declaration.
-    pub fn parse_interface_decl(&mut self) -> ParseResult<InterfaceDecl> {
-        let start = self.current.span.start;
-        self.expect(TokenKind::Interface)?;
-        let name = self.parse_ident()?;
-        self.expect(TokenKind::LBrace)?;
-        let elems = self.parse_interface_elems()?;
-        self.expect(TokenKind::RBrace)?;
-        self.expect_semi();
-        Ok(InterfaceDecl {
-            name,
-            elems,
-            span: Span::new(start, self.current.span.start),
-        })
     }
 
     pub(crate) fn parse_interface_elems(&mut self) -> ParseResult<Vec<InterfaceElem>> {

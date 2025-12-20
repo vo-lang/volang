@@ -28,7 +28,7 @@ Tokenization of source code:
 ### `ast`
 Complete AST definitions for GoX:
 - `File` - Top-level source file
-- `Decl` - Declarations (var, const, type, func, interface)
+- `Decl` - Declarations (var, const, type, func)
 - `Stmt` - Statements (if, for, switch, return, etc.)
 - `Expr` - Expressions (binary, unary, call, index, etc.)
 - `Type` - Type expressions (named, array, slice, map, etc.)
@@ -83,9 +83,8 @@ File
 └── decls: Vec<Decl>
     ├── VarDecl
     ├── ConstDecl
-    ├── TypeDecl
-    ├── FuncDecl
-    └── InterfaceDecl
+    ├── TypeDecl (includes interface types)
+    └── FuncDecl
 
 Stmt
 ├── Block

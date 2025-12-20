@@ -85,7 +85,6 @@ impl<'a> AstPrinter<'a> {
             Decl::Const(c) => self.write_const_decl(c),
             Decl::Type(t) => self.write_type_decl(t),
             Decl::Func(f) => self.write_func_decl(f),
-            Decl::Interface(i) => self.write_interface_decl(i),
         }
     }
 
@@ -267,39 +266,6 @@ impl<'a> AstPrinter<'a> {
         if sig.variadic {
             self.writeln("variadic: true,");
         }
-    }
-
-    fn write_interface_decl(&mut self, i: &InterfaceDecl) {
-        self.writeln("Interface {");
-        self.indent += 1;
-        
-        let name = self.resolve_symbol(i.name.symbol);
-        self.write_indent();
-        writeln!(self.output, "name: \"{}\",", name).unwrap();
-
-        if !i.elems.is_empty() {
-            self.writeln("methods: [");
-            self.indent += 1;
-            for elem in &i.elems {
-                match elem {
-                    InterfaceElem::Method(m) => {
-                        self.write_indent();
-                        let mname = self.resolve_symbol(m.name.symbol);
-                        writeln!(self.output, "{},", mname).unwrap();
-                    }
-                    InterfaceElem::Embedded(e) => {
-                        self.write_indent();
-                        let ename = self.resolve_symbol(e.symbol);
-                        writeln!(self.output, "embed: {},", ename).unwrap();
-                    }
-                }
-            }
-            self.indent -= 1;
-            self.writeln("],");
-        }
-
-        self.indent -= 1;
-        self.writeln("},");
     }
 
     fn write_type_inline(&mut self, ty: &TypeExpr) {

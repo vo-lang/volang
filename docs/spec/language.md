@@ -348,7 +348,6 @@ ImportDecl    ::= "import" StringLit ";" ;
 TopDecl ::= VarDecl
           | ConstDecl
           | TypeDecl
-          | InterfaceDecl
           | FuncDecl ;
 ```
 
@@ -821,8 +820,11 @@ e.name = "Alice"   // accesses User.name
 
 ### 7.1 Interface Declarations
 
+Interfaces are declared using the `type` keyword, following Go syntax:
+
 ```ebnf
-InterfaceDecl ::= "interface" Ident "{" InterfaceElem* "}" ";" ;
+TypeDecl      ::= "type" Ident Type ";" ;
+InterfaceType ::= "interface" "{" InterfaceElem* "}" ;
 InterfaceElem ::= MethodSpec | EmbeddedIface ;
 MethodSpec    ::= Ident "(" ParamList? ")" ResultType? ";" ;
 EmbeddedIface ::= Ident ";" ;
@@ -831,11 +833,11 @@ Param         ::= IdentList Type ;   // Type sharing: x, y int
 ```
 
 ```gox
-interface Reader {
+type Reader interface {
     Read(buf []byte) int
 }
 
-interface ReadWriter {
+type ReadWriter interface {
     Reader  // embedding
     Write(buf []byte) int
 }
@@ -855,18 +857,18 @@ The **method set** of an interface is computed as follows:
    - If signatures differ → compile error
 
 ```gox
-interface A { Foo() int }
-interface B {
+type A interface { Foo() int }
+type B interface {
     Foo() int
     Bar()
 }
-interface C {
+type C interface {
     A
     B
 }  // method set = {Foo() int, Bar()}
 
-interface D { Foo() string }
-interface E {
+type D interface { Foo() string }
+type E interface {
     A
     D
 }  // ERROR: Foo has conflicting signatures

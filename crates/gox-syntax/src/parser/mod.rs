@@ -867,23 +867,28 @@ mod tests {
     }
 
     // =========================================================================
-    // Interface declaration tests
+    // Interface type tests (via type declaration)
     // =========================================================================
 
     #[test]
-    fn test_interface_decl() {
+    fn test_interface_type() {
         let file = parse_ok(
             r#"
-            interface Reader {
+            type Reader interface {
                 Read(p []byte) int
             }
         "#,
         );
         match &file.decls[0] {
-            Decl::Interface(i) => {
-                assert_eq!(i.elems.len(), 1);
+            Decl::Type(t) => {
+                match &t.ty.kind {
+                    TypeExprKind::Interface(i) => {
+                        assert_eq!(i.elems.len(), 1);
+                    }
+                    _ => panic!("expected interface type"),
+                }
             }
-            _ => panic!("expected interface decl"),
+            _ => panic!("expected type decl"),
         }
     }
 
