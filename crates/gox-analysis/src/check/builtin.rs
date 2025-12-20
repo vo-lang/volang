@@ -407,7 +407,17 @@ impl<F: FileSystem> Checker<F> {
 
         // Check length <= capacity
         if nargs == 3 {
-            // TODO: If both are constants, check length <= capacity
+            let mut len_op = Operand::new();
+            let mut cap_op = Operand::new();
+            self.expr(&mut len_op, &call.args[1], fctx);
+            self.expr(&mut cap_op, &call.args[2], fctx);
+            if let (OperandMode::Constant(len_val), OperandMode::Constant(cap_val)) = (&len_op.mode, &cap_op.mode) {
+                let (len, len_exact) = len_val.int_as_i64();
+                let (cap, cap_exact) = cap_val.int_as_i64();
+                if len_exact && cap_exact && len > cap {
+                    self.error(call_span, format!("length ({}) larger than capacity ({})", len, cap));
+                }
+            }
         }
 
         x.mode = OperandMode::Value;
