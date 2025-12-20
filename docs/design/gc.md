@@ -37,14 +37,18 @@ pub enum GcGen {
 ```rust
 #[repr(C)]
 pub struct GcHeader {
-    pub mark: u8,       // GcColor
-    pub gen: u8,        // GcGen (for generational GC)
-    pub flags: u8,      // Reserved flags
+    pub mark: u8,        // GcColor
+    pub gen: u8,         // GcGen (for generational GC)
+    pub value_kind: u8,  // ValueKind (determines scan method)
     pub _pad: u8,
-    pub type_id: u32,   // Type ID → TypeMeta
+    pub type_id: u16,    // RuntimeTypeId (index into struct_metas, only for Struct)
+    pub _pad2: u16,
 }
 // Total: 8 bytes
 ```
+
+- **value_kind**: Determines how to scan the object (String, Slice, Struct, etc.)
+- **type_id**: Only meaningful when `value_kind == Struct`, indexes into `struct_metas[]`
 
 ### 2.4 GC State Machine
 
@@ -306,29 +310,37 @@ impl GcRoots for Vm {
 ```rust
 impl Gc {
     fn scan_object(&mut self, obj: *mut GcObject) {
-        let type_id = unsafe { (*obj).header.type_id };
-        let meta = get_type_meta(type_id);
+        let header = unsafe { &(*obj).header };
+        let value_kind = ValueKind::from_u8(header.value_kind);
         
-        match meta.kind {
-            TypeKind::Interface => {
-                // Special: check type_id to determine if data is pointer
-                let actual_type = unsafe { (*obj).data[0] };
-                let data = unsafe { (*obj).data[1] };
-                if get_type_meta(actual_type as u32).is_reference_type() {
-                    self.mark_gray(data as *mut GcObject);
-                }
-            }
-            _ => {
-                // Normal: scan by ptr_bitmap
-                for (i, is_ptr) in meta.ptr_bitmap.iter().enumerate() {
-                    if *is_ptr {
-                        let child = unsafe { (*obj).data[i] };
-                        if child != 0 {
-                            self.mark_gray(child as *mut GcObject);
+        match value_kind {
+            ValueKind::Struct => {
+                // User-defined struct: use slot_types from struct_metas
+                let slot_types = get_struct_slot_types(header.type_id);
+                for (i, &slot_type) in slot_types.iter().enumerate() {
+                    match slot_type {
+                        SlotType::Value | SlotType::Interface0 => {}
+                        SlotType::GcRef => {
+                            let child = unsafe { (*obj).data[i] };
+                            if child != 0 { self.mark_gray(child as *mut GcObject); }
+                        }
+                        SlotType::Interface1 => {
+                            // Dynamic check: extract value_kind from previous slot
+                            let packed = unsafe { (*obj).data[i - 1] };
+                            if needs_gc(extract_value_kind(packed)) {
+                                let child = unsafe { (*obj).data[i] };
+                                if child != 0 { self.mark_gray(child as *mut GcObject); }
+                            }
                         }
                     }
                 }
             }
+            ValueKind::String | ValueKind::Slice => {
+                let child = unsafe { (*obj).data[0] };
+                if child != 0 { self.mark_gray(child as *mut GcObject); }
+            }
+            // ... other built-in types with fixed layouts
+            _ => {}
         }
     }
     
@@ -351,7 +363,7 @@ impl Gc {
 ```rust
 impl Gc {
     /// Allocate a new object
-    pub fn alloc(&mut self, type_id: TypeId, size_slots: usize) -> GcRef;
+    pub fn alloc(&mut self, value_kind: ValueKind, type_id: u16, size_slots: usize) -> GcRef;
     
     /// Pause GC (call before extern function)
     pub fn pause(&mut self);
