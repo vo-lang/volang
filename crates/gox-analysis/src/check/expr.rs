@@ -1018,8 +1018,87 @@ impl<F: FileSystem> Checker<F> {
                 if x.invalid() {
                     return;
                 }
-                // TODO: Full slice expression handling
+
+                let utype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                
+                // Extract type info first to avoid borrow conflicts
+                enum SliceInfo {
+                    String { len: Option<u64>, is_untyped: bool },
+                    Array { elem: TypeKey, len: Option<u64>, addressable: bool },
+                    PointerArray { elem: TypeKey, len: Option<u64> },
+                    Slice,
+                    Invalid,
+                }
+                
+                let info = {
+                    let utype_val = self.otype(utype);
+                    match utype_val {
+                        Type::Basic(_) if typ::is_string(utype, &self.tc_objs) => {
+                            let len = if let OperandMode::Constant(v) = &x.mode {
+                                Some(v.str_as_string().len() as u64)
+                            } else {
+                                None
+                            };
+                            SliceInfo::String { len, is_untyped: typ::is_untyped(utype, &self.tc_objs) }
+                        }
+                        Type::Array(arr) => {
+                            SliceInfo::Array { 
+                                elem: arr.elem(), 
+                                len: arr.len(),
+                                addressable: x.mode == OperandMode::Variable 
+                            }
+                        }
+                        Type::Pointer(ptr) => {
+                            if let Some(arr) = self.otype(ptr.base()).underlying_val(&self.tc_objs).try_as_array() {
+                                SliceInfo::PointerArray { elem: arr.elem(), len: arr.len() }
+                            } else {
+                                SliceInfo::Invalid
+                            }
+                        }
+                        Type::Slice(_) => SliceInfo::Slice,
+                        _ => SliceInfo::Invalid,
+                    }
+                };
+                
+                let (valid, length) = match info {
+                    SliceInfo::String { len, is_untyped } => {
+                        if is_untyped {
+                            x.typ = Some(self.basic_type(BasicType::Str));
+                        }
+                        (true, len)
+                    }
+                    SliceInfo::Array { elem, len, addressable } => {
+                        if !addressable {
+                            self.invalid_op(Span::default(), "cannot slice array (value not addressable)");
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
+                        x.typ = Some(self.tc_objs.new_t_slice(elem));
+                        (true, len)
+                    }
+                    SliceInfo::PointerArray { elem, len } => {
+                        x.mode = OperandMode::Variable;
+                        x.typ = Some(self.tc_objs.new_t_slice(elem));
+                        (true, len)
+                    }
+                    SliceInfo::Slice => (true, None),
+                    SliceInfo::Invalid => (false, None),
+                };
+
+                if !valid {
+                    self.invalid_op(Span::default(), "cannot slice expression");
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
                 x.mode = OperandMode::Value;
+
+                // Check slice indices
+                if let Some(ref low) = sl.low {
+                    let _ = self.index(low, length, fctx);
+                }
+                if let Some(ref high) = sl.high {
+                    let _ = self.index(high, length, fctx);
+                }
             }
             ExprKind::Selector(sel) => {
                 self.selector(x, sel, fctx);
