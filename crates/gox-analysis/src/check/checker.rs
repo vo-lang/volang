@@ -338,4 +338,64 @@ impl<F: FileSystem> Checker<F> {
     ) {
         self.raw_expr_impl(x, expr, hint, fctx);
     }
+
+    // =========================================================================
+    // Main entry point
+    // =========================================================================
+
+    /// Main entry point for type checking a set of files.
+    pub fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
+        self.check_files_pkg_name(files)?;
+        let fctx = &mut FilesContext::new(files);
+        self.collect_objects(fctx);
+        self.package_objects(fctx);
+        fctx.process_delayed(0, self);
+        self.init_order();
+        self.unused_imports(fctx);
+        self.record_untyped(fctx);
+        Ok(self.pkg)
+    }
+
+    /// Check that all files have the same package name.
+    fn check_files_pkg_name(&mut self, files: &[File]) -> Result<(), ()> {
+        let mut pkg_name: Option<String> = None;
+        for f in files.iter() {
+            if let Some(ident) = &f.package {
+                let name = self.resolve_ident(ident);
+                if pkg_name.is_none() {
+                    if name == "_" {
+                        self.error(ident.span, "invalid package name _".to_string());
+                        return Err(());
+                    } else {
+                        pkg_name = Some(name.to_string());
+                    }
+                } else if name != pkg_name.as_ref().unwrap() {
+                    self.error(
+                        ident.span,
+                        format!(
+                            "package {}; expected {}",
+                            name,
+                            pkg_name.as_ref().unwrap()
+                        ),
+                    );
+                    return Err(());
+                }
+            }
+        }
+        if let Some(name) = pkg_name {
+            self.package_mut(self.pkg).set_name(name);
+        }
+        Ok(())
+    }
+
+    /// Record all untyped expressions in the result.
+    fn record_untyped(&mut self, fctx: &mut FilesContext<F>) {
+        for (id, info) in fctx.untyped.iter() {
+            if info.mode != OperandMode::Invalid {
+                if let Some(typ) = info.typ {
+                    self.result.record_type_and_value(*id, info.mode.clone(), typ);
+                }
+            }
+        }
+    }
 }
