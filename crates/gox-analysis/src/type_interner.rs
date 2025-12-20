@@ -87,8 +87,8 @@ impl TypeInterner {
         self.symbol_types.get(&sym).copied()
     }
 
-    /// Binds an expression to a type.
-    pub fn bind_expr(&mut self, expr_id: ExprId, type_id: TypeId) {
+    /// Records the type of an expression.
+    pub fn record_expr_type(&mut self, expr_id: ExprId, type_id: TypeId) {
         self.expr_types.insert(expr_id, type_id);
     }
 
@@ -172,7 +172,7 @@ mod tests {
         let type_id = interner.intern(Type::Basic(BasicType::Int));
         let expr_id = ExprId(42);
 
-        interner.bind_expr(expr_id, type_id);
+        interner.record_expr_type(expr_id, type_id);
 
         assert_eq!(interner.get_expr_type(expr_id), Some(type_id));
         assert_eq!(interner.get_expr_type(ExprId(999)), None);

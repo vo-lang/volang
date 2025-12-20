@@ -116,7 +116,7 @@ impl<'a> TypeChecker<'a> {
     /// Interns the type and binds it to the expression's ID.
     pub(crate) fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
         let type_id = self.types.intern(ty);
-        self.types.bind_expr(expr.id, type_id);
+        self.types.record_expr_type(expr.id, type_id);
     }
 
     /// Sets imported packages for cross-package call resolution.
