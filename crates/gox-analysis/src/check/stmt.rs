@@ -134,14 +134,15 @@ impl<F: FileSystem> Checker<F> {
 
     /// Opens a new scope for a statement.
     fn open_scope(&mut self, span: Span, comment: &str) {
+        let pos = span.start.to_usize();
         let scope = self.tc_objs.new_scope(
             self.octx.scope,
-            span.start.to_usize(),
+            pos,
             span.end.to_usize(),
             comment,
             false,
         );
-        // TODO: record_scope when TypeInfo supports it
+        self.result.record_stmt_scope(pos, scope);
         self.octx.scope = Some(scope);
     }
 

@@ -57,6 +57,10 @@ pub struct TypeInfo {
     /// Maps expression IDs to the scopes they define.
     pub scopes: HashMap<ExprId, ScopeKey>,
 
+    /// Maps statement positions to the scopes they define.
+    /// Used for block, if, for, switch, etc. statements.
+    pub stmt_scopes: HashMap<usize, ScopeKey>,
+
     /// Package-level initializers in execution order.
     pub init_order: Vec<Initializer>,
 }
@@ -96,9 +100,14 @@ impl TypeInfo {
         self.selections.insert(expr_id, sel);
     }
 
-    /// Records a scope.
+    /// Records a scope for an expression.
     pub fn record_scope(&mut self, expr_id: ExprId, scope: ScopeKey) {
         self.scopes.insert(expr_id, scope);
+    }
+
+    /// Records a scope for a statement (by position).
+    pub fn record_stmt_scope(&mut self, pos: usize, scope: ScopeKey) {
+        self.stmt_scopes.insert(pos, scope);
     }
 
     /// Records init order.
