@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use crate::check::Checker;
+use crate::check::{Checker, FilesContext};
 use crate::obj::LangObj;
 use crate::objects::{ObjKey, PackageKey, TCObjects, TypeKey};
 use crate::selection::{Selection, SelectionKind};
@@ -483,6 +483,7 @@ pub fn missing_method<F: FileSystem>(
     intf: TypeKey,
     static_: bool,
     checker: &mut Checker<F>,
+    _fctx: &mut FilesContext<F>,
 ) -> Option<(ObjKey, bool)> {
     // First, check if interface is empty
     {
@@ -561,10 +562,11 @@ pub fn assertable_to<F: FileSystem>(
     iface: TypeKey,
     t: TypeKey,
     checker: &mut Checker<F>,
+    fctx: &mut FilesContext<F>,
 ) -> Option<(ObjKey, bool)> {
     let strict = true;
     if !strict && checker.tc_objs.types[t].is_interface(&checker.tc_objs) {
         return None;
     }
-    missing_method(t, iface, false, checker)
+    missing_method(t, iface, false, checker, fctx)
 }

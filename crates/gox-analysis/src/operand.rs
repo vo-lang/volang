@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::check::Checker;
+use crate::check::{Checker, FilesContext};
 use crate::obj::{Builtin, ConstValue, Pos};
 use crate::objects::{TCObjects, TypeKey};
 use crate::typ::{self, BasicType};
@@ -223,6 +223,7 @@ impl Operand {
         t: TypeKey,
         reason: Option<&mut String>,
         checker: &mut Checker<F>,
+        fctx: &mut FilesContext<F>,
     ) -> bool {
         let objs = &checker.tc_objs;
         let u = checker.universe();
@@ -283,7 +284,7 @@ impl Operand {
 
         // Interface implementation check
         if ut_left.try_as_interface().is_some() {
-            if let Some((m, wrong_type)) = crate::lookup::missing_method(self_typ, ut_key_left, true, checker) {
+            if let Some((m, wrong_type)) = crate::lookup::missing_method(self_typ, ut_key_left, true, checker, fctx) {
                 if let Some(re) = reason {
                     let msg = if wrong_type {
                         "wrong type for method"

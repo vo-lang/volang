@@ -1346,7 +1346,7 @@ impl<F: FileSystem> Checker<F> {
         xtype: TypeKey,
         t: TypeKey,
         span: Span,
-        _fctx: &mut FilesContext<F>,
+        fctx: &mut FilesContext<F>,
     ) {
         // Check that xtype is an interface type
         if self.otype(xtype).try_as_interface().is_none() {
@@ -1356,7 +1356,7 @@ impl<F: FileSystem> Checker<F> {
         }
         
         // Check that t can satisfy the interface
-        if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self) {
+        if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self, fctx) {
             let method_name = self.lobj(missing).name();
             if wrong_type {
                 self.error(
