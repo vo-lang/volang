@@ -1,706 +1,571 @@
-//! Field and method lookup for GoX types.
+//! Field and method lookup.
 //!
-//! This module implements the complete lookup algorithm for fields and methods,
-//! including:
-//! - Field lookup in structs with embedded field traversal
-//! - Method lookup with proper method set computation
-//! - Ambiguity detection for multiple embedded fields with same name
-//! - Index sequences for runtime field/method access
-//! - Type assertion checking (assertable_to)
-//!
-//! Based on Go's types/lookup.go implementation.
+//! This module provides functions for looking up fields and methods
+//! in types, including embedded fields.
 
-use crate::types::{
-    FuncType, InterfaceType, Method, MethodSet, NamedTypeInfo, Type,
-};
-use gox_common::Symbol;
+#![allow(dead_code)]
+
+use crate::check::Checker;
+use crate::obj::LangObj;
+use crate::objects::{ObjKey, PackageKey, TCObjects, TypeKey};
+use crate::selection::{Selection, SelectionKind};
+use crate::typ::{self, Type};
+use gox_common::vfs::FileSystem;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Write};
 
-/// Result of looking up a field or method.
-#[derive(Debug, Clone)]
+macro_rules! lookup_on_found {
+    ($indices:ident, $i:ident, $target:expr, $et:ident, $indirect:ident, $found:expr) => {
+        $indices = concat_vec($et.indices.clone(), $i);
+        if $target.is_some() || $et.multiples {
+            return LookupResult::Ambiguous($indices.unwrap());
+        }
+        *$target = Some($found);
+        $indirect = $et.indirect;
+    };
+}
+
+/// The result of lookup_field_or_method.
+#[derive(Debug, PartialEq)]
 pub enum LookupResult {
-    /// Found a field.
-    /// Contains: field type, index path to field, whether access was indirect (through embedded)
-    Field(Type, Vec<usize>, bool),
-
-    /// Found a method.
-    /// Contains: method signature, index path, whether access was indirect
-    Method(FuncType, Vec<usize>, bool),
-
-    /// Ambiguous: multiple fields/methods with the same name at the same depth.
-    /// Contains: the index path where ambiguity was detected
+    /// Valid entry: object key, index path, and whether indirect.
+    Entry(ObjKey, Vec<usize>, bool),
+    /// The index sequence points to an ambiguous entry.
     Ambiguous(Vec<usize>),
-
+    /// A method with pointer receiver was found but receiver was not addressable.
+    BadMethodReceiver,
     /// Nothing found.
     NotFound,
 }
 
-/// Tracks an embedded type during breadth-first search.
-#[derive(Debug, Clone)]
+/// MethodSet represents the method set of a type.
+pub struct MethodSet {
+    list: Vec<Selection>,
+}
+
+impl MethodSet {
+    /// Creates a new method set for the given type.
+    pub fn new(t: &TypeKey, objs: &mut TCObjects) -> MethodSet {
+        let mut mset_base: HashMap<String, MethodCollision> = HashMap::new();
+        let (tkey, is_ptr) = try_deref(*t, objs);
+        
+        // *typ where typ is an interface has no methods
+        if is_ptr && objs.types[tkey].try_as_interface().is_some() {
+            return MethodSet { list: vec![] };
+        }
+
+        let mut current = vec![EmbeddedType::new(tkey, None, is_ptr, false)];
+        let mut seen: Option<HashSet<TypeKey>> = None;
+        
+        while !current.is_empty() {
+            let mut next = vec![];
+            let mut fset: HashMap<String, FieldCollision> = HashMap::new();
+            let mut mset: HashMap<String, MethodCollision> = HashMap::new();
+            
+            for et in current.iter() {
+                let mut tobj = &objs.types[et.typ];
+                if let typ::Type::Named(detail) = tobj {
+                    if seen.is_none() {
+                        seen = Some(HashSet::new());
+                    }
+                    let seen_mut = seen.as_mut().unwrap();
+                    if seen_mut.contains(&et.typ) {
+                        continue;
+                    }
+                    seen_mut.insert(et.typ);
+                    add_to_method_set(
+                        &mut mset,
+                        detail.methods(),
+                        et.indices.as_ref().unwrap_or(&vec![]),
+                        et.indirect,
+                        et.multiples,
+                        objs,
+                    );
+                    tobj = &objs.types[detail.underlying()];
+                }
+                match tobj {
+                    typ::Type::Struct(detail) => {
+                        for (i, f) in detail.fields().iter().enumerate() {
+                            let fobj = &objs.lobjs[*f];
+                            add_to_field_set(&mut fset, f, et.multiples, objs);
+                            if fobj.var_embedded() {
+                                let (tkey, is_ptr) = try_deref(fobj.typ().unwrap(), objs);
+                                next.push(EmbeddedType::new(
+                                    tkey,
+                                    concat_vec(et.indices.clone(), i),
+                                    et.indirect || is_ptr,
+                                    et.multiples,
+                                ))
+                            }
+                        }
+                    }
+                    typ::Type::Interface(detail) => {
+                        let all_methods = detail.all_methods();
+                        if let Some(ref all) = *all_methods {
+                            add_to_method_set(
+                                &mut mset,
+                                all,
+                                et.indices.as_ref().unwrap_or(&vec![]),
+                                true,
+                                et.multiples,
+                                objs,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            
+            for (k, m) in mset.iter() {
+                if !mset_base.contains_key(k) {
+                    mset_base.insert(
+                        k.clone(),
+                        if fset.contains_key(k) {
+                            MethodCollision::Collision
+                        } else {
+                            m.clone()
+                        },
+                    );
+                }
+            }
+            
+            for (k, f) in fset.iter() {
+                if *f == FieldCollision::Collision && !mset_base.contains_key(k) {
+                    mset_base.insert(k.clone(), MethodCollision::Collision);
+                }
+            }
+            
+            current = consolidate_multiples(next, objs);
+        }
+        
+        let mut list: Vec<Selection> = mset_base
+            .into_iter()
+            .filter_map(|(_, m)| match m {
+                MethodCollision::Method(sel) => Some(sel),
+                MethodCollision::Collision => None,
+            })
+            .collect();
+        list.sort_by(|a, b| a.id().cmp(b.id()));
+        MethodSet { list }
+    }
+
+    pub fn list(&self) -> &[Selection] {
+        &self.list
+    }
+
+    pub fn lookup(&self, pkgkey: &PackageKey, name: &str, objs: &TCObjects) -> Option<&Selection> {
+        if self.list.is_empty() {
+            return None;
+        }
+        let pkg = &objs.pkgs[*pkgkey];
+        let id = crate::obj::get_id(Some(pkg), name).to_string();
+        self.list
+            .binary_search_by_key(&id.as_str(), |x| x.id())
+            .ok()
+            .map(|i| &self.list[i])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn fmt(&self, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -> fmt::Result {
+        f.write_str("MethodSet {")?;
+        for sel in self.list.iter() {
+            sel.fmt(f, objs)?;
+        }
+        f.write_char('}')
+    }
+}
+
+/// Looks up a field or method with given package and name in type T.
+pub fn lookup_field_or_method(
+    tkey: TypeKey,
+    addressable: bool,
+    pkg: Option<PackageKey>,
+    name: &str,
+    objs: &TCObjects,
+) -> LookupResult {
+    if let Some(named) = objs.types[tkey].try_as_named() {
+        let pkey = named.underlying();
+        if objs.types[pkey].try_as_pointer().is_some() {
+            let re = lookup_field_or_method_impl(pkey, false, pkg, name, objs);
+            if let LookupResult::Entry(okey, _, _) = &re {
+                if objs.lobjs[*okey].entity_type().is_func() {
+                    return LookupResult::NotFound;
+                }
+            }
+            return re;
+        }
+    }
+    lookup_field_or_method_impl(tkey, addressable, pkg, name, objs)
+}
+
+fn lookup_field_or_method_impl(
+    tkey: TypeKey,
+    addressable: bool,
+    pkg: Option<PackageKey>,
+    name: &str,
+    objs: &TCObjects,
+) -> LookupResult {
+    if name == "_" {
+        return LookupResult::NotFound;
+    }
+    let (tkey, is_ptr) = try_deref(tkey, objs);
+    if is_ptr && typ::is_interface(tkey, objs) {
+        return LookupResult::NotFound;
+    }
+    
+    let mut current = vec![EmbeddedType::new(tkey, None, is_ptr, false)];
+    let mut indices = None;
+    let mut target = None;
+    let mut indirect = false;
+    let mut seen: Option<HashSet<TypeKey>> = None;
+    
+    while !current.is_empty() {
+        let mut next = vec![];
+        for et in current.iter() {
+            let mut tobj = &objs.types[et.typ];
+            if let typ::Type::Named(detail) = tobj {
+                if seen.is_none() {
+                    seen = Some(HashSet::new());
+                }
+                let seen_mut = seen.as_mut().unwrap();
+                if seen_mut.contains(&et.typ) {
+                    continue;
+                }
+                seen_mut.insert(et.typ);
+                if let Some((i, &okey)) = lookup_method(detail.methods(), pkg, name, objs) {
+                    lookup_on_found!(indices, i, &mut target, et, indirect, okey);
+                    continue;
+                }
+                tobj = &objs.types[detail.underlying()];
+            }
+            match tobj {
+                typ::Type::Struct(detail) => {
+                    for (i, &f) in detail.fields().iter().enumerate() {
+                        let fobj = &objs.lobjs[f];
+                        if fobj.same_id(pkg, name, objs) {
+                            lookup_on_found!(indices, i, &mut target, et, indirect, f);
+                            continue;
+                        }
+                        if target.is_none() && fobj.var_embedded() {
+                            let (tkey, is_ptr) = try_deref(fobj.typ().unwrap(), objs);
+                            match &objs.types[tkey] {
+                                typ::Type::Named(_)
+                                | typ::Type::Struct(_)
+                                | typ::Type::Interface(_) => next.push(EmbeddedType::new(
+                                    tkey,
+                                    concat_vec(et.indices.clone(), i),
+                                    et.indirect || is_ptr,
+                                    et.multiples,
+                                )),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                typ::Type::Interface(detail) => {
+                    let all_methods = detail.all_methods();
+                    if let Some(ref all) = *all_methods {
+                        if let Some((i, &okey)) = lookup_method(all, pkg, name, objs) {
+                            lookup_on_found!(indices, i, &mut target, et, indirect, okey);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(okey) = target {
+            let lobj = &objs.lobjs[okey];
+            if lobj.entity_type().is_func() && ptr_recv(lobj, objs) && !indirect && !addressable {
+                return LookupResult::BadMethodReceiver;
+            }
+            return LookupResult::Entry(okey, indices.unwrap(), indirect);
+        }
+        current = consolidate_multiples(next, objs);
+    }
+    LookupResult::NotFound
+}
+
+/// Try to dereference a pointer type, returns (base_type, was_pointer).
+pub fn try_deref(t: TypeKey, objs: &TCObjects) -> (TypeKey, bool) {
+    match &objs.types[t] {
+        Type::Pointer(detail) => (detail.base(), true),
+        _ => (t, false),
+    }
+}
+
+/// Dereference if pointer to struct, otherwise return original type.
+pub fn deref_struct_ptr(t: TypeKey, objs: &TCObjects) -> TypeKey {
+    let ut = typ::underlying_type(t, objs);
+    match &objs.types[ut] {
+        Type::Pointer(detail) => {
+            let but = typ::underlying_type(detail.base(), objs);
+            match &objs.types[but] {
+                Type::Struct(_) => but,
+                _ => t,
+            }
+        }
+        _ => t,
+    }
+}
+
+/// Returns the index of the field with matching package and name.
+pub fn field_index(
+    fields: &[ObjKey],
+    pkg: Option<PackageKey>,
+    name: &str,
+    objs: &TCObjects,
+) -> Option<usize> {
+    if name != "_" {
+        fields
+            .iter()
+            .enumerate()
+            .find(|(_, x)| objs.lobjs[**x].same_id(pkg, name, objs))
+            .map(|(i, _)| i)
+    } else {
+        None
+    }
+}
+
+/// Returns the index and key of the method with matching package and name.
+pub fn lookup_method<'a>(
+    methods: &'a [ObjKey],
+    pkg: Option<PackageKey>,
+    name: &str,
+    objs: &TCObjects,
+) -> Option<(usize, &'a ObjKey)> {
+    if name != "_" {
+        methods
+            .iter()
+            .enumerate()
+            .find(|(_, x)| objs.lobjs[**x].same_id(pkg, name, objs))
+    } else {
+        None
+    }
+}
+
+/// ptr_recv returns true if the receiver is of the form *T.
+fn ptr_recv(lo: &LangObj, objs: &TCObjects) -> bool {
+    if lo.typ().is_none() {
+        return false;
+    }
+    if let Some(sig) = objs.types[lo.typ().unwrap()].try_as_signature() {
+        if let Some(re) = sig.recv() {
+            let t = objs.lobjs[*re].typ().unwrap();
+            let (_, is_ptr) = try_deref(t, objs);
+            return is_ptr;
+        }
+    }
+    lo.entity_type().func_has_ptr_recv()
+}
+
+fn concat_vec(list: Option<Vec<usize>>, i: usize) -> Option<Vec<usize>> {
+    match list {
+        None => Some(vec![i]),
+        Some(mut v) => {
+            v.push(i);
+            Some(v)
+        }
+    }
+}
+
+#[derive(Debug)]
 struct EmbeddedType {
-    /// The type being searched.
-    ty: Type,
-    /// Index path to reach this embedded type from the root.
-    indices: Vec<usize>,
-    /// Whether we went through an indirect (embedded) access.
+    typ: TypeKey,
+    indices: Option<Vec<usize>>,
     indirect: bool,
-    /// Whether this type appeared multiple times at this depth.
     multiples: bool,
 }
 
 impl EmbeddedType {
-    fn new(ty: Type, indices: Vec<usize>, indirect: bool, multiples: bool) -> Self {
-        Self { ty, indices, indirect, multiples }
+    fn new(typ: TypeKey, indices: Option<Vec<usize>>, indirect: bool, multiples: bool) -> Self {
+        EmbeddedType { typ, indices, indirect, multiples }
     }
 }
 
-/// Represents either a found method or a collision during method set computation.
-#[derive(Debug, Clone)]
-enum MethodOrCollision {
-    Method { sig: FuncType, is_pointer_receiver: bool },
-    Collision,
-}
-
-/// Complete lookup implementation for fields and methods.
-pub struct Lookup<'a> {
-    named_types: &'a [NamedTypeInfo],
-}
-
-impl<'a> Lookup<'a> {
-    /// Creates a new lookup context.
-    pub fn new(named_types: &'a [NamedTypeInfo]) -> Self {
-        Self { named_types }
-    }
-
-    /// Gets the underlying type for a type, resolving Named types.
-    pub fn underlying(&self, ty: &Type) -> Type {
-        match ty {
-            Type::Named(id) => {
-                let idx = id.0 as usize;
-                if idx < self.named_types.len() {
-                    self.named_types[idx].underlying.clone()
-                } else {
-                    Type::Invalid
-                }
-            }
-            _ => ty.clone(),
-        }
-    }
-
-    /// Looks up a field or method by name in a type.
-    ///
-    /// Returns:
-    /// - `LookupResult::Field` if a field was found
-    /// - `LookupResult::Method` if a method was found
-    /// - `LookupResult::Ambiguous` if multiple fields/methods with same name exist at same depth
-    /// - `LookupResult::NotFound` if nothing was found
-    pub fn lookup_field_or_method(&self, ty: &Type, name: Symbol) -> LookupResult {
-        // Start with the type as single entry at shallowest depth
-        let mut current = vec![EmbeddedType::new(ty.clone(), vec![], false, false)];
-
-        // Track found target
-        let mut target: Option<LookupResult> = None;
-
-        // Track seen named types to avoid infinite recursion
-        let mut seen: HashSet<u32> = HashSet::new();
-
-        while !current.is_empty() {
-            // Embedded types found at current depth
-            let mut next: Vec<EmbeddedType> = vec![];
-
-            for et in &current {
-                let mut search_ty = et.ty.clone();
-
-                // First, dereference pointer types
-                if let Type::Pointer(inner) = &search_ty {
-                    search_ty = inner.as_ref().clone();
-                }
-
-                // Handle Named types (either directly or after pointer deref)
-                if let Type::Named(id) = &search_ty {
-                    let idx = id.0 as usize;
-                    if seen.contains(&(idx as u32)) {
-                        // Already seen at shallower depth, skip
-                        continue;
-                    }
-                    seen.insert(idx as u32);
-
-                    if idx < self.named_types.len() {
-                        let info = &self.named_types[idx];
-                        
-
-                        // Look for method on this named type
-                        if let Some((i, method)) = info.methods.iter().enumerate()
-                            .find(|(_, m)| m.name == name)
-                        {
-                            let mut indices = et.indices.clone();
-                            indices.push(i);
-
-                            if et.multiples || target.is_some() {
-                                return LookupResult::Ambiguous(indices);
-                            }
-                            target = Some(LookupResult::Method(
-                                method.sig.clone(),
-                                indices,
-                                et.indirect,
-                            ));
-                            continue; // Can't have matching field
-                        }
-
-                        // Continue with underlying type
-                        search_ty = info.underlying.clone();
-                    }
-                }
-
-                // For pointer types (in underlying), dereference again
-                let deref_ty = search_ty.deref_if_pointer();
-                
-                // Search in the underlying type
-                match deref_ty {
-                    Type::Struct(s) => {
-                        for (i, field) in s.fields.iter().enumerate() {
-                            // Check if field name matches
-                            if field.name == Some(name) {
-                                let mut indices = et.indices.clone();
-                                indices.push(i);
-
-                                if et.multiples || target.is_some() {
-                                    return LookupResult::Ambiguous(indices);
-                                }
-                                target = Some(LookupResult::Field(
-                                    field.ty.clone(),
-                                    indices,
-                                    et.indirect,
-                                ));
-                                continue;
-                            }
-
-                            // Collect embedded fields for next depth search
-                            // Only if we haven't found a target yet
-                            if target.is_none() && field.embedded {
-                                let embedded_ty = &field.ty;
-                                // Only traverse Named, Struct, Pointer, Interface types
-                                match embedded_ty {
-                                    Type::Named(_) | Type::Struct(_) | Type::Pointer(_) | Type::Interface(_) => {
-                                        let mut indices = et.indices.clone();
-                                        indices.push(i);
-                                        next.push(EmbeddedType::new(
-                                            embedded_ty.clone(),
-                                            indices,
-                                            true, // indirect through embedded
-                                            et.multiples,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    Type::Interface(iface) => {
-                        // Get full method set including embedded interfaces
-                        let full_methods = self.interface_method_set(iface);
-                        
-                        // Look for method in interface
-                        if let Some(method) = full_methods.get(name) {
-                            let indices = et.indices.clone();
-
-                            if et.multiples || target.is_some() {
-                                return LookupResult::Ambiguous(indices);
-                            }
-                            target = Some(LookupResult::Method(
-                                method.sig.clone(),
-                                indices,
-                                et.indirect,
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // If we found a target, return it
-            if let Some(result) = target {
-                return result;
-            }
-
-            // Consolidate multiples for next depth
-            current = consolidate_multiples(next);
-        }
-
-        LookupResult::NotFound
-    }
-
-    /// Computes the complete method set for a type.
-    ///
-    /// This implements Go's method set rules:
-    /// - For value type T: only value receiver methods (is_pointer_receiver = false)
-    /// - For pointer type *T: both value and pointer receiver methods
-    ///
-    /// This includes:
-    /// - Methods declared directly on the type (for named types)
-    /// - Methods from embedded fields (promoted methods)
-    /// - Methods from embedded interfaces
-    ///
-    /// Handles ambiguity by excluding methods that appear multiple times at the same depth.
-    pub fn method_set(&self, ty: &Type) -> MethodSet {
-        // Check if this is a pointer type - if so, include pointer receiver methods
-        let include_pointer_receivers = matches!(ty, Type::Pointer(_));
-        self.method_set_impl(ty, include_pointer_receivers)
-    }
-
-    /// Internal implementation of method_set with explicit pointer receiver control.
-    fn method_set_impl(&self, ty: &Type, include_pointer_receivers: bool) -> MethodSet {
-        let mut result: HashMap<Symbol, MethodOrCollision> = HashMap::new();
-
-        // Start with type at depth 0
-        let mut current = vec![EmbeddedType::new(ty.clone(), vec![], false, false)];
-        let mut seen: HashSet<u32> = HashSet::new();
-
-        while !current.is_empty() {
-            let mut next: Vec<EmbeddedType> = vec![];
-            let mut depth_methods: HashMap<Symbol, MethodOrCollision> = HashMap::new();
-            let mut depth_fields: HashMap<Symbol, bool> = HashMap::new(); // name -> multiples
-
-            for et in &current {
-                let mut search_ty = et.ty.clone();
-
-                // First, dereference pointer types
-                if let Type::Pointer(inner) = &search_ty {
-                    search_ty = inner.as_ref().clone();
-                }
-
-                // Handle Named types (either directly or after pointer deref)
-                if let Type::Named(id) = &search_ty {
-                    let idx = id.0 as usize;
-                    if seen.contains(&(idx as u32)) {
-                        continue;
-                    }
-                    seen.insert(idx as u32);
-
-                    if idx < self.named_types.len() {
-                        let info = &self.named_types[idx];
-
-                        // Add methods from this named type
-                        // Only include pointer receiver methods if include_pointer_receivers is true
-                        for method in &info.methods {
-                            if method.is_pointer_receiver && !include_pointer_receivers {
-                                // Skip pointer receiver methods for value types
-                                continue;
-                            }
-                            add_to_method_set(
-                                &mut depth_methods,
-                                method,
-                                et.multiples,
-                            );
-                        }
-
-                        search_ty = info.underlying.clone();
-                    }
-                }
-
-                // For pointer types, dereference to get the underlying struct
-                let deref_ty = search_ty.deref_if_pointer();
-                
-                match deref_ty {
-                    Type::Struct(s) => {
-                        for (i, field) in s.fields.iter().enumerate() {
-                            // Track field names for collision with methods
-                            if let Some(name) = field.name {
-                                let entry = depth_fields.entry(name).or_insert(false);
-                                if et.multiples {
-                                    *entry = true;
-                                }
-                            }
-
-                            // Collect embedded fields for next depth
-                            if field.embedded {
-                                match &field.ty {
-                                    Type::Named(_) | Type::Struct(_) | Type::Pointer(_) | Type::Interface(_) => {
-                                        let mut indices = et.indices.clone();
-                                        indices.push(i);
-                                        next.push(EmbeddedType::new(
-                                            field.ty.clone(),
-                                            indices,
-                                            true,
-                                            et.multiples,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    Type::Interface(iface) => {
-                        for method in &iface.methods {
-                            add_to_method_set(
-                                &mut depth_methods,
-                                method,
-                                et.multiples,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // Merge depth_methods into result, but only if not already present
-            // (shallower depth shadows deeper)
-            for (name, entry) in depth_methods {
-                result.entry(name).or_insert_with(|| {
-                    // Check for field collision
-                    if depth_fields.contains_key(&name) {
-                        MethodOrCollision::Collision
-                    } else {
-                        entry
-                    }
-                });
-            }
-
-            // Mark field collisions
-            for (name, is_multiple) in &depth_fields {
-                if *is_multiple && !result.contains_key(name) {
-                    result.insert(*name, MethodOrCollision::Collision);
-                }
-            }
-
-            current = consolidate_multiples(next);
-        }
-
-        // Convert to MethodSet, excluding collisions
-        let methods: Vec<Method> = result
-            .into_iter()
-            .filter_map(|(name, entry)| match entry {
-                MethodOrCollision::Method { sig, is_pointer_receiver } => Some(Method { name, sig, is_pointer_receiver }),
-                MethodOrCollision::Collision => None,
-            })
-            .collect();
-
-        MethodSet::from_methods(methods)
-    }
-
-    /// Checks if a value of interface type `iface` can be asserted to have type `target`.
-    ///
-    /// Returns `None` if the assertion is valid.
-    /// Returns `Some((method_name, wrong_type))` if invalid:
-    /// - `wrong_type = false`: method is missing
-    /// - `wrong_type = true`: method exists but has wrong signature
-    pub fn assertable_to(
-        &self,
-        iface: &InterfaceType,
-        target: &Type,
-    ) -> Option<(Symbol, bool)> {
-        // If target is an interface, no static check needed
-        // (dynamic check at runtime)
-        if matches!(self.underlying(target), Type::Interface(_)) {
-            return None;
-        }
-
-        // Check if target implements all methods of iface
-        self.missing_method(target, iface)
-    }
-
-    /// Checks if type `ty` implements interface `iface`.
-    ///
-    /// Returns `None` if `ty` implements `iface`.
-    /// Returns `Some((method_name, wrong_type))` if not:
-    /// - `wrong_type = false`: method is missing
-    /// - `wrong_type = true`: method exists but has wrong signature
-    pub fn missing_method(
-        &self,
-        ty: &Type,
-        iface: &InterfaceType,
-    ) -> Option<(Symbol, bool)> {
-        if iface.methods.is_empty() && iface.embeds.is_empty() {
-            return None; // Empty interface is always satisfied
-        }
-
-        // Get all methods required by the interface
-        let iface_methods = self.interface_method_set(iface);
-
-        // Check if ty is also an interface
-        if let Type::Interface(ty_iface) = self.underlying(ty) {
-            // Interface to interface: check method compatibility
-            let ty_methods = self.interface_method_set(&ty_iface);
-            for req in &iface_methods.methods {
-                if let Some(found) = ty_methods.get(req.name) {
-                    if found.sig != req.sig {
-                        return Some((req.name, true)); // Wrong signature
-                    }
-                }
-                // Note: for interface-to-interface, missing methods are OK
-                // (dynamic check at runtime)
-            }
-            return None;
-        }
-
-        // Concrete type: must have all methods
-        let ty_methods = self.method_set(ty);
-        for req in &iface_methods.methods {
-            match ty_methods.get(req.name) {
-                Some(found) if found.sig == req.sig => {
-                    // OK
-                }
-                Some(_) => {
-                    return Some((req.name, true)); // Wrong signature
-                }
-                None => {
-                    return Some((req.name, false)); // Missing
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Computes the full method set for an interface, expanding embedded interfaces.
-    pub fn interface_method_set(&self, iface: &InterfaceType) -> MethodSet {
-        let mut methods = iface.methods.clone();
-
-        // Expand embedded interfaces
-        for embed_name in &iface.embeds {
-            if let Some(info) = self.named_types.iter().find(|i| i.name == *embed_name) {
-                if let Type::Interface(embedded_iface) = &info.underlying {
-                    let embedded_set = self.interface_method_set(embedded_iface);
-                    for m in embedded_set.methods {
-                        if !methods.iter().any(|existing| existing.name == m.name) {
-                            methods.push(m);
-                        }
-                    }
-                }
-            }
-        }
-
-        MethodSet::from_methods(methods)
-    }
-}
-
-/// Adds a method to the method set, handling collisions.
-fn add_to_method_set(
-    set: &mut HashMap<Symbol, MethodOrCollision>,
-    method: &Method,
-    multiples: bool,
-) {
-    if multiples {
-        set.insert(method.name, MethodOrCollision::Collision);
-        return;
-    }
-
-    match set.entry(method.name) {
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            e.insert(MethodOrCollision::Collision);
-        }
-        std::collections::hash_map::Entry::Vacant(e) => {
-            e.insert(MethodOrCollision::Method { 
-                sig: method.sig.clone(),
-                is_pointer_receiver: method.is_pointer_receiver,
-            });
-        }
-    }
-}
-
-/// Consolidates multiple embedded types with the same underlying type.
-fn consolidate_multiples(list: Vec<EmbeddedType>) -> Vec<EmbeddedType> {
+fn consolidate_multiples(list: Vec<EmbeddedType>, objs: &TCObjects) -> Vec<EmbeddedType> {
+    let mut result = Vec::with_capacity(list.len());
     if list.is_empty() {
-        return vec![];
+        return result;
     }
-
-    let mut result: Vec<EmbeddedType> = Vec::with_capacity(list.len());
-    let mut seen: HashMap<u32, usize> = HashMap::new(); // type_id -> index in result
-
-    for et in list {
-        // Get a unique ID for the type
-        let type_id = match &et.ty {
-            Type::Named(id) => id.0,
-            // For non-named types, use a hash or just add them
-            _ => {
-                result.push(et);
-                continue;
-            }
-        };
-
-        if let Some(&idx) = seen.get(&type_id) {
-            // Mark as multiples
-            result[idx].multiples = true;
+    let lookup = |map: &HashMap<TypeKey, usize>, typ: TypeKey| {
+        if let Some(i) = map.get(&typ) {
+            Some(*i)
         } else {
-            seen.insert(type_id, result.len());
+            map.iter()
+                .find(|(k, _)| typ::identical(**k, typ, objs))
+                .map(|(_, i)| *i)
+        }
+    };
+    let mut map = HashMap::new();
+    for et in list.into_iter() {
+        if let Some(i) = lookup(&map, et.typ) {
+            result[i].multiples = true;
+        } else {
+            map.insert(et.typ, result.len());
             result.push(et);
         }
     }
-
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{BasicType, Field, StructType, NamedTypeId};
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FieldCollision {
+    Var(ObjKey),
+    Collision,
+}
 
-    fn make_symbol(id: u32) -> Symbol {
-        unsafe { std::mem::transmute(id) }
+fn add_to_field_set(
+    set: &mut HashMap<String, FieldCollision>,
+    f: &ObjKey,
+    multiples: bool,
+    objs: &TCObjects,
+) {
+    let key = objs.lobjs[*f].id(objs);
+    if !multiples {
+        if set.insert(key.to_string(), FieldCollision::Var(*f)).is_none() {
+            return;
+        }
     }
+    set.insert(key.to_string(), FieldCollision::Collision);
+}
 
-    #[test]
-    fn test_lookup_direct_field() {
-        let named_types = vec![];
-        let lookup = Lookup::new(&named_types);
+#[derive(Clone, Debug)]
+enum MethodCollision {
+    Method(Selection),
+    Collision,
+}
 
-        let struct_ty = Type::Struct(StructType {
-            fields: vec![
-                Field {
-                    name: Some(make_symbol(1)), // "x"
-                    ty: Type::Basic(BasicType::Int),
-                    embedded: false,
-                    tag: None,
-                },
-            ],
-        });
-
-        match lookup.lookup_field_or_method(&struct_ty, make_symbol(1)) {
-            LookupResult::Field(ty, indices, indirect) => {
-                assert_eq!(ty, Type::Basic(BasicType::Int));
-                assert_eq!(indices, vec![0]);
-                assert!(!indirect);
+fn add_to_method_set(
+    set: &mut HashMap<String, MethodCollision>,
+    list: &[ObjKey],
+    indices: &[usize],
+    indirect: bool,
+    multiples: bool,
+    objs: &TCObjects,
+) {
+    for (i, okey) in list.iter().enumerate() {
+        let mobj = &objs.lobjs[*okey];
+        let key = mobj.id(objs).to_string();
+        if !multiples {
+            if !set.contains_key(&key) && (indirect || !ptr_recv(mobj, objs)) {
+                set.insert(
+                    key,
+                    MethodCollision::Method(Selection::new(
+                        SelectionKind::MethodVal,
+                        None,
+                        *okey,
+                        concat_vec(Some(indices.to_vec()), i).unwrap(),
+                        indirect,
+                        objs,
+                    )),
+                );
+                continue;
             }
-            _ => panic!("Expected Field result"),
+        }
+        set.insert(key, MethodCollision::Collision);
+    }
+}
+
+/// missing_method returns None if 't' implements 'intf', otherwise it
+/// returns a missing method required by intf and whether it is missing or
+/// just has the wrong type.
+///
+/// For non-interface types 't', or if static is set, 't' implements
+/// 'intf' if all methods of 'intf' are present in 't'. Otherwise ('t'
+/// is an interface and static is not set), missing_method only checks
+/// that methods of 'intf' which are also present in 't' have matching
+/// types (e.g., for a type assertion x.(T) where x is of interface type 't').
+pub fn missing_method<F: FileSystem>(
+    t: TypeKey,
+    intf: TypeKey,
+    static_: bool,
+    checker: &mut Checker<F>,
+) -> Option<(ObjKey, bool)> {
+    // First, check if interface is empty
+    {
+        let ival = checker.tc_objs.types[intf].try_as_interface().unwrap();
+        if ival.is_empty() {
+            return None;
         }
     }
 
-    #[test]
-    fn test_lookup_not_found() {
-        let named_types = vec![];
-        let lookup = Lookup::new(&named_types);
+    // Check if t is an interface type
+    let is_t_interface = {
+        let tval = checker.tc_objs.types[t].underlying_val(&checker.tc_objs);
+        tval.try_as_interface().is_some()
+    };
 
-        let struct_ty = Type::Struct(StructType {
-            fields: vec![],
-        });
-
-        match lookup.lookup_field_or_method(&struct_ty, make_symbol(1)) {
-            LookupResult::NotFound => {}
-            _ => panic!("Expected NotFound"),
-        }
-    }
-
-    #[test]
-    fn test_method_set_from_named_type() {
-        let method = Method {
-            name: make_symbol(1),
-            sig: FuncType {
-                params: vec![],
-                results: vec![Type::Basic(BasicType::Int)],
-                variadic: false,
-            },
-            is_pointer_receiver: false,
+    if is_t_interface {
+        // t is an interface - compare method sets directly
+        let t_methods: Vec<ObjKey> = {
+            let tval = checker.tc_objs.types[t].underlying_val(&checker.tc_objs);
+            let detail = tval.try_as_interface().unwrap();
+            detail.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
+        };
+        let i_methods: Vec<ObjKey> = {
+            let ival = checker.tc_objs.types[intf].try_as_interface().unwrap();
+            ival.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
         };
 
-        let named_types = vec![NamedTypeInfo {
-            name: make_symbol(100),
-            underlying: Type::Struct(StructType { fields: vec![] }),
-            methods: vec![method.clone()],
-        }];
-
-        let lookup = Lookup::new(&named_types);
-        let ty = Type::Named(NamedTypeId(0));
-
-        // Value type should have value receiver methods
-        let set = lookup.method_set(&ty);
-        assert_eq!(set.methods.len(), 1);
-    }
-
-    #[test]
-    fn test_method_set_pointer_receiver_rules() {
-        // Create a value receiver method
-        let value_method = Method {
-            name: make_symbol(1), // "Sum"
-            sig: FuncType {
-                params: vec![],
-                results: vec![Type::Basic(BasicType::Int)],
-                variadic: false,
-            },
-            is_pointer_receiver: false,
-        };
-
-        // Create a pointer receiver method
-        let pointer_method = Method {
-            name: make_symbol(2), // "Move"
-            sig: FuncType {
-                params: vec![Type::Basic(BasicType::Int), Type::Basic(BasicType::Int)],
-                results: vec![],
-                variadic: false,
-            },
-            is_pointer_receiver: true,
-        };
-
-        let named_types = vec![NamedTypeInfo {
-            name: make_symbol(100), // "Point"
-            underlying: Type::Struct(StructType { fields: vec![] }),
-            methods: vec![value_method.clone(), pointer_method.clone()],
-        }];
-
-        let lookup = Lookup::new(&named_types);
-
-        // Test 1: Value type T should only have value receiver methods
-        let value_ty = Type::Named(NamedTypeId(0));
-        let value_set = lookup.method_set(&value_ty);
-        assert_eq!(value_set.methods.len(), 1, "Value type should only have 1 method (value receiver)");
-        assert!(!value_set.methods[0].is_pointer_receiver, "Method should be value receiver");
-
-        // Test 2: Pointer type *T should have both value and pointer receiver methods
-        let pointer_ty = Type::Pointer(Box::new(Type::Named(NamedTypeId(0))));
-        let pointer_set = lookup.method_set(&pointer_ty);
-        assert_eq!(pointer_set.methods.len(), 2, "Pointer type should have 2 methods (both receivers)");
-    }
-
-    #[test]
-    fn test_lookup_direct_field_on_pointer() {
-        let named_types = vec![];
-        let lookup = Lookup::new(&named_types);
-
-        // Create a pointer to struct
-        let struct_ty = Type::Struct(StructType {
-            fields: vec![
-                Field {
-                    name: Some(make_symbol(1)), // "x"
-                    ty: Type::Basic(BasicType::Int),
-                    embedded: false,
-                    tag: None,
-                },
-            ],
-        });
-        let pointer_ty = Type::Pointer(Box::new(struct_ty));
-
-        // Should be able to access field through pointer (auto-deref)
-        match lookup.lookup_field_or_method(&pointer_ty, make_symbol(1)) {
-            LookupResult::Field(ty, indices, _) => {
-                assert_eq!(ty, Type::Basic(BasicType::Int));
-                assert_eq!(indices, vec![0]);
+        for fkey in i_methods {
+            let (pkg, name, x_type) = {
+                let fval = &checker.tc_objs.lobjs[fkey];
+                (fval.pkg(), fval.name().to_string(), fval.typ())
+            };
+            if let Some((_i, &f)) = lookup_method(&t_methods, pkg, &name, &checker.tc_objs) {
+                let y_type = checker.tc_objs.lobjs[f].typ();
+                if !typ::identical_o(x_type, y_type, &checker.tc_objs) {
+                    return Some((fkey, true)); // wrong type
+                }
+            } else if static_ {
+                return Some((fkey, false)); // missing
             }
-            _ => panic!("Expected Field result for pointer field access"),
+        }
+        return None;
+    }
+
+    // A concrete type implements 'intf' if it implements all methods of 'intf'.
+    let all_methods: Vec<ObjKey> = {
+        let ival = checker.tc_objs.types[intf].try_as_interface().unwrap();
+        ival.all_methods().as_ref().map(|v| v.clone()).unwrap_or_default()
+    };
+
+    for fkey in all_methods {
+        let (pkg, name, x_type) = {
+            let fval = &checker.tc_objs.lobjs[fkey];
+            (fval.pkg(), fval.name().to_string(), fval.typ())
+        };
+        match lookup_field_or_method(t, false, pkg, &name, &checker.tc_objs) {
+            LookupResult::Entry(okey, _, _) => {
+                if !checker.tc_objs.lobjs[okey].entity_type().is_func() {
+                    return Some((fkey, false)); // not a method
+                }
+                // Ensure method signature is fully set up
+                checker.obj_decl(okey);
+                let y_type = checker.tc_objs.lobjs[okey].typ();
+                if !typ::identical_o(x_type, y_type, &checker.tc_objs) {
+                    return Some((fkey, true)); // wrong type
+                }
+            }
+            _ => return Some((fkey, false)), // missing
         }
     }
+    None
+}
 
-    #[test]
-    fn test_method_set_from_named_type_old() {
-        let method = Method {
-            name: make_symbol(1),
-            sig: FuncType {
-                params: vec![],
-                results: vec![Type::Basic(BasicType::Int)],
-                variadic: false,
-            },
-            is_pointer_receiver: false,
-        };
-
-        let named_types = vec![NamedTypeInfo {
-            name: make_symbol(100),
-            underlying: Type::Struct(StructType { fields: vec![] }),
-            methods: vec![method.clone()],
-        }];
-
-        let lookup = Lookup::new(&named_types);
-        let ty = Type::Named(NamedTypeId(0));
-
-        let method_set = lookup.method_set(&ty);
-        assert_eq!(method_set.len(), 1);
-        assert!(method_set.get(make_symbol(1)).is_some());
+/// assertable_to reports whether a value of type iface can be asserted to have type t.
+/// It returns None as affirmative answer. See docs for missing_method for more info.
+pub fn assertable_to<F: FileSystem>(
+    iface: TypeKey,
+    t: TypeKey,
+    checker: &mut Checker<F>,
+) -> Option<(ObjKey, bool)> {
+    let strict = true;
+    if !strict && checker.tc_objs.types[t].is_interface(&checker.tc_objs) {
+        return None;
     }
+    missing_method(t, iface, false, checker)
 }

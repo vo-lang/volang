@@ -761,6 +761,8 @@ pub struct FloatLit {
 pub struct RuneLit {
     /// The raw text of the literal (including quotes).
     pub raw: Symbol,
+    /// The parsed character value.
+    pub value: char,
 }
 
 /// A string literal.
@@ -768,6 +770,8 @@ pub struct RuneLit {
 pub struct StringLit {
     /// The raw text of the literal (including quotes).
     pub raw: Symbol,
+    /// The parsed string value.
+    pub value: String,
     /// Whether this is a raw string literal.
     pub is_raw: bool,
 }

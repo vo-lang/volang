@@ -94,19 +94,23 @@ impl<'a> Parser<'a> {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
-                Ok(self.make_expr(ExprKind::RuneLit(RuneLit { raw }), token.span))
+                let value = self.parse_rune_value(text);
+                Ok(self.make_expr(ExprKind::RuneLit(RuneLit { raw, value }), token.span))
             }
             TokenKind::StringLit => {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
-                Ok(self.make_expr(ExprKind::StringLit(StringLit { raw, is_raw: false }), token.span))
+                let value = super::parse_string_value(text);
+                Ok(self.make_expr(ExprKind::StringLit(StringLit { raw, value, is_raw: false }), token.span))
             }
             TokenKind::RawStringLit => {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
-                Ok(self.make_expr(ExprKind::StringLit(StringLit { raw, is_raw: true }), token.span))
+                // Raw strings: just strip the backticks
+                let value = text[1..text.len()-1].to_string();
+                Ok(self.make_expr(ExprKind::StringLit(StringLit { raw, value, is_raw: true }), token.span))
             }
             TokenKind::LParen => {
                 self.advance();

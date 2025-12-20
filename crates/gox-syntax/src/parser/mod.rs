@@ -430,16 +430,25 @@ impl<'a> Parser<'a> {
             let token = self.advance();
             let text = &self.source[self.span_to_local_range(token.span)];
             let raw = self.interner.intern(text);
-            Ok(StringLit { raw, is_raw: false })
+            // Parse the string value (strip quotes and process escapes)
+            let value = parse_string_value(text);
+            Ok(StringLit { raw, value, is_raw: false })
         } else if self.at(TokenKind::RawStringLit) {
             let token = self.advance();
             let text = &self.source[self.span_to_local_range(token.span)];
             let raw = self.interner.intern(text);
-            Ok(StringLit { raw, is_raw: true })
+            // Raw strings: just strip the backticks
+            let value = text[1..text.len()-1].to_string();
+            Ok(StringLit { raw, value, is_raw: true })
         } else {
             self.error_expected("string literal");
             Err(())
         }
+    }
+
+    /// Parse a rune literal and return the character value.
+    pub(crate) fn parse_rune_value(&self, text: &str) -> char {
+        parse_rune_value(text)
     }
 
     /// Parses a block: `{ stmt* }`
@@ -460,6 +469,105 @@ impl<'a> Parser<'a> {
             stmts,
             span: Span::new(start, end_token.span.end),
         })
+    }
+}
+
+/// Parse a string literal value, processing escape sequences.
+/// The input includes the surrounding quotes.
+fn parse_string_value(text: &str) -> String {
+    let inner = &text[1..text.len()-1]; // strip quotes
+    let mut result = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(escaped) = parse_escape_char(&mut chars) {
+                result.push(escaped);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    
+    result
+}
+
+/// Parse a rune literal value.
+/// The input includes the surrounding single quotes.
+fn parse_rune_value(text: &str) -> char {
+    let inner = &text[1..text.len()-1]; // strip quotes
+    let mut chars = inner.chars().peekable();
+    
+    if let Some(c) = chars.next() {
+        if c == '\\' {
+            parse_escape_char(&mut chars).unwrap_or('\0')
+        } else {
+            c
+        }
+    } else {
+        '\0'
+    }
+}
+
+/// Parse a single escape sequence and return the resulting character.
+fn parse_escape_char(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<char> {
+    match chars.next()? {
+        'a' => Some('\x07'),  // alert/bell
+        'b' => Some('\x08'),  // backspace
+        'f' => Some('\x0C'),  // form feed
+        'n' => Some('\n'),
+        'r' => Some('\r'),
+        't' => Some('\t'),
+        'v' => Some('\x0B'),  // vertical tab
+        '\\' => Some('\\'),
+        '\'' => Some('\''),
+        '"' => Some('"'),
+        'x' => {
+            // \xNN - 2 hex digits
+            let mut val = 0u32;
+            for _ in 0..2 {
+                if let Some(c) = chars.next() {
+                    val = val * 16 + c.to_digit(16)?;
+                }
+            }
+            char::from_u32(val)
+        }
+        'u' => {
+            // \uNNNN - 4 hex digits
+            let mut val = 0u32;
+            for _ in 0..4 {
+                if let Some(c) = chars.next() {
+                    val = val * 16 + c.to_digit(16)?;
+                }
+            }
+            char::from_u32(val)
+        }
+        'U' => {
+            // \UNNNNNNNN - 8 hex digits
+            let mut val = 0u32;
+            for _ in 0..8 {
+                if let Some(c) = chars.next() {
+                    val = val * 16 + c.to_digit(16)?;
+                }
+            }
+            char::from_u32(val)
+        }
+        c @ '0'..='7' => {
+            // Octal escape \NNN - 3 octal digits
+            let mut val = c.to_digit(8)?;
+            for _ in 0..2 {
+                if let Some(&next) = chars.peek() {
+                    if let Some(d) = next.to_digit(8) {
+                        chars.next();
+                        val = val * 8 + d;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            char::from_u32(val)
+        }
+        _ => None, // Unknown escape
     }
 }
 

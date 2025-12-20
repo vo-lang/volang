@@ -1,602 +1,514 @@
-//! Compile-time constant values for the GoX type checker.
+//! Constant value representation and operations.
 //!
-//! This module provides arbitrary-precision constant representation
-//! for evaluating constant expressions at compile time, matching Go's
-//! semantics for untyped constants.
-//!
-//! # Go Constant Semantics
-//!
-//! - Integer constants have arbitrary precision (no overflow at compile time)
-//! - Floating-point constants use high-precision rational arithmetic
-//! - Constants are "untyped" until assigned to a typed variable
-//! - `1 << 100` is valid as a constant, overflow only checked at use
+//! This module implements compile-time constant values and operations
+//! for constant folding during type checking.
 
+#![allow(dead_code)]
+
+use crate::typ::{BasicDetail, BasicInfo, BasicType};
+use gox_syntax::ast::{BinaryOp, UnaryOp};
+use num_bigint::{BigInt, Sign};
+use num_rational::BigRational;
+use num_traits::cast::FromPrimitive;
+use num_traits::cast::ToPrimitive;
+use num_traits::sign::Signed;
+use num_traits::{Num, Zero};
+use std::borrow::Cow;
 use std::fmt;
 
-use num_bigint::BigInt;
-use num_rational::BigRational;
-use num_traits::{Zero, ToPrimitive, Signed};
+type F64 = f64;
 
-use crate::types::{BasicType, UntypedKind};
-
-/// A compile-time constant value with arbitrary precision.
-#[derive(Debug, Clone)]
-pub enum Constant {
+/// Constant values for compile-time evaluation.
+/// GoX doesn't support complex numbers, so we skip Complex variant.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    /// Unknown value (due to error).
+    Unknown,
     /// Boolean constant.
     Bool(bool),
-
+    /// String constant.
+    Str(String),
     /// Integer constant (arbitrary precision).
     Int(BigInt),
-
-    /// Floating-point constant (arbitrary precision rational).
-    Float(BigRational),
-
-    /// Rune (character) constant.
-    Rune(char),
-
-    /// String constant.
-    String(String),
-
-    /// Nil constant.
-    Nil,
+    /// Rational constant (for exact division).
+    Rat(BigRational),
+    /// Float constant.
+    Float(F64),
 }
 
-/// Helper to create BigInt from i64.
-impl Constant {
-    /// Create an integer constant from i64.
-    pub fn int(v: i64) -> Self {
-        Constant::Int(BigInt::from(v))
-    }
-    
-    /// Create a float constant from f64.
-    pub fn float(v: f64) -> Self {
-        Constant::Float(BigRational::from_float(v).unwrap_or_else(BigRational::zero))
-    }
-    
-    /// Returns the untyped kind of this constant.
-    pub fn kind(&self) -> Option<UntypedKind> {
-        match self {
-            Constant::Bool(_) => Some(UntypedKind::Bool),
-            Constant::Int(_) => Some(UntypedKind::Int),
-            Constant::Float(_) => Some(UntypedKind::Float),
-            Constant::Rune(_) => Some(UntypedKind::Rune),
-            Constant::String(_) => Some(UntypedKind::String),
-            Constant::Nil => None,
-        }
-    }
-
-    /// Returns the default type for this constant.
-    pub fn default_type(&self) -> Option<BasicType> {
-        self.kind().map(|k| k.default_type())
-    }
-
-    /// Returns true if this constant is zero/false/empty.
-    pub fn is_zero(&self) -> bool {
-        match self {
-            Constant::Bool(b) => !*b,
-            Constant::Int(i) => i.is_zero(),
-            Constant::Float(f) => f.is_zero(),
-            Constant::Rune(c) => *c == '\0',
-            Constant::String(s) => s.is_empty(),
-            Constant::Nil => true,
-        }
-    }
-
-    /// Attempts to convert this constant to a boolean.
-    pub fn to_bool(&self) -> Option<bool> {
-        match self {
-            Constant::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    /// Attempts to convert this constant to a BigInt.
-    pub fn to_bigint(&self) -> Option<BigInt> {
-        match self {
-            Constant::Int(i) => Some(i.clone()),
-            Constant::Rune(c) => Some(BigInt::from(*c as u32)),
-            Constant::Float(f) if f.is_integer() => Some(f.to_integer()),
-            _ => None,
-        }
-    }
-    
-    /// Attempts to convert this constant to i64.
-    pub fn to_i64(&self) -> Option<i64> {
-        self.to_bigint().and_then(|b| b.to_i64())
-    }
-
-    /// Attempts to convert this constant to a float (f64).
-    pub fn to_f64(&self) -> Option<f64> {
-        match self {
-            Constant::Float(f) => f.to_f64(),
-            Constant::Int(i) => i.to_f64(),
-            Constant::Rune(c) => Some(*c as u32 as f64),
-            _ => None,
-        }
-    }
-
-    /// Checks if this constant is representable in the given basic type.
-    pub fn is_representable_as(&self, ty: BasicType) -> bool {
-        match self {
-            Constant::Bool(_) => ty == BasicType::Bool,
-            Constant::String(_) => ty == BasicType::String,
-            Constant::Nil => false,
-            Constant::Rune(c) => {
-                let v = BigInt::from(*c as u32);
-                Self::bigint_fits(&v, ty)
-            }
-            Constant::Int(i) => {
-                match ty {
-                    BasicType::Float32 | BasicType::Float64 => true,
-                    _ => Self::bigint_fits(i, ty),
-                }
-            }
-            Constant::Float(f) => {
-                match ty {
-                    BasicType::Float32 => {
-                        if let Some(v) = f.to_f64() {
-                            v >= f32::MIN as f64 && v <= f32::MAX as f64
-                        } else {
-                            false
-                        }
-                    }
-                    BasicType::Float64 => true,
-                    _ if ty.is_integer() && f.is_integer() => {
-                        let i = f.to_integer();
-                        Self::bigint_fits(&i, ty)
-                    }
-                    _ => false,
-                }
-            }
-        }
-    }
-
-    /// Checks if a BigInt fits in the given basic type.
-    fn bigint_fits(v: &BigInt, ty: BasicType) -> bool {
-        let min_i8 = BigInt::from(i8::MIN);
-        let max_i8 = BigInt::from(i8::MAX);
-        let min_i16 = BigInt::from(i16::MIN);
-        let max_i16 = BigInt::from(i16::MAX);
-        let min_i32 = BigInt::from(i32::MIN);
-        let max_i32 = BigInt::from(i32::MAX);
-        let min_i64 = BigInt::from(i64::MIN);
-        let max_i64 = BigInt::from(i64::MAX);
-        let zero = BigInt::zero();
-        let max_u8 = BigInt::from(u8::MAX);
-        let max_u16 = BigInt::from(u16::MAX);
-        let max_u32 = BigInt::from(u32::MAX);
-        let max_u64 = BigInt::from(u64::MAX);
-        
-        match ty {
-            BasicType::Int8 => *v >= min_i8 && *v <= max_i8,
-            BasicType::Int16 => *v >= min_i16 && *v <= max_i16,
-            BasicType::Int32 => *v >= min_i32 && *v <= max_i32,
-            BasicType::Int64 | BasicType::Int => *v >= min_i64 && *v <= max_i64,
-            BasicType::Uint8 => *v >= zero && *v <= max_u8,
-            BasicType::Uint16 => *v >= zero && *v <= max_u16,
-            BasicType::Uint32 => *v >= zero && *v <= max_u32,
-            BasicType::Uint64 | BasicType::Uint => *v >= zero && *v <= max_u64,
-            _ => false,
-        }
+impl Default for Value {
+    fn default() -> Self {
+        Value::Unknown
     }
 }
 
-impl fmt::Display for Constant {
+impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Constant::Bool(b) => write!(f, "{}", b),
-            Constant::Int(i) => write!(f, "{}", i),
-            Constant::Float(r) => {
-                // Display as decimal if possible
-                if let Some(v) = r.to_f64() {
-                    write!(f, "{}", v)
-                } else {
-                    write!(f, "{}/{}", r.numer(), r.denom())
-                }
-            }
-            Constant::Rune(c) => write!(f, "'{}'", c.escape_default()),
-            Constant::String(s) => write!(f, "\"{}\"", s.escape_default()),
-            Constant::Nil => write!(f, "nil"),
+            Value::Unknown => write!(f, "unknown"),
+            Value::Bool(b) => b.fmt(f),
+            Value::Str(s) => write!(f, "\"{}\"", s),
+            Value::Int(i) => i.fmt(f),
+            Value::Rat(r) => r.fmt(f),
+            Value::Float(fl) => fl.fmt(f),
         }
     }
 }
 
-impl PartialEq for Constant {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Constant::Bool(a), Constant::Bool(b)) => a == b,
-            (Constant::Int(a), Constant::Int(b)) => a == b,
-            (Constant::Float(a), Constant::Float(b)) => a == b,
-            (Constant::Rune(a), Constant::Rune(b)) => a == b,
-            (Constant::String(a), Constant::String(b)) => a == b,
-            (Constant::Nil, Constant::Nil) => true,
-            // Cross-type comparisons for numeric types
-            (Constant::Int(a), Constant::Float(b)) => {
-                BigRational::from(a.clone()) == *b
-            }
-            (Constant::Float(a), Constant::Int(b)) => {
-                *a == BigRational::from(b.clone())
-            }
+impl Value {
+    pub fn with_bool(b: bool) -> Value {
+        Value::Bool(b)
+    }
+
+    pub fn with_str(s: String) -> Value {
+        Value::Str(s)
+    }
+
+    pub fn with_i64(i: i64) -> Value {
+        Value::Int(BigInt::from_i64(i).unwrap())
+    }
+
+    pub fn with_u64(u: u64) -> Value {
+        Value::Int(BigInt::from_u64(u).unwrap())
+    }
+
+    pub fn with_f64(f: f64) -> Value {
+        Value::Float(f)
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Value::Unknown)
+    }
+
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Value::Bool(_))
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self, Value::Str(_))
+    }
+
+    pub fn is_int(&self) -> bool {
+        match self {
+            Value::Int(_) => true,
+            Value::Rat(r) => r.is_integer(),
             _ => false,
         }
     }
-}
 
-/// Binary operations on constants (arbitrary precision).
-impl Constant {
-    /// Adds two constants.
-    pub fn add(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a + b)),
-            (Constant::Float(a), Constant::Float(b)) => Some(Constant::Float(a + b)),
-            (Constant::Int(a), Constant::Float(b)) => {
-                Some(Constant::Float(BigRational::from(a.clone()) + b))
-            }
-            (Constant::Float(a), Constant::Int(b)) => {
-                Some(Constant::Float(a + BigRational::from(b.clone())))
-            }
-            (Constant::String(a), Constant::String(b)) => {
-                Some(Constant::String(format!("{}{}", a, b)))
-            }
-            (Constant::Rune(a), Constant::Int(b)) => {
-                let v = BigInt::from(*a as u32) + b;
-                v.to_u32().and_then(char::from_u32).map(Constant::Rune)
-            }
-            _ => None,
-        }
+    pub fn is_float(&self) -> bool {
+        matches!(self, Value::Float(_))
     }
 
-    /// Subtracts two constants.
-    pub fn sub(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a - b)),
-            (Constant::Float(a), Constant::Float(b)) => Some(Constant::Float(a - b)),
-            (Constant::Int(a), Constant::Float(b)) => {
-                Some(Constant::Float(BigRational::from(a.clone()) - b))
-            }
-            (Constant::Float(a), Constant::Int(b)) => {
-                Some(Constant::Float(a - BigRational::from(b.clone())))
-            }
-            _ => None,
-        }
-    }
-
-    /// Multiplies two constants.
-    pub fn mul(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a * b)),
-            (Constant::Float(a), Constant::Float(b)) => Some(Constant::Float(a * b)),
-            (Constant::Int(a), Constant::Float(b)) => {
-                Some(Constant::Float(BigRational::from(a.clone()) * b))
-            }
-            (Constant::Float(a), Constant::Int(b)) => {
-                Some(Constant::Float(a * BigRational::from(b.clone())))
-            }
-            _ => None,
-        }
-    }
-
-    /// Divides two constants.
-    /// For integers, this performs integer division (like Go).
-    pub fn div(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) if !b.is_zero() => {
-                Some(Constant::Int(a / b))
-            }
-            (Constant::Float(a), Constant::Float(b)) if !b.is_zero() => {
-                Some(Constant::Float(a / b))
-            }
-            (Constant::Int(a), Constant::Float(b)) if !b.is_zero() => {
-                Some(Constant::Float(BigRational::from(a.clone()) / b))
-            }
-            (Constant::Float(a), Constant::Int(b)) if !b.is_zero() => {
-                Some(Constant::Float(a / BigRational::from(b.clone())))
-            }
-            _ => None,
-        }
-    }
-
-    /// Computes the remainder of two constants.
-    pub fn rem(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) if !b.is_zero() => {
-                Some(Constant::Int(a % b))
-            }
-            _ => None,
-        }
-    }
-
-    /// Negates a constant.
-    pub fn neg(&self) -> Option<Constant> {
+    /// Returns the boolean value if this is a Bool.
+    pub fn bool_val(&self) -> Option<bool> {
         match self {
-            Constant::Int(i) => Some(Constant::Int(-i)),
-            Constant::Float(f) => Some(Constant::Float(-f)),
+            Value::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
-    /// Logical NOT on a constant.
-    pub fn not(&self) -> Option<Constant> {
+    /// Returns the string value if this is a String.
+    pub fn string_val(&self) -> Option<&str> {
         match self {
-            Constant::Bool(b) => Some(Constant::Bool(!b)),
+            Value::Str(s) => Some(s),
             _ => None,
         }
     }
 
-    /// Bitwise NOT on a constant.
-    pub fn bit_not(&self) -> Option<Constant> {
+    /// Returns the integer value as i64 if possible.
+    pub fn int_val(&self) -> Option<i64> {
         match self {
-            // For arbitrary precision, we use two's complement behavior
-            // In Go, ^x for integers means bitwise complement
-            Constant::Int(i) => Some(Constant::Int(!i.clone())),
+            Value::Int(i) => i.to_i64(),
             _ => None,
         }
     }
 
-    /// Left shift (arbitrary precision - no overflow!).
-    pub fn shl(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => {
-                // Shift amount must be non-negative and reasonable
-                if b.is_negative() {
-                    return None;
-                }
-                // Allow very large shifts for compile-time constants
-                if let Some(shift) = b.to_u64() {
-                    if shift <= 10000 {  // Reasonable limit
-                        Some(Constant::Int(a << shift as usize))
-                    } else {
-                        None  // Too large
-                    }
-                } else {
-                    None
-                }
-            }
+    /// Returns the float value if this is a Float.
+    pub fn float_val(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
             _ => None,
         }
     }
 
-    /// Right shift.
-    pub fn shr(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => {
-                if b.is_negative() {
-                    return None;
-                }
-                if let Some(shift) = b.to_u64() {
-                    if shift <= 10000 {
-                        Some(Constant::Int(a >> shift as usize))
-                    } else {
-                        // Shifting by very large amount: result is 0 or -1
-                        if a.is_negative() {
-                            Some(Constant::Int(BigInt::from(-1)))
-                        } else {
-                            Some(Constant::Int(BigInt::zero()))
+    /// Check if value can be represented as the given basic type.
+    pub fn representable(&self, base: &BasicDetail, rounded: Option<&mut Value>) -> bool {
+        if let Value::Unknown = self {
+            return true; // avoid follow-up errors
+        }
+
+        let float_representable = |val: &Value, btype: BasicType, rounded: Option<&mut Value>| -> bool {
+            match val.to_float() {
+                Value::Float(f) => match btype {
+                    BasicType::Float64 => true,
+                    BasicType::Float32 => {
+                        let f32_ = f as f32;
+                        let ok = !f32_.is_infinite();
+                        if let Some(r) = rounded {
+                            *r = Value::Float((f as f32) as f64);
                         }
+                        ok
                     }
+                    BasicType::UntypedFloat => true,
+                    _ => false,
+                },
+                _ => false,
+            }
+        };
+
+        match base.info() {
+            BasicInfo::IsInteger => match self.to_int() {
+                Cow::Owned(Value::Int(ref ival)) | Cow::Borrowed(Value::Int(ref ival)) => {
+                    if let Some(r) = rounded {
+                        *r = Value::Int(ival.clone())
+                    }
+                    match base.typ() {
+                        BasicType::Int => ival.to_isize().is_some(),
+                        BasicType::Int8 => ival.to_i8().is_some(),
+                        BasicType::Int16 => ival.to_i16().is_some(),
+                        BasicType::Int32 | BasicType::Rune => ival.to_i32().is_some(),
+                        BasicType::Int64 => ival.to_i64().is_some(),
+                        BasicType::Uint | BasicType::Uintptr => ival.to_usize().is_some(),
+                        BasicType::Uint8 | BasicType::Byte => ival.to_u8().is_some(),
+                        BasicType::Uint16 => ival.to_u16().is_some(),
+                        BasicType::Uint32 => ival.to_u32().is_some(),
+                        BasicType::Uint64 => ival.to_u64().is_some(),
+                        BasicType::UntypedInt | BasicType::UntypedRune => true,
+                        _ => false,
+                    }
+                }
+                _ => false,
+            },
+            BasicInfo::IsFloat => float_representable(self, base.typ(), rounded),
+            BasicInfo::IsBoolean => matches!(self, Value::Bool(_)),
+            BasicInfo::IsString => matches!(self, Value::Str(_)),
+            _ => false,
+        }
+    }
+
+    /// Convert to integer if possible.
+    pub fn to_int(&self) -> Cow<Value> {
+        let f64_to_int = |x: f64| -> Cow<Value> {
+            match BigRational::from_f64(x) {
+                Some(v) => {
+                    if v.is_integer() {
+                        Cow::Owned(Value::Int(v.to_integer()))
+                    } else {
+                        Cow::Owned(Value::Unknown)
+                    }
+                }
+                None => Cow::Owned(Value::Unknown),
+            }
+        };
+        match self {
+            Value::Int(_) => Cow::Borrowed(self),
+            Value::Rat(r) => {
+                if r.is_integer() {
+                    Cow::Owned(Value::Int(r.to_integer()))
                 } else {
-                    None
+                    Cow::Owned(Value::Unknown)
                 }
             }
-            _ => None,
+            Value::Float(f) => f64_to_int(*f),
+            _ => Cow::Owned(Value::Unknown),
         }
     }
 
-    /// Bitwise AND.
-    pub fn bit_and(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a & b)),
+    /// Convert to float.
+    pub fn to_float(&self) -> Value {
+        let v = match self {
+            Value::Int(i) => i.to_f64(),
+            Value::Rat(r) => rat_to_f64(r),
+            Value::Float(f) => Some(*f),
             _ => None,
-        }
-    }
-
-    /// Bitwise OR.
-    pub fn bit_or(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a | b)),
-            _ => None,
-        }
-    }
-
-    /// Bitwise XOR.
-    pub fn bit_xor(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a ^ b)),
-            _ => None,
-        }
-    }
-
-    /// Bit clear (AND NOT).
-    pub fn bit_clear(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => Some(Constant::Int(a & !b.clone())),
-            _ => None,
-        }
-    }
-
-    /// Equality comparison.
-    pub fn const_eq(&self, other: &Constant) -> Option<Constant> {
-        let result = match (self, other) {
-            (Constant::Bool(a), Constant::Bool(b)) => a == b,
-            (Constant::Int(a), Constant::Int(b)) => a == b,
-            (Constant::Float(a), Constant::Float(b)) => a == b,
-            (Constant::Int(a), Constant::Float(b)) => BigRational::from(a.clone()) == *b,
-            (Constant::Float(a), Constant::Int(b)) => *a == BigRational::from(b.clone()),
-            (Constant::Rune(a), Constant::Rune(b)) => a == b,
-            (Constant::String(a), Constant::String(b)) => a == b,
-            (Constant::Nil, Constant::Nil) => true,
-            _ => return None,
         };
-        Some(Constant::Bool(result))
+        v.map_or(Value::Unknown, Value::Float)
     }
 
-    /// Less than comparison.
-    pub fn lt(&self, other: &Constant) -> Option<Constant> {
-        let result = match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => a < b,
-            (Constant::Float(a), Constant::Float(b)) => a < b,
-            (Constant::Int(a), Constant::Float(b)) => BigRational::from(a.clone()) < *b,
-            (Constant::Float(a), Constant::Int(b)) => *a < BigRational::from(b.clone()),
-            (Constant::String(a), Constant::String(b)) => a < b,
-            _ => return None,
-        };
-        Some(Constant::Bool(result))
-    }
-
-    /// Less than or equal comparison.
-    pub fn le(&self, other: &Constant) -> Option<Constant> {
-        let result = match (self, other) {
-            (Constant::Int(a), Constant::Int(b)) => a <= b,
-            (Constant::Float(a), Constant::Float(b)) => a <= b,
-            (Constant::Int(a), Constant::Float(b)) => BigRational::from(a.clone()) <= *b,
-            (Constant::Float(a), Constant::Int(b)) => *a <= BigRational::from(b.clone()),
-            (Constant::String(a), Constant::String(b)) => a <= b,
-            _ => return None,
-        };
-        Some(Constant::Bool(result))
-    }
-    
-    /// Greater than comparison.
-    pub fn gt(&self, other: &Constant) -> Option<Constant> {
-        other.lt(self)
-    }
-    
-    /// Greater than or equal comparison.
-    pub fn ge(&self, other: &Constant) -> Option<Constant> {
-        other.le(self)
-    }
-
-    /// Logical AND.
-    pub fn and(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Bool(a), Constant::Bool(b)) => Some(Constant::Bool(*a && *b)),
-            _ => None,
+    /// Returns the sign: -1, 0, or 1.
+    pub fn sign(&self) -> isize {
+        match self {
+            Value::Int(i) => match i.sign() {
+                Sign::Plus => 1,
+                Sign::Minus => -1,
+                Sign::NoSign => 0,
+            },
+            Value::Rat(r) => {
+                if r.is_positive() { 1 } 
+                else if r.is_negative() { -1 } 
+                else { 0 }
+            }
+            Value::Float(v) => {
+                if *v > 0.0 { 1 } 
+                else if *v < 0.0 { -1 } 
+                else { 0 }
+            }
+            Value::Unknown => 1, // avoid spurious division by zero errors
+            _ => 0,
         }
     }
 
-    /// Logical OR.
-    pub fn or(&self, other: &Constant) -> Option<Constant> {
-        match (self, other) {
-            (Constant::Bool(a), Constant::Bool(b)) => Some(Constant::Bool(*a || *b)),
-            _ => None,
+    /// Match types for binary operations.
+    pub fn match_type<'a>(x: Cow<'a, Value>, y: Cow<'a, Value>) -> (Cow<'a, Value>, Cow<'a, Value>) {
+        fn ord(v: &Value) -> u8 {
+            match v {
+                Value::Unknown => 0,
+                Value::Bool(_) => 1,
+                Value::Int(_) => 2,
+                Value::Rat(_) => 3,
+                Value::Float(_) => 4,
+                Value::Str(_) => 5,
+            }
+        }
+
+        let ox = ord(&x);
+        let oy = ord(&y);
+        if ox == oy {
+            return (x, y);
+        }
+
+        // Promote to higher type
+        match (ox, oy) {
+            (2, 3) => (Cow::Owned(int_to_rat(&x)), y), // Int -> Rat
+            (3, 2) => (x, Cow::Owned(int_to_rat(&y))),
+            (2, 4) => (Cow::Owned(x.to_float()), y), // Int -> Float
+            (4, 2) => (x, Cow::Owned(y.to_float())),
+            (3, 4) => (Cow::Owned(x.to_float()), y), // Rat -> Float
+            (4, 3) => (x, Cow::Owned(y.to_float())),
+            _ => (x, y),
+        }
+    }
+
+    /// Binary operation.
+    pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
+        let (x, y) = Value::match_type(Cow::Borrowed(x), Cow::Borrowed(y));
+        match (&*x, &*y) {
+            (Value::Unknown, _) | (_, Value::Unknown) => Value::Unknown,
+            (Value::Bool(a), Value::Bool(b)) => match op {
+                BinaryOp::LogAnd => Value::Bool(*a && *b),
+                BinaryOp::LogOr => Value::Bool(*a || *b),
+                _ => Value::Unknown,
+            },
+            (Value::Int(a), Value::Int(b)) => match op {
+                BinaryOp::Add => Value::Int(a + b),
+                BinaryOp::Sub => Value::Int(a - b),
+                BinaryOp::Mul => Value::Int(a * b),
+                BinaryOp::Div => {
+                    if b.sign() == Sign::NoSign {
+                        Value::Unknown
+                    } else {
+                        Value::Rat(BigRational::new(a.clone(), b.clone()))
+                    }
+                }
+                BinaryOp::Rem => {
+                    if b.sign() == Sign::NoSign {
+                        Value::Unknown
+                    } else {
+                        Value::Int(a % b)
+                    }
+                }
+                BinaryOp::And => Value::Int(a & b),
+                BinaryOp::Or => Value::Int(a | b),
+                BinaryOp::Xor => Value::Int(a ^ b),
+                BinaryOp::AndNot => Value::Int(a & !b),
+                _ => Value::Unknown,
+            },
+            (Value::Rat(a), Value::Rat(b)) => match op {
+                BinaryOp::Add => Value::Rat(a + b),
+                BinaryOp::Sub => Value::Rat(a - b),
+                BinaryOp::Mul => Value::Rat(a * b),
+                BinaryOp::Div => {
+                    if b.is_zero() {
+                        Value::Unknown
+                    } else {
+                        Value::Rat(a / b)
+                    }
+                }
+                _ => Value::Unknown,
+            },
+            (Value::Float(a), Value::Float(b)) => match op {
+                BinaryOp::Add => Value::Float(a + b),
+                BinaryOp::Sub => Value::Float(a - b),
+                BinaryOp::Mul => Value::Float(a * b),
+                BinaryOp::Div => Value::Float(a / b),
+                _ => Value::Unknown,
+            },
+            (Value::Str(a), Value::Str(b)) => match op {
+                BinaryOp::Add => Value::Str(format!("{}{}", a, b)),
+                _ => Value::Unknown,
+            },
+            _ => Value::Unknown,
+        }
+    }
+
+    /// Unary operation.
+    /// If prec > 0, it specifies the ^ (xor) result size in bits.
+    pub fn unary_op(op: UnaryOp, y: &Value, prec: usize) -> Value {
+        if y.is_unknown() {
+            return Value::Unknown;
+        }
+        match op {
+            UnaryOp::Pos => y.clone(),
+            UnaryOp::Neg => match y {
+                Value::Int(i) => Value::Int(-i),
+                Value::Rat(r) => Value::Rat(-r),
+                Value::Float(f) => Value::Float(-f),
+                _ => Value::Unknown,
+            },
+            UnaryOp::Not => match y {
+                Value::Bool(b) => Value::Bool(!b),
+                _ => Value::Unknown,
+            },
+            UnaryOp::BitNot => match y {
+                Value::Int(i) => {
+                    let mut v = !i;
+                    if prec > 0 {
+                        // Mask to prec bytes
+                        let mask = (BigInt::from(1) << (prec * 8)) - 1;
+                        v = v & mask;
+                    }
+                    Value::Int(v)
+                }
+                _ => Value::Unknown,
+            },
+            _ => Value::Unknown,
+        }
+    }
+
+    /// Shift operation.
+    pub fn shift(x: &Value, op: BinaryOp, s: u64) -> Value {
+        match x {
+            Value::Unknown => Value::Unknown,
+            Value::Int(i) => match op {
+                BinaryOp::Shl => Value::Int(i << s),
+                BinaryOp::Shr => Value::Int(i >> s),
+                _ => Value::Unknown,
+            },
+            _ => Value::Unknown,
+        }
+    }
+
+    /// Compare operation.
+    pub fn compare(x: &Value, op: BinaryOp, y: &Value) -> bool {
+        if x.is_unknown() || y.is_unknown() {
+            return false;
+        }
+        let (x, y) = Value::match_type(Cow::Borrowed(x), Cow::Borrowed(y));
+        let cmp = match (&*x, &*y) {
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Rat(a), Value::Rat(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            _ => return false,
+        };
+        match op {
+            BinaryOp::Eq => cmp == std::cmp::Ordering::Equal,
+            BinaryOp::NotEq => cmp != std::cmp::Ordering::Equal,
+            BinaryOp::Lt => cmp == std::cmp::Ordering::Less,
+            BinaryOp::LtEq => cmp != std::cmp::Ordering::Greater,
+            BinaryOp::Gt => cmp == std::cmp::Ordering::Greater,
+            BinaryOp::GtEq => cmp != std::cmp::Ordering::Less,
+            _ => false,
+        }
+    }
+
+    /// Returns the bool value.
+    pub fn bool_as_bool(&self) -> bool {
+        match self {
+            Value::Bool(b) => *b,
+            Value::Unknown => false,
+            _ => panic!("not a bool"),
+        }
+    }
+
+    /// Returns the string value.
+    pub fn str_as_string(&self) -> String {
+        match self {
+            Value::Str(s) => s.clone(),
+            Value::Unknown => String::new(),
+            _ => panic!("not a string"),
+        }
+    }
+
+    /// int_as_i64 returns the Go int64 value and whether the result is exact.
+    pub fn int_as_i64(&self) -> (i64, bool) {
+        match self {
+            Value::Int(i) => match i.to_i64() {
+                Some(v) => (v, true),
+                None => (0, false),
+            },
+            _ => (0, false),
+        }
+    }
+
+    /// int_as_u64 returns the Go uint64 value and whether the result is exact.
+    pub fn int_as_u64(&self) -> (u64, bool) {
+        match self {
+            Value::Int(i) => match i.to_u64() {
+                Some(v) => (v, true),
+                None => (0, false),
+            },
+            _ => (0, false),
+        }
+    }
+
+    /// num_as_f64 returns float64 value and whether the result is exact.
+    pub fn num_as_f64(&self) -> (f64, bool) {
+        match self {
+            Value::Float(f) => (*f, true),
+            Value::Int(i) => (i.to_f64().unwrap_or(0.0), true),
+            Value::Rat(r) => (rat_to_f64(r).unwrap_or(0.0), true),
+            _ => (0.0, false),
+        }
+    }
+
+    /// num_as_f32 returns float32 value and whether the result is exact.
+    pub fn num_as_f32(&self) -> (f32, bool) {
+        match self {
+            Value::Int(_) | Value::Rat(_) => {
+                let vf = self.to_float();
+                if let Value::Float(f) = vf {
+                    let f32_ = f as f32;
+                    if f32_.is_finite() {
+                        (f32_, true)
+                    } else {
+                        (if self.sign() > 0 { f32::MAX } else { f32::MIN }, false)
+                    }
+                } else {
+                    (if self.sign() > 0 { f32::MAX } else { f32::MIN }, false)
+                }
+            }
+            Value::Float(v) => {
+                let f = *v;
+                let min = f32::MIN as f64;
+                let max = f32::MAX as f64;
+                if f > min && f < max {
+                    (f as f32, true)
+                } else if f <= min {
+                    (f32::MIN, false)
+                } else {
+                    (f32::MAX, false)
+                }
+            }
+            Value::Unknown => (0.0, false),
+            _ => panic!("not a number"),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// Helper functions
 
-    #[test]
-    fn test_constant_kind() {
-        assert_eq!(Constant::int(42).kind(), Some(UntypedKind::Int));
-        assert_eq!(Constant::float(3.14).kind(), Some(UntypedKind::Float));
-        assert_eq!(Constant::Bool(true).kind(), Some(UntypedKind::Bool));
-        assert_eq!(Constant::Rune('a').kind(), Some(UntypedKind::Rune));
-        assert_eq!(
-            Constant::String("hello".to_string()).kind(),
-            Some(UntypedKind::String)
-        );
-        assert_eq!(Constant::Nil.kind(), None);
-    }
+fn rat_to_f64(r: &BigRational) -> Option<f64> {
+    let num = r.numer().to_f64()?;
+    let den = r.denom().to_f64()?;
+    Some(num / den)
+}
 
-    #[test]
-    fn test_constant_arithmetic() {
-        let a = Constant::int(10);
-        let b = Constant::int(3);
-
-        assert_eq!(a.add(&b), Some(Constant::int(13)));
-        assert_eq!(a.sub(&b), Some(Constant::int(7)));
-        assert_eq!(a.mul(&b), Some(Constant::int(30)));
-        assert_eq!(a.div(&b), Some(Constant::int(3)));
-        assert_eq!(a.rem(&b), Some(Constant::int(1)));
-    }
-
-    #[test]
-    fn test_constant_division_by_zero() {
-        let a = Constant::int(10);
-        let zero = Constant::int(0);
-
-        assert_eq!(a.div(&zero), None);
-        assert_eq!(a.rem(&zero), None);
-    }
-
-    #[test]
-    fn test_constant_string_concat() {
-        let a = Constant::String("hello".to_string());
-        let b = Constant::String(" world".to_string());
-
-        assert_eq!(
-            a.add(&b),
-            Some(Constant::String("hello world".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_constant_comparison() {
-        let a = Constant::int(10);
-        let b = Constant::int(20);
-
-        assert_eq!(a.lt(&b), Some(Constant::Bool(true)));
-        assert_eq!(a.const_eq(&b), Some(Constant::Bool(false)));
-        assert_eq!(a.le(&a), Some(Constant::Bool(true)));
-    }
-
-    #[test]
-    fn test_constant_representability() {
-        assert!(Constant::int(127).is_representable_as(BasicType::Int8));
-        assert!(!Constant::int(128).is_representable_as(BasicType::Int8));
-        assert!(Constant::int(255).is_representable_as(BasicType::Uint8));
-        assert!(!Constant::int(256).is_representable_as(BasicType::Uint8));
-        assert!(!Constant::int(-1).is_representable_as(BasicType::Uint8));
-
-        assert!(Constant::float(3.14).is_representable_as(BasicType::Float64));
-        assert!(Constant::float(3.0).is_representable_as(BasicType::Int)); // whole number
-        assert!(!Constant::float(3.14).is_representable_as(BasicType::Int)); // not whole
-    }
-
-    #[test]
-    fn test_constant_shift() {
-        let a = Constant::int(1);
-        let shift = Constant::int(10);
-
-        assert_eq!(a.shl(&shift), Some(Constant::int(1024)));
-        assert_eq!(Constant::int(1024).shr(&shift), Some(Constant::int(1)));
-    }
-    
-    #[test]
-    fn test_arbitrary_precision_shift() {
-        // Go allows `1 << 100` as a compile-time constant
-        let one = Constant::int(1);
-        let shift_100 = Constant::int(100);
-        
-        let result = one.shl(&shift_100);
-        assert!(result.is_some());
-        
-        // The result should be a very large number
-        let big = result.unwrap();
-        if let Constant::Int(ref v) = big {
-            // 2^100 is a 101-bit number
-            assert!(v.bits() > 100);
-        } else {
-            panic!("expected Int");
-        }
-    }
-    
-    #[test]
-    fn test_arbitrary_precision_multiply() {
-        // Test multiplication that would overflow i64
-        let large = Constant::Int(BigInt::from(i64::MAX));
-        let two = Constant::int(2);
-        
-        let result = large.mul(&two);
-        assert!(result.is_some());
-        
-        // Should not overflow, result should be 2 * i64::MAX
-        if let Some(Constant::Int(v)) = result {
-            assert!(v > BigInt::from(i64::MAX));
-        } else {
-            panic!("expected Int");
-        }
+fn int_to_rat(v: &Value) -> Value {
+    match v {
+        Value::Int(i) => Value::Rat(BigRational::from_integer(i.clone())),
+        _ => Value::Unknown,
     }
 }

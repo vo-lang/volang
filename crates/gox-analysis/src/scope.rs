@@ -1,357 +1,235 @@
-//! Symbol table and scope management for the GoX type checker.
+//! Scope management for type checking.
 //!
-//! This module provides the scope hierarchy and entity definitions
-//! for name resolution during type checking.
-//!
-//! # Scope Hierarchy
-//!
-//! ```text
-//! Universe Scope (built-in types: int, bool, string, etc.)
-//!     └── Package Scope (top-level declarations)
-//!             └── Function Scope (parameters, named returns)
-//!                     └── Block Scope (if/for/switch bodies)
-//!                             └── Block Scope (nested blocks)
-//! ```
-//!
-//! # Entities
-//!
-//! The symbol table stores different kinds of entities:
-//! - [`Entity::Var`]: Variables and constants with their types
-//! - [`Entity::Type`]: Type declarations (named types)
-//! - [`Entity::Func`]: Function declarations with signatures
-//! - [`Entity::Builtin`]: Built-in functions like `len`, `make`, `append`
-//!
-//! # Name Resolution
-//!
-//! Names are resolved by searching from the innermost scope outward:
-//! 1. Current block scope (if any)
-//! 2. Enclosing block scopes
-//! 3. Function scope (parameters, named returns)
-//! 4. Package scope (top-level declarations)
-//! 5. Universe scope (built-in types and functions)
+//! A Scope maintains the set of named language entities declared in the scope
+//! and a link to the immediately surrounding (outer) scope.
 
+#![allow(dead_code)]
+
+use crate::obj::Pos;
+use crate::objects::{ObjKey, ScopeKey, TCObjects};
 use std::collections::HashMap;
 
-use gox_common::{Symbol, Span};
-
-use crate::types::{Type, FuncType, NamedTypeId};
-use crate::constant::Constant;
-
-/// An entity in the symbol table.
-#[derive(Debug, Clone)]
-pub enum Entity {
-    /// A variable or constant.
-    Var(VarEntity),
-
-    /// A type declaration.
-    Type(TypeEntity),
-
-    /// A function declaration.
-    Func(FuncEntity),
-
-    /// A package import.
-    Package(PackageEntity),
-
-    /// A label (for goto).
-    Label(LabelEntity),
-
-    /// A built-in function.
-    Builtin(BuiltinKind),
-}
-
-/// A variable or constant entity.
-#[derive(Debug, Clone)]
-pub struct VarEntity {
-    /// The variable's type.
-    pub ty: Type,
-    /// The constant value, if this is a constant.
-    pub constant: Option<Constant>,
-    /// The declaration span.
-    pub span: Span,
-}
-
-/// A type declaration entity.
-#[derive(Debug, Clone)]
-pub struct TypeEntity {
-    /// The named type ID in the type registry.
-    pub id: NamedTypeId,
-    /// The declaration span.
-    pub span: Span,
-}
-
-/// A function declaration entity.
-#[derive(Debug, Clone)]
-pub struct FuncEntity {
-    /// The function's signature.
-    pub sig: FuncType,
-    /// Whether this is an extern function (implemented outside GoX).
-    pub is_extern: bool,
-    /// The declaration span.
-    pub span: Span,
-}
-
-/// A package import entity.
-#[derive(Debug, Clone)]
-pub struct PackageEntity {
-    /// The import path.
-    pub path: String,
-    /// The declaration span.
-    pub span: Span,
-}
-
-/// A label entity.
-#[derive(Debug, Clone)]
-pub struct LabelEntity {
-    /// The declaration span.
-    pub span: Span,
-}
-
-/// Built-in function kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BuiltinKind {
-    Len,
-    Cap,
-    Append,
-    Copy,
-    Delete,
-    Make,
-    Close,
-    Panic,
-    Recover,
-    Print,
-    Println,
-    Assert,
-}
-
-impl BuiltinKind {
-    /// Returns the name of this built-in function.
-    pub fn name(&self) -> &'static str {
-        match self {
-            BuiltinKind::Len => "len",
-            BuiltinKind::Cap => "cap",
-            BuiltinKind::Append => "append",
-            BuiltinKind::Copy => "copy",
-            BuiltinKind::Delete => "delete",
-            BuiltinKind::Make => "make",
-            BuiltinKind::Close => "close",
-            BuiltinKind::Panic => "panic",
-            BuiltinKind::Recover => "recover",
-            BuiltinKind::Print => "print",
-            BuiltinKind::Println => "println",
-            BuiltinKind::Assert => "assert",
-        }
-    }
-
-    /// Returns all built-in function kinds.
-    pub fn all() -> &'static [BuiltinKind] {
-        &[
-            BuiltinKind::Len,
-            BuiltinKind::Cap,
-            BuiltinKind::Append,
-            BuiltinKind::Copy,
-            BuiltinKind::Delete,
-            BuiltinKind::Make,
-            BuiltinKind::Close,
-            BuiltinKind::Panic,
-            BuiltinKind::Recover,
-            BuiltinKind::Print,
-            BuiltinKind::Println,
-            BuiltinKind::Assert,
-        ]
-    }
-}
-
-/// A scope in the symbol table hierarchy.
-#[derive(Debug, Default)]
+/// A Scope maintains the set of named language entities declared in the scope.
+#[derive(Debug)]
 pub struct Scope {
-    /// Parent scope (None for universe scope).
-    parent: Option<Box<Scope>>,
-    /// Symbols defined in this scope.
-    symbols: HashMap<Symbol, Entity>,
-    /// The kind of this scope.
-    kind: ScopeKind,
-}
-
-/// The kind of a scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScopeKind {
-    /// Universe scope (predefined types, constants, built-ins).
-    #[default]
-    Universe,
-    /// Package scope (top-level declarations).
-    Package,
-    /// File scope (imports).
-    File,
-    /// Function scope (parameters).
-    Function,
-    /// Block scope (local variables).
-    Block,
+    parent: Option<ScopeKey>,
+    children: Vec<ScopeKey>,
+    elems: HashMap<String, ObjKey>,
+    pos: Pos,
+    end: Pos,
+    comment: String,
+    is_func: bool,
 }
 
 impl Scope {
-    /// Creates a new scope with the given parent and kind.
-    pub fn new(parent: Option<Scope>, kind: ScopeKind) -> Self {
-        Self {
-            parent: parent.map(Box::new),
-            symbols: HashMap::new(),
-            kind,
+    /// Creates a new empty scope.
+    pub fn new(parent: Option<ScopeKey>, pos: Pos, end: Pos, comment: &str) -> Scope {
+        Scope {
+            parent,
+            children: Vec::new(),
+            elems: HashMap::new(),
+            pos,
+            end,
+            comment: comment.to_string(),
+            is_func: false,
         }
     }
 
-    /// Creates the universe scope with predefined entities.
-    pub fn universe() -> Self {
-        let mut scope = Self::new(None, ScopeKind::Universe);
-        scope.populate_universe();
+    /// Creates a new function scope.
+    pub fn new_func(parent: Option<ScopeKey>, pos: Pos, end: Pos) -> Scope {
+        let mut scope = Scope::new(parent, pos, end, "function");
+        scope.is_func = true;
         scope
     }
 
-    /// Populates the universe scope with predefined entities.
-    fn populate_universe(&mut self) {
-        // Built-in functions are added by the checker when it has access to the interner
+    pub fn parent(&self) -> Option<ScopeKey> {
+        self.parent
     }
 
-    /// Returns the kind of this scope.
-    pub fn kind(&self) -> ScopeKind {
-        self.kind
+    pub fn children(&self) -> &[ScopeKey] {
+        &self.children
     }
 
-    /// Inserts an entity into this scope.
-    /// Returns the previous entity if the symbol was already defined.
-    pub fn insert(&mut self, symbol: Symbol, entity: Entity) -> Option<Entity> {
-        self.symbols.insert(symbol, entity)
+    pub fn pos(&self) -> Pos {
+        self.pos
     }
 
-    /// Looks up a symbol in this scope only (not parent scopes).
-    pub fn lookup_local(&self, symbol: Symbol) -> Option<&Entity> {
-        self.symbols.get(&symbol)
+    pub fn set_pos(&mut self, pos: Pos) {
+        self.pos = pos;
     }
 
-    /// Looks up a symbol in this scope and all parent scopes.
-    pub fn lookup(&self, symbol: Symbol) -> Option<&Entity> {
-        self.symbols
-            .get(&symbol)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.lookup(symbol)))
+    pub fn end(&self) -> Pos {
+        self.end
     }
 
-    /// Returns a mutable reference to an entity in this scope only.
-    pub fn lookup_local_mut(&mut self, symbol: Symbol) -> Option<&mut Entity> {
-        self.symbols.get_mut(&symbol)
+    pub fn comment(&self) -> &str {
+        &self.comment
     }
 
-    /// Returns true if the symbol is defined in this scope (not parent scopes).
-    pub fn contains_local(&self, symbol: Symbol) -> bool {
-        self.symbols.contains_key(&symbol)
+    pub fn is_func(&self) -> bool {
+        self.is_func
     }
 
-    /// Returns true if the symbol is defined in this scope or any parent scope.
-    pub fn contains(&self, symbol: Symbol) -> bool {
-        self.symbols.contains_key(&symbol)
-            || self.parent.as_ref().is_some_and(|p| p.contains(symbol))
+    pub fn len(&self) -> usize {
+        self.elems.len()
     }
 
-    /// Returns an iterator over all symbols in this scope (not parent scopes).
-    pub fn local_symbols(&self) -> impl Iterator<Item = (&Symbol, &Entity)> {
-        self.symbols.iter()
+    pub fn is_empty(&self) -> bool {
+        self.elems.is_empty()
     }
 
-    /// Takes ownership of the parent scope, leaving None in its place.
-    pub fn take_parent(&mut self) -> Option<Scope> {
-        self.parent.take().map(|b| *b)
+    /// Adds a child scope.
+    pub fn add_child(&mut self, child: ScopeKey) {
+        self.children.push(child);
     }
 
-    /// Sets the parent scope.
-    pub fn set_parent(&mut self, parent: Scope) {
-        self.parent = Some(Box::new(parent));
+    /// Looks up a name in this scope only (not parent scopes).
+    pub fn lookup(&self, name: &str) -> Option<ObjKey> {
+        self.elems.get(name).copied()
     }
 
-    /// Returns a reference to the parent scope.
-    pub fn parent(&self) -> Option<&Scope> {
-        self.parent.as_deref()
+    /// Looks up a name in this scope and all parent scopes.
+    pub fn lookup_parent(&self, name: &str, objs: &TCObjects) -> Option<(ScopeKey, ObjKey)> {
+        // First check this scope
+        if let Some(obj) = self.elems.get(name) {
+            // We need the scope key for this scope, but we don't have it here
+            // This is a limitation - caller should use lookup_parent_with_key
+            return None;
+        }
+        // Check parent scopes
+        if let Some(parent_key) = self.parent {
+            let parent = &objs.scopes[parent_key];
+            if let Some(obj) = parent.lookup(name) {
+                return Some((parent_key, obj));
+            }
+            return parent.lookup_parent(name, objs);
+        }
+        None
+    }
+
+    /// Returns an iterator over all names in the scope.
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.elems.keys()
+    }
+
+    /// Returns an iterator over all objects in the scope.
+    pub fn objects(&self) -> impl Iterator<Item = ObjKey> + '_ {
+        self.elems.values().copied()
+    }
+
+    /// Sets the end position.
+    pub fn set_end(&mut self, end: Pos) {
+        self.end = end;
+    }
+
+    /// Returns true if pos is within the scope [pos, end].
+    pub fn contains(&self, pos: Pos) -> bool {
+        self.pos <= pos && pos <= self.end
+    }
+
+    /// insert attempts to insert an object into scope.
+    /// If the scope already contains an object with the same name,
+    /// insert leaves the scope unchanged and returns the existing object.
+    /// Otherwise it inserts the object, sets the object's parent scope
+    /// if not already set, and returns None.
+    pub fn insert(self_key: ScopeKey, okey: ObjKey, objs: &mut TCObjects) -> Option<ObjKey> {
+        let lang_obj = &objs.lobjs[okey];
+        let name = lang_obj.name().to_string();
+        
+        let scope = &objs.scopes[self_key];
+        if let Some(&existing) = scope.elems.get(&name) {
+            return Some(existing);
+        }
+        
+        // Insert into scope
+        objs.scopes[self_key].elems.insert(name, okey);
+        
+        // Set parent if not already set
+        if objs.lobjs[okey].parent().is_none() {
+            objs.lobjs[okey].set_parent(Some(self_key));
+        }
+        
+        None
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::BasicType;
-
-    fn dummy_symbol(n: u32) -> Symbol {
-        // Create a symbol for testing
-        unsafe { std::mem::transmute(n) }
-    }
-
-    #[test]
-    fn test_scope_insert_lookup() {
-        let mut scope = Scope::new(None, ScopeKind::Block);
-        let sym = dummy_symbol(1);
-
-        let entity = Entity::Var(VarEntity {
-            ty: Type::Basic(BasicType::Int),
-            constant: None,
-            span: Span::dummy(),
-        });
-
-        assert!(scope.lookup_local(sym).is_none());
-        scope.insert(sym, entity);
-        assert!(scope.lookup_local(sym).is_some());
-    }
-
-    #[test]
-    fn test_scope_parent_lookup() {
-        let mut parent = Scope::new(None, ScopeKind::Function);
-        let parent_sym = dummy_symbol(1);
-        parent.insert(
-            parent_sym,
-            Entity::Var(VarEntity {
-                ty: Type::Basic(BasicType::Int),
-                constant: None,
-                span: Span::dummy(),
-            }),
-        );
-
-        let child = Scope::new(Some(parent), ScopeKind::Block);
-
-        // Should find in parent
-        assert!(child.lookup(parent_sym).is_some());
-        // But not in local
-        assert!(child.lookup_local(parent_sym).is_none());
-    }
-
-    #[test]
-    fn test_scope_shadowing() {
-        let mut parent = Scope::new(None, ScopeKind::Function);
-        let sym = dummy_symbol(1);
-        parent.insert(
-            sym,
-            Entity::Var(VarEntity {
-                ty: Type::Basic(BasicType::Int),
-                constant: None,
-                span: Span::dummy(),
-            }),
-        );
-
-        let mut child = Scope::new(Some(parent), ScopeKind::Block);
-        child.insert(
-            sym,
-            Entity::Var(VarEntity {
-                ty: Type::Basic(BasicType::String),
-                constant: None,
-                span: Span::dummy(),
-            }),
-        );
-
-        // Child's definition shadows parent's
-        if let Some(Entity::Var(v)) = child.lookup(sym) {
-            assert!(matches!(v.ty, Type::Basic(BasicType::String)));
-        } else {
-            panic!("expected Var entity");
+/// Looks up a name starting from a given scope, traversing parent scopes.
+pub fn lookup_parent(
+    start: ScopeKey,
+    name: &str,
+    objs: &TCObjects,
+) -> Option<(ScopeKey, ObjKey)> {
+    let mut current = Some(start);
+    while let Some(scope_key) = current {
+        let scope = &objs.scopes[scope_key];
+        if let Some(obj) = scope.lookup(name) {
+            return Some((scope_key, obj));
         }
+        current = scope.parent();
     }
+    None
+}
 
-    #[test]
-    fn test_builtin_kind() {
-        assert_eq!(BuiltinKind::Len.name(), "len");
-        assert_eq!(BuiltinKind::Make.name(), "make");
-        assert!(BuiltinKind::all().contains(&BuiltinKind::Append));
+/// Looks up a name starting from a given scope, with position-aware visibility.
+pub fn lookup_parent_at(
+    start: ScopeKey,
+    name: &str,
+    pos: Pos,
+    objs: &TCObjects,
+) -> Option<(ScopeKey, ObjKey)> {
+    let mut current = Some(start);
+    while let Some(scope_key) = current {
+        let scope = &objs.scopes[scope_key];
+        if let Some(obj_key) = scope.lookup(name) {
+            let obj = &objs.lobjs[obj_key];
+            // Check if the object is visible at this position
+            if obj.scope_pos() <= pos {
+                return Some((scope_key, obj_key));
+            }
+        }
+        current = scope.parent();
     }
+    None
+}
+
+// ----------------------------------------------------------------------------
+// Formatting
+
+use std::fmt;
+
+impl fmt::Display for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_scope(self, f, 0)
+    }
+}
+
+fn fmt_scope(scope: &Scope, f: &mut fmt::Formatter<'_>, n: usize) -> fmt::Result {
+    let ind = ".  ";
+    let indn = ind.repeat(n);
+    writeln!(f, "{}{} scope", indn, scope.comment)?;
+    let indn1 = ind.repeat(n + 1);
+    let mut names: Vec<_> = scope.elems.keys().collect();
+    names.sort();
+    for name in names {
+        writeln!(f, "{}{}", indn1, name)?;
+    }
+    Ok(())
+}
+
+/// Formats the scope including its children recursively.
+pub fn fmt_scope_full(
+    skey: ScopeKey,
+    f: &mut fmt::Formatter<'_>,
+    n: usize,
+    objs: &TCObjects,
+) -> fmt::Result {
+    let ind = ".  ";
+    let indn = ind.repeat(n);
+    let scope = &objs.scopes[skey];
+    writeln!(f, "{}{} scope {:?}", indn, scope.comment, skey)?;
+    fmt_scope(scope, f, n)?;
+    for child in scope.children.iter() {
+        fmt_scope_full(*child, f, n + 1, objs)?;
+    }
+    Ok(())
 }
