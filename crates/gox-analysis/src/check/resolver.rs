@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use gox_common::span::Span;
 use gox_common::vfs::FileSystem;
 use gox_common_core::ExprId;
-use gox_syntax::ast::{Decl, Expr, File, FuncDecl, InterfaceDecl, TypeExpr};
+use gox_syntax::ast::{Decl, Expr, File, FuncDecl, TypeExpr};
 
 use crate::constant::Value;
 use crate::obj::LangObj;
@@ -53,13 +53,6 @@ pub struct DeclInfoFunc {
     pub deps: HashSet<ObjKey>,
 }
 
-/// DeclInfo for interface declarations.
-#[derive(Debug, Clone)]
-pub struct DeclInfoInterface {
-    pub file_scope: ScopeKey,
-    pub iface: InterfaceDecl,
-}
-
 /// DeclInfo describes a package-level const, type, var, or func declaration.
 #[derive(Debug)]
 pub enum DeclInfo {
@@ -67,7 +60,6 @@ pub enum DeclInfo {
     Var(DeclInfoVar),
     Type(DeclInfoType),
     Func(DeclInfoFunc),
-    Interface(DeclInfoInterface),
 }
 
 impl DeclInfo {
@@ -115,13 +107,6 @@ impl DeclInfo {
         })
     }
 
-    pub fn new_interface(file_scope: ScopeKey, iface: InterfaceDecl) -> DeclInfo {
-        DeclInfo::Interface(DeclInfoInterface {
-            file_scope,
-            iface,
-        })
-    }
-
     pub fn as_const(&self) -> &DeclInfoConst {
         match self {
             DeclInfo::Const(c) => c,
@@ -156,7 +141,6 @@ impl DeclInfo {
             DeclInfo::Var(v) => v.file_scope,
             DeclInfo::Type(t) => t.file_scope,
             DeclInfo::Func(f) => f.file_scope,
-            DeclInfo::Interface(i) => i.file_scope,
         }
     }
 
@@ -492,22 +476,6 @@ impl<F: FileSystem> Checker<F> {
                 self.obj_map.insert(okey, di);
                 let order = self.obj_map.len() as u32;
                 self.lobj_mut(okey).set_order(order);
-            }
-            Decl::Interface(iface_decl) => {
-                let name_str = self.resolve_ident(&iface_decl.name);
-                let okey = self.tc_objs.new_type_name(
-                    0, // pos
-                    Some(self.pkg),
-                    name_str.to_string(),
-                    None,
-                );
-
-                let di = self.tc_objs.decls.insert(DeclInfo::new_interface(
-                    file_scope,
-                    iface_decl.clone(),
-                ));
-
-                self.declare_pkg_obj(&iface_decl.name, okey, di);
             }
         }
     }

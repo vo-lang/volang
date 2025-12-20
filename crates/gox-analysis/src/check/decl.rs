@@ -600,10 +600,6 @@ impl<F: FileSystem> Checker<F> {
             Decl::Func(_) => {
                 self.error(Span::default(), "unexpected function declaration in statement".to_string());
             }
-
-            Decl::Interface(_) => {
-                self.error(Span::default(), "unexpected interface declaration in statement".to_string());
-            }
         }
     }
 
