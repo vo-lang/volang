@@ -579,37 +579,57 @@ fn compile_index(
     Ok(dst)
 }
 
+/// Traverse through embedded structs to reach the final field.
+/// Returns (final_base_reg, last_field_byte_offset).
+/// For indices [0, 1]: reads field 0 of start_reg, then returns that as base with offset for field 1.
+pub fn traverse_to_field(
+    indices: &[usize],
+    start_reg: u16,
+    func: &mut FuncBuilder,
+) -> (u16, u16) {
+    let mut current = start_reg;
+    
+    // Traverse all but the last index
+    for &field_idx in &indices[..indices.len().saturating_sub(1)] {
+        let byte_offset = (field_idx * 8) as u16;
+        let tmp = func.alloc_temp_typed(&[SlotType::GcRef]);
+        func.emit_with_flags(Opcode::GetField, 3, tmp, current, byte_offset);
+        current = tmp;
+    }
+    
+    let last_offset = (indices.last().copied().unwrap_or(0) * 8) as u16;
+    (current, last_offset)
+}
+
 fn compile_selector(
     expr: &Expr,
-    field: gox_common::Symbol,
+    _field: gox_common::Symbol,
     selector_expr: &Expr,  // The full selector expression for type info
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfo,
 ) -> Result<u16> {
-    let base = compile_expr(expr, ctx, func, info)?;
+    let base_reg = compile_expr(expr, ctx, func, info)?;
 
-    // Get field info (byte_offset and slot count) from type info
-    let ty = info.expr_type(expr);
-    let (byte_offset, _field_slots) = if let Some(t) = ty {
-        info.struct_field_info(t, field).unwrap_or((0, 1))
-    } else {
-        (0, 1)
-    };
-
-    // Get the result type for correct slot allocation
-    let result_ty = info.expr_type(selector_expr);
-    let slot_types = if let Some(t) = result_ty {
-        info.type_slot_types(t)
-    } else {
-        vec![SlotType::Value]
-    };
+    // Get selection info - all valid selector expressions should have this recorded by analysis
+    let selection = info.expr_selection(expr)
+        .expect("selector expression should have selection info from analysis");
+    let indices = selection.indices();
+    
+    if indices.is_empty() {
+        unreachable!("selector expression has empty indices");
+    }
+    
+    // Traverse to the final field
+    let (current, byte_offset) = traverse_to_field(indices, base_reg, func);
+    
+    // Read the final field value
+    let slot_types = info.slot_types_or_default(info.expr_type(selector_expr));
     let dst = func.alloc_temp_typed(&slot_types);
     
-    // For multi-slot fields (like interface), emit multiple GetField ops
-    for i in 0..slot_types.len() {
-        let slot_offset = byte_offset + (i * 8) as u16;
-        func.emit_with_flags(Opcode::GetField, 3, dst + i as u16, base, slot_offset);
+    for j in 0..slot_types.len() {
+        let slot_offset = byte_offset + (j * 8) as u16;
+        func.emit_with_flags(Opcode::GetField, 3, dst + j as u16, current, slot_offset);
     }
     
     Ok(dst)
@@ -645,6 +665,51 @@ fn is_string_type(ty: Option<&Type>) -> bool {
     }
 }
 
+/// Recursively allocate an empty struct and initialize all its embedded struct fields.
+fn alloc_empty_struct(
+    ty: &Type,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16> {
+    // Get underlying struct type
+    let (struct_detail, type_key) = match ty {
+        Type::Named(n) => {
+            if let Some(Type::Struct(s)) = info.query.named_underlying(n) {
+                (s, n.underlying())
+            } else {
+                return Err(CodegenError::internal("Expected struct type for embedding", Span::from_u32(0, 0)));
+            }
+        }
+        Type::Struct(_) => {
+            // Anonymous struct - can't get type_key easily, skip for now
+            return Err(CodegenError::internal("Anonymous struct embedding not supported", Span::from_u32(0, 0)));
+        }
+        _ => return Err(CodegenError::internal("Expected struct type for embedding", Span::from_u32(0, 0))),
+    };
+    
+    let fields = info.query.struct_fields(struct_detail);
+    let field_count = fields.len() as u16;
+    let type_id = ctx.type_id_for_struct(type_key);
+    
+    // Allocate the struct
+    let dst = func.alloc_temp_typed(&[SlotType::GcRef]);
+    func.emit_with_flags(Opcode::Alloc, field_count as u8, dst, type_id, 0);
+    
+    // Recursively initialize embedded struct fields
+    for field in &fields {
+        if let Some(field_ty) = field.typ {
+            if info.is_struct_type(field_ty) {
+                let embedded = alloc_empty_struct(field_ty, ctx, func, info)?;
+                let byte_offset = (field.index * 8) as u16;
+                func.emit_with_flags(Opcode::SetField, 3, dst, byte_offset, embedded);
+            }
+        }
+    }
+    
+    Ok(dst)
+}
+
 fn compile_composite_lit(
     _ty: &TypeExpr,
     elems: &[CompositeLitElem],
@@ -665,7 +730,8 @@ fn compile_composite_lit(
     match underlying {
         Some(Type::Struct(s)) => {
             // Struct literal: S{a, b, c} or S{x: a, y: b}
-            let field_count = s.fields().len() as u16;
+            let fields = info.query.struct_fields(s);
+            let field_count = fields.len() as u16;
             let type_key = info.expr_type_key(expr).expect("struct literal must have type_key");
             let type_id = ctx.type_id_for_struct(type_key);
             let type_id_lo = type_id;
@@ -675,11 +741,41 @@ fn compile_composite_lit(
             // Alloc: a=dest, b=type_id_lo, c=type_id_hi, flags=field_count
             func.emit_with_flags(Opcode::Alloc, field_count as u8, dst, type_id_lo, type_id_hi);
             
-            // Set each field (byte_offset = i * 8, size_code = 3 for 8-byte slots)
+            // Track which fields are explicitly set
+            let mut set_fields = std::collections::HashSet::new();
+            
+            // Set each explicitly provided field
             for (i, elem) in elems.iter().enumerate() {
+                // Determine field index: keyed or positional
+                let field_idx = match &elem.key {
+                    Some(CompositeLitKey::Ident(ident)) => {
+                        // Keyed: find field by name - analysis should have validated the name
+                        let name = info.symbol_str(ident.symbol);
+                        fields.iter().position(|f| f.name == name)
+                            .expect("field name should exist - validated by analysis")
+                    }
+                    _ => i, // Positional
+                };
+                set_fields.insert(field_idx);
                 let val = compile_expr(&elem.value, ctx, func, info)?;
-                let byte_offset = (i * 8) as u16;
+                let byte_offset = (field_idx * 8) as u16;
                 func.emit_with_flags(Opcode::SetField, 3, dst, byte_offset, val);
+            }
+            
+            // Initialize unset struct-type fields (especially embedded structs)
+            for field in &fields {
+                if set_fields.contains(&field.index) {
+                    continue;
+                }
+                if let Some(field_ty) = field.typ {
+                    if info.is_struct_type(field_ty) {
+                        // Recursively allocate and initialize embedded struct
+                        let embedded = alloc_empty_struct(field_ty, ctx, func, info)?;
+                        // Set the embedded field
+                        let byte_offset = (field.index * 8) as u16;
+                        func.emit_with_flags(Opcode::SetField, 3, dst, byte_offset, embedded);
+                    }
+                }
             }
             
             Ok(dst)

@@ -169,9 +169,11 @@ impl<'a> TypeQuery<'a> {
             .enumerate()
             .map(|(i, &okey)| {
                 let obj = &self.objs.lobjs[okey];
+                let type_key = obj.typ();
                 FieldInfo {
                     name: obj.name(),
-                    typ: obj.typ().map(|t| &self.objs.types[t]),
+                    typ: type_key.map(|t| &self.objs.types[t]),
+                    type_key,
                     tag: s.tag(i).map(|s| s.as_str()),
                     embedded: obj.var_embedded(),
                     index: i,
@@ -387,6 +389,7 @@ pub enum EntityRef<'a> {
 pub struct FieldInfo<'a> {
     pub name: &'a str,
     pub typ: Option<&'a Type>,
+    pub type_key: Option<TypeKey>,
     pub tag: Option<&'a str>,
     pub embedded: bool,
     pub index: usize,

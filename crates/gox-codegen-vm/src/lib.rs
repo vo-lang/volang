@@ -32,8 +32,8 @@ pub fn compile_project(project: &Project) -> Result<Module> {
     // Create a TypeQuery for the main package
     let query = project.query();
     
-    // Use expr_types and type_expr_types from Project
-    let info = TypeInfo::new(query, project.expr_types(), project.type_expr_types());
+    // Use expr_types, type_expr_types, and selections from Project
+    let info = TypeInfo::new(query, project.expr_types(), project.type_expr_types(), project.selections());
 
     // Register all struct and interface types and generate TypeMeta
     register_types(project, &mut ctx, &info);
@@ -98,10 +98,12 @@ fn register_types(project: &Project, ctx: &mut CodegenContext, info: &TypeInfo) 
     }
     
     // Second pass: generate TypeMeta for structs, sorted by type_id
-    struct_types.sort_by_key(|(tk, _)| ctx.get_struct_type_id(*tk).unwrap_or(0));
+    struct_types.sort_by_key(|(tk, _)| ctx.get_struct_type_id(*tk)
+        .expect("struct type should be registered"));
     
     for (type_key, ty) in struct_types {
-        let type_id = ctx.get_struct_type_id(type_key).unwrap_or(0);
+        let type_id = ctx.get_struct_type_id(type_key)
+            .expect("struct type should be registered");
         let size_slots = info.struct_size_slots(ty) as usize;
         let slot_types = info.struct_field_slot_types(ty);
         
@@ -122,10 +124,12 @@ fn register_types(project: &Project, ctx: &mut CodegenContext, info: &TypeInfo) 
     }
     
     // Third pass: generate TypeMeta for interfaces, sorted by type_id
-    interface_types.sort_by_key(|(tk, _)| ctx.get_interface_type_id(*tk).unwrap_or(0));
+    interface_types.sort_by_key(|(tk, _)| ctx.get_interface_type_id(*tk)
+        .expect("interface type should be registered"));
     
     for (type_key, _ty) in interface_types {
-        let type_id = ctx.get_interface_type_id(type_key).unwrap_or(0);
+        let type_id = ctx.get_interface_type_id(type_key)
+            .expect("interface type should be registered");
         // Interface is 2 slots: (metadata, data)
         let meta = TypeMeta {
             value_kind: ValueKind::Interface,
@@ -195,7 +199,7 @@ pub fn compile_single_file(project: &Project) -> Result<Module> {
     let file = project.files.first().expect("project must have at least one file");
     let query = project.query();
     let mut ctx = CodegenContext::new("main");
-    let info = TypeInfo::new(query, project.expr_types(), project.type_expr_types());
+    let info = TypeInfo::new(query, project.expr_types(), project.type_expr_types(), project.selections());
 
     collect_declarations(file, &info, &mut ctx)?;
     compile_functions(file, &info, &mut ctx)?;

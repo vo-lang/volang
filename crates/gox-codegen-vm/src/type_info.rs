@@ -2,7 +2,7 @@
 //!
 //! This module wraps gox_analysis::TypeQuery and adds expression type tracking.
 
-use gox_analysis::{Builtin, ConstValue, Type, TypeAndValue, TypeKey, TypeQuery};
+use gox_analysis::{Builtin, ConstValue, Selection, Type, TypeAndValue, TypeKey, TypeQuery};
 use gox_analysis::operand::OperandMode;
 use gox_common::Symbol;
 use gox_common_core::SlotType;
@@ -16,15 +16,24 @@ use gox_common_core::{ExprId, TypeExprId};
 pub struct LayoutCalculator;
 
 impl LayoutCalculator {
+    /// Get the StructDetail from a type (handles Named types).
+    pub fn get_struct_detail<'a>(query: &'a TypeQuery, ty: &'a Type) -> Option<&'a gox_analysis::StructDetail> {
+        match ty {
+            Type::Struct(s) => Some(s),
+            Type::Named(named) => {
+                if let Some(Type::Struct(s)) = query.named_underlying(named) {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Check if a type is a struct (including named structs).
     pub fn is_struct_type(query: &TypeQuery, ty: &Type) -> bool {
-        match ty {
-            Type::Struct(_) => true,
-            Type::Named(named) => {
-                matches!(query.named_underlying(named), Some(Type::Struct(_)))
-            }
-            _ => false,
-        }
+        Self::get_struct_detail(query, ty).is_some()
     }
 
     /// Get the size in slots for a struct type.
@@ -59,19 +68,7 @@ impl LayoutCalculator {
 
     /// Get slot types for struct fields (for TypeMeta generation).
     pub fn struct_field_slot_types(query: &TypeQuery, ty: &Type) -> Vec<SlotType> {
-        let struct_detail = match ty {
-            Type::Struct(s) => Some(s),
-            Type::Named(named) => {
-                if let Some(Type::Struct(s)) = query.named_underlying(named) {
-                    Some(s)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        
-        let Some(s) = struct_detail else {
+        let Some(s) = Self::get_struct_detail(query, ty) else {
             return Vec::new();
         };
         
@@ -92,17 +89,7 @@ impl LayoutCalculator {
 
     /// Get the byte offset and slot count of a struct field.
     pub fn struct_field_info(query: &TypeQuery, struct_type: &Type, field: Symbol) -> Option<(u16, usize)> {
-        let struct_detail = match struct_type {
-            Type::Named(named) => {
-                if let Some(Type::Struct(s)) = query.named_underlying(named) {
-                    Some(s)
-                } else {
-                    None
-                }
-            }
-            Type::Struct(s) => Some(s),
-            _ => None,
-        }?;
+        let struct_detail = Self::get_struct_detail(query, struct_type)?;
         
         let fields = query.struct_fields(struct_detail);
         let field_name = query.symbol_str(field);
@@ -134,20 +121,8 @@ impl LayoutCalculator {
     }
 
     /// Get nested struct fields that need recursive deep copy.
-    pub fn struct_nested_fields<'a>(query: &TypeQuery<'a>, ty: &Type) -> Vec<(u16, &'a Type)> {
-        let struct_detail = match ty {
-            Type::Struct(s) => Some(s),
-            Type::Named(named) => {
-                if let Some(Type::Struct(s)) = query.named_underlying(named) {
-                    Some(s)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        
-        let Some(s) = struct_detail else {
+    pub fn struct_nested_fields<'a>(query: &TypeQuery<'a>, ty: &'a Type) -> Vec<(u16, &'a Type)> {
+        let Some(s) = Self::get_struct_detail(query, ty) else {
             return Vec::new();
         };
         
@@ -182,6 +157,8 @@ pub struct TypeInfo<'a> {
     pub expr_types: &'a HashMap<ExprId, TypeAndValue>,
     /// Type expression types recorded during type checking.
     pub type_expr_types: &'a HashMap<TypeExprId, TypeKey>,
+    /// Selector expression selections (for field promotion).
+    pub selections: &'a HashMap<ExprId, Selection>,
 }
 
 impl<'a> TypeInfo<'a> {
@@ -189,8 +166,14 @@ impl<'a> TypeInfo<'a> {
         query: TypeQuery<'a>,
         expr_types: &'a HashMap<ExprId, TypeAndValue>,
         type_expr_types: &'a HashMap<TypeExprId, TypeKey>,
+        selections: &'a HashMap<ExprId, Selection>,
     ) -> Self {
-        Self { query, expr_types, type_expr_types }
+        Self { query, expr_types, type_expr_types, selections }
+    }
+    
+    /// Get the selection for a selector expression (field access).
+    pub fn expr_selection(&self, expr: &Expr) -> Option<&'a Selection> {
+        self.selections.get(&expr.id)
     }
 
     // === Expression type queries ===
@@ -237,6 +220,11 @@ impl<'a> TypeInfo<'a> {
 
     pub fn type_slot_types(&self, ty: &Type) -> Vec<SlotType> {
         self.query.type_slot_types(ty)
+    }
+
+    /// Get slot types for a type, with a default of [Value] if None.
+    pub fn slot_types_or_default(&self, ty: Option<&Type>) -> Vec<SlotType> {
+        ty.map(|t| self.type_slot_types(t)).unwrap_or_else(|| vec![SlotType::Value])
     }
 
     pub fn is_ref_type(&self, ty: &Type) -> bool {
@@ -304,7 +292,7 @@ impl<'a> TypeInfo<'a> {
     }
 
     /// Delegate to LayoutCalculator.
-    pub fn struct_nested_fields(&self, ty: &Type) -> Vec<(u16, &'a Type)> {
+    pub fn struct_nested_fields(&self, ty: &'a Type) -> Vec<(u16, &'a Type)> {
         LayoutCalculator::struct_nested_fields(&self.query, ty)
     }
 

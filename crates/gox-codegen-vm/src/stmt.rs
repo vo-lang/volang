@@ -186,59 +186,31 @@ fn compile_assign(
                 func.emit_op(opcode, base, index, src);
             }
             ExprKind::Selector(sel) => {
-                let base = compile_expr(&sel.expr, ctx, func, info)?;
-                // Get field index from type info
-                let ty = info.expr_type(&sel.expr);
-                let field_idx = match ty {
-                    Some(Type::Named(named)) => {
-                        if let Some(underlying) = info.query.named_underlying(named) {
-                            if let Type::Struct(s) = underlying {
-                                info.query.struct_field_index(s, sel.sel.symbol)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    Some(Type::Pointer(ptr)) => {
-                        let base_ty = info.query.pointer_base(ptr);
-                        match base_ty {
-                            Type::Named(named) => {
-                                if let Some(underlying) = info.query.named_underlying(named) {
-                                    if let Type::Struct(s) = underlying {
-                                        info.query.struct_field_index(s, sel.sel.symbol)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            Type::Struct(s) => info.query.struct_field_index(s, sel.sel.symbol),
-                            _ => None,
-                        }
-                    }
-                    Some(Type::Struct(s)) => info.query.struct_field_index(s, sel.sel.symbol),
-                    _ => None,
-                };
-                let byte_offset = (field_idx.unwrap_or(0) * 8) as u16;
+                let base_reg = compile_expr(&sel.expr, ctx, func, info)?;
                 
-                // Handle compound assignment (+=, -=, etc.)
+                // Get selection info - all valid selector expressions should have this recorded by analysis
+                let selection = info.expr_selection(&sel.expr)
+                    .expect("selector expression should have selection info from analysis");
+                let indices = selection.indices();
+                
+                // Traverse to the final field
+                let (current, byte_offset) = crate::expr::traverse_to_field(indices, base_reg, func);
+                
+                // Set the field value (handle compound assignment)
                 let field_ty = info.expr_type(l);
                 let is_float = is_float_type(field_ty);
                 let final_src = match op {
                     AssignOp::Assign => src,
                     _ => {
                         let old_val = func.alloc_temp(1);
-                        func.emit_with_flags(Opcode::GetField, 3, old_val, base, byte_offset);
+                        func.emit_with_flags(Opcode::GetField, 3, old_val, current, byte_offset);
                         let new_val = func.alloc_temp(1);
                         let opcode = compound_assign_opcode(op, is_float);
                         func.emit_op(opcode, new_val, old_val, src);
                         new_val
                     }
                 };
-                func.emit_with_flags(Opcode::SetField, 3, base, byte_offset, final_src);
+                func.emit_with_flags(Opcode::SetField, 3, current, byte_offset, final_src);
             }
             _ => {}
         }
