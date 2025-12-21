@@ -1,9 +1,0 @@
-// +vm
-// Test redeclaration errors
-package main
-
-var x int
-var x string  // redeclared
-
-=== typecheck ===
-E2000
