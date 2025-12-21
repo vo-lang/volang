@@ -69,6 +69,10 @@ impl Vm {
     
     /// Load a module.
     pub fn load_module(&mut self, module: Module) {
+        // Load type metadata
+        self.types.load_struct_types(&module.struct_types);
+        self.types.load_interface_types(&module.interface_types);
+        
         // Preload string constants
         self.string_constants.clear();
         for c in &module.constants {
@@ -551,7 +555,7 @@ impl Vm {
                     // Anonymous struct - use field_count directly as size
                     field_count
                 } else {
-                    let type_meta = self.types.get_unchecked(type_id);
+                    let type_meta = self.types.get_struct_unchecked(type_id);
                     type_meta.size_slots
                 };
                 let obj = self.gc.alloc(ValueKind::Struct as u8, type_id as u16, size);
@@ -630,16 +634,23 @@ impl Vm {
                 self.write_reg(fiber_id, a, hash);
             }
             
+            Opcode::StructClone => {
+                // a=dest, b=src_struct, c=size_slots
+                // Deep copy: allocate new struct with same type and copy all slots
+                let src = self.read_reg(fiber_id, b) as GcRef;
+                let size_slots = c as usize;
+                let cloned = objects::struct_clone(&mut self.gc, src, size_slots);
+                self.write_reg(fiber_id, a, cloned as u64);
+            }
+            
             // ============ Array ============
             Opcode::ArrayNew => {
-                // a=dest, b=elem_type, c=len
-                let elem_type = b as TypeId;
-                let type_meta = self.types.get_unchecked(elem_type);
+                // a=dest, b=elem_type (ValueKind), c=len
+                let elem_kind = b as u8;
                 // Use elem_bytes for compact storage (1/2/4/8 bytes per element)
-                // Compute elem_bytes from type_id
-                let elem_bytes = elem_bytes_from_type_id(elem_type);
+                let elem_bytes = elem_bytes_from_value_kind(elem_kind);
                 let len = c as usize;
-                let arr = array::create(&mut self.gc, type_meta.value_kind as u8, type_meta.type_id, elem_bytes, len);
+                let arr = array::create(&mut self.gc, elem_kind, 0, elem_bytes, len);
                 self.write_reg(fiber_id, a, arr as u64);
             }
             
@@ -1861,16 +1872,16 @@ fn format_value(val: u64, value_kind: u32) -> String {
 }
 
 /// Get element byte size from ValueKind.
-fn elem_bytes_from_type_id(value_kind: u32) -> usize {
+fn elem_bytes_from_value_kind(value_kind: u8) -> usize {
     match value_kind {
-        t if t == ValueKind::Bool as u32 => 1,
-        t if t == ValueKind::Int8 as u32 => 1,
-        t if t == ValueKind::Uint8 as u32 => 1,
-        t if t == ValueKind::Int16 as u32 => 2,
-        t if t == ValueKind::Uint16 as u32 => 2,
-        t if t == ValueKind::Int32 as u32 => 4,
-        t if t == ValueKind::Uint32 as u32 => 4,
-        t if t == ValueKind::Float32 as u32 => 4,
+        t if t == ValueKind::Bool as u8 => 1,
+        t if t == ValueKind::Int8 as u8 => 1,
+        t if t == ValueKind::Uint8 as u8 => 1,
+        t if t == ValueKind::Int16 as u8 => 2,
+        t if t == ValueKind::Uint16 as u8 => 2,
+        t if t == ValueKind::Int32 as u8 => 4,
+        t if t == ValueKind::Uint32 as u8 => 4,
+        t if t == ValueKind::Float32 as u8 => 4,
         _ => 8, // 64-bit types and all references
     }
 }

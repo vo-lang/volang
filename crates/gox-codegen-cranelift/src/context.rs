@@ -172,9 +172,14 @@ impl<'a> CompileContext<'a> {
         Ok(data_id)
     }
 
-    /// Get type metadata by ID.
-    pub fn get_type(&self, type_id: u32) -> Option<&TypeMeta> {
-        self.bytecode.types.get(type_id as usize)
+    /// Get struct type metadata by ID.
+    pub fn get_struct_type(&self, type_id: u32) -> Option<&TypeMeta> {
+        self.bytecode.struct_types.get(type_id as usize)
+    }
+    
+    /// Get interface type metadata by ID.
+    pub fn get_interface_type(&self, type_id: u32) -> Option<&TypeMeta> {
+        self.bytecode.interface_types.get(type_id as usize)
     }
 
     /// Get function definition by index.

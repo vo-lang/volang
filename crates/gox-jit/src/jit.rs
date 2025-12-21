@@ -102,7 +102,7 @@ impl JitCompiler {
         gox_runtime_native::init_gc();
         
         // Initialize struct slot_types for GC scanning
-        let slot_types_data: Vec<Vec<_>> = bytecode.types.iter()
+        let slot_types_data: Vec<Vec<_>> = bytecode.struct_types.iter()
             .map(|t| t.slot_types.clone())
             .collect();
         gox_runtime_core::gc_types::init_struct_slot_types(slot_types_data);

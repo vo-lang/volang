@@ -254,17 +254,8 @@ impl<'a> TypeQuery<'a> {
                 let len = arr.len().unwrap_or(0) as u16;
                 len * self.type_slots(&self.objs.types[arr.elem()])
             }
-            Type::Struct(s) => {
-                s.fields()
-                    .iter()
-                    .map(|&okey| {
-                        self.objs.lobjs[okey]
-                            .typ()
-                            .map(|t| self.type_slots(&self.objs.types[t]))
-                            .unwrap_or(1)
-                    })
-                    .sum()
-            }
+            // Struct is stored as GcRef (1 slot) in VM
+            Type::Struct(_) => 1,
             Type::Interface(_) => 2,
             Type::Named(n) => {
                 let u = n.try_underlying().expect("Named type must have underlying in codegen");
@@ -290,15 +281,8 @@ impl<'a> TypeQuery<'a> {
                 }
                 result
             }
-            Type::Struct(s) => {
-                let mut result = Vec::new();
-                for &okey in s.fields() {
-                    if let Some(t) = self.objs.lobjs[okey].typ() {
-                        result.extend(self.type_slot_types(&self.objs.types[t]));
-                    }
-                }
-                result
-            }
+            // Struct is stored as GcRef (1 slot) in VM, not expanded fields
+            Type::Struct(_) => vec![SlotType::GcRef],
             Type::Interface(_) => vec![SlotType::Interface0, SlotType::Interface1],
             Type::Named(n) => {
                 let u = n.try_underlying().expect("Named type must have underlying in codegen");

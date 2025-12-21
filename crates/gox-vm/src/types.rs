@@ -151,103 +151,78 @@ impl TypeMeta {
     }
 }
 
-/// Type table (compile-time generated, loaded into VM).
+/// Type table with separate struct and interface metadata.
+/// Struct and interface type_ids are independent (both start from 0).
 #[derive(Clone, Debug, Default)]
 pub struct TypeTable {
-    types: Vec<TypeMeta>,
-    by_name: HashMap<String, TypeId>,
+    /// Struct type metadata, indexed by struct type_id (0-based).
+    struct_metas: Vec<TypeMeta>,
+    /// Interface type metadata, indexed by interface type_id (0-based).
+    interface_metas: Vec<TypeMeta>,
 }
 
 impl TypeTable {
     pub fn new() -> Self {
-        let mut table = Self {
-            types: Vec::new(),
-            by_name: HashMap::new(),
-        };
-        table.init_builtins();
-        table
-    }
-    
-    fn init_builtins(&mut self) {
-        // Reserve space for builtin types (ValueKind values 0-23)
-        self.types.resize(24, TypeMeta::nil());
-        
-        // Helper to set builtin type at its ValueKind index
-        let set_builtin = |types: &mut Vec<TypeMeta>, by_name: &mut HashMap<String, TypeId>, meta: TypeMeta| {
-            let idx = meta.value_kind as usize;
-            by_name.insert(meta.name.clone(), idx as TypeId);
-            types[idx] = meta;
-        };
-        
-        // Primitives
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::nil());
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Bool, "bool"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Int, "int"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Int8, "int8"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Int16, "int16"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Int32, "int32"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Int64, "int64"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Uint, "uint"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Uint8, "uint8"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Uint16, "uint16"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Uint32, "uint32"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Uint64, "uint64"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Float32, "float32"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::Float64, "float64"));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::primitive(ValueKind::FuncPtr, "funcptr"));
-        
-        // Reference types
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::String, "string", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Array, "array", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Slice, "slice", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Map, "map", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Channel, "channel", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Closure, "closure", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Struct, "struct", 0, vec![]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Pointer, "pointer", 1, vec![SlotType::GcRef]));
-        set_builtin(&mut self.types, &mut self.by_name, TypeMeta::object(ValueKind::Interface, "interface", 2, vec![SlotType::Interface0, SlotType::Interface1]));
-    }
-    
-    fn set(&mut self, id: TypeId, meta: TypeMeta) {
-        let idx = id as usize;
-        if idx >= self.types.len() {
-            self.types.resize(idx + 1, TypeMeta::nil());
+        Self {
+            struct_metas: Vec::new(),
+            interface_metas: Vec::new(),
         }
-        self.by_name.insert(meta.name.clone(), id);
-        self.types[idx] = meta;
     }
     
-    /// Register a new struct type.
-    pub fn register_struct(&mut self, type_id: RuntimeTypeId, name: &str, size_slots: usize, slot_types: Vec<SlotType>) -> TypeId {
-        let meta = TypeMeta::struct_(type_id, name, size_slots, slot_types);
-        self.by_name.insert(name.to_string(), self.types.len() as TypeId);
-        let id = self.types.len() as TypeId;
-        self.types.push(meta);
-        id
+    /// Load struct types from module.
+    pub fn load_struct_types(&mut self, types: &[TypeMeta]) {
+        for meta in types {
+            let idx = meta.type_id as usize;
+            if idx >= self.struct_metas.len() {
+                self.struct_metas.resize(idx + 1, TypeMeta::nil());
+            }
+            self.struct_metas[idx] = meta.clone();
+        }
     }
     
-    /// Get type metadata by ID.
-    pub fn get(&self, id: TypeId) -> Option<&TypeMeta> {
-        self.types.get(id as usize)
+    /// Load interface types from module.
+    pub fn load_interface_types(&mut self, types: &[TypeMeta]) {
+        for meta in types {
+            let idx = meta.type_id as usize;
+            if idx >= self.interface_metas.len() {
+                self.interface_metas.resize(idx + 1, TypeMeta::nil());
+            }
+            self.interface_metas[idx] = meta.clone();
+        }
     }
     
-    /// Get type metadata by ID (unchecked).
-    pub fn get_unchecked(&self, id: TypeId) -> &TypeMeta {
-        &self.types[id as usize]
+    /// Get struct metadata by type_id.
+    pub fn get_struct(&self, type_id: u32) -> Option<&TypeMeta> {
+        self.struct_metas.get(type_id as usize)
     }
     
-    /// Get type ID by name.
-    pub fn get_by_name(&self, name: &str) -> Option<TypeId> {
-        self.by_name.get(name).copied()
+    /// Get struct metadata by type_id (unchecked).
+    pub fn get_struct_unchecked(&self, type_id: u32) -> &TypeMeta {
+        &self.struct_metas[type_id as usize]
     }
     
-    /// Get number of types.
-    pub fn len(&self) -> usize {
-        self.types.len()
+    /// Get interface metadata by type_id.
+    pub fn get_interface(&self, type_id: u32) -> Option<&TypeMeta> {
+        self.interface_metas.get(type_id as usize)
+    }
+    
+    /// Get interface metadata by type_id (unchecked).
+    pub fn get_interface_unchecked(&self, type_id: u32) -> &TypeMeta {
+        &self.interface_metas[type_id as usize]
+    }
+    
+    /// Get number of struct types.
+    pub fn struct_count(&self) -> usize {
+        self.struct_metas.len()
+    }
+    
+    /// Get number of interface types.
+    pub fn interface_count(&self) -> usize {
+        self.interface_metas.len()
     }
     
     pub fn is_empty(&self) -> bool {
-        self.types.is_empty()
+        self.struct_metas.is_empty() && self.interface_metas.is_empty()
     }
 }
 

@@ -36,8 +36,8 @@ pub fn compile_project(project: &Project) -> Result<Module> {
     // Use expr_types and type_expr_types from Project
     let info = TypeInfo::new(query, project.expr_types(), project.type_expr_types());
 
-    // Register all struct and interface types (Pass 1)
-    register_types(project, &mut ctx);
+    // Register all struct and interface types and generate TypeMeta
+    register_types(project, &mut ctx, &info);
 
     // Collect declarations from all files
     for file in &project.files {
@@ -55,31 +55,40 @@ pub fn compile_project(project: &Project) -> Result<Module> {
     Ok(ctx.finish())
 }
 
-/// Register all struct and interface types to allocate unique type IDs.
-fn register_types(project: &Project, ctx: &mut CodegenContext) {
+/// Register all struct and interface types to allocate unique type IDs,
+/// and generate TypeMeta for each type.
+fn register_types(project: &Project, ctx: &mut CodegenContext, info: &TypeInfo) {
     use gox_analysis::Type;
+    use gox_vm::types::TypeMeta;
+    use gox_common_core::ValueKind;
     
     let query = project.query();
     
-    // Iterate through all types in the project
+    // First pass: register all types to allocate IDs
+    let mut struct_types: Vec<(gox_analysis::TypeKey, &Type)> = Vec::new();
+    let mut interface_types: Vec<(gox_analysis::TypeKey, &Type)> = Vec::new();
+    
     for (type_key, ty) in query.iter_types() {
         match ty {
             Type::Struct(_) => {
                 ctx.register_struct_type(type_key);
+                struct_types.push((type_key, ty));
             }
             Type::Interface(_) => {
                 ctx.register_interface_type(type_key);
+                interface_types.push((type_key, ty));
             }
             Type::Named(n) => {
-                // Also register named types that wrap structs/interfaces
                 if let Some(underlying_key) = n.try_underlying() {
                     let underlying = query.get_type(underlying_key);
                     match underlying {
                         Type::Struct(_) => {
                             ctx.register_struct_type(type_key);
+                            struct_types.push((type_key, underlying));
                         }
                         Type::Interface(_) => {
                             ctx.register_interface_type(type_key);
+                            interface_types.push((type_key, underlying));
                         }
                         _ => {}
                     }
@@ -87,6 +96,52 @@ fn register_types(project: &Project, ctx: &mut CodegenContext) {
             }
             _ => {}
         }
+    }
+    
+    // Second pass: generate TypeMeta for structs, sorted by type_id
+    struct_types.sort_by_key(|(tk, _)| ctx.get_struct_type_id(*tk).unwrap_or(0));
+    
+    for (type_key, ty) in struct_types {
+        let type_id = ctx.get_struct_type_id(type_key).unwrap_or(0);
+        let size_slots = info.struct_size_slots(ty) as usize;
+        let slot_types = info.struct_field_slot_types(ty);
+        
+        let meta = TypeMeta {
+            value_kind: ValueKind::Struct,
+            type_id,
+            size_slots,
+            size_bytes: size_slots * 8,
+            slot_types,
+            name: String::new(),
+            field_layouts: Vec::new(),
+            elem_type: None,
+            elem_size: None,
+            key_type: None,
+            value_type: None,
+        };
+        ctx.module.struct_types.push(meta);
+    }
+    
+    // Third pass: generate TypeMeta for interfaces, sorted by type_id
+    interface_types.sort_by_key(|(tk, _)| ctx.get_interface_type_id(*tk).unwrap_or(0));
+    
+    for (type_key, _ty) in interface_types {
+        let type_id = ctx.get_interface_type_id(type_key).unwrap_or(0);
+        // Interface is 2 slots: (metadata, data)
+        let meta = TypeMeta {
+            value_kind: ValueKind::Interface,
+            type_id,
+            size_slots: 2,
+            size_bytes: 16,
+            slot_types: vec![SlotType::Interface0, SlotType::Interface1],
+            name: String::new(),
+            field_layouts: Vec::new(),
+            elem_type: None,
+            elem_size: None,
+            key_type: None,
+            value_type: None,
+        };
+        ctx.module.interface_types.push(meta);
     }
 }
 
@@ -159,7 +214,11 @@ fn collect_declarations(
         match decl {
             Decl::Func(func) => {
                 if func.body.is_some() {
-                    ctx.register_func(func.name.symbol);
+                    // Get receiver type for methods
+                    let recv_type_key = func.receiver.as_ref().and_then(|recv| {
+                        info.lookup_type_key(recv.ty.symbol)
+                    });
+                    ctx.register_method(recv_type_key, func.name.symbol);
                 } else {
                     let name = info.symbol_str(func.name.symbol);
                     let param_slots: u16 = func.sig.params.iter()
@@ -212,42 +271,29 @@ fn compile_func_decl(
     let mut builder = FuncBuilder::new(name);
 
     // Define receiver parameter first (for methods)
-    // Get receiver type from the function's signature (computed during analysis)
+    // In VM, all structs are heap-allocated, so receiver is always 1 slot (GcRef)
+    // Value receiver vs pointer receiver difference is handled at call site (deep copy for value)
     if let Some(recv) = &func.receiver {
-        if let Some(recv_type) = info.func_recv_type(func.name.symbol) {
-            let slot_types = info.type_slot_types(recv_type);
-            let slots = slot_types.len() as u16;
-            builder.define_param(recv.name.symbol, slots, &slot_types);
-        } else {
-            // Fallback: pointer receiver is always 1 slot (GcRef)
-            if recv.is_pointer {
-                builder.define_param(recv.name.symbol, 1, &[SlotType::GcRef]);
-            } else {
-                // Value receiver - look up the base type
-                let type_key = info.lookup_type_key(recv.ty.symbol)
-                    .expect("receiver type must resolve");
-                let recv_type = info.query.get_type(type_key);
-                let slot_types = info.type_slot_types(recv_type);
-                let slots = slot_types.len() as u16;
-                builder.define_param(recv.name.symbol, slots, &slot_types);
-            }
-        }
+        builder.define_param(recv.name.symbol, 1, &[SlotType::GcRef]);
     }
 
     // Define parameters with proper type handling
-    // Use analysis-recorded TypeExpr types (handles all types including literals)
+    // In VM, structs are heap-allocated (1 slot GcRef), other types use natural slots
     for param in &func.sig.params {
         let param_type = info.resolve_type_expr(&param.ty)
             .expect("param type must be recorded by analysis");
-        let is_interface = info.is_interface(param_type);
         
         for pname in &param.names {
-            if is_interface {
+            if info.is_interface(param_type) {
                 // Interface parameter: 2 slots + InitInterface
                 let type_key = info.type_expr_type_key(&param.ty).expect("interface type must have TypeKey");
                 let iface_type_id = ctx.type_id_for_interface(type_key);
                 builder.define_param_interface(pname.symbol, iface_type_id as u32);
+            } else if info.is_struct_type(param_type) {
+                // Struct parameter: 1 slot (GcRef) - heap allocated
+                builder.define_param(pname.symbol, 1, &[SlotType::GcRef]);
             } else {
+                // Other types: use natural slot count
                 let slot_types = info.type_slot_types(param_type);
                 let slots = slot_types.len() as u16;
                 builder.define_param(pname.symbol, slots, &slot_types);

@@ -119,6 +119,7 @@ pub enum Opcode {
     GetFieldN,    // copy c slots from b.field[flags] to a
     SetFieldN,    // copy c slots from b to a.field[flags]
     StructHash,   // a = hash(b) with c fields (for struct map keys)
+    StructClone,  // a = deep copy of struct at b
     
     // ============ Array/Slice ============
     ArrayNew = 95,    // a = new array, elem_type=b, len=c

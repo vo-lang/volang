@@ -585,6 +585,29 @@ pub unsafe extern "C" fn gox_struct_hash(obj: GcRef, field_count: usize) -> u64 
     struct_hash(obj, field_count)
 }
 
+/// Deep copy a struct: allocate new object with same type and copy all slots.
+/// The size_slots must be provided since GC objects don't store their size.
+pub fn struct_clone(gc: &mut Gc, src: GcRef, size_slots: usize) -> GcRef {
+    let header = Gc::get_header(src);
+    let type_id = header.type_id;
+    
+    // Allocate new struct with same type
+    let dst = gc.alloc(ValueKind::Struct as u8, type_id, size_slots);
+    
+    // Copy all slots
+    for i in 0..size_slots {
+        let val = Gc::read_slot(src, i);
+        Gc::write_slot(dst, i, val);
+    }
+    
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gox_struct_clone(gc: *mut Gc, src: GcRef, size_slots: usize) -> GcRef {
+    struct_clone(&mut *gc, src, size_slots)
+}
+
 // =============================================================================
 // Map Operations (requires std feature for IndexMap)
 // =============================================================================

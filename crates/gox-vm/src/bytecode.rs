@@ -109,7 +109,10 @@ pub struct GlobalDef {
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub name: String,
-    pub types: Vec<TypeMeta>,
+    /// Struct type metadata, indexed by struct type_id (0-based).
+    pub struct_types: Vec<TypeMeta>,
+    /// Interface type metadata, indexed by interface type_id (0-based).
+    pub interface_types: Vec<TypeMeta>,
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -121,7 +124,8 @@ impl Module {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            types: Vec::new(),
+            struct_types: Vec::new(),
+            interface_types: Vec::new(),
             constants: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),
@@ -200,9 +204,15 @@ impl Module {
         // Module name
         write_string(&mut buf, &self.name);
         
-        // Types section
-        write_u32(&mut buf, self.types.len() as u32);
-        for ty in &self.types {
+        // Struct types section
+        write_u32(&mut buf, self.struct_types.len() as u32);
+        for ty in &self.struct_types {
+            write_type_meta(&mut buf, ty);
+        }
+        
+        // Interface types section
+        write_u32(&mut buf, self.interface_types.len() as u32);
+        for ty in &self.interface_types {
             write_type_meta(&mut buf, ty);
         }
         
@@ -261,11 +271,18 @@ impl Module {
         // Module name
         let name = read_string(&mut cursor)?;
         
-        // Types section
-        let type_count = read_u32(&mut cursor)?;
-        let mut types = Vec::with_capacity(type_count as usize);
-        for _ in 0..type_count {
-            types.push(read_type_meta(&mut cursor)?);
+        // Struct types section
+        let struct_type_count = read_u32(&mut cursor)?;
+        let mut struct_types = Vec::with_capacity(struct_type_count as usize);
+        for _ in 0..struct_type_count {
+            struct_types.push(read_type_meta(&mut cursor)?);
+        }
+        
+        // Interface types section
+        let interface_type_count = read_u32(&mut cursor)?;
+        let mut interface_types = Vec::with_capacity(interface_type_count as usize);
+        for _ in 0..interface_type_count {
+            interface_types.push(read_type_meta(&mut cursor)?);
         }
         
         // Constants section
@@ -305,7 +322,8 @@ impl Module {
         
         Ok(Module {
             name,
-            types,
+            struct_types,
+            interface_types,
             constants,
             globals,
             functions,

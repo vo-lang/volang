@@ -1,0 +1,26 @@
+// +vm
+package main
+
+type Point struct {
+    x int
+    y int
+}
+
+func (p Point) Sum() int {
+    return p.x + p.y
+}
+
+type Rect struct {
+    origin Point
+    width  int
+}
+
+func main() {
+    p := Point{x: 1, y: 2}
+    println(p.Sum())  // 应该是 3
+    
+    r := Rect{origin: Point{x: 1, y: 2}, width: 10}
+    println(r.origin.x)     // 应该是 1
+    println(r.origin.y)     // 应该是 2
+    println(r.origin.Sum()) // 应该是 3
+}

@@ -28,10 +28,14 @@ fn basic_to_value_kind(b: BasicType) -> ValueKind {
     }
 }
 
+/// Key for function/method lookup: (receiver_type, method_name)
+/// For regular functions, receiver_type is None.
+type FuncKey = (Option<TypeKey>, Symbol);
+
 /// Package-level codegen context.
 pub struct CodegenContext {
     pub module: Module,
-    func_indices: HashMap<Symbol, u32>,
+    func_indices: HashMap<FuncKey, u32>,
     next_func_idx: u32,
     extern_indices: HashMap<Symbol, u32>,
     global_indices: HashMap<Symbol, u32>,
@@ -108,15 +112,28 @@ impl CodegenContext {
 
     // === Function management ===
 
+    /// Register a regular function (no receiver).
     pub fn register_func(&mut self, symbol: Symbol) -> u32 {
+        self.register_method(None, symbol)
+    }
+
+    /// Register a method with receiver type.
+    pub fn register_method(&mut self, recv_type: Option<TypeKey>, symbol: Symbol) -> u32 {
+        let key = (recv_type, symbol);
         let idx = self.next_func_idx;
-        self.func_indices.insert(symbol, idx);
+        self.func_indices.insert(key, idx);
         self.next_func_idx += 1;
         idx
     }
 
+    /// Get function index for a regular function (no receiver).
     pub fn get_func_index(&self, symbol: Symbol) -> Option<u32> {
-        self.func_indices.get(&symbol).copied()
+        self.get_method_index(None, symbol)
+    }
+
+    /// Get function index for a method with receiver type.
+    pub fn get_method_index(&self, recv_type: Option<TypeKey>, symbol: Symbol) -> Option<u32> {
+        self.func_indices.get(&(recv_type, symbol)).copied()
     }
 
     // === Extern management ===

@@ -7,7 +7,7 @@ use gox_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::Result;
-use crate::expr::compile_expr;
+use crate::expr::{compile_expr, compile_expr_value};
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfo;
 
@@ -61,7 +61,13 @@ fn compile_assign(
     info: &TypeInfo,
 ) -> Result<()> {
     for (l, r) in lhs.iter().zip(rhs.iter()) {
-        let src = compile_expr(r, ctx, func, info)?;
+        // For simple assignment (=), use compile_expr_value for struct deep copy
+        // For compound assignment (+=, etc.), use compile_expr (no copy needed)
+        let src = if op == AssignOp::Assign {
+            compile_expr_value(r, ctx, func, info)?
+        } else {
+            compile_expr(r, ctx, func, info)?
+        };
 
         match &l.kind {
             ExprKind::Ident(ident) => {
@@ -178,10 +184,16 @@ fn compile_short_var_decl(
     info: &TypeInfo,
 ) -> Result<()> {
     for (name, value) in names.iter().zip(values.iter()) {
-        let src = compile_expr(value, ctx, func, info)?;
+        // Use compile_expr_value for deep copy of non-pointer structs
+        let src = compile_expr_value(value, ctx, func, info)?;
         let ty = info.expr_type(value);
-        let slot_types = ty.map(|t| info.type_slot_types(t)).unwrap_or_else(|| vec![SlotType::Value]);
-        let dst = func.define_local(name.symbol, slot_types.len() as u16, &slot_types);
+        let slot_types = if let Some(t) = ty {
+            info.type_slot_types(t)
+        } else {
+            vec![SlotType::Value]
+        };
+        let slots = slot_types.len() as u16;
+        let dst = func.define_local(name.symbol, slots, &slot_types);
         func.emit_op(Opcode::Mov, dst, src, 0);
     }
     Ok(())

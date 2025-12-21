@@ -151,7 +151,7 @@ pub enum SlotType {
     /// Non-pointer value (int, float, bool). No scanning needed.
     #[default]
     Value = 0,
-    /// GC-managed pointer (string, slice, map, *T, closure, chan). Must be scanned.
+    /// GC-managed pointer (string, slice, map, struct, *T, closure, chan). Must be scanned.
     GcRef = 1,
     /// First slot of interface (packed type info). Not a pointer, skip.
     Interface0 = 2,

@@ -1,0 +1,19 @@
+// +vm
+package main
+
+type Inner struct {
+    a int
+    b int
+}
+
+type Outer struct {
+    inner Inner
+    c int
+}
+
+func main() {
+    o := Outer{inner: Inner{a: 1, b: 2}, c: 3}
+    println(o.inner.a)  // 应该是 1
+    println(o.inner.b)  // 应该是 2
+    println(o.c)        // 应该是 3
+}

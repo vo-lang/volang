@@ -169,6 +169,12 @@ impl Gc {
         ptr
     }
     
+    /// Get the header of an object.
+    #[inline]
+    pub fn get_header(obj: GcRef) -> &'static GcHeader {
+        unsafe { &(*obj).header }
+    }
+    
     /// Get data slot pointer for an object.
     #[inline]
     pub fn get_data_ptr(obj: GcRef) -> *mut u64 {

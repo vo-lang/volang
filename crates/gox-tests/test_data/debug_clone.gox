@@ -1,0 +1,20 @@
+// +vm
+package main
+
+type Point struct {
+    x int
+    y int
+}
+
+type Rect struct {
+    origin Point
+    width  int
+}
+
+func main() {
+    r := Rect{origin: Point{x: 1, y: 2}, width: 10}
+    
+    // After deep copy, check origin fields
+    println(r.origin.x)  // should be 1
+    println(r.origin.y)  // should be 2
+}

@@ -12,6 +12,16 @@ use crate::error::{CodegenError, Result};
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfo;
 
+/// Allocate a temporary register with correct slot types for the given type.
+fn alloc_temp_for_type(func: &mut FuncBuilder, ty: Option<&Type>, info: &TypeInfo) -> u16 {
+    let slot_types = if let Some(t) = ty {
+        info.type_slot_types(t)
+    } else {
+        vec![SlotType::Value]
+    };
+    func.alloc_temp_typed(&slot_types)
+}
+
 pub fn compile_expr(
     expr: &Expr,
     ctx: &mut CodegenContext,
@@ -29,12 +39,64 @@ pub fn compile_expr(
         ExprKind::Unary(un) => compile_unary(un.op, &un.operand, ctx, func, info),
         ExprKind::Paren(inner) => compile_expr(inner, ctx, func, info),
         ExprKind::Call(call) => compile_call(&call.func, &call.args, ctx, func, info),
-        ExprKind::Index(idx) => compile_index(&idx.expr, &idx.index, ctx, func, info),
-        ExprKind::Selector(sel) => compile_selector(&sel.expr, sel.sel.symbol, ctx, func, info),
-        ExprKind::Receive(inner) => compile_receive(inner, ctx, func, info),
+        ExprKind::Index(idx) => compile_index(&idx.expr, &idx.index, expr, ctx, func, info),
+        ExprKind::Selector(sel) => compile_selector(&sel.expr, sel.sel.symbol, expr, ctx, func, info),
+        ExprKind::Receive(inner) => compile_receive(inner, expr, ctx, func, info),
         ExprKind::CompositeLit(lit) => compile_composite_lit(&lit.ty, &lit.elems, expr, ctx, func, info),
         _ => todo!("expr {:?}", std::mem::discriminant(&expr.kind)),
     }
+}
+
+/// Compile an expression for value passing (assignment, function argument, etc.)
+/// For non-pointer struct types, this creates a deep copy.
+/// For other types, this just compiles the expression normally.
+pub fn compile_expr_value(
+    expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16> {
+    let src = compile_expr(expr, ctx, func, info)?;
+    
+    // Check if this is a non-pointer struct type that needs deep copy
+    if let Some(ty) = info.expr_type(expr) {
+        if info.is_struct_type(ty) && !matches!(ty, Type::Pointer(_)) {
+            return compile_struct_deep_copy(src, ty, func, info);
+        }
+    }
+    
+    Ok(src)
+}
+
+/// Generate deep copy code for a struct value.
+/// This recursively clones nested struct fields.
+fn compile_struct_deep_copy(
+    src: u16,
+    ty: &Type,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16> {
+    // Get struct size and do shallow clone first
+    let size_slots = info.struct_size_slots(ty);
+    // Struct is stored as GcRef (1 slot)
+    let dst = func.alloc_temp_typed(&[SlotType::GcRef]);
+    func.emit_op(Opcode::StructClone, dst, src, size_slots);
+    
+    // Now recursively clone nested struct fields
+    let nested_fields = info.struct_nested_fields(ty);
+    for (byte_offset, field_ty) in nested_fields {
+        // Read the GcRef from cloned struct - this is also a GcRef
+        let field_ref = func.alloc_temp_typed(&[SlotType::GcRef]);
+        func.emit_with_flags(Opcode::GetField, 3, field_ref, dst, byte_offset);
+        
+        // Recursively deep copy the nested struct (returns GcRef)
+        let cloned_field = compile_struct_deep_copy(field_ref, field_ty, func, info)?;
+        
+        // Write back the cloned GcRef
+        func.emit_with_flags(Opcode::SetField, 3, dst, byte_offset, cloned_field);
+    }
+    
+    Ok(dst)
 }
 
 fn compile_const_value(val: &ConstValue, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16> {
@@ -252,7 +314,9 @@ fn compile_call(
         
         if is_method_call {
             // Method call: receiver is the first argument
-            if let Some(func_idx) = ctx.get_func_index(func_sym) {
+            // Get the receiver's base type key for method lookup
+            let recv_type_key = info.method_receiver_type_key(&sel.expr);
+            if let Some(func_idx) = ctx.get_method_index(recv_type_key, func_sym) {
                 return compile_method_call(func_idx, &sel.expr, args, ctx, func, info);
             }
         }
@@ -285,9 +349,9 @@ fn compile_func_call(
         .map(|_| func.alloc_temp(1))
         .collect();
     
-    // Compile each argument and move to argument slot
+    // Compile each argument with value semantics (deep copy for structs)
     for (i, arg) in args.iter().enumerate() {
-        let src = compile_expr(arg, ctx, func, info)?;
+        let src = compile_expr_value(arg, ctx, func, info)?;
         if src != arg_slots[i] {
             func.emit_op(Opcode::Mov, arg_slots[i], src, 0);
         }
@@ -319,15 +383,16 @@ fn compile_method_call(
         .map(|_| func.alloc_temp(1))
         .collect();
     
-    // Compile receiver and move to first argument slot
-    let recv_src = compile_expr(receiver, ctx, func, info)?;
+    // Compile receiver with value semantics (deep copy for value receivers)
+    // Note: For pointer receivers (*T), the type is Pointer so no copy occurs
+    let recv_src = compile_expr_value(receiver, ctx, func, info)?;
     if recv_src != arg_slots[0] {
         func.emit_op(Opcode::Mov, arg_slots[0], recv_src, 0);
     }
     
-    // Compile each argument and move to argument slot
+    // Compile each argument with value semantics
     for (i, arg) in args.iter().enumerate() {
-        let src = compile_expr(arg, ctx, func, info)?;
+        let src = compile_expr_value(arg, ctx, func, info)?;
         if src != arg_slots[i + 1] {
             func.emit_op(Opcode::Mov, arg_slots[i + 1], src, 0);
         }
@@ -496,13 +561,17 @@ fn compile_builtin_call(
 fn compile_index(
     expr: &Expr,
     index: &Expr,
+    index_expr: &Expr,  // The full index expression for type info
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfo,
 ) -> Result<u16> {
     let base = compile_expr(expr, ctx, func, info)?;
     let idx = compile_expr(index, ctx, func, info)?;
-    let dst = func.alloc_temp(1);
+    
+    // Get the result type (element type) for correct slot allocation
+    let result_ty = info.expr_type(index_expr);
+    let dst = alloc_temp_for_type(func, result_ty, info);
 
     let ty = info.expr_type(expr);
     let opcode = match ty {
@@ -520,45 +589,50 @@ fn compile_index(
 fn compile_selector(
     expr: &Expr,
     field: gox_common::Symbol,
+    selector_expr: &Expr,  // The full selector expression for type info
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfo,
 ) -> Result<u16> {
     let base = compile_expr(expr, ctx, func, info)?;
-    let dst = func.alloc_temp(1);
 
-    // Try to find field index from type info
+    // Get field info (byte_offset and slot count) from type info
     let ty = info.expr_type(expr);
-    let field_idx = match ty {
-        Some(Type::Named(named)) => {
-            // Get underlying type through TypeQuery
-            if let Some(underlying) = info.query.named_underlying(named) {
-                if let Type::Struct(s) = underlying {
-                    info.query.struct_field_index(s, field)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        Some(Type::Struct(s)) => info.query.struct_field_index(s, field),
-        _ => None,
+    let (byte_offset, _field_slots) = if let Some(t) = ty {
+        info.struct_field_info(t, field).unwrap_or((0, 1))
+    } else {
+        (0, 1)
     };
 
-    let byte_offset = (field_idx.unwrap_or(0) * 8) as u16;
-    func.emit_with_flags(Opcode::GetField, 3, dst, base, byte_offset);
+    // Get the result type for correct slot allocation
+    let result_ty = info.expr_type(selector_expr);
+    let slot_types = if let Some(t) = result_ty {
+        info.type_slot_types(t)
+    } else {
+        vec![SlotType::Value]
+    };
+    let dst = func.alloc_temp_typed(&slot_types);
+    
+    // For multi-slot fields (like interface), emit multiple GetField ops
+    for i in 0..slot_types.len() {
+        let slot_offset = byte_offset + (i * 8) as u16;
+        func.emit_with_flags(Opcode::GetField, 3, dst + i as u16, base, slot_offset);
+    }
+    
     Ok(dst)
 }
 
 fn compile_receive(
     chan_expr: &Expr,
+    recv_expr: &Expr,  // The full receive expression for type info
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfo,
 ) -> Result<u16> {
     let chan_reg = compile_expr(chan_expr, ctx, func, info)?;
-    let dst = func.alloc_temp(1);
+    // Get the result type (channel element type) for correct slot allocation
+    let result_ty = info.expr_type(recv_expr);
+    let dst = alloc_temp_for_type(func, result_ty, info);
     func.emit_op(Opcode::ChanRecv, dst, chan_reg, 0);
     Ok(dst)
 }
@@ -603,7 +677,8 @@ fn compile_composite_lit(
             let type_id = ctx.type_id_for_struct(type_key);
             let type_id_lo = type_id;
             let type_id_hi = 0u16;
-            let dst = func.alloc_temp(1);
+            // Alloc returns a GcRef
+            let dst = func.alloc_temp_typed(&[SlotType::GcRef]);
             // Alloc: a=dest, b=type_id_lo, c=type_id_hi, flags=field_count
             func.emit_with_flags(Opcode::Alloc, field_count as u8, dst, type_id_lo, type_id_hi);
             
