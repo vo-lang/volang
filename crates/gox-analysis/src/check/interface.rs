@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -28,13 +29,23 @@ use super::checker::{Checker, FilesContext};
 pub type RcIfaceInfo = Rc<IfaceInfo>;
 
 /// Information about an interface method.
-/// At least one of scope or func must be Some.
+/// At least one of src or func must be Some.
+/// (Methods declared in the current package have a non-None scope
+/// and src, and eventually a non-None func field; imported and pre-
+/// declared methods have a None scope and src, and only a non-None func field.)
+/// Uses Rc<RefCell<>> for interior mutability (like goscript).
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
+    data: Rc<RefCell<MethodInfoData>>,
+}
+
+#[derive(Debug)]
+struct MethodInfoData {
     /// Scope of interface method; or None.
     scope: Option<ScopeKey>,
-    /// Method name (for methods not yet type-checked).
-    name: Option<String>,
+    /// Index of the method in the interface's elems array; or None.
+    /// This is GoX's equivalent of goscript's FieldKey.
+    src_index: Option<usize>,
     /// Corresponding fully type-checked method (LangObj::Func); or None.
     func: Option<ObjKey>,
 }
@@ -42,47 +53,68 @@ pub struct MethodInfo {
 impl MethodInfo {
     pub fn with_func(func: ObjKey) -> MethodInfo {
         MethodInfo {
-            scope: None,
-            name: None,
-            func: Some(func),
+            data: Rc::new(RefCell::new(MethodInfoData {
+                scope: None,
+                src_index: None,
+                func: Some(func),
+            })),
         }
     }
 
-    pub fn with_scope_name(scope: ScopeKey, name: String) -> MethodInfo {
+    pub fn with_scope_src(scope: ScopeKey, src_index: usize) -> MethodInfo {
         MethodInfo {
-            scope: Some(scope),
-            name: Some(name),
-            func: None,
+            data: Rc::new(RefCell::new(MethodInfoData {
+                scope: Some(scope),
+                src_index: Some(src_index),
+                func: None,
+            })),
         }
     }
 
     pub fn scope(&self) -> Option<ScopeKey> {
-        self.scope
+        self.data.borrow().scope
+    }
+
+    pub fn src_index(&self) -> Option<usize> {
+        self.data.borrow().src_index
     }
 
     pub fn func(&self) -> Option<ObjKey> {
-        self.func
+        self.data.borrow().func
     }
 
-    pub fn set_func(&mut self, func: ObjKey) {
-        self.func = Some(func);
+    pub fn set_func(&self, func: ObjKey) {
+        self.data.borrow_mut().func = Some(func);
     }
 
-    /// Returns the method name.
+    /// Returns the method name from func or by looking up in the interface AST.
+    pub fn method_name_from_iface(&self, tc_objs: &TCObjects, iface: &InterfaceType, interner: &gox_common::symbol::SymbolInterner) -> String {
+        if let Some(okey) = self.func() {
+            tc_objs.lobjs[okey].name().to_string()
+        } else if let Some(idx) = self.src_index() {
+            if let Some(InterfaceElem::Method(m)) = iface.elems.get(idx) {
+                interner.resolve(m.name.symbol).unwrap_or("").to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    }
+
+    /// Returns the method name (requires func to be set).
     pub fn method_name(&self, tc_objs: &TCObjects) -> String {
-        if let Some(okey) = self.func {
+        if let Some(okey) = self.func() {
             tc_objs.lobjs[okey].name().to_string()
         } else {
-            self.name.clone().unwrap_or_default()
+            String::new()
         }
     }
 
     /// Returns the method id (for duplicate checking).
     pub fn id(&self, _pkg: PackageKey, tc_objs: &TCObjects) -> String {
-        if let Some(okey) = self.func {
+        if let Some(okey) = self.func() {
             tc_objs.lobjs[okey].id(tc_objs).to_string()
-        } else if let Some(name) = &self.name {
-            name.clone()
         } else {
             String::new()
         }
@@ -201,7 +233,7 @@ impl Checker {
             let mut methods = vec![];
             let mut embeddeds = vec![];
 
-            for elem in &iface.elems {
+            for (elem_index, elem) in iface.elems.iter().enumerate() {
                 match elem {
                     InterfaceElem::Method(m) => {
                         let name = self.resolve_ident(&m.name).to_string();
@@ -210,7 +242,7 @@ impl Checker {
                             continue;
                         }
 
-                        let mi = MethodInfo::with_scope_name(scope, name.clone());
+                        let mi = MethodInfo::with_scope_src(scope, elem_index);
                         if self.declare_in_method_set(&mut mset, name.clone(), mi.clone(), m.span) {
                             methods.push(mi);
                         }

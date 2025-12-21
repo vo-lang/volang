@@ -15,7 +15,7 @@ use crate::scope;
 use crate::typ::{self, ChanDir, Type};
 use gox_syntax::ast::{self, Expr, FuncSig, Param, Receiver, TypeExpr, TypeExprKind, InterfaceElem};
 
-use super::checker::{Checker, FilesContext};
+use super::checker::{Checker, FilesContext, ObjContext};
 
 impl Checker {
     // =========================================================================
@@ -750,72 +750,15 @@ impl Checker {
 
         // Collect embedded interface idents for delayed processing (like goscript)
         let mut embedded_idents: Vec<Ident> = Vec::new();
-        
-        // Collect methods immediately
-        let mut methods: Vec<ObjKey> = Vec::new();
-        let mut method_set: std::collections::HashMap<String, ObjKey> = std::collections::HashMap::new();
-
-        // Use named receiver type if available (for better error messages)
-        let recv_type = def.unwrap_or(itype);
-
         for elem in &iface.elems {
-            match elem {
-                InterfaceElem::Method(method) => {
-                    let name_str = self.resolve_ident(&method.name).to_string();
-                    
-                    // spec: "each method must have a unique non-blank name"
-                    if name_str == "_" {
-                        self.error(method.name.span, "invalid method name _".to_string());
-                        continue;
-                    }
-
-                    // Check for duplicate method
-                    if let Some(&prev) = method_set.get(&name_str) {
-                        self.error(method.name.span, format!("{} redeclared", name_str));
-                        self.report_alt_decl(prev);
-                        continue;
-                    }
-
-                    // Create receiver for the method signature
-                    let recv_var = self.tc_objs.new_var(0, Some(self.pkg), String::new(), Some(recv_type));
-                    
-                    // Type-check the method signature
-                    let sig_type = self.func_type_from_sig(None, &method.sig, fctx);
-                    
-                    // Update signature with receiver
-                    if let Type::Signature(sig) = &mut self.tc_objs.types[sig_type] {
-                        sig.set_recv(Some(recv_var));
-                    }
-
-                    let method_obj = self.tc_objs.new_func(0, Some(self.pkg), name_str.clone(), Some(sig_type));
-                    self.result.record_def(method.name.clone(), Some(method_obj));
-                    
-                    method_set.insert(name_str, method_obj);
-                    methods.push(method_obj);
-                }
-                InterfaceElem::Embedded(ident) => {
-                    // Collect for delayed processing (like goscript's fctx.later)
-                    embedded_idents.push(ident.clone());
-                }
+            if let InterfaceElem::Embedded(ident) = elem {
+                embedded_idents.push(ident.clone());
             }
         }
 
-        // Sort methods by name for consistent ordering
-        methods.sort_by(|a, b| {
-            let name_a = self.tc_objs.lobjs[*a].name();
-            let name_b = self.tc_objs.lobjs[*b].name();
-            name_a.cmp(name_b)
-        });
-
-        // Set methods immediately
-        if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
-            *iface_detail.methods_mut() = methods.clone();
-        }
-
         // Delay embedded interface checking (like goscript: fctx.later)
-        // This handles circular dependencies between interfaces
-        let has_embeddeds = !embedded_idents.is_empty();
-        if has_embeddeds {
+        // Only collects embeds - does NOT call complete() here
+        if !embedded_idents.is_empty() {
             let f = move |checker: &mut Checker, _fctx: &mut FilesContext| {
                 let mut embeds: Vec<TypeKey> = Vec::new();
                 let invalid_type = checker.invalid_type();
@@ -831,7 +774,9 @@ impl Checker {
                                 }
                                 let underlying = typ::underlying_type(t, &checker.tc_objs);
                                 match &checker.tc_objs.types[underlying] {
-                                    Type::Interface(_) => {
+                                    Type::Interface(embed) => {
+                                        // Correct embedded interfaces must be complete
+                                        debug_assert!(embed.all_methods().is_some());
                                         embeds.push(t);
                                     }
                                     _ => {
@@ -846,19 +791,153 @@ impl Checker {
                 if let Type::Interface(iface_detail) = &mut checker.tc_objs.types[itype] {
                     *iface_detail.embeddeds_mut() = embeds;
                 }
-                // Complete the interface, collecting methods from embedded interfaces
-                if let Some(iface_detail) = checker.tc_objs.types[itype].try_as_interface() {
-                    iface_detail.complete(&checker.tc_objs);
-                }
             };
             fctx.later(Box::new(f));
         }
 
-        // Set all_methods with the methods we collected above
-        // (For interfaces without embeddeds, complete() won't be called via fctx.later)
-        if !has_embeddeds {
+        // Compute method set using info_from_type_lit (like goscript)
+        let (tname, path) = if let Some(d) = def {
+            if let Some(named) = self.tc_objs.types[d].try_as_named() {
+                let obj = named.obj().clone();
+                (obj, obj.map(|o| vec![o]).unwrap_or_default())
+            } else {
+                (None, vec![])
+            }
+        } else {
+            (None, vec![])
+        };
+        
+        let scope = self.octx.scope.unwrap_or(self.tc_objs.universe().scope());
+        let info = self.info_from_type_lit(scope, iface, tname, &path, fctx);
+        
+        if info.is_none() || info.as_ref().unwrap().is_empty() {
+            // Empty interface or error - exit early
+            if let Some(iface_detail) = self.tc_objs.types[itype].try_as_interface() {
+                iface_detail.set_empty_complete();
+            }
+            return itype;
+        }
+
+        // Use named receiver type if available (for better error messages)
+        let recv_type = def.unwrap_or(itype);
+
+        // Correct receiver type for all methods explicitly declared
+        // by this interface after we're done with type-checking at this level.
+        // (like goscript's second fctx.later)
+        let f = move |checker: &mut Checker, _fctx: &mut FilesContext| {
+            if let Some(iface_detail) = checker.tc_objs.types[itype].try_as_interface() {
+                for &m in iface_detail.methods().iter() {
+                    let t = checker.tc_objs.lobjs[m].typ().unwrap();
+                    if let Type::Signature(sig) = &checker.tc_objs.types[t] {
+                        if let Some(recv_var) = sig.recv() {
+                            checker.tc_objs.lobjs[*recv_var].set_type(Some(recv_type));
+                        }
+                    }
+                }
+            }
+        };
+        fctx.later(Box::new(f));
+
+        // Two-phase processing (like goscript):
+        // Phase 1: Create method objects with empty signatures, call set_func
+        // Phase 2: Fix signatures using minfo.src_index() to get AST
+        
+        let info_ref = info.unwrap();
+        let explicits = info_ref.explicits;
+        let mut sig_fix: Vec<super::interface::MethodInfo> = vec![];
+        
+        // Phase 1: Create method objects
+        for (i, minfo) in info_ref.methods.iter().enumerate() {
+            let fun = if minfo.func().is_none() {
+                // Method not yet type-checked, get name from AST using src_index
+                let src_index = minfo.src_index().expect("MethodInfo must have src_index when func is None");
+                let method_ast = match &iface.elems[src_index] {
+                    InterfaceElem::Method(m) => m,
+                    _ => panic!("src_index should point to a Method element"),
+                };
+                let name = self.resolve_ident(&method_ast.name).to_string();
+                
+                // Create receiver
+                let recv_var = self.tc_objs.new_var(0, Some(self.pkg), String::new(), Some(recv_type));
+                
+                // Create empty signature (will be fixed in phase 2)
+                let empty_tuple = self.tc_objs.new_t_tuple(vec![]);
+                let sig_type = self.tc_objs.new_t_signature(None, Some(recv_var), empty_tuple, empty_tuple, false);
+
+                let fun_key = self.tc_objs.new_func(0, Some(self.pkg), name.clone(), Some(sig_type));
+                
+                // Record definition for the method
+                self.result.record_def(method_ast.name.clone(), Some(fun_key));
+                
+                minfo.set_func(fun_key);
+                sig_fix.push(minfo.clone());
+                fun_key
+            } else {
+                minfo.func().unwrap()
+            };
+            
+            // Add to interface type
             if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
-                iface_detail.set_complete(methods);
+                if i < explicits {
+                    iface_detail.methods_mut().push(fun);
+                }
+                iface_detail.all_methods_push(fun);
+            }
+        }
+
+        // Phase 2: Fix signatures now that we have collected all methods
+        // (possibly embedded) methods must be type-checked within their scope
+        let saved_context = self.octx.clone();
+        for minfo in sig_fix {
+            let src_index = minfo.src_index().unwrap();
+            let method_ast = match &iface.elems[src_index] {
+                InterfaceElem::Method(m) => m,
+                _ => continue,
+            };
+            
+            // Type-check method signature within its scope (like goscript)
+            self.octx = ObjContext::new();
+            self.octx.scope = minfo.scope();
+            
+            // Type-check the method signature
+            let sig_type = self.func_type_from_sig(None, &method_ast.sig, fctx);
+            
+            // Update the method's signature, keeping the receiver
+            let fun_key = minfo.func().unwrap();
+            let old_sig_type = self.tc_objs.lobjs[fun_key].typ().unwrap();
+            let recv = if let Type::Signature(old_sig) = &self.tc_objs.types[old_sig_type] {
+                *old_sig.recv()
+            } else {
+                None
+            };
+            
+            if let Type::Signature(sig) = &mut self.tc_objs.types[sig_type] {
+                sig.set_recv(recv);
+            }
+            
+            // Update the function's type to the new signature
+            self.tc_objs.lobjs[fun_key].set_type(Some(sig_type));
+        }
+        self.octx = saved_context;
+
+        // Sort methods by name
+        if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
+            let mut methods = iface_detail.methods().clone();
+            methods.sort_by(|a, b| {
+                let name_a = self.tc_objs.lobjs[*a].name();
+                let name_b = self.tc_objs.lobjs[*b].name();
+                name_a.cmp(name_b)
+            });
+            *iface_detail.methods_mut() = methods;
+            
+            // Sort all_methods
+            let mut all = iface_detail.all_methods_mut();
+            if let Some(ref mut all_methods) = *all {
+                all_methods.sort_by(|a, b| {
+                    let name_a = self.tc_objs.lobjs[*a].name();
+                    let name_b = self.tc_objs.lobjs[*b].name();
+                    name_a.cmp(name_b)
+                });
             }
         }
 

@@ -658,6 +658,20 @@ impl InterfaceDetail {
         *self.all_methods.borrow_mut() = Some(methods);
     }
 
+    /// Push a method to all_methods. Creates the vec if None.
+    pub fn all_methods_push(&self, m: ObjKey) {
+        let mut all = self.all_methods.borrow_mut();
+        if all.is_none() {
+            *all = Some(Vec::new());
+        }
+        all.as_mut().unwrap().push(m);
+    }
+
+    /// Set all_methods to empty vec (for empty interfaces).
+    pub fn set_empty_complete(&self) {
+        *self.all_methods.borrow_mut() = Some(Vec::new());
+    }
+
     /// Completes the interface by collecting all methods including from embedded interfaces.
     /// This must be called after all embedded interfaces are themselves complete.
     pub fn complete(&self, objs: &TCObjects) {

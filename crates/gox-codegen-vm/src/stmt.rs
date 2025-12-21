@@ -35,7 +35,7 @@ fn compound_assign_opcode(op: AssignOp, is_float: bool) -> Opcode {
 
 use crate::context::CodegenContext;
 use crate::error::Result;
-use crate::expr::{compile_expr, compile_expr_value};
+use crate::expr::{alloc_empty_struct, compile_expr, compile_expr_value};
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfo;
 
@@ -132,23 +132,67 @@ fn compile_var_decl(
                     func.define_local_interface(name.symbol, iface_type_id as u32);
                 }
             } else {
-                let slot_types = if let Some(ty) = &spec.ty {
-                    info.type_expr_slot_types(ty)
+                // Check if this is a struct type - need to allocate heap object
+                let is_struct = type_key
+                    .map(|k| info.query.get_type(k))
+                    .map(|t| info.is_struct_type(t))
+                    .unwrap_or(false);
+                
+                if is_struct {
+                    // Struct variable: allocate heap object
+                    let ty = info.query.get_type(type_key.unwrap());
+                    for name in &spec.names {
+                        let src = alloc_empty_struct(ty, ctx, func, info)?;
+                        let slot_types = &[SlotType::GcRef];
+                        define_local_with_init(name.symbol, slot_types, Some(src), func);
+                    }
                 } else {
-                    vec![SlotType::Value]
-                };
-                for name in &spec.names {
-                    define_local_with_init(name.symbol, &slot_types, None, func);
+                    let slot_types = if let Some(ty) = &spec.ty {
+                        info.type_expr_slot_types(ty)
+                    } else {
+                        vec![SlotType::Value]
+                    };
+                    for name in &spec.names {
+                        define_local_with_init(name.symbol, &slot_types, None, func);
+                    }
                 }
             }
         } else {
             // Has initializer
+            // Check if lhs is interface and rhs is concrete (boxing)
+            let lhs_type_key = spec.ty.as_ref().and_then(|ty| info.type_expr_type_key(ty));
+            let lhs_is_interface = lhs_type_key
+                .map(|k| info.query.get_type(k))
+                .map(|t| info.is_interface(t))
+                .unwrap_or(false);
+            
             for (name, value) in spec.names.iter().zip(spec.values.iter()) {
-                let src = compile_expr_value(value, ctx, func, info)?;
-                let slot_types = info.expr_type(value)
-                    .map(|t| info.type_slot_types(t))
-                    .unwrap_or_else(|| vec![SlotType::Value]);
-                define_local_with_init(name.symbol, &slot_types, Some(src), func);
+                let rhs_ty = info.expr_type(value);
+                let rhs_is_interface = rhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+                let is_box_iface = lhs_is_interface && !rhs_is_interface;
+                
+                if is_box_iface {
+                    // Interface boxing: InitInterface first, then BoxInterface
+                    let iface_type_id = ctx.type_id_for_interface(lhs_type_key.unwrap());
+                    let dst = func.define_local_interface(name.symbol, iface_type_id as u32);
+                    
+                    // Compile rhs value
+                    let src = compile_expr_value(value, ctx, func, info)?;
+                    
+                    // Register dispatch table
+                    if let Some(rhs_type_key) = info.expr_type_key(value) {
+                        register_iface_dispatch_if_needed(lhs_type_key.unwrap(), rhs_type_key, ctx, info);
+                    }
+                    
+                    // Box the value
+                    emit_box_interface(dst, src, rhs_ty, value, ctx, func, info);
+                } else {
+                    let src = compile_expr_value(value, ctx, func, info)?;
+                    let slot_types = info.expr_type(value)
+                        .map(|t| info.type_slot_types(t))
+                        .unwrap_or_else(|| vec![SlotType::Value]);
+                    define_local_with_init(name.symbol, &slot_types, Some(src), func);
+                }
             }
         }
     }

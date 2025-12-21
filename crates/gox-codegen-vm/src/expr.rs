@@ -715,7 +715,7 @@ fn is_string_type(ty: Option<&Type>) -> bool {
 }
 
 /// Recursively allocate an empty struct and initialize all its embedded struct fields.
-fn alloc_empty_struct(
+pub fn alloc_empty_struct(
     ty: &Type,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
