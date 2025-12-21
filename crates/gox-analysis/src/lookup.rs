@@ -265,6 +265,8 @@ fn lookup_field_or_method_impl(
                     }
                 }
                 typ::Type::Interface(detail) => {
+                    // Ensure interface is complete (collects embedded methods)
+                    detail.complete(objs);
                     let all_methods = detail.all_methods();
                     if let Some(ref all) = *all_methods {
                         if let Some((i, &okey)) = lookup_method(all, pkg, name, objs) {

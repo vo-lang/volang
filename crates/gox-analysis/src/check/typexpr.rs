@@ -739,7 +739,7 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks an interface type.
-    /// Aligned with goscript's interface_type: delays embedded interface checking.
+    /// Aligned with goscript's interface_type: uses info_from_type_lit to collect all methods.
     fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         if iface.elems.is_empty() {
             return self.tc_objs.new_t_empty_interface();
@@ -820,9 +820,6 @@ impl Checker {
                 let invalid_type = checker.invalid_type();
                 
                 for ident in &embedded_idents {
-                    let _x = Operand::new();
-                    // Note: we pass a dummy fctx since we're in delayed context
-                    // The type should already be resolved
                     let name = checker.resolve_ident(ident);
                     if let Some(scope_key) = checker.octx.scope {
                         if let Some((_, okey)) = scope::lookup_parent(scope_key, name, &checker.tc_objs) {
@@ -845,22 +842,54 @@ impl Checker {
                     }
                 }
                 
-                // Note: goscript sorts embeds by type name, but we skip sorting
-                // since TypeKey doesn't implement Ord
-                
                 if let Type::Interface(iface_detail) = &mut checker.tc_objs.types[itype] {
                     *iface_detail.embeddeds_mut() = embeds;
-                    // Set complete with current methods
-                    let current_methods = iface_detail.methods().clone();
-                    iface_detail.set_complete(current_methods);
+                }
+                // Complete the interface, collecting methods from embedded interfaces
+                if let Some(iface_detail) = checker.tc_objs.types[itype].try_as_interface() {
+                    iface_detail.complete(&checker.tc_objs);
                 }
             };
             fctx.later(Box::new(f));
-        } else {
-            // No embedded interfaces, set complete immediately
-            if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
-                iface_detail.set_complete(methods);
+        }
+
+        // Compute method set using info_from_type_lit (like goscript)
+        // This collects all methods including from embedded interfaces
+        let (tname, path) = if let Some(d) = def {
+            if let Some(named) = self.tc_objs.types[d].try_as_named() {
+                let obj = named.obj().clone();
+                (obj, obj.map(|o| vec![o]).unwrap_or_default())
+            } else {
+                (None, vec![])
             }
+        } else {
+            (None, vec![])
+        };
+        
+        let scope = self.octx.scope.unwrap_or(self.tc_objs.universe().scope());
+        let info = self.info_from_type_lit(scope, iface, tname, &path, fctx);
+        
+        if info.is_none() || info.as_ref().unwrap().is_empty() {
+            // Empty interface or error - set complete with empty methods
+            if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
+                iface_detail.set_complete(vec![]);
+            }
+            return itype;
+        }
+        
+        // Collect all methods (explicit + embedded) and set all_methods
+        let info_ref = info.unwrap();
+        let mut all_method_objs: Vec<ObjKey> = Vec::new();
+        
+        for minfo in info_ref.methods.iter() {
+            if let Some(func_obj) = minfo.func() {
+                all_method_objs.push(func_obj);
+            }
+        }
+        
+        // Set all_methods with collected methods
+        if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
+            iface_detail.set_complete(all_method_objs);
         }
 
         itype

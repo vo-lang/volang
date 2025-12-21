@@ -657,6 +657,26 @@ impl InterfaceDetail {
     pub fn set_complete(&self, methods: Vec<ObjKey>) {
         *self.all_methods.borrow_mut() = Some(methods);
     }
+
+    /// Completes the interface by collecting all methods including from embedded interfaces.
+    /// This must be called after all embedded interfaces are themselves complete.
+    pub fn complete(&self, objs: &TCObjects) {
+        if self.all_methods.borrow().is_some() {
+            return;
+        }
+        let mut all = self.methods.clone();
+        for &tkey in &self.embeddeds {
+            // Get underlying type for Named types (e.g., type Reader interface{...})
+            let underlying_key = underlying_type(tkey, objs);
+            if let Some(embedded) = objs.types[underlying_key].try_as_interface() {
+                embedded.complete(objs);
+                if let Some(ref embedded_methods) = *embedded.all_methods() {
+                    all.extend(embedded_methods.iter().cloned());
+                }
+            }
+        }
+        *self.all_methods.borrow_mut() = Some(all);
+    }
 }
 
 /// A MapDetail represents a map type.
