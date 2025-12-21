@@ -550,15 +550,8 @@ impl Vm {
             Opcode::Alloc => {
                 // a=dest, b=type_id_lo, c=type_id_hi, flags=field_count
                 let type_id = (b as u32) | ((c as u32) << 16);
-                let field_count = flags as usize;
-                let size = if type_id == 0 {
-                    // Anonymous struct - use field_count directly as size
-                    field_count
-                } else {
-                    let type_meta = self.types.get_struct_unchecked(type_id);
-                    type_meta.size_slots
-                };
-                let obj = self.gc.alloc(ValueKind::Struct as u8, type_id as u16, size);
+                let type_meta = self.types.get_struct_unchecked(type_id);
+                let obj = self.gc.alloc(ValueKind::Struct as u8, type_id as u16, type_meta.size_slots);
                 self.write_reg(fiber_id, a, obj as u64);
             }
             
