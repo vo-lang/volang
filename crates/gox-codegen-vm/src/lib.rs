@@ -224,8 +224,15 @@ fn collect_declarations(
                     let func_idx = ctx.register_method(recv_type_key, func.name.symbol);
                     
                     // Register ObjKey -> func_idx mapping for interface dispatch
-                    if let Some(objkey) = info.lookup_symbol_objkey(func.name.symbol) {
-                        ctx.register_objkey_func(objkey, func_idx);
+                    // For methods, use lookup_concrete_method; for functions, use lookup_symbol_objkey
+                    let func_name = info.symbol_str(func.name.symbol);
+                    let objkey = if let Some(recv_key) = recv_type_key {
+                        info.query.lookup_concrete_method(recv_key, func_name)
+                    } else {
+                        info.lookup_symbol_objkey(func.name.symbol)
+                    };
+                    if let Some(okey) = objkey {
+                        ctx.register_objkey_func(okey, func_idx);
                     }
                 } else {
                     let name = info.symbol_str(func.name.symbol);

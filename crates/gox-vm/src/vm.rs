@@ -503,10 +503,9 @@ impl Vm {
                 let iface_slot0 = self.read_reg(fiber_id, a);
                 let iface_slot1 = self.read_reg(fiber_id, a + 1);
                 
-                // Extract type info from slot0:
-                // packed: (iface_type_id:16 | value_type_id:16 | value_kind:8 | ...)
-                let iface_type_id = ((iface_slot0 >> 48) & 0xFFFF) as u16;
-                let concrete_type_id = ((iface_slot0 >> 32) & 0xFFFF) as u16;
+                // Extract type info from slot0
+                let iface_type_id = interface::unpack_iface_type_id(iface_slot0);
+                let concrete_type_id = interface::unpack_value_type_id(iface_slot0);
                 
                 // Lookup method in dispatch table
                 let module = self.module.as_ref().unwrap();
@@ -1426,12 +1425,12 @@ impl Vm {
             }
             
             Opcode::BoxInterface => {
-                // a=dest (2 slots), b=value_kind, c=value, flags=value_type_id
+                // a=dest (2 slots), b=value_type_id, c=value, flags=value_kind
                 // Preserve iface_type_id, set value_kind, value_type_id, and data
                 let old_slot0 = self.read_reg(fiber_id, a);
                 let iface_type_id = interface::unpack_iface_type_id(old_slot0);
-                let value_kind = b as u8;
-                let value_type_id = flags as u16;
+                let value_type_id = b;
+                let value_kind = flags;
                 let slot0 = interface::pack_slot0(iface_type_id, value_type_id, value_kind);
                 let val = self.read_reg(fiber_id, c);
                 self.write_reg(fiber_id, a, slot0);

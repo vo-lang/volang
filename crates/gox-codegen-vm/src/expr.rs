@@ -314,7 +314,8 @@ fn compile_call(
         
         if is_method_call {
             // Check if this is an interface method call
-            if let Some(selection) = info.expr_selection(callee) {
+            // Selection is recorded on sel.expr (the base expression), not on callee
+            if let Some(selection) = info.expr_selection(&sel.expr) {
                 if let Some((iface_type_key, method_idx)) = info.interface_method_info(&sel.expr, selection) {
                     return compile_interface_call(iface_type_key, method_idx, &sel.expr, args, ctx, func, info);
                 }

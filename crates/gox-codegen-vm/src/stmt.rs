@@ -118,13 +118,28 @@ fn compile_var_decl(
     for spec in &decl.specs {
         if spec.values.is_empty() {
             // No initializer - allocate and zero-initialize
-            let slot_types = if let Some(ty) = &spec.ty {
-                info.type_expr_slot_types(ty)
+            // Check if this is an interface type
+            let type_key = spec.ty.as_ref().and_then(|ty| info.type_expr_type_key(ty));
+            let is_interface = type_key
+                .map(|k| info.query.get_type(k))
+                .map(|t| info.is_interface(t))
+                .unwrap_or(false);
+            
+            if is_interface {
+                // Interface variable: use define_local_interface to set iface_type_id
+                let iface_type_id = ctx.type_id_for_interface(type_key.unwrap());
+                for name in &spec.names {
+                    func.define_local_interface(name.symbol, iface_type_id as u32);
+                }
             } else {
-                vec![SlotType::Value]
-            };
-            for name in &spec.names {
-                define_local_with_init(name.symbol, &slot_types, None, func);
+                let slot_types = if let Some(ty) = &spec.ty {
+                    info.type_expr_slot_types(ty)
+                } else {
+                    vec![SlotType::Value]
+                };
+                for name in &spec.names {
+                    define_local_with_init(name.symbol, &slot_types, None, func);
+                }
             }
         } else {
             // Has initializer
@@ -152,9 +167,11 @@ fn compile_assign(
         let lhs_ty = info.expr_type(l);
         let rhs_ty = info.expr_type(r);
         
-        // Check if this is an interface assignment (concrete type -> interface)
-        let is_iface_assign = lhs_ty.map(|t| info.is_interface(t)).unwrap_or(false)
-            && rhs_ty.map(|t| !info.is_interface(t)).unwrap_or(false);
+        // Determine interface assignment type
+        let lhs_is_iface = lhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+        let rhs_is_iface = rhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+        let is_box_iface = lhs_is_iface && !rhs_is_iface;  // concrete -> interface
+        let is_iface_to_iface = lhs_is_iface && rhs_is_iface;  // interface -> interface
         
         // For simple assignment (=), use compile_expr_value for struct deep copy
         // For compound assignment (+=, etc.), use compile_expr (no copy needed)
@@ -164,8 +181,8 @@ fn compile_assign(
             compile_expr(r, ctx, func, info)?
         };
 
-        // If assigning to interface, register dispatch table
-        if is_iface_assign && op == AssignOp::Assign {
+        // If boxing to interface, register dispatch table
+        if is_box_iface && op == AssignOp::Assign {
             if let (Some(lhs_type_key), Some(rhs_type_key)) = (info.expr_type_key(l), info.expr_type_key(r)) {
                 register_iface_dispatch_if_needed(lhs_type_key, rhs_type_key, ctx, info);
             }
@@ -177,7 +194,15 @@ fn compile_assign(
                 if let Some(local) = func.lookup_local(ident.symbol) {
                     let dst = local.slot;
                     if op == AssignOp::Assign {
-                        func.emit_op(Opcode::Mov, dst, src, 0);
+                        if is_box_iface {
+                            // Box concrete value into interface
+                            emit_box_interface(dst, src, rhs_ty, r, ctx, func, info);
+                        } else if is_iface_to_iface {
+                            // Interface to interface: copy 2 slots
+                            func.emit_mov_slots(dst, src, 2);
+                        } else {
+                            func.emit_op(Opcode::Mov, dst, src, 0);
+                        }
                     } else {
                         let opcode = compound_assign_opcode(op, is_float);
                         func.emit_op(opcode, dst, dst, src);
@@ -670,6 +695,27 @@ fn compile_switch(
 
     func.pop_scope();
     Ok(())
+}
+
+/// Emit BoxInterface instruction to box a concrete value into an interface.
+fn emit_box_interface(
+    dst: u16,
+    src: u16,
+    rhs_ty: Option<&Type>,
+    rhs_expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) {
+    let value_kind = rhs_ty.map(|t| info.value_kind(t)).unwrap_or(gox_common_core::ValueKind::Nil) as u8;
+    // Only Named types (structs) have type IDs; for primitives use 0
+    let is_named = rhs_ty.map(|t| matches!(t, Type::Named(_))).unwrap_or(false);
+    let value_type_id = if is_named {
+        info.expr_type_key(rhs_expr).map(|k| ctx.type_id_for_struct(k)).unwrap_or(0)
+    } else {
+        0
+    };
+    func.emit_with_flags(Opcode::BoxInterface, value_kind, dst, value_type_id, src);
 }
 
 /// Register interface dispatch table entry if not already registered.
