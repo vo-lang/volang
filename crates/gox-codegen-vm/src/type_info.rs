@@ -283,14 +283,6 @@ impl<'a> TypeInfo<'a> {
         }
     }
 
-    /// Get TypeKey from a TypeExpr (for named types).
-    pub fn type_expr_key(&self, ty: &TypeExpr) -> Option<TypeKey> {
-        match &ty.kind {
-            TypeExprKind::Ident(ident) => self.query.lookup_type_key(ident.symbol),
-            _ => None,
-        }
-    }
-
     /// Delegate to LayoutCalculator for struct field info.
     pub fn struct_field_info(&self, struct_type: &Type, field: Symbol) -> Option<(u16, usize)> {
         LayoutCalculator::struct_field_info(&self.query, struct_type, field)

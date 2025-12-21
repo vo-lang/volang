@@ -76,8 +76,68 @@ pub fn compile_stmt(
             ctx, func, info,
         ),
         StmtKind::Empty => Ok(()),
+        StmtKind::Var(decl) => compile_var_decl(decl, ctx, func, info),
         _ => todo!("statement {:?}", std::mem::discriminant(&stmt.kind)),
     }
+}
+
+fn emit_zero_init(func: &mut FuncBuilder, dst: u16, slot_types: &[SlotType]) {
+    for (i, slot_type) in slot_types.iter().enumerate() {
+        let slot = dst + i as u16;
+        match slot_type {
+            SlotType::Value => func.emit_op(Opcode::LoadInt, slot, 0, 0),
+            SlotType::GcRef => func.emit_op(Opcode::LoadNil, slot, 0, 0),
+            SlotType::Interface0 => func.emit_op(Opcode::LoadInt, slot, 0, 0),
+            SlotType::Interface1 => func.emit_op(Opcode::LoadNil, slot, 0, 0),
+        };
+    }
+}
+
+fn define_local_with_init(
+    name: gox_common::Symbol,
+    slot_types: &[SlotType],
+    src: Option<u16>,
+    func: &mut FuncBuilder,
+) -> u16 {
+    let slots = slot_types.len() as u16;
+    let dst = func.define_local(name, slots, slot_types);
+    if let Some(src) = src {
+        func.emit_op(Opcode::Mov, dst, src, 0);
+    } else {
+        emit_zero_init(func, dst, slot_types);
+    }
+    dst
+}
+
+fn compile_var_decl(
+    decl: &gox_syntax::ast::VarDecl,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    for spec in &decl.specs {
+        if spec.values.is_empty() {
+            // No initializer - allocate and zero-initialize
+            let slot_types = if let Some(ty) = &spec.ty {
+                info.type_expr_slot_types(ty)
+            } else {
+                vec![SlotType::Value]
+            };
+            for name in &spec.names {
+                define_local_with_init(name.symbol, &slot_types, None, func);
+            }
+        } else {
+            // Has initializer
+            for (name, value) in spec.names.iter().zip(spec.values.iter()) {
+                let src = compile_expr_value(value, ctx, func, info)?;
+                let slot_types = info.expr_type(value)
+                    .map(|t| info.type_slot_types(t))
+                    .unwrap_or_else(|| vec![SlotType::Value]);
+                define_local_with_init(name.symbol, &slot_types, Some(src), func);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compile_assign(
@@ -194,17 +254,11 @@ fn compile_short_var_decl(
     info: &TypeInfo,
 ) -> Result<()> {
     for (name, value) in names.iter().zip(values.iter()) {
-        // Use compile_expr_value for deep copy of non-pointer structs
         let src = compile_expr_value(value, ctx, func, info)?;
-        let ty = info.expr_type(value);
-        let slot_types = if let Some(t) = ty {
-            info.type_slot_types(t)
-        } else {
-            vec![SlotType::Value]
-        };
-        let slots = slot_types.len() as u16;
-        let dst = func.define_local(name.symbol, slots, &slot_types);
-        func.emit_op(Opcode::Mov, dst, src, 0);
+        let slot_types = info.expr_type(value)
+            .map(|t| info.type_slot_types(t))
+            .unwrap_or_else(|| vec![SlotType::Value]);
+        define_local_with_init(name.symbol, &slot_types, Some(src), func);
     }
     Ok(())
 }
