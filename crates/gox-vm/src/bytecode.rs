@@ -105,6 +105,18 @@ pub struct GlobalDef {
     pub type_id: u16,
 }
 
+/// Interface method dispatch entry.
+/// For a concrete type implementing an interface, maps method indices to func IDs.
+#[derive(Clone, Debug, Default)]
+pub struct IfaceDispatchEntry {
+    /// Concrete struct type ID.
+    pub concrete_type_id: u16,
+    /// Interface type ID.
+    pub iface_type_id: u16,
+    /// Function IDs for each method in the interface (indexed by method_idx).
+    pub method_funcs: Vec<u32>,
+}
+
 /// Bytecode module.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
@@ -117,6 +129,8 @@ pub struct Module {
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
     pub externs: Vec<ExternDef>,
+    /// Interface method dispatch table.
+    pub iface_dispatch: Vec<IfaceDispatchEntry>,
     pub entry_func: u32,
 }
 
@@ -127,6 +141,7 @@ impl Module {
             struct_types: Vec::new(),
             interface_types: Vec::new(),
             constants: Vec::new(),
+            iface_dispatch: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),
             externs: Vec::new(),
@@ -191,6 +206,22 @@ impl Module {
         self.externs.iter().position(|n| n.name == name).map(|i| i as u32)
     }
     
+    /// Add an interface dispatch entry.
+    pub fn add_iface_dispatch(&mut self, entry: IfaceDispatchEntry) {
+        self.iface_dispatch.push(entry);
+    }
+    
+    /// Lookup func_id for an interface method call.
+    /// Returns None if no dispatch entry found.
+    pub fn lookup_iface_method(&self, concrete_type_id: u16, iface_type_id: u16, method_idx: usize) -> Option<u32> {
+        for entry in &self.iface_dispatch {
+            if entry.concrete_type_id == concrete_type_id && entry.iface_type_id == iface_type_id {
+                return entry.method_funcs.get(method_idx).copied();
+            }
+        }
+        None
+    }
+    
     /// Serialize module to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -243,6 +274,17 @@ impl Module {
         write_u32(&mut buf, self.functions.len() as u32);
         for f in &self.functions {
             write_function_def(&mut buf, f);
+        }
+        
+        // Interface dispatch table
+        write_u32(&mut buf, self.iface_dispatch.len() as u32);
+        for entry in &self.iface_dispatch {
+            write_u16(&mut buf, entry.concrete_type_id);
+            write_u16(&mut buf, entry.iface_type_id);
+            write_u16(&mut buf, entry.method_funcs.len() as u16);
+            for &func_id in &entry.method_funcs {
+                write_u32(&mut buf, func_id);
+            }
         }
         
         buf
@@ -320,6 +362,24 @@ impl Module {
             functions.push(read_function_def(&mut cursor)?);
         }
         
+        // Interface dispatch table
+        let dispatch_count = read_u32(&mut cursor)?;
+        let mut iface_dispatch = Vec::with_capacity(dispatch_count as usize);
+        for _ in 0..dispatch_count {
+            let concrete_type_id = read_u16(&mut cursor)?;
+            let iface_type_id = read_u16(&mut cursor)?;
+            let method_count = read_u16(&mut cursor)? as usize;
+            let mut method_funcs = Vec::with_capacity(method_count);
+            for _ in 0..method_count {
+                method_funcs.push(read_u32(&mut cursor)?);
+            }
+            iface_dispatch.push(IfaceDispatchEntry {
+                concrete_type_id,
+                iface_type_id,
+                method_funcs,
+            });
+        }
+        
         Ok(Module {
             name,
             struct_types,
@@ -328,6 +388,7 @@ impl Module {
             globals,
             functions,
             externs,
+            iface_dispatch,
             entry_func,
         })
     }

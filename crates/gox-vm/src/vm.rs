@@ -496,12 +496,47 @@ impl Vm {
             
             Opcode::CallInterface => {
                 // a=iface_reg, b=method_idx, c=args_start, flags=(ret_count<<4)|arg_count
-                // TODO: Implement interface method dispatch
-                // 1. Read interface slot[0] to get concrete type info
-                // 2. Lookup method in dispatch table: (concrete_type_id, method_idx) -> func_id
-                // 3. Read interface slot[1] to get receiver value
-                // 4. Call the resolved function with receiver + args
-                todo!("CallInterface not yet implemented in VM");
+                let arg_count = (flags & 0x0F) as u16;
+                let ret_count = flags >> 4;
+                
+                // Read interface value (2 slots)
+                let iface_slot0 = self.read_reg(fiber_id, a);
+                let iface_slot1 = self.read_reg(fiber_id, a + 1);
+                
+                // Extract type info from slot0:
+                // packed: (iface_type_id:16 | value_type_id:16 | value_kind:8 | ...)
+                let iface_type_id = ((iface_slot0 >> 48) & 0xFFFF) as u16;
+                let concrete_type_id = ((iface_slot0 >> 32) & 0xFFFF) as u16;
+                
+                // Lookup method in dispatch table
+                let module = self.module.as_ref().unwrap();
+                let func_id = match module.lookup_iface_method(concrete_type_id, iface_type_id, b as usize) {
+                    Some(id) => id,
+                    None => {
+                        return VmResult::Panic(format!(
+                            "interface method not found: concrete_type={}, iface_type={}, method_idx={}",
+                            concrete_type_id, iface_type_id, b
+                        ));
+                    }
+                };
+                
+                let func = &module.functions[func_id as usize];
+                
+                // Copy receiver (from iface_slot1) + args before pushing frame
+                let mut args_with_recv: Vec<u64> = Vec::with_capacity(1 + arg_count as usize);
+                args_with_recv.push(iface_slot1); // receiver is first arg
+                for i in 0..arg_count {
+                    args_with_recv.push(self.read_reg(fiber_id, c + i));
+                }
+                
+                // Push frame: return to c (args_start)
+                let fiber = self.scheduler.get_mut(fiber_id).unwrap();
+                fiber.push_frame(func_id, c, func.local_slots as usize, c, ret_count);
+                
+                // Copy args into new frame
+                for (i, &val) in args_with_recv.iter().enumerate() {
+                    self.write_reg(fiber_id, i as u16, val);
+                }
             }
             
             // ============ Extern call (zero-copy) ============

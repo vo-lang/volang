@@ -1,10 +1,10 @@
 //! Codegen context - manages package-level compilation state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gox_analysis::TypeKey;
 use gox_common::Symbol;
-use gox_vm::bytecode::{Constant, Module};
+use gox_vm::bytecode::{Constant, IfaceDispatchEntry, Module};
 
 /// Key for function/method lookup: (receiver_type, method_name)
 /// For regular functions, receiver_type is None.
@@ -23,6 +23,8 @@ pub struct CodegenContext {
     interface_type_ids: HashMap<TypeKey, u16>,
     next_struct_id: u16,
     next_interface_id: u16,
+    // Track which (concrete, interface) pairs have dispatch entries
+    iface_dispatch_registered: HashSet<(u16, u16)>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -46,6 +48,7 @@ impl CodegenContext {
             interface_type_ids: HashMap::new(),
             next_struct_id: 0,
             next_interface_id: 0,
+            iface_dispatch_registered: HashSet::new(),
         }
     }
 
@@ -194,6 +197,26 @@ impl CodegenContext {
 
     pub fn add_interface_type(&mut self, meta: gox_vm::types::TypeMeta) {
         self.module.interface_types.push(meta);
+    }
+
+    /// Register interface dispatch entry if not already registered.
+    /// method_funcs: func_ids for each method in the interface (indexed by method_idx).
+    pub fn register_iface_dispatch(
+        &mut self,
+        concrete_type_id: u16,
+        iface_type_id: u16,
+        method_funcs: Vec<u32>,
+    ) {
+        let key = (concrete_type_id, iface_type_id);
+        if self.iface_dispatch_registered.contains(&key) {
+            return;
+        }
+        self.iface_dispatch_registered.insert(key);
+        self.module.add_iface_dispatch(IfaceDispatchEntry {
+            concrete_type_id,
+            iface_type_id,
+            method_funcs,
+        });
     }
 
     pub fn add_function(&mut self, func_def: gox_vm::bytecode::FunctionDef) -> u32 {
