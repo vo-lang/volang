@@ -49,7 +49,7 @@ pub fn compile_project(project: &Project) -> Result<Module> {
     }
 
     // Generate init and entry
-    compile_init_and_entry_files(&project.files, &info, &mut ctx)?;
+    compile_init_and_entry(project, &info, &mut ctx)?;
 
     Ok(ctx.finish())
 }
@@ -148,27 +148,25 @@ fn register_types(project: &Project, ctx: &mut CodegenContext, info: &TypeInfo) 
     }
 }
 
-fn compile_init_and_entry_files(
-    files: &[File],
+fn compile_init_and_entry(
+    project: &Project,
     info: &TypeInfo,
     ctx: &mut CodegenContext,
 ) -> Result<()> {
     let mut init_builder = FuncBuilder::new("__init__");
 
-    // Compile global var initializers from all files
-    for file in files {
-        for decl in &file.decls {
-            if let Decl::Var(var) = decl {
-                for spec in &var.specs {
-                    for (i, name) in spec.names.iter().enumerate() {
-                        if i < spec.values.len() {
-                            let src = compile_expr(&spec.values[i], ctx, &mut init_builder, info)?;
-                            if let Some(idx) = ctx.get_global_index(name.symbol) {
-                                init_builder.emit_op(Opcode::SetGlobal, idx as u16, src, 0);
-                            }
-                        }
-                    }
-                }
+    // Compile global var initializers in dependency order from init_order
+    for initializer in &project.type_info.init_order {
+        // Compile the RHS expression
+        let src = compile_expr(&initializer.rhs, ctx, &mut init_builder, info)?;
+        
+        // Set each LHS variable
+        for &okey in &initializer.lhs {
+            // Get the variable name from ObjKey
+            let var_name = project.tc_objs.lobjs[okey].name();
+            let var_sym = project.interner.get(var_name).expect("var name should be interned");
+            if let Some(idx) = ctx.get_global_index(var_sym) {
+                init_builder.emit_op(Opcode::SetGlobal, idx as u16, src, 0);
             }
         }
     }
@@ -203,7 +201,7 @@ pub fn compile_single_file(project: &Project) -> Result<Module> {
 
     collect_declarations(file, &info, &mut ctx)?;
     compile_functions(file, &info, &mut ctx)?;
-    compile_init_and_entry_files(&project.files, &info, &mut ctx)?;
+    compile_init_and_entry(project, &info, &mut ctx)?;
 
     Ok(ctx.finish())
 }

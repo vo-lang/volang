@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gox_common::span::Span;
-use gox_common_core::ExprId;
 
 use crate::objects::{DeclInfoKey, ObjKey, TCObjects};
 
@@ -131,7 +130,7 @@ impl Checker {
                         }
                         emitted.insert(decl_key);
                         let lhs = var.lhs.clone().unwrap_or(vec![x]);
-                        Some(Initializer::new(lhs, ExprId(var.init.as_ref().unwrap().id.0)))
+                        Some(Initializer::new(lhs, var.init.clone().unwrap()))
                     }
                     _ => None,
                 }

@@ -8,6 +8,7 @@ use crate::selection::Selection;
 use gox_common::symbol::Ident;
 use gox_common_core::{ExprId, TypeExprId};
 use gox_common::Span;
+use gox_syntax::ast::Expr;
 use std::collections::HashMap;
 
 /// TypeAndValue reports the type and value (for constants) of an expression.
@@ -24,15 +25,15 @@ impl TypeAndValue {
 }
 
 /// An Initializer describes a package-level variable initialization.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Initializer {
     pub lhs: Vec<ObjKey>,
-    pub rhs_expr_id: ExprId,
+    pub rhs: Expr,
 }
 
 impl Initializer {
-    pub(crate) fn new(lhs: Vec<ObjKey>, rhs_expr_id: ExprId) -> Self {
-        Initializer { lhs, rhs_expr_id }
+    pub(crate) fn new(lhs: Vec<ObjKey>, rhs: Expr) -> Self {
+        Initializer { lhs, rhs }
     }
 }
 
