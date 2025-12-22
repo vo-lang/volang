@@ -27,7 +27,7 @@ pub use obj::{Builtin, ConstValue, EntityType, LangObj};
 pub use objects::*;
 pub use operand::*;
 pub use package::Package;
-pub use project::{analyze_project, analyze_single_file, AnalysisError, Project};
+pub use project::{analyze_project, analyze_project_with_options, analyze_single_file, analyze_single_file_with_options, AnalysisError, AnalysisOptions, Project};
 pub use query::{EntityRef, FieldInfo, TypeQuery};
 pub use scope::Scope;
 pub use selection::*;

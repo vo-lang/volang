@@ -78,6 +78,13 @@ impl std::fmt::Display for AnalysisError {
 
 impl std::error::Error for AnalysisError {}
 
+/// Options for project analysis.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisOptions {
+    /// Enable type checker trace output.
+    pub trace: bool,
+}
+
 /// Result of project analysis.
 pub struct Project {
     /// Shared type checking objects storage (arena).
@@ -162,6 +169,15 @@ pub fn analyze_project(
     files: FileSet,
     vfs: &Vfs,
 ) -> Result<Project, AnalysisError> {
+    analyze_project_with_options(files, vfs, &AnalysisOptions::default())
+}
+
+/// Analyze a project with custom options.
+pub fn analyze_project_with_options(
+    files: FileSet,
+    vfs: &Vfs,
+    options: &AnalysisOptions,
+) -> Result<Project, AnalysisError> {
     let state = Rc::new(RefCell::new(ProjectState {
         tc_objs: TCObjects::new(),
         interner: SymbolInterner::new(),
@@ -187,7 +203,7 @@ pub fn analyze_project(
     // Type check the main package
     {
         let mut state_ref = state.borrow_mut();
-        let mut checker = Checker::new(main_pkg_key, state_ref.interner.clone());
+        let mut checker = Checker::new_with_trace(main_pkg_key, state_ref.interner.clone(), options.trace);
         
         // Swap tc_objs so checker uses our shared one (imports already loaded)
         std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
@@ -240,9 +256,18 @@ pub fn analyze_single_file(
     file: File,
     interner: SymbolInterner,
 ) -> Result<Project, AnalysisError> {
+    analyze_single_file_with_options(file, interner, &AnalysisOptions::default())
+}
+
+/// Analyze a single file with custom options.
+pub fn analyze_single_file_with_options(
+    file: File,
+    interner: SymbolInterner,
+    options: &AnalysisOptions,
+) -> Result<Project, AnalysisError> {
     // Create checker first (it creates its own TCObjects with Universe)
     // Then create the package in checker's TCObjects
-    let mut checker = Checker::new(PackageKey::null(), interner.clone());
+    let mut checker = Checker::new_with_trace(PackageKey::null(), interner.clone(), options.trace);
     let main_pkg_key = checker.tc_objs.new_package("main".to_string());
     checker.pkg = main_pkg_key;
     

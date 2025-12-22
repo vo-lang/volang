@@ -852,6 +852,11 @@ impl Checker {
         e: &Expr,
         hint: Option<TypeKey>,
     ) {
+        let pos = e.span.start.0 as usize;
+        if self.trace() {
+            self.trace_begin(pos, "expr");
+        }
+
         self.raw_internal(x, e, hint);
 
         let ty = match &x.mode {
@@ -873,6 +878,10 @@ impl Checker {
             );
         } else {
             self.result.record_type_and_value(e.id, x.mode.clone(), ty);
+        }
+
+        if self.trace() {
+            self.trace_end(pos, "expr");
         }
     }
 

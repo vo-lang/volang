@@ -108,8 +108,10 @@ pub struct Checker {
     pub octx: ObjContext,
     /// Type checking results.
     pub result: TypeInfo,
-    /// For debug tracing.
-    pub indent: Rc<RefCell<usize>>,
+    /// Enable debug tracing (set via GOX_TRACE env var).
+    pub trace_enabled: bool,
+    /// Current trace indentation level.
+    pub trace_indent: Rc<RefCell<usize>>,
     
     // --- Per-check state ---
     /// Positions of unused dot-imported packages for each file scope.
@@ -129,6 +131,11 @@ pub struct Checker {
 impl Checker {
     /// Creates a new type checker for the given package.
     pub fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker {
+        Self::new_with_trace(pkg, interner, false)
+    }
+
+    /// Creates a new type checker with trace option.
+    pub fn new_with_trace(pkg: PackageKey, interner: SymbolInterner, trace_enabled: bool) -> Checker {
         let tc_objs = TCObjects::new();
         Checker {
             tc_objs,
@@ -139,7 +146,8 @@ impl Checker {
             imp_map: HashMap::new(),
             octx: ObjContext::new(),
             result: TypeInfo::new(),
-            indent: Rc::new(RefCell::new(0)),
+            trace_enabled,
+            trace_indent: Rc::new(RefCell::new(0)),
             unused_dot_imports: HashMap::new(),
             methods: HashMap::new(),
             ifaces: HashMap::new(),
@@ -154,6 +162,7 @@ impl Checker {
         pkg: PackageKey,
         interner: SymbolInterner,
         tc_objs: TCObjects,
+        trace_enabled: bool,
     ) -> Checker {
         Checker {
             tc_objs,
@@ -164,7 +173,8 @@ impl Checker {
             imp_map: HashMap::new(),
             octx: ObjContext::new(),
             result: TypeInfo::new(),
-            indent: Rc::new(RefCell::new(0)),
+            trace_enabled,
+            trace_indent: Rc::new(RefCell::new(0)),
             unused_dot_imports: HashMap::new(),
             methods: HashMap::new(),
             ifaces: HashMap::new(),
@@ -251,17 +261,33 @@ impl Checker {
 
     /// Returns whether tracing is enabled.
     pub fn trace(&self) -> bool {
-        false
+        self.trace_enabled
     }
 
-    /// Begin a trace block.
-    pub fn trace_begin(&self, _pos: usize, _msg: &str) {
-        // TODO: Implement tracing
+    /// Print a trace message with current indentation.
+    fn trace_print(&self, msg: &str) {
+        let indent = *self.trace_indent.borrow();
+        let prefix = "  ".repeat(indent);
+        eprintln!("{}{}", prefix, msg);
     }
 
-    /// End a trace block.
-    pub fn trace_end(&self, _pos: usize, _msg: &str) {
-        // TODO: Implement tracing
+    /// Begin a trace block (increases indentation).
+    pub fn trace_begin(&self, pos: usize, msg: &str) {
+        if self.trace_enabled {
+            self.trace_print(&format!(">> {} (pos:{})", msg, pos));
+            *self.trace_indent.borrow_mut() += 1;
+        }
+    }
+
+    /// End a trace block (decreases indentation).
+    pub fn trace_end(&self, pos: usize, msg: &str) {
+        if self.trace_enabled {
+            {
+                let indent = &mut *self.trace_indent.borrow_mut();
+                *indent = indent.saturating_sub(1);
+            }
+            self.trace_print(&format!("<< {} (pos:{})", msg, pos));
+        }
     }
 
     // =========================================================================

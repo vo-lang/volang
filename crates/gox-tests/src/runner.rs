@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use gox_common::diagnostics::DiagnosticSink;
 use gox_common::vfs::{FileSet, RealFs};
 use gox_syntax::parser;
-use gox_analysis::analyze_project;
+use gox_analysis::{analyze_project_with_options, analyze_single_file_with_options, AnalysisOptions};
 use gox_module::VfsConfig;
 
 use crate::printer::AstPrinter;
@@ -308,7 +308,10 @@ pub fn run_single_file_with_mode(path: &Path, mode: RunMode) -> TestResult {
     
     // 2. Type check (only if not parser-only test and no imports)
     if !has_imports {
-        let typecheck_result = gox_analysis::analyze_single_file(file.clone(), interner.clone());
+        let options = AnalysisOptions {
+            trace: std::env::var("GOX_TRACE").is_ok(),
+        };
+        let typecheck_result = analyze_single_file_with_options(file.clone(), interner.clone(), &options);
         let typecheck_has_errors = typecheck_result.is_err();
         let typecheck_errors_str = match &typecheck_result {
             Err(e) => format!("{}", e),
@@ -510,7 +513,10 @@ fn compile_project_dir(dir: &Path) -> Result<gox_vm::Module, String> {
     
     let vfs_config = VfsConfig::new(std_root, dir.to_path_buf(), mod_root);
     let analysis_vfs = vfs_config.to_vfs();
-    let project = analyze_project(file_set, &analysis_vfs)
+    let options = AnalysisOptions {
+        trace: std::env::var("GOX_TRACE").is_ok(),
+    };
+    let project = analyze_project_with_options(file_set, &analysis_vfs, &options)
         .map_err(|e| format!("analysis error: {}", e))?;
     
     // Compile
