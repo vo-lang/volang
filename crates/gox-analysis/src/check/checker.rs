@@ -375,9 +375,8 @@ impl Checker {
         x: &mut crate::operand::Operand,
         expr: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext,
     ) {
-        self.raw_expr_impl(x, expr, hint, fctx);
+        self.raw_expr_impl(x, expr, hint);
     }
 
     // =========================================================================

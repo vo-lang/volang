@@ -23,7 +23,7 @@ impl Checker {
     /// If necessary, converts untyped values to the appropriate type.
     /// Use t == None to indicate assignment to an untyped blank identifier.
     /// x.mode is set to invalid if the assignment failed.
-    pub fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str, fctx: &mut FilesContext) {
+    pub fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str) {
         self.single_value(x);
         if x.invalid() {
             return;
@@ -57,7 +57,7 @@ impl Checker {
             } else {
                 t.unwrap()
             };
-            self.convert_untyped(x, target, fctx);
+            self.convert_untyped(x, target);
             if x.invalid() {
                 return;
             }
@@ -83,7 +83,7 @@ impl Checker {
     }
 
     /// Initializes a constant with value x.
-    pub fn init_const(&mut self, lhs: ObjKey, x: &mut Operand, fctx: &mut FilesContext) {
+    pub fn init_const(&mut self, lhs: ObjKey, x: &mut Operand) {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -103,7 +103,7 @@ impl Checker {
         // rhs must be a constant
         if let OperandMode::Constant(ref _val) = x.mode {
             let t = self.lobj(lhs).typ();
-            self.assignment(x, t, "constant declaration", fctx);
+            self.assignment(x, t, "constant declaration");
             if x.mode != OperandMode::Invalid {
                 if let OperandMode::Constant(ref v) = x.mode {
                     self.lobj_mut(lhs).set_const_val(v.clone());
@@ -115,7 +115,7 @@ impl Checker {
     }
 
     /// Initializes a variable with value x.
-    pub fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str, fctx: &mut FilesContext) -> Option<TypeKey> {
+    pub fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -151,7 +151,7 @@ impl Checker {
         }
 
         let t = self.lobj(lhs).typ();
-        self.assignment(x, t, msg, fctx);
+        self.assignment(x, t, msg);
         if x.mode != OperandMode::Invalid {
             x.typ
         } else {
@@ -160,7 +160,7 @@ impl Checker {
     }
 
     /// Assigns x to the variable denoted by lhs expression.
-    pub fn assign_var(&mut self, lhs: &Expr, x: &mut Operand, fctx: &mut FilesContext) -> Option<TypeKey> {
+    pub fn assign_var(&mut self, lhs: &Expr, x: &mut Operand) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         if x.invalid() || x.typ == Some(invalid_type) {
             return None;
@@ -174,7 +174,7 @@ impl Checker {
             let name = self.resolve_ident(&ident);
             if name == "_" {
                 self.result.record_def(ident, None);
-                self.assignment(x, None, "assignment to _ identifier", fctx);
+                self.assignment(x, None, "assignment to _ identifier");
                 return if x.mode != OperandMode::Invalid {
                     x.typ
                 } else {
@@ -200,7 +200,7 @@ impl Checker {
 
         // Evaluate lhs
         let mut z = Operand::new();
-        self.expr(&mut z, lhs, fctx);
+        self.expr(&mut z, lhs);
         
         // restore v.used
         if let Some(okey) = v {
@@ -221,7 +221,7 @@ impl Checker {
                 // Check if this is a selector on a map index (cannot assign to struct field in map)
                 if let gox_syntax::ast::ExprKind::Selector(sel) = &lhs.kind {
                     let mut op = Operand::new();
-                    self.expr(&mut op, &sel.expr, fctx);
+                    self.expr(&mut op, &sel.expr);
                     if op.mode == OperandMode::MapIndex {
                         self.error(lhs.span, "cannot assign to struct field in map".to_string());
                         return None;
@@ -232,7 +232,7 @@ impl Checker {
             }
         }
 
-        self.assignment(x, z.typ, "assignment", fctx);
+        self.assignment(x, z.typ, "assignment");
         if x.mode != OperandMode::Invalid {
             x.typ
         } else {
@@ -243,7 +243,7 @@ impl Checker {
     /// Initializes multiple variables from multiple values.
     /// Aligned with goscript/types/src/check/assignment.rs::init_vars
     /// If return_pos is Some, init_vars is called to type-check return expressions.
-    pub fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>, fctx: &mut FilesContext) {
+    pub fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
         
@@ -252,7 +252,7 @@ impl Checker {
         
         // Use unpack to handle all cases uniformly
         // requires return_pos.is_none for comma-ok handling
-        let result = self.unpack(rhs, ll, ll == 2 && return_pos.is_none(), false, fctx);
+        let result = self.unpack(rhs, ll, ll == 2 && return_pos.is_none(), false);
         
         let mut invalidate_lhs = || {
             for &okey in lhs.iter() {
@@ -273,7 +273,7 @@ impl Checker {
                 match ord {
                     Ordering::Greater | Ordering::Less => {
                         invalidate_lhs();
-                        result.use_(self, 0, fctx);
+                        result.use_(self, 0);
                         if !rhs.is_empty() {
                             if let Some(pos) = return_pos {
                                 self.error(
@@ -293,8 +293,8 @@ impl Checker {
                         let context = if return_pos.is_some() { "return statement" } else { "assignment" };
                         for (i, &l) in lhs.iter().enumerate() {
                             let mut x = Operand::new();
-                            result.get(self, &mut x, i, fctx);
-                            self.init_var(l, &mut x, context, fctx);
+                            result.get(self, &mut x, i);
+                            self.init_var(l, &mut x, context);
                         }
                     }
                 }
@@ -310,15 +310,15 @@ impl Checker {
 
     /// Assigns multiple values to multiple variables.
     /// Aligned with goscript/types/src/check/assignment.rs::assign_vars
-    pub fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr], fctx: &mut FilesContext) {
+    pub fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr]) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
         
         let ll = lhs.len();
-        let result = self.unpack(rhs, ll, ll == 2, false, fctx);
+        let result = self.unpack(rhs, ll, ll == 2, false);
         
         match &result {
-            UnpackResult::Error => self.use_lhs(lhs, fctx),
+            UnpackResult::Error => self.use_lhs(lhs),
             UnpackResult::Tuple(_, _, _)
             | UnpackResult::CommaOk(_, _)
             | UnpackResult::Multiple(_, _)
@@ -327,7 +327,7 @@ impl Checker {
                 let (count, ord) = result.rhs_count();
                 match ord {
                     Ordering::Greater | Ordering::Less => {
-                        result.use_(self, 0, fctx);
+                        result.use_(self, 0);
                         if !rhs.is_empty() {
                             self.error(
                                 rhs[0].span,
@@ -339,8 +339,8 @@ impl Checker {
                     Ordering::Equal => {
                         for (i, l) in lhs.iter().enumerate() {
                             let mut x = Operand::new();
-                            result.get(self, &mut x, i, fctx);
-                            self.assign_var(l, &mut x, fctx);
+                            result.get(self, &mut x, i);
+                            self.assign_var(l, &mut x);
                         }
                     }
                 }
@@ -355,7 +355,7 @@ impl Checker {
     }
 
     /// Handles short variable declarations (:=).
-    pub fn short_var_decl(&mut self, lhs: &[Expr], rhs: &[Expr], pos: Span, fctx: &mut FilesContext) {
+    pub fn short_var_decl(&mut self, lhs: &[Expr], rhs: &[Expr], pos: Span) {
         let top = self.delayed_count();
         let scope_key = match self.octx.scope {
             Some(s) => s,
@@ -395,7 +395,7 @@ impl Checker {
             }
         }
 
-        self.init_vars(&lhs_vars, rhs, None, fctx);
+        self.init_vars(&lhs_vars, rhs, None);
 
         // process function literals in rhs expressions before scope changes
         self.process_delayed(top);

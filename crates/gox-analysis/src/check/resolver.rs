@@ -253,7 +253,7 @@ impl Checker {
 
         // Associate methods with receiver base types
         for (method_key, recv_type_name, is_pointer) in methods {
-            self.associate_method_with_receiver(method_key, &recv_type_name, is_pointer, fctx);
+            self.associate_method_with_receiver(method_key, &recv_type_name, is_pointer);
         }
     }
 
@@ -530,7 +530,6 @@ impl Checker {
         method_key: ObjKey,
         receiver_type_name: &str,
         is_pointer: bool,
-        fctx: &mut FilesContext,
     ) {
         // Look up the receiver base type in package scope
         let pkg_scope = *self.package(self.pkg).scope();
@@ -728,7 +727,7 @@ impl Checker {
         for &o in &obj_list {
             let lobj = self.lobj(o);
             if lobj.entity_type().is_type_name() && lobj.typ().is_some() {
-                self.add_method_decls(o, fctx);
+                self.add_method_decls(o);
             }
         }
 
@@ -746,14 +745,14 @@ impl Checker {
                     }
                 }
                 // Phase 1: type-check non-alias
-                self.obj_decl(o, None, fctx);
+                self.obj_decl(o, None);
                 false
             })
             .collect();
 
         // Third pass: type-check alias declarations
         for o in alias_list {
-            self.obj_decl(o, None, fctx);
+            self.obj_decl(o, None);
         }
 
         // Clear methods map

@@ -119,7 +119,6 @@ impl Checker {
         e: Option<ExprId>,
         op: UnaryOp,
         operand_expr: &Expr,
-        fctx: &mut FilesContext,
     ) {
         match op {
             UnaryOp::Addr => {
@@ -169,7 +168,7 @@ impl Checker {
                         if e.is_some() {
                             x.expr_id = e; // for better error message
                         }
-                        self.representable(x, ty, fctx);
+                        self.representable(x, ty);
                     }
                     return;
                 }
@@ -197,7 +196,7 @@ impl Checker {
     }
 
     /// Checks that a constant operand is representable in the given basic type.
-    pub fn representable(&mut self, x: &mut Operand, t: TypeKey, _fctx: &mut FilesContext) {
+    pub fn representable(&mut self, x: &mut Operand, t: TypeKey) {
         let tval = self.otype(t);
         let tbasic = match tval.try_as_basic() {
             Some(b) => b,
@@ -243,7 +242,6 @@ impl Checker {
         expr_id: ExprId,
         t: TypeKey,
         final_: bool,
-        fctx: &mut FilesContext,
     ) {
         let info = match self.untyped.get(&expr_id) {
             Some(i) => i.clone(),
@@ -275,12 +273,12 @@ impl Checker {
                 // or a qualified identifier. No operands to take care of.
             }
             ExprKind::Paren(inner) => {
-                self.update_expr_type(inner.id, t, final_, fctx);
+                self.update_expr_type(inner.id, t, final_);
             }
             ExprKind::Unary(u) => {
                 // If x is a constant, the operands were constants.
                 if info.mode.constant_val().is_none() {
-                    self.update_expr_type(u.operand.id, t, final_, fctx);
+                    self.update_expr_type(u.operand.id, t, final_);
                 }
             }
             ExprKind::Binary(b) => {
@@ -289,11 +287,11 @@ impl Checker {
                         // The result type is independent of operand types
                     } else if Self::is_shift(b.op) {
                         // The result type depends only on lhs operand.
-                        self.update_expr_type(b.left.id, t, final_, fctx);
+                        self.update_expr_type(b.left.id, t, final_);
                     } else {
                         // The operand types match the result type.
-                        self.update_expr_type(b.left.id, t, final_, fctx);
-                        self.update_expr_type(b.right.id, t, final_, fctx);
+                        self.update_expr_type(b.left.id, t, final_);
+                        self.update_expr_type(b.right.id, t, final_);
                     }
                 }
             }
@@ -327,7 +325,7 @@ impl Checker {
         if info.mode.constant_val().is_some() {
             // If x is a constant, it must be representable as a value of typ.
             let mut c = Operand::with_expr(info.mode.clone(), expr_id, info.typ);
-            self.convert_untyped(&mut c, t, fctx);
+            self.convert_untyped(&mut c, t);
             if c.invalid() {
                 return;
             }
@@ -351,7 +349,6 @@ impl Checker {
         &mut self,
         x: &mut Operand,
         target: TypeKey,
-        fctx: &mut FilesContext,
     ) {
         if x.invalid() || typ::is_typed(x.typ.unwrap(), self.objs()) || target == self.invalid_type() {
             return;
@@ -376,7 +373,7 @@ impl Checker {
                     if order(xbasic) < order(tbasic) {
                         x.typ = Some(target);
                         if let Some(expr_id) = x.expr_id {
-                            self.update_expr_type(expr_id, target, false, fctx);
+                            self.update_expr_type(expr_id, target, false);
                         }
                     }
                 } else {
@@ -395,7 +392,7 @@ impl Checker {
             Type::Basic(_) => {
                 if let OperandMode::Constant(v) = &x.mode {
                     let v_clone = v.clone();
-                    self.representable(x, t, fctx);
+                    self.representable(x, t);
                     if x.invalid() {
                         return;
                     }
@@ -443,7 +440,7 @@ impl Checker {
         if let Some(t) = final_target {
             x.typ = final_target;
             if let Some(expr_id) = x.expr_id {
-                self.update_expr_type(expr_id, t, true, fctx);
+                self.update_expr_type(expr_id, t, true);
             }
         } else {
             self.error(Span::default(), "cannot convert untyped value".to_string());
@@ -461,7 +458,6 @@ impl Checker {
         x: &mut Operand,
         y: &Operand,
         op: BinaryOp,
-        fctx: &mut FilesContext,
     ) {
         // spec: "In any comparison, the first operand must be assignable
         // to the type of the second operand, or vice versa."
@@ -507,11 +503,11 @@ impl Checker {
                 // Update operand types to their default types
                 if let Some(expr_id) = x.expr_id {
                     let default_t = typ::untyped_default_type(xtype, self.objs());
-                    self.update_expr_type(expr_id, default_t, true, fctx);
+                    self.update_expr_type(expr_id, default_t, true);
                 }
                 if let Some(expr_id) = y.expr_id {
                     let default_t = typ::untyped_default_type(ytype, self.objs());
-                    self.update_expr_type(expr_id, default_t, true, fctx);
+                    self.update_expr_type(expr_id, default_t, true);
                 }
             }
         }
@@ -531,7 +527,6 @@ impl Checker {
         y: &mut Operand,
         op: BinaryOp,
         e: Option<ExprId>,
-        fctx: &mut FilesContext,
     ) {
         let xtval = self.otype(x.typ.unwrap());
         let xt_untyped = xtval.is_untyped(self.objs());
@@ -552,7 +547,7 @@ impl Checker {
         if ytval.is_unsigned(self.objs()) {
             // ok
         } else if ytval.is_untyped(self.objs()) {
-            self.convert_untyped(y, self.basic_type(BasicType::Uint), fctx);
+            self.convert_untyped(y, self.basic_type(BasicType::Uint));
             if y.invalid() {
                 x.mode = OperandMode::Invalid;
                 return;
@@ -591,7 +586,7 @@ impl Checker {
                     if e.is_some() {
                         x.expr_id = e;
                     }
-                    self.representable(x, x.typ.unwrap(), fctx);
+                    self.representable(x, x.typ.unwrap());
                 }
                 return;
             }
@@ -636,11 +631,10 @@ impl Checker {
         lhs: &Expr,
         rhs: &Expr,
         op: BinaryOp,
-        fctx: &mut FilesContext,
     ) {
         let mut y = Operand::new();
-        self.expr(x, lhs, fctx);
-        self.expr(&mut y, rhs, fctx);
+        self.expr(x, lhs);
+        self.expr(&mut y, rhs);
 
         if x.invalid() {
             return;
@@ -652,23 +646,23 @@ impl Checker {
         }
 
         if Self::is_shift(op) {
-            self.shift(x, &mut y, op, e, fctx);
+            self.shift(x, &mut y, op, e);
             return;
         }
 
-        self.convert_untyped(x, y.typ.unwrap(), fctx);
+        self.convert_untyped(x, y.typ.unwrap());
         if x.invalid() {
             return;
         }
 
-        self.convert_untyped(&mut y, x.typ.unwrap(), fctx);
+        self.convert_untyped(&mut y, x.typ.unwrap());
         if y.invalid() {
             x.mode = OperandMode::Invalid;
             return;
         }
 
         if Self::is_comparison(op) {
-            self.comparison(x, &y, op, fctx);
+            self.comparison(x, &y, op);
             return;
         }
 
@@ -706,7 +700,7 @@ impl Checker {
                 // Typed constants must be representable in their type
                 if typ::is_typed(ty, self.objs()) {
                     x.expr_id = e;
-                    self.representable(x, ty, fctx);
+                    self.representable(x, ty);
                 }
             }
             _ => {
@@ -726,16 +720,15 @@ impl Checker {
         &mut self,
         index: &Expr,
         max: Option<u64>,
-        fctx: &mut FilesContext,
     ) -> Result<Option<u64>, ()> {
         let x = &mut Operand::new();
-        self.expr(x, index, fctx);
+        self.expr(x, index);
         if x.invalid() {
             return Err(());
         }
 
         // An untyped constant must be representable as Int
-        self.convert_untyped(x, self.basic_type(BasicType::Int), fctx);
+        self.convert_untyped(x, self.basic_type(BasicType::Int));
         if x.invalid() {
             return Err(());
         }
@@ -771,7 +764,6 @@ impl Checker {
         elems: &[gox_syntax::ast::CompositeLitElem],
         t: TypeKey,
         length: Option<u64>,
-        fctx: &mut FilesContext,
     ) -> u64 {
         use std::collections::HashSet;
         use gox_syntax::ast::CompositeLitKey;
@@ -783,7 +775,7 @@ impl Checker {
             let (valid_index, eval) = if let Some(ref key) = elem.key {
                 let kv_index = match key {
                     CompositeLitKey::Expr(key_expr) => {
-                        let i = self.index(key_expr, length, fctx);
+                        let i = self.index(key_expr, length);
                         if let Ok(Some(idx)) = i {
                             Some(idx)
                         } else if i.is_ok() {
@@ -826,8 +818,8 @@ impl Checker {
 
             // Check element against composite literal element type
             let x = &mut Operand::new();
-            self.raw_expr(x, eval, Some(t), fctx);
-            self.assignment(x, Some(t), "array or slice literal", fctx);
+            self.raw_expr(x, eval, Some(t));
+            self.assignment(x, Some(t), "array or slice literal");
         }
         max
     }
@@ -838,9 +830,8 @@ impl Checker {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext,
     ) {
-        self.raw_expr(x, e, hint, fctx);
+        self.raw_expr(x, e, hint);
     }
 
     // =========================================================================
@@ -856,9 +847,8 @@ impl Checker {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext,
     ) {
-        self.raw_internal(x, e, hint, fctx);
+        self.raw_internal(x, e, hint);
 
         let ty = match &x.mode {
             OperandMode::Invalid => self.invalid_type(),
@@ -888,7 +878,6 @@ impl Checker {
         x: &mut Operand,
         e: &Expr,
         hint: Option<TypeKey>,
-        fctx: &mut FilesContext,
     ) {
         // Make sure x has a valid state in case of bailout
         x.mode = OperandMode::Invalid;
@@ -897,7 +886,7 @@ impl Checker {
 
         match &e.kind {
             ExprKind::Ident(ident) => {
-                self.ident(x, ident, None, false, fctx);
+                self.ident(x, ident, None, false);
             }
             ExprKind::IntLit(lit) => {
                 let raw = self.resolve_symbol(lit.raw);
@@ -922,23 +911,23 @@ impl Checker {
                 x.typ = Some(self.basic_type(BasicType::UntypedString));
             }
             ExprKind::Paren(inner) => {
-                self.raw_internal(x, inner, hint, fctx);
+                self.raw_internal(x, inner, hint);
             }
             ExprKind::Unary(u) => {
-                self.expr(x, &u.operand, fctx);
+                self.expr(x, &u.operand);
                 if x.invalid() {
                     return;
                 }
-                self.unary(x, Some(e.id), u.op, &u.operand, fctx);
+                self.unary(x, Some(e.id), u.op, &u.operand);
             }
             ExprKind::Binary(b) => {
-                self.binary(x, Some(e.id), &b.left, &b.right, b.op, fctx);
+                self.binary(x, Some(e.id), &b.left, &b.right, b.op);
             }
             ExprKind::Call(call) => {
-                self.call(x, call, e.span, fctx);
+                self.call(x, call, e.span);
             }
             ExprKind::Index(idx) => {
-                self.expr(x, &idx.expr, fctx);
+                self.expr(x, &idx.expr);
                 if x.invalid() {
                     return;
                 }
@@ -984,8 +973,8 @@ impl Checker {
                         let elem = m.elem();
                         // Check index type
                         let mut xkey = Operand::new();
-                        self.expr(&mut xkey, &idx.index, fctx);
-                        self.assignment(&mut xkey, Some(key), "map index", fctx);
+                        self.expr(&mut xkey, &idx.index);
+                        self.assignment(&mut xkey, Some(key), "map index");
                         if xkey.invalid() {
                             x.mode = OperandMode::Invalid;
                             return;
@@ -1003,10 +992,10 @@ impl Checker {
                     return;
                 }
                 // Check index
-                let _ = self.index(&idx.index, length, fctx);
+                let _ = self.index(&idx.index, length);
             }
             ExprKind::Slice(sl) => {
-                self.expr(x, &sl.expr, fctx);
+                self.expr(x, &sl.expr);
                 if x.invalid() {
                     return;
                 }
@@ -1086,17 +1075,17 @@ impl Checker {
 
                 // Check slice indices
                 if let Some(ref low) = sl.low {
-                    let _ = self.index(low, length, fctx);
+                    let _ = self.index(low, length);
                 }
                 if let Some(ref high) = sl.high {
-                    let _ = self.index(high, length, fctx);
+                    let _ = self.index(high, length);
                 }
             }
             ExprKind::Selector(sel) => {
-                self.selector(x, sel, fctx);
+                self.selector(x, sel);
             }
             ExprKind::TypeAssert(ta) => {
-                self.expr(x, &ta.expr, fctx);
+                self.expr(x, &ta.expr);
                 if x.invalid() {
                     return;
                 }
@@ -1116,19 +1105,19 @@ impl Checker {
                     return;
                 }
                 
-                let target = self.type_expr(ta.ty.as_ref().unwrap(), fctx);
+                let target = self.type_expr(ta.ty.as_ref().unwrap());
                 if target == self.invalid_type() {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
                 
                 // Check type assertion validity
-                self.type_assertion(x, xtype, target, e.span, fctx);
+                self.type_assertion(x, xtype, target, e.span);
                 x.mode = OperandMode::CommaOk;
                 x.typ = Some(target);
             }
             ExprKind::CompositeLit(lit) => {
-                let ty = self.type_expr(&lit.ty, fctx);
+                let ty = self.type_expr(&lit.ty);
                 if ty == self.invalid_type() {
                     x.mode = OperandMode::Invalid;
                     return;
@@ -1143,7 +1132,7 @@ impl Checker {
                         // Check elements
                         for (i, elem) in lit.elems.iter().enumerate() {
                             let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value, fctx);
+                            self.expr(&mut val, &elem.value);
                             if val.invalid() {
                                 continue;
                             }
@@ -1171,7 +1160,7 @@ impl Checker {
                             };
                             
                             if let Some(ft) = field_type {
-                                self.assignment(&mut val, Some(ft), "struct literal", fctx);
+                                self.assignment(&mut val, Some(ft), "struct literal");
                             }
                         }
                     }
@@ -1179,9 +1168,9 @@ impl Checker {
                         let elem_type = arr.elem();
                         for elem in &lit.elems {
                             let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value, fctx);
+                            self.expr(&mut val, &elem.value);
                             if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "array literal", fctx);
+                                self.assignment(&mut val, Some(elem_type), "array literal");
                             }
                         }
                     }
@@ -1189,9 +1178,9 @@ impl Checker {
                         let elem_type = sl.elem();
                         for elem in &lit.elems {
                             let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value, fctx);
+                            self.expr(&mut val, &elem.value);
                             if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "slice literal", fctx);
+                                self.assignment(&mut val, Some(elem_type), "slice literal");
                             }
                         }
                     }
@@ -1203,17 +1192,17 @@ impl Checker {
                             if let Some(ref key) = elem.key {
                                 if let CompositeLitKey::Expr(key_expr) = key {
                                     let mut key_op = Operand::new();
-                                    self.expr(&mut key_op, key_expr, fctx);
+                                    self.expr(&mut key_op, key_expr);
                                     if !key_op.invalid() {
-                                        self.assignment(&mut key_op, Some(key_type), "map literal key", fctx);
+                                        self.assignment(&mut key_op, Some(key_type), "map literal key");
                                     }
                                 }
                             }
                             // Check value
                             let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value, fctx);
+                            self.expr(&mut val, &elem.value);
                             if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "map literal value", fctx);
+                                self.assignment(&mut val, Some(elem_type), "map literal value");
                             }
                         }
                     }
@@ -1229,7 +1218,7 @@ impl Checker {
             }
             ExprKind::FuncLit(func) => {
                 // Get function type from signature
-                let t = self.func_type_from_sig(None, &func.sig, fctx);
+                let t = self.func_type_from_sig(None, &func.sig);
                 if self.otype(t).try_as_signature().is_some() {
                     x.mode = OperandMode::Value;
                     x.typ = Some(t);
@@ -1240,15 +1229,15 @@ impl Checker {
                 }
             }
             ExprKind::Conversion(conv) => {
-                let ty = self.type_expr(&conv.ty, fctx);
-                self.expr(x, &conv.expr, fctx);
+                let ty = self.type_expr(&conv.ty);
+                self.expr(x, &conv.expr);
                 if x.invalid() {
                     return;
                 }
-                self.convert_untyped(x, ty, fctx);
+                self.convert_untyped(x, ty);
             }
             ExprKind::Receive(recv) => {
-                self.expr(x, recv, fctx);
+                self.expr(x, recv);
                 if x.invalid() {
                     return;
                 }
@@ -1267,7 +1256,7 @@ impl Checker {
                 }
             }
             ExprKind::TypeAsExpr(ty) => {
-                let t = self.type_expr(ty, fctx);
+                let t = self.type_expr(ty);
                 x.mode = OperandMode::TypeExpr;
                 x.typ = Some(t);
             }
@@ -1276,7 +1265,7 @@ impl Checker {
                 // The inner expression must return a value where the last element is of type error.
                 // If error != nil, the function returns early with that error.
                 // If error == nil, the result is the value(s) without the error part.
-                self.expr(x, inner, fctx);
+                self.expr(x, inner);
                 if x.invalid() {
                     return;
                 }
@@ -1345,7 +1334,6 @@ impl Checker {
         xtype: TypeKey,
         t: TypeKey,
         span: Span,
-        fctx: &mut FilesContext,
     ) {
         // Check that xtype is an interface type
         if self.otype(xtype).try_as_interface().is_none() {
@@ -1355,7 +1343,7 @@ impl Checker {
         }
         
         // Check that t can satisfy the interface
-        if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self, fctx) {
+        if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self) {
             let method_name = self.lobj(missing).name();
             if wrong_type {
                 self.error(
@@ -1406,14 +1394,14 @@ impl Checker {
 
     /// Typechecks expression e and initializes x with the expression value.
     /// The result must be a single value.
-    pub fn expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
-        self.multi_expr(x, e, fctx);
+    pub fn expr(&mut self, x: &mut Operand, e: &Expr) {
+        self.multi_expr(x, e);
         self.single_value(x);
     }
 
     /// Like expr but the result may be a multi-value.
-    pub fn multi_expr(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
-        self.raw_expr(x, e, None, fctx);
+    pub fn multi_expr(&mut self, x: &mut Operand, e: &Expr) {
+        self.raw_expr(x, e, None);
         self.expr_value_err(x);
     }
 
@@ -1427,8 +1415,8 @@ impl Checker {
 
     /// Typechecks expression or type e and initializes x with the expression
     /// value or type. If an error occurred, x.mode is set to invalid.
-    pub fn expr_or_type(&mut self, x: &mut Operand, e: &Expr, fctx: &mut FilesContext) {
-        self.raw_expr(x, e, None, fctx);
+    pub fn expr_or_type(&mut self, x: &mut Operand, e: &Expr) {
+        self.raw_expr(x, e, None);
         self.single_value(x);
         if x.mode == OperandMode::NoValue {
             self.error(Span::default(), "expression used as value or type".to_string());
@@ -1441,7 +1429,6 @@ impl Checker {
         &mut self,
         x: &mut Operand,
         sel: &gox_syntax::ast::SelectorExpr,
-        fctx: &mut FilesContext,
     ) {
         // If the identifier refers to a package, handle everything here
         // so we don't need a "package" mode for operands: package names
@@ -1513,7 +1500,7 @@ impl Checker {
             }
         }
 
-        self.expr_or_type(x, &sel.expr, fctx);
+        self.expr_or_type(x, &sel.expr);
         if x.invalid() {
             x.expr_id = Some(sel.expr.id);
             return;
@@ -1553,7 +1540,7 @@ impl Checker {
 
         // methods may not have a fully set up signature yet
         if self.lobj(okey).entity_type().is_func() {
-            self.obj_decl(okey, None, fctx);
+            self.obj_decl(okey, None);
         }
 
         if x.mode == OperandMode::TypeExpr {

@@ -18,7 +18,7 @@ use super::checker::{Checker, FilesContext};
 
 impl Checker {
     /// Performs explicit type conversion of x to type t.
-    pub fn conversion(&mut self, x: &mut Operand, t: TypeKey, fctx: &mut FilesContext) {
+    pub fn conversion(&mut self, x: &mut Operand, t: TypeKey) {
         let constv = match &mut x.mode {
             OperandMode::Constant(v) => Some(v),
             _ => None,
@@ -85,7 +85,7 @@ impl Checker {
                 t
             };
             if let Some(expr_id) = x.expr_id {
-                self.update_expr_type(expr_id, final_t, true, fctx);
+                self.update_expr_type(expr_id, final_t, true);
             }
         }
 

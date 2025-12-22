@@ -164,7 +164,6 @@ impl Checker {
         sig: TypeKey,
         body: &Block,
         iota: Option<Value>,
-        fctx: &mut FilesContext,
     ) {
         let (pos, end) = (body.span.start.to_usize(), body.span.end.to_usize());
 
@@ -186,7 +185,7 @@ impl Checker {
 
         // Check the function body
         let sctx = StmtContext::new();
-        self.stmt_list(&body.stmts, &sctx, fctx);
+        self.stmt_list(&body.stmts, &sctx);
 
         // Check labels if any
         if self.octx.has_label {
@@ -316,21 +315,20 @@ impl Checker {
         x: &mut Operand,
         exprs: &[Expr],
         seen: &mut ValueMap,
-        fctx: &mut FilesContext,
     ) {
         for e in exprs {
             let v = &mut Operand::new();
-            self.expr(v, e, fctx);
+            self.expr(v, e);
             if x.invalid() || v.invalid() {
                 continue;
             }
-            self.convert_untyped(v, x.typ.unwrap(), fctx);
+            self.convert_untyped(v, x.typ.unwrap());
             if v.invalid() {
                 continue;
             }
             // Order matters: By comparing v against x, error positions are at the case values.
             let res = &mut v.clone();
-            self.comparison(res, x, gox_syntax::ast::BinaryOp::Eq, fctx);
+            self.comparison(res, x, gox_syntax::ast::BinaryOp::Eq);
             if res.invalid() {
                 continue;
             }
@@ -369,13 +367,12 @@ impl Checker {
         _xtype: TypeKey,
         types: &[Option<gox_syntax::ast::TypeExpr>],
         seen: &mut HashMap<Option<TypeKey>, Span>,
-        fctx: &mut FilesContext,
     ) -> Option<TypeKey> {
         let mut last_type: Option<TypeKey> = None;
         for ty_opt in types {
             let t = match ty_opt {
                 Some(ty) => {
-                    let t = self.type_expr(ty, fctx);
+                    let t = self.type_expr(ty);
                     if t == self.invalid_type() {
                         continue;
                     }
@@ -413,15 +410,15 @@ impl Checker {
     // =========================================================================
 
     /// Checks a simple (optional) statement.
-    fn simple_stmt(&mut self, s: Option<&Stmt>, fctx: &mut FilesContext) {
+    fn simple_stmt(&mut self, s: Option<&Stmt>) {
         if let Some(s) = s {
             let sctx = StmtContext::new();
-            self.stmt(s, &sctx, fctx);
+            self.stmt(s, &sctx);
         }
     }
 
     /// Checks a list of statements.
-    fn stmt_list(&mut self, list: &[Stmt], sctx: &StmtContext, fctx: &mut FilesContext) {
+    fn stmt_list(&mut self, list: &[Stmt], sctx: &StmtContext) {
         // Trailing empty statements are "invisible" to fallthrough analysis
         let index = list
             .iter()
@@ -436,23 +433,23 @@ impl Checker {
         for (i, s) in list[0..index].iter().enumerate() {
             let mut inner = *sctx;
             inner.fallthrough_ok = sctx.fallthrough_ok && i + 1 == index;
-            self.stmt(s, &inner, fctx);
+            self.stmt(s, &inner);
         }
     }
 
     /// Main statement checking wrapper - handles delayed actions.
-    fn stmt(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext) {
+    fn stmt(&mut self, stmt: &Stmt, ctx: &StmtContext) {
         let begin_scope = self.octx.scope;
         let begin_delayed_count = self.delayed_count();
 
-        self.stmt_impl(stmt, ctx, fctx);
+        self.stmt_impl(stmt, ctx);
 
         self.process_delayed(begin_delayed_count);
         debug_assert_eq!(begin_scope, self.octx.scope);
     }
 
     /// Internal statement implementation.
-    fn stmt_impl(&mut self, stmt: &Stmt, ctx: &StmtContext, fctx: &mut FilesContext) {
+    fn stmt_impl(&mut self, stmt: &Stmt, ctx: &StmtContext) {
         let mut inner_ctx = *ctx;
         inner_ctx.fallthrough_ok = false;
         inner_ctx.final_switch_case = false;
@@ -462,13 +459,13 @@ impl Checker {
 
             StmtKind::Block(block) => {
                 self.open_scope(block.span, "block");
-                self.stmt_list(&block.stmts, &inner_ctx, fctx);
+                self.stmt_list(&block.stmts, &inner_ctx);
                 self.close_scope();
             }
 
             StmtKind::Labeled(labeled) => {
                 self.octx.has_label = true;
-                self.stmt(&labeled.stmt, ctx, fctx);
+                self.stmt(&labeled.stmt, ctx);
             }
 
             StmtKind::Expr(e) => {
@@ -476,7 +473,7 @@ impl Checker {
                 // function and method calls and receive operations can appear
                 // in statement context."
                 let x = &mut Operand::new();
-                self.raw_expr(x, e, None, fctx);
+                self.raw_expr(x, e, None);
                 // Check that the expression is a valid statement expression
                 match &x.mode {
                     OperandMode::Invalid | OperandMode::NoValue => {}
@@ -496,8 +493,8 @@ impl Checker {
 
             StmtKind::Send(ss) => {
                 let (ch, x) = (&mut Operand::new(), &mut Operand::new());
-                self.expr(ch, &ss.chan, fctx);
-                self.expr(x, &ss.value, fctx);
+                self.expr(ch, &ss.chan);
+                self.expr(x, &ss.value);
                 if ch.invalid() || x.invalid() {
                     return;
                 }
@@ -508,7 +505,7 @@ impl Checker {
                         self.error(ss.chan.span, "cannot send to receive-only channel".to_string());
                     } else {
                         let elem_ty = Some(chan.elem());
-                        self.assignment(x, elem_ty, "send", fctx);
+                        self.assignment(x, elem_ty, "send");
                     }
                 } else {
                     self.error(ss.chan.span, "cannot send to non-chan type".to_string());
@@ -517,7 +514,7 @@ impl Checker {
 
             StmtKind::IncDec(ids) => {
                 let x = &mut Operand::new();
-                self.expr(x, &ids.expr, fctx);
+                self.expr(x, &ids.expr);
                 if x.invalid() {
                     return;
                 }
@@ -527,7 +524,7 @@ impl Checker {
                 }
                 // x++ is like x = x + 1, x-- is like x = x - 1
                 // For now, just check assignability (binary op result type is same as x)
-                self.assign_var(&ids.expr, x, fctx);
+                self.assign_var(&ids.expr, x);
             }
 
             StmtKind::Assign(astmt) => {
@@ -537,7 +534,7 @@ impl Checker {
                             self.error(stmt.span, "missing lhs in assignment".to_string());
                             return;
                         }
-                        self.assign_vars(&astmt.lhs, &astmt.rhs, fctx);
+                        self.assign_vars(&astmt.lhs, &astmt.rhs);
                     }
                     _ => {
                         // Compound assignment: +=, -=, etc.
@@ -550,9 +547,9 @@ impl Checker {
                         }
                         if let Some(bin_op) = Self::assign_op_to_binary(astmt.op) {
                             let x = &mut Operand::new();
-                            self.binary(x, None, &astmt.lhs[0], &astmt.rhs[0], bin_op, fctx);
+                            self.binary(x, None, &astmt.lhs[0], &astmt.rhs[0], bin_op);
                             if !x.invalid() {
-                                self.assign_var(&astmt.lhs[0], x, fctx);
+                                self.assign_var(&astmt.lhs[0], x);
                             }
                         }
                     }
@@ -560,30 +557,30 @@ impl Checker {
             }
 
             StmtKind::ShortVar(sv) => {
-                self.short_var_decl_stmt(&sv.names, &sv.values, stmt.span, fctx);
+                self.short_var_decl_stmt(&sv.names, &sv.values, stmt.span);
             }
 
             StmtKind::Go(gs) => {
-                self.suspended_call("go", &gs.call, fctx);
+                self.suspended_call("go", &gs.call);
             }
 
             StmtKind::Defer(ds) => {
-                self.suspended_call("defer", &ds.call, fctx);
+                self.suspended_call("defer", &ds.call);
             }
 
             StmtKind::ErrDefer(eds) => {
                 // GoX extension: errdefer runs only on error return
-                self.suspended_call("errdefer", &eds.call, fctx);
+                self.suspended_call("errdefer", &eds.call);
             }
 
             StmtKind::Fail(fs) => {
                 // GoX extension: fail returns error from fallible function
                 let x = &mut Operand::new();
-                self.expr(x, &fs.error, fctx);
+                self.expr(x, &fs.error);
                 // Check that the expression is assignable to error type
                 if !x.invalid() {
                     let error_type = self.universe().error_type();
-                    self.assignment(x, Some(error_type), "fail statement", fctx);
+                    self.assignment(x, Some(error_type), "fail statement");
                 }
             }
 
@@ -622,11 +619,11 @@ impl Checker {
                     } else {
                         // return has results or result parameters are unnamed
                         let vars = res.vars().clone();
-                        self.init_vars(&vars, &rs.values, Some(stmt.span), fctx);
+                        self.init_vars(&vars, &rs.values, Some(stmt.span));
                     }
                 } else if !rs.values.is_empty() {
                     self.error(rs.values[0].span, "no result values expected".to_string());
-                    self.use_exprs(&rs.values, fctx);
+                    self.use_exprs(&rs.values);
                 }
             }
 
@@ -669,18 +666,18 @@ impl Checker {
             StmtKind::If(ifs) => {
                 self.open_scope(stmt.span, "if");
                 if let Some(init) = &ifs.init {
-                    self.stmt(init, &StmtContext::new(), fctx);
+                    self.stmt(init, &StmtContext::new());
                 }
                 let x = &mut Operand::new();
-                self.expr(x, &ifs.cond, fctx);
+                self.expr(x, &ifs.cond);
                 if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                     self.error(ifs.cond.span, "non-boolean condition in if statement".to_string());
                 }
                 self.open_scope(ifs.then.span, "then");
-                self.stmt_list(&ifs.then.stmts, &inner_ctx, fctx);
+                self.stmt_list(&ifs.then.stmts, &inner_ctx);
                 self.close_scope();
                 if let Some(els) = &ifs.else_ {
-                    self.stmt(els, &inner_ctx, fctx);
+                    self.stmt(els, &inner_ctx);
                 }
                 self.close_scope();
             }
@@ -689,12 +686,12 @@ impl Checker {
                 inner_ctx.break_ok = true;
                 self.open_scope(stmt.span, "switch");
                 if let Some(init) = &ss.init {
-                    self.stmt(init, &StmtContext::new(), fctx);
+                    self.stmt(init, &StmtContext::new());
                 }
                 let x = &mut Operand::new();
                 if let Some(tag) = &ss.tag {
-                    self.expr(x, tag, fctx);
-                    self.assignment(x, None, "switch expression", fctx);
+                    self.expr(x, tag);
+                    self.assignment(x, None, "switch expression");
                 } else {
                     // Missing switch expression is equivalent to true
                     x.mode = OperandMode::Constant(Value::with_bool(true));
@@ -705,7 +702,7 @@ impl Checker {
                 let case_count = ss.cases.len();
                 for (i, clause) in ss.cases.iter().enumerate() {
                     // Check case expressions for duplicates
-                    self.case_values(x, &clause.exprs, &mut seen, fctx);
+                    self.case_values(x, &clause.exprs, &mut seen);
                     self.open_scope(clause.span, "case");
                     let mut inner2 = inner_ctx;
                     if i + 1 < case_count {
@@ -713,7 +710,7 @@ impl Checker {
                     } else {
                         inner2.final_switch_case = true;
                     }
-                    self.stmt_list(&clause.body, &inner2, fctx);
+                    self.stmt_list(&clause.body, &inner2);
                     self.close_scope();
                 }
                 self.close_scope();
@@ -723,7 +720,7 @@ impl Checker {
                 inner_ctx.break_ok = true;
                 self.open_scope(stmt.span, "type switch");
                 if let Some(init) = &tss.init {
-                    self.stmt(init, &StmtContext::new(), fctx);
+                    self.stmt(init, &StmtContext::new());
                 }
                 
                 // Check if there's a lhs variable (x := expr.(type))
@@ -740,7 +737,7 @@ impl Checker {
                 });
                 
                 let x = &mut Operand::new();
-                self.expr(x, &tss.expr, fctx);
+                self.expr(x, &tss.expr);
                 if x.invalid() {
                     self.close_scope();
                     return;
@@ -760,7 +757,7 @@ impl Checker {
                 
                 for clause in &tss.cases {
                     // Check each type in this type switch case.
-                    let mut t = self.case_types(x, xtype, &clause.types, &mut seen_types, fctx);
+                    let mut t = self.case_types(x, xtype, &clause.types, &mut seen_types);
                     self.open_scope(clause.span, "case");
                     
                     // If lhs exists, declare a corresponding variable in the case-local scope.
@@ -783,7 +780,7 @@ impl Checker {
                         lhs_vars.push(okey);
                     }
                     
-                    self.stmt_list(&clause.body, &inner_ctx, fctx);
+                    self.stmt_list(&clause.body, &inner_ctx);
                     self.close_scope();
                 }
                 
@@ -815,8 +812,8 @@ impl Checker {
                             gox_syntax::ast::CommClause::Send(send) => {
                                 let ch = &mut Operand::new();
                                 let val = &mut Operand::new();
-                                self.expr(ch, &send.chan, fctx);
-                                self.expr(val, &send.value, fctx);
+                                self.expr(ch, &send.chan);
+                                self.expr(val, &send.value);
                                 // Check channel type for send
                                 if !ch.invalid() {
                                     let chtype = ch.typ.unwrap();
@@ -825,7 +822,7 @@ impl Checker {
                                         if chan.dir() == ChanDir::RecvOnly {
                                             self.error(send.chan.span, "cannot send to receive-only channel".to_string());
                                         } else if !val.invalid() {
-                                            self.assignment(val, Some(chan.elem()), "send", fctx);
+                                            self.assignment(val, Some(chan.elem()), "send");
                                         }
                                     } else {
                                         self.error(send.chan.span, "cannot send to non-chan type".to_string());
@@ -834,7 +831,7 @@ impl Checker {
                             }
                             gox_syntax::ast::CommClause::Recv(recv) => {
                                 let x = &mut Operand::new();
-                                self.expr(x, &recv.expr, fctx);
+                                self.expr(x, &recv.expr);
                                 // Check receive expression is a channel receive
                                 if !x.invalid() {
                                     let xtype = x.typ.unwrap();
@@ -852,7 +849,7 @@ impl Checker {
                             }
                         }
                     }
-                    self.stmt_list(&case.body, &inner_ctx, fctx);
+                    self.stmt_list(&case.body, &inner_ctx);
                     self.close_scope();
                 }
             }
@@ -865,7 +862,7 @@ impl Checker {
                     ForClause::Cond(cond) => {
                         if let Some(c) = cond {
                             let x = &mut Operand::new();
-                            self.expr(x, c, fctx);
+                            self.expr(x, c);
                             if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                                 self.error(c.span, "non-boolean condition in for statement".to_string());
                             }
@@ -873,11 +870,11 @@ impl Checker {
                     }
                     ForClause::Three { init, cond, post } => {
                         if let Some(i) = init {
-                            self.stmt(i, &StmtContext::new(), fctx);
+                            self.stmt(i, &StmtContext::new());
                         }
                         if let Some(c) = cond {
                             let x = &mut Operand::new();
-                            self.expr(x, c, fctx);
+                            self.expr(x, c);
                             if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                                 self.error(c.span, "non-boolean condition in for statement".to_string());
                             }
@@ -887,12 +884,12 @@ impl Checker {
                             if matches!(&p.kind, StmtKind::ShortVar(_)) {
                                 self.error(p.span, "cannot declare in post statement".to_string());
                             }
-                            self.stmt(p, &StmtContext::new(), fctx);
+                            self.stmt(p, &StmtContext::new());
                         }
                     }
                     ForClause::Range { key, value, define, expr } => {
                         let x = &mut Operand::new();
-                        self.expr(x, expr, fctx);
+                        self.expr(x, expr);
                         
                         // Determine key/value types based on range expression type
                         let (key_type, val_type) = if x.invalid() {
@@ -962,7 +959,7 @@ impl Checker {
                                     let mut x = Operand::new();
                                     x.mode = OperandMode::Value;
                                     x.typ = Some(rhs_type);
-                                    self.init_var(okey, &mut x, "range clause", fctx);
+                                    self.init_var(okey, &mut x, "range clause");
                                 } else {
                                     let invalid_type = self.invalid_type();
                                     self.lobj_mut(okey).set_type(Some(invalid_type));
@@ -978,14 +975,14 @@ impl Checker {
                                 if lhs_expr.is_some() && rhs[i].is_some() {
                                     x.mode = OperandMode::Value;
                                     x.typ = rhs[i];
-                                    self.assign_var(lhs_expr.unwrap(), x, fctx);
+                                    self.assign_var(lhs_expr.unwrap(), x);
                                 }
                             }
                         }
                     }
                 }
                 self.open_scope(fs.body.span, "for body");
-                self.stmt_list(&fs.body.stmts, &inner_ctx, fctx);
+                self.stmt_list(&fs.body.stmts, &inner_ctx);
                 self.close_scope();
                 self.close_scope();
             }
@@ -995,16 +992,16 @@ impl Checker {
                 let scope_key = self.octx.scope.unwrap();
                 for spec in &var.specs {
                     // Get type if specified
-                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty, fctx));
+                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty));
                     
                     // Evaluate initializer expressions
                     let mut rhs_types: Vec<Option<TypeKey>> = Vec::new();
                     for val in &spec.values {
                         let x = &mut Operand::new();
-                        self.expr(x, val, fctx);
+                        self.expr(x, val);
                         if !x.invalid() {
                             if let Some(dt) = declared_type {
-                                self.assignment(x, Some(dt), "variable declaration", fctx);
+                                self.assignment(x, Some(dt), "variable declaration");
                             }
                         }
                         rhs_types.push(x.typ);
@@ -1028,12 +1025,12 @@ impl Checker {
                 let scope_key = self.octx.scope.unwrap();
                 for spec in &cons.specs {
                     // Get type if specified
-                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty, fctx));
+                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty));
                     
                     // Evaluate constant expressions
                     for (_i, (name, val)) in spec.names.iter().zip(spec.values.iter()).enumerate() {
                         let x = &mut Operand::new();
-                        self.expr(x, val, fctx);
+                        self.expr(x, val);
                         
                         let const_type = declared_type.or(x.typ);
                         let const_val = match &x.mode {
@@ -1060,7 +1057,7 @@ impl Checker {
                 // Type declaration in statement context
                 let scope_key = self.octx.scope.unwrap();
                 let name_str = self.resolve_symbol(ty.name.symbol).to_string();
-                let rhs_type = self.type_expr(&ty.ty, fctx);
+                let rhs_type = self.type_expr(&ty.ty);
                 let okey = self.new_type_name(ty.name.span.start.to_usize(), Some(self.pkg), name_str.clone(), Some(rhs_type));
                 if name_str != "_" {
                     self.result.record_def(ty.name.clone(), Some(okey));
@@ -1071,9 +1068,9 @@ impl Checker {
     }
 
     /// Check a go/defer/errdefer call - must be a function call.
-    fn suspended_call(&mut self, kw: &str, call: &Expr, fctx: &mut FilesContext) {
+    fn suspended_call(&mut self, kw: &str, call: &Expr) {
         let x = &mut Operand::new();
-        self.raw_expr(x, call, None, fctx);
+        self.raw_expr(x, call, None);
         
         // Check that it's actually a function call
         match &call.kind {
@@ -1098,7 +1095,6 @@ impl Checker {
         names: &[Ident],
         values: &[Expr],
         span: Span,
-        fctx: &mut FilesContext,
     ) {
         let scope_key = match self.octx.scope {
             Some(s) => s,
@@ -1134,7 +1130,7 @@ impl Checker {
         }
 
         // Use init_vars to properly handle type inference (converts untyped to default types)
-        self.init_vars(&lhs_vars, values, None, fctx);
+        self.init_vars(&lhs_vars, values, None);
 
         // Declare new variables in scope
         if !new_vars.is_empty() {

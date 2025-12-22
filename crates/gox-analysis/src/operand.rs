@@ -290,7 +290,7 @@ impl Operand {
 
         // Interface implementation check
         if ut_left.try_as_interface().is_some() {
-            if let Some((m, wrong_type)) = crate::lookup::missing_method(self_typ, ut_key_left, true, checker, fctx) {
+            if let Some((m, wrong_type)) = crate::lookup::missing_method(self_typ, ut_key_left, true, checker) {
                 if let Some(re) = reason {
                     let msg = if wrong_type {
                         "wrong type for method"

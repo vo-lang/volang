@@ -30,7 +30,6 @@ impl Checker {
         call: &CallExpr,
         call_span: Span,
         id: Builtin,
-        fctx: &mut FilesContext,
     ) -> bool {
         let binfo = self.universe().builtins()[&id];
 
@@ -40,7 +39,7 @@ impl Checker {
                 call_span,
                 &format!("invalid use of ... with built-in {}", binfo.name),
             );
-            self.use_exprs(&call.args, fctx);
+            self.use_exprs(&call.args);
             return false;
         }
 
@@ -72,7 +71,7 @@ impl Checker {
             _ => {
                 // For other builtins, unpack evaluates first argument
                 if nargs > 0 {
-                    self.multi_expr(x, &call.args[0], fctx);
+                    self.multi_expr(x, &call.args[0]);
                     if x.invalid() {
                         return false;
                     }
@@ -92,7 +91,7 @@ impl Checker {
 
         match id {
             Builtin::Append => {
-                self.builtin_append(x, call, call_span, fctx)
+                self.builtin_append(x, call, call_span)
             }
             Builtin::Cap | Builtin::Len => {
                 let result = self.builtin_len_cap(x, id, hcor_backup.unwrap());
@@ -103,22 +102,22 @@ impl Checker {
                 self.builtin_close(x)
             }
             Builtin::Copy => {
-                self.builtin_copy(x, call, call_span, fctx)
+                self.builtin_copy(x, call, call_span)
             }
             Builtin::Delete => {
-                self.builtin_delete(x, call, call_span, fctx)
+                self.builtin_delete(x, call, call_span)
             }
             Builtin::Make => {
-                self.builtin_make(x, call, call_span, fctx)
+                self.builtin_make(x, call, call_span)
             }
             Builtin::New => {
-                self.builtin_new(x, call, call_span, fctx)
+                self.builtin_new(x, call, call_span)
             }
             Builtin::Panic => {
-                self.builtin_panic(x, call, call_span, fctx)
+                self.builtin_panic(x, call, call_span)
             }
             Builtin::Print | Builtin::Println => {
-                self.builtin_print(x, call, call_span, id, fctx)
+                self.builtin_print(x, call, call_span, id)
             }
             Builtin::Recover => {
                 self.builtin_recover(x)
@@ -135,7 +134,6 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
         let slice = match x.typ {
             Some(t) => t,
@@ -159,7 +157,7 @@ impl Checker {
             let mut reason = String::new();
             if self.assignable_to(x, slice_of_bytes, &mut reason) {
                 let mut y = Operand::new();
-                self.multi_expr(&mut y, &call.args[1], fctx);
+                self.multi_expr(&mut y, &call.args[1]);
                 if y.invalid() {
                     return false;
                 }
@@ -176,7 +174,7 @@ impl Checker {
         // General case: check remaining arguments
         for i in 1..nargs {
             let mut arg = Operand::new();
-            self.multi_expr(&mut arg, &call.args[i], fctx);
+            self.multi_expr(&mut arg, &call.args[i]);
             if arg.invalid() {
                 return false;
             }
@@ -291,7 +289,6 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
         // dst element type
         let dst = match self.otype(x.typ.unwrap()).underlying_val(self.objs()) {
@@ -301,7 +298,7 @@ impl Checker {
 
         // Evaluate src
         let mut y = Operand::new();
-        self.multi_expr(&mut y, &call.args[1], fctx);
+        self.multi_expr(&mut y, &call.args[1]);
         if y.invalid() {
             return false;
         }
@@ -336,7 +333,6 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
         let mtype = x.typ.unwrap();
         match self.otype(mtype).underlying_val(self.objs()) {
@@ -345,7 +341,7 @@ impl Checker {
                 
                 // Evaluate key argument
                 let mut k = Operand::new();
-                self.multi_expr(&mut k, &call.args[1], fctx);
+                self.multi_expr(&mut k, &call.args[1]);
                 if k.invalid() {
                     return false;
                 }
@@ -372,12 +368,11 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
         let nargs = call.args.len();
         
         // First argument is a type
-        let arg0t = self.type_expr_from_expr(&call.args[0], fctx);
+        let arg0t = self.type_expr_from_expr(&call.args[0]);
         let invalid_type = self.invalid_type();
         if arg0t == invalid_type {
             return false;
@@ -399,7 +394,7 @@ impl Checker {
 
         // Validate size arguments
         for i in 1..nargs {
-            if let Err(_) = self.index(&call.args[i], None, fctx) {
+            if let Err(_) = self.index(&call.args[i], None) {
                 // Error already reported by index
             }
         }
@@ -408,8 +403,8 @@ impl Checker {
         if nargs == 3 {
             let mut len_op = Operand::new();
             let mut cap_op = Operand::new();
-            self.expr(&mut len_op, &call.args[1], fctx);
-            self.expr(&mut cap_op, &call.args[2], fctx);
+            self.expr(&mut len_op, &call.args[1]);
+            self.expr(&mut cap_op, &call.args[2]);
             if let (OperandMode::Constant(len_val), OperandMode::Constant(cap_val)) = (&len_op.mode, &cap_op.mode) {
                 let (len, len_exact) = len_val.int_as_i64();
                 let (cap, cap_exact) = cap_val.int_as_i64();
@@ -430,9 +425,8 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         _call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
-        let arg0t = self.type_expr_from_expr(&call.args[0], fctx);
+        let arg0t = self.type_expr_from_expr(&call.args[0]);
         let invalid_type = self.invalid_type();
         if arg0t == invalid_type {
             return false;
@@ -449,7 +443,6 @@ impl Checker {
         x: &mut Operand,
         _call: &CallExpr,
         _call_span: Span,
-        fctx: &mut FilesContext,
     ) -> bool {
         // Record panic call if inside a function with result parameters
         if let Some(sig) = self.octx.sig {
@@ -465,7 +458,7 @@ impl Checker {
 
         // Argument must be assignable to interface{}
         let iempty = self.new_t_empty_interface();
-        self.assignment(x, Some(iempty), "argument to panic", fctx);
+        self.assignment(x, Some(iempty), "argument to panic");
         if x.invalid() {
             return false;
         }
@@ -481,17 +474,16 @@ impl Checker {
         call: &CallExpr,
         _call_span: Span,
         id: Builtin,
-        fctx: &mut FilesContext,
     ) -> bool {
         let name = if id == Builtin::Print { "print" } else { "println" };
         let nargs = call.args.len();
 
         for i in 0..nargs {
             if i > 0 {
-                self.multi_expr(x, &call.args[i], fctx);
+                self.multi_expr(x, &call.args[i]);
             }
             let msg = format!("argument to {}", name);
-            self.assignment(x, None, &msg, fctx);
+            self.assignment(x, None, &msg);
             if x.invalid() {
                 return false;
             }
@@ -538,11 +530,11 @@ impl Checker {
     // index function moved to expr.rs
 
     /// Type-checks a type expression from an Expr AST node.
-    fn type_expr_from_expr(&mut self, e: &Expr, fctx: &mut FilesContext) -> TypeKey {
+    fn type_expr_from_expr(&mut self, e: &Expr) -> TypeKey {
         // For now, delegate to a simplified type checking
         // Full implementation would parse the TypeExpr from Expr
         let mut x = Operand::new();
-        self.expr(&mut x, e, fctx);
+        self.expr(&mut x, e);
         if let OperandMode::TypeExpr = x.mode {
             x.typ.unwrap_or(self.invalid_type())
         } else {

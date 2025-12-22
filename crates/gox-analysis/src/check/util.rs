@@ -47,7 +47,6 @@ impl<'a> UnpackResult<'a> {
         checker: &mut Checker,
         x: &mut Operand,
         i: usize,
-        fctx: &mut FilesContext,
     ) {
         match self {
             UnpackResult::Tuple(expr, types, _) => {
@@ -61,7 +60,7 @@ impl<'a> UnpackResult<'a> {
                 x.typ = Some(types[i]);
             }
             UnpackResult::Multiple(exprs, _) => {
-                checker.multi_expr(x, &exprs[i], fctx);
+                checker.multi_expr(x, &exprs[i]);
             }
             UnpackResult::Single(sx, _) => {
                 x.mode = sx.mode.clone();
@@ -90,7 +89,6 @@ impl<'a> UnpackResult<'a> {
         &self,
         checker: &mut Checker,
         from: usize,
-        fctx: &mut FilesContext,
     ) {
         let exprs = match self {
             UnpackResult::Multiple(exprs, _) => exprs,
@@ -99,7 +97,7 @@ impl<'a> UnpackResult<'a> {
 
         let mut x = Operand::new();
         for i in from..exprs.len() {
-            checker.multi_expr(&mut x, &exprs[i], fctx);
+            checker.multi_expr(&mut x, &exprs[i]);
         }
     }
 
@@ -128,9 +126,9 @@ impl<'a> UnpackedResultLeftovers<'a> {
     }
 
     /// Use all remaining values.
-    pub fn use_all(&self, checker: &mut Checker, fctx: &mut FilesContext) {
+    pub fn use_all(&self, checker: &mut Checker) {
         let from = self.consumed.map_or(0, |c| c.len());
-        self.leftovers.use_(checker, from, fctx);
+        self.leftovers.use_(checker, from);
     }
 
     /// Get the i-th value, considering already consumed operands.
@@ -139,7 +137,6 @@ impl<'a> UnpackedResultLeftovers<'a> {
         checker: &mut Checker,
         x: &mut Operand,
         i: usize,
-        fctx: &mut FilesContext,
     ) {
         if let Some(consumed) = self.consumed {
             if i < consumed.len() {
@@ -150,7 +147,7 @@ impl<'a> UnpackedResultLeftovers<'a> {
                 return;
             }
         }
-        self.leftovers.get(checker, x, i, fctx);
+        self.leftovers.get(checker, x, i);
     }
 }
 
@@ -246,7 +243,6 @@ impl Checker {
         lhs_len: usize,
         allow_comma_ok: bool,
         variadic: bool,
-        fctx: &mut FilesContext,
     ) -> UnpackResult<'b> {
         let do_match = |rhs_len: usize| {
             let order = rhs_len.cmp(&lhs_len);
@@ -267,7 +263,7 @@ impl Checker {
         }
 
         let mut x = Operand::new();
-        self.multi_expr(&mut x, &rhs[0], fctx);
+        self.multi_expr(&mut x, &rhs[0]);
         if x.invalid() {
             return UnpackResult::Error;
         }
@@ -289,16 +285,16 @@ impl Checker {
     }
 
     /// Type-check a list of expressions (for side effects).
-    pub fn use_exprs(&mut self, exprs: &[Expr], fctx: &mut FilesContext) {
+    pub fn use_exprs(&mut self, exprs: &[Expr]) {
         let mut x = Operand::new();
         for e in exprs.iter() {
-            self.raw_expr(&mut x, e, None, fctx);
+            self.raw_expr(&mut x, e, None);
         }
     }
 
     /// Like use_exprs, but doesn't "use" top-level identifiers.
     /// Used for LHS of assignments.
-    pub fn use_lhs(&mut self, lhs: &[Expr], fctx: &mut FilesContext) {
+    pub fn use_lhs(&mut self, lhs: &[Expr]) {
         let mut x = Operand::new();
         for e in lhs.iter() {
             let v: Option<(ObjKey, bool)> = match Self::unparen(e) {
@@ -324,7 +320,7 @@ impl Checker {
                 _ => None,
             };
 
-            self.raw_expr(&mut x, e, None, fctx);
+            self.raw_expr(&mut x, e, None);
 
             // Restore used state if needed
             if let Some((okey, used)) = v {

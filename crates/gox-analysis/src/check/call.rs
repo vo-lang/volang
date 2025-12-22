@@ -25,14 +25,13 @@ impl Checker {
         x: &mut Operand,
         call: &CallExpr,
         call_span: Span,
-        fctx: &mut FilesContext,
     ) -> ExprKind {
         // Evaluate the function expression
-        self.raw_expr(x, &call.func, None, fctx);
+        self.raw_expr(x, &call.func, None);
 
         match &x.mode {
             OperandMode::Invalid => {
-                self.use_exprs(&call.args, fctx);
+                self.use_exprs(&call.args);
                 ExprKind::Statement
             }
 
@@ -46,13 +45,13 @@ impl Checker {
                         self.error(call_span, "missing argument in conversion".to_string());
                     }
                     1 => {
-                        self.expr(x, &call.args[0], fctx);
+                        self.expr(x, &call.args[0]);
                         if !x.invalid() {
-                            self.conversion(x, t, fctx);
+                            self.conversion(x, t);
                         }
                     }
                     _ => {
-                        self.use_exprs(&call.args, fctx);
+                        self.use_exprs(&call.args);
                         self.error(call.args.last().unwrap().span, "too many arguments in conversion".to_string());
                     }
                 }
@@ -61,7 +60,7 @@ impl Checker {
 
             OperandMode::Builtin(id) => {
                 let id = *id;
-                if !self.builtin(x, call, call_span, id, fctx) {
+                if !self.builtin(x, call, call_span, id) {
                     x.mode = OperandMode::Invalid;
                 }
                 // A non-constant result implies a function call
@@ -83,13 +82,13 @@ impl Checker {
                     let pcount = sig.params_count(self.objs());
 
                     // Unpack arguments (handles multi-value returns)
-                    let result = self.unpack(&call.args, pcount, false, variadic, fctx);
+                    let result = self.unpack(&call.args, pcount, false, variadic);
                     match result {
                         UnpackResult::Error => x.mode = OperandMode::Invalid,
                         _ => {
                             let (count, _) = result.rhs_count();
                             let re = UnpackedResultLeftovers::new(&result, None);
-                            self.arguments(x, call, call_span, sig_key, &re, count, fctx);
+                            self.arguments(x, call, call_span, sig_key, &re, count);
                         }
                     }
 
@@ -125,7 +124,6 @@ impl Checker {
         sig: TypeKey,
         re: &UnpackedResultLeftovers,
         n: usize,
-        fctx: &mut FilesContext,
     ) {
         let sig_val = self.otype(sig).try_as_signature().unwrap();
         let variadic = sig_val.variadic();
@@ -136,22 +134,22 @@ impl Checker {
         if call.spread {
             if !variadic {
                 self.error(call_span, "cannot use ... in call to non-variadic function".to_string());
-                re.use_all(self, fctx);
+                re.use_all(self);
                 return;
             }
             if call.args.len() == 1 && n > 1 {
                 self.error(call_span, format!("cannot use ... with {}-valued expression", n));
-                re.use_all(self, fctx);
+                re.use_all(self);
                 return;
             }
         }
 
         // Evaluate arguments
         for i in 0..n {
-            re.get(self, x, i, fctx);
+            re.get(self, x, i);
             if !x.invalid() {
                 let ellipsis = if i == n - 1 { call.spread } else { false };
-                self.argument(sig, i, x, ellipsis, "argument", fctx);
+                self.argument(sig, i, x, ellipsis, "argument");
             }
         }
 
@@ -172,7 +170,6 @@ impl Checker {
         x: &mut Operand,
         ellipsis: bool,
         note: &str,
-        fctx: &mut FilesContext,
     ) {
         self.single_value(x);
         if x.invalid() {
@@ -213,6 +210,6 @@ impl Checker {
             }
         }
 
-        self.assignment(x, Some(ty), note, fctx);
+        self.assignment(x, Some(ty), note);
     }
 }

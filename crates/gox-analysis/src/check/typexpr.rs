@@ -23,14 +23,14 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks the type expression and returns its type, or Invalid Type.
-    pub fn type_expr(&mut self, ty: &TypeExpr, fctx: &mut FilesContext) -> TypeKey {
-        self.defined_type(ty, None, fctx)
+    pub fn type_expr(&mut self, ty: &TypeExpr) -> TypeKey {
+        self.defined_type(ty, None)
     }
 
     /// Like type_expr but also accepts a type name def.
     /// If def is Some, ty is the type specification for the defined type def.
-    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
-        let t = self.type_internal(ty, def, fctx);
+    pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>) -> TypeKey {
+        let t = self.type_internal(ty, def);
         debug_assert!(typ::is_typed(t, self.objs()));
         // Record the resolved type for this TypeExpr
         self.result.record_type_expr(ty.id, t);
@@ -39,9 +39,9 @@ impl Checker {
 
     /// Like type_expr but breaks infinite size of recursive types.
     /// Used for pointer base types, slice/map element types, function params, etc.
-    pub fn indirect_type(&mut self, ty: &TypeExpr, fctx: &mut FilesContext) -> TypeKey {
+    pub fn indirect_type(&mut self, ty: &TypeExpr) -> TypeKey {
         self.push_obj_path(self.universe().indir());
-        let t = self.defined_type(ty, None, fctx);
+        let t = self.defined_type(ty, None);
         self.pop_obj_path();
         t
     }
@@ -51,7 +51,7 @@ impl Checker {
     // =========================================================================
 
     /// Drives type checking of types. Must only be called by defined_type.
-    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
+    fn type_internal(&mut self, ty: &TypeExpr, def: Option<TypeKey>) -> TypeKey {
         let set_underlying = |typ: Option<TypeKey>, tc_objs: &mut crate::objects::TCObjects| {
             if let Some(d) = def {
                 if let Some(named) = tc_objs.types[d].try_as_named_mut() {
@@ -65,7 +65,7 @@ impl Checker {
         let result_t: Option<TypeKey> = match &ty.kind {
             TypeExprKind::Ident(ident) => {
                 let mut x = Operand::new();
-                self.ident(&mut x, ident, def, true, fctx);
+                self.ident(&mut x, ident, def, true);
                 match x.mode {
                     OperandMode::TypeExpr => {
                         set_underlying(x.typ, &mut self.tc_objs);
@@ -115,21 +115,21 @@ impl Checker {
                 None
             }
             TypeExprKind::Array(arr) => {
-                let len = self.array_len(&arr.len, fctx);
-                let elem = self.type_expr(&arr.elem, fctx);
+                let len = self.array_len(&arr.len);
+                let elem = self.type_expr(&arr.elem);
                 let t = self.new_t_array(elem, len);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Slice(elem) => {
-                let elem_type = self.indirect_type(elem, fctx);
+                let elem_type = self.indirect_type(elem);
                 let t = self.new_t_slice(elem_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Map(map) => {
-                let key = self.indirect_type(&map.key, fctx);
-                let value = self.indirect_type(&map.value, fctx);
+                let key = self.indirect_type(&map.key);
+                let value = self.indirect_type(&map.value);
                 let t = self.new_t_map(key, value);
                 set_underlying(Some(t), &mut self.tc_objs);
 
@@ -150,29 +150,29 @@ impl Checker {
                     ast::ChanDir::Send => ChanDir::SendOnly,
                     ast::ChanDir::Recv => ChanDir::RecvOnly,
                 };
-                let elem = self.indirect_type(&chan.elem, fctx);
+                let elem = self.indirect_type(&chan.elem);
                 let t = self.new_t_chan(dir, elem);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Func(func) => {
-                let t = self.func_type_ast(func, fctx);
+                let t = self.func_type_ast(func);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Struct(s) => {
-                let t = self.struct_type(s, fctx);
+                let t = self.struct_type(s);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Pointer(base) => {
-                let base_type = self.indirect_type(base, fctx);
+                let base_type = self.indirect_type(base);
                 let t = self.new_t_pointer(base_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Interface(iface) => {
-                let t = self.interface_type(iface, def, fctx);
+                let t = self.interface_type(iface, def);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
@@ -199,7 +199,6 @@ impl Checker {
         ident: &Ident,
         _def: Option<TypeKey>,
         want_type: bool,
-        fctx: &mut FilesContext,
     ) {
         x.mode = OperandMode::Invalid;
         x.expr_id = None;
@@ -215,7 +214,7 @@ impl Checker {
                 let obj = &self.lobj(okey);
                 let mut otype = obj.typ();
                 if otype.is_none() || (obj.entity_type().is_type_name() && want_type) {
-                    self.obj_decl(okey, None, fctx);
+                    self.obj_decl(okey, None);
                     otype = self.lobj(okey).typ();
                 }
 
@@ -302,9 +301,9 @@ impl Checker {
     // =========================================================================
 
     /// Evaluates an array length expression and returns the length.
-    fn array_len(&mut self, e: &Expr, fctx: &mut FilesContext) -> Option<u64> {
+    fn array_len(&mut self, e: &Expr) -> Option<u64> {
         let mut x = Operand::new();
-        self.expr(&mut x, e, fctx);
+        self.expr(&mut x, e);
         if let OperandMode::Constant(v) = &x.mode {
             if let Some(t) = x.typ {
                 if typ::is_untyped(t, self.objs()) || typ::is_integer(t, self.objs()) {
@@ -325,7 +324,7 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks a function type from AST.
-    fn func_type_ast(&mut self, func: &ast::FuncType, fctx: &mut FilesContext) -> TypeKey {
+    fn func_type_ast(&mut self, func: &ast::FuncType) -> TypeKey {
         // Create a new scope for the function
         let scope_key = self.new_scope(
             self.octx.scope,
@@ -338,7 +337,7 @@ impl Checker {
         // Collect parameters - FuncType has Vec<TypeExpr>, not Vec<Param>
         let mut params = Vec::new();
         for param_type in &func.params {
-            let ty = self.indirect_type(param_type, fctx);
+            let ty = self.indirect_type(param_type);
             let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             params.push(var);
         }
@@ -347,7 +346,7 @@ impl Checker {
         // Collect results
         let mut results = Vec::new();
         for result_type in &func.results {
-            let ty = self.indirect_type(result_type, fctx);
+            let ty = self.indirect_type(result_type);
             let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             results.push(var);
         }
@@ -364,7 +363,6 @@ impl Checker {
         &mut self,
         recv: Option<&Receiver>,
         sig: &FuncSig,
-        fctx: &mut FilesContext,
     ) -> TypeKey {
         // Create a new scope for the function (like goscript)
         let scope_key = self.new_scope(
@@ -378,13 +376,13 @@ impl Checker {
         self.result.record_scope(sig.span, scope_key);
 
         // Collect receiver (like goscript's collect_params for recv)
-        let recv_list = self.collect_receiver(scope_key, recv, fctx);
+        let recv_list = self.collect_receiver(scope_key, recv);
         
         // Collect params (like goscript's collect_params with variadic_ok=true)
-        let (params, variadic) = self.collect_params_from_sig(scope_key, &sig.params, sig.variadic, fctx);
+        let (params, variadic) = self.collect_params_from_sig(scope_key, &sig.params, sig.variadic);
         
         // Collect results (like goscript's collect_params with variadic_ok=false)
-        let (results, _) = self.collect_results_from_sig(scope_key, &sig.results, fctx);
+        let (results, _) = self.collect_results_from_sig(scope_key, &sig.results);
 
         // Validate receiver (like goscript)
         let recv_okey = if recv.is_some() {
@@ -450,7 +448,6 @@ impl Checker {
         &mut self,
         scope_key: ScopeKey,
         recv: Option<&Receiver>,
-        fctx: &mut FilesContext,
     ) -> Vec<ObjKey> {
         let Some(r) = recv else {
             return vec![];
@@ -464,7 +461,7 @@ impl Checker {
         };
         
         // Resolve type using indirect_type (like goscript)
-        let base_type = self.indirect_type(&base_type_expr, fctx);
+        let base_type = self.indirect_type(&base_type_expr);
         
         // Final type is T or *T
         let recv_type = if r.is_pointer {
@@ -489,7 +486,6 @@ impl Checker {
         scope_key: ScopeKey,
         params: &[Param],
         variadic_ok: bool,
-        fctx: &mut FilesContext,
     ) -> (Vec<ObjKey>, bool) {
         if params.is_empty() {
             return (vec![], false);
@@ -501,7 +497,7 @@ impl Checker {
 
         for param in params.iter() {
             // Resolve parameter type (without slice wrapping first, like goscript)
-            let param_type = self.indirect_type(&param.ty, fctx);
+            let param_type = self.indirect_type(&param.ty);
 
             if param.names.is_empty() {
                 // Anonymous parameter
@@ -551,7 +547,6 @@ impl Checker {
         &mut self,
         scope_key: ScopeKey,
         results: &[ast::ResultParam],
-        fctx: &mut FilesContext,
     ) -> (Vec<ObjKey>, bool) {
         if results.is_empty() {
             return (vec![], false);
@@ -560,7 +555,7 @@ impl Checker {
         let mut vars = Vec::new();
 
         for result in results {
-            let result_type = self.indirect_type(&result.ty, fctx);
+            let result_type = self.indirect_type(&result.ty);
 
             if let Some(name) = &result.name {
                 let name_str = self.resolve_ident(name).to_string();
@@ -590,9 +585,9 @@ impl Checker {
 
     /// Type-checks the type expression (or nil value) and returns the type, or None for nil.
     /// If e is neither a type nor nil, returns Invalid type.
-    pub fn type_or_nil(&mut self, e: &Expr, fctx: &mut FilesContext) -> Option<TypeKey> {
+    pub fn type_or_nil(&mut self, e: &Expr) -> Option<TypeKey> {
         let mut x = Operand::new();
-        self.raw_expr(&mut x, e, None, fctx);
+        self.raw_expr(&mut x, e, None);
         let invalid_type = self.invalid_type();
         match x.mode {
             OperandMode::Invalid => Some(invalid_type),
@@ -617,7 +612,7 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks a struct type.
-    fn struct_type(&mut self, s: &ast::StructType, fctx: &mut FilesContext) -> TypeKey {
+    fn struct_type(&mut self, s: &ast::StructType) -> TypeKey {
         if s.fields.is_empty() {
             return self.new_t_struct(Vec::new(), None);
         }
@@ -627,7 +622,7 @@ impl Checker {
         let mut field_set: std::collections::HashMap<String, ObjKey> = std::collections::HashMap::new();
 
         for field in &s.fields {
-            let field_type = self.type_expr(&field.ty, fctx);
+            let field_type = self.type_expr(&field.ty);
             let tag = field.tag.as_ref().map(|t| t.value.clone());
 
             if field.names.is_empty() {
@@ -740,7 +735,7 @@ impl Checker {
 
     /// Type-checks an interface type.
     /// Aligned with goscript's interface_type: uses info_from_type_lit to collect all methods.
-    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
+    fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>) -> TypeKey {
         if iface.elems.is_empty() {
             return self.new_t_empty_interface();
         }
@@ -808,7 +803,7 @@ impl Checker {
         };
         
         let scope = self.octx.scope.unwrap_or(self.universe().scope());
-        let info = self.info_from_type_lit(scope, iface, tname, &path, fctx);
+        let info = self.info_from_type_lit(scope, iface, tname, &path);
         
         if info.is_none() || info.as_ref().unwrap().is_empty() {
             // Empty interface or error - exit early
@@ -900,7 +895,7 @@ impl Checker {
             self.octx.scope = minfo.scope();
             
             // Type-check the method signature
-            let sig_type = self.func_type_from_sig(None, &method_ast.sig, fctx);
+            let sig_type = self.func_type_from_sig(None, &method_ast.sig);
             
             // Update the method's signature, keeping the receiver
             let fun_key = minfo.func().unwrap();

@@ -52,7 +52,7 @@ impl Checker {
 
     /// Type-checks an object declaration.
     /// Uses color-based cycle detection (White -> Gray -> Black).
-    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>, fctx: &mut FilesContext) {
+    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>) {
         // During type-checking, white objects may be assigned a type without
         // traversing through obj_decl. Update colors of those objects here.
         if self.lobj(okey).color() == ObjColor::White && self.lobj(okey).typ().is_some() {
@@ -88,24 +88,24 @@ impl Checker {
                         self.octx.decl = Some(dkey);
                         if let DeclInfo::Const(cd) = self.decl_info(dkey) {
                             let (typ, init) = (cd.typ.clone(), cd.init.clone());
-                            self.const_decl(okey, &typ, &init, fctx);
+                            self.const_decl(okey, &typ, &init);
                         }
                     }
                     EntityType::Var { .. } => {
                         self.octx.decl = Some(dkey);
                         if let DeclInfo::Var(vd) = self.decl_info(dkey) {
                             let (lhs, typ, init) = (vd.lhs.clone(), vd.typ.clone(), vd.init.clone());
-                            self.var_decl(okey, lhs.as_ref(), &typ, &init, fctx);
+                            self.var_decl(okey, lhs.as_ref(), &typ, &init);
                         }
                     }
                     EntityType::TypeName => {
                         if let DeclInfo::Type(td) = self.decl_info(dkey) {
                             let (typ, alias) = (td.typ.clone(), td.alias);
-                            self.type_decl(okey, &typ, def, alias, fctx);
+                            self.type_decl(okey, &typ, def, alias);
                         }
                     }
                     EntityType::Func { .. } => {
-                        self.func_decl(okey, dkey, fctx);
+                        self.func_decl(okey, dkey);
                     }
                     _ => {}
                 }
@@ -124,18 +124,18 @@ impl Checker {
                 let lobj = &self.lobj(okey);
                 match lobj.entity_type() {
                     EntityType::Const { .. } | EntityType::Var { .. } => {
-                        if self.invalid_type_cycle(okey, fctx) || lobj.typ().is_none() {
+                        if self.invalid_type_cycle(okey) || lobj.typ().is_none() {
                             self.lobj_mut(okey).set_type(Some(invalid_type));
                         }
                     }
                     EntityType::TypeName => {
-                        if self.invalid_type_cycle(okey, fctx) {
+                        if self.invalid_type_cycle(okey) {
                             self.lobj_mut(okey).set_type(Some(invalid_type));
                         }
                     }
                     EntityType::Func { .. } => {
                         // Don't set obj.typ to Invalid here - functions need a Signature type
-                        let _ = self.invalid_type_cycle(okey, fctx);
+                        let _ = self.invalid_type_cycle(okey);
                     }
                     _ => {}
                 }
@@ -145,7 +145,7 @@ impl Checker {
     }
 
     /// Returns true if the cycle starting with obj is invalid and reports an error.
-    pub fn invalid_type_cycle(&self, okey: ObjKey, fctx: &FilesContext) -> bool {
+    pub fn invalid_type_cycle(&self, okey: ObjKey) -> bool {
         let lobj = self.lobj(okey);
         let mut has_indir = false;
         let mut has_type_def = false;
@@ -226,7 +226,6 @@ impl Checker {
         okey: ObjKey,
         typ: &Option<TypeExpr>,
         init: &Option<Expr>,
-        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
@@ -239,7 +238,7 @@ impl Checker {
 
         // Determine type, if any
         if let Some(e) = typ {
-            let t = self.type_expr(e, fctx);
+            let t = self.type_expr(e);
             let tval = &self.otype(t);
             if !tval.is_const_type(self.objs()) {
                 let invalid_type = self.invalid_type();
@@ -255,9 +254,9 @@ impl Checker {
 
         let mut x = Operand::new();
         if let Some(expr) = init {
-            self.expr(&mut x, expr, fctx);
+            self.expr(&mut x, expr);
         }
-        self.init_const(okey, &mut x, fctx);
+        self.init_const(okey, &mut x);
 
         // Clear iota
         self.octx.iota = None;
@@ -270,13 +269,12 @@ impl Checker {
         lhs: Option<&Vec<ObjKey>>,
         typ: &Option<TypeExpr>,
         init: &Option<Expr>,
-        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
         // Determine type, if any
         if let Some(texpr) = typ {
-            let t = self.type_expr(texpr, fctx);
+            let t = self.type_expr(texpr);
             self.lobj_mut(okey).set_type(Some(t));
         }
 
@@ -291,8 +289,8 @@ impl Checker {
 
         if lhs.is_none() || lhs.as_ref().unwrap().len() == 1 {
             let mut x = Operand::new();
-            self.expr(&mut x, init.as_ref().unwrap(), fctx);
-            self.init_var(okey, &mut x, "variable declaration", fctx);
+            self.expr(&mut x, init.as_ref().unwrap());
+            self.init_var(okey, &mut x, "variable declaration");
             return;
         }
 
@@ -304,7 +302,7 @@ impl Checker {
             }
         }
 
-        self.init_vars(lhs.as_ref().unwrap(), &[init.clone().unwrap()], None, fctx);
+        self.init_vars(lhs.as_ref().unwrap(), &[init.clone().unwrap()], None);
     }
 
     /// Type-checks a type declaration.
@@ -314,14 +312,13 @@ impl Checker {
         typ: &TypeExpr,
         def: Option<TypeKey>,
         alias: bool,
-        fctx: &mut FilesContext,
     ) {
         debug_assert!(self.lobj(okey).typ().is_none());
 
         if alias {
             let invalid = self.invalid_type();
             self.lobj_mut(okey).set_type(Some(invalid));
-            let t = self.type_expr(typ, fctx);
+            let t = self.type_expr(typ);
             self.lobj_mut(okey).set_type(Some(t));
         } else {
             let named_key = self.new_t_named(Some(okey), None, vec![]);
@@ -334,7 +331,7 @@ impl Checker {
             self.lobj_mut(okey).set_type(Some(named_key));
 
             // Determine underlying type of named
-            self.defined_type(typ, Some(named_key), fctx);
+            self.defined_type(typ, Some(named_key));
 
             // Resolve forward chain to final unnamed underlying type
             let underlying = typ::deep_underlying_type(named_key, self.objs());
@@ -343,11 +340,11 @@ impl Checker {
             }
         }
 
-        self.add_method_decls(okey, fctx);
+        self.add_method_decls(okey);
     }
 
     /// Type-checks a function declaration.
-    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey, fctx: &mut FilesContext) {
+    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey) {
         debug_assert!(self.lobj(okey).typ().is_none());
         debug_assert!(self.octx.iota.is_none());
 
@@ -361,7 +358,7 @@ impl Checker {
             let fdecl = fd.fdecl.clone();
 
             // Type-check function signature (with receiver if present)
-            let sig_key = self.func_type_from_sig(fdecl.receiver.as_ref(), &fdecl.sig, fctx);
+            let sig_key = self.func_type_from_sig(fdecl.receiver.as_ref(), &fdecl.sig);
             self.lobj_mut(okey).set_type(Some(sig_key));
 
             // Check for 'init' func
@@ -383,8 +380,7 @@ impl Checker {
                 let body = fdecl.body.clone();
                 self.later(Box::new(move |checker: &mut Checker| {
                     if let Some(b) = &body {
-                        let mut fctx = FilesContext::new(&[]);
-                        checker.func_body(None, &name, sig_key, b, None, &mut fctx);
+                        checker.func_body(None, &name, sig_key, b, None);
                     }
                 }));
             }
@@ -392,7 +388,7 @@ impl Checker {
     }
 
     /// Adds method declarations to a type.
-    pub fn add_method_decls(&mut self, okey: ObjKey, fctx: &mut FilesContext) {
+    pub fn add_method_decls(&mut self, okey: ObjKey) {
         // Get associated methods
         if !self.methods.contains_key(&okey) {
             return;
@@ -463,7 +459,7 @@ impl Checker {
     }
 
     /// Type-checks a declaration statement (const, var, or type) inside a function.
-    pub fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl, fctx: &mut FilesContext) {
+    pub fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl) {
         use gox_syntax::ast::Decl;
 
         match decl {
@@ -500,7 +496,7 @@ impl Checker {
                             let typ = current_spec
                                 .and_then(|s| s.ty.clone());
 
-                            self.const_decl(okey, &typ, &init, fctx);
+                            self.const_decl(okey, &typ, &init);
                             self.result.record_def(name.clone(), Some(okey));
                             okey
                         })
@@ -549,7 +545,6 @@ impl Checker {
                             Some(&vars),
                             &spec.ty,
                             &Some(spec.values[0].clone()),
-                            fctx,
                         );
                     } else {
                         // 1-to-1 or no init
@@ -559,7 +554,6 @@ impl Checker {
                                 None,
                                 &spec.ty,
                                 &spec.values.get(i).cloned(),
-                                fctx,
                             );
                         }
                     }
@@ -596,7 +590,7 @@ impl Checker {
                 let idx = self.push_obj_path(okey);
                 self.lobj_mut(okey).set_color(ObjColor::Gray(idx));
                 // GoX doesn't have type aliases in the same way as Go
-                self.type_decl(okey, &tdecl.ty, None, false, fctx);
+                self.type_decl(okey, &tdecl.ty, None, false);
                 let popped = self.pop_obj_path();
                 self.lobj_mut(popped).set_color(ObjColor::Black);
             }

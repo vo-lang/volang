@@ -484,7 +484,6 @@ pub fn missing_method(
     intf: TypeKey,
     static_: bool,
     checker: &mut Checker,
-    fctx: &mut FilesContext,
 ) -> Option<(ObjKey, bool)> {
     // First, check if interface is empty
     {
@@ -546,7 +545,7 @@ pub fn missing_method(
                     return Some((fkey, false)); // not a method
                 }
                 // methods may not have a fully set up signature yet
-                checker.obj_decl(okey, None, fctx);
+                checker.obj_decl(okey, None);
                 let y_type = checker.tc_objs.lobjs[okey].typ();
                 if !typ::identical_o(x_type, y_type, &checker.tc_objs) {
                     return Some((fkey, true)); // wrong type
@@ -564,11 +563,10 @@ pub fn assertable_to(
     iface: TypeKey,
     t: TypeKey,
     checker: &mut Checker,
-    fctx: &mut FilesContext,
 ) -> Option<(ObjKey, bool)> {
     let strict = true;
     if !strict && checker.tc_objs.types[t].is_interface(&checker.tc_objs) {
         return None;
     }
-    missing_method(t, iface, false, checker, fctx)
+    missing_method(t, iface, false, checker)
 }

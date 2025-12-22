@@ -208,7 +208,6 @@ impl Checker {
         iface: &InterfaceType,
         tname: Option<ObjKey>,
         path: &Vec<ObjKey>,
-        fctx: &mut FilesContext,
     ) -> Option<RcIfaceInfo> {
         // If the interface is named, check if we computed info already.
         // This prevents stack overflow with recursive interface declarations.
@@ -250,7 +249,7 @@ impl Checker {
                     InterfaceElem::Embedded(ident) => {
                         // Look up embedded interface
                         let type_name = self.resolve_ident(ident).to_string();
-                        if let Some(e) = self.info_from_type_name(scope, &type_name, path, fctx) {
+                        if let Some(e) = self.info_from_type_name(scope, &type_name, path) {
                             embeddeds.push((e, ident.span));
                         }
                     }
@@ -286,7 +285,6 @@ impl Checker {
         scope: ScopeKey,
         name: &str,
         path: &Vec<ObjKey>,
-        _fctx: &mut FilesContext,
     ) -> Option<RcIfaceInfo> {
         let start = path.len();
         let mut cur_path = path.clone();
