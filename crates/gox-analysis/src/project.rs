@@ -55,12 +55,8 @@ pub struct Project {
     pub packages: Vec<PackageKey>,
     /// Main package key.
     pub main_package: PackageKey,
-    /// Expression types and values from type checking.
-    pub expr_types: HashMap<gox_common_core::ExprId, crate::check::TypeAndValue>,
-    /// Type expression types from type checking.
-    pub type_expr_types: HashMap<gox_common_core::TypeExprId, TypeKey>,
-    /// Selector expression selections (for field promotion).
-    pub selections: HashMap<gox_common_core::ExprId, crate::selection::Selection>,
+    /// Type checking results.
+    pub type_info: crate::check::TypeInfo,
     /// Parsed files from the main package.
     pub files: Vec<File>,
 }
@@ -85,22 +81,27 @@ impl Project {
 
     /// Gets the type of an expression by ExprId.
     pub fn expr_type(&self, expr_id: gox_common_core::ExprId) -> Option<&crate::typ::Type> {
-        self.expr_types.get(&expr_id).map(|tv| &self.tc_objs.types[tv.typ])
+        self.type_info.types.get(&expr_id).map(|tv| &self.tc_objs.types[tv.typ])
     }
 
     /// Gets the expression types map.
     pub fn expr_types(&self) -> &HashMap<gox_common_core::ExprId, crate::check::TypeAndValue> {
-        &self.expr_types
+        &self.type_info.types
     }
 
     /// Gets the type expression types map.
     pub fn type_expr_types(&self) -> &HashMap<gox_common_core::TypeExprId, TypeKey> {
-        &self.type_expr_types
+        &self.type_info.type_exprs
     }
 
     /// Gets the selections map.
     pub fn selections(&self) -> &HashMap<gox_common_core::ExprId, crate::selection::Selection> {
-        &self.selections
+        &self.type_info.selections
+    }
+
+    /// Gets the full type info.
+    pub fn type_info(&self) -> &crate::check::TypeInfo {
+        &self.type_info
     }
 }
 
@@ -116,12 +117,8 @@ struct ProjectState {
     checked_packages: Vec<PackageKey>,
     /// Current source file base offset for parsing.
     parse_base: u32,
-    /// Expression types collected from type checking.
-    expr_types: HashMap<gox_common_core::ExprId, crate::check::TypeAndValue>,
-    /// Type expression types collected from type checking.
-    type_expr_types: HashMap<gox_common_core::TypeExprId, TypeKey>,
-    /// Selector expression selections collected from type checking.
-    selections: HashMap<gox_common_core::ExprId, crate::selection::Selection>,
+    /// Type checking results from main package.
+    type_info: Option<crate::check::TypeInfo>,
 }
 
 /// Analyze a project starting from the given source files.
@@ -139,9 +136,7 @@ pub fn analyze_project(
         in_progress: HashSet::new(),
         checked_packages: Vec::new(),
         parse_base: 0,
-        expr_types: HashMap::new(),
-        type_expr_types: HashMap::new(),
-        selections: HashMap::new(),
+        type_info: None,
     }));
     
     // Create the main package
@@ -168,24 +163,10 @@ pub fn analyze_project(
         // Use check() - imports preloaded, will be found via find_package_by_path
         let result = checker.check(&parsed_files);
         
-        // Swap back and collect expr_types
+        // Swap back and take type_info
         let mut state_ref = state.borrow_mut();
         std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-        
-        // Collect expression types from checker result
-        for (expr_id, tv) in &checker.result.types {
-            state_ref.expr_types.insert(*expr_id, tv.clone());
-        }
-        
-        // Collect type expression types from checker result
-        for (type_expr_id, type_key) in &checker.result.type_exprs {
-            state_ref.type_expr_types.insert(*type_expr_id, *type_key);
-        }
-        
-        // Collect selections from checker result
-        for (expr_id, sel) in &checker.result.selections {
-            state_ref.selections.insert(*expr_id, sel.clone());
-        }
+        state_ref.type_info = Some(checker.result);
         
         match result {
             Ok(_) => {}
@@ -213,9 +194,7 @@ pub fn analyze_project(
         interner: final_state.interner,
         packages,
         main_package: main_pkg_key,
-        expr_types: final_state.expr_types,
-        type_expr_types: final_state.type_expr_types,
-        selections: final_state.selections,
+        type_info: final_state.type_info.unwrap_or_default(),
         files: parsed_files,
     })
 }
@@ -237,18 +216,6 @@ pub fn analyze_single_file(
     let mut null_importer = NullImporter;
     let result = checker.check_with_importer(&[file.clone()], &mut null_importer);
     
-    // Collect expression types
-    let mut expr_types = HashMap::new();
-    for (expr_id, tv) in &checker.result.types {
-        expr_types.insert(*expr_id, tv.clone());
-    }
-    
-    // Collect type expression types
-    let type_expr_types = checker.result.type_exprs.clone();
-    
-    // Collect selections
-    let selections = checker.result.selections.clone();
-    
     match result {
         Ok(_) => {}
         Err(_) => {
@@ -265,9 +232,7 @@ pub fn analyze_single_file(
         interner,
         packages: vec![main_pkg_key],
         main_package: main_pkg_key,
-        expr_types,
-        type_expr_types,
-        selections,
+        type_info: checker.result,
         files: vec![file],
     })
 }
