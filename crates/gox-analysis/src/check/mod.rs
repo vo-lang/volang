@@ -20,6 +20,6 @@ mod type_info;
 mod typexpr;
 mod util;
 
-pub use checker::{Checker, FilesContext};
+pub use checker::Checker;
 pub use resolver::DeclInfo;
 pub use type_info::{Initializer, TypeAndValue, TypeInfo};

@@ -12,7 +12,8 @@ use gox_syntax::ast::{Decl, Expr, FuncDecl, TypeExpr};
 use crate::constant::Value;
 use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
-use super::checker::{Checker, FilesContext};
+use super::checker::Checker;
+use crate::importer::Importer;
 
 /// DeclInfo for const declarations.
 #[derive(Debug, Clone)]
@@ -171,7 +172,7 @@ impl DeclInfo {
 impl Checker {
     /// Collects all package-level declarations from the files.
     /// This is the first pass of type checking.
-    pub fn collect_objects(&mut self, fctx: &mut FilesContext) {
+    pub fn collect_objects(&mut self, files: &[gox_syntax::ast::File], importer: Option<&mut dyn Importer>) {
         // Track all imported packages
         let mut all_imported: HashSet<PackageKey> = self
             .package(self.pkg)
@@ -182,8 +183,11 @@ impl Checker {
 
         // List of methods with non-blank names: (method_key, receiver_type_name, is_pointer)
         let mut methods: Vec<(ObjKey, String, bool)> = Vec::new();
+        
+        // We need to reborrow importer for each import, so collect import info first
+        let mut import_infos: Vec<(usize, ScopeKey, gox_syntax::ast::ImportDecl)> = Vec::new();
 
-        for (file_num, file) in fctx.files.iter().enumerate() {
+        for (file_num, file) in files.iter().enumerate() {
             // Create file scope
             let parent_scope = Some(*self.package(self.pkg).scope());
             let file_scope = self.tc_objs.new_scope(
@@ -195,9 +199,9 @@ impl Checker {
             );
             self.result.record_scope(file.span, file_scope);
 
-            // Process imports
+            // Collect imports for later processing
             for import in &file.imports {
-                self.collect_import(import, file_scope, &mut all_imported, fctx);
+                import_infos.push((file_num, file_scope, import.clone()));
             }
 
             // Process declarations
@@ -250,6 +254,12 @@ impl Checker {
             }
         }
 
+        // Process imports with importer
+        let mut importer = importer;
+        for (_file_num, file_scope, import) in import_infos {
+            self.collect_import(&import, file_scope, &mut all_imported, &mut importer);
+        }
+
         // Associate methods with receiver base types
         for (method_key, recv_type_name, is_pointer) in methods {
             self.associate_method_with_receiver(method_key, &recv_type_name, is_pointer);
@@ -262,12 +272,12 @@ impl Checker {
         import: &gox_syntax::ast::ImportDecl,
         file_scope: ScopeKey,
         all_imported: &mut HashSet<PackageKey>,
-        fctx: &mut FilesContext,
+        importer: &mut Option<&mut dyn Importer>,
     ) {
         let path = &import.path.value;
         
         // Import the package using importer if available
-        let imp = if let Some(importer) = fctx.importer.as_mut() {
+        let imp = if let Some(importer) = importer.as_mut() {
             use crate::importer::{ImportKey as ImpKey, ImportResult};
             let dir = importer.working_dir().to_string_lossy().to_string();
             let key = ImpKey::new(path, &dir);

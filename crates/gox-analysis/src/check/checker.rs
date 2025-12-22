@@ -65,36 +65,8 @@ impl ObjContext {
     }
 }
 
-// =============================================================================
-// FilesContext - context for type-checking a set of files
-// =============================================================================
-
 /// Delayed action to be executed later during type checking.
 pub type DelayedAction = Box<dyn FnOnce(&mut Checker)>;
-
-/// Simplified context for type-checking - only holds borrowed data.
-pub struct FilesContext<'a> {
-    /// Package files.
-    pub files: &'a [File],
-    /// Optional importer for resolving package imports.
-    pub importer: Option<&'a mut dyn Importer>,
-}
-
-impl<'a> FilesContext<'a> {
-    pub fn new(files: &'a [File]) -> FilesContext<'a> {
-        FilesContext {
-            files,
-            importer: None,
-        }
-    }
-    
-    pub fn with_importer(files: &'a [File], importer: &'a mut dyn Importer) -> FilesContext<'a> {
-        FilesContext {
-            files,
-            importer: Some(importer),
-        }
-    }
-}
 
 // =============================================================================
 // Checker - the main type checker
@@ -137,7 +109,7 @@ pub struct Checker {
     /// For debug tracing.
     pub indent: Rc<RefCell<usize>>,
     
-    // --- Fields moved from FilesContext ---
+    // --- Per-check state ---
     /// Positions of unused dot-imported packages for each file scope.
     pub unused_dot_imports: HashMap<ScopeKey, HashMap<PackageKey, Span>>,
     /// Maps package scope type names to associated non-blank, non-interface methods.
@@ -319,7 +291,7 @@ impl Checker {
     // Note: report_alt_decl and add_method_decls are in decl.rs
 
     // =========================================================================
-    // Methods moved from FilesContext
+    // Per-check state management
     // =========================================================================
 
     /// Add an unused dot import.
@@ -385,8 +357,7 @@ impl Checker {
     /// Main entry point for type checking a set of files.
     pub fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
         self.check_files_pkg_name(files)?;
-        let fctx = &mut FilesContext::new(files);
-        self.collect_objects(fctx);
+        self.collect_objects(files, None);
         self.package_objects();
         self.process_delayed(0);
         self.init_order();
@@ -402,8 +373,7 @@ impl Checker {
         importer: &mut dyn Importer,
     ) -> Result<PackageKey, ()> {
         self.check_files_pkg_name(files)?;
-        let fctx = &mut FilesContext::with_importer(files, importer);
-        self.collect_objects(fctx);
+        self.collect_objects(files, Some(importer));
         self.package_objects();
         self.process_delayed(0);
         self.init_order();
