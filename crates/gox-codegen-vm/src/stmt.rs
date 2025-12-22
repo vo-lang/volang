@@ -77,6 +77,7 @@ pub fn compile_stmt(
         ),
         StmtKind::Empty => Ok(()),
         StmtKind::Var(decl) => compile_var_decl(decl, ctx, func, info),
+        StmtKind::Type(_) => Ok(()), // Type declarations are compile-time only
         _ => todo!("statement {:?}", std::mem::discriminant(&stmt.kind)),
     }
 }
