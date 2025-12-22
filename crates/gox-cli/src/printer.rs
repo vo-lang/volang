@@ -352,6 +352,9 @@ impl<'a> AstPrinter<'a> {
                         InterfaceElem::Embedded(e) => {
                             write!(self.output, "{}; ", self.resolve_symbol(e.symbol)).unwrap();
                         }
+                        InterfaceElem::EmbeddedQualified { pkg, name, .. } => {
+                            write!(self.output, "{}.{}; ", self.resolve_symbol(pkg.symbol), self.resolve_symbol(name.symbol)).unwrap();
+                        }
                     }
                 }
                 write!(self.output, "}}").unwrap();

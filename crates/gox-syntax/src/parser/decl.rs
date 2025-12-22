@@ -338,8 +338,17 @@ impl<'a> Parser<'a> {
                     sig: sig.clone(),
                     span: Span::new(elem_start, self.current.span.start),
                 }));
+            } else if self.at(TokenKind::Dot) {
+                // Qualified embedded interface (pkg.Type)
+                self.advance(); // consume '.'
+                let type_name = self.parse_ident()?;
+                elems.push(InterfaceElem::EmbeddedQualified {
+                    pkg: name,
+                    name: type_name,
+                    span: Span::new(elem_start, self.current.span.start),
+                });
             } else {
-                // Embedded interface
+                // Simple embedded interface
                 elems.push(InterfaceElem::Embedded(name));
             }
             self.expect_semi();

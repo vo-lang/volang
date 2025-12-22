@@ -1,0 +1,14 @@
+package main
+
+import "bytes"
+
+// Test qualified embedded interface: bytes.Buffer implements io.Writer-like interface
+type MyWriter interface {
+    bytes.ByteWriter  // qualified embedded interface  
+}
+
+func main() {
+    // Simple parse test - if we get here, parsing qualified embed works
+    println("qualified embedded interface parsed successfully")
+    println("[GOX:OK]")
+}

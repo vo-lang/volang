@@ -617,7 +617,8 @@ PointerType ::= "*" Type ;  // Only valid when Type is a struct type
 InterfaceType ::= "interface" "{" InterfaceElem* "}" ;
 InterfaceElem ::= MethodSpec | EmbeddedIface ;
 MethodSpec    ::= Ident "(" ParamList? ")" ResultType? ";" ;  // ParamList defined in §7.1
-EmbeddedIface ::= Ident ";" ;
+EmbeddedIface ::= TypeName ";" ;
+TypeName      ::= Ident | Ident "." Ident ;  // simple or qualified
 ```
 
 ### 6.2 Built-in Types
@@ -805,7 +806,8 @@ TypeDecl      ::= "type" Ident Type ";" ;
 InterfaceType ::= "interface" "{" InterfaceElem* "}" ;
 InterfaceElem ::= MethodSpec | EmbeddedIface ;
 MethodSpec    ::= Ident "(" ParamList? ")" ResultType? ";" ;
-EmbeddedIface ::= Ident ";" ;
+EmbeddedIface ::= TypeName ";" ;
+TypeName      ::= Ident | Ident "." Ident ;  // simple or qualified
 ParamList     ::= Param ( "," Param )* ;
 Param         ::= IdentList Type ;   // Type sharing: x, y int
 ```
@@ -821,7 +823,7 @@ type ReadWriter interface {
 }
 ```
 
-> **Scope Limitation**: Embedded interfaces must be unqualified names from the current package.
+> **Note**: Embedded interfaces can be simple names (`Reader`) or qualified names (`io.Reader`).
 
 ### 7.2 Interface Method Sets
 

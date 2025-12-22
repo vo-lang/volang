@@ -197,8 +197,17 @@ pub struct Param {
 pub enum InterfaceElem {
     /// A method specification.
     Method(MethodSpec),
-    /// An embedded interface.
+    /// An embedded interface (simple name like `Reader`).
     Embedded(Ident),
+    /// An embedded interface with qualified name (like `io.Reader`).
+    EmbeddedQualified {
+        /// Package name.
+        pkg: Ident,
+        /// Type name.
+        name: Ident,
+        /// Span of the entire qualified name.
+        span: Span,
+    },
 }
 
 /// A method specification in an interface.
@@ -1229,6 +1238,10 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
                     }
                     InterfaceElem::Embedded(e) => {
                         visitor.visit_ident(e);
+                    }
+                    InterfaceElem::EmbeddedQualified { pkg, name, .. } => {
+                        visitor.visit_ident(pkg);
+                        visitor.visit_ident(name);
                     }
                 }
             }

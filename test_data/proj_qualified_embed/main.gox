@@ -1,0 +1,28 @@
+package main
+
+import "iface"
+
+// MyGreeter embeds iface.Greeter using qualified name
+type MyGreeter interface {
+    iface.Greeter  // qualified embedded interface
+    Farewell() string
+}
+
+type Person struct {
+    name string
+}
+
+func (p *Person) Greet() string {
+    return "Hello, " + p.name
+}
+
+func (p *Person) Farewell() string {
+    return "Goodbye, " + p.name
+}
+
+func main() {
+    var g MyGreeter = &Person{name: "World"}
+    println(g.Greet())
+    println(g.Farewell())
+    println("[GOX:OK]")
+}
