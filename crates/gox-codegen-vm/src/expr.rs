@@ -302,6 +302,11 @@ fn compile_call(
     func: &mut FuncBuilder,
     info: &TypeInfo,
 ) -> Result<u16> {
+    // Check if this is a type conversion (callee is a type expression)
+    if info.is_type_expr(callee) {
+        return compile_type_conversion(callee, args, ctx, func, info);
+    }
+
     if let ExprKind::Ident(ident) = &callee.kind {
         if let Some(builtin) = info.is_builtin(ident.symbol) {
             return compile_builtin_call(builtin, args, ctx, func, info);
@@ -355,6 +360,85 @@ fn compile_call(
     // Closure calls not yet supported
     Err(CodegenError::internal("closure calls not yet supported", callee.span))
 }
+
+/// Compile a type conversion expression like T(x).
+fn compile_type_conversion(
+    callee: &Expr,
+    args: &[Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16> {
+    // Type conversion has exactly one argument
+    let arg = &args[0];
+    
+    // Get the target type from the callee
+    let target_type = info.expr_type(callee);
+    let target_type_key = info.expr_type_key(callee);
+    
+    // Get the source type
+    let src_type = info.expr_type(arg);
+    
+    // Check if target is interface
+    let target_is_interface = target_type.map(|t| info.is_interface(t)).unwrap_or(false);
+    let src_is_interface = src_type.map(|t| info.is_interface(t)).unwrap_or(false);
+    
+    if target_is_interface && !src_is_interface {
+        // Boxing concrete value to interface: T(x) where T is interface
+        let iface_type_key = target_type_key.unwrap();
+        let iface_type_id = ctx.type_id_for_interface(iface_type_key);
+        
+        // Allocate 2 slots for interface (header + data)
+        let dst = func.alloc_temp(2);
+        
+        // InitInterface: set up the interface header
+        func.emit_op(Opcode::InitInterface, dst, iface_type_id, 0);
+        
+        // Compile source value
+        let src = compile_expr_value(arg, ctx, func, info)?;
+        
+        // Register dispatch table if concrete type is a struct
+        if let Some(src_type_key) = info.expr_type_key(arg) {
+            register_iface_dispatch_if_needed(iface_type_key, src_type_key, ctx, info);
+        }
+        
+        // Box the value
+        emit_box_interface(dst, src, src_type, arg, ctx, func, info);
+        
+        Ok(dst)
+    } else if target_is_interface && src_is_interface {
+        // Interface to interface conversion: just copy
+        let src = compile_expr(arg, ctx, func, info)?;
+        let dst = func.alloc_temp(2);
+        func.emit_op(Opcode::MovN, dst, src, 2);
+        Ok(dst)
+    } else {
+        // Numeric conversions or identity conversion
+        let src = compile_expr(arg, ctx, func, info)?;
+        
+        // Check for numeric type conversions
+        let src_is_float = is_float_type(src_type);
+        let target_is_float = is_float_type(target_type);
+        
+        if src_is_float && !target_is_float {
+            // float64 -> int
+            let dst = func.alloc_temp(1);
+            func.emit_op(Opcode::F64ToI64, dst, src, 0);
+            Ok(dst)
+        } else if !src_is_float && target_is_float {
+            // int -> float64
+            let dst = func.alloc_temp(1);
+            func.emit_op(Opcode::I64ToF64, dst, src, 0);
+            Ok(dst)
+        } else {
+            // Identity conversion or same-size conversion
+            Ok(src)
+        }
+    }
+}
+
+// emit_box_interface and register_iface_dispatch_if_needed are defined in stmt.rs
+use super::stmt::{emit_box_interface, register_iface_dispatch_if_needed};
 
 /// Compile arguments into contiguous slots.
 /// Returns (args_start, arg_count).

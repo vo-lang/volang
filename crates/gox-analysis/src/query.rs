@@ -471,6 +471,11 @@ fn basic_to_value_kind(b: BasicType) -> ValueKind {
         BasicType::Float32 => ValueKind::Float32,
         BasicType::Float64 => ValueKind::Float64,
         BasicType::Str => ValueKind::String,
+        BasicType::UntypedNil => ValueKind::Nil,
+        BasicType::UntypedBool => ValueKind::Bool,
+        BasicType::UntypedInt | BasicType::UntypedRune => ValueKind::Int,
+        BasicType::UntypedFloat => ValueKind::Float64,
+        BasicType::UntypedString => ValueKind::String,
         _ => panic!("unexpected BasicType in value_kind: {:?}", b),
     }
 }

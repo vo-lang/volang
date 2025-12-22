@@ -198,6 +198,14 @@ impl<'a> TypeInfo<'a> {
         })
     }
 
+    /// Check if an expression is a type expression (for type conversions).
+    pub fn is_type_expr(&self, expr: &Expr) -> bool {
+        self.expr_types
+            .get(&expr.id)
+            .map(|tv| matches!(tv.mode, OperandMode::TypeExpr))
+            .unwrap_or(false)
+    }
+
     // === Symbol queries (delegate to TypeQuery) ===
 
     pub fn symbol_str(&self, sym: Symbol) -> &str {

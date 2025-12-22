@@ -743,7 +743,7 @@ fn compile_switch(
 }
 
 /// Emit BoxInterface instruction to box a concrete value into an interface.
-fn emit_box_interface(
+pub(crate) fn emit_box_interface(
     dst: u16,
     src: u16,
     rhs_ty: Option<&Type>,
@@ -765,7 +765,7 @@ fn emit_box_interface(
 
 /// Register interface dispatch table entry if not already registered.
 /// This is called when assigning a concrete type to an interface variable.
-fn register_iface_dispatch_if_needed(
+pub(crate) fn register_iface_dispatch_if_needed(
     iface_type_key: gox_analysis::TypeKey,
     concrete_type_key: gox_analysis::TypeKey,
     ctx: &mut CodegenContext,

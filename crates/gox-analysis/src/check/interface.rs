@@ -202,7 +202,7 @@ impl Checker {
                         }
 
                         let mi = MethodInfo::with_scope_src(skey, elem_index);
-                        if self.declare_in_method_set(&mut mset, mi.clone(), m.span) {
+                        if self.declare_in_method_set(&mut mset, &name, mi.clone(), m.span) {
                             methods.push(mi);
                         }
                     }
@@ -232,7 +232,8 @@ impl Checker {
             for (i, e) in embeddeds.into_iter().enumerate() {
                 let pos = positions[i];
                 for m in e.methods.iter() {
-                    if self.declare_in_method_set(&mut mset, m.clone(), pos) {
+                    let name = m.method_name(self.objs());
+                    if self.declare_in_method_set(&mut mset, &name, m.clone(), pos) {
                         methods.push(m.clone());
                     }
                 }
@@ -439,13 +440,13 @@ impl Checker {
     fn declare_in_method_set(
         &self,
         set: &mut HashMap<String, MethodInfo>,
+        name: &str,
         mi: MethodInfo,
         pos: Span,
     ) -> bool {
-        let id = mi.id(self.pkg, self.objs());
-        if let Some(_alt) = set.insert(id.clone(), mi) {
-            let mi_ref = set.get(&id).unwrap();
-            let name = mi_ref.method_name(self.objs());
+        // Use name as id for duplicate detection
+        // (func may not be set yet for explicit methods being collected)
+        if let Some(_alt) = set.insert(name.to_string(), mi) {
             self.error_code_msg(TypeError::MethodRedeclared, pos, format!("{} redeclared", name));
             // Would also report other declaration location like goscript
             false
