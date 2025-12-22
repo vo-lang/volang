@@ -105,20 +105,27 @@ fn compile_struct_deep_copy(
 
 fn compile_const_value(val: &ConstValue, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16> {
     match val {
-        ConstValue::Bool(b) => compile_int_lit(if *b { 1 } else { 0 }, func),
-        ConstValue::Int64(i) => compile_int_lit(*i, func),
-        ConstValue::IntBig(i) => compile_int_lit(i.try_into().unwrap_or(0), func),
+        ConstValue::Bool(b) => compile_int_lit(if *b { 1 } else { 0 }, ctx, func),
+        ConstValue::Int64(i) => compile_int_lit(*i, ctx, func),
+        ConstValue::IntBig(i) => compile_int_lit(i.try_into().unwrap_or(0), ctx, func),
         ConstValue::Rat(r) => compile_float_lit(r.to_f64().unwrap_or(0.0), ctx, func),
         ConstValue::Float(f) => compile_float_lit(*f, ctx, func),
         ConstValue::Str(s) => compile_string_lit(s, ctx, func),
-        ConstValue::Unknown => compile_int_lit(0, func),
+        ConstValue::Unknown => compile_int_lit(0, ctx, func),
     }
 }
 
 
-fn compile_int_lit(value: i64, func: &mut FuncBuilder) -> Result<u16> {
+fn compile_int_lit(value: i64, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16> {
     let dst = func.alloc_temp(1);
-    func.emit_op(Opcode::LoadInt, dst, value as u16, (value >> 16) as u16);
+    // Check if value fits in 32-bit signed range for LoadInt
+    if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+        func.emit_op(Opcode::LoadInt, dst, value as u16, (value >> 16) as u16);
+    } else {
+        // Use constant pool for 64-bit integers
+        let idx = ctx.const_int(value);
+        func.emit_op(Opcode::LoadConst, dst, idx, 0);
+    }
     Ok(dst)
 }
 
@@ -520,14 +527,26 @@ fn compile_builtin_call(
             Ok(dst)
         }
         Builtin::Assert => {
-            // assert(cond) -> if !cond { panic }
+            // assert(cond, msg...) using AssertBegin/AssertArg/AssertEnd
             let cond = compile_expr(&args[0], ctx, func, info)?;
-            let skip = func.emit_op(Opcode::JumpIf, cond, 0, 0);
-            // Panic with nil message
-            let msg = func.alloc_temp(1);
-            func.emit_op(Opcode::LoadNil, msg, 0, 0);
-            func.emit_op(Opcode::Panic, msg, 0, 0);
-            func.patch_jump(skip);
+            let arg_count = args.len().saturating_sub(1) as u16; // message args after condition
+            let line = 0u16; // TODO: get actual line number from span
+            
+            // AssertBegin: a=cond, b=arg_count, c=line
+            func.emit_op(Opcode::AssertBegin, cond, arg_count, line);
+            
+            // AssertArg for each message argument
+            for arg in args.iter().skip(1) {
+                let src = compile_expr(arg, ctx, func, info)?;
+                let ty = info.expr_type(arg);
+                let vk = ty.map(|t| info.value_kind(t) as u8).unwrap_or(0);
+                // AssertArg: a=src, b=value_kind
+                func.emit_op(Opcode::AssertArg, src, vk as u16, 0);
+            }
+            
+            // AssertEnd
+            func.emit_op(Opcode::AssertEnd, 0, 0, 0);
+            
             let dst = func.alloc_temp(1);
             func.emit_op(Opcode::LoadNil, dst, 0, 0);
             Ok(dst)

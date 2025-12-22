@@ -62,7 +62,7 @@ pub struct ObjContext {
 }
 
 impl ObjContext {
-    pub fn new() -> ObjContext {
+    pub(crate) fn new() -> ObjContext {
         ObjContext::default()
     }
 }
@@ -82,7 +82,7 @@ pub struct ImportKey {
 }
 
 impl ImportKey {
-    pub fn new(path: &str, dir: &str) -> ImportKey {
+    pub(crate) fn new(path: &str, dir: &str) -> ImportKey {
         ImportKey {
             path: path.to_string(),
             dir: dir.to_string(),
@@ -130,12 +130,12 @@ pub struct Checker {
 
 impl Checker {
     /// Creates a new type checker for the given package.
-    pub fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker {
+    pub(crate) fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker {
         Self::new_with_trace(pkg, interner, false)
     }
 
     /// Creates a new type checker with trace option.
-    pub fn new_with_trace(pkg: PackageKey, interner: SymbolInterner, trace_enabled: bool) -> Checker {
+    pub(crate) fn new_with_trace(pkg: PackageKey, interner: SymbolInterner, trace_enabled: bool) -> Checker {
         let tc_objs = TCObjects::new();
         Checker {
             tc_objs,
@@ -158,7 +158,7 @@ impl Checker {
     }
     
     /// Creates a new type checker with pre-existing TCObjects.
-    pub fn with_objs(
+    pub(crate) fn with_objs(
         pkg: PackageKey,
         interner: SymbolInterner,
         tc_objs: TCObjects,
@@ -185,82 +185,82 @@ impl Checker {
     }
     
     /// Take ownership of tc_objs (for sharing between checkers).
-    pub fn take_objs(&mut self) -> TCObjects {
+    pub(crate) fn take_objs(&mut self) -> TCObjects {
         std::mem::take(&mut self.tc_objs)
     }
     
     /// Put tc_objs back.
-    pub fn put_objs(&mut self, objs: TCObjects) {
+    pub(crate) fn put_objs(&mut self, objs: TCObjects) {
         self.tc_objs = objs;
     }
 
     /// Resolves a symbol to its string.
-    pub fn resolve_symbol(&self, symbol: gox_common::symbol::Symbol) -> &str {
+    pub(crate) fn resolve_symbol(&self, symbol: gox_common::symbol::Symbol) -> &str {
         self.interner.resolve(symbol).unwrap_or("<unknown>")
     }
 
     /// Resolves an identifier to its string.
-    pub fn resolve_ident(&self, ident: &gox_common::symbol::Ident) -> &str {
+    pub(crate) fn resolve_ident(&self, ident: &gox_common::symbol::Ident) -> &str {
         self.resolve_symbol(ident.symbol)
     }
 
     /// Returns the universe.
-    pub fn universe(&self) -> &Universe {
+    pub(crate) fn universe(&self) -> &Universe {
         self.tc_objs.universe()
     }
 
     /// Returns a reference to the TCObjects.
-    pub fn objects(&self) -> &TCObjects {
+    pub(crate) fn objects(&self) -> &TCObjects {
         &self.tc_objs
     }
 
     /// Returns a mutable reference to the TCObjects.
-    pub fn objects_mut(&mut self) -> &mut TCObjects {
+    pub(crate) fn objects_mut(&mut self) -> &mut TCObjects {
         &mut self.tc_objs
     }
 
     /// Returns the type checking results.
-    pub fn type_info(&self) -> &TypeInfo {
+    pub(crate) fn type_info(&self) -> &TypeInfo {
         &self.result
     }
 
     /// Returns a mutable reference to the type checking results.
-    pub fn type_info_mut(&mut self) -> &mut TypeInfo {
+    pub(crate) fn type_info_mut(&mut self) -> &mut TypeInfo {
         &mut self.result
     }
 
     /// Emit a diagnostic.
-    pub fn emit(&self, diagnostic: Diagnostic) {
+    pub(crate) fn emit(&self, diagnostic: Diagnostic) {
         self.diagnostics.borrow_mut().emit(diagnostic);
     }
 
     /// Report an error with a TypeError code.
-    pub fn error_code(&self, code: TypeError, span: Span) {
+    pub(crate) fn error_code(&self, code: TypeError, span: Span) {
         self.emit(code.at(span));
     }
 
     /// Report an error with a TypeError code and custom message.
-    pub fn error_code_msg(&self, code: TypeError, span: Span, msg: impl Into<String>) {
+    pub(crate) fn error_code_msg(&self, code: TypeError, span: Span, msg: impl Into<String>) {
         self.emit(code.at_with_message(span, msg));
     }
 
     /// Returns true if any errors were emitted.
-    pub fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         self.diagnostics.borrow().has_errors()
     }
 
     /// Returns the error count.
-    pub fn error_count(&self) -> usize {
+    pub(crate) fn error_count(&self) -> usize {
         self.diagnostics.borrow().error_count()
     }
 
     /// Format a position for error messages.
-    pub fn position(&self, pos: usize) -> String {
+    pub(crate) fn position(&self, pos: usize) -> String {
         format!("pos:{}", pos)
     }
 
     /// Returns whether tracing is enabled.
-    pub fn trace(&self) -> bool {
+    pub(crate) fn trace(&self) -> bool {
         self.trace_enabled
     }
 
@@ -272,7 +272,7 @@ impl Checker {
     }
 
     /// Begin a trace block for an expression.
-    pub fn trace_expr(&self, expr: &gox_syntax::ast::Expr) {
+    pub(crate) fn trace_expr(&self, expr: &gox_syntax::ast::Expr) {
         if self.trace_enabled {
             let s = super::format::format_expr(expr, &self.interner);
             self.trace_print(&format!("expr[ {} ]", s));
@@ -281,7 +281,7 @@ impl Checker {
     }
 
     /// End a trace block for an expression.
-    pub fn trace_expr_end(&self) {
+    pub(crate) fn trace_expr_end(&self) {
         if self.trace_enabled {
             let indent = &mut *self.trace_indent.borrow_mut();
             *indent = indent.saturating_sub(1);
@@ -289,7 +289,7 @@ impl Checker {
     }
 
     /// Begin a trace block for a statement.
-    pub fn trace_stmt(&self, stmt: &gox_syntax::ast::Stmt) {
+    pub(crate) fn trace_stmt(&self, stmt: &gox_syntax::ast::Stmt) {
         if self.trace_enabled {
             let s = super::format::format_stmt(stmt, &self.interner);
             self.trace_print(&format!("stmt[ {} ]", s));
@@ -298,7 +298,7 @@ impl Checker {
     }
 
     /// End a trace block for a statement.
-    pub fn trace_stmt_end(&self) {
+    pub(crate) fn trace_stmt_end(&self) {
         if self.trace_enabled {
             let indent = &mut *self.trace_indent.borrow_mut();
             *indent = indent.saturating_sub(1);
@@ -310,33 +310,33 @@ impl Checker {
     // =========================================================================
 
     /// Returns a reference to a package.
-    pub fn package(&self, key: PackageKey) -> &crate::package::Package {
+    pub(crate) fn package(&self, key: PackageKey) -> &crate::package::Package {
         &self.tc_objs.pkgs[key]
     }
 
     /// Returns a mutable reference to a package.
-    pub fn package_mut(&mut self, key: PackageKey) -> &mut crate::package::Package {
+    pub(crate) fn package_mut(&mut self, key: PackageKey) -> &mut crate::package::Package {
         &mut self.tc_objs.pkgs[key]
     }
 
     /// Returns a reference to a scope.
-    pub fn scope(&self, key: ScopeKey) -> &crate::scope::Scope {
+    pub(crate) fn scope(&self, key: ScopeKey) -> &crate::scope::Scope {
         &self.tc_objs.scopes[key]
     }
 
     /// Returns a mutable reference to a scope.
-    pub fn scope_mut(&mut self, key: ScopeKey) -> &mut crate::scope::Scope {
+    pub(crate) fn scope_mut(&mut self, key: ScopeKey) -> &mut crate::scope::Scope {
         &mut self.tc_objs.scopes[key]
     }
 
 
     /// Returns a reference to a declaration info.
-    pub fn decl_info(&self, key: DeclInfoKey) -> &super::resolver::DeclInfo {
+    pub(crate) fn decl_info(&self, key: DeclInfoKey) -> &super::resolver::DeclInfo {
         &self.tc_objs.decls[key]
     }
 
     /// Returns a mutable reference to a declaration info.
-    pub fn decl_info_mut(&mut self, key: DeclInfoKey) -> &mut super::resolver::DeclInfo {
+    pub(crate) fn decl_info_mut(&mut self, key: DeclInfoKey) -> &mut super::resolver::DeclInfo {
         &mut self.tc_objs.decls[key]
     }
 
@@ -347,7 +347,7 @@ impl Checker {
     // =========================================================================
 
     /// Add an unused dot import.
-    pub fn add_unused_dot_import(&mut self, scope: ScopeKey, pkg: PackageKey, span: Span) {
+    pub(crate) fn add_unused_dot_import(&mut self, scope: ScopeKey, pkg: PackageKey, span: Span) {
         self.unused_dot_imports
             .entry(scope)
             .or_default()
@@ -355,22 +355,22 @@ impl Checker {
     }
 
     /// Remember an untyped expression.
-    pub fn remember_untyped(&mut self, expr_id: ExprId, info: ExprInfo) {
+    pub(crate) fn remember_untyped(&mut self, expr_id: ExprId, info: ExprInfo) {
         self.untyped.insert(expr_id, info);
     }
 
     /// Push a delayed action onto the stack.
-    pub fn later(&mut self, action: DelayedAction) {
+    pub(crate) fn later(&mut self, action: DelayedAction) {
         self.delayed.push(action);
     }
 
     /// Returns the count of delayed actions.
-    pub fn delayed_count(&self) -> usize {
+    pub(crate) fn delayed_count(&self) -> usize {
         self.delayed.len()
     }
 
     /// Process delayed actions starting from index `top`.
-    pub fn process_delayed(&mut self, top: usize) {
+    pub(crate) fn process_delayed(&mut self, top: usize) {
         let actions: Vec<DelayedAction> = self.delayed.drain(top..).collect();
         for action in actions {
             action(self);
@@ -378,13 +378,13 @@ impl Checker {
     }
 
     /// Push an object onto the dependency path.
-    pub fn push_obj_path(&mut self, obj: ObjKey) -> usize {
+    pub(crate) fn push_obj_path(&mut self, obj: ObjKey) -> usize {
         self.obj_path.push(obj);
         self.obj_path.len() - 1
     }
 
     /// Pop an object from the dependency path.
-    pub fn pop_obj_path(&mut self) -> ObjKey {
+    pub(crate) fn pop_obj_path(&mut self) -> ObjKey {
         self.obj_path.pop().unwrap()
     }
 
@@ -393,7 +393,7 @@ impl Checker {
     // =========================================================================
 
     /// Raw expression type-checking - delegates to raw_expr_impl in expr.rs.
-    pub fn raw_expr(
+    pub(crate) fn raw_expr(
         &mut self,
         x: &mut crate::operand::Operand,
         expr: &Expr,
@@ -407,7 +407,7 @@ impl Checker {
     // =========================================================================
 
     /// Main entry point for type checking a set of files.
-    pub fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
+    pub(crate) fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
         self.check_files_pkg_name(files)?;
         self.collect_objects(files, None);
         self.package_objects();
@@ -424,7 +424,7 @@ impl Checker {
     }
     
     /// Type check files with an importer for handling imports.
-    pub fn check_with_importer(
+    pub(crate) fn check_with_importer(
         &mut self,
         files: &[File],
         importer: &mut dyn Importer,

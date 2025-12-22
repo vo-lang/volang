@@ -25,14 +25,14 @@ use super::resolver::DeclInfo;
 
 impl Checker {
     /// Reports the location of an alternative declaration.
-    pub fn report_alt_decl(&self, okey: ObjKey) {
+    pub(crate) fn report_alt_decl(&self, okey: ObjKey) {
         let lobj = self.lobj(okey);
         self.error_code_msg(TypeError::OtherDeclaration, Span::default(), format!("\tother declaration of {}", lobj.name()));
     }
 
     /// Declares an object in a scope.
     /// Returns error if name already exists (except for blank identifier "_").
-    pub fn declare(&mut self, skey: ScopeKey, okey: ObjKey) {
+    pub(crate) fn declare(&mut self, skey: ScopeKey, okey: ObjKey) {
         // spec: "The blank identifier, represented by the underscore
         // character _, may be used in a declaration like any other
         // identifier but the declaration does not introduce a new binding."
@@ -53,7 +53,7 @@ impl Checker {
 
     /// Type-checks an object declaration.
     /// Uses color-based cycle detection (White -> Gray -> Black).
-    pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>) {
+    pub(crate) fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>) {
         // During type-checking, white objects may be assigned a type without
         // traversing through obj_decl. Update colors of those objects here.
         if self.lobj(okey).color() == ObjColor::White && self.lobj(okey).typ().is_some() {
@@ -146,7 +146,7 @@ impl Checker {
     }
 
     /// Returns true if the cycle starting with obj is invalid and reports an error.
-    pub fn invalid_type_cycle(&self, okey: ObjKey) -> bool {
+    pub(crate) fn invalid_type_cycle(&self, okey: ObjKey) -> bool {
         let lobj = self.lobj(okey);
         let mut has_indir = false;
         let mut has_type_def = false;
@@ -230,7 +230,7 @@ impl Checker {
     }
 
     /// Type-checks a constant declaration.
-    pub fn const_decl(
+    pub(crate) fn const_decl(
         &mut self,
         okey: ObjKey,
         typ: &Option<TypeExpr>,
@@ -272,7 +272,7 @@ impl Checker {
     }
 
     /// Type-checks a variable declaration.
-    pub fn var_decl(
+    pub(crate) fn var_decl(
         &mut self,
         okey: ObjKey,
         lhs: Option<&Vec<ObjKey>>,
@@ -315,7 +315,7 @@ impl Checker {
     }
 
     /// Type-checks a type declaration.
-    pub fn type_decl(
+    pub(crate) fn type_decl(
         &mut self,
         okey: ObjKey,
         typ: &TypeExpr,
@@ -353,7 +353,7 @@ impl Checker {
     }
 
     /// Type-checks a function declaration.
-    pub fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey) {
+    pub(crate) fn func_decl(&mut self, okey: ObjKey, dkey: DeclInfoKey) {
         debug_assert!(self.lobj(okey).typ().is_none());
         debug_assert!(self.octx.iota.is_none());
 
@@ -394,7 +394,7 @@ impl Checker {
     }
 
     /// Adds method declarations to a type.
-    pub fn add_method_decls(&mut self, okey: ObjKey) {
+    pub(crate) fn add_method_decls(&mut self, okey: ObjKey) {
         // Get associated methods
         if !self.methods.contains_key(&okey) {
             return;
@@ -467,7 +467,7 @@ impl Checker {
     }
 
     /// Type-checks a declaration statement (const, var, or type) inside a function.
-    pub fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl) {
+    pub(crate) fn decl_stmt(&mut self, decl: &gox_syntax::ast::Decl) {
         use gox_syntax::ast::Decl;
 
         match decl {

@@ -23,7 +23,7 @@ impl Checker {
     /// If necessary, converts untyped values to the appropriate type.
     /// Use t == None to indicate assignment to an untyped blank identifier.
     /// x.mode is set to invalid if the assignment failed.
-    pub fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str) {
+    pub(crate) fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str) {
         self.single_value(x);
         if x.invalid() {
             return;
@@ -83,7 +83,7 @@ impl Checker {
     }
 
     /// Initializes a constant with value x.
-    pub fn init_const(&mut self, lhs: ObjKey, x: &mut Operand) {
+    pub(crate) fn init_const(&mut self, lhs: ObjKey, x: &mut Operand) {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -115,7 +115,7 @@ impl Checker {
     }
 
     /// Initializes a variable with value x.
-    pub fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str) -> Option<TypeKey> {
+    pub(crate) fn init_var(&mut self, lhs: ObjKey, x: &mut Operand, msg: &str) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
@@ -160,7 +160,7 @@ impl Checker {
     }
 
     /// Assigns x to the variable denoted by lhs expression.
-    pub fn assign_var(&mut self, lhs: &Expr, x: &mut Operand) -> Option<TypeKey> {
+    pub(crate) fn assign_var(&mut self, lhs: &Expr, x: &mut Operand) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
         if x.invalid() || x.typ == Some(invalid_type) {
             return None;
@@ -243,7 +243,7 @@ impl Checker {
     /// Initializes multiple variables from multiple values.
     /// Aligned with goscript/types/src/check/assignment.rs::init_vars
     /// If return_pos is Some, init_vars is called to type-check return expressions.
-    pub fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>) {
+    pub(crate) fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
         
@@ -304,15 +304,14 @@ impl Checker {
         }
         if let UnpackResult::CommaOk(e, types) = result {
             if let Some(expr) = e {
-                let tuple_type = self.new_comma_ok_tuple(&types);
-                self.result.record_comma_ok_types(expr, types, tuple_type);
+                self.result.record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
             }
         }
     }
 
     /// Assigns multiple values to multiple variables.
     /// Aligned with goscript/types/src/check/assignment.rs::assign_vars
-    pub fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr]) {
+    pub(crate) fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr]) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
         
@@ -351,71 +350,14 @@ impl Checker {
         }
         if let UnpackResult::CommaOk(e, types) = result {
             if let Some(expr) = e {
-                let tuple_type = self.new_comma_ok_tuple(&types);
-                self.result.record_comma_ok_types(expr, types, tuple_type);
+                self.result.record_comma_ok_types(expr, &types, &mut self.tc_objs, self.pkg);
             }
-        }
-    }
-
-    /// Handles short variable declarations (:=).
-    pub fn short_var_decl(&mut self, lhs: &[Expr], rhs: &[Expr], pos: Span) {
-        let top = self.delayed_count();
-        let scope_key = match self.octx.scope {
-            Some(s) => s,
-            None => return,
-        };
-
-        let mut new_vars = Vec::new();
-        let mut lhs_vars = Vec::new();
-
-        for l in lhs {
-            if let Some(ident) = self.expr_as_ident(l) {
-                let name = self.resolve_ident(&ident).to_string();
-                
-                // Check if variable already exists in current scope
-                if let Some(okey) = self.scope(scope_key).lookup(&name) {
-                    self.result.record_use(ident.clone(), okey);
-                    if self.lobj(okey).entity_type().is_var() {
-                        lhs_vars.push(okey);
-                    } else {
-                        self.error_code_msg(TypeError::CannotAssign, l.span, format!("cannot assign to {}", name));
-                        let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
-                        lhs_vars.push(dummy);
-                    }
-                } else {
-                    // Declare new variable
-                    let okey = self.new_var(0, Some(self.pkg), name.clone(), None);
-                    if name != "_" {
-                        new_vars.push(okey);
-                    }
-                    self.result.record_def(ident, Some(okey));
-                    lhs_vars.push(okey);
-                }
-            } else {
-                self.error_code(TypeError::NonNameInShortDecl, l.span);
-                let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
-                lhs_vars.push(dummy);
-            }
-        }
-
-        self.init_vars(&lhs_vars, rhs, None);
-
-        // process function literals in rhs expressions before scope changes
-        self.process_delayed(top);
-
-        // Declare new variables in scope
-        if !new_vars.is_empty() {
-            for okey in new_vars {
-                self.declare(scope_key, okey);
-            }
-        } else {
-            self.emit(TypeError::NoNewVars.at(pos));
         }
     }
 
     /// Checks if x is assignable to type t.
     /// Aligned with goscript/types/src/operand.rs::assignable_to
-    pub fn assignable_to(&self, x: &Operand, t: TypeKey, reason: &mut String) -> bool {
+    pub(crate) fn assignable_to(&self, x: &Operand, t: TypeKey, reason: &mut String) -> bool {
         let xt = match x.typ {
             Some(typ) => typ,
             None => return false,
@@ -496,7 +438,7 @@ impl Checker {
     }
 
     /// Extracts an identifier from an expression if possible.
-    pub fn expr_as_ident(&self, e: &Expr) -> Option<Ident> {
+    pub(crate) fn expr_as_ident(&self, e: &Expr) -> Option<Ident> {
         match &e.kind {
             gox_syntax::ast::ExprKind::Ident(ident) => Some(ident.clone()),
             gox_syntax::ast::ExprKind::Paren(inner) => self.expr_as_ident(inner),

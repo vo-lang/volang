@@ -24,6 +24,8 @@ use std::fmt;
 
 /// Maximum supported mantissa precision (in bits).
 /// The Go spec requires at least 256 bits; typical implementations use 512 bits.
+/// TODO: Implement overflow check for untyped integers (see Go's types/const.go).
+#[allow(dead_code)]
 const MAX_PREC: usize = 512;
 
 /// Maximum exponent for "small" rationals that we keep as rationals.

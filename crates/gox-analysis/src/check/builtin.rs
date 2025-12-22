@@ -24,7 +24,7 @@ impl Checker {
     /// Type-checks a call to the built-in function specified by id.
     /// Returns true if the call is valid, with *x holding the result.
     /// x.expr_id is not set. If the call is invalid, returns false and *x is undefined.
-    pub fn builtin(
+    pub(crate) fn builtin(
         &mut self,
         x: &mut Operand,
         call: &CallExpr,
@@ -203,14 +203,10 @@ impl Checker {
                 ok
             }
             Builtin::Assert => {
-                // assert(pred) - GoX extension
-                // Only record signature when argument is not constant
-                let arg_type = x.typ.unwrap_or(self.invalid_type());
-                let is_constant = matches!(x.mode, OperandMode::Constant(_));
-                let ok = self.builtin_assert(x, call_span);
-                if ok && !is_constant {
-                    // Only record when the argument is not constant
-                    record_sig(self, None, &[arg_type], false);
+                // assert(pred, msg...) - GoX extension
+                let (ok, params) = self.builtin_assert(x, call, call_span);
+                if ok && !params.is_empty() {
+                    record_sig(self, None, &params, false);
                 }
                 ok
             }
@@ -600,11 +596,34 @@ impl Checker {
         true
     }
 
-    /// assert(pred bool) - GoX extension
-    fn builtin_assert(&mut self, x: &mut Operand, call_span: Span) -> bool {
+    /// assert(pred bool, msg...) - GoX extension
+    /// Returns (ok, arg_types) where arg_types are the converted argument types.
+    fn builtin_assert(
+        &mut self,
+        x: &mut Operand,
+        call: &CallExpr,
+        call_span: Span,
+    ) -> (bool, Vec<TypeKey>) {
+        let nargs = call.args.len();
+        let mut params = Vec::with_capacity(nargs);
+        
+        // First argument: condition (already in x)
+        self.assignment(x, None, "argument to assert");
+        if x.invalid() {
+            return (false, vec![]);
+        }
+        
         if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), self.objs()) {
             self.error_code(TypeError::AssertNotBool, call_span);
-            return false;
+            return (false, vec![]);
+        }
+        
+        // Collect first arg type if not constant
+        let is_constant = matches!(x.mode, OperandMode::Constant(_));
+        if !is_constant {
+            if let Some(t) = x.typ {
+                params.push(t);
+            }
         }
 
         // If argument is a constant false, report error
@@ -612,9 +631,21 @@ impl Checker {
             self.error_code(TypeError::AssertFailed, call_span);
             // Safe to continue - compile-time assertion failure
         }
+        
+        // Process message arguments (args[1..])
+        for i in 1..nargs {
+            self.multi_expr(x, &call.args[i]);
+            self.assignment(x, None, "argument to assert");
+            if x.invalid() {
+                return (false, vec![]);
+            }
+            if let Some(t) = x.typ {
+                params.push(t);
+            }
+        }
 
         x.mode = OperandMode::NoValue;
-        true
+        (true, params)
     }
 
     /// Reports argument count mismatch.

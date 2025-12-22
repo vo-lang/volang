@@ -49,7 +49,7 @@ struct GraphNode {
 
 impl Checker {
     /// Computes and records the initialization order for package-level variables.
-    pub fn init_order(&mut self) {
+    pub(crate) fn init_order(&mut self) {
         let (mut nodes, edges) = self.dependency_graph();
         nodes.sort_by(|a, b| a.ndeps.cmp(&b.ndeps)); // sort by n_deps
         let len = nodes.len();

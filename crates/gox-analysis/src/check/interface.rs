@@ -50,7 +50,7 @@ struct MethodInfoData {
 }
 
 impl MethodInfo {
-    pub fn with_func(func: ObjKey) -> MethodInfo {
+    pub(crate) fn with_func(func: ObjKey) -> MethodInfo {
         MethodInfo {
             data: Rc::new(RefCell::new(MethodInfoData {
                 scope: None,
@@ -60,7 +60,7 @@ impl MethodInfo {
         }
     }
 
-    pub fn with_scope_src(scope: ScopeKey, src_index: usize) -> MethodInfo {
+    pub(crate) fn with_scope_src(scope: ScopeKey, src_index: usize) -> MethodInfo {
         MethodInfo {
             data: Rc::new(RefCell::new(MethodInfoData {
                 scope: Some(scope),
@@ -70,24 +70,24 @@ impl MethodInfo {
         }
     }
 
-    pub fn scope(&self) -> Option<ScopeKey> {
+    pub(crate) fn scope(&self) -> Option<ScopeKey> {
         self.data.borrow().scope
     }
 
-    pub fn src_index(&self) -> Option<usize> {
+    pub(crate) fn src_index(&self) -> Option<usize> {
         self.data.borrow().src_index
     }
 
-    pub fn func(&self) -> Option<ObjKey> {
+    pub(crate) fn func(&self) -> Option<ObjKey> {
         self.data.borrow().func
     }
 
-    pub fn set_func(&self, func: ObjKey) {
+    pub(crate) fn set_func(&self, func: ObjKey) {
         self.data.borrow_mut().func = Some(func);
     }
 
     /// Returns the method name from func or by looking up in the interface AST.
-    pub fn method_name_from_iface(&self, tc_objs: &TCObjects, iface: &InterfaceType, interner: &gox_common::symbol::SymbolInterner) -> String {
+    pub(crate) fn method_name_from_iface(&self, tc_objs: &TCObjects, iface: &InterfaceType, interner: &gox_common::symbol::SymbolInterner) -> String {
         if let Some(okey) = self.func() {
             tc_objs.lobjs[okey].name().to_string()
         } else if let Some(idx) = self.src_index() {
@@ -102,7 +102,7 @@ impl MethodInfo {
     }
 
     /// Returns the method name (requires func to be set).
-    pub fn method_name(&self, tc_objs: &TCObjects) -> String {
+    pub(crate) fn method_name(&self, tc_objs: &TCObjects) -> String {
         if let Some(okey) = self.func() {
             tc_objs.lobjs[okey].name().to_string()
         } else {
@@ -111,7 +111,7 @@ impl MethodInfo {
     }
 
     /// Returns the method id (for duplicate checking).
-    pub fn id(&self, _pkg: PackageKey, tc_objs: &TCObjects) -> String {
+    pub(crate) fn id(&self, _pkg: PackageKey, tc_objs: &TCObjects) -> String {
         if let Some(okey) = self.func() {
             tc_objs.lobjs[okey].id(tc_objs).to_string()
         } else {
@@ -130,15 +130,15 @@ pub struct IfaceInfo {
 }
 
 impl IfaceInfo {
-    pub fn new(explicits: usize, methods: Vec<MethodInfo>) -> IfaceInfo {
+    pub(crate) fn new(explicits: usize, methods: Vec<MethodInfo>) -> IfaceInfo {
         IfaceInfo { explicits, methods }
     }
 
-    pub fn new_empty() -> IfaceInfo {
+    pub(crate) fn new_empty() -> IfaceInfo {
         IfaceInfo::new(0, vec![])
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.methods.is_empty()
     }
 }
@@ -146,7 +146,7 @@ impl IfaceInfo {
 impl Checker {
     /// Computes method set for an interface from its InterfaceDetail.
     /// This is used for interfaces that have already been type-checked.
-    pub fn info_from_interface_detail(&self, iface: &InterfaceDetail) -> RcIfaceInfo {
+    pub(crate) fn info_from_interface_detail(&self, iface: &InterfaceDetail) -> RcIfaceInfo {
         let all_methods_ref = iface.all_methods();
         let all_methods = match all_methods_ref.as_ref() {
             Some(m) => m,
@@ -189,7 +189,7 @@ impl Checker {
     }
 
     /// Computes method set for an interface from its type.
-    pub fn info_from_type(&self, iface_type: TypeKey) -> RcIfaceInfo {
+    pub(crate) fn info_from_type(&self, iface_type: TypeKey) -> RcIfaceInfo {
         let iface = match &self.otype(iface_type) {
             Type::Interface(i) => i,
             _ => return Rc::new(IfaceInfo::new_empty()),
@@ -201,7 +201,7 @@ impl Checker {
     /// If a corresponding type name exists (tname is Some), it is used for
     /// cycle detection and to cache the method set.
     /// Returns None if there is a cycle via embedded interfaces.
-    pub fn info_from_type_lit(
+    pub(crate) fn info_from_type_lit(
         &mut self,
         scope: ScopeKey,
         iface: &InterfaceType,
@@ -322,7 +322,7 @@ impl Checker {
     }
 
     /// Computes method set for an interface.
-    pub fn interface_method_set(&self, iface: TypeKey) -> IfaceInfo {
+    pub(crate) fn interface_method_set(&self, iface: TypeKey) -> IfaceInfo {
         let iface_detail = match &self.otype(iface) {
             Type::Interface(i) => i,
             _ => return IfaceInfo::new_empty(),
@@ -333,19 +333,19 @@ impl Checker {
     }
 
     /// Checks if type T implements interface I.
-    pub fn implements(&self, t: TypeKey, iface: TypeKey) -> bool {
+    pub(crate) fn implements(&self, t: TypeKey, iface: TypeKey) -> bool {
         self.missing_method(t, iface).is_none()
     }
 
     /// Computes method set of a type.
-    pub fn method_set(&self, _t: TypeKey) -> HashMap<String, ObjKey> {
+    pub(crate) fn method_set(&self, _t: TypeKey) -> HashMap<String, ObjKey> {
         // Full implementation would compute the method set for any type
         HashMap::new()
     }
 
     /// Returns missing method info if T doesn't implement I.
     /// Returns (method_name, have_type, want_type) or None if T implements I.
-    pub fn missing_method(
+    pub(crate) fn missing_method(
         &self,
         _t: TypeKey,
         iface: TypeKey,
@@ -373,7 +373,7 @@ impl Checker {
     }
 
     /// Declares a method in a method set, checking for duplicates.
-    pub fn declare_in_method_set(
+    pub(crate) fn declare_in_method_set(
         &self,
         set: &mut HashMap<String, MethodInfo>,
         name: String,

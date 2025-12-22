@@ -10,7 +10,7 @@ use super::checker::Checker;
 impl Checker {
     /// Returns true if the statement is a terminating statement.
     /// A terminating statement prevents execution from reaching the end of a function.
-    pub fn is_terminating(&self, stmt: &Stmt) -> bool {
+    pub(crate) fn is_terminating(&self, stmt: &Stmt) -> bool {
         self.is_terminating_impl(stmt, None)
     }
 
@@ -93,7 +93,7 @@ impl Checker {
     }
 
     /// Returns true if the last non-empty statement in the list terminates.
-    pub fn is_terminating_list(&self, stmts: &[Stmt], label: Option<&str>) -> bool {
+    pub(crate) fn is_terminating_list(&self, stmts: &[Stmt], label: Option<&str>) -> bool {
         // Find the last non-empty statement
         let last_non_empty = stmts.iter().rev().find(|s| !matches!(s.kind, StmtKind::Empty));
 

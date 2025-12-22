@@ -20,7 +20,7 @@ use super::util::{UnpackResult, UnpackedResultLeftovers};
 impl Checker {
     /// Type-checks a call expression.
     /// Returns the expression kind (Statement, Conversion, or Expression).
-    pub fn call(
+    pub(crate) fn call(
         &mut self,
         x: &mut Operand,
         call: &CallExpr,
@@ -116,7 +116,7 @@ impl Checker {
     }
 
     /// Checks argument passing for the call with the given signature.
-    pub fn arguments(
+    pub(crate) fn arguments(
         &mut self,
         x: &mut Operand,
         call: &CallExpr,

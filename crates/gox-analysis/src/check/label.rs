@@ -64,7 +64,7 @@ impl LabelBlock {
 
 impl Checker {
     /// Checks labels in a function body.
-    pub fn check_labels(&mut self, body: &Block) {
+    pub(crate) fn check_labels(&mut self, body: &Block) {
         let mut block = LabelBlock::new(None);
         self.collect_labels(&body.stmts, &mut block);
         self.check_label_usages(&body.stmts, &mut block);

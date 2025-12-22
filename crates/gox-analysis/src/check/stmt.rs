@@ -92,7 +92,7 @@ pub struct StmtContext {
 }
 
 impl StmtContext {
-    pub fn new() -> StmtContext {
+    pub(crate) fn new() -> StmtContext {
         StmtContext::default()
     }
 }
@@ -132,7 +132,7 @@ impl Checker {
     // =========================================================================
 
     /// Type-checks a function body.
-    pub fn func_body(
+    pub(crate) fn func_body(
         &mut self,
         di: Option<crate::objects::DeclInfoKey>,
         _name: &str,
@@ -965,80 +965,20 @@ impl Checker {
 
             StmtKind::Var(var) => {
                 // Variable declaration in statement context
-                let scope_key = self.octx.scope.unwrap();
-                for spec in &var.specs {
-                    // Get type if specified
-                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty));
-                    
-                    // Evaluate initializer expressions
-                    let mut rhs_types: Vec<Option<TypeKey>> = Vec::new();
-                    for val in &spec.values {
-                        let x = &mut Operand::new();
-                        self.expr(x, val);
-                        if !x.invalid() {
-                            if let Some(dt) = declared_type {
-                                self.assignment(x, Some(dt), "variable declaration");
-                            }
-                        }
-                        rhs_types.push(x.typ);
-                    }
-                    
-                    // Declare variables
-                    for (i, name) in spec.names.iter().enumerate() {
-                        let name_str = self.resolve_symbol(name.symbol).to_string();
-                        let var_type = declared_type.or_else(|| rhs_types.get(i).copied().flatten());
-                        let okey = self.new_var(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), var_type);
-                        if name_str != "_" {
-                            self.result.record_def(name.clone(), Some(okey));
-                            self.declare(scope_key, okey);
-                        }
-                    }
-                }
+                // Delegate to decl_stmt which properly handles var_decl, N-to-1, etc.
+                self.decl_stmt(&gox_syntax::ast::Decl::Var(var.clone()));
             }
 
             StmtKind::Const(cons) => {
                 // Constant declaration in statement context
-                let scope_key = self.octx.scope.unwrap();
-                for spec in &cons.specs {
-                    // Get type if specified
-                    let declared_type = spec.ty.as_ref().map(|ty| self.type_expr(ty));
-                    
-                    // Evaluate constant expressions
-                    for (_i, (name, val)) in spec.names.iter().zip(spec.values.iter()).enumerate() {
-                        let x = &mut Operand::new();
-                        self.expr(x, val);
-                        
-                        let const_type = declared_type.or(x.typ);
-                        let const_val = match &x.mode {
-                            OperandMode::Constant(v) => v.clone(),
-                            _ => {
-                                if !x.invalid() {
-                                    self.error_code(TypeError::NotConstant, val.span);
-                                }
-                                Value::Unknown
-                            }
-                        };
-                        
-                        let name_str = self.resolve_symbol(name.symbol).to_string();
-                        let okey = self.new_const(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), const_type, const_val);
-                        if name_str != "_" {
-                            self.result.record_def(name.clone(), Some(okey));
-                            self.declare(scope_key, okey);
-                        }
-                    }
-                }
+                // Delegate to decl_stmt which properly handles const_decl, iota, etc.
+                self.decl_stmt(&gox_syntax::ast::Decl::Const(cons.clone()));
             }
 
-            StmtKind::Type(ty) => {
+            StmtKind::Type(tdecl) => {
                 // Type declaration in statement context
-                let scope_key = self.octx.scope.unwrap();
-                let name_str = self.resolve_symbol(ty.name.symbol).to_string();
-                let rhs_type = self.type_expr(&ty.ty);
-                let okey = self.new_type_name(ty.name.span.start.to_usize(), Some(self.pkg), name_str.clone(), Some(rhs_type));
-                if name_str != "_" {
-                    self.result.record_def(ty.name.clone(), Some(okey));
-                    self.declare(scope_key, okey);
-                }
+                // Delegate to decl_stmt which properly handles type_decl with Named types
+                self.decl_stmt(&gox_syntax::ast::Decl::Type(tdecl.clone()));
             }
         }
     }
@@ -1072,6 +1012,7 @@ impl Checker {
         values: &[Expr],
         span: Span,
     ) {
+        let top = self.delayed_count();
         let scope_key = match self.octx.scope {
             Some(s) => s,
             None => return,
@@ -1107,6 +1048,9 @@ impl Checker {
 
         // Use init_vars to properly handle type inference (converts untyped to default types)
         self.init_vars(&lhs_vars, values, None);
+
+        // Process function literals in rhs expressions before scope changes
+        self.process_delayed(top);
 
         // Declare new variables in scope
         if !new_vars.is_empty() {

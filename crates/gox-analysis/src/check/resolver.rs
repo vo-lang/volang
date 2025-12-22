@@ -60,7 +60,7 @@ pub enum DeclInfo {
 }
 
 impl DeclInfo {
-    pub fn new_const(
+    pub(crate) fn new_const(
         file_scope: ScopeKey,
         typ: Option<TypeExpr>,
         init: Option<Expr>,
@@ -73,7 +73,7 @@ impl DeclInfo {
         })
     }
 
-    pub fn new_var(
+    pub(crate) fn new_var(
         file_scope: ScopeKey,
         lhs: Option<Vec<ObjKey>>,
         typ: Option<TypeExpr>,
@@ -88,7 +88,7 @@ impl DeclInfo {
         })
     }
 
-    pub fn new_type(file_scope: ScopeKey, typ: TypeExpr, alias: bool) -> DeclInfo {
+    pub(crate) fn new_type(file_scope: ScopeKey, typ: TypeExpr, alias: bool) -> DeclInfo {
         DeclInfo::Type(DeclInfoType {
             file_scope,
             typ,
@@ -96,7 +96,7 @@ impl DeclInfo {
         })
     }
 
-    pub fn new_func(file_scope: ScopeKey, fdecl: FuncDecl) -> DeclInfo {
+    pub(crate) fn new_func(file_scope: ScopeKey, fdecl: FuncDecl) -> DeclInfo {
         DeclInfo::Func(DeclInfoFunc {
             file_scope,
             fdecl,
@@ -104,35 +104,35 @@ impl DeclInfo {
         })
     }
 
-    pub fn as_const(&self) -> &DeclInfoConst {
+    pub(crate) fn as_const(&self) -> &DeclInfoConst {
         match self {
             DeclInfo::Const(c) => c,
             _ => unreachable!(),
         }
     }
 
-    pub fn as_var(&self) -> &DeclInfoVar {
+    pub(crate) fn as_var(&self) -> &DeclInfoVar {
         match self {
             DeclInfo::Var(v) => v,
             _ => unreachable!(),
         }
     }
 
-    pub fn as_type(&self) -> &DeclInfoType {
+    pub(crate) fn as_type(&self) -> &DeclInfoType {
         match self {
             DeclInfo::Type(t) => t,
             _ => unreachable!(),
         }
     }
 
-    pub fn as_func(&self) -> &DeclInfoFunc {
+    pub(crate) fn as_func(&self) -> &DeclInfoFunc {
         match self {
             DeclInfo::Func(f) => f,
             _ => unreachable!(),
         }
     }
 
-    pub fn file_scope(&self) -> ScopeKey {
+    pub(crate) fn file_scope(&self) -> ScopeKey {
         match self {
             DeclInfo::Const(c) => c.file_scope,
             DeclInfo::Var(v) => v.file_scope,
@@ -141,7 +141,7 @@ impl DeclInfo {
         }
     }
 
-    pub fn deps(&self) -> &HashSet<ObjKey> {
+    pub(crate) fn deps(&self) -> &HashSet<ObjKey> {
         match self {
             DeclInfo::Const(c) => &c.deps,
             DeclInfo::Var(v) => &v.deps,
@@ -150,7 +150,7 @@ impl DeclInfo {
         }
     }
 
-    pub fn deps_mut(&mut self) -> &mut HashSet<ObjKey> {
+    pub(crate) fn deps_mut(&mut self) -> &mut HashSet<ObjKey> {
         match self {
             DeclInfo::Const(c) => &mut c.deps,
             DeclInfo::Var(v) => &mut v.deps,
@@ -160,7 +160,7 @@ impl DeclInfo {
     }
 
     /// Add a dependency to this declaration.
-    pub fn add_dep(&mut self, okey: ObjKey) {
+    pub(crate) fn add_dep(&mut self, okey: ObjKey) {
         self.deps_mut().insert(okey);
     }
 }
@@ -172,7 +172,7 @@ impl DeclInfo {
 impl Checker {
     /// Collects all package-level declarations from the files.
     /// This is the first pass of type checking.
-    pub fn collect_objects(&mut self, files: &[gox_syntax::ast::File], importer: Option<&mut dyn Importer>) {
+    pub(crate) fn collect_objects(&mut self, files: &[gox_syntax::ast::File], importer: Option<&mut dyn Importer>) {
         // Track all imported packages
         let mut all_imported: HashSet<PackageKey> = self
             .package(self.pkg)
@@ -703,7 +703,7 @@ impl Checker {
     }
 
     /// Type-checks all package objects (but not function bodies).
-    pub fn package_objects(&mut self) {
+    pub(crate) fn package_objects(&mut self) {
         // Process package objects in source order
         let mut obj_list: Vec<ObjKey> = self.obj_map.keys().copied().collect();
         obj_list.sort_by_key(|&o| self.lobj(o).order());
@@ -745,7 +745,7 @@ impl Checker {
     }
 
     /// Checks for unused imports.
-    pub fn unused_imports(&mut self) {
+    pub(crate) fn unused_imports(&mut self) {
         // Check regular imported packages
         let pkg_scope = *self.package(self.pkg).scope();
         for &child_scope in self.scope(pkg_scope).children() {

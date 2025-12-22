@@ -265,18 +265,18 @@ pub enum TypeError {
 impl TypeError {
     /// Returns the numeric error code.
     #[inline]
-    pub fn code(self) -> u16 {
+    pub(crate) fn code(self) -> u16 {
         self as u16
     }
 
     /// Returns whether this is a warning (soft error).
     #[inline]
-    pub fn is_warning(self) -> bool {
+    pub(crate) fn is_warning(self) -> bool {
         self.code() >= 2900
     }
 
     /// Returns the default error message.
-    pub fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             // Type/Assignment
             TypeError::TypeMismatch => "type mismatch",
@@ -410,7 +410,7 @@ impl TypeError {
     }
 
     /// Creates a diagnostic with this error code (no location).
-    pub fn diagnostic(self) -> Diagnostic {
+    pub(crate) fn diagnostic(self) -> Diagnostic {
         if self.is_warning() {
             Diagnostic::warning(self.message()).with_code(self.code())
         } else {
@@ -419,7 +419,7 @@ impl TypeError {
     }
 
     /// Creates a diagnostic with this error code and a custom message.
-    pub fn with_message(self, message: impl Into<String>) -> Diagnostic {
+    pub(crate) fn with_message(self, message: impl Into<String>) -> Diagnostic {
         if self.is_warning() {
             Diagnostic::warning(message).with_code(self.code())
         } else {
@@ -428,12 +428,12 @@ impl TypeError {
     }
 
     /// Creates a diagnostic with this error code and a span label.
-    pub fn at(self, span: impl Into<Span>) -> Diagnostic {
+    pub(crate) fn at(self, span: impl Into<Span>) -> Diagnostic {
         self.diagnostic().with_label(Label::primary(span))
     }
 
     /// Creates a diagnostic with this error code, custom message, and span.
-    pub fn at_with_message(self, span: impl Into<Span>, message: impl Into<String>) -> Diagnostic {
+    pub(crate) fn at_with_message(self, span: impl Into<Span>, message: impl Into<String>) -> Diagnostic {
         self.with_message(message).with_label(Label::primary(span))
     }
 }

@@ -17,7 +17,7 @@ use super::errors::TypeError;
 
 impl Checker {
     /// Performs explicit type conversion of x to type t.
-    pub fn conversion(&mut self, x: &mut Operand, t: TypeKey) {
+    pub(crate) fn conversion(&mut self, x: &mut Operand, t: TypeKey) {
         let constv = match &mut x.mode {
             OperandMode::Constant(v) => Some(v),
             _ => None,
@@ -93,7 +93,7 @@ impl Checker {
     }
 
     /// Reports whether x is convertible to type t.
-    pub fn convertible_to(&mut self, x: &Operand, t: TypeKey) -> bool {
+    pub(crate) fn convertible_to(&mut self, x: &Operand, t: TypeKey) -> bool {
         // "x is assignable to t"
         let mut reason = String::new();
         if self.assignable_to(x, t, &mut reason) {

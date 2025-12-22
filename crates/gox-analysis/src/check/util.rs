@@ -42,7 +42,7 @@ pub enum UnpackResult<'a> {
 
 impl<'a> UnpackResult<'a> {
     /// Get the i-th value from the unpacked result.
-    pub fn get(
+    pub(crate) fn get(
         &self,
         checker: &mut Checker,
         x: &mut Operand,
@@ -77,7 +77,7 @@ impl<'a> UnpackResult<'a> {
     }
 
     /// Returns the count of RHS values and ordering relative to LHS count.
-    pub fn rhs_count(&self) -> (usize, Ordering) {
+    pub(crate) fn rhs_count(&self) -> (usize, Ordering) {
         match self {
             UnpackResult::Tuple(_, types, ord) => (types.len(), *ord),
             UnpackResult::CommaOk(_, types) => (types.len(), Ordering::Equal),
@@ -89,7 +89,7 @@ impl<'a> UnpackResult<'a> {
     }
 
     /// Use (type-check) remaining expressions starting from index `from`.
-    pub fn use_(
+    pub(crate) fn use_(
         &self,
         checker: &mut Checker,
         from: usize,
@@ -106,7 +106,7 @@ impl<'a> UnpackResult<'a> {
     }
 
     /// Returns true if this is an error result.
-    pub fn is_err(&self) -> bool {
+    pub(crate) fn is_err(&self) -> bool {
         matches!(self, UnpackResult::Error)
     }
 }
@@ -119,7 +119,7 @@ pub struct UnpackedResultLeftovers<'a> {
 }
 
 impl<'a> UnpackedResultLeftovers<'a> {
-    pub fn new(
+    pub(crate) fn new(
         re: &'a UnpackResult<'a>,
         consumed: Option<&'a Vec<Operand>>,
     ) -> UnpackedResultLeftovers<'a> {
@@ -130,13 +130,13 @@ impl<'a> UnpackedResultLeftovers<'a> {
     }
 
     /// Use all remaining values.
-    pub fn use_all(&self, checker: &mut Checker) {
+    pub(crate) fn use_all(&self, checker: &mut Checker) {
         let from = self.consumed.map_or(0, |c| c.len());
         self.leftovers.use_(checker, from);
     }
 
     /// Get the i-th value, considering already consumed operands.
-    pub fn get(
+    pub(crate) fn get(
         &self,
         checker: &mut Checker,
         x: &mut Operand,
@@ -161,7 +161,7 @@ impl<'a> UnpackedResultLeftovers<'a> {
 
 impl Checker {
     /// Remove parentheses from an expression.
-    pub fn unparen(expr: &Expr) -> &Expr {
+    pub(crate) fn unparen(expr: &Expr) -> &Expr {
         match &expr.kind {
             ExprKind::Paren(inner) => Self::unparen(inner),
             _ => expr,
@@ -169,29 +169,29 @@ impl Checker {
     }
 
     /// Report an invalid AST error.
-    pub fn invalid_ast(&self, span: Span, err: &str) {
+    pub(crate) fn invalid_ast(&self, span: Span, err: &str) {
         self.error_code_msg(TypeError::InvalidOp, span, format!("invalid AST: {}", err));
     }
 
     /// Report an invalid argument error.
-    pub fn invalid_arg(&self, span: Span, err: &str) {
+    pub(crate) fn invalid_arg(&self, span: Span, err: &str) {
         self.error_code_msg(TypeError::InvalidOp, span, format!("invalid argument: {}", err));
     }
 
     /// Report an invalid operation error.
-    pub fn invalid_op(&self, span: Span, err: &str) {
+    pub(crate) fn invalid_op(&self, span: Span, err: &str) {
         self.error_code_msg(TypeError::InvalidOp, span, format!("invalid operation: {}", err));
     }
 
     /// Format object path as string for error messages.
-    pub fn obj_path_str(&self, path: &[ObjKey]) -> String {
+    pub(crate) fn obj_path_str(&self, path: &[ObjKey]) -> String {
         let names: Vec<&str> = path.iter().map(|p| self.lobj(*p).name()).collect();
         names.join("->")
     }
 
     /// Check if obj appears in path (cycle detection).
     /// If report is true, also reports a cycle error.
-    pub fn has_cycle(&self, okey: ObjKey, path: &[ObjKey], report: bool) -> bool {
+    pub(crate) fn has_cycle(&self, okey: ObjKey, path: &[ObjKey], report: bool) -> bool {
         if let Some((i, _)) = path.iter().enumerate().find(|(_, &x)| x == okey) {
             if report {
                 let obj_val = self.lobj(okey);
@@ -218,31 +218,8 @@ impl Checker {
         false
     }
 
-    /// Create a comma-ok tuple type.
-    pub fn comma_ok_type(
-        tc_objs: &mut TCObjects,
-        pkg: PackageKey,
-        t: &[TypeKey; 2],
-    ) -> TypeKey {
-        let vars = vec![
-            tc_objs.lobjs.insert(obj::LangObj::new_var(
-                0,
-                Some(pkg),
-                String::new(),
-                Some(t[0]),
-            )),
-            tc_objs.lobjs.insert(obj::LangObj::new_var(
-                0,
-                Some(pkg),
-                String::new(),
-                Some(t[1]),
-            )),
-        ];
-        tc_objs.new_t_tuple(vars)
-    }
-
     /// Unpack the RHS of an assignment.
-    pub fn unpack<'b>(
+    pub(crate) fn unpack<'b>(
         &mut self,
         rhs: &'b [Expr],
         lhs_len: usize,
@@ -290,7 +267,7 @@ impl Checker {
     }
 
     /// Type-check a list of expressions (for side effects).
-    pub fn use_exprs(&mut self, exprs: &[Expr]) {
+    pub(crate) fn use_exprs(&mut self, exprs: &[Expr]) {
         let mut x = Operand::new();
         for e in exprs.iter() {
             self.raw_expr(&mut x, e, None);
@@ -299,7 +276,7 @@ impl Checker {
 
     /// Like use_exprs, but doesn't "use" top-level identifiers.
     /// Used for LHS of assignments.
-    pub fn use_lhs(&mut self, lhs: &[Expr]) {
+    pub(crate) fn use_lhs(&mut self, lhs: &[Expr]) {
         let mut x = Operand::new();
         for e in lhs.iter() {
             let v: Option<(ObjKey, bool)> = match Self::unparen(e) {
@@ -335,7 +312,7 @@ impl Checker {
     }
 
     /// Look up an identifier in the current scope.
-    pub fn lookup(&self, name: &str) -> Option<ObjKey> {
+    pub(crate) fn lookup(&self, name: &str) -> Option<ObjKey> {
         let scope_key = self.octx.scope?;
         if let Some(pos) = self.octx.pos {
             scope::lookup_parent_at(scope_key, name, pos, self.objs())
@@ -346,7 +323,7 @@ impl Checker {
     }
 
     /// Add a dependency from the current declaration to `to`.
-    pub fn add_decl_dep(&mut self, to: ObjKey) {
+    pub(crate) fn add_decl_dep(&mut self, to: ObjKey) {
         let decl_key = match self.octx.decl {
             Some(k) => k,
             None => return,
@@ -362,59 +339,59 @@ impl Checker {
     // =========================================================================
 
     /// Get a language object by key.
-    pub fn lobj(&self, key: ObjKey) -> &LangObj {
+    pub(crate) fn lobj(&self, key: ObjKey) -> &LangObj {
         &self.tc_objs.lobjs[key]
     }
 
     /// Get a mutable language object by key.
-    pub fn lobj_mut(&mut self, key: ObjKey) -> &mut LangObj {
+    pub(crate) fn lobj_mut(&mut self, key: ObjKey) -> &mut LangObj {
         &mut self.tc_objs.lobjs[key]
     }
 
     /// Get a type by key.
-    pub fn otype(&self, key: TypeKey) -> &Type {
+    pub(crate) fn otype(&self, key: TypeKey) -> &Type {
         &self.tc_objs.types[key]
     }
 
     /// Get a mutable type by key.
-    pub fn otype_mut(&mut self, key: TypeKey) -> &mut Type {
+    pub(crate) fn otype_mut(&mut self, key: TypeKey) -> &mut Type {
         &mut self.tc_objs.types[key]
     }
 
     /// Get an interface type by key.
-    pub fn otype_interface(&self, key: TypeKey) -> &typ::InterfaceDetail {
+    pub(crate) fn otype_interface(&self, key: TypeKey) -> &typ::InterfaceDetail {
         self.otype(key).try_as_interface().unwrap()
     }
 
     /// Get a signature type by key.
-    pub fn otype_signature(&self, key: TypeKey) -> &typ::SignatureDetail {
+    pub(crate) fn otype_signature(&self, key: TypeKey) -> &typ::SignatureDetail {
         self.otype(key).try_as_signature().unwrap()
     }
 
     /// Get a mutable interface type by key.
-    pub fn otype_interface_mut(&mut self, key: TypeKey) -> &mut typ::InterfaceDetail {
+    pub(crate) fn otype_interface_mut(&mut self, key: TypeKey) -> &mut typ::InterfaceDetail {
         self.otype_mut(key).try_as_interface_mut().unwrap()
     }
 
     /// Get a mutable signature type by key.
-    pub fn otype_signature_mut(&mut self, key: TypeKey) -> &mut typ::SignatureDetail {
+    pub(crate) fn otype_signature_mut(&mut self, key: TypeKey) -> &mut typ::SignatureDetail {
         self.otype_mut(key).try_as_signature_mut().unwrap()
     }
 
     // Note: package, package_mut, scope are in checker.rs
 
     /// Get builtin function info.
-    pub fn builtin_info(&self, id: Builtin) -> &BuiltinInfo {
+    pub(crate) fn builtin_info(&self, id: Builtin) -> &BuiltinInfo {
         &self.universe().builtins()[&id]
     }
 
     /// Get a basic type by kind.
-    pub fn basic_type(&self, t: BasicType) -> TypeKey {
+    pub(crate) fn basic_type(&self, t: BasicType) -> TypeKey {
         self.universe().types()[&t]
     }
 
     /// Get the invalid type.
-    pub fn invalid_type(&self) -> TypeKey {
+    pub(crate) fn invalid_type(&self) -> TypeKey {
         self.basic_type(BasicType::Invalid)
     }
     
@@ -424,113 +401,113 @@ impl Checker {
     
     /// Get a reference to the TCObjects.
     #[inline]
-    pub fn objs(&self) -> &TCObjects {
+    pub(crate) fn objs(&self) -> &TCObjects {
         &self.tc_objs
     }
     
     /// Get a mutable reference to the TCObjects.
     #[inline]
-    pub fn objs_mut(&mut self) -> &mut TCObjects {
+    pub(crate) fn objs_mut(&mut self) -> &mut TCObjects {
         &mut self.tc_objs
     }
     
     /// Insert a declaration info and return its key.
     #[inline]
-    pub fn insert_decl(&mut self, decl: super::resolver::DeclInfo) -> DeclInfoKey {
+    pub(crate) fn insert_decl(&mut self, decl: super::resolver::DeclInfo) -> DeclInfoKey {
         self.tc_objs.decls.insert(decl)
     }
     
     // Factory method wrappers
     
     #[inline]
-    pub fn new_scope(&mut self, parent: Option<ScopeKey>, pos: usize, end: usize, comment: &str, is_func: bool) -> ScopeKey {
+    pub(crate) fn new_scope(&mut self, parent: Option<ScopeKey>, pos: usize, end: usize, comment: &str, is_func: bool) -> ScopeKey {
         self.tc_objs.new_scope(parent, pos, end, comment, is_func)
     }
     
     #[inline]
-    pub fn new_package(&mut self, path: String) -> PackageKey {
+    pub(crate) fn new_package(&mut self, path: String) -> PackageKey {
         self.tc_objs.new_package(path)
     }
     
     #[inline]
-    pub fn new_pkg_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, imported: PackageKey) -> ObjKey {
+    pub(crate) fn new_pkg_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, imported: PackageKey) -> ObjKey {
         self.tc_objs.new_pkg_name(pos, pkg, name, imported)
     }
     
     #[inline]
-    pub fn new_const(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, val: crate::constant::Value) -> ObjKey {
+    pub(crate) fn new_const(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, val: crate::constant::Value) -> ObjKey {
         self.tc_objs.new_const(pos, pkg, name, typ, val)
     }
     
     #[inline]
-    pub fn new_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
         self.tc_objs.new_var(pos, pkg, name, typ)
     }
     
     #[inline]
-    pub fn new_param_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_param_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
         self.tc_objs.new_param_var(pos, pkg, name, typ)
     }
     
     #[inline]
-    pub fn new_field(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, embedded: bool) -> ObjKey {
+    pub(crate) fn new_field(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, embedded: bool) -> ObjKey {
         self.tc_objs.new_field(pos, pkg, name, typ, embedded)
     }
     
     #[inline]
-    pub fn new_func(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_func(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
         self.tc_objs.new_func(pos, pkg, name, typ)
     }
     
     #[inline]
-    pub fn new_type_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+    pub(crate) fn new_type_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
         self.tc_objs.new_type_name(pos, pkg, name, typ)
     }
     
     #[inline]
-    pub fn new_label(&mut self, pos: usize, pkg: Option<PackageKey>, name: String) -> ObjKey {
+    pub(crate) fn new_label(&mut self, pos: usize, pkg: Option<PackageKey>, name: String) -> ObjKey {
         self.tc_objs.new_label(pos, pkg, name)
     }
     
     // Type creation wrappers
     
     #[inline]
-    pub fn new_t_array(&mut self, elem: TypeKey, len: Option<u64>) -> TypeKey {
+    pub(crate) fn new_t_array(&mut self, elem: TypeKey, len: Option<u64>) -> TypeKey {
         self.tc_objs.new_t_array(elem, len)
     }
     
     #[inline]
-    pub fn new_t_slice(&mut self, elem: TypeKey) -> TypeKey {
+    pub(crate) fn new_t_slice(&mut self, elem: TypeKey) -> TypeKey {
         self.tc_objs.new_t_slice(elem)
     }
     
     #[inline]
-    pub fn new_t_map(&mut self, key: TypeKey, value: TypeKey) -> TypeKey {
+    pub(crate) fn new_t_map(&mut self, key: TypeKey, value: TypeKey) -> TypeKey {
         self.tc_objs.new_t_map(key, value)
     }
     
     #[inline]
-    pub fn new_t_chan(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
+    pub(crate) fn new_t_chan(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
         self.tc_objs.new_t_chan(dir, elem)
     }
     
     #[inline]
-    pub fn new_t_pointer(&mut self, base: TypeKey) -> TypeKey {
+    pub(crate) fn new_t_pointer(&mut self, base: TypeKey) -> TypeKey {
         self.tc_objs.new_t_pointer(base)
     }
     
     #[inline]
-    pub fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
+    pub(crate) fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
         self.tc_objs.new_t_tuple(vars)
     }
     
     #[inline]
-    pub fn new_t_struct(&mut self, fields: Vec<ObjKey>, tags: Option<Vec<Option<String>>>) -> TypeKey {
+    pub(crate) fn new_t_struct(&mut self, fields: Vec<ObjKey>, tags: Option<Vec<Option<String>>>) -> TypeKey {
         self.tc_objs.new_t_struct(fields, tags)
     }
     
     #[inline]
-    pub fn new_t_signature(
+    pub(crate) fn new_t_signature(
         &mut self,
         scope: Option<ScopeKey>,
         recv: Option<ObjKey>,
@@ -542,17 +519,17 @@ impl Checker {
     }
     
     #[inline]
-    pub fn new_t_interface(&mut self, methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> TypeKey {
+    pub(crate) fn new_t_interface(&mut self, methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> TypeKey {
         self.tc_objs.new_t_interface(methods, embeddeds)
     }
     
     #[inline]
-    pub fn new_t_empty_interface(&mut self) -> TypeKey {
+    pub(crate) fn new_t_empty_interface(&mut self) -> TypeKey {
         self.tc_objs.new_t_empty_interface()
     }
     
     #[inline]
-    pub fn new_t_named(&mut self, obj: Option<ObjKey>, underlying: Option<TypeKey>, methods: Vec<ObjKey>) -> TypeKey {
+    pub(crate) fn new_t_named(&mut self, obj: Option<ObjKey>, underlying: Option<TypeKey>, methods: Vec<ObjKey>) -> TypeKey {
         self.tc_objs.new_t_named(obj, underlying, methods)
     }
 }
