@@ -3,7 +3,6 @@
 //! This module implements compile-time constant values and operations
 //! for constant folding during type checking.
 
-#![allow(dead_code)]
 
 use crate::typ::{BasicDetail, BasicInfo, BasicType};
 use gox_syntax::ast::{BinaryOp, UnaryOp};

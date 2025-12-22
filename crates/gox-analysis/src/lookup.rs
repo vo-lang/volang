@@ -3,7 +3,6 @@
 //! This module provides functions for looking up fields and methods
 //! in types, including embedded fields.
 
-#![allow(dead_code)]
 
 use crate::check::Checker;
 use crate::obj::LangObj;

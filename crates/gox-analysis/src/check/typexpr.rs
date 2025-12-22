@@ -3,9 +3,8 @@
 //! This module converts AST type expressions (TypeExpr) to internal types (TypeKey).
 //! It handles type-checking of type expressions and resolves them to TypeKey values.
 
-#![allow(dead_code)]
 
-use gox_common::symbol::{Ident, Symbol};
+use gox_common::symbol::{Ident};
 
 use crate::obj::EntityType;
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
@@ -942,13 +941,4 @@ impl Checker {
         itype
     }
 
-    // =========================================================================
-    // Helper methods
-    // =========================================================================
-
-    /// Looks up a predeclared type by name.
-    fn lookup_predeclared_type(&self, name: Symbol) -> Option<TypeKey> {
-        let name_str = self.interner.resolve(name)?;
-        self.universe().lookup_type_by_name(name_str)
-    }
 }

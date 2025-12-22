@@ -127,12 +127,6 @@ macro_rules! define_key {
             $vis struct $name(u32);
 
             impl $name {
-                /// Creates a new key from a raw u32 value.
-                #[inline]
-                pub fn new(idx: u32) -> Self {
-                    Self(idx)
-                }
-
                 /// Returns the raw u32 value.
                 #[inline]
                 pub fn raw(&self) -> u32 {

@@ -3,7 +3,6 @@
 //! This module provides utility types, macros, and functions used throughout
 //! the type checking process.
 
-#![allow(dead_code)]
 
 use std::cmp::Ordering;
 
@@ -549,29 +548,5 @@ impl Checker {
     #[inline]
     pub fn new_t_named(&mut self, obj: Option<ObjKey>, underlying: Option<TypeKey>, methods: Vec<ObjKey>) -> TypeKey {
         self.tc_objs.new_t_named(obj, underlying, methods)
-    }
-}
-
-// =============================================================================
-// Type utility functions
-// =============================================================================
-
-/// Returns true if the type is a basic type of the given kind.
-pub fn is_basic(typ: TypeKey, kind: BasicType, objs: &TCObjects) -> bool {
-    match &objs.types[typ] {
-        Type::Basic(detail) => detail.typ() == kind,
-        _ => false,
-    }
-}
-
-/// Returns the element type of a slice, array, map, channel, or pointer.
-pub fn elem_type(typ: TypeKey, objs: &TCObjects) -> Option<TypeKey> {
-    match &objs.types[typ] {
-        Type::Array(d) => Some(d.elem()),
-        Type::Slice(d) => Some(d.elem()),
-        Type::Map(d) => Some(d.elem()),
-        Type::Chan(d) => Some(d.elem()),
-        Type::Pointer(d) => Some(d.base()),
-        _ => None,
     }
 }

@@ -3,7 +3,6 @@
 //! This module implements assignment compatibility checking, variable
 //! initialization, and short variable declarations.
 
-#![allow(dead_code)]
 
 use gox_common::span::{BytePos, Span};
 use gox_common::symbol::Ident;
@@ -410,13 +409,6 @@ impl Checker {
         }
     }
 
-    /// Converts comma-ok mode to single value mode.
-    fn use_single_value(&mut self, x: &mut Operand) {
-        if let OperandMode::CommaOk = x.mode {
-            x.mode = OperandMode::Value;
-        }
-    }
-
     /// Checks if x is assignable to type t.
     /// Aligned with goscript/types/src/operand.rs::assignable_to
     pub fn assignable_to(&self, x: &Operand, t: TypeKey, reason: &mut String) -> bool {
@@ -496,14 +488,6 @@ impl Checker {
             }
         }
 
-        false
-    }
-
-    /// Checks if a constant value is representable as the target type.
-    fn is_representable(&self, val: &crate::constant::Value, target: TypeKey) -> bool {
-        if let crate::typ::Type::Basic(basic) = &self.otype(target) {
-            return val.representable(basic, None);
-        }
         false
     }
 

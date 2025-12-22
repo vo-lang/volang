@@ -3,7 +3,6 @@
 //! This module validates label declarations and usages for goto, break,
 //! and continue statements.
 
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -46,17 +45,6 @@ impl LabelBlock {
         } else {
             self.labels.insert(name, LabelInfo { span, used: false });
             true
-        }
-    }
-
-    /// Looks up a label in this block and parent blocks.
-    fn lookup(&self, name: &str) -> Option<&LabelInfo> {
-        if let Some(info) = self.labels.get(name) {
-            Some(info)
-        } else if let Some(ref parent) = self.parent {
-            parent.lookup(name)
-        } else {
-            None
         }
     }
 

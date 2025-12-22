@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128, real, imag)
 //! - No unsafe package (Alignof, Offsetof, Sizeof)
 
-#![allow(dead_code)]
 
 use std::cmp::Ordering;
 
@@ -89,43 +88,145 @@ impl Checker {
             }
         }
 
-        match id {
+        // Record builtin type signature helper
+        let record_sig = |checker: &mut Checker, res: Option<TypeKey>, args: &[TypeKey], variadic: bool| {
+            let sig = make_sig(&mut checker.tc_objs, res, args, variadic);
+            checker.result.record_builtin_type(&OperandMode::Builtin(id), &call.func, sig);
+        };
+
+        let result = match id {
             Builtin::Append => {
-                self.builtin_append(x, call, call_span)
+                let ok = self.builtin_append(x, call, call_span);
+                if ok {
+                    // append(s S, x ...T) S
+                    let slice = x.typ.unwrap();
+                    if let Some(detail) = self.otype(typ::underlying_type(slice, self.objs())).try_as_slice() {
+                        let tslice = self.new_t_slice(detail.elem());
+                        record_sig(self, Some(slice), &[slice, tslice], true);
+                    }
+                }
+                ok
             }
             Builtin::Cap | Builtin::Len => {
+                let arg_type = x.typ.unwrap_or(self.invalid_type());
                 let result = self.builtin_len_cap(x, id, hcor_backup.unwrap());
                 self.octx.has_call_or_recv = hcor_backup.unwrap();
+                if result {
+                    // len(x) int / cap(x) int - only record for non-constant results
+                    if !matches!(x.mode, OperandMode::Constant(_)) {
+                        let ty = typ::underlying_type(arg_type, self.objs());
+                        let ty = implicit_array_deref(ty, self.objs());
+                        record_sig(self, x.typ, &[ty], false);
+                    }
+                }
                 result
             }
             Builtin::Close => {
-                self.builtin_close(x)
+                let arg_type = x.typ.unwrap_or(self.invalid_type());
+                let ok = self.builtin_close(x);
+                if ok {
+                    // close(c)
+                    let tkey = typ::underlying_type(arg_type, self.objs());
+                    record_sig(self, None, &[tkey], false);
+                }
+                ok
             }
             Builtin::Copy => {
-                self.builtin_copy(x, call, call_span)
+                let dst_type = x.typ.unwrap_or(self.invalid_type());
+                let ok = self.builtin_copy(x, call, call_span);
+                if ok {
+                    // copy(dst, src []T) int
+                    let mut y = Operand::new();
+                    self.multi_expr(&mut y, &call.args[1]);
+                    let src_type = y.typ.unwrap_or(self.invalid_type());
+                    record_sig(self, Some(self.basic_type(BasicType::Int)), &[dst_type, src_type], false);
+                }
+                ok
             }
             Builtin::Delete => {
-                self.builtin_delete(x, call, call_span)
+                let map_type = x.typ.unwrap_or(self.invalid_type());
+                let ok = self.builtin_delete(x, call, call_span);
+                if ok {
+                    // delete(m, k)
+                    if let Some(detail) = self.otype(map_type).underlying_val(self.objs()).try_as_map() {
+                        record_sig(self, None, &[map_type, detail.key()], false);
+                    }
+                }
+                ok
             }
             Builtin::Make => {
-                self.builtin_make(x, call, call_span)
+                let ok = self.builtin_make(x, call, call_span);
+                if ok {
+                    // make(T, n) or make(T, n, m)
+                    let arg0t = x.typ.unwrap();
+                    let int_type = self.basic_type(BasicType::Int);
+                    // Record signature based on actual argument count
+                    let size_args = nargs - 1; // excluding type argument
+                    let args: Vec<TypeKey> = std::iter::once(arg0t)
+                        .chain(std::iter::repeat(int_type).take(size_args))
+                        .collect();
+                    record_sig(self, x.typ, &args, false);
+                }
+                ok
             }
             Builtin::New => {
-                self.builtin_new(x, call, call_span)
+                let ok = self.builtin_new(x, call, call_span);
+                if ok {
+                    // new(T) *T
+                    let arg0t = self.type_expr_from_expr(&call.args[0]);
+                    record_sig(self, x.typ, &[arg0t], false);
+                }
+                ok
             }
             Builtin::Panic => {
-                self.builtin_panic(x, call, call_span)
+                let ok = self.builtin_panic(x, call, call_span);
+                if ok {
+                    // panic(x interface{})
+                    let iempty = self.new_t_empty_interface();
+                    record_sig(self, None, &[iempty], false);
+                }
+                ok
             }
             Builtin::Print | Builtin::Println => {
-                self.builtin_print(x, call, call_span, id)
+                let ok = self.builtin_print(x, call, call_span, id);
+                if ok {
+                    // print(x, y, ...) / println(x, y, ...)
+                    // Collect all argument types
+                    let mut params = vec![];
+                    for i in 0..nargs {
+                        let mut arg = Operand::new();
+                        self.multi_expr(&mut arg, &call.args[i]);
+                        if let Some(t) = arg.typ {
+                            params.push(t);
+                        }
+                    }
+                    // note: not variadic
+                    record_sig(self, None, &params, false);
+                }
+                ok
             }
             Builtin::Recover => {
-                self.builtin_recover(x)
+                let ok = self.builtin_recover(x);
+                if ok {
+                    // recover() interface{}
+                    record_sig(self, x.typ, &[], false);
+                }
+                ok
             }
             Builtin::Assert => {
-                self.builtin_assert(x)
+                // assert(pred) - GoX extension
+                // Only record signature when argument is not constant
+                let arg_type = x.typ.unwrap_or(self.invalid_type());
+                let is_constant = matches!(x.mode, OperandMode::Constant(_));
+                let ok = self.builtin_assert(x);
+                if ok && !is_constant {
+                    // Only record when the argument is not constant
+                    record_sig(self, None, &[arg_type], false);
+                }
+                ok
             }
-        }
+        };
+        result
     }
 
     /// append(s S, x ...T) S

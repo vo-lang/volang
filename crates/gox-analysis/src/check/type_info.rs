@@ -1,6 +1,5 @@
 //! Type information produced by type checking.
 
-#![allow(dead_code)]
 
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
 use crate::operand::OperandMode;

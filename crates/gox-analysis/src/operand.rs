@@ -2,7 +2,6 @@
 //!
 //! An Operand represents an intermediate value during type checking.
 
-#![allow(dead_code)]
 
 use crate::check::Checker;
 use crate::obj::{Builtin, ConstValue, Pos};

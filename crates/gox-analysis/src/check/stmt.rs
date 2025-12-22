@@ -3,7 +3,6 @@
 //! This module type-checks statements, handling control flow,
 //! scope management, and statement-specific semantics.
 
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -92,33 +91,6 @@ pub struct StmtContext {
 impl StmtContext {
     pub fn new() -> StmtContext {
         StmtContext::default()
-    }
-
-    /// Create a context for loop body.
-    pub fn for_loop() -> StmtContext {
-        StmtContext {
-            break_ok: true,
-            continue_ok: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a context for switch case.
-    pub fn for_switch(is_final: bool) -> StmtContext {
-        StmtContext {
-            break_ok: true,
-            fallthrough_ok: !is_final,
-            final_switch_case: is_final,
-            ..Default::default()
-        }
-    }
-
-    /// Create a context for select case.
-    pub fn for_select() -> StmtContext {
-        StmtContext {
-            break_ok: true,
-            ..Default::default()
-        }
     }
 }
 
@@ -408,14 +380,6 @@ impl Checker {
     // =========================================================================
     // Statement list and wrapper (with fctx)
     // =========================================================================
-
-    /// Checks a simple (optional) statement.
-    fn simple_stmt(&mut self, s: Option<&Stmt>) {
-        if let Some(s) = s {
-            let sctx = StmtContext::new();
-            self.stmt(s, &sctx);
-        }
-    }
 
     /// Checks a list of statements.
     fn stmt_list(&mut self, list: &[Stmt], sctx: &StmtContext) {

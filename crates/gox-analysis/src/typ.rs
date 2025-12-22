@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128)
 //! - Pointer only valid for struct types
 
-#![allow(dead_code)]
 
 use crate::objects::{ObjKey, ScopeKey, TCObjects, TypeKey};
 use std::cell::{Ref, RefCell, RefMut};

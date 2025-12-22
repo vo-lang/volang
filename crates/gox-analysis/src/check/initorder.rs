@@ -3,7 +3,6 @@
 //! This module computes the order in which package-level variables
 //! must be initialized, detecting and reporting initialization cycles.
 
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

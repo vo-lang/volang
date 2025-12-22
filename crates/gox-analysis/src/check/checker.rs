@@ -3,7 +3,6 @@
 //! This module contains the main Checker struct and related context types
 //! for type checking GoX source code.
 
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

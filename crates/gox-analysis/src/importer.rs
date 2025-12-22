@@ -2,7 +2,6 @@
 //!
 //! This module provides the interface for importing packages during type checking.
 
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 

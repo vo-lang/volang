@@ -2,7 +2,6 @@
 //!
 //! A Selection describes a selector expression x.f.
 
-#![allow(dead_code)]
 
 use crate::objects::{ObjKey, TCObjects, TypeKey};
 use crate::typ;

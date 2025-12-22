@@ -3,7 +3,6 @@
 //! This module provides display/formatting traits for types, objects,
 //! and other type-checker constructs.
 
-#![allow(dead_code)]
 
 use crate::obj::{fmt_obj, Pos};
 use crate::objects::{ObjKey, ScopeKey, TCObjects, TypeKey};

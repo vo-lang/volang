@@ -3,7 +3,6 @@
 //! A LangObj describes a named language entity such as a package,
 //! constant, type, variable, function (incl. methods), or label.
 
-#![allow(dead_code)]
 
 pub use crate::constant::Value as ConstValue;
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
@@ -400,10 +399,6 @@ impl LangObj {
         self.typ = typ;
     }
 
-    pub(crate) fn set_pkg(&mut self, pkg: Option<PackageKey>) {
-        self.pkg = pkg;
-    }
-
     pub(crate) fn set_parent(&mut self, parent: Option<ScopeKey>) {
         self.parent = parent;
     }
@@ -414,10 +409,6 @@ impl LangObj {
 
     pub(crate) fn set_color(&mut self, color: ObjColor) {
         self.color = color;
-    }
-
-    pub(crate) fn set_scope_pos(&mut self, pos: Pos) {
-        self.scope_pos = pos;
     }
 
     /// Returns true if the name is exported (starts with uppercase).

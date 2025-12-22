@@ -3,7 +3,6 @@
 //! A Scope maintains the set of named language entities declared in the scope
 //! and a link to the immediately surrounding (outer) scope.
 
-#![allow(dead_code)]
 
 use crate::obj::Pos;
 use crate::objects::{ObjKey, ScopeKey, TCObjects};

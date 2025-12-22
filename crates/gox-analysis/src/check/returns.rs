@@ -3,7 +3,6 @@
 //! This module provides `is_terminating` logic to determine if a statement
 //! always terminates (e.g., returns, panics, infinite loops, etc.).
 
-#![allow(dead_code)]
 use gox_syntax::ast::{CaseClause, ExprKind, SelectCase, Stmt, StmtKind, TypeCaseClause};
 
 use super::checker::Checker;

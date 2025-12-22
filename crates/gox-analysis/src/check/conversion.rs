@@ -5,7 +5,6 @@
 //! - No complex types (complex64/128)
 //! - No UnsafePointer
 
-#![allow(dead_code)]
 
 use gox_common::span::Span;
 
@@ -158,19 +157,6 @@ impl Checker {
             {
                 return b.typ() == BasicType::Byte || b.typ() == BasicType::Rune;
             }
-        }
-        false
-    }
-
-    /// Reports whether t is a pointer type.
-    fn is_pointer(&self, t: &Type) -> bool {
-        t.underlying_val(self.objs()).try_as_pointer().is_some()
-    }
-
-    /// Reports whether t is uintptr.
-    fn is_uintptr(&self, t: &Type) -> bool {
-        if let Some(detail) = t.underlying_val(self.objs()).try_as_basic() {
-            return detail.typ() == BasicType::Uintptr;
         }
         false
     }

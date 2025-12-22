@@ -22,7 +22,6 @@
 //! The update_expr_type method is used to record this final type and update
 //! the recorded types.
 
-#![allow(dead_code)]
 
 use gox_common::span::Span;
 use gox_common_core::ExprId;
@@ -1166,23 +1165,18 @@ impl Checker {
                     }
                     Type::Array(arr) => {
                         let elem_type = arr.elem();
-                        for elem in &lit.elems {
-                            let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value);
-                            if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "array literal");
+                        let arr_len = arr.len();
+                        let n = self.indexed_elems(&lit.elems, elem_type, arr_len);
+                        // If array has unknown length (e.g. [...]T), set it now
+                        if arr_len.is_none() {
+                            if let Some(arr_mut) = self.otype_mut(utype).try_as_array_mut() {
+                                arr_mut.set_len(n);
                             }
                         }
                     }
                     Type::Slice(sl) => {
                         let elem_type = sl.elem();
-                        for elem in &lit.elems {
-                            let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value);
-                            if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "slice literal");
-                            }
-                        }
+                        self.indexed_elems(&lit.elems, elem_type, None);
                     }
                     Type::Map(m) => {
                         let key_type = m.key();

@@ -10,7 +10,6 @@
 //!
 //! Adapted from goscript with GoX-specific modifications.
 
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +18,6 @@ use std::rc::Rc;
 use gox_common::span::Span;
 use gox_syntax::ast::{InterfaceElem, InterfaceType};
 
-use crate::obj::EntityType;
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::typ::{self, InterfaceDetail, Type};
 
@@ -319,43 +317,6 @@ impl Checker {
             }
         }
 
-        None
-    }
-
-    /// Computes method set for a qualified type name (pkg.Type).
-    fn info_from_qualified_type_name(
-        &self,
-        scope: ScopeKey,
-        pkg_name: &str,
-        type_name: &str,
-    ) -> Option<RcIfaceInfo> {
-        // Look up the package
-        let lookup = self.scope(scope).lookup_parent(pkg_name, self.objs());
-        if lookup.is_none() {
-            return None;
-        }
-        let (_, obj1) = lookup.unwrap();
-        let obj_val = self.lobj(obj1);
-
-        if let EntityType::PkgName { imported, .. } = obj_val.entity_type() {
-            let imported_val = self.package(*imported);
-            let pkg_scope = self.scope(*imported_val.scope());
-
-            if let Some(obj2) = pkg_scope.lookup(type_name) {
-                let obj_val2 = self.lobj(obj2);
-                if !obj_val2.exported() {
-                    return None;
-                }
-                if obj_val2.entity_type().is_type_name() {
-                    if let Some(ty) = obj_val2.typ() {
-                        let ty = typ::underlying_type(ty, self.objs());
-                        if let Type::Interface(iface) = &self.otype(ty) {
-                            return Some(self.info_from_interface_detail(iface));
-                        }
-                    }
-                }
-            }
-        }
         None
     }
 

@@ -3,7 +3,6 @@
 //! This crate provides type checking for GoX source code, producing type information
 //! needed for code generation.
 
-#![allow(dead_code)]
 
 #[macro_use]
 pub mod arena;

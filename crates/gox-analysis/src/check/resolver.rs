@@ -3,7 +3,6 @@
 //! This module handles the first pass of type checking: collecting all
 //! package-level declarations and organizing them for later type checking.
 
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 
@@ -385,6 +384,15 @@ impl Checker {
 
                         self.declare_pkg_obj(name, okey, di);
                     }
+
+                    // Check arity: names vs values count
+                    self.arity_match(
+                        spec.names.len(),
+                        last_values.len(),
+                        last_typ_expr.is_some(),
+                        true, // is_const
+                        spec.span,
+                    );
                 }
             }
             Decl::Var(var_decl) => {
@@ -430,6 +438,15 @@ impl Checker {
                             self.declare_pkg_obj(name, okey, di);
                         }
                     }
+
+                    // Check arity: names vs values count
+                    self.arity_match(
+                        spec.names.len(),
+                        spec.values.len(),
+                        typ_expr.is_some(),
+                        false, // is_const
+                        spec.span,
+                    );
                 }
             }
             Decl::Type(type_decl) => {
@@ -531,33 +548,12 @@ impl Checker {
         receiver_type_name: &str,
         is_pointer: bool,
     ) {
-        // Look up the receiver base type in package scope
-        let pkg_scope = *self.package(self.pkg).scope();
-        let scope = self.scope(pkg_scope);
-
-        if let Some(base_obj) = scope.lookup(receiver_type_name) {
-            let base_val = self.lobj(base_obj);
-            // The object must be a type name
-            if !base_val.entity_type().is_type_name() {
-                return;
-            }
-
-            // Check for alias and resolve to non-alias type
-            if let Some(&decl_key) = self.obj_map.get(&base_obj) {
-                let decl = self.decl_info(decl_key);
-                if let DeclInfo::Type(t) = decl {
-                    if t.alias {
-                        // For aliases, we'd need to resolve further
-                        // For now, just use the alias target
-                        return;
-                    }
-                }
-            }
-
+        // Use resolve_base_type_name to properly resolve the base type
+        if let Some((ptr, base_obj)) = self.resolve_base_type_name(receiver_type_name, is_pointer) {
             // Set pointer receiver flag on method
             self.lobj_mut(method_key)
                 .entity_type_mut()
-                .func_set_has_ptr_recv(is_pointer);
+                .func_set_has_ptr_recv(ptr);
 
             // Associate method with base type
             self.methods.entry(base_obj).or_default().push(method_key);
@@ -627,29 +623,6 @@ impl Checker {
             return Err(format!("invalid character: {}", c));
         }
         Ok(path)
-    }
-
-    /// Returns the package path and name (last element).
-    fn pkg_path_and_name<'a>(&'a self, pkey: PackageKey) -> (&'a str, &'a str) {
-        let pkg_val = self.package(pkey);
-        let path = pkg_val.path();
-        if let Some(i) = path.rfind('/') {
-            if i > 0 && i < path.len() - 1 {
-                return (path, &path[i + 1..]);
-            }
-        }
-        (path, path)
-    }
-
-    /// Returns the directory portion of a file path.
-    fn file_dir(&self, file_num: usize, fctx: &FilesContext) -> String {
-        // Try to get the file path from the file
-        if file_num < fctx.files.len() {
-            // In a real implementation, we'd get the actual file path
-            // For now, return current directory
-            return ".".to_owned();
-        }
-        ".".to_owned()
     }
 
     /// Imports a package (fallback when no importer is available).

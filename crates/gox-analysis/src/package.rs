@@ -1,6 +1,5 @@
 //! Package representation for type checking.
 
-#![allow(dead_code)]
 
 use crate::objects::{PackageKey, ScopeKey};
 use std::borrow::Cow;

@@ -3,7 +3,6 @@
 //! This module sets up the universe scope with all predefined types,
 //! constants, and built-in functions.
 
-#![allow(dead_code)]
 
 use crate::obj::{Builtin, ConstValue, LangObj};
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};

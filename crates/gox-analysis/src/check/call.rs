@@ -4,7 +4,6 @@
 //!
 //! Adapted from goscript with GoX-specific modifications.
 
-#![allow(dead_code)]
 
 use gox_common::span::Span;
 use gox_syntax::ast::CallExpr;
