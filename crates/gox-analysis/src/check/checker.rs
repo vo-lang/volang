@@ -8,10 +8,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gox_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
+use gox_common::diagnostics::{Diagnostic, DiagnosticSink};
 use gox_common::span::Span;
 use gox_common::symbol::SymbolInterner;
-use gox_common::BytePos;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{Expr, File};
 
@@ -235,28 +234,6 @@ impl Checker {
         self.emit(code.at_with_message(span, msg));
     }
 
-    /// Report an error (legacy method for compatibility).
-    pub fn error(&self, span: Span, msg: String) {
-        self.diagnostics.borrow_mut().emit(
-            Diagnostic::error(msg).with_label(Label::primary(span))
-        );
-    }
-
-    /// Report an error with a string message (convenience method).
-    pub fn error_str(&self, pos: usize, msg: &str) {
-        let span = Span::new(BytePos(pos as u32), BytePos(pos as u32));
-        self.diagnostics.borrow_mut().emit(
-            Diagnostic::error(msg).with_label(Label::primary(span))
-        );
-    }
-
-    /// Report a soft error (warning-like).
-    pub fn soft_error(&self, span: Span, msg: String) {
-        self.diagnostics.borrow_mut().emit(
-            Diagnostic::warning(msg).with_label(Label::primary(span))
-        );
-    }
-
     /// Returns true if any errors were emitted.
     pub fn has_errors(&self) -> bool {
         self.diagnostics.borrow().has_errors()
@@ -434,13 +411,14 @@ impl Checker {
                 let name = self.resolve_ident(ident);
                 if pkg_name.is_none() {
                     if name == "_" {
-                        self.error(ident.span, "invalid package name _".to_string());
+                        self.error_code(TypeError::InvalidPackageName, ident.span);
                         return Err(());
                     } else {
                         pkg_name = Some(name.to_string());
                     }
                 } else if name != pkg_name.as_ref().unwrap() {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::PackageNameMismatch,
                         ident.span,
                         format!(
                             "package {}; expected {}",

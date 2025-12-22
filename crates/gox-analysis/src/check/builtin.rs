@@ -17,7 +17,8 @@ use crate::objects::{ObjKey, TCObjects, TypeKey};
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicInfo, BasicType, Type};
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 impl Checker {
     /// Type-checks a call to the built-in function specified by id.
@@ -245,7 +246,7 @@ impl Checker {
         let telem = match self.otype(typ::underlying_type(slice, self.objs())) {
             Type::Slice(detail) => detail.elem(),
             _ => {
-                self.error(call_span, "first argument to append must be a slice".to_string());
+                self.error_code(TypeError::AppendNotSlice, call_span);
                 return false;
             }
         };
@@ -288,13 +289,13 @@ impl Checker {
                 let tslice = self.new_t_slice(telem);
                 let mut reason = String::new();
                 if !self.assignable_to(&arg, tslice, &mut reason) {
-                    self.error(call.args[i].span, format!("cannot use value as []T in argument to append"));
+                    self.error_code(TypeError::AppendInvalidArg, call.args[i].span);
                     return false;
                 }
             } else {
                 let mut reason = String::new();
                 if !self.assignable_to(&arg, telem, &mut reason) {
-                    self.error(call.args[i].span, format!("cannot use value as type in argument to append"));
+                    self.error_code(TypeError::AppendInvalidArg, call.args[i].span);
                     return false;
                 }
             }
@@ -356,7 +357,7 @@ impl Checker {
         let invalid_type = self.invalid_type();
         if mode == OperandMode::Invalid && ty != invalid_type {
             let name = if id == Builtin::Len { "len" } else { "cap" };
-            self.error(Span::default(), format!("invalid argument for {}", name));
+            self.error_code_msg(TypeError::InvalidLenCapArg, Span::default(), format!("invalid argument for {}", name));
             return false;
         }
 
@@ -371,14 +372,14 @@ impl Checker {
         match &self.otype(tkey) {
             Type::Chan(detail) => {
                 if detail.dir() == typ::ChanDir::RecvOnly {
-                    self.error(Span::default(), "cannot close receive-only channel".to_string());
+                    self.error_code(TypeError::CloseRecvOnly, Span::default());
                     return false;
                 }
                 x.mode = OperandMode::NoValue;
                 true
             }
             _ => {
-                self.error(Span::default(), "argument to close must be a channel".to_string());
+                self.error_code(TypeError::CloseNotChan, Span::default());
                 false
             }
         }
@@ -414,12 +415,12 @@ impl Checker {
         };
 
         if dst.is_none() || src.is_none() {
-            self.error(call_span, "copy expects slice arguments".to_string());
+            self.error_code(TypeError::CopyNotSlice, call_span);
             return false;
         }
 
         if !typ::identical_o(dst, src, self.objs()) {
-            self.error(call_span, "arguments to copy have different element types".to_string());
+            self.error_code(TypeError::CopyTypeMismatch, call_span);
             return false;
         }
 
@@ -449,7 +450,7 @@ impl Checker {
                 
                 let mut reason = String::new();
                 if !self.assignable_to(&k, key, &mut reason) {
-                    self.error(call.args[1].span, format!("key is not assignable to map key type"));
+                    self.error_code(TypeError::DeleteKeyMismatch, call.args[1].span);
                     return false;
                 }
                 
@@ -457,7 +458,7 @@ impl Checker {
                 true
             }
             _ => {
-                self.error(call_span, "first argument to delete must be a map".to_string());
+                self.error_code(TypeError::DeleteNotMap, call_span);
                 false
             }
         }
@@ -483,13 +484,13 @@ impl Checker {
             Type::Slice(_) => 2,
             Type::Map(_) | Type::Chan(_) => 1,
             _ => {
-                self.error(call.args[0].span, "cannot make; type must be slice, map, or channel".to_string());
+                self.error_code(TypeError::MakeInvalidType, call.args[0].span);
                 return false;
             }
         };
 
         if nargs < min || min + 1 < nargs {
-            self.error(call_span, format!("make expects {} or {} arguments; found {}", min, min + 1, nargs));
+            self.error_code_msg(TypeError::MakeArgCount, call_span, format!("make expects {} or {} arguments; found {}", min, min + 1, nargs));
             return false;
         }
 
@@ -510,7 +511,7 @@ impl Checker {
                 let (len, len_exact) = len_val.int_as_i64();
                 let (cap, cap_exact) = cap_val.int_as_i64();
                 if len_exact && cap_exact && len > cap {
-                    self.error(call_span, format!("length ({}) larger than capacity ({})", len, cap));
+                    self.error_code_msg(TypeError::MakeLenGtCap, call_span, format!("length ({}) larger than capacity ({})", len, cap));
                 }
             }
         }
@@ -604,13 +605,13 @@ impl Checker {
     /// assert(pred bool) - GoX extension
     fn builtin_assert(&mut self, x: &mut Operand) -> bool {
         if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), self.objs()) {
-            self.error(Span::default(), "argument to assert is not a boolean".to_string());
+            self.error_code(TypeError::AssertNotBool, Span::default());
             return false;
         }
 
         // If argument is a constant false, report error
         if let OperandMode::Constant(Value::Bool(false)) = &x.mode {
-            self.error(Span::default(), "assertion failed".to_string());
+            self.error_code(TypeError::AssertFailed, Span::default());
             // Safe to continue - compile-time assertion failure
         }
 
@@ -625,7 +626,7 @@ impl Checker {
         } else {
             "too many"
         };
-        self.error(call_span, format!("{} arguments for {} (expected {}, found {})", msg, name, expected, got));
+        self.error_code_msg(TypeError::BuiltinArgCount, call_span, format!("{} arguments for {} (expected {}, found {})", msg, name, expected, got));
     }
 
     // index function moved to expr.rs
@@ -639,7 +640,7 @@ impl Checker {
         if let OperandMode::TypeExpr = x.mode {
             x.typ.unwrap_or(self.invalid_type())
         } else {
-            self.error(e.span, "expected type".to_string());
+            self.error_code(TypeError::ExpectedType, e.span);
             self.invalid_type()
         }
     }

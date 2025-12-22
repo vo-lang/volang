@@ -32,7 +32,8 @@ use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 impl Checker {
     // =========================================================================
@@ -220,7 +221,7 @@ impl Checker {
                 } else {
                     "cannot convert".to_string()
                 };
-                self.error(Span::default(), msg);
+                self.error_code_msg(TypeError::TypeMismatch, Span::default(), msg);
                 x.mode = OperandMode::Invalid;
             }
         }
@@ -376,7 +377,7 @@ impl Checker {
                         }
                     }
                 } else {
-                    self.error(Span::default(), "cannot convert untyped value".to_string());
+                    self.error_code_msg(TypeError::TypeMismatch, Span::default(), "cannot convert untyped value".to_string());
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -442,7 +443,7 @@ impl Checker {
                 self.update_expr_type(expr_id, t, true);
             }
         } else {
-            self.error(Span::default(), "cannot convert untyped value".to_string());
+            self.error_code(TypeError::TypeMismatch, Span::default());
             x.mode = OperandMode::Invalid;
         }
     }
@@ -488,7 +489,7 @@ impl Checker {
         };
 
         if let Some(m) = emsg {
-            self.error(Span::default(), format!("cannot compare: {}", m));
+            self.error_code_msg(TypeError::InvalidOp, Span::default(), format!("cannot compare: {}", m));
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -552,7 +553,7 @@ impl Checker {
                 return;
             }
         } else {
-            self.error(Span::default(), "shift count must be unsigned integer".to_string());
+            self.error_code(TypeError::ShiftCountNotUnsigned, Span::default());
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -780,7 +781,7 @@ impl Checker {
                         if let Ok(Some(idx)) = i {
                             Some(idx)
                         } else if i.is_ok() {
-                            self.error(Span::default(), "index must be integer constant".to_string());
+                            self.error_code_msg(TypeError::InvalidOp, Span::default(), "index must be integer constant");
                             None
                         } else {
                             None
@@ -793,7 +794,8 @@ impl Checker {
                 };
                 (kv_index, &elem.value)
             } else if length.is_some() && index >= length.unwrap() {
-                self.error(
+                self.error_code_msg(
+                    TypeError::InvalidOp,
                     Span::default(),
                     format!("index {} is out of bounds (>= {})", index, length.unwrap()),
                 );
@@ -804,7 +806,8 @@ impl Checker {
 
             if let Some(i) = valid_index {
                 if visited.contains(&i) {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::DuplicateCase,
                         Span::default(),
                         format!("duplicate index {} in array or slice literal", i),
                     );
@@ -1273,7 +1276,7 @@ impl Checker {
                 if let Some(tuple) = self.otype(inner_type).try_as_tuple() {
                     let vars = tuple.vars();
                     if vars.is_empty() {
-                        self.error(e.span, "? operator requires expression returning error".to_string());
+                        self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression returning error");
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -1282,7 +1285,7 @@ impl Checker {
                     let last_var = vars.last().unwrap();
                     let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
                     if !typ::identical(last_type, error_type, self.objs()) {
-                        self.error(e.span, "? operator requires expression with error as last return value".to_string());
+                        self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression with error as last return value");
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -1312,7 +1315,7 @@ impl Checker {
                     x.mode = OperandMode::NoValue;
                     x.typ = None;
                 } else {
-                    self.error(e.span, "? operator requires expression returning error type".to_string());
+                    self.error_code_msg(TypeError::InvalidOp, e.span, "? operator requires expression returning error type");
                     x.mode = OperandMode::Invalid;
                 }
             }
@@ -1333,7 +1336,7 @@ impl Checker {
     ) {
         // Check that xtype is an interface type
         if self.otype(xtype).try_as_interface().is_none() {
-            self.error(span, "type assertion requires interface type".to_string());
+            self.error_code(TypeError::TypeAssertNotInterface, span);
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -1342,12 +1345,14 @@ impl Checker {
         if let Some((missing, wrong_type)) = crate::lookup::assertable_to(xtype, t, self) {
             let method_name = self.lobj(missing).name();
             if wrong_type {
-                self.error(
+                self.error_code_msg(
+                    TypeError::TypeMismatch,
                     span,
                     format!("impossible type assertion: method {} has wrong type", method_name),
                 );
             } else {
-                self.error(
+                self.error_code_msg(
+                    TypeError::TypeMismatch,
                     span,
                     format!("impossible type assertion: missing method {}", method_name),
                 );
@@ -1367,7 +1372,7 @@ impl Checker {
             _ => None,
         };
         if let Some(m) = msg {
-            self.error(Span::default(), format!("expression {}", m));
+            self.error_code_msg(TypeError::InvalidOp, Span::default(), format!("expression {}", m));
             // Don't set x.mode to Invalid here - caller handles it
         }
     }
@@ -1378,7 +1383,8 @@ impl Checker {
             if let Some(tuple) = self.otype(x.typ.unwrap()).try_as_tuple() {
                 let len = tuple.vars().len();
                 if len != 1 {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::InvalidOp,
                         Span::default(),
                         format!("{}-valued expression where single value is expected", len),
                     );
@@ -1415,7 +1421,7 @@ impl Checker {
         self.raw_expr(x, e, None);
         self.single_value(x);
         if x.mode == OperandMode::NoValue {
-            self.error(Span::default(), "expression used as value or type".to_string());
+            self.error_code_msg(TypeError::InvalidOp, Span::default(), "expression used as value or type");
             x.mode = OperandMode::Invalid;
         }
     }
@@ -1459,7 +1465,7 @@ impl Checker {
                                 sel_name,
                                 pkg_name.as_ref().unwrap_or(&"<unknown>".to_string())
                             );
-                            self.error(sel.sel.span, msg);
+                            self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                         }
                         x.mode = OperandMode::Invalid;
                         x.set_expr(&sel.expr);
@@ -1474,7 +1480,7 @@ impl Checker {
                             sel_name,
                             pkg_name.as_ref().unwrap_or(&"<unknown>".to_string())
                         );
-                        self.error(sel.sel.span, msg);
+                        self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                     }
                     self.result.record_use(sel.sel.clone(), exp_key);
 
@@ -1527,7 +1533,7 @@ impl Checker {
                     }
                     crate::lookup::LookupResult::Entry(_, _, _) => unreachable!(),
                 };
-                self.error(sel.sel.span, msg);
+                self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                 x.mode = OperandMode::Invalid;
                 x.set_expr(&sel.expr);
                 return;
@@ -1574,7 +1580,7 @@ impl Checker {
                     "{} undefined (type has no method {})",
                     sel_name, sel_name
                 );
-                self.error(sel.sel.span, msg);
+                self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
                 x.mode = OperandMode::Invalid;
                 x.set_expr(&sel.expr);
                 return;

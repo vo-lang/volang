@@ -16,7 +16,8 @@ use crate::scope;
 use crate::typ::{self, BasicType, Type};
 use crate::universe::BuiltinInfo;
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 // =============================================================================
 // UnpackResult - for unpacking assignment RHS
@@ -169,17 +170,17 @@ impl Checker {
 
     /// Report an invalid AST error.
     pub fn invalid_ast(&self, span: Span, err: &str) {
-        self.error(span, format!("invalid AST: {}", err));
+        self.error_code_msg(TypeError::InvalidOp, span, format!("invalid AST: {}", err));
     }
 
     /// Report an invalid argument error.
     pub fn invalid_arg(&self, span: Span, err: &str) {
-        self.error(span, format!("invalid argument: {}", err));
+        self.error_code_msg(TypeError::InvalidOp, span, format!("invalid argument: {}", err));
     }
 
     /// Report an invalid operation error.
     pub fn invalid_op(&self, span: Span, err: &str) {
-        self.error(span, format!("invalid operation: {}", err));
+        self.error_code_msg(TypeError::InvalidOp, span, format!("invalid operation: {}", err));
     }
 
     /// Format object path as string for error messages.
@@ -196,7 +197,8 @@ impl Checker {
                 let obj_val = self.lobj(okey);
                 let pos = obj_val.pos();
                 let span = Span::new(gox_common::BytePos(pos as u32), gox_common::BytePos(pos as u32));
-                self.error(
+                self.error_code_msg(
+                    TypeError::IllegalCycle,
                     span,
                     format!("illegal cycle in declaration of {}", obj_val.name()),
                 );
@@ -205,11 +207,11 @@ impl Checker {
                     let oval = self.lobj(*o);
                     let pos = oval.pos();
                     let span = Span::new(gox_common::BytePos(pos as u32), gox_common::BytePos(pos as u32));
-                    self.error(span, format!("\t{} refers to", oval.name()));
+                    self.error_code_msg(TypeError::RefersTo, span, format!("\t{} refers to", oval.name()));
                 }
                 let pos = obj_val.pos();
                 let span = Span::new(gox_common::BytePos(pos as u32), gox_common::BytePos(pos as u32));
-                self.error(span, format!("\t{}", obj_val.name()));
+                self.error_code_msg(TypeError::RefersTo, span, format!("\t{}", obj_val.name()));
             }
             return true;
         }

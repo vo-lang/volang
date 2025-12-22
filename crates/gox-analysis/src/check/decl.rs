@@ -20,13 +20,14 @@ use crate::scope::Scope;
 use crate::typ;
 
 use super::checker::{Checker, ObjContext};
+use super::errors::TypeError;
 use super::resolver::DeclInfo;
 
 impl Checker {
     /// Reports the location of an alternative declaration.
     pub fn report_alt_decl(&self, okey: ObjKey) {
         let lobj = self.lobj(okey);
-        self.error(Span::default(), format!("\tother declaration of {}", lobj.name()));
+        self.error_code_msg(TypeError::OtherDeclaration, Span::default(), format!("\tother declaration of {}", lobj.name()));
     }
 
     /// Declares an object in a scope.
@@ -39,7 +40,8 @@ impl Checker {
             let alt = Scope::insert(skey, okey, &mut self.tc_objs);
             if let Some(o) = alt {
                 let lobj = self.lobj(okey);
-                self.error(
+                self.error_code_msg(
+                    TypeError::Redeclared,
                     Span::default(),
                     format!("{} redeclared in this block", lobj.name()),
                 );
@@ -211,17 +213,18 @@ impl Checker {
         }
 
         // Report error
-        self.error(
+        self.error_code_msg(
+            TypeError::IllegalCycle,
             Span::default(),
             format!("illegal cycle in declaration of {}", lobj.name()),
         );
-        for o in cycle {
+        for o in self.obj_path.iter() {
             if self.universe().indir() == *o {
                 continue;
             }
-            self.error(Span::default(), format!("\t{} refers to", self.lobj(*o).name()));
+            self.error_code_msg(TypeError::RefersTo, Span::default(), format!("\t{} refers to", self.lobj(*o).name()));
         }
-        self.error(Span::default(), format!("\t{} refers to", lobj.name()));
+        self.error_code_msg(TypeError::RefersTo, Span::default(), format!("\t{} refers to", lobj.name()));
 
         true
     }
@@ -249,7 +252,7 @@ impl Checker {
             if !tval.is_const_type(self.objs()) {
                 let invalid_type = self.invalid_type();
                 if tval.underlying().unwrap_or(t) != invalid_type {
-                    self.error(Span::default(), "invalid constant type".to_string());
+                    self.error_code(TypeError::InvalidConstType, Span::default());
                 }
                 self.lobj_mut(okey).set_type(Some(invalid_type));
                 self.octx.iota = None;
@@ -374,10 +377,7 @@ impl Checker {
                 && lobj.name() == "init"
                 && (sig.params_count(self.objs()) > 0 || sig.results_count(self.objs()) > 0)
             {
-                self.error(
-                    Span::default(),
-                    "func init must have no arguments and no return values".to_string(),
-                );
+                self.error_code(TypeError::InvalidInitSignature, Span::default());
             }
 
             // Queue function body for later checking
@@ -438,13 +438,15 @@ impl Checker {
                 let alt_obj = self.lobj(alt);
                 match alt_obj.entity_type() {
                     EntityType::Var { .. } => {
-                        self.error(
+                        self.error_code_msg(
+                            TypeError::FieldMethodConflict,
                             Span::default(),
                             format!("field and method with the same name {}", mname),
                         );
                     }
                     EntityType::Func { .. } => {
-                        self.error(
+                        self.error_code_msg(
+                            TypeError::MethodRedeclared,
                             Span::default(),
                             format!("method {} already declared", mname),
                         );
@@ -602,7 +604,7 @@ impl Checker {
             }
 
             Decl::Func(_) => {
-                self.error(Span::default(), "unexpected function declaration in statement".to_string());
+                self.error_code(TypeError::UnexpectedFuncDecl, Span::default());
             }
         }
     }
@@ -618,17 +620,17 @@ impl Checker {
 
         if r == 0 {
             // No init expressions at all - error for const
-            self.error(spec.span, "missing value in const declaration".to_string());
+            self.error_code(TypeError::MissingConstValue, spec.span);
         } else if l < r {
             // More values than names
             if l < spec.values.len() {
-                self.error(spec.values[l].span, "extra init expr".to_string());
+                self.error_code(TypeError::ExtraInitExpr, spec.values[l].span);
             } else if let Some(_is) = init_spec {
-                self.error(spec.span, "extra init expr from previous spec".to_string());
+                self.error_code_msg(TypeError::ExtraInitExpr, spec.span, "extra init expr from previous spec");
             }
         } else if l > r {
             // More names than values
-            self.error(spec.span, format!("missing init expr for {}", self.resolve_ident(&spec.names[r])));
+            self.error_code_msg(TypeError::MissingInitExpr, spec.span, format!("missing init expr for {}", self.resolve_ident(&spec.names[r])));
         }
     }
 
@@ -640,14 +642,14 @@ impl Checker {
         if r == 0 {
             // No init expressions - must have type
             if spec.ty.is_none() {
-                self.error(spec.span, "missing type or init expr".to_string());
+                self.error_code(TypeError::MissingTypeOrInit, spec.span);
             }
         } else if l < r {
             // More values than names
-            self.error(spec.values[l].span, "extra init expr".to_string());
+            self.error_code(TypeError::ExtraInitExpr, spec.values[l].span);
         } else if l > r && r != 1 {
             // More names than values (unless it's N-to-1 assignment)
-            self.error(spec.span, format!("assignment mismatch: {} variables but {} values", l, r));
+            self.error_code_msg(TypeError::AssignmentMismatch, spec.span, format!("assignment mismatch: {} variables but {} values", l, r));
         }
     }
 }

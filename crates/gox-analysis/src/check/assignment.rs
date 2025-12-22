@@ -15,7 +15,8 @@ use crate::typ::{self, BasicType, Type};
 /// Default span for error reporting when no span is available.
 const DEFAULT_SPAN: Span = Span { start: BytePos(0), end: BytePos(0) };
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 impl Checker {
     /// Reports whether x can be assigned to a variable of type t.
@@ -44,7 +45,7 @@ impl Checker {
 
         if typ::is_untyped(xt, self.objs()) {
             if t.is_none() && xt == self.basic_type(BasicType::UntypedNil) {
-                self.error(DEFAULT_SPAN, format!("use of untyped nil in {}", note));
+                self.error_code_msg(TypeError::UseOfUntypedNil, DEFAULT_SPAN, format!("use of untyped nil in {}", note));
                 x.mode = OperandMode::Invalid;
                 return;
             }
@@ -73,9 +74,9 @@ impl Checker {
         let mut reason = String::new();
         if !self.assignable_to(x, t.unwrap(), &mut reason) {
             if reason.is_empty() {
-                self.error(DEFAULT_SPAN, format!("cannot use value as type in {}", note));
+                self.error_code_msg(TypeError::CannotAssign, DEFAULT_SPAN, format!("cannot use value as type in {}", note));
             } else {
-                self.error(DEFAULT_SPAN, format!("cannot use value as type in {}: {}", note, reason));
+                self.error_code_msg(TypeError::CannotAssign, DEFAULT_SPAN, format!("cannot use value as type in {}: {}", note, reason));
             }
             x.mode = OperandMode::Invalid;
         }
@@ -109,7 +110,7 @@ impl Checker {
                 }
             }
         } else {
-            self.error(DEFAULT_SPAN, "value is not constant".to_string());
+            self.error_code(TypeError::NotConstant, DEFAULT_SPAN);
         }
     }
 
@@ -134,7 +135,7 @@ impl Checker {
             let lhs_type = if typ::is_untyped(xt, self.objs()) {
                 // convert untyped types to default types
                 if xt == self.basic_type(BasicType::UntypedNil) {
-                    self.error(DEFAULT_SPAN, format!("use of untyped nil in {}", msg));
+                    self.error_code_msg(TypeError::UseOfUntypedNil, DEFAULT_SPAN, format!("use of untyped nil in {}", msg));
                     invalid_type
                 } else {
                     typ::untyped_default_type(xt, self.objs())
@@ -222,11 +223,11 @@ impl Checker {
                     let mut op = Operand::new();
                     self.expr(&mut op, &sel.expr);
                     if op.mode == OperandMode::MapIndex {
-                        self.error(lhs.span, "cannot assign to struct field in map".to_string());
+                        self.error_code(TypeError::CannotAssignMapField, lhs.span);
                         return None;
                     }
                 }
-                self.error(lhs.span, "cannot assign to expression".to_string());
+                self.error_code(TypeError::CannotAssign, lhs.span);
                 return None;
             }
         }
@@ -275,12 +276,14 @@ impl Checker {
                         result.use_(self, 0);
                         if !rhs.is_empty() {
                             if let Some(pos) = return_pos {
-                                self.error(
+                                self.error_code_msg(
+                                    TypeError::AssignmentMismatch,
                                     pos,
                                     format!("wrong number of return values (want {}, got {})", ll, count),
                                 );
                             } else {
-                                self.error(
+                                self.error_code_msg(
+                                    TypeError::AssignmentMismatch,
                                     rhs[0].span,
                                     format!("cannot initialize {} variables with {} values", ll, count),
                                 );
@@ -328,7 +331,8 @@ impl Checker {
                     Ordering::Greater | Ordering::Less => {
                         result.use_(self, 0);
                         if !rhs.is_empty() {
-                            self.error(
+                            self.error_code_msg(
+                                TypeError::AssignmentMismatch,
                                 rhs[0].span,
                                 format!("cannot assign {} values to {} variables", count, ll),
                             );
@@ -374,7 +378,7 @@ impl Checker {
                     if self.lobj(okey).entity_type().is_var() {
                         lhs_vars.push(okey);
                     } else {
-                        self.error(l.span, format!("cannot assign to {}", name));
+                        self.error_code_msg(TypeError::CannotAssign, l.span, format!("cannot assign to {}", name));
                         let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
                         lhs_vars.push(dummy);
                     }
@@ -388,7 +392,7 @@ impl Checker {
                     lhs_vars.push(okey);
                 }
             } else {
-                self.error(l.span, "non-name on left side of :=".to_string());
+                self.error_code(TypeError::NonNameInShortDecl, l.span);
                 let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
                 lhs_vars.push(dummy);
             }
@@ -405,7 +409,7 @@ impl Checker {
                 self.declare(scope_key, okey);
             }
         } else {
-            self.soft_error(pos, "no new variables on left side of :=".to_string());
+            self.emit(TypeError::NoNewVars.at(pos));
         }
     }
 

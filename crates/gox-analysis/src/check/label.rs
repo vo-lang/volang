@@ -11,6 +11,7 @@ use gox_common::symbol::Ident;
 use gox_syntax::ast::{Block, Stmt, StmtKind};
 
 use super::checker::Checker;
+use super::errors::TypeError;
 
 /// A label block for tracking label scopes.
 #[derive(Debug)]
@@ -76,7 +77,8 @@ impl Checker {
             if let StmtKind::Labeled(labeled) = &stmt.kind {
                 let name = self.ident_name(&labeled.label);
                 if !block.declare(name.clone(), labeled.label.span) {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::Redeclared,
                         labeled.label.span,
                         format!("label {} already declared", name),
                     );
@@ -136,14 +138,14 @@ impl Checker {
                 if block.mark_used(&name) {
                     // Label found and marked as used
                 } else {
-                    self.error(goto.label.span, format!("label {} not declared", name));
+                    self.error_code_msg(TypeError::LabelNotDeclared, goto.label.span, format!("label {} not declared", name));
                 }
             }
             StmtKind::Break(brk) => {
                 if let Some(label) = &brk.label {
                     let name = self.ident_name(label);
                     if !block.mark_used(&name) {
-                        self.error(label.span, format!("label {} not declared", name));
+                        self.error_code_msg(TypeError::LabelNotDeclared, label.span, format!("label {} not declared", name));
                     }
                 }
             }
@@ -151,7 +153,7 @@ impl Checker {
                 if let Some(label) = &cont.label {
                     let name = self.ident_name(label);
                     if !block.mark_used(&name) {
-                        self.error(label.span, format!("label {} not declared", name));
+                        self.error_code_msg(TypeError::LabelNotDeclared, label.span, format!("label {} not declared", name));
                     }
                 }
             }
@@ -193,7 +195,7 @@ impl Checker {
     fn report_unused_labels(&mut self, block: &LabelBlock) {
         for (name, info) in &block.labels {
             if !info.used {
-                self.soft_error(info.span, format!("label {} declared but not used", name));
+                self.emit(TypeError::UnusedLabel.at_with_message(info.span, format!("label {} declared but not used", name)));
             }
         }
     }

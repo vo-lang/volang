@@ -4,7 +4,7 @@
 //! It handles type-checking of type expressions and resolves them to TypeKey values.
 
 
-use gox_common::symbol::{Ident};
+use gox_common::symbol::Ident;
 
 use crate::obj::EntityType;
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
@@ -15,6 +15,7 @@ use crate::typ::{self, ChanDir, Type};
 use gox_syntax::ast::{self, Expr, FuncSig, Param, Receiver, TypeExpr, TypeExprKind, InterfaceElem};
 
 use super::checker::{Checker, ObjContext};
+use super::errors::TypeError;
 
 impl Checker {
     // =========================================================================
@@ -72,7 +73,7 @@ impl Checker {
                     }
                     OperandMode::Invalid => None,
                     _ => {
-                        self.error(ident.span, format!("{} is not a type", self.resolve_ident(ident)));
+                        self.error_code_msg(TypeError::NotAType, ident.span, format!("{} is not a type", self.resolve_ident(ident)));
                         None
                     }
                 }
@@ -100,15 +101,15 @@ impl Checker {
                                         return t;
                                     }
                                 }
-                                self.error(ty.span, format!("{}.{} is not a type", pkg_name, type_name));
+                                self.error_code_msg(TypeError::NotAType, ty.span, format!("{}.{} is not a type", pkg_name, type_name));
                             } else {
-                                self.error(ty.span, format!("{}.{} is not a type", pkg_name, type_name));
+                                self.error_code_msg(TypeError::NotAType, ty.span, format!("{}.{} is not a type", pkg_name, type_name));
                             }
                         } else {
-                            self.error(sel.pkg.span, format!("{} is not a package", pkg_name));
+                            self.error_code_msg(TypeError::NotAType, sel.pkg.span, format!("{} is not a package", pkg_name));
                         }
                     } else {
-                        self.error(sel.pkg.span, format!("undeclared name: {}", pkg_name));
+                        self.error_code_msg(TypeError::Undeclared, sel.pkg.span, format!("undeclared name: {}", pkg_name));
                     }
                 }
                 None
@@ -136,7 +137,7 @@ impl Checker {
                 let key_span = map.key.span;
                 let f = move |checker: &mut Checker| {
                     if !crate::typ::comparable(key, &checker.tc_objs) {
-                        checker.error(key_span, format!("invalid map key type"));
+                        checker.error_code_msg(TypeError::InvalidOp, key_span, "invalid map key type");
                     }
                 };
                 self.later(Box::new(f));
@@ -225,7 +226,7 @@ impl Checker {
 
                 match &entity_type {
                     EntityType::PkgName { .. } => {
-                        self.error(ident.span, format!("use of package {} not in selector", obj_name));
+                        self.error_code_msg(TypeError::PackageNotInSelector, ident.span, format!("use of package {} not in selector", obj_name));
                         return;
                     }
                     EntityType::Const { val } => {
@@ -238,7 +239,7 @@ impl Checker {
                             if let Some(iota_val) = &self.octx.iota {
                                 x.mode = OperandMode::Constant(iota_val.clone());
                             } else {
-                                self.error(ident.span, "cannot use iota outside constant declaration".to_string());
+                                self.error_code(TypeError::IotaOutsideConst, ident.span);
                                 return;
                             }
                         } else {
@@ -284,9 +285,9 @@ impl Checker {
 
         // Name not found
         if name == "_" {
-            self.error(ident.span, "cannot use _ as value or type".to_string());
+            self.error_code(TypeError::BlankAsValue, ident.span);
         } else {
-            self.error(ident.span, format!("undeclared name: {}", name));
+            self.error_code_msg(TypeError::Undeclared, ident.span, format!("undeclared name: {}", name));
         }
     }
 
@@ -311,9 +312,9 @@ impl Checker {
                     }
                 }
             }
-            self.error(e.span, "array length must be a non-negative integer".to_string());
+            self.error_code(TypeError::ArrayLenNotInteger, e.span);
         } else if x.mode != OperandMode::Invalid {
-            self.error(e.span, "array length must be constant".to_string());
+            self.error_code(TypeError::ArrayLenNotConstant, e.span);
         }
         None
     }
@@ -391,7 +392,7 @@ impl Checker {
             // GoX Receiver is always exactly one, so recv_list has 0 or 1 element
             let recv_var = if recv_list.is_empty() {
                 // This shouldn't happen with valid GoX syntax, but handle like goscript
-                self.error(r.span, "method is missing receiver".to_string());
+                self.error_code(TypeError::MissingReceiver, r.span);
                 self.new_param_var(0, None, String::new(), Some(invalid_type))
             } else {
                 recv_list[0]
@@ -426,7 +427,7 @@ impl Checker {
                 };
                 
                 if let Some(err) = err_msg {
-                    self.error(r.span, format!("invalid receiver ({})", err));
+                    self.error_code_msg(TypeError::InvalidReceiver, r.span, format!("invalid receiver ({})", err));
                     // ok to continue
                 }
             }
@@ -591,7 +592,7 @@ impl Checker {
         match x.mode {
             OperandMode::Invalid => Some(invalid_type),
             OperandMode::NoValue => {
-                self.error(e.span, "used as type".to_string());
+                self.error_code(TypeError::UsedAsType, e.span);
                 Some(invalid_type)
             }
             OperandMode::TypeExpr => x.typ,
@@ -599,7 +600,7 @@ impl Checker {
                 if x.mode == OperandMode::Value && x.is_nil(self.objs()) {
                     None
                 } else {
-                    self.error(e.span, "is not a type".to_string());
+                    self.error_code(TypeError::NotAType, e.span);
                     Some(invalid_type)
                 }
             }
@@ -640,11 +641,11 @@ impl Checker {
                 let is_valid = match &self.otype(underlying_type) {
                     Type::Basic(_) if underlying_type == invalid_type => false,
                     Type::Pointer(_) => {
-                        self.error(field.ty.span, "embedded field type cannot be a pointer".to_string());
+                        self.error_code(TypeError::EmbeddedPointer, field.ty.span);
                         false
                     }
                     Type::Interface(_) if is_ptr => {
-                        self.error(field.ty.span, "embedded field type cannot be a pointer to an interface".to_string());
+                        self.error_code(TypeError::EmbeddedPointerInterface, field.ty.span);
                         false
                     }
                     _ => true,
@@ -662,7 +663,7 @@ impl Checker {
                 // Check for duplicate field
                 if embedded_name != "_" {
                     if let Some(&prev) = field_set.get(&embedded_name) {
-                        self.error(field.ty.span, format!("{} redeclared", embedded_name));
+                        self.error_code_msg(TypeError::FieldRedeclared, field.ty.span, format!("{} redeclared", embedded_name));
                         self.report_alt_decl(prev);
                     } else {
                         field_set.insert(embedded_name, fld);
@@ -685,7 +686,7 @@ impl Checker {
                     // Check for duplicate field
                     if name_str != "_" {
                         if let Some(&prev) = field_set.get(&name_str) {
-                            self.error(name.span, format!("{} redeclared", name_str));
+                            self.error_code_msg(TypeError::FieldRedeclared, name.span, format!("{} redeclared", name_str));
                             self.report_alt_decl(prev);
                         } else {
                             field_set.insert(name_str, fld);
@@ -774,7 +775,7 @@ impl Checker {
                                         embeds.push(t);
                                     }
                                     _ => {
-                                        checker.error(ident.span, format!("{} is not an interface", name));
+                                        checker.error_code_msg(TypeError::NotAType, ident.span, format!("{} is not an interface", name));
                                     }
                                 }
                             }

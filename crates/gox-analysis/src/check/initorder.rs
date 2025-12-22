@@ -14,6 +14,7 @@ use gox_common_core::ExprId;
 use crate::objects::{DeclInfoKey, ObjKey, TCObjects};
 
 use super::checker::Checker;
+use super::errors::TypeError;
 use super::resolver::DeclInfo;
 use super::type_info::Initializer;
 
@@ -213,14 +214,14 @@ impl Checker {
             return;
         }
         let o = self.lobj(cycle[0]);
-        self.error(Span::default(), format!("initialization cycle for {}", o.name()));
-        self.error(Span::default(), format!("\t{} refers to", o.name()));
+        self.error_code_msg(TypeError::InitCycle, Span::default(), format!("initialization cycle for {}", o.name()));
+        self.error_code_msg(TypeError::RefersTo, Span::default(), format!("\t{} refers to", o.name()));
         for okey in cycle[1..].iter().rev() {
             let o = self.lobj(*okey);
-            self.error(Span::default(), format!("\t{} refers to", o.name()));
+            self.error_code_msg(TypeError::RefersTo, Span::default(), format!("\t{} refers to", o.name()));
         }
         let o = self.lobj(cycle[0]);
-        self.error(Span::default(), format!("\t{}", o.name()));
+        self.error_code_msg(TypeError::RefersTo, Span::default(), format!("\t{}", o.name()));
     }
 }
 

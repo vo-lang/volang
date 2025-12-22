@@ -13,7 +13,8 @@ use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 impl Checker {
     /// Performs explicit type conversion of x to type t.
@@ -57,9 +58,10 @@ impl Checker {
         };
 
         if !ok {
-            self.error(
+            self.error_code_msg(
+                TypeError::TypeMismatch,
                 Span::default(),
-                format!("cannot convert value to type"),
+                "cannot convert value to type",
             );
             x.mode = OperandMode::Invalid;
             return;

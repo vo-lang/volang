@@ -21,7 +21,8 @@ use gox_syntax::ast::{InterfaceElem, InterfaceType};
 use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::typ::{self, InterfaceDetail, Type};
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 
 /// Shared reference to IfaceInfo.
 pub type RcIfaceInfo = Rc<IfaceInfo>;
@@ -235,7 +236,7 @@ impl Checker {
                     InterfaceElem::Method(m) => {
                         let name = self.resolve_ident(&m.name).to_string();
                         if name == "_" {
-                            self.error(m.span, "invalid method name _".to_string());
+                            self.error_code_msg(TypeError::InvalidOp, m.span, "invalid method name _");
                             continue;
                         }
 
@@ -381,7 +382,7 @@ impl Checker {
     ) -> bool {
         if let Some(alt) = set.insert(name.clone(), mi) {
             // Duplicate method
-            self.error(pos, format!("{} redeclared", name));
+            self.error_code_msg(TypeError::MethodRedeclared, pos, format!("{} redeclared", name));
             let _ = alt; // Would report other declaration location
             false
         } else {

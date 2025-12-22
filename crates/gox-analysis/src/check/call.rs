@@ -13,7 +13,8 @@ use crate::operand::{Operand, OperandMode};
 use crate::typ;
 use crate::universe::ExprKind;
 
-use super::checker::{Checker};
+use super::checker::Checker;
+use super::errors::TypeError;
 use super::util::{UnpackResult, UnpackedResultLeftovers};
 
 impl Checker {
@@ -41,7 +42,7 @@ impl Checker {
 
                 match call.args.len() {
                     0 => {
-                        self.error(call_span, "missing argument in conversion".to_string());
+                        self.error_code(TypeError::MissingConversionArg, call_span);
                     }
                     1 => {
                         self.expr(x, &call.args[0]);
@@ -51,7 +52,7 @@ impl Checker {
                     }
                     _ => {
                         self.use_exprs(&call.args);
-                        self.error(call.args.last().unwrap().span, "too many arguments in conversion".to_string());
+                        self.error_code(TypeError::TooManyConversionArgs, call.args.last().unwrap().span);
                     }
                 }
                 ExprKind::Conversion
@@ -106,7 +107,7 @@ impl Checker {
                     }
                     self.octx.has_call_or_recv = true;
                 } else {
-                    self.error(call_span, "cannot call non-function".to_string());
+                    self.error_code(TypeError::CannotCall, call_span);
                     x.mode = OperandMode::Invalid;
                 }
                 ExprKind::Statement
@@ -132,12 +133,12 @@ impl Checker {
         // Check ellipsis usage
         if call.spread {
             if !variadic {
-                self.error(call_span, "cannot use ... in call to non-variadic function".to_string());
+                self.error_code(TypeError::SpreadNonVariadic, call_span);
                 re.use_all(self);
                 return;
             }
             if call.args.len() == 1 && n > 1 {
-                self.error(call_span, format!("cannot use ... with {}-valued expression", n));
+                self.error_code_msg(TypeError::SpreadMultiValue, call_span, format!("cannot use ... with {}-valued expression", n));
                 re.use_all(self);
                 return;
             }
@@ -156,7 +157,7 @@ impl Checker {
         // A variadic function accepts an "empty" last argument: count one extra
         let count = if variadic { n + 1 } else { n };
         if count < params_len {
-            self.error(call_span, "too few arguments in call".to_string());
+            self.error_code(TypeError::TooFewArgs, call_span);
         }
     }
 
@@ -184,14 +185,14 @@ impl Checker {
         } else if sig_val.variadic() {
             self.lobj(params.vars()[n - 1]).typ().unwrap()
         } else {
-            self.error(Span::default(), "too many arguments".to_string());
+            self.error_code(TypeError::TooManyArgs, Span::default());
             return;
         };
 
         if ellipsis {
             // Argument is of the form x... and x is single-valued
             if i != n - 1 {
-                self.error(Span::default(), "can only use ... with matching parameter".to_string());
+                self.error_code(TypeError::SpreadMismatch, Span::default());
                 return;
             }
             // Check that x is assignable to the slice type
@@ -199,7 +200,7 @@ impl Checker {
             if self.otype(xtype).underlying_val(self.objs()).try_as_slice().is_none()
                 && xtype != self.basic_type(typ::BasicType::UntypedNil)
             {
-                self.error(Span::default(), "cannot use value as variadic argument".to_string());
+                self.error_code(TypeError::InvalidVariadicArg, Span::default());
                 return;
             }
         } else if sig_val.variadic() && i >= n - 1 {

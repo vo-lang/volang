@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use gox_common::diagnostics::Label;
 use gox_common::span::Span;
 use gox_common::symbol::Ident;
 use gox_syntax::ast::{AssignOp, Block, Expr, ForClause, Stmt, StmtKind};
@@ -17,6 +18,7 @@ use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, ChanDir};
 
 use super::checker::{Checker, ObjContext};
+use super::errors::TypeError;
 
 // =============================================================================
 // GoVal - for switch case duplicate detection
@@ -167,7 +169,7 @@ impl Checker {
         // Check for missing return
         let sig_val = self.otype(sig).try_as_signature().unwrap();
         if sig_val.results_count(self.objs()) > 0 && !self.is_terminating_block(body) {
-            self.error_str(end, "missing return");
+            self.error_code_msg(TypeError::MissingReturn, Span::new(gox_common::BytePos(end as u32), gox_common::BytePos(end as u32)), "missing return");
         }
 
         // Check for unused variables
@@ -202,7 +204,7 @@ impl Checker {
         unused.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (pos, name) in unused {
-            self.error_str(pos, &format!("{} declared but not used", name));
+            self.error_code_msg(TypeError::UnusedVar, Span::new(gox_common::BytePos(pos as u32), gox_common::BytePos(pos as u32)), format!("{} declared but not used", name));
         }
 
         // Recursively check children scopes (but not function literal scopes)
@@ -234,7 +236,8 @@ impl Checker {
             if case.exprs.is_empty() {
                 // This is a default case
                 if let Some(first_span) = first_default {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::MultipleDefaults,
                         case.span,
                         format!("multiple defaults (first at {})", first_span.start.to_usize()),
                     );
@@ -252,7 +255,8 @@ impl Checker {
             if case.types.is_empty() {
                 // This is a default case
                 if let Some(first_span) = first_default {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::MultipleDefaults,
                         case.span,
                         format!("multiple defaults (first at {})", first_span.start.to_usize()),
                     );
@@ -270,7 +274,8 @@ impl Checker {
             if case.comm.is_none() {
                 // This is a default case
                 if let Some(first_span) = first_default {
-                    self.error(
+                    self.error_code_msg(
+                        TypeError::MultipleDefaults,
                         case.span,
                         format!("multiple defaults (first at {})", first_span.start.to_usize()),
                     );
@@ -315,11 +320,11 @@ impl Checker {
                             .iter()
                             .find(|pt| typ::identical(v.typ.unwrap(), pt.typ, self.objs()))
                         {
-                            self.error(
-                                e.span,
-                                format!("duplicate case {} in expression switch", val),
+                            self.emit(
+                                TypeError::DuplicateCase
+                                    .at_with_message(e.span, format!("duplicate case {} in expression switch", val))
+                                    .with_label(Label::secondary(pt.span).with_message("previous case"))
                             );
-                            self.error_str(pt.span.start.to_usize(), "\tprevious case");
                             continue;
                         }
                         entry.push(PosType {
@@ -360,8 +365,11 @@ impl Checker {
             {
                 let ts = t.map_or("nil".to_owned(), |tk| format!("{:?}", tk));
                 let span = ty_opt.as_ref().map_or(Span::default(), |ty| ty.span);
-                self.error(span, format!("duplicate case {} in type switch", ts));
-                self.error_str(prev_span.start.to_usize(), "\tprevious case");
+                self.emit(
+                    TypeError::DuplicateCase
+                        .at_with_message(span, format!("duplicate case {} in type switch", ts))
+                        .with_label(Label::secondary(prev_span).with_message("previous case"))
+                );
                 continue;
             }
 
@@ -442,10 +450,10 @@ impl Checker {
                 match &x.mode {
                     OperandMode::Invalid | OperandMode::NoValue => {}
                     OperandMode::Builtin(_) => {
-                        self.error(e.span, "builtin must be called".to_string());
+                        self.error_code(TypeError::BuiltinMustBeCalled, e.span);
                     }
                     OperandMode::TypeExpr => {
-                        self.error(e.span, "type is not an expression".to_string());
+                        self.error_code(TypeError::TypeNotExpression, e.span);
                     }
                     _ => {
                         // Valid expression statement: call result is discarded
@@ -466,13 +474,13 @@ impl Checker {
                 let under_chtype = typ::underlying_type(chtype, self.objs());
                 if let Some(chan) = self.otype(under_chtype).try_as_chan() {
                     if chan.dir() == ChanDir::RecvOnly {
-                        self.error(ss.chan.span, "cannot send to receive-only channel".to_string());
+                        self.error_code(TypeError::SendToRecvOnly, ss.chan.span);
                     } else {
                         let elem_ty = Some(chan.elem());
                         self.assignment(x, elem_ty, "send");
                     }
                 } else {
-                    self.error(ss.chan.span, "cannot send to non-chan type".to_string());
+                    self.error_code(TypeError::SendToNonChan, ss.chan.span);
                 }
             }
 
@@ -483,7 +491,7 @@ impl Checker {
                     return;
                 }
                 if !typ::is_numeric(x.typ.unwrap(), self.objs()) {
-                    self.error(ids.expr.span, "non-numeric operand for inc/dec".to_string());
+                    self.error_code(TypeError::NonNumericIncDec, ids.expr.span);
                     return;
                 }
                 // x++ is like x = x + 1, x-- is like x = x - 1
@@ -495,7 +503,7 @@ impl Checker {
                 match astmt.op {
                     AssignOp::Assign => {
                         if astmt.lhs.is_empty() {
-                            self.error(stmt.span, "missing lhs in assignment".to_string());
+                            self.error_code(TypeError::MissingLhs, stmt.span);
                             return;
                         }
                         self.assign_vars(&astmt.lhs, &astmt.rhs);
@@ -503,10 +511,7 @@ impl Checker {
                     _ => {
                         // Compound assignment: +=, -=, etc.
                         if astmt.lhs.len() != 1 || astmt.rhs.len() != 1 {
-                            self.error(
-                                stmt.span,
-                                "assignment operation requires single-valued expressions".to_string(),
-                            );
+                            self.error_code(TypeError::CompoundAssignMultiValue, stmt.span);
                             return;
                         }
                         if let Some(bin_op) = Self::assign_op_to_binary(astmt.op) {
@@ -568,15 +573,13 @@ impl Checker {
                                 if alt == okey {
                                     continue;
                                 }
-                                self.error(
-                                    stmt.span,
-                                    format!(
-                                        "result parameter {} not in scope at return",
-                                        lobj.name()
-                                    ),
-                                );
                                 let alt_pos = self.lobj(alt).pos();
-                                self.error_str(alt_pos, &format!("\tinner declaration of {}", lobj.name()));
+                                let alt_span = Span::new(gox_common::BytePos(alt_pos as u32), gox_common::BytePos(alt_pos as u32));
+                                self.emit(
+                                    TypeError::ResultNotInScope
+                                        .at_with_message(stmt.span, format!("result parameter {} not in scope at return", lobj.name()))
+                                        .with_label(Label::secondary(alt_span).with_message(format!("inner declaration of {}", lobj.name())))
+                                );
                                 // ok to continue
                             }
                         }
@@ -586,7 +589,7 @@ impl Checker {
                         self.init_vars(&vars, &rs.values, Some(stmt.span));
                     }
                 } else if !rs.values.is_empty() {
-                    self.error(rs.values[0].span, "no result values expected".to_string());
+                    self.error_code(TypeError::UnexpectedReturn, rs.values[0].span);
                     self.use_exprs(&rs.values);
                 }
             }
@@ -597,7 +600,7 @@ impl Checker {
                     return; // checked in label pass
                 }
                 if !ctx.break_ok {
-                    self.error(stmt.span, "break not in for, switch, or select statement".to_string());
+                    self.error_code(TypeError::InvalidBreak, stmt.span);
                 }
             }
 
@@ -607,7 +610,7 @@ impl Checker {
                     return; // checked in label pass
                 }
                 if !ctx.continue_ok {
-                    self.error(stmt.span, "continue not in for statement".to_string());
+                    self.error_code(TypeError::InvalidContinue, stmt.span);
                 }
             }
 
@@ -623,7 +626,7 @@ impl Checker {
                     } else {
                         "fallthrough statement out of place"
                     };
-                    self.error(stmt.span, msg.to_string());
+                    self.error_code_msg(TypeError::InvalidFallthrough, stmt.span, msg);
                 }
             }
 
@@ -635,7 +638,7 @@ impl Checker {
                 let x = &mut Operand::new();
                 self.expr(x, &ifs.cond);
                 if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
-                    self.error(ifs.cond.span, "non-boolean condition in if statement".to_string());
+                    self.error_code(TypeError::NonBoolCondition, ifs.cond.span);
                 }
                 self.open_scope(ifs.then.span, "then");
                 self.stmt_list(&ifs.then.stmts, &inner_ctx);
@@ -692,7 +695,7 @@ impl Checker {
                 let lhs: Option<&Ident> = tss.assign.as_ref().and_then(|assign| {
                     let name = self.resolve_symbol(assign.symbol);
                     if name == "_" {
-                        self.soft_error(assign.span, "no new variable on left side of :=".to_string());
+                        self.emit(TypeError::NoNewVars.at(assign.span));
                         None
                     } else {
                         self.result.record_def(assign.clone(), None);
@@ -708,7 +711,7 @@ impl Checker {
                 }
                 let xtype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 if self.otype(xtype).try_as_interface().is_none() {
-                    self.error(tss.expr.span, "cannot type switch on non-interface type".to_string());
+                    self.error_code(TypeError::TypeSwitchNonInterface, tss.expr.span);
                     self.close_scope();
                     return;
                 }
@@ -759,7 +762,7 @@ impl Checker {
                     if !used {
                         let lhs_ident = lhs.unwrap();
                         let name = self.resolve_symbol(lhs_ident.symbol);
-                        self.soft_error(lhs_ident.span, format!("{} declared but not used", name));
+                        self.emit(TypeError::UnusedVar.at_with_message(lhs_ident.span, format!("{} declared but not used", name)));
                     }
                 }
                 
@@ -784,12 +787,12 @@ impl Checker {
                                     let under = typ::underlying_type(chtype, self.objs());
                                     if let Some(chan) = self.otype(under).try_as_chan() {
                                         if chan.dir() == ChanDir::RecvOnly {
-                                            self.error(send.chan.span, "cannot send to receive-only channel".to_string());
+                                            self.error_code(TypeError::SendToRecvOnly, send.chan.span);
                                         } else if !val.invalid() {
                                             self.assignment(val, Some(chan.elem()), "send");
                                         }
                                     } else {
-                                        self.error(send.chan.span, "cannot send to non-chan type".to_string());
+                                        self.error_code(TypeError::SendToNonChan, send.chan.span);
                                     }
                                 }
                             }
@@ -802,12 +805,12 @@ impl Checker {
                                     let under = typ::underlying_type(xtype, self.objs());
                                     if let Some(chan) = self.otype(under).try_as_chan() {
                                         if chan.dir() == ChanDir::SendOnly {
-                                            self.error(recv.expr.span, "cannot receive from send-only channel".to_string());
+                                            self.error_code(TypeError::RecvFromSendOnly, recv.expr.span);
                                         }
                                         // Assign received value to lhs variables if any
                                         // (recv.lhs contains the identifiers, recv.define indicates :=)
                                     } else {
-                                        self.error(recv.expr.span, "cannot receive from non-chan type".to_string());
+                                        self.error_code(TypeError::RecvFromNonChan, recv.expr.span);
                                     }
                                 }
                             }
@@ -828,7 +831,7 @@ impl Checker {
                             let x = &mut Operand::new();
                             self.expr(x, c);
                             if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
-                                self.error(c.span, "non-boolean condition in for statement".to_string());
+                                self.error_code(TypeError::NonBoolCondition, c.span);
                             }
                         }
                     }
@@ -840,13 +843,13 @@ impl Checker {
                             let x = &mut Operand::new();
                             self.expr(x, c);
                             if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
-                                self.error(c.span, "non-boolean condition in for statement".to_string());
+                                self.error_code(TypeError::NonBoolCondition, c.span);
                             }
                         }
                         if let Some(p) = post {
                             // spec: post statement must not be a short variable declaration
                             if matches!(&p.kind, StmtKind::ShortVar(_)) {
-                                self.error(p.span, "cannot declare in post statement".to_string());
+                                self.error_code_msg(TypeError::InvalidOp, p.span, "cannot declare in post statement");
                             }
                             self.stmt(p, &StmtContext::new());
                         }
@@ -877,12 +880,12 @@ impl Checker {
                                 }
                                 typ::Type::Chan(c) => {
                                     if c.dir() == ChanDir::SendOnly {
-                                        self.error(expr.span, "cannot range over send-only channel".to_string());
+                                        self.error_code(TypeError::RecvFromSendOnly, expr.span);
                                     }
                                     (Some(c.elem()), None)
                                 }
                                 _ => {
-                                    self.error(expr.span, format!("cannot range over {:?}", xtype));
+                                    self.error_code_msg(TypeError::InvalidOp, expr.span, format!("cannot range over {:?}", xtype));
                                     (None, None)
                                 }
                             }
@@ -906,7 +909,7 @@ impl Checker {
                                 let ident = match self.expr_as_ident(lhs_e) {
                                     Some(id) => id,
                                     None => {
-                                        self.error(lhs_e.span, "expected identifier on left side of :=".to_string());
+                                        self.error_code_msg(TypeError::NonNameInShortDecl, lhs_e.span, "expected identifier on left side of :=");
                                         continue;
                                     }
                                 };
@@ -1001,7 +1004,7 @@ impl Checker {
                             OperandMode::Constant(v) => v.clone(),
                             _ => {
                                 if !x.invalid() {
-                                    self.error(val.span, "const initializer is not a constant".to_string());
+                                    self.error_code(TypeError::NotConstant, val.span);
                                 }
                                 Value::Unknown
                             }
@@ -1042,11 +1045,11 @@ impl Checker {
                 // Valid: function call
             }
             gox_syntax::ast::ExprKind::Conversion(_) => {
-                self.error(call.span, format!("{} requires function call, not conversion", kw));
+                self.error_code_msg(TypeError::CannotCall, call.span, format!("{} requires function call, not conversion", kw));
             }
             _ => {
                 if !x.invalid() {
-                    self.error(call.span, format!("expression in {} must be function call", kw));
+                    self.error_code_msg(TypeError::CannotCall, call.span, format!("expression in {} must be function call", kw));
                 }
             }
         }
@@ -1077,7 +1080,7 @@ impl Checker {
                 if self.lobj(okey).entity_type().is_var() {
                     lhs_vars.push(okey);
                 } else {
-                    self.error(ident.span, format!("cannot assign to {}", name));
+                    self.error_code_msg(TypeError::CannotAssign, ident.span, format!("cannot assign to {}", name));
                     // dummy variable
                     let dummy = self.new_var(ident.span.start.to_usize(), Some(self.pkg), "_".to_string(), None);
                     lhs_vars.push(dummy);
@@ -1102,7 +1105,7 @@ impl Checker {
                 self.declare(scope_key, *okey);
             }
         } else {
-            self.soft_error(span, "no new variables on left side of :=".to_string());
+            self.emit(TypeError::NoNewVars.at(span));
         }
     }
 

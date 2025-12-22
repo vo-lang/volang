@@ -13,6 +13,7 @@ use crate::constant::Value;
 use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::Checker;
+use super::errors::TypeError;
 use crate::importer::Importer;
 
 /// DeclInfo for const declarations.
@@ -228,7 +229,8 @@ impl Checker {
                     let alt_val = self.lobj(alt);
                     if let crate::obj::EntityType::PkgName { imported, .. } = obj_val.entity_type() {
                         let pkg_val = self.package(*imported);
-                        self.error(
+                        self.error_code_msg(
+                            TypeError::Redeclared,
                             Span::default(),
                             format!(
                                 "{} already declared through import of {}",
@@ -239,7 +241,8 @@ impl Checker {
                     } else {
                         if let Some(pkg_key) = obj_val.pkg() {
                             let pkg_val = self.package(pkg_key);
-                            self.error(
+                            self.error_code_msg(
+                                TypeError::Redeclared,
                                 Span::default(),
                                 format!(
                                     "{} already declared through dot-import of {}",
@@ -284,11 +287,11 @@ impl Checker {
             match importer.import(&key) {
                 ImportResult::Ok(pkg) => pkg,
                 ImportResult::Err(e) => {
-                    self.error(import.span, e);
+                    self.error_code_msg(TypeError::InvalidImportPath, import.span, e);
                     return;
                 }
                 ImportResult::Cycle => {
-                    self.error(import.span, format!("import cycle not allowed: {}", path));
+                    self.error_code_msg(TypeError::ImportCycle, import.span, format!("import cycle not allowed: {}", path));
                     return;
                 }
             }
@@ -307,7 +310,7 @@ impl Checker {
         let name = if let Some(alias) = &import.alias {
             let alias_name = self.resolve_ident(alias);
             if alias_name == "init" {
-                self.error(import.span, "cannot declare init - must be func".to_string());
+                self.error_code(TypeError::CannotDeclareInit, import.span);
             }
             alias_name.to_string()
         } else {
@@ -492,7 +495,7 @@ impl Checker {
                         self.lobj_mut(okey).set_parent(Some(scope));
                         self.result.record_def(func_decl.name.clone(), Some(okey));
                         if func_decl.body.is_none() {
-                            self.error(func_decl.span, "missing function body".to_string());
+                            self.error_code(TypeError::MissingFuncBody, func_decl.span);
                         }
                     } else {
                         self.declare(scope, okey);
@@ -532,13 +535,13 @@ impl Checker {
 
         // Check for special names
         if name == "init" {
-            self.error(ident.span, "cannot declare init - must be func".to_string());
+            self.error_code(TypeError::CannotDeclareInit, ident.span);
             return;
         }
 
         let pkg_name = self.package(self.pkg).name();
         if name == "main" && pkg_name.as_deref() == Some("main") {
-            self.error(ident.span, "cannot declare main - must be func".to_string());
+            self.error_code(TypeError::CannotDeclareMain, ident.span);
             return;
         }
 
@@ -640,7 +643,7 @@ impl Checker {
     fn import_package(&mut self, path: &str, span: Span) -> PackageKey {
         // Validate import path
         if let Err(e) = self.valid_import_path(path) {
-            self.error(span, format!("invalid import path ({})", e));
+            self.error_code_msg(TypeError::InvalidImportPath, span, format!("invalid import path ({})", e));
         }
 
         let dir = ".".to_string();
@@ -685,16 +688,16 @@ impl Checker {
         let r = values_count;
 
         if l < r {
-            self.error(span, "extra init expr".to_string());
+            self.error_code(TypeError::ExtraInitExpr, span);
         } else if l > r {
             if is_const {
                 if r == 0 && !has_type {
-                    self.error(span, "missing type or init expr".to_string());
+                    self.error_code(TypeError::MissingTypeOrInit, span);
                 }
             } else {
                 // var declaration
                 if r != 1 {
-                    self.error(span, "missing init expr".to_string());
+                    self.error_code(TypeError::MissingInitExpr, span);
                 }
             }
         }
@@ -752,10 +755,10 @@ impl Checker {
                 if let crate::obj::EntityType::PkgName { imported, used } = obj.entity_type() {
                     if !used {
                         let pkg = self.package(*imported);
-                        self.soft_error(
+                        self.emit(TypeError::UnusedImport.at_with_message(
                             Span::default(),
                             format!("{} imported but not used", pkg.path()),
-                        );
+                        ));
                     }
                 }
             }
@@ -764,10 +767,10 @@ impl Checker {
         // Check dot-imported packages
         for (_, imports) in &self.unused_dot_imports {
             for (&pkey, &span) in imports {
-                self.soft_error(
+                self.emit(TypeError::UnusedImport.at_with_message(
                     span,
                     format!("{} imported but not used", self.package(pkey).path()),
-                );
+                ));
             }
         }
     }
