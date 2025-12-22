@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use gox_common::diagnostics::DiagnosticSink;
 use gox_common::symbol::SymbolInterner;
 use gox_common::vfs::FileSet;
 use gox_module::vfs::Vfs;
@@ -20,23 +21,55 @@ use crate::importer::{ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
 
 /// Analysis error.
-#[derive(Debug)]
 pub enum AnalysisError {
     /// Parse error.
     Parse(String),
-    /// Type check error.
-    Check(String),
+    /// Type check error with collected diagnostics.
+    Check(DiagnosticSink),
     /// Import error.
     Import(String),
     /// Cycle detected.
     Cycle(Vec<String>),
 }
 
+impl AnalysisError {
+    /// Returns the diagnostics if this is a Check error.
+    pub fn diagnostics(&self) -> Option<&DiagnosticSink> {
+        match self {
+            AnalysisError::Check(diags) => Some(diags),
+            _ => None,
+        }
+    }
+
+    /// Takes the diagnostics if this is a Check error.
+    pub fn take_diagnostics(&mut self) -> Option<DiagnosticSink> {
+        match self {
+            AnalysisError::Check(diags) => Some(std::mem::take(diags)),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for AnalysisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnalysisError::Parse(msg) => f.debug_tuple("Parse").field(msg).finish(),
+            AnalysisError::Check(diags) => f.debug_tuple("Check")
+                .field(&format!("{} errors, {} warnings", diags.error_count(), diags.warning_count()))
+                .finish(),
+            AnalysisError::Import(msg) => f.debug_tuple("Import").field(msg).finish(),
+            AnalysisError::Cycle(path) => f.debug_tuple("Cycle").field(path).finish(),
+        }
+    }
+}
+
 impl std::fmt::Display for AnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnalysisError::Parse(msg) => write!(f, "parse error: {}", msg),
-            AnalysisError::Check(msg) => write!(f, "type check error: {}", msg),
+            AnalysisError::Check(diags) => {
+                write!(f, "type check failed: {} error(s)", diags.error_count())
+            }
             AnalysisError::Import(msg) => write!(f, "import error: {}", msg),
             AnalysisError::Cycle(path) => write!(f, "import cycle: {}", path.join(" -> ")),
         }
@@ -171,18 +204,19 @@ pub fn analyze_project(
         match result {
             Ok(_) => {}
             Err(_) => {
-                let msg = checker.errors.iter()
-                    .map(|(span, msg)| format!("error at {:?}: {}", span, msg))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(AnalysisError::Check(msg));
+                let diags = checker.diagnostics.take();
+                return Err(AnalysisError::Check(diags));
             }
         }
     }
     
     // Extract final state
     let final_state = Rc::try_unwrap(state)
-        .map_err(|_| AnalysisError::Check("internal error: state still borrowed".to_string()))?
+        .map_err(|_| {
+            let mut diags = DiagnosticSink::new();
+            diags.error("internal error: state still borrowed");
+            AnalysisError::Check(diags)
+        })?
         .into_inner();
     
     // Collect packages in dependency order
@@ -219,11 +253,8 @@ pub fn analyze_single_file(
     match result {
         Ok(_) => {}
         Err(_) => {
-            let msg = checker.errors.iter()
-                .map(|(span, msg)| format!("error at {:?}: {}", span, msg))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(AnalysisError::Check(msg));
+            let diags = checker.diagnostics.take();
+            return Err(AnalysisError::Check(diags));
         }
     }
     

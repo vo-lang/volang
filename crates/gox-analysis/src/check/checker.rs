@@ -8,11 +8,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use gox_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
 use gox_common::span::Span;
 use gox_common::symbol::SymbolInterner;
+use gox_common::BytePos;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{Expr, File};
 
+use super::errors::TypeError;
 use super::type_info::TypeInfo;
 use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
@@ -94,8 +97,8 @@ pub struct Checker {
     pub tc_objs: TCObjects,
     /// Symbol interner for resolving identifiers.
     pub interner: SymbolInterner,
-    /// Error messages.
-    pub errors: Vec<(Span, String)>,
+    /// Diagnostics collector (interior mutability for &self error reporting).
+    pub diagnostics: RefCell<DiagnosticSink>,
     /// Current package being checked.
     pub pkg: PackageKey,
     /// Maps package-level objects and methods to declaration info.
@@ -131,7 +134,7 @@ impl Checker {
         Checker {
             tc_objs,
             interner,
-            errors: Vec::new(),
+            diagnostics: RefCell::new(DiagnosticSink::new()),
             pkg,
             obj_map: HashMap::new(),
             imp_map: HashMap::new(),
@@ -156,7 +159,7 @@ impl Checker {
         Checker {
             tc_objs,
             interner,
-            errors: Vec::new(),
+            diagnostics: RefCell::new(DiagnosticSink::new()),
             pkg,
             obj_map: HashMap::new(),
             imp_map: HashMap::new(),
@@ -217,20 +220,51 @@ impl Checker {
         &mut self.result
     }
 
-    /// Report an error.
+    /// Emit a diagnostic.
+    pub fn emit(&self, diagnostic: Diagnostic) {
+        self.diagnostics.borrow_mut().emit(diagnostic);
+    }
+
+    /// Report an error with a TypeError code.
+    pub fn error_code(&self, code: TypeError, span: Span) {
+        self.emit(code.at(span));
+    }
+
+    /// Report an error with a TypeError code and custom message.
+    pub fn error_code_msg(&self, code: TypeError, span: Span, msg: impl Into<String>) {
+        self.emit(code.at_with_message(span, msg));
+    }
+
+    /// Report an error (legacy method for compatibility).
     pub fn error(&self, span: Span, msg: String) {
-        // TODO: Proper error handling
-        eprintln!("error at {:?}: {}", span, msg);
+        self.diagnostics.borrow_mut().emit(
+            Diagnostic::error(msg).with_label(Label::primary(span))
+        );
     }
 
     /// Report an error with a string message (convenience method).
     pub fn error_str(&self, pos: usize, msg: &str) {
-        eprintln!("error at pos {}: {}", pos, msg);
+        let span = Span::new(BytePos(pos as u32), BytePos(pos as u32));
+        self.diagnostics.borrow_mut().emit(
+            Diagnostic::error(msg).with_label(Label::primary(span))
+        );
     }
 
     /// Report a soft error (warning-like).
     pub fn soft_error(&self, span: Span, msg: String) {
-        eprintln!("warning at {:?}: {}", span, msg);
+        self.diagnostics.borrow_mut().emit(
+            Diagnostic::warning(msg).with_label(Label::primary(span))
+        );
+    }
+
+    /// Returns true if any errors were emitted.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.borrow().has_errors()
+    }
+
+    /// Returns the error count.
+    pub fn error_count(&self) -> usize {
+        self.diagnostics.borrow().error_count()
     }
 
     /// Format a position for error messages.
@@ -363,7 +397,12 @@ impl Checker {
         self.init_order();
         self.unused_imports();
         self.record_untyped();
-        Ok(self.pkg)
+        
+        if self.has_errors() {
+            Err(())
+        } else {
+            Ok(self.pkg)
+        }
     }
     
     /// Type check files with an importer for handling imports.
@@ -379,7 +418,12 @@ impl Checker {
         self.init_order();
         self.unused_imports();
         self.record_untyped();
-        Ok(self.pkg)
+        
+        if self.has_errors() {
+            Err(())
+        } else {
+            Ok(self.pkg)
+        }
     }
 
     /// Check that all files have the same package name.
