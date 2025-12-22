@@ -9,7 +9,7 @@ use gox_common::symbol::Ident;
 use gox_common_core::{ExprId, TypeExprId};
 use gox_common::Span;
 use gox_syntax::ast::Expr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// TypeAndValue reports the type and value (for constants) of an expression.
 #[derive(Debug, Clone)]
@@ -68,6 +68,9 @@ pub struct TypeInfo {
 
     /// Package-level initializers in execution order.
     pub init_order: Vec<Initializer>,
+
+    /// Variables that escape to heap (set by escape analysis pass).
+    pub escaped_vars: HashSet<ObjKey>,
 }
 
 impl TypeInfo {
@@ -196,5 +199,10 @@ impl TypeInfo {
     /// Returns true if the identifier is a definition.
     pub(crate) fn is_def(&self, ident: &Ident) -> bool {
         self.defs.contains_key(ident)
+    }
+
+    /// Returns true if the variable escapes to heap.
+    pub fn is_escaped(&self, obj: ObjKey) -> bool {
+        self.escaped_vars.contains(&obj)
     }
 }

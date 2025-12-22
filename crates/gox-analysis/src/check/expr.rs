@@ -1227,7 +1227,14 @@ impl Checker {
                 if self.otype(t).try_as_signature().is_some() {
                     x.mode = OperandMode::Value;
                     x.typ = Some(t);
-                    // Note: func_body checking is deferred via delayed action
+                    // Defer func_body checking via delayed action (like goscript)
+                    let decl = self.octx.decl;
+                    let body = func.body.clone();
+                    let iota = self.octx.iota.clone();
+                    let sig_key = t;
+                    self.later(Box::new(move |checker: &mut Checker| {
+                        checker.func_body(decl, "<function literal>", sig_key, &body, iota);
+                    }));
                 } else {
                     x.mode = OperandMode::Invalid;
                     x.typ = Some(self.invalid_type());

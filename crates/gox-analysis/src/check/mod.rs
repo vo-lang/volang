@@ -10,6 +10,7 @@ pub(crate) mod checker;
 mod conversion;
 mod decl;
 pub mod errors;
+pub(crate) mod escape;
 mod expr;
 pub(crate) mod format;
 mod initorder;

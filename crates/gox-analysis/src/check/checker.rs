@@ -416,6 +416,9 @@ impl Checker {
         self.unused_imports();
         self.record_untyped();
         
+        // Escape analysis pass
+        self.result.escaped_vars = super::escape::analyze(files, &self.result, &self.tc_objs);
+        
         if self.has_errors() {
             Err(())
         } else {
@@ -436,6 +439,9 @@ impl Checker {
         self.init_order();
         self.unused_imports();
         self.record_untyped();
+        
+        // Escape analysis pass
+        self.result.escaped_vars = super::escape::analyze(files, &self.result, &self.tc_objs);
         
         if self.has_errors() {
             Err(())
