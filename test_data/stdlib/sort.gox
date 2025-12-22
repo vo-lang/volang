@@ -1,0 +1,38 @@
+package main
+
+import "sort"
+
+func main() {
+    println("Starting sort tests...")
+    
+    // Test sorting integers
+    ints := []int{5, 2, 8, 1, 9, 3}
+    assert(!sort.IntsAreSorted(ints), "unsorted ints should not be sorted")
+    sort.Ints(ints)
+    assert(sort.IntsAreSorted(ints), "sorted ints should be sorted")
+    assert(ints[0] == 1, "first element should be 1")
+    assert(ints[5] == 9, "last element should be 9")
+    
+    // Test searching integers
+    idx := sort.SearchInts(ints, 5)
+    assert(idx == 3, "SearchInts should find 5 at index 3")
+    
+    idx2 := sort.SearchInts(ints, 4)
+    assert(idx2 == 3, "SearchInts should return 3 for 4 (insertion point between 3 and 5)")
+    
+    // Test reverse
+    sort.Reverse(ints)
+    assert(ints[0] == 9, "after reverse, first should be 9")
+    assert(ints[5] == 1, "after reverse, last should be 1")
+    
+    // Test empty/single element slices
+    empty := []int{}
+    sort.Ints(empty)
+    assert(sort.IntsAreSorted(empty), "empty slice should be sorted")
+    
+    single := []int{42}
+    sort.Ints(single)
+    assert(sort.IntsAreSorted(single), "single element should be sorted")
+    
+    println("All sort tests passed!")
+}

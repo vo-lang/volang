@@ -1,0 +1,132 @@
+package main
+
+// Complex Literal Tests
+
+type Point struct {
+    x int
+    y int
+}
+
+type Rect struct {
+    topLeft     Point
+    bottomRight Point
+}
+
+type Color struct {
+    r int
+    g int
+    b int
+}
+
+type ObjContainer struct {
+    id    int
+    items []int
+    meta  map[string]int
+}
+
+type Tree struct {
+    value    int
+    children []int
+    props    map[int]int
+}
+
+func main() {
+    // Test 1: Nested Struct Literals
+    r := Rect{Point{10, 20}, Point{100, 200}}
+    assert(r.topLeft.x == 10, "r.topLeft.x should be 10")
+    assert(r.topLeft.y == 20, "r.topLeft.y should be 20")
+    assert(r.bottomRight.x == 100, "r.bottomRight.x should be 100")
+    assert(r.bottomRight.y == 200, "r.bottomRight.y should be 200")
+    
+    // Test 2: Slice of Structs
+    points := []Point{Point{1, 2}, Point{3, 4}, Point{5, 6}}
+    assert(len(points) == 3, "points len should be 3")
+    assert(points[0].x == 1, "points[0].x should be 1")
+    assert(points[0].y == 2, "points[0].y should be 2")
+    assert(points[1].x == 3, "points[1].x should be 3")
+    assert(points[2].y == 6, "points[2].y should be 6")
+    
+    // Test 3: Map with Struct Values
+    colorMap := map[string]Color{
+        "red":   Color{255, 0, 0},
+        "green": Color{0, 255, 0},
+        "blue":  Color{0, 0, 255},
+    }
+    red := colorMap["red"]
+    green := colorMap["green"]
+    blue := colorMap["blue"]
+    assert(red.r == 255, "red.r should be 255")
+    assert(green.g == 255, "green.g should be 255")
+    assert(blue.b == 255, "blue.b should be 255")
+    
+    // Test 4: Nested Maps
+    matrix := map[int]map[int]int{
+        0: map[int]int{0: 1, 1: 2, 2: 3},
+        1: map[int]int{0: 4, 1: 5, 2: 6},
+    }
+    row0 := matrix[0]
+    row1 := matrix[1]
+    assert(row0[0] == 1, "matrix[0][0] should be 1")
+    assert(row0[2] == 3, "matrix[0][2] should be 3")
+    assert(row1[1] == 5, "matrix[1][1] should be 5")
+    
+    // Test 2: Slice of Slices
+    grid := [][]int{
+        []int{1, 2, 3},
+        []int{4, 5, 6},
+        []int{7, 8, 9},
+    }
+    assert(len(grid) == 3, "grid len should be 3")
+    assert(len(grid[0]) == 3, "grid[0] len should be 3")
+    gridRow0 := grid[0]
+    gridRow1 := grid[1]
+    gridRow2 := grid[2]
+    assert(gridRow0[0] == 1, "grid[0][0] should be 1")
+    assert(gridRow0[2] == 3, "grid[0][2] should be 3")
+    assert(gridRow1[1] == 5, "grid[1][1] should be 5")
+    assert(gridRow2[2] == 9, "grid[2][2] should be 9")
+    
+    // Test 3: Object with Nested Collections
+    container := ObjContainer{
+        42,
+        []int{10, 20, 30, 40, 50},
+        map[string]int{"count": 5, "sum": 150},
+    }
+    assert(container.id == 42, "container.id should be 42")
+    assert(len(container.items) == 5, "container.items len should be 5")
+    assert(container.items[0] == 10, "container.items[0] should be 10")
+    assert(container.items[4] == 50, "container.items[4] should be 50")
+    assert(container.meta["count"] == 5, "container.meta[count] should be 5")
+    assert(container.meta["sum"] == 150, "container.meta[sum] should be 150")
+    
+    // Struct value semantics (copy on assignment)
+    container2 := container
+    container2.id = 99
+    assert(container.id == 42, "struct value: container.id should still be 42")
+    assert(container2.id == 99, "struct value: container2.id should be 99")
+    
+    // Test 4: Tree with slice and map
+    tree := Tree{
+        100,
+        []int{1, 2, 3},
+        map[int]int{1: 10, 2: 20, 3: 30},
+    }
+    assert(tree.value == 100, "tree.value should be 100")
+    assert(len(tree.children) == 3, "tree.children len should be 3")
+    assert(tree.children[0] == 1, "tree.children[0] should be 1")
+    assert(tree.children[2] == 3, "tree.children[2] should be 3")
+    assert(tree.props[1] == 10, "tree.props[1] should be 10")
+    assert(tree.props[3] == 30, "tree.props[3] should be 30")
+    
+    // Test 5: Grid computation
+    gridSum := 0
+    for i := 0; i < len(grid); i++ {
+        row := grid[i]
+        for j := 0; j < len(row); j++ {
+            gridSum = gridSum + row[j]
+        }
+    }
+    assert(gridSum == 45, "grid sum should be 45, got ", gridSum)
+    
+    println("complex_literal_test: ALL PASSED")
+}

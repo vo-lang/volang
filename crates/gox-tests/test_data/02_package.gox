@@ -1,8 +1,0 @@
-// +vm
-// Test: Package declaration
-package main
-
-=== parser ===
-File {
-  package: "main",
-}

@@ -1,0 +1,27 @@
+package main
+
+type Point struct {
+    x int
+    y int
+}
+
+func (p Point) Sum() int {
+    return p.x + p.y
+}
+
+type Rect struct {
+    origin Point
+    width  int
+}
+
+func main() {
+    // Create Rect with nested Point
+    r := Rect{origin: Point{x: 1, y: 2}, width: 10}
+    
+    // Access nested fields directly
+    println(r.origin.x)  // 1
+    println(r.origin.y)  // 2
+    
+    // Call method on nested struct
+    println(r.origin.Sum())  // should be 3
+}

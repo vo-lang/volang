@@ -1,0 +1,12 @@
+package main
+
+func main() {
+    println("Testing range string...")
+    
+    s := "中b"
+    for _, r := range s {
+        println(r)
+    }
+    
+    println("Range string test passed!")
+}

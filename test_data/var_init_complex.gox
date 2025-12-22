@@ -1,0 +1,20 @@
+// Test: Complex variable initialization with function calls
+package main
+
+func getInitialValue() int {
+    return 42
+}
+
+func double(x int) int {
+    return x * 2
+}
+
+var initialValue = getInitialValue()
+var doubledValue = double(21)
+
+func main() {
+    assert(initialValue == 42, "initialValue should be 42")
+    assert(doubledValue == 42, "doubledValue should be 42")
+    
+    println("var_init_complex: ALL TESTS PASSED")
+}

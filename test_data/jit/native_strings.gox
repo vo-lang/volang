@@ -1,0 +1,25 @@
+// Native function call test - strings package
+package main
+
+import "strings"
+
+func main() {
+    s := "hello world"
+    
+    // Test strings.Index
+    idx := strings.Index(s, "world")
+    println(idx)
+    assert(idx == 6, "Index should be 6")
+    
+    // Test strings.Contains
+    has := strings.Contains(s, "llo")
+    assert(has, "Contains should be true")
+    
+    // Test strings.HasPrefix
+    pre := strings.HasPrefix(s, "hello")
+    assert(pre, "HasPrefix should be true")
+    
+    // Test strings.HasSuffix
+    suf := strings.HasSuffix(s, "world")
+    assert(suf, "HasSuffix should be true")
+}

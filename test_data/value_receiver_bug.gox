@@ -1,0 +1,19 @@
+package main
+
+type Point struct {
+    x int
+    y int
+}
+
+func (p Point) Sum() int {
+    return p.x + p.y
+}
+
+type Container struct {
+    pt Point
+}
+
+func main() {
+    c := Container{pt: Point{x: 3, y: 4}}
+    println(c.pt.Sum())  // 应该是 7
+}

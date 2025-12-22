@@ -1,0 +1,55 @@
+package main
+
+type Point struct {
+    x int
+    y int
+}
+
+func (p Point) Sum() int {
+    return p.x + p.y
+}
+
+type Rect struct {
+    origin Point
+    width  int
+    height int
+}
+
+func (r Rect) Area() int {
+    return r.width * r.height
+}
+
+func (r *Rect) MoveX(dx int) {
+    r.origin.x += dx
+}
+
+type Calculator struct {
+    x int
+    y int
+}
+
+func (c Calculator) Add() int {
+    return c.x + c.y
+}
+
+func (c Calculator) Sub() int {
+    return c.x - c.y
+}
+
+func main() {
+    // Test Point
+    p := Point{x: 1, y: 2}
+    println(p.Sum())  // 3
+    
+    // Test Rect with nested Point
+    r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
+    println(r.origin.Sum())  // 3
+    println(r.Area())        // 50
+    r.MoveX(5)
+    println(r.origin.x)      // 6
+    
+    // Test Calculator
+    c := Calculator{x: 10, y: 3}
+    println(c.Add())  // 13
+    println(c.Sub())  // 7
+}

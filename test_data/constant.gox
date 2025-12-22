@@ -1,0 +1,83 @@
+package main
+
+func main() {
+    // ========== Large Integer Constants ==========
+    
+    // Test i32 boundary values
+    max32 := 2147483647
+    min32 := -2147483648
+    assert(max32 == 2147483647, "max32 should be 2147483647")
+    assert(min32 == -2147483648, "min32 should be -2147483648")
+    
+    // Test values just outside i32 range
+    over32 := 2147483648
+    under32 := -2147483649
+    assert(over32 == 2147483648, "over32 should be 2147483648")
+    assert(under32 == -2147483649, "under32 should be -2147483649")
+    
+    // Test large positive integers
+    big1 := 9999999999
+    big2 := 100000000000
+    assert(big1 == 9999999999, "big1 should be 9999999999")
+    assert(big2 == 100000000000, "big2 should be 100000000000")
+    
+    // Test large negative integers
+    negbig1 := -9999999999
+    negbig2 := -100000000000
+    assert(negbig1 == -9999999999, "negbig1 should be -9999999999")
+    assert(negbig2 == -100000000000, "negbig2 should be -100000000000")
+    
+    // ========== Large Integer Arithmetic ==========
+    
+    // Addition with large integers
+    sum1 := big1 + big2
+    assert(sum1 == 109999999999, "big1 + big2 should be 109999999999")
+    
+    // Subtraction with large integers
+    diff1 := big2 - big1
+    assert(diff1 == 90000000001, "big2 - big1 should be 90000000001")
+    
+    // Multiplication with large integers
+    prod1 := over32 * 2
+    assert(prod1 == 4294967296, "over32 * 2 should be 4294967296")
+    
+    // Division with large integers
+    div1 := big2 / 10
+    assert(div1 == 10000000000, "big2 / 10 should be 10000000000")
+    
+    // Mixed operations
+    mixed1 := (big1 + 1) * 2
+    assert(mixed1 == 20000000000, "mixed1 should be 20000000000")
+    
+    // ========== Integer Comparison ==========
+    
+    // Comparison operators
+    assert(big1 > max32, "big1 should be > max32")
+    assert(negbig1 < min32, "negbig1 should be < min32")
+    assert(big1 >= big1, "big1 should be >= big1")
+    assert(big1 <= big1, "big1 should be <= big1")
+    assert(big1 != big2, "big1 should be != big2")
+    
+    // ========== Float Constants ==========
+    // Note: Float arithmetic has known issues - testing basic comparisons only
+    
+    // Basic floats
+    f1 := 3.14159
+    f2 := 2.71828
+    assert(f1 > 3.14, "f1 should be > 3.14")
+    assert(f1 < 3.15, "f1 should be < 3.15")
+    assert(f2 > 2.71, "f2 should be > 2.71")
+    assert(f2 < 2.72, "f2 should be < 2.72")
+    
+    // Large floats
+    bigf := 1234567890.123
+    assert(bigf > 1234567890.0, "bigf should be > 1234567890")
+    assert(bigf < 1234567891.0, "bigf should be < 1234567891")
+    
+    // Negative floats
+    negf := -123.456
+    assert(negf < 0.0, "negf should be < 0")
+    assert(negf > -124.0, "negf should be > -124")
+    
+    println("constant_test: ALL PASSED")
+}

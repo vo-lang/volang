@@ -1,0 +1,49 @@
+// Test rune literal escape sequences
+package main
+
+func main() {
+    // Simple rune literals
+    assert('a' == 97, "rune 'a' should be 97")
+    assert('A' == 65, "rune 'A' should be 65")
+    assert('0' == 48, "rune '0' should be 48")
+    assert(' ' == 32, "rune ' ' should be 32")
+
+    // Simple escape sequences
+    assert('\n' == 10, "rune '\\n' should be 10")
+    assert('\r' == 13, "rune '\\r' should be 13")
+    assert('\t' == 9, "rune '\\t' should be 9")
+    assert('\\' == 92, "rune '\\\\' should be 92")
+    assert('\'' == 39, "rune '\\'' should be 39")
+
+    // Bell, backspace, form feed, vertical tab
+    assert('\a' == 7, "rune '\\a' should be 7 (bell)")
+    assert('\b' == 8, "rune '\\b' should be 8 (backspace)")
+    assert('\f' == 12, "rune '\\f' should be 12 (form feed)")
+    assert('\v' == 11, "rune '\\v' should be 11 (vertical tab)")
+
+    // Hex escape
+    assert('\x41' == 65, "rune '\\x41' should be 65 (A)")
+    assert('\x00' == 0, "rune '\\x00' should be 0")
+    assert('\x7F' == 127, "rune '\\x7F' should be 127 (DEL)")
+
+    // Unicode escape \u (4 digits)
+    assert('\u0041' == 65, "rune '\\u0041' should be 65 (A)")
+    assert('\u4e2d' == 20013, "rune '\\u4e2d' should be 20013 (中)")
+
+    // Octal escape
+    assert('\000' == 0, "rune '\\000' should be 0")
+    assert('\101' == 65, "rune '\\101' should be 65 (A)")
+    assert('\012' == 10, "rune '\\012' should be 10 (newline)")
+    assert('\177' == 127, "rune '\\177' should be 127 (DEL)")
+
+    // Rune arithmetic (since rune = int32)
+    r := 'A'
+    r = r + 1
+    assert(r == 'B', "rune arithmetic: 'A' + 1 should be 'B'")
+
+    r = 'Z' - 'A'
+    assert(r == 25, "rune arithmetic: 'Z' - 'A' should be 25")
+
+    println("rune_literal: ALL TESTS PASSED")
+}
+

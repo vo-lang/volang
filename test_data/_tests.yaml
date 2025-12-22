@@ -1,0 +1,189 @@
+# GoX Integration Test Configuration
+#
+# Format:
+#   tests:
+#     - file: path/to/test.gox   # Relative to test_data/
+#       mode: [vm, jit]          # Which modes to run
+#       skip: true               # Optional: skip this test
+#       skip: "reason"           # Optional: skip with reason
+#
+# For project directories (proj_*), specify the directory path.
+
+tests:
+  # Runtime tests (VM only)
+  - file: channel_send.gox
+    mode: [vm]
+  - file: clone_immediate_read.gox
+    mode: [vm]
+  - file: complex_literal.gox
+    mode: [vm]
+  - file: const_fold.gox
+    mode: [vm]
+  - file: const.gox
+    mode: [vm]
+  - file: constant.gox
+    mode: [vm]
+  - file: debug_clone.gox
+    mode: [vm]
+  - file: debug_sequence.gox
+    mode: [vm]
+  - file: defer_stmt.gox
+    mode: [vm]
+  - file: embed_interface_impl.gox
+    mode: [vm]
+  - file: embed_interface.gox
+    mode: [vm]
+  - file: embed_method.gox
+    mode: [vm]
+  - file: embed_pointer.gox
+    mode: [vm]
+  - file: embed_shadow.gox
+    mode: [vm]
+  - file: embed_struct.gox
+    mode: [vm]
+  - file: fib_goroutine.gox
+    mode: [vm]
+  - file: field_offset_debug.gox
+    mode: [vm]
+  - file: go_stmt.gox
+    mode: [vm]
+  - file: init_call_error.gox
+    mode: [vm]
+  - file: interface_conversion.gox
+    mode: [vm]
+  - file: interface_method_set.gox
+    mode: [vm]
+  - file: interface_pointer.gox
+    mode: [vm]
+  - file: interface.gox
+    mode: [vm]
+  - file: local_type.gox
+    mode: [vm]
+  - file: map.gox
+    mode: [vm]
+  - file: method_dispatch_bug.gox
+    mode: [vm]
+  - file: minimal_bug.gox
+    mode: [vm]
+  - file: minimal_bug2.gox
+    mode: [vm]
+  - file: multi_init.gox
+    mode: [vm]
+  - file: multi_type_method.gox
+    mode: [vm]
+  - file: nested_clone_test.gox
+    mode: [vm]
+  - file: nested_struct_bug.gox
+    mode: [vm]
+  - file: point_then_rect.gox
+    mode: [vm]
+  - file: pointer_basic.gox
+    mode: [vm]
+  - file: pointer_comprehensive.gox
+    mode: [vm]
+  - file: pointer_embedded.gox
+    mode: [vm]
+  - file: pointer_method_call.gox
+    mode: [vm]
+  - file: range_string.gox
+    mode: [vm, jit]
+  - file: rect_only_sum.gox
+    mode: [vm]
+  - file: rect_only.gox
+    mode: [vm]
+  - file: rune_literal.gox
+    mode: [vm]
+  - file: select_stmt.gox
+    mode: [vm]
+  - file: setfield_getfield_test.gox
+    mode: [vm]
+  - file: setfield_test.gox
+    mode: [vm]
+  - file: simple_clone_test.gox
+    mode: [vm]
+  - file: slice_map.gox
+    mode: [vm]
+  - file: slice.gox
+    mode: [vm]
+  - file: struct_method_simple.gox
+    mode: [vm]
+  - file: struct_object.gox
+    mode: [vm]
+  - file: switch_stmt.gox
+    mode: [vm]
+  - file: type_debug.gox
+    mode: [vm]
+  - file: value_receiver_bug.gox
+    mode: [vm]
+  - file: var_dependency.gox
+    mode: [vm]
+  - file: var_init_complex.gox
+    mode: [vm]
+  - file: var_init_func.gox
+    mode: [vm]
+  - file: var_init_order.gox
+    mode: [vm]
+
+  # JIT-only tests
+  - file: jit/bitwise_ops.gox
+    mode: [jit]
+  - file: jit/boolean_ops.gox
+    mode: [jit]
+  - file: jit/channel_basic.gox
+    mode: [jit]
+  - file: jit/comparisons.gox
+    mode: [jit]
+  - file: jit/control_flow.gox
+    mode: [jit]
+  - file: jit/float_ops.gox
+    mode: [jit]
+  - file: jit/for_loop.gox
+    mode: [jit]
+  - file: jit/modulo_ops.gox
+    mode: [jit]
+  - file: jit/multi_return.gox
+    mode: [jit]
+  - file: jit/native_math.gox
+    mode: [jit]
+  - file: jit/native_strings.gox
+    mode: [jit]
+  - file: jit/negative_numbers.gox
+    mode: [jit]
+  - file: jit/nested_calls.gox
+    mode: [jit]
+  - file: jit/recursion.gox
+    mode: [jit]
+  - file: jit/simple_arithmetic.gox
+    mode: [jit]
+  - file: jit/string_const.gox
+    mode: [jit]
+  - file: jit/type_conversion.gox
+    mode: [jit]
+
+  # Stdlib tests (VM + JIT)
+  - file: stdlib/base64.gox
+    mode: [vm, jit]
+  - file: stdlib/bytes.gox
+    mode: [vm, jit]
+  - file: stdlib/errors.gox
+    mode: [vm, jit]
+  - file: stdlib/hex.gox
+    mode: [vm, jit]
+  - file: stdlib/math.gox
+    mode: [vm, jit]
+  - file: stdlib/regexp.gox
+    mode: [vm, jit]
+  - file: stdlib/sort.gox
+    mode: [vm, jit]
+  - file: stdlib/strconv.gox
+    mode: [vm, jit]
+  - file: stdlib/strings.gox
+    mode: [vm, jit]
+  - file: stdlib/unicode.gox
+    mode: [vm, jit]
+
+  # Multi-file projects
+  - file: proj_multifile/
+    mode: [vm]
+  - file: proj_taskman/
+    mode: [vm]

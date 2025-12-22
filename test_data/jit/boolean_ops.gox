@@ -1,0 +1,30 @@
+// Boolean operations
+package main
+
+func main() {
+    // Basic boolean values
+    t := true
+    f := false
+    
+    assert(t)
+    assert(!f)
+    
+    // Logical AND
+    assert(true && true)
+    assert(!(true && false))
+    assert(!(false && true))
+    assert(!(false && false))
+    
+    // Logical OR
+    assert(true || true)
+    assert(true || false)
+    assert(false || true)
+    assert(!(false || false))
+    
+    // With variables
+    a := true
+    b := false
+    assert(a && !b)
+    assert(a || b)
+    assert(!(!a && !b))
+}

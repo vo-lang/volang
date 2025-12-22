@@ -17,6 +17,8 @@ gox-codegen-vm = { path = "../gox-codegen-vm" }
 gox-module = { path = "../gox-module" }
 gox-vm = { path = "../gox-vm" }
 gox-runtime-vm = { path = "../gox-runtime-vm" }
+gox-runtime-native = { path = "../gox-runtime-native" }
+gox-jit = { path = "../gox-jit" }
 clap = { version = "4.4", features = ["derive"] }
 
 [dev-dependencies]

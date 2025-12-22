@@ -1,0 +1,26 @@
+// Comparison operations
+package main
+
+func main() {
+    // Integer comparisons
+    assert(10 == 10)
+    assert(10 != 20)
+    assert(10 < 20)
+    assert(20 > 10)
+    assert(10 <= 10)
+    assert(10 <= 20)
+    assert(20 >= 20)
+    assert(20 >= 10)
+    
+    // With variables
+    a := 5
+    b := 10
+    assert(a < b)
+    assert(b > a)
+    assert(a != b)
+    
+    // Chained comparisons via logic
+    c := 15
+    assert(a < b)
+    assert(b < c)
+}

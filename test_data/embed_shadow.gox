@@ -1,0 +1,51 @@
+// Test: embedded field shadowing - outer field shadows promoted field
+package main
+
+type Inner struct {
+	value int
+}
+
+func (i Inner) GetValue() int {
+	return i.value
+}
+
+type Outer struct {
+	Inner
+	value int  // shadows Inner.value
+}
+
+func (o Outer) GetValue() int {  // shadows Inner.GetValue
+	return o.value * 10
+}
+
+type Deep struct {
+	Outer
+	value int  // shadows Outer.value and Inner.value
+}
+
+func main() {
+	// Field shadowing
+	o := Outer{}
+	o.value = 5        // sets Outer.value
+	o.Inner.value = 3  // sets Inner.value explicitly
+	
+	assert(o.value == 5, "o.value should be 5")
+	assert(o.Inner.value == 3, "o.Inner.value should be 3")
+	
+	// Method shadowing
+	assert(o.GetValue() == 50, "o.GetValue() should be 50")
+	assert(o.Inner.GetValue() == 3, "o.Inner.GetValue() should be 3")
+	
+	// Multi-level shadowing
+	d := Deep{}
+	d.value = 7
+	d.Outer.value = 5
+	d.Outer.Inner.value = 3
+	
+	assert(d.value == 7, "d.value should be 7")
+	assert(d.Outer.value == 5, "d.Outer.value should be 5")
+	assert(d.Outer.Inner.value == 3, "d.Outer.Inner.value should be 3")
+	
+	println("shadowing tests passed")
+}
+

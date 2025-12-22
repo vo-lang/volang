@@ -605,7 +605,9 @@ dependencies = [
  "gox-analysis",
  "gox-codegen-vm",
  "gox-common",
+ "gox-jit",
  "gox-module",
+ "gox-runtime-native",
  "gox-runtime-vm",
  "gox-syntax",
  "gox-vm",
@@ -738,22 +740,6 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "thiserror",
-]
-
-[[package]]
-name = "gox-tests"
-version = "0.1.0"
-dependencies = [
- "gox-analysis",
- "gox-cli",
- "gox-codegen-vm",
- "gox-common",
- "gox-jit",
- "gox-module",
- "gox-runtime-native",
- "gox-runtime-vm",
- "gox-syntax",
- "gox-vm",
 ]
 
 [[package]]

@@ -1,0 +1,22 @@
+// Test: defer statement - typecheck only
+package main
+
+var counter int
+
+func main() {
+	testDefer()
+}
+
+func testDefer() {
+	defer cleanup()
+	defer reset()
+}
+
+func cleanup() {
+	counter = 0
+}
+
+func reset() {
+	counter = 1
+}
+

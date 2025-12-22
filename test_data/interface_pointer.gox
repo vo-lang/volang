@@ -1,0 +1,105 @@
+package main
+
+// Comprehensive test for interface implementation with pointer receivers
+
+// ============================================
+// Part 1: Interface Definitions
+// ============================================
+
+type Stringer interface {
+    String() string
+}
+
+type Mover interface {
+    Move(dx, dy int)
+}
+
+type Summer interface {
+    Sum() int
+}
+
+// ============================================
+// Part 2: Type with Both Receiver Types
+// ============================================
+
+type Vector struct {
+    x int
+    y int
+}
+
+// Value receiver - belongs to both Vector and *Vector method sets
+func (v Vector) Sum() int {
+    return v.x + v.y
+}
+
+// Value receiver - belongs to both Vector and *Vector method sets
+func (v Vector) String() string {
+    return "Vector"
+}
+
+// Pointer receiver - belongs ONLY to *Vector method set
+func (v *Vector) Move(dx, dy int) {
+    v.x = v.x + dx
+    v.y = v.y + dy
+}
+
+// Pointer receiver - belongs ONLY to *Vector method set
+func (v *Vector) Scale(factor int) {
+    v.x = v.x * factor
+    v.y = v.y * factor
+}
+
+// ============================================
+// Part 3: Tests
+// ============================================
+
+func main() {
+    testPointerImplementsMover()
+    testPointerImplementsSummer()
+    testValueImplementsSummer()
+    testMethodCallThroughInterface()
+    
+    println("interface_pointer: ALL PASSED")
+}
+
+// Test 1: *Vector implements Mover (pointer receiver method)
+func testPointerImplementsMover() {
+    v := &Vector{10, 20}
+    
+    // Direct method call
+    v.Move(5, 10)
+    assert(v.x == 15, "testPointerImplementsMover: v.x should be 15")
+    assert(v.y == 30, "testPointerImplementsMover: v.y should be 30")
+}
+
+// Test 2: *Vector implements Summer (value receiver method)
+func testPointerImplementsSummer() {
+    v := &Vector{10, 20}
+    
+    // Call value receiver on pointer (auto-deref)
+    sum := v.Sum()
+    assert(sum == 30, "testPointerImplementsSummer: sum should be 30")
+}
+
+// Test 3: Vector implements Summer (value receiver method)
+func testValueImplementsSummer() {
+    v := Vector{10, 20}
+    
+    // Call value receiver on value
+    sum := v.Sum()
+    assert(sum == 30, "testValueImplementsSummer: sum should be 30")
+}
+
+// Test 4: Method call through interface
+func testMethodCallThroughInterface() {
+    v := &Vector{10, 20}
+    
+    // Test value receiver method
+    str := v.String()
+    assert(str == "Vector", "testMethodCallThroughInterface: String() should return 'Vector'")
+    
+    // Test pointer receiver method
+    v.Scale(3)
+    assert(v.x == 30, "testMethodCallThroughInterface: after Scale v.x should be 30")
+    assert(v.y == 60, "testMethodCallThroughInterface: after Scale v.y should be 60")
+}

@@ -1,0 +1,27 @@
+// Modulo operations
+package main
+
+func is_even(n int) bool {
+    return n % 2 == 0
+}
+
+func is_divisible(n, d int) bool {
+    return n % d == 0
+}
+
+func main() {
+    // Basic modulo
+    assert(10 % 3 == 1)
+    assert(15 % 5 == 0)
+    assert(17 % 4 == 1)
+    
+    // Even check
+    assert(is_even(4))
+    assert(!is_even(5))
+    assert(is_even(0))
+    
+    // Divisibility
+    assert(is_divisible(12, 3))
+    assert(is_divisible(12, 4))
+    assert(!is_divisible(12, 5))
+}

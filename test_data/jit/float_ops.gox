@@ -1,0 +1,23 @@
+// Float operations
+package main
+
+func main() {
+    // Basic float arithmetic
+    a := 3.5
+    b := 2.0
+    
+    sum := a + b
+    diff := a - b
+    prod := a * b
+    quot := a / b
+    
+    // Check by converting to int for comparison
+    assert(int(sum) == 5)    // 3.5 + 2.0 = 5.5 -> 5
+    assert(int(diff) == 1)   // 3.5 - 2.0 = 1.5 -> 1
+    assert(int(prod) == 7)   // 3.5 * 2.0 = 7.0 -> 7
+    assert(int(quot) == 1)   // 3.5 / 2.0 = 1.75 -> 1
+    
+    // Negative floats
+    c := -2.5
+    assert(int(c) == -2)
+}

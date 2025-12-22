@@ -1,0 +1,27 @@
+package main
+
+import "strconv"
+
+func main() {
+    // Itoa
+    assert(strconv.Itoa(42) == "42", "Itoa(42) failed")
+    assert(strconv.Itoa(-123) == "-123", "Itoa(-123) failed")
+    assert(strconv.Itoa(0) == "0", "Itoa(0) failed")
+    
+    // FormatInt with different bases
+    assert(strconv.FormatInt(255, 16) == "ff", "FormatInt hex failed")
+    assert(strconv.FormatInt(8, 2) == "1000", "FormatInt binary failed")
+    assert(strconv.FormatInt(64, 8) == "100", "FormatInt octal failed")
+    assert(strconv.FormatInt(100, 10) == "100", "FormatInt decimal failed")
+    
+    // FormatBool
+    assert(strconv.FormatBool(true) == "true", "FormatBool(true) failed")
+    assert(strconv.FormatBool(false) == "false", "FormatBool(false) failed")
+    
+    // Quote - verify it returns a quoted string
+    quoted := strconv.Quote("hello")
+    assert(len(quoted) == 7, "Quote should return 7 chars for 'hello'")
+    
+    println("All strconv tests passed!")
+}
+

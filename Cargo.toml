@@ -31,7 +31,6 @@ members = [
   
   # Tools
   "crates/gox-cli",
-  "crates/gox-tests",
 ]
 
 [workspace.package]

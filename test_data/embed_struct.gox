@@ -1,0 +1,53 @@
+// Test: struct embedding - field promotion
+package main
+
+type Person struct {
+	name string
+	age  int
+}
+
+type Employee struct {
+	Person  // embedded field
+	salary int
+}
+
+type Manager struct {
+	Employee  // nested embedding
+	team string
+}
+
+func main() {
+	// Basic embedding - field promotion
+	e := Employee{}
+	e.name = "Alice"
+	e.age = 30
+	e.salary = 50000
+	
+	assert(e.name == "Alice", "e.name should be Alice")
+	assert(e.age == 30, "e.age should be 30")
+	assert(e.salary == 50000, "e.salary should be 50000")
+	
+	// Access via embedded field name
+	assert(e.Person.name == "Alice", "e.Person.name should be Alice")
+	
+	// Nested embedding - multi-level promotion
+	m := Manager{}
+	m.name = "Bob"      // promoted from Person through Employee
+	m.age = 40
+	m.salary = 80000    // promoted from Employee
+	m.team = "Engineering"
+	
+	assert(m.name == "Bob", "m.name should be Bob")
+	assert(m.Employee.name == "Bob", "m.Employee.name should be Bob")
+	assert(m.Employee.Person.name == "Bob", "m.Employee.Person.name should be Bob")
+	
+	// Composite literal with embedded fields
+	e2 := Employee{
+		Person: Person{name: "Carol", age: 25},
+		salary: 45000,
+	}
+	assert(e2.name == "Carol", "e2.name should be Carol")
+	
+	println("struct embedding tests passed")
+}
+

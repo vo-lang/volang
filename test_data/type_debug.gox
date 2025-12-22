@@ -1,0 +1,14 @@
+package main
+
+// Only one struct type
+type Point struct {
+    x int
+    y int
+}
+
+func main() {
+    p1 := Point{x: 1, y: 2}
+    p2 := Point{x: 3, y: 4}
+    println(p1.x)  // 1
+    println(p2.x)  // 3
+}

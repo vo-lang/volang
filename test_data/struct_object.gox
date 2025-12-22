@@ -1,0 +1,45 @@
+package main
+
+// Test struct value semantics and pointer semantics
+
+type S struct {
+    x int
+    y int
+}
+
+type Person struct {
+    age    int
+    height int
+    score  int
+}
+
+type Container struct {
+    name  string
+    items []int
+}
+
+func main() {
+    // Test 1: Struct value semantics (copy on assignment)
+    s1 := S{10, 20}
+    s2 := s1
+    s2.x = 100
+    assert(s1.x == 10, "struct value semantics: s1.x should be 10, got ", s1.x)
+    assert(s2.x == 100, "struct value semantics: s2.x should be 100, got ", s2.x)
+    
+    // Test 2: Multi-field struct
+    p := Person{11, 22, 33}
+    assert(p.age == 11, "multi-field struct: p.age should be 11")
+    assert(p.height == 22, "multi-field struct: p.height should be 22")
+    assert(p.score == 33, "multi-field struct: p.score should be 33")
+    
+    // Test 4: Slice literal
+    items := []int{1, 2, 3}
+    assert(len(items) == 3, "slice literal: len should be 3")
+    
+    // Test 5: Struct with string and slice fields
+    c := Container{"hello", items}
+    assert(len(c.name) == 5, "container name len should be 5")
+    assert(len(c.items) == 3, "container items len should be 3")
+    
+    println("struct_pointer_test: ALL PASSED")
+}

@@ -1,0 +1,23 @@
+package main
+
+import "regexp"
+
+func main() {
+    println("Testing regexp...")
+    
+    // Test MatchString
+    matched, err := regexp.MatchString("^hello", "hello world")
+    assert(err == nil, "MatchString should not error")
+    assert(matched, "should match 'hello world'")
+    
+    matched2, _ := regexp.MatchString("^world", "hello world")
+    assert(!matched2, "should not match at start")
+    
+    // Test Compile + MatchString method
+    re, err2 := regexp.Compile("[0-9]+")
+    assert(err2 == nil, "Compile should not error")
+    assert(re.MatchString("abc123def"), "should match digits")
+    assert(!re.MatchString("abcdef"), "should not match without digits")
+    
+    println("All regexp tests passed!")
+}

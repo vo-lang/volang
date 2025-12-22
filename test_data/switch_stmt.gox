@@ -1,0 +1,96 @@
+// Test: switch statement - comprehensive tests
+package main
+
+func main() {
+	// 1. Basic switch with tag
+	x := 2
+	result := 0
+	switch x {
+	case 1:
+		result = 10
+	case 2:
+		result = 20
+	case 3:
+		result = 30
+	default:
+		result = -1
+	}
+	assert(result == 20, "basic switch case 2")
+	
+	// 2. Switch with multiple case values
+	y := 5
+	category := 0
+	switch y {
+	case 1, 2, 3:
+		category = 1
+	case 4, 5, 6:
+		category = 2
+	default:
+		category = 3
+	}
+	assert(category == 2, "multiple case values")
+	
+	// 3. Default case
+	z := 100
+	hit := 0
+	switch z {
+	case 1:
+		hit = 1
+	case 2:
+		hit = 2
+	default:
+		hit = 99
+	}
+	assert(hit == 99, "default case")
+	
+	// 4. First case match
+	a := 1
+	first := 0
+	switch a {
+	case 1:
+		first = 100
+	case 2:
+		first = 200
+	}
+	assert(first == 100, "first case match")
+	
+	// 5. No default, no match
+	b := 999
+	noMatch := 0
+	switch b {
+	case 1:
+		noMatch = 1
+	case 2:
+		noMatch = 2
+	}
+	assert(noMatch == 0, "no match no default")
+	
+	// 6. Switch with init statement
+	switch c := 3; c {
+	case 1:
+		result = 1
+	case 3:
+		result = 33
+	}
+	assert(result == 33, "switch with init")
+	
+	// 7. Nested switch
+	outer := 2
+	inner := 1
+	nested := 0
+	switch outer {
+	case 1:
+		nested = 10
+	case 2:
+		switch inner {
+		case 1:
+			nested = 21
+		case 2:
+			nested = 22
+		}
+	}
+	assert(nested == 21, "nested switch")
+	
+	println("switch tests passed")
+}
+

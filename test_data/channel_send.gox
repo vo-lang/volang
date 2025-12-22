@@ -1,0 +1,19 @@
+// Test: channel send/receive
+package main
+
+var ch = make(chan int, 1)
+
+func sendToChannel() {
+	ch <- 42
+}
+
+func recvFromChannel() int {
+	return <-ch
+}
+
+func main() {
+	sendToChannel()
+	val := recvFromChannel()
+	assert(val == 42, "channel value should be 42")
+	println("channel send/receive test passed")
+}

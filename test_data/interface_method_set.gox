@@ -1,0 +1,29 @@
+package main
+
+// Test: Interface method set rules
+// Go rule: Value type T only has value receiver methods
+// Pointer type *T has both value and pointer receiver methods
+
+type Point struct {
+    x int
+    y int
+}
+
+// Pointer receiver only - belongs to *Point method set, NOT Point
+func (p *Point) Move(dx, dy int) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+type Mover interface {
+    Move(dx, dy int)
+}
+
+func main() {
+    // Test: *Point implements Mover
+    pp := &Point{10, 20}
+    pp.Move(5, 10)
+    assert(pp.x == 15, "pp.x should be 15")
+    
+    println("interface_method_set: ALL PASSED")
+}
