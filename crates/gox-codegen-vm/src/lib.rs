@@ -177,9 +177,16 @@ fn compile_init_and_entry(
 
     let mut entry_builder = FuncBuilder::new("__entry__");
 
+    // 1. Call __init__ (variable initialization)
     let init_idx = ctx.func_count() as u16 - 1;
     entry_builder.emit_op(Opcode::Call, init_idx, 0, 0);
 
+    // 2. Call all init() functions in order
+    for &init_func_idx in ctx.get_init_functions() {
+        entry_builder.emit_op(Opcode::Call, init_func_idx as u16, 0, 0);
+    }
+
+    // 3. Call main()
     if let Some(main_idx) = ctx.find_function("main") {
         entry_builder.emit_with_flags(Opcode::Call, 0, main_idx as u16, 0, 0);
     }
@@ -221,9 +228,14 @@ fn collect_declarations(
                     });
                     let func_idx = ctx.register_method(recv_type_key, func.name.symbol);
                     
+                    // Track init() functions (no receiver, name is "init")
+                    let func_name = info.symbol_str(func.name.symbol);
+                    if func_name == "init" && recv_type_key.is_none() {
+                        ctx.register_init_function(func_idx);
+                    }
+                    
                     // Register ObjKey -> func_idx mapping for interface dispatch
                     // For methods, use lookup_concrete_method; for functions, use lookup_symbol_objkey
-                    let func_name = info.symbol_str(func.name.symbol);
                     let objkey = if let Some(recv_key) = recv_type_key {
                         info.query.lookup_concrete_method(recv_key, func_name)
                     } else {

@@ -27,6 +27,8 @@ pub struct CodegenContext {
     iface_dispatch_registered: HashSet<(u16, u16)>,
     // ObjKey to func_idx mapping for method dispatch
     objkey_to_func: HashMap<ObjKey, u32>,
+    // init() function indices in declaration order
+    init_functions: Vec<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -52,6 +54,7 @@ impl CodegenContext {
             next_interface_id: 0,
             iface_dispatch_registered: HashSet::new(),
             objkey_to_func: HashMap::new(),
+            init_functions: Vec::new(),
         }
     }
 
@@ -128,6 +131,16 @@ impl CodegenContext {
     /// Get func_idx by ObjKey.
     pub fn get_func_by_objkey(&self, objkey: ObjKey) -> Option<u32> {
         self.objkey_to_func.get(&objkey).copied()
+    }
+
+    /// Register an init() function.
+    pub fn register_init_function(&mut self, func_idx: u32) {
+        self.init_functions.push(func_idx);
+    }
+
+    /// Get all init() function indices in declaration order.
+    pub fn get_init_functions(&self) -> &[u32] {
+        &self.init_functions
     }
 
     // === Extern management ===
