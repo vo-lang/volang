@@ -69,18 +69,18 @@ impl Checker {
                     OperandMode::Invalid | OperandMode::Constant(_) => false,
                     _ => true,
                 };
-                self.tc_objs.universe().builtins()[&id].kind
+                self.universe().builtins()[&id].kind
             }
 
             _ => {
                 // Function/method call
                 let func_type = x.typ.unwrap_or(self.invalid_type());
-                let sig_key = typ::underlying_type(func_type, &self.tc_objs);
+                let sig_key = typ::underlying_type(func_type, self.objs());
 
                 if let Some(sig) = self.otype(sig_key).try_as_signature() {
                     let sig_results = sig.results();
                     let variadic = sig.variadic();
-                    let pcount = sig.params_count(&self.tc_objs);
+                    let pcount = sig.params_count(self.objs());
 
                     // Unpack arguments (handles multi-value returns)
                     let result = self.unpack(&call.args, pcount, false, variadic, fctx);
@@ -200,7 +200,7 @@ impl Checker {
             }
             // Check that x is assignable to the slice type
             let xtype = x.typ.unwrap();
-            if self.otype(xtype).underlying_val(&self.tc_objs).try_as_slice().is_none()
+            if self.otype(xtype).underlying_val(self.objs()).try_as_slice().is_none()
                 && xtype != self.basic_type(typ::BasicType::UntypedNil)
             {
                 self.error(Span::default(), "cannot use value as variadic argument".to_string());

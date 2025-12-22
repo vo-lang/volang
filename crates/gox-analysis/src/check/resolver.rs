@@ -267,8 +267,26 @@ impl Checker {
     ) {
         let path = &import.path.value;
         
-        // Import the package
-        let imp = self.import_package(path, import.span);
+        // Import the package using importer if available
+        let imp = if let Some(importer) = fctx.importer.as_mut() {
+            use crate::importer::{ImportKey as ImpKey, ImportResult};
+            let dir = importer.working_dir().to_string_lossy().to_string();
+            let key = ImpKey::new(path, &dir);
+            match importer.import(&key) {
+                ImportResult::Ok(pkg) => pkg,
+                ImportResult::Err(e) => {
+                    self.error(import.span, e);
+                    return;
+                }
+                ImportResult::Cycle => {
+                    self.error(import.span, format!("import cycle not allowed: {}", path));
+                    return;
+                }
+            }
+        } else {
+            // Fallback: create empty package (for testing without importer)
+            self.import_package(path, import.span)
+        };
 
         // Add to list of explicit imports
         if !all_imported.contains(&imp) {
@@ -635,23 +653,30 @@ impl Checker {
         ".".to_owned()
     }
 
-    /// Imports a package.
+    /// Imports a package (fallback when no importer is available).
+    /// First tries to find an already loaded package, then creates empty package.
     fn import_package(&mut self, path: &str, span: Span) -> PackageKey {
         // Validate import path
         if let Err(e) = self.valid_import_path(path) {
             self.error(span, format!("invalid import path ({})", e));
         }
 
-        let dir = ".".to_string(); // TODO: Get actual file directory
+        let dir = ".".to_string();
         let key = super::checker::ImportKey::new(path, &dir);
 
-        // Check if already imported
+        // Check if already imported in this checker
         if let Some(&imp) = self.imp_map.get(&key) {
             return imp;
         }
 
-        // Create a new package (in real implementation, would call importer)
-        let pkg = self.tc_objs.new_package(path.to_string());
+        // Check if package was pre-loaded (search by path in tc_objs)
+        if let Some(pkg) = self.tc_objs.find_package_by_path(path) {
+            self.imp_map.insert(key, pkg);
+            return pkg;
+        }
+
+        // Create a new empty package as last resort
+        let pkg = self.new_package(path.to_string());
 
         // Extract package name from path
         let name = if let Some(i) = path.rfind('/') {

@@ -150,19 +150,23 @@ pub fn analyze_project(
     // Parse the source files
     let parsed_files = parse_files(&files, &state)?;
     
-    // Create the project importer
-    let mut importer = ProjectImporter::new(vfs, &files.root, Rc::clone(&state));
+    // Pre-load all imports BEFORE swap (importer needs state.tc_objs)
+    {
+        let mut importer = ProjectImporter::new(vfs, &files.root, Rc::clone(&state));
+        preload_imports(&parsed_files, &mut importer);
+    }
     
     // Type check the main package
     {
         let mut state_ref = state.borrow_mut();
         let mut checker = Checker::new(main_pkg_key, state_ref.interner.clone());
         
-        // Swap tc_objs so checker uses our shared one
+        // Swap tc_objs so checker uses our shared one (imports already loaded)
         std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
         drop(state_ref); // Release borrow before calling check
         
-        let result = checker.check_with_importer(&parsed_files, &mut importer);
+        // Use check() - imports preloaded, will be found via find_package_by_path
+        let result = checker.check(&parsed_files);
         
         // Swap back and collect expr_types
         let mut state_ref = state.borrow_mut();
@@ -194,9 +198,6 @@ pub fn analyze_project(
             }
         }
     }
-    
-    // Drop importer to release Rc reference
-    drop(importer);
     
     // Extract final state
     let final_state = Rc::try_unwrap(state)
@@ -341,6 +342,19 @@ fn parse_vfs_package(
     Ok(parsed_files)
 }
 
+/// Pre-load all imports from the parsed files.
+/// This must be called BEFORE swapping tc_objs with checker.
+fn preload_imports(files: &[File], importer: &mut ProjectImporter) {
+    for file in files {
+        for import in &file.imports {
+            let path = &import.path.value;
+            let key = ImportKey::new(path, ".");
+            // Ignore errors during preload - they'll be reported during type check
+            let _ = importer.import(&key);
+        }
+    }
+}
+
 /// Project-level importer that uses VFS to resolve packages.
 struct ProjectImporter<'a> {
     /// VFS for resolving import paths.
@@ -397,9 +411,14 @@ impl Importer for ProjectImporter<'_> {
         };
         
         // Create package and type check
+        // Use import_path (e.g., "encoding/hex") as path for find_package_by_path
+        // But set name to short name (e.g., "hex") for local reference
         let pkg_key = {
             let mut state = self.state.borrow_mut();
-            state.tc_objs.new_package(vfs_pkg.name.clone())
+            let pkg = state.tc_objs.new_package(import_path.to_string());
+            // Set short name for package (used when referencing: hex.Encode)
+            state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
+            pkg
         };
         
         // Type check the package (recursively handles its imports)

@@ -191,7 +191,7 @@ impl Checker {
 
     /// Computes method set for an interface from its type.
     pub fn info_from_type(&self, iface_type: TypeKey) -> RcIfaceInfo {
-        let iface = match &self.tc_objs.types[iface_type] {
+        let iface = match &self.otype(iface_type) {
             Type::Interface(i) => i,
             _ => return Rc::new(IfaceInfo::new_empty()),
         };
@@ -262,7 +262,7 @@ impl Checker {
             // Collect methods of embedded interfaces
             for (e, _span) in embeddeds {
                 for m in e.methods.iter() {
-                    let name = m.method_name(&self.tc_objs);
+                    let name = m.method_name(self.objs());
                     if self.declare_in_method_set(&mut mset, name, m.clone(), Span::default()) {
                         methods.push(m.clone());
                     }
@@ -292,7 +292,7 @@ impl Checker {
         let mut cur_path = path.clone();
 
         // Look up the type name
-        let lookup = self.scope(scope).lookup_parent(name, &self.tc_objs);
+        let lookup = self.scope(scope).lookup_parent(name, self.objs());
         if lookup.is_none() {
             return None;
         }
@@ -315,8 +315,8 @@ impl Checker {
 
         // If tname has a type, check if it's an interface
         if let Some(ty) = tname_val.typ() {
-            let ty = typ::underlying_type(ty, &self.tc_objs);
-            if let Type::Interface(iface) = &self.tc_objs.types[ty] {
+            let ty = typ::underlying_type(ty, self.objs());
+            if let Type::Interface(iface) = &self.otype(ty) {
                 return Some(self.info_from_interface_detail(iface));
             }
         }
@@ -332,7 +332,7 @@ impl Checker {
         type_name: &str,
     ) -> Option<RcIfaceInfo> {
         // Look up the package
-        let lookup = self.scope(scope).lookup_parent(pkg_name, &self.tc_objs);
+        let lookup = self.scope(scope).lookup_parent(pkg_name, self.objs());
         if lookup.is_none() {
             return None;
         }
@@ -350,8 +350,8 @@ impl Checker {
                 }
                 if obj_val2.entity_type().is_type_name() {
                     if let Some(ty) = obj_val2.typ() {
-                        let ty = typ::underlying_type(ty, &self.tc_objs);
-                        if let Type::Interface(iface) = &self.tc_objs.types[ty] {
+                        let ty = typ::underlying_type(ty, self.objs());
+                        if let Type::Interface(iface) = &self.otype(ty) {
                             return Some(self.info_from_interface_detail(iface));
                         }
                     }
@@ -363,7 +363,7 @@ impl Checker {
 
     /// Computes method set for an interface.
     pub fn interface_method_set(&self, iface: TypeKey) -> IfaceInfo {
-        let iface_detail = match &self.tc_objs.types[iface] {
+        let iface_detail = match &self.otype(iface) {
             Type::Interface(i) => i,
             _ => return IfaceInfo::new_empty(),
         };
@@ -390,7 +390,7 @@ impl Checker {
         _t: TypeKey,
         iface: TypeKey,
     ) -> Option<(String, Option<TypeKey>, Option<TypeKey>)> {
-        let iface_detail = match &self.tc_objs.types[iface] {
+        let iface_detail = match &self.otype(iface) {
             Type::Interface(i) => i,
             _ => return None,
         };

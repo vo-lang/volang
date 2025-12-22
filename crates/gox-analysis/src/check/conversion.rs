@@ -69,7 +69,7 @@ impl Checker {
         // The conversion argument types are final. For untyped values the
         // conversion provides the type, per the spec: "A constant may be
         // given a type explicitly by a constant declaration or conversion,...".
-        if typ::is_untyped(xtype, &self.tc_objs) {
+        if typ::is_untyped(xtype, self.objs()) {
             // - For conversions to interfaces, use the argument's default type.
             // - For conversions of untyped constants to non-constant types, also
             //   use the default type (e.g., []byte("foo") should report string
@@ -153,7 +153,7 @@ impl Checker {
         if let Some(detail) = t.try_as_slice() {
             if let Some(b) = self
                 .otype(detail.elem())
-                .underlying_val(&self.tc_objs)
+                .underlying_val(self.objs())
                 .try_as_basic()
             {
                 return b.typ() == BasicType::Byte || b.typ() == BasicType::Rune;
@@ -164,12 +164,12 @@ impl Checker {
 
     /// Reports whether t is a pointer type.
     fn is_pointer(&self, t: &Type) -> bool {
-        t.underlying_val(&self.tc_objs).try_as_pointer().is_some()
+        t.underlying_val(self.objs()).try_as_pointer().is_some()
     }
 
     /// Reports whether t is uintptr.
     fn is_uintptr(&self, t: &Type) -> bool {
-        if let Some(detail) = t.underlying_val(&self.tc_objs).try_as_basic() {
+        if let Some(detail) = t.underlying_val(self.objs()).try_as_basic() {
             return detail.typ() == BasicType::Uintptr;
         }
         false

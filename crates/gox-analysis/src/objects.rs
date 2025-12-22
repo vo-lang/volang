@@ -145,6 +145,16 @@ impl TCObjects {
         let pkg = Package::new(path, None, skey);
         self.pkgs.insert(pkg)
     }
+    
+    /// Find an existing package by its path.
+    pub fn find_package_by_path(&self, path: &str) -> Option<PackageKey> {
+        for (key, pkg) in self.pkgs.iter() {
+            if pkg.path() == path {
+                return Some(key);
+            }
+        }
+        None
+    }
 
     pub fn new_pkg_name(
         &mut self,

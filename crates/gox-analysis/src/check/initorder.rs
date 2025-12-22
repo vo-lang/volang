@@ -79,7 +79,7 @@ impl Checker {
                 // the cycle will be broken (dependency count will be reduced
                 // below), and so the remaining nodes in the cycle don't trigger
                 // another error (unless they are part of multiple cycles).
-                if let Some(cycle) = find_path(&self.obj_map, obj, obj, visited, &self.tc_objs) {
+                if let Some(cycle) = find_path(&self.obj_map, obj, obj, visited, self.objs()) {
                     self.report_cycle(&cycle);
                 }
                 // Ok to continue, but the variable initialization order
@@ -117,7 +117,7 @@ impl Checker {
             .into_iter()
             .filter_map(|x| {
                 let decl_key = self.obj_map[&x];
-                match &self.tc_objs.decls[decl_key] {
+                match &self.decl_info(decl_key) {
                     DeclInfo::Var(var) => {
                         if var.init.is_none() {
                             return None;
@@ -149,7 +149,7 @@ impl Checker {
             HashMap::new(),
             |mut init: HashMap<ObjKey, GraphEdges>, (&x, &decl_key)| {
                 if self.lobj(x).entity_type().is_dependency() {
-                    let decl = &self.tc_objs.decls[decl_key];
+                    let decl = &self.decl_info(decl_key);
                     let deps: HashSet<ObjKey> = decl.deps().iter().copied().collect();
                     init.insert(x, GraphEdges::new(Rc::new(RefCell::new(deps))));
                 }

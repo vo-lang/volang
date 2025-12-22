@@ -40,8 +40,8 @@ func Contains(s, substr string) bool {
 }
 
 // Pure extern — no body, implemented by runtime
-extern func Index(s, substr string) int
-extern func ToLower(s string) string
+func Index(s, substr string) int
+func ToLower(s string) string
 ```
 
 ## Design Principles
@@ -239,8 +239,8 @@ func NewFunc(s string) bool {
     return len(s) > 0
 }
 
-// Or extern
-extern func NewExternFunc(s string) int
+// Or extern (no body)
+func NewExternFunc(s string) int
 ```
 
 ### Step 2: Core Layer (if extern)

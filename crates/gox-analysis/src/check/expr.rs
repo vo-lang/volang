@@ -47,26 +47,26 @@ impl Checker {
             if binary {
                 match o {
                     BinaryOp::Add => {
-                        Some(typ::is_numeric(ty, &self.tc_objs) || typ::is_string(ty, &self.tc_objs))
+                        Some(typ::is_numeric(ty, self.objs()) || typ::is_string(ty, self.objs()))
                     }
-                    BinaryOp::Sub => Some(typ::is_numeric(ty, &self.tc_objs)),
-                    BinaryOp::Mul => Some(typ::is_numeric(ty, &self.tc_objs)),
-                    BinaryOp::Div => Some(typ::is_numeric(ty, &self.tc_objs)),
-                    BinaryOp::Rem => Some(typ::is_integer(ty, &self.tc_objs)),
-                    BinaryOp::And => Some(typ::is_integer(ty, &self.tc_objs)),
-                    BinaryOp::Or => Some(typ::is_integer(ty, &self.tc_objs)),
-                    BinaryOp::Xor => Some(typ::is_integer(ty, &self.tc_objs)),
-                    BinaryOp::AndNot => Some(typ::is_integer(ty, &self.tc_objs)),
-                    BinaryOp::LogAnd => Some(typ::is_boolean(ty, &self.tc_objs)),
-                    BinaryOp::LogOr => Some(typ::is_boolean(ty, &self.tc_objs)),
+                    BinaryOp::Sub => Some(typ::is_numeric(ty, self.objs())),
+                    BinaryOp::Mul => Some(typ::is_numeric(ty, self.objs())),
+                    BinaryOp::Div => Some(typ::is_numeric(ty, self.objs())),
+                    BinaryOp::Rem => Some(typ::is_integer(ty, self.objs())),
+                    BinaryOp::And => Some(typ::is_integer(ty, self.objs())),
+                    BinaryOp::Or => Some(typ::is_integer(ty, self.objs())),
+                    BinaryOp::Xor => Some(typ::is_integer(ty, self.objs())),
+                    BinaryOp::AndNot => Some(typ::is_integer(ty, self.objs())),
+                    BinaryOp::LogAnd => Some(typ::is_boolean(ty, self.objs())),
+                    BinaryOp::LogOr => Some(typ::is_boolean(ty, self.objs())),
                     _ => None,
                 }
             } else {
                 // For unary, we map to BinaryOp equivalents
                 match o {
-                    BinaryOp::Add => Some(typ::is_numeric(ty, &self.tc_objs)),
-                    BinaryOp::Sub => Some(typ::is_numeric(ty, &self.tc_objs)),
-                    BinaryOp::Xor => Some(typ::is_integer(ty, &self.tc_objs)),
+                    BinaryOp::Add => Some(typ::is_numeric(ty, self.objs())),
+                    BinaryOp::Sub => Some(typ::is_numeric(ty, self.objs())),
+                    BinaryOp::Xor => Some(typ::is_integer(ty, self.objs())),
                     _ => None,
                 }
             }
@@ -90,10 +90,10 @@ impl Checker {
     fn op_unary(&self, x: &mut Operand, op: UnaryOp) -> bool {
         let pred = |o: UnaryOp, ty: TypeKey| -> Option<bool> {
             match o {
-                UnaryOp::Pos => Some(typ::is_numeric(ty, &self.tc_objs)),
-                UnaryOp::Neg => Some(typ::is_numeric(ty, &self.tc_objs)),
-                UnaryOp::BitNot => Some(typ::is_integer(ty, &self.tc_objs)),
-                UnaryOp::Not => Some(typ::is_boolean(ty, &self.tc_objs)),
+                UnaryOp::Pos => Some(typ::is_numeric(ty, self.objs())),
+                UnaryOp::Neg => Some(typ::is_numeric(ty, self.objs())),
+                UnaryOp::BitNot => Some(typ::is_integer(ty, self.objs())),
+                UnaryOp::Not => Some(typ::is_boolean(ty, self.objs())),
                 _ => None,
             }
         };
@@ -136,7 +136,7 @@ impl Checker {
                     }
                 }
                 x.mode = OperandMode::Value;
-                x.typ = Some(self.tc_objs.new_t_pointer(x.typ.unwrap()));
+                x.typ = Some(self.new_t_pointer(x.typ.unwrap()));
             }
             UnaryOp::Deref => {
                 // Dereference operation
@@ -155,9 +155,9 @@ impl Checker {
                     return;
                 }
                 if let OperandMode::Constant(v) = &mut x.mode {
-                    let ty = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                    let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
                     let tval = self.otype(ty);
-                    let prec = if tval.is_unsigned(&self.tc_objs) {
+                    let prec = if tval.is_unsigned(self.objs()) {
                         tval.try_as_basic().map(|b| b.size_of()).unwrap_or(0)
                     } else {
                         0
@@ -165,7 +165,7 @@ impl Checker {
                     *v = Value::unary_op(op, v, prec);
                     // Typed constants must be representable in
                     // their type after each constant operation.
-                    if tval.is_typed(&self.tc_objs) {
+                    if tval.is_typed(self.objs()) {
                         if e.is_some() {
                             x.expr_id = e; // for better error message
                         }
@@ -213,8 +213,8 @@ impl Checker {
                 // integer -> float   : overflows (actually not possible)
                 // float   -> integer : truncated
                 // float   -> float   : overflows
-                let msg = if xtval.is_numeric(&self.tc_objs) && tval.is_numeric(&self.tc_objs) {
-                    if !xtval.is_integer(&self.tc_objs) && tval.is_integer(&self.tc_objs) {
+                let msg = if xtval.is_numeric(self.objs()) && tval.is_numeric(self.objs()) {
+                    if !xtval.is_integer(self.objs()) && tval.is_integer(self.objs()) {
                         "truncated".to_string()
                     } else {
                         "overflows".to_string()
@@ -301,9 +301,9 @@ impl Checker {
         }
 
         // If the new type is not final and still untyped, just update the recorded type.
-        if !final_ && typ::is_untyped(t, &self.tc_objs) {
+        if !final_ && typ::is_untyped(t, self.objs()) {
             if let Some(info) = fctx.untyped.get_mut(&expr_id) {
-                info.typ = Some(typ::underlying_type(t, &self.tc_objs));
+                info.typ = Some(typ::underlying_type(t, self.objs()));
             }
             return;
         }
@@ -318,7 +318,7 @@ impl Checker {
 
         if info.is_lhs {
             // If x is the lhs of a shift, its final type must be integer.
-            if !typ::is_integer(t, &self.tc_objs) {
+            if !typ::is_integer(t, self.objs()) {
                 self.invalid_op(Span::default(), "shifted operand must be integer");
                 return;
             }
@@ -352,11 +352,11 @@ impl Checker {
         target: TypeKey,
         fctx: &mut FilesContext,
     ) {
-        if x.invalid() || typ::is_typed(x.typ.unwrap(), &self.tc_objs) || target == self.invalid_type() {
+        if x.invalid() || typ::is_typed(x.typ.unwrap(), self.objs()) || target == self.invalid_type() {
             return;
         }
 
-        if typ::is_untyped(target, &self.tc_objs) {
+        if typ::is_untyped(target, self.objs()) {
             // both x and target are untyped
             let order = |bt: BasicType| -> usize {
                 match bt {
@@ -371,7 +371,7 @@ impl Checker {
             let xbasic = xtval.try_as_basic().unwrap().typ();
             let tbasic = ttval.try_as_basic().unwrap().typ();
             if xbasic != tbasic {
-                if xtval.is_numeric(&self.tc_objs) && ttval.is_numeric(&self.tc_objs) {
+                if xtval.is_numeric(self.objs()) && ttval.is_numeric(self.objs()) {
                     if order(xbasic) < order(tbasic) {
                         x.typ = Some(target);
                         if let Some(expr_id) = x.expr_id {
@@ -387,7 +387,7 @@ impl Checker {
             return;
         }
 
-        let t = typ::underlying_type(target, &self.tc_objs);
+        let t = typ::underlying_type(target, self.objs());
         let xtype = x.typ.unwrap();
         let tval = self.otype(t);
         let final_target = match tval {
@@ -409,28 +409,28 @@ impl Checker {
                     // (delayed-checked) rhs operands of shifts, and as
                     // the value nil.
                     let ok = match self.otype(x.typ.unwrap()).try_as_basic().unwrap().typ() {
-                        BasicType::UntypedBool => tval.is_boolean(&self.tc_objs),
+                        BasicType::UntypedBool => tval.is_boolean(self.objs()),
                         BasicType::UntypedInt
                         | BasicType::UntypedRune
-                        | BasicType::UntypedFloat => tval.is_numeric(&self.tc_objs),
+                        | BasicType::UntypedFloat => tval.is_numeric(self.objs()),
                         BasicType::UntypedString => unreachable!(),
-                        BasicType::UntypedNil => typ::has_nil(t, &self.tc_objs),
+                        BasicType::UntypedNil => typ::has_nil(t, self.objs()),
                         _ => false,
                     };
                     if ok { Some(target) } else { None }
                 }
             }
             Type::Interface(detail) => {
-                if x.is_nil(&self.tc_objs) {
+                if x.is_nil(self.objs()) {
                     Some(self.basic_type(BasicType::UntypedNil))
                 } else if detail.is_empty() {
-                    Some(typ::untyped_default_type(xtype, &self.tc_objs))
+                    Some(typ::untyped_default_type(xtype, self.objs()))
                 } else {
                     None
                 }
             }
             Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) => {
-                if x.is_nil(&self.tc_objs) {
+                if x.is_nil(self.objs()) {
                     Some(self.basic_type(BasicType::UntypedNil))
                 } else {
                     None
@@ -473,12 +473,12 @@ impl Checker {
             let (xtval, ytval) = (self.otype(xtype), self.otype(ytype));
             let defined = match op {
                 BinaryOp::Eq | BinaryOp::NotEq => {
-                    (xtval.comparable(&self.tc_objs) && ytval.comparable(&self.tc_objs))
-                        || (x.is_nil(&self.tc_objs) && typ::has_nil(ytype, &self.tc_objs))
-                        || (y.is_nil(&self.tc_objs) && typ::has_nil(xtype, &self.tc_objs))
+                    (xtval.comparable(self.objs()) && ytval.comparable(self.objs()))
+                        || (x.is_nil(self.objs()) && typ::has_nil(ytype, self.objs()))
+                        || (y.is_nil(self.objs()) && typ::has_nil(xtype, self.objs()))
                 }
                 BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {
-                    xtval.is_ordered(&self.tc_objs) && ytval.is_ordered(&self.tc_objs)
+                    xtval.is_ordered(self.objs()) && ytval.is_ordered(self.objs())
                 }
                 _ => false,
             };
@@ -505,11 +505,11 @@ impl Checker {
                 x.mode = OperandMode::Value;
                 // Update operand types to their default types
                 if let Some(expr_id) = x.expr_id {
-                    let default_t = typ::untyped_default_type(xtype, &self.tc_objs);
+                    let default_t = typ::untyped_default_type(xtype, self.objs());
                     self.update_expr_type(expr_id, default_t, true, fctx);
                 }
                 if let Some(expr_id) = y.expr_id {
-                    let default_t = typ::untyped_default_type(ytype, &self.tc_objs);
+                    let default_t = typ::untyped_default_type(ytype, self.objs());
                     self.update_expr_type(expr_id, default_t, true, fctx);
                 }
             }
@@ -533,8 +533,8 @@ impl Checker {
         fctx: &mut FilesContext,
     ) {
         let xtval = self.otype(x.typ.unwrap());
-        let xt_untyped = xtval.is_untyped(&self.tc_objs);
-        let xt_integer = xtval.is_integer(&self.tc_objs);
+        let xt_untyped = xtval.is_untyped(self.objs());
+        let xt_integer = xtval.is_integer(self.objs());
         let x_const = x.mode.constant_val().map(|v| v.to_int().into_owned());
 
         // The lhs is of integer type or an untyped constant representable as an integer
@@ -548,9 +548,9 @@ impl Checker {
         // spec: "The right operand in a shift expression must have unsigned
         // integer type or be an untyped constant representable by a value of type uint."
         let ytval = self.otype(y.typ.unwrap());
-        if ytval.is_unsigned(&self.tc_objs) {
+        if ytval.is_unsigned(self.objs()) {
             // ok
-        } else if ytval.is_untyped(&self.tc_objs) {
+        } else if ytval.is_untyped(self.objs()) {
             self.convert_untyped(y, self.basic_type(BasicType::Uint), fctx);
             if y.invalid() {
                 x.mode = OperandMode::Invalid;
@@ -586,7 +586,7 @@ impl Checker {
                 // x is a constant so xval != nil and it must be of Int kind.
                 *xv = Value::shift(&xv.to_int(), op, s);
                 // Typed constants must be representable in their type
-                if typ::is_typed(x.typ.unwrap(), &self.tc_objs) {
+                if typ::is_typed(x.typ.unwrap(), self.objs()) {
                     if e.is_some() {
                         x.expr_id = e;
                     }
@@ -614,7 +614,7 @@ impl Checker {
             }
         }
 
-        if !typ::is_integer(x.typ.unwrap(), &self.tc_objs) {
+        if !typ::is_integer(x.typ.unwrap(), self.objs()) {
             self.invalid_op(Span::default(), "shifted operand must be integer");
             x.mode = OperandMode::Invalid;
             return;
@@ -671,7 +671,7 @@ impl Checker {
             return;
         }
 
-        if !typ::identical_o(x.typ, y.typ, &self.tc_objs) {
+        if !typ::identical_o(x.typ, y.typ, self.objs()) {
             let invalid = Some(self.invalid_type());
             if x.typ != invalid && y.typ != invalid {
                 self.invalid_op(Span::default(), "mismatched types");
@@ -687,7 +687,7 @@ impl Checker {
 
         // Check for zero divisor
         if op == BinaryOp::Div || op == BinaryOp::Rem {
-            if x.mode.constant_val().is_some() || typ::is_integer(x.typ.unwrap(), &self.tc_objs) {
+            if x.mode.constant_val().is_some() || typ::is_integer(x.typ.unwrap(), self.objs()) {
                 if let Some(v) = y.mode.constant_val() {
                     if v.sign() == 0 {
                         self.invalid_op(Span::default(), "division by zero");
@@ -700,10 +700,10 @@ impl Checker {
 
         match (&mut x.mode, &y.mode) {
             (OperandMode::Constant(vx), OperandMode::Constant(vy)) => {
-                let ty = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
                 *vx = Value::binary_op(vx, op, vy);
                 // Typed constants must be representable in their type
-                if typ::is_typed(ty, &self.tc_objs) {
+                if typ::is_typed(ty, self.objs()) {
                     x.expr_id = e;
                     self.representable(x, ty, fctx);
                 }
@@ -740,7 +740,7 @@ impl Checker {
         }
 
         // The index must be of integer type
-        if !typ::is_integer(x.typ.unwrap(), &self.tc_objs) {
+        if !typ::is_integer(x.typ.unwrap(), self.objs()) {
             self.invalid_arg(Span::default(), "index must be integer");
             return Err(());
         }
@@ -865,7 +865,7 @@ impl Checker {
             _ => x.typ.unwrap_or(self.invalid_type()),
         };
 
-        if typ::is_untyped(ty, &self.tc_objs) {
+        if typ::is_untyped(ty, self.objs()) {
             // Delay type and value recording until we know the type
             fctx.remember_untyped(
                 e.id,
@@ -942,10 +942,10 @@ impl Checker {
                     return;
                 }
 
-                let utype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let utype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 let utype_val = self.otype(utype);
                 let (valid, length) = match &utype_val {
-                    Type::Basic(_) if typ::is_string(utype, &self.tc_objs) => {
+                    Type::Basic(_) if typ::is_string(utype, self.objs()) => {
                         // String indexing yields byte
                         let len = if let OperandMode::Constant(v) = &x.mode {
                             Some(v.str_as_string().len() as u64)
@@ -965,7 +965,7 @@ impl Checker {
                     }
                     Type::Pointer(ptr) => {
                         // Pointer to array
-                        if let Some(arr) = self.otype(ptr.base()).underlying_val(&self.tc_objs).try_as_array() {
+                        if let Some(arr) = self.otype(ptr.base()).underlying_val(self.objs()).try_as_array() {
                             x.mode = OperandMode::Variable;
                             x.typ = Some(arr.elem());
                             (true, arr.len())
@@ -1010,7 +1010,7 @@ impl Checker {
                     return;
                 }
 
-                let utype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let utype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 
                 // Extract type info first to avoid borrow conflicts
                 enum SliceInfo {
@@ -1024,13 +1024,13 @@ impl Checker {
                 let info = {
                     let utype_val = self.otype(utype);
                     match utype_val {
-                        Type::Basic(_) if typ::is_string(utype, &self.tc_objs) => {
+                        Type::Basic(_) if typ::is_string(utype, self.objs()) => {
                             let len = if let OperandMode::Constant(v) = &x.mode {
                                 Some(v.str_as_string().len() as u64)
                             } else {
                                 None
                             };
-                            SliceInfo::String { len, is_untyped: typ::is_untyped(utype, &self.tc_objs) }
+                            SliceInfo::String { len, is_untyped: typ::is_untyped(utype, self.objs()) }
                         }
                         Type::Array(arr) => {
                             SliceInfo::Array { 
@@ -1040,7 +1040,7 @@ impl Checker {
                             }
                         }
                         Type::Pointer(ptr) => {
-                            if let Some(arr) = self.otype(ptr.base()).underlying_val(&self.tc_objs).try_as_array() {
+                            if let Some(arr) = self.otype(ptr.base()).underlying_val(self.objs()).try_as_array() {
                                 SliceInfo::PointerArray { elem: arr.elem(), len: arr.len() }
                             } else {
                                 SliceInfo::Invalid
@@ -1064,12 +1064,12 @@ impl Checker {
                             x.mode = OperandMode::Invalid;
                             return;
                         }
-                        x.typ = Some(self.tc_objs.new_t_slice(elem));
+                        x.typ = Some(self.new_t_slice(elem));
                         (true, len)
                     }
                     SliceInfo::PointerArray { elem, len } => {
                         x.mode = OperandMode::Variable;
-                        x.typ = Some(self.tc_objs.new_t_slice(elem));
+                        x.typ = Some(self.new_t_slice(elem));
                         (true, len)
                     }
                     SliceInfo::Slice => (true, None),
@@ -1101,7 +1101,7 @@ impl Checker {
                 }
                 
                 // Check that x is an interface type
-                let xtype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let xtype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 if self.otype(xtype).try_as_interface().is_none() {
                     self.invalid_op(Span::default(), "type assertion requires interface type");
                     x.mode = OperandMode::Invalid;
@@ -1133,7 +1133,7 @@ impl Checker {
                     return;
                 }
                 
-                let utype = typ::underlying_type(ty, &self.tc_objs);
+                let utype = typ::underlying_type(ty, self.objs());
                 let utype_val = self.otype(utype);
                 
                 match &utype_val {
@@ -1251,7 +1251,7 @@ impl Checker {
                 if x.invalid() {
                     return;
                 }
-                if let Some(chan) = self.otype(x.typ.unwrap()).underlying_val(&self.tc_objs).try_as_chan() {
+                if let Some(chan) = self.otype(x.typ.unwrap()).underlying_val(self.objs()).try_as_chan() {
                     if chan.dir() == typ::ChanDir::SendOnly {
                         self.invalid_op(recv.span, "cannot receive from send-only channel");
                         x.mode = OperandMode::Invalid;
@@ -1295,7 +1295,7 @@ impl Checker {
                     // Check that the last element is error type
                     let last_var = vars.last().unwrap();
                     let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
-                    if !typ::identical(last_type, error_type, &self.tc_objs) {
+                    if !typ::identical(last_type, error_type, self.objs()) {
                         self.error(e.span, "? operator requires expression with error as last return value".to_string());
                         x.mode = OperandMode::Invalid;
                         return;
@@ -1316,12 +1316,12 @@ impl Checker {
                         _ => {
                             // (T1, T2, ..., error) -> (T1, T2, ...)
                             let new_vars: Vec<_> = vars[..vars.len() - 1].to_vec();
-                            let new_tuple = self.tc_objs.new_t_tuple(new_vars);
+                            let new_tuple = self.new_t_tuple(new_vars);
                             x.mode = OperandMode::Value;
                             x.typ = Some(new_tuple);
                         }
                     }
-                } else if typ::identical(inner_type, error_type, &self.tc_objs) {
+                } else if typ::identical(inner_type, error_type, self.objs()) {
                     // Single error type -> NoValue after unwrap
                     x.mode = OperandMode::NoValue;
                     x.typ = None;
@@ -1524,7 +1524,7 @@ impl Checker {
             x.mode == OperandMode::Variable,
             Some(self.pkg),
             &sel_name,
-            &self.tc_objs,
+            self.objs(),
         );
 
         let (okey, indices, indirect) = match result {
@@ -1564,7 +1564,7 @@ impl Checker {
                     okey,
                     indices,
                     indirect,
-                    &self.tc_objs,
+                    self.objs(),
                 );
                 self.result.record_selection(sel.expr.id, selection);
 
@@ -1579,8 +1579,8 @@ impl Checker {
                 let params_val = self.otype(p).try_as_tuple().unwrap();
                 let mut vars = vec![var];
                 vars.append(&mut params_val.vars().clone());
-                let params = self.tc_objs.new_t_tuple(vars);
-                let new_sig = self.tc_objs.new_t_signature(None, None, params, r, v);
+                let params = self.new_t_tuple(vars);
+                let new_sig = self.new_t_signature(None, None, params, r, v);
                 x.mode = OperandMode::Value;
                 x.typ = Some(new_sig);
 
@@ -1607,7 +1607,7 @@ impl Checker {
                     okey,
                     indices.clone(),
                     indirect,
-                    &self.tc_objs,
+                    self.objs(),
                 );
                 self.result.record_selection(sel.expr.id, selection);
                 x.mode = if x.mode == OperandMode::Variable || indirect {
@@ -1623,7 +1623,7 @@ impl Checker {
                     okey,
                     indices.clone(),
                     indirect,
-                    &self.tc_objs,
+                    self.objs(),
                 );
                 self.result.record_selection(sel.expr.id, selection);
 
@@ -1633,7 +1633,7 @@ impl Checker {
                 let lobj = self.lobj(okey);
                 let sig = self.otype(lobj.typ().unwrap()).try_as_signature().unwrap();
                 let (p, r, v) = (sig.params(), sig.results(), sig.variadic());
-                let new_sig = self.tc_objs.new_t_signature(None, None, p, r, v);
+                let new_sig = self.new_t_signature(None, None, p, r, v);
                 x.typ = Some(new_sig);
 
                 self.add_decl_dep(okey);

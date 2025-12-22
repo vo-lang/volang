@@ -32,7 +32,7 @@ impl Checker {
         id: Builtin,
         fctx: &mut FilesContext,
     ) -> bool {
-        let binfo = self.tc_objs.universe().builtins()[&id];
+        let binfo = self.universe().builtins()[&id];
 
         // append is the only built-in that permits the use of ... for the last argument
         if call.spread && id != Builtin::Append {
@@ -143,7 +143,7 @@ impl Checker {
         };
 
         // Get element type
-        let telem = match self.otype(typ::underlying_type(slice, &self.tc_objs)) {
+        let telem = match self.otype(typ::underlying_type(slice, self.objs())) {
             Type::Slice(detail) => detail.elem(),
             _ => {
                 self.error(call_span, "first argument to append must be a slice".to_string());
@@ -155,7 +155,7 @@ impl Checker {
 
         // Special case: append([]byte, string...)
         if nargs == 2 && call.spread {
-            let slice_of_bytes = self.tc_objs.universe().slice_of_bytes();
+            let slice_of_bytes = self.universe().slice_of_bytes();
             let mut reason = String::new();
             if self.assignable_to(x, slice_of_bytes, &mut reason) {
                 let mut y = Operand::new();
@@ -164,7 +164,7 @@ impl Checker {
                     return false;
                 }
                 if let Some(yt) = y.typ {
-                    if typ::is_string(yt, &self.tc_objs) {
+                    if typ::is_string(yt, self.objs()) {
                         x.mode = OperandMode::Value;
                         x.typ = Some(slice);
                         return true;
@@ -186,7 +186,7 @@ impl Checker {
             if call.spread && i == nargs - 1 {
                 // Last arg with spread must be a slice
                 let _arg_type = arg.typ.unwrap_or(self.invalid_type());
-                let tslice = self.tc_objs.new_t_slice(telem);
+                let tslice = self.new_t_slice(telem);
                 let mut reason = String::new();
                 if !self.assignable_to(&arg, tslice, &mut reason) {
                     self.error(call.args[i].span, format!("cannot use value as []T in argument to append"));
@@ -213,10 +213,10 @@ impl Checker {
         id: Builtin,
         has_call_or_recv: bool,
     ) -> bool {
-        let ty = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
-        let ty = implicit_array_deref(ty, &self.tc_objs);
+        let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
+        let ty = implicit_array_deref(ty, self.objs());
 
-        let mode = match &self.tc_objs.types[ty] {
+        let mode = match &self.otype(ty) {
             Type::Basic(detail) => {
                 if detail.info() == BasicInfo::IsString {
                     if let OperandMode::Constant(v) = &x.mode {
@@ -268,8 +268,8 @@ impl Checker {
 
     /// close(c)
     fn builtin_close(&mut self, x: &mut Operand) -> bool {
-        let tkey = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
-        match &self.tc_objs.types[tkey] {
+        let tkey = typ::underlying_type(x.typ.unwrap(), self.objs());
+        match &self.otype(tkey) {
             Type::Chan(detail) => {
                 if detail.dir() == typ::ChanDir::RecvOnly {
                     self.error(Span::default(), "cannot close receive-only channel".to_string());
@@ -294,7 +294,7 @@ impl Checker {
         fctx: &mut FilesContext,
     ) -> bool {
         // dst element type
-        let dst = match self.otype(x.typ.unwrap()).underlying_val(&self.tc_objs) {
+        let dst = match self.otype(x.typ.unwrap()).underlying_val(self.objs()) {
             Type::Slice(detail) => Some(detail.elem()),
             _ => None,
         };
@@ -307,9 +307,9 @@ impl Checker {
         }
 
         // src element type
-        let src = match self.otype(y.typ.unwrap()).underlying_val(&self.tc_objs) {
+        let src = match self.otype(y.typ.unwrap()).underlying_val(self.objs()) {
             Type::Basic(detail) if detail.info() == BasicInfo::IsString => {
-                Some(self.tc_objs.universe().byte())
+                Some(self.universe().byte())
             }
             Type::Slice(detail) => Some(detail.elem()),
             _ => None,
@@ -320,7 +320,7 @@ impl Checker {
             return false;
         }
 
-        if !typ::identical_o(dst, src, &self.tc_objs) {
+        if !typ::identical_o(dst, src, self.objs()) {
             self.error(call_span, "arguments to copy have different element types".to_string());
             return false;
         }
@@ -339,7 +339,7 @@ impl Checker {
         fctx: &mut FilesContext,
     ) -> bool {
         let mtype = x.typ.unwrap();
-        match self.otype(mtype).underlying_val(&self.tc_objs) {
+        match self.otype(mtype).underlying_val(self.objs()) {
             Type::Map(detail) => {
                 let key = detail.key();
                 
@@ -383,7 +383,7 @@ impl Checker {
             return false;
         }
 
-        let min = match self.otype(arg0t).underlying_val(&self.tc_objs) {
+        let min = match self.otype(arg0t).underlying_val(self.objs()) {
             Type::Slice(_) => 2,
             Type::Map(_) | Type::Chan(_) => 1,
             _ => {
@@ -439,7 +439,7 @@ impl Checker {
         }
 
         x.mode = OperandMode::Value;
-        x.typ = Some(self.tc_objs.new_t_pointer(arg0t));
+        x.typ = Some(self.new_t_pointer(arg0t));
         true
     }
 
@@ -454,7 +454,7 @@ impl Checker {
         // Record panic call if inside a function with result parameters
         if let Some(sig) = self.octx.sig {
             if let Some(sig_detail) = self.otype(sig).try_as_signature() {
-                if sig_detail.results_count(&self.tc_objs) > 0 {
+                if sig_detail.results_count(self.objs()) > 0 {
                     if self.octx.panics.is_none() {
                         self.octx.panics = Some(std::collections::HashSet::new());
                     }
@@ -464,7 +464,7 @@ impl Checker {
         }
 
         // Argument must be assignable to interface{}
-        let iempty = self.tc_objs.new_t_empty_interface();
+        let iempty = self.new_t_empty_interface();
         self.assignment(x, Some(iempty), "argument to panic", fctx);
         if x.invalid() {
             return false;
@@ -504,13 +504,13 @@ impl Checker {
     /// recover() interface{}
     fn builtin_recover(&mut self, x: &mut Operand) -> bool {
         x.mode = OperandMode::Value;
-        x.typ = Some(self.tc_objs.new_t_empty_interface());
+        x.typ = Some(self.new_t_empty_interface());
         true
     }
 
     /// assert(pred bool) - GoX extension
     fn builtin_assert(&mut self, x: &mut Operand) -> bool {
-        if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), &self.tc_objs) {
+        if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), self.objs()) {
             self.error(Span::default(), "argument to assert is not a boolean".to_string());
             return false;
         }

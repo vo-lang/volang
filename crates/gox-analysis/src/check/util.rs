@@ -11,7 +11,7 @@ use gox_common::span::Span;
 use gox_syntax::ast::{Expr, ExprKind};
 
 use crate::obj::{self, Builtin, LangObj};
-use crate::objects::{ObjKey, PackageKey, TCObjects, TypeKey};
+use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::operand::{Operand, OperandMode};
 use crate::scope;
 use crate::typ::{self, BasicType, Type};
@@ -337,9 +337,9 @@ impl Checker {
     pub fn lookup(&self, name: &str) -> Option<ObjKey> {
         let scope_key = self.octx.scope?;
         if let Some(pos) = self.octx.pos {
-            scope::lookup_parent_at(scope_key, name, pos, &self.tc_objs)
+            scope::lookup_parent_at(scope_key, name, pos, self.objs())
         } else {
-            scope::lookup_parent(scope_key, name, &self.tc_objs)
+            scope::lookup_parent(scope_key, name, self.objs())
         }
         .map(|(_, okey)| okey)
     }
@@ -353,7 +353,7 @@ impl Checker {
         if !self.obj_map.contains_key(&to) {
             return;
         }
-        self.tc_objs.decls[decl_key].add_dep(to);
+        self.decl_info_mut(decl_key).add_dep(to);
     }
 
     // =========================================================================
@@ -415,6 +415,144 @@ impl Checker {
     /// Get the invalid type.
     pub fn invalid_type(&self) -> TypeKey {
         self.basic_type(BasicType::Invalid)
+    }
+    
+    // =========================================================================
+    // TCObjects access helpers
+    // =========================================================================
+    
+    /// Get a reference to the TCObjects.
+    #[inline]
+    pub fn objs(&self) -> &TCObjects {
+        &self.tc_objs
+    }
+    
+    /// Get a mutable reference to the TCObjects.
+    #[inline]
+    pub fn objs_mut(&mut self) -> &mut TCObjects {
+        &mut self.tc_objs
+    }
+    
+    /// Insert a declaration info and return its key.
+    #[inline]
+    pub fn insert_decl(&mut self, decl: super::resolver::DeclInfo) -> DeclInfoKey {
+        self.tc_objs.decls.insert(decl)
+    }
+    
+    // Factory method wrappers
+    
+    #[inline]
+    pub fn new_scope(&mut self, parent: Option<ScopeKey>, pos: usize, end: usize, comment: &str, is_func: bool) -> ScopeKey {
+        self.tc_objs.new_scope(parent, pos, end, comment, is_func)
+    }
+    
+    #[inline]
+    pub fn new_package(&mut self, path: String) -> PackageKey {
+        self.tc_objs.new_package(path)
+    }
+    
+    #[inline]
+    pub fn new_pkg_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, imported: PackageKey) -> ObjKey {
+        self.tc_objs.new_pkg_name(pos, pkg, name, imported)
+    }
+    
+    #[inline]
+    pub fn new_const(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, val: crate::constant::Value) -> ObjKey {
+        self.tc_objs.new_const(pos, pkg, name, typ, val)
+    }
+    
+    #[inline]
+    pub fn new_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+        self.tc_objs.new_var(pos, pkg, name, typ)
+    }
+    
+    #[inline]
+    pub fn new_param_var(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+        self.tc_objs.new_param_var(pos, pkg, name, typ)
+    }
+    
+    #[inline]
+    pub fn new_field(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>, embedded: bool) -> ObjKey {
+        self.tc_objs.new_field(pos, pkg, name, typ, embedded)
+    }
+    
+    #[inline]
+    pub fn new_func(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+        self.tc_objs.new_func(pos, pkg, name, typ)
+    }
+    
+    #[inline]
+    pub fn new_type_name(&mut self, pos: usize, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
+        self.tc_objs.new_type_name(pos, pkg, name, typ)
+    }
+    
+    #[inline]
+    pub fn new_label(&mut self, pos: usize, pkg: Option<PackageKey>, name: String) -> ObjKey {
+        self.tc_objs.new_label(pos, pkg, name)
+    }
+    
+    // Type creation wrappers
+    
+    #[inline]
+    pub fn new_t_array(&mut self, elem: TypeKey, len: Option<u64>) -> TypeKey {
+        self.tc_objs.new_t_array(elem, len)
+    }
+    
+    #[inline]
+    pub fn new_t_slice(&mut self, elem: TypeKey) -> TypeKey {
+        self.tc_objs.new_t_slice(elem)
+    }
+    
+    #[inline]
+    pub fn new_t_map(&mut self, key: TypeKey, value: TypeKey) -> TypeKey {
+        self.tc_objs.new_t_map(key, value)
+    }
+    
+    #[inline]
+    pub fn new_t_chan(&mut self, dir: typ::ChanDir, elem: TypeKey) -> TypeKey {
+        self.tc_objs.new_t_chan(dir, elem)
+    }
+    
+    #[inline]
+    pub fn new_t_pointer(&mut self, base: TypeKey) -> TypeKey {
+        self.tc_objs.new_t_pointer(base)
+    }
+    
+    #[inline]
+    pub fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
+        self.tc_objs.new_t_tuple(vars)
+    }
+    
+    #[inline]
+    pub fn new_t_struct(&mut self, fields: Vec<ObjKey>, tags: Option<Vec<Option<String>>>) -> TypeKey {
+        self.tc_objs.new_t_struct(fields, tags)
+    }
+    
+    #[inline]
+    pub fn new_t_signature(
+        &mut self,
+        scope: Option<ScopeKey>,
+        recv: Option<ObjKey>,
+        params: TypeKey,
+        results: TypeKey,
+        variadic: bool,
+    ) -> TypeKey {
+        self.tc_objs.new_t_signature(scope, recv, params, results, variadic)
+    }
+    
+    #[inline]
+    pub fn new_t_interface(&mut self, methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> TypeKey {
+        self.tc_objs.new_t_interface(methods, embeddeds)
+    }
+    
+    #[inline]
+    pub fn new_t_empty_interface(&mut self) -> TypeKey {
+        self.tc_objs.new_t_empty_interface()
+    }
+    
+    #[inline]
+    pub fn new_t_named(&mut self, obj: Option<ObjKey>, underlying: Option<TypeKey>, methods: Vec<ObjKey>) -> TypeKey {
+        self.tc_objs.new_t_named(obj, underlying, methods)
     }
 }
 

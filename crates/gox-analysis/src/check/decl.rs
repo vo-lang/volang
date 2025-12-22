@@ -55,16 +55,15 @@ impl Checker {
     pub fn obj_decl(&mut self, okey: ObjKey, def: Option<TypeKey>, fctx: &mut FilesContext) {
         // During type-checking, white objects may be assigned a type without
         // traversing through obj_decl. Update colors of those objects here.
-        let lobj = &mut self.tc_objs.lobjs[okey];
-        if lobj.color() == ObjColor::White && lobj.typ().is_some() {
-            lobj.set_color(ObjColor::Black);
+        if self.lobj(okey).color() == ObjColor::White && self.lobj(okey).typ().is_some() {
+            self.lobj_mut(okey).set_color(ObjColor::Black);
             return;
         }
 
-        match lobj.color() {
+        match self.lobj(okey).color() {
             ObjColor::White => {
-                debug_assert!(lobj.typ().is_none());
-                lobj.set_color(ObjColor::Gray(fctx.push(okey)));
+                debug_assert!(self.lobj(okey).typ().is_none());
+                self.lobj_mut(okey).set_color(ObjColor::Gray(fctx.push(okey)));
 
                 let dkey = match self.obj_map.get(&okey) {
                     Some(&k) => k,
@@ -81,7 +80,7 @@ impl Checker {
                 octx.scope = Some(d.file_scope());
                 std::mem::swap(&mut self.octx, &mut octx);
 
-                let lobj = &self.tc_objs.lobjs[okey];
+                let lobj = &self.lobj(okey);
                 match lobj.entity_type() {
                     EntityType::Const { .. } => {
                         self.octx.decl = Some(dkey);
@@ -114,21 +113,21 @@ impl Checker {
                 self.lobj_mut(fctx.pop()).set_color(ObjColor::Black);
             }
             ObjColor::Black => {
-                debug_assert!(lobj.typ().is_some());
+                debug_assert!(self.lobj(okey).typ().is_some());
             }
             ObjColor::Gray(_) => {
                 // We have a cycle.
                 let invalid_type = self.invalid_type();
-                let lobj = &self.tc_objs.lobjs[okey];
+                let lobj = &self.lobj(okey);
                 match lobj.entity_type() {
                     EntityType::Const { .. } | EntityType::Var { .. } => {
                         if self.invalid_type_cycle(okey, fctx) || lobj.typ().is_none() {
-                            self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                            self.lobj_mut(okey).set_type(Some(invalid_type));
                         }
                     }
                     EntityType::TypeName => {
                         if self.invalid_type_cycle(okey, fctx) {
-                            self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                            self.lobj_mut(okey).set_type(Some(invalid_type));
                         }
                     }
                     EntityType::Func { .. } => {
@@ -165,7 +164,7 @@ impl Checker {
                 }
                 EntityType::TypeName => {
                     // Check if it's the indirection marker
-                    if self.tc_objs.universe().indir() == *o {
+                    if self.universe().indir() == *o {
                         ncycle -= 1;
                         has_indir = true;
                     } else {
@@ -208,7 +207,7 @@ impl Checker {
             format!("illegal cycle in declaration of {}", lobj.name()),
         );
         for o in cycle {
-            if self.tc_objs.universe().indir() == *o {
+            if self.universe().indir() == *o {
                 continue;
             }
             self.error(Span::default(), format!("\t{} refers to", self.lobj(*o).name()));
@@ -238,8 +237,8 @@ impl Checker {
         // Determine type, if any
         if let Some(e) = typ {
             let t = self.type_expr(e, fctx);
-            let tval = &self.tc_objs.types[t];
-            if !tval.is_const_type(&self.tc_objs) {
+            let tval = &self.otype(t);
+            if !tval.is_const_type(self.objs()) {
                 let invalid_type = self.invalid_type();
                 if tval.underlying().unwrap_or(t) != invalid_type {
                     self.error(Span::default(), "invalid constant type".to_string());
@@ -322,9 +321,9 @@ impl Checker {
             let t = self.type_expr(typ, fctx);
             self.lobj_mut(okey).set_type(Some(t));
         } else {
-            let named_key = self.tc_objs.new_t_named(Some(okey), None, vec![]);
+            let named_key = self.new_t_named(Some(okey), None, vec![]);
             if let Some(d) = def {
-                if let Some(named) = self.tc_objs.types[d].try_as_named_mut() {
+                if let Some(named) = self.otype_mut(d).try_as_named_mut() {
                     named.set_underlying(named_key);
                 }
             }
@@ -335,8 +334,8 @@ impl Checker {
             self.defined_type(typ, Some(named_key), fctx);
 
             // Resolve forward chain to final unnamed underlying type
-            let underlying = typ::deep_underlying_type(named_key, &self.tc_objs);
-            if let Some(named) = self.tc_objs.types[named_key].try_as_named_mut() {
+            let underlying = typ::deep_underlying_type(named_key, self.objs());
+            if let Some(named) = self.otype_mut(named_key).try_as_named_mut() {
                 named.set_underlying(underlying);
             }
         }
@@ -350,7 +349,7 @@ impl Checker {
         debug_assert!(self.octx.iota.is_none());
 
         // Set guard signature to prevent infinite recursion
-        let guard_sig = self.tc_objs.universe().guard_sig();
+        let guard_sig = self.universe().guard_sig();
         self.lobj_mut(okey).set_type(Some(guard_sig));
 
         // Get function declaration info
@@ -363,11 +362,11 @@ impl Checker {
             self.lobj_mut(okey).set_type(Some(sig_key));
 
             // Check for 'init' func
-            let sig = self.tc_objs.types[sig_key].try_as_signature().unwrap();
-            let lobj = &self.tc_objs.lobjs[okey];
+            let sig = self.otype(sig_key).try_as_signature().unwrap();
+            let lobj = &self.lobj(okey);
             if sig.recv().is_none()
                 && lobj.name() == "init"
-                && (sig.params_count(&self.tc_objs) > 0 || sig.results_count(&self.tc_objs) > 0)
+                && (sig.params_count(self.objs()) > 0 || sig.results_count(self.objs()) > 0)
             {
                 self.error(
                     Span::default(),
@@ -454,7 +453,7 @@ impl Checker {
         }
 
         // Append valid methods to the named type
-        if let Some(named) = self.tc_objs.types[type_key].try_as_named_mut() {
+        if let Some(named) = self.otype_mut(type_key).try_as_named_mut() {
             named.methods_mut().append(&mut valids);
         }
     }
@@ -484,7 +483,7 @@ impl Checker {
                         .iter()
                         .enumerate()
                         .map(|(i, name)| {
-                            let okey = self.tc_objs.new_const(
+                            let okey = self.new_const(
                                 0,
                                 Some(self.pkg),
                                 self.resolve_ident(name).to_string(),
@@ -526,7 +525,7 @@ impl Checker {
                         .names
                         .iter()
                         .map(|name| {
-                            let okey = self.tc_objs.new_var(
+                            let okey = self.new_var(
                                 0,
                                 Some(self.pkg),
                                 self.resolve_ident(name).to_string(),
@@ -576,7 +575,7 @@ impl Checker {
             }
 
             Decl::Type(tdecl) => {
-                let okey = self.tc_objs.new_type_name(
+                let okey = self.new_type_name(
                     0,
                     Some(self.pkg),
                     self.resolve_ident(&tdecl.name).to_string(),

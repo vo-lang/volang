@@ -19,6 +19,7 @@ use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::operand::OperandMode;
 use crate::universe::Universe;
+use crate::importer::{Importer, ImportResult};
 
 // =============================================================================
 // ExprInfo - information about untyped expressions
@@ -88,6 +89,8 @@ pub struct FilesContext<'a> {
     pub delayed: Vec<DelayedAction>,
     /// Path of object dependencies during type inference (for cycle reporting).
     pub obj_path: Vec<ObjKey>,
+    /// Optional importer for resolving package imports.
+    pub importer: Option<&'a mut dyn Importer>,
 }
 
 impl<'a> FilesContext<'a> {
@@ -100,6 +103,20 @@ impl<'a> FilesContext<'a> {
             untyped: HashMap::new(),
             delayed: Vec::new(),
             obj_path: Vec::new(),
+            importer: None,
+        }
+    }
+    
+    pub fn with_importer(files: &'a [File], importer: &'a mut dyn Importer) -> FilesContext<'a> {
+        FilesContext {
+            files,
+            unused_dot_imports: HashMap::new(),
+            methods: HashMap::new(),
+            ifaces: HashMap::new(),
+            untyped: HashMap::new(),
+            delayed: Vec::new(),
+            obj_path: Vec::new(),
+            importer: Some(importer),
         }
     }
 
@@ -203,6 +220,35 @@ impl Checker {
             result: TypeInfo::new(),
             indent: Rc::new(RefCell::new(0)),
         }
+    }
+    
+    /// Creates a new type checker with pre-existing TCObjects.
+    pub fn with_objs(
+        pkg: PackageKey,
+        interner: SymbolInterner,
+        tc_objs: TCObjects,
+    ) -> Checker {
+        Checker {
+            tc_objs,
+            interner,
+            errors: Vec::new(),
+            pkg,
+            obj_map: HashMap::new(),
+            imp_map: HashMap::new(),
+            octx: ObjContext::new(),
+            result: TypeInfo::new(),
+            indent: Rc::new(RefCell::new(0)),
+        }
+    }
+    
+    /// Take ownership of tc_objs (for sharing between checkers).
+    pub fn take_objs(&mut self) -> TCObjects {
+        std::mem::take(&mut self.tc_objs)
+    }
+    
+    /// Put tc_objs back.
+    pub fn put_objs(&mut self, objs: TCObjects) {
+        self.tc_objs = objs;
     }
 
     /// Resolves a symbol to its string.
@@ -349,11 +395,17 @@ impl Checker {
     pub fn check_with_importer(
         &mut self,
         files: &[File],
-        _importer: &mut dyn crate::importer::Importer,
+        importer: &mut dyn Importer,
     ) -> Result<PackageKey, ()> {
-        // For now, delegate to check() - importer integration will be added
-        // when import_package() is updated to use the importer
-        self.check(files)
+        self.check_files_pkg_name(files)?;
+        let fctx = &mut FilesContext::with_importer(files, importer);
+        self.collect_objects(fctx);
+        self.package_objects(fctx);
+        fctx.process_delayed(0, self);
+        self.init_order();
+        self.unused_imports(fctx);
+        self.record_untyped(fctx);
+        Ok(self.pkg)
     }
 
     /// Check that all files have the same package name.

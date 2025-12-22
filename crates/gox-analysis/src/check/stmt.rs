@@ -134,7 +134,7 @@ impl Checker {
     /// Opens a new scope for a statement.
     fn open_scope(&mut self, span: Span, comment: &str) {
         let pos = span.start.to_usize();
-        let scope = self.tc_objs.new_scope(
+        let scope = self.new_scope(
             self.octx.scope,
             pos,
             span.end.to_usize(),
@@ -148,7 +148,7 @@ impl Checker {
     /// Closes the current scope, restoring the parent scope.
     fn close_scope(&mut self) {
         if let Some(current) = self.octx.scope {
-            self.octx.scope = self.tc_objs.scopes[current].parent();
+            self.octx.scope = self.scope(current).parent();
         }
     }
 
@@ -171,7 +171,7 @@ impl Checker {
         // Set function scope extent
         let scope_key = self.otype(sig).try_as_signature().unwrap().scope().unwrap();
         {
-            let scope = &mut self.tc_objs.scopes[scope_key];
+            let scope = self.scope_mut(scope_key);
             scope.set_pos(pos);
             scope.set_end(end);
         }
@@ -195,7 +195,7 @@ impl Checker {
 
         // Check for missing return
         let sig_val = self.otype(sig).try_as_signature().unwrap();
-        if sig_val.results_count(&self.tc_objs) > 0 && !self.is_terminating_block(body) {
+        if sig_val.results_count(self.objs()) > 0 && !self.is_terminating_block(body) {
             self.error_str(end, "missing return");
         }
 
@@ -210,12 +210,12 @@ impl Checker {
     fn usage(&self, skey: ScopeKey) {
         use crate::obj::EntityType;
 
-        let scope = &self.tc_objs.scopes[skey];
+        let scope = &self.scope(skey);
         let mut unused: Vec<(usize, String)> = scope
             .elems()
             .iter()
             .filter_map(|(_, &okey)| {
-                let lobj = &self.tc_objs.lobjs[okey];
+                let lobj = &self.lobj(okey);
                 match lobj.entity_type() {
                     EntityType::Var(var) => {
                         if !var.used {
@@ -236,7 +236,7 @@ impl Checker {
 
         // Recursively check children scopes (but not function literal scopes)
         for &child_key in scope.children() {
-            if !self.tc_objs.scopes[child_key].is_func() {
+            if !self.scope(child_key).is_func() {
                 self.usage(child_key);
             }
         }
@@ -343,7 +343,7 @@ impl Checker {
                         let entry = seen.entry(gov).or_insert_with(Vec::new);
                         if let Some(pt) = entry
                             .iter()
-                            .find(|pt| typ::identical(v.typ.unwrap(), pt.typ, &self.tc_objs))
+                            .find(|pt| typ::identical(v.typ.unwrap(), pt.typ, self.objs()))
                         {
                             self.error(
                                 e.span,
@@ -387,7 +387,7 @@ impl Checker {
             // Check for duplicate types
             if let Some((&_prev_t, &prev_span)) = seen
                 .iter()
-                .find(|(&t2, _)| typ::identical_o(t, t2, &self.tc_objs))
+                .find(|(&t2, _)| typ::identical_o(t, t2, self.objs()))
             {
                 let ts = t.map_or("nil".to_owned(), |tk| format!("{:?}", tk));
                 let span = ty_opt.as_ref().map_or(Span::default(), |ty| ty.span);
@@ -502,7 +502,7 @@ impl Checker {
                     return;
                 }
                 let chtype = ch.typ.unwrap();
-                let under_chtype = typ::underlying_type(chtype, &self.tc_objs);
+                let under_chtype = typ::underlying_type(chtype, self.objs());
                 if let Some(chan) = self.otype(under_chtype).try_as_chan() {
                     if chan.dir() == ChanDir::RecvOnly {
                         self.error(ss.chan.span, "cannot send to receive-only channel".to_string());
@@ -521,7 +521,7 @@ impl Checker {
                 if x.invalid() {
                     return;
                 }
-                if !typ::is_numeric(x.typ.unwrap(), &self.tc_objs) {
+                if !typ::is_numeric(x.typ.unwrap(), self.objs()) {
                     self.error(ids.expr.span, "non-numeric operand for inc/dec".to_string());
                     return;
                 }
@@ -673,7 +673,7 @@ impl Checker {
                 }
                 let x = &mut Operand::new();
                 self.expr(x, &ifs.cond, fctx);
-                if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), &self.tc_objs) {
+                if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                     self.error(ifs.cond.span, "non-boolean condition in if statement".to_string());
                 }
                 self.open_scope(ifs.then.span, "then");
@@ -745,7 +745,7 @@ impl Checker {
                     self.close_scope();
                     return;
                 }
-                let xtype = typ::underlying_type(x.typ.unwrap(), &self.tc_objs);
+                let xtype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 if self.otype(xtype).try_as_interface().is_none() {
                     self.error(tss.expr.span, "cannot type switch on non-interface type".to_string());
                     self.close_scope();
@@ -774,7 +774,7 @@ impl Checker {
                             t = x.typ;
                         }
                         let name = self.resolve_symbol(lhs_ident.symbol).to_string();
-                        let okey = self.tc_objs.new_var(lhs_ident.span.start.to_usize(), Some(self.pkg), name, t);
+                        let okey = self.new_var(lhs_ident.span.start.to_usize(), Some(self.pkg), name, t);
                         self.declare(self.octx.scope.unwrap(), okey);
                         self.result.record_implicit(clause.span, okey);
                         // For the "declared but not used" error, all lhs variables act as
@@ -790,7 +790,7 @@ impl Checker {
                 // If lhs exists, we must have at least one lhs variable that was used.
                 if lhs.is_some() {
                     let used = lhs_vars.iter().fold(false, |acc, &okey| {
-                        let prop = self.tc_objs.lobjs[okey].entity_type_mut().var_property_mut();
+                        let prop = self.lobj_mut(okey).entity_type_mut().var_property_mut();
                         let var_used = prop.used;
                         prop.used = true; // avoid usage error when checking entire function
                         acc || var_used
@@ -820,7 +820,7 @@ impl Checker {
                                 // Check channel type for send
                                 if !ch.invalid() {
                                     let chtype = ch.typ.unwrap();
-                                    let under = typ::underlying_type(chtype, &self.tc_objs);
+                                    let under = typ::underlying_type(chtype, self.objs());
                                     if let Some(chan) = self.otype(under).try_as_chan() {
                                         if chan.dir() == ChanDir::RecvOnly {
                                             self.error(send.chan.span, "cannot send to receive-only channel".to_string());
@@ -838,7 +838,7 @@ impl Checker {
                                 // Check receive expression is a channel receive
                                 if !x.invalid() {
                                     let xtype = x.typ.unwrap();
-                                    let under = typ::underlying_type(xtype, &self.tc_objs);
+                                    let under = typ::underlying_type(xtype, self.objs());
                                     if let Some(chan) = self.otype(under).try_as_chan() {
                                         if chan.dir() == ChanDir::SendOnly {
                                             self.error(recv.expr.span, "cannot receive from send-only channel".to_string());
@@ -866,7 +866,7 @@ impl Checker {
                         if let Some(c) = cond {
                             let x = &mut Operand::new();
                             self.expr(x, c, fctx);
-                            if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), &self.tc_objs) {
+                            if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                                 self.error(c.span, "non-boolean condition in for statement".to_string());
                             }
                         }
@@ -878,7 +878,7 @@ impl Checker {
                         if let Some(c) = cond {
                             let x = &mut Operand::new();
                             self.expr(x, c, fctx);
-                            if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), &self.tc_objs) {
+                            if !x.invalid() && !typ::is_boolean(x.typ.unwrap(), self.objs()) {
                                 self.error(c.span, "non-boolean condition in for statement".to_string());
                             }
                         }
@@ -899,9 +899,9 @@ impl Checker {
                             (None, None)
                         } else {
                             let xtype = x.typ.unwrap();
-                            let under = typ::underlying_type(xtype, &self.tc_objs);
+                            let under = typ::underlying_type(xtype, self.objs());
                             match self.otype(under) {
-                                typ::Type::Basic(_) if typ::is_string(under, &self.tc_objs) => {
+                                typ::Type::Basic(_) if typ::is_string(under, self.objs()) => {
                                     (Some(self.basic_type(BasicType::Int)), 
                                      Some(self.basic_type(BasicType::Rune)))
                                 }
@@ -952,7 +952,7 @@ impl Checker {
                                 let name = self.resolve_ident(&ident).to_string();
                                 let has_name = name != "_";
                                 // Create var with type None - init_var will set type
-                                let okey = self.tc_objs.new_var(lhs_e.span.start.to_usize(), Some(self.pkg), name, None);
+                                let okey = self.new_var(lhs_e.span.start.to_usize(), Some(self.pkg), name, None);
                                 self.result.record_def(ident, Some(okey));
                                 if has_name {
                                     vars.push(okey);
@@ -965,7 +965,7 @@ impl Checker {
                                     self.init_var(okey, &mut x, "range clause", fctx);
                                 } else {
                                     let invalid_type = self.invalid_type();
-                                    self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                                    self.lobj_mut(okey).set_type(Some(invalid_type));
                                 }
                             }
                             // Declare variables
@@ -1014,7 +1014,7 @@ impl Checker {
                     for (i, name) in spec.names.iter().enumerate() {
                         let name_str = self.resolve_symbol(name.symbol).to_string();
                         let var_type = declared_type.or_else(|| rhs_types.get(i).copied().flatten());
-                        let okey = self.tc_objs.new_var(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), var_type);
+                        let okey = self.new_var(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), var_type);
                         if name_str != "_" {
                             self.result.record_def(name.clone(), Some(okey));
                             self.declare(scope_key, okey);
@@ -1047,7 +1047,7 @@ impl Checker {
                         };
                         
                         let name_str = self.resolve_symbol(name.symbol).to_string();
-                        let okey = self.tc_objs.new_const(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), const_type, const_val);
+                        let okey = self.new_const(name.span.start.to_usize(), Some(self.pkg), name_str.clone(), const_type, const_val);
                         if name_str != "_" {
                             self.result.record_def(name.clone(), Some(okey));
                             self.declare(scope_key, okey);
@@ -1061,7 +1061,7 @@ impl Checker {
                 let scope_key = self.octx.scope.unwrap();
                 let name_str = self.resolve_symbol(ty.name.symbol).to_string();
                 let rhs_type = self.type_expr(&ty.ty, fctx);
-                let okey = self.tc_objs.new_type_name(ty.name.span.start.to_usize(), Some(self.pkg), name_str.clone(), Some(rhs_type));
+                let okey = self.new_type_name(ty.name.span.start.to_usize(), Some(self.pkg), name_str.clone(), Some(rhs_type));
                 if name_str != "_" {
                     self.result.record_def(ty.name.clone(), Some(okey));
                     self.declare(scope_key, okey);
@@ -1114,17 +1114,17 @@ impl Checker {
             // Check if variable already exists in current scope
             if let Some(okey) = self.scope(scope_key).lookup(&name) {
                 self.result.record_use(ident.clone(), okey);
-                if self.tc_objs.lobjs[okey].entity_type().is_var() {
+                if self.lobj(okey).entity_type().is_var() {
                     lhs_vars.push(okey);
                 } else {
                     self.error(ident.span, format!("cannot assign to {}", name));
                     // dummy variable
-                    let dummy = self.tc_objs.new_var(ident.span.start.to_usize(), Some(self.pkg), "_".to_string(), None);
+                    let dummy = self.new_var(ident.span.start.to_usize(), Some(self.pkg), "_".to_string(), None);
                     lhs_vars.push(dummy);
                 }
             } else {
                 // Declare new variable with type=None (init_var will set type)
-                let okey = self.tc_objs.new_var(ident.span.start.to_usize(), Some(self.pkg), name.clone(), None);
+                let okey = self.new_var(ident.span.start.to_usize(), Some(self.pkg), name.clone(), None);
                 if name != "_" {
                     new_vars.push(okey);
                 }

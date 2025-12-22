@@ -31,7 +31,7 @@ impl Checker {
     /// If def is Some, ty is the type specification for the defined type def.
     pub fn defined_type(&mut self, ty: &TypeExpr, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         let t = self.type_internal(ty, def, fctx);
-        debug_assert!(typ::is_typed(t, &self.tc_objs));
+        debug_assert!(typ::is_typed(t, self.objs()));
         // Record the resolved type for this TypeExpr
         self.result.record_type_expr(ty.id, t);
         t
@@ -40,7 +40,7 @@ impl Checker {
     /// Like type_expr but breaks infinite size of recursive types.
     /// Used for pointer base types, slice/map element types, function params, etc.
     pub fn indirect_type(&mut self, ty: &TypeExpr, fctx: &mut FilesContext) -> TypeKey {
-        fctx.push(self.tc_objs.universe().indir());
+        fctx.push(self.universe().indir());
         let t = self.defined_type(ty, None, fctx);
         fctx.pop();
         t
@@ -85,14 +85,14 @@ impl Checker {
                 let sel_sel = sel.sel.clone();
                 
                 if let Some(scope_key) = self.octx.scope {
-                    if let Some((_, pkg_obj)) = scope::lookup_parent(scope_key, &pkg_name, &self.tc_objs) {
-                        let entity = self.tc_objs.lobjs[pkg_obj].entity_type().clone();
+                    if let Some((_, pkg_obj)) = scope::lookup_parent(scope_key, &pkg_name, self.objs()) {
+                        let entity = self.lobj(pkg_obj).entity_type().clone();
                         if let EntityType::PkgName { imported, .. } = entity {
                             let pkg_scope = *self.package(imported).scope();
                             if let Some(type_obj) = self.scope(pkg_scope).lookup(&type_name) {
                                 self.result.record_use(sel_sel, type_obj);
-                                let is_type = self.tc_objs.lobjs[type_obj].entity_type().is_type_name();
-                                let typ = self.tc_objs.lobjs[type_obj].typ();
+                                let is_type = self.lobj(type_obj).entity_type().is_type_name();
+                                let typ = self.lobj(type_obj).typ();
                                 if is_type {
                                     if let Some(t) = typ {
                                         set_underlying(Some(t), &mut self.tc_objs);
@@ -117,20 +117,20 @@ impl Checker {
             TypeExprKind::Array(arr) => {
                 let len = self.array_len(&arr.len, fctx);
                 let elem = self.type_expr(&arr.elem, fctx);
-                let t = self.tc_objs.new_t_array(elem, len);
+                let t = self.new_t_array(elem, len);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Slice(elem) => {
                 let elem_type = self.indirect_type(elem, fctx);
-                let t = self.tc_objs.new_t_slice(elem_type);
+                let t = self.new_t_slice(elem_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
             TypeExprKind::Map(map) => {
                 let key = self.indirect_type(&map.key, fctx);
                 let value = self.indirect_type(&map.value, fctx);
-                let t = self.tc_objs.new_t_map(key, value);
+                let t = self.new_t_map(key, value);
                 set_underlying(Some(t), &mut self.tc_objs);
 
                 // Check map key is comparable (like goscript: delayed check via fctx.later)
@@ -151,7 +151,7 @@ impl Checker {
                     ast::ChanDir::Recv => ChanDir::RecvOnly,
                 };
                 let elem = self.indirect_type(&chan.elem, fctx);
-                let t = self.tc_objs.new_t_chan(dir, elem);
+                let t = self.new_t_chan(dir, elem);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
@@ -167,7 +167,7 @@ impl Checker {
             }
             TypeExprKind::Pointer(base) => {
                 let base_type = self.indirect_type(base, fctx);
-                let t = self.tc_objs.new_t_pointer(base_type);
+                let t = self.new_t_pointer(base_type);
                 set_underlying(Some(t), &mut self.tc_objs);
                 Some(t)
             }
@@ -208,22 +208,22 @@ impl Checker {
 
         // Look up in scope
         if let Some(scope_key) = self.octx.scope {
-            if let Some((_skey, okey)) = scope::lookup_parent(scope_key, name, &self.tc_objs) {
+            if let Some((_skey, okey)) = scope::lookup_parent(scope_key, name, self.objs()) {
                 self.result.record_use(ident.clone(), okey);
 
                 // Type-check the object if needed
-                let obj = &self.tc_objs.lobjs[okey];
+                let obj = &self.lobj(okey);
                 let mut otype = obj.typ();
                 if otype.is_none() || (obj.entity_type().is_type_name() && want_type) {
                     self.obj_decl(okey, None, fctx);
-                    otype = self.tc_objs.lobjs[okey].typ();
+                    otype = self.lobj(okey).typ();
                 }
 
                 let invalid_type = self.invalid_type();
                 
                 // Extract entity info first to avoid borrow conflicts
-                let entity_type = self.tc_objs.lobjs[okey].entity_type().clone();
-                let obj_name = self.tc_objs.lobjs[okey].name().to_string();
+                let entity_type = self.lobj(okey).entity_type().clone();
+                let obj_name = self.lobj(okey).name().to_string();
 
                 match &entity_type {
                     EntityType::PkgName { .. } => {
@@ -254,9 +254,9 @@ impl Checker {
                         // It's ok to mark non-local variables, but ignore variables
                         // from other packages to avoid potential race conditions with
                         // dot-imported variables.
-                        let obj_pkg = self.tc_objs.lobjs[okey].pkg();
+                        let obj_pkg = self.lobj(okey).pkg();
                         if obj_pkg == Some(self.pkg) {
-                            self.tc_objs.lobjs[okey].set_var_used(true);
+                            self.lobj_mut(okey).set_var_used(true);
                         }
                         self.add_decl_dep(okey);
                         if otype == Some(invalid_type) {
@@ -307,7 +307,7 @@ impl Checker {
         self.expr(&mut x, e, fctx);
         if let OperandMode::Constant(v) = &x.mode {
             if let Some(t) = x.typ {
-                if typ::is_untyped(t, &self.tc_objs) || typ::is_integer(t, &self.tc_objs) {
+                if typ::is_untyped(t, self.objs()) || typ::is_integer(t, self.objs()) {
                     if let Some(n) = v.int_val().and_then(|i| u64::try_from(i).ok()) {
                         return Some(n);
                     }
@@ -327,7 +327,7 @@ impl Checker {
     /// Type-checks a function type from AST.
     fn func_type_ast(&mut self, func: &ast::FuncType, fctx: &mut FilesContext) -> TypeKey {
         // Create a new scope for the function
-        let scope_key = self.tc_objs.new_scope(
+        let scope_key = self.new_scope(
             self.octx.scope,
             0, // pos
             0, // end
@@ -339,7 +339,7 @@ impl Checker {
         let mut params = Vec::new();
         for param_type in &func.params {
             let ty = self.indirect_type(param_type, fctx);
-            let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
+            let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             params.push(var);
         }
         let variadic = false; // FuncType in GoX doesn't have variadic marker
@@ -348,14 +348,14 @@ impl Checker {
         let mut results = Vec::new();
         for result_type in &func.results {
             let ty = self.indirect_type(result_type, fctx);
-            let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
+            let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
             results.push(var);
         }
 
         let params_tuple = self.new_tuple(params);
         let results_tuple = self.new_tuple(results);
 
-        self.tc_objs.new_t_signature(Some(scope_key), None, params_tuple, results_tuple, variadic)
+        self.new_t_signature(Some(scope_key), None, params_tuple, results_tuple, variadic)
     }
 
     /// Type-checks a function signature and returns its type.
@@ -367,7 +367,7 @@ impl Checker {
         fctx: &mut FilesContext,
     ) -> TypeKey {
         // Create a new scope for the function (like goscript)
-        let scope_key = self.tc_objs.new_scope(
+        let scope_key = self.new_scope(
             self.octx.scope,
             0,
             0,
@@ -395,7 +395,7 @@ impl Checker {
             let recv_var = if recv_list.is_empty() {
                 // This shouldn't happen with valid GoX syntax, but handle like goscript
                 self.error(r.span, "method is missing receiver".to_string());
-                self.tc_objs.new_param_var(0, None, String::new(), Some(invalid_type))
+                self.new_param_var(0, None, String::new(), Some(invalid_type))
             } else {
                 recv_list[0]
             };
@@ -403,7 +403,7 @@ impl Checker {
             // spec: "The receiver type must be of the form T or *T where T is a type name."
             let recv_var_val = self.lobj(recv_var);
             let recv_type = recv_var_val.typ().unwrap();
-            let (t, _) = crate::lookup::try_deref(recv_type, &self.tc_objs);
+            let (t, _) = crate::lookup::try_deref(recv_type, self.objs());
             
             if t != invalid_type {
                 let err_msg = if let Some(n) = self.otype(t).try_as_named() {
@@ -442,7 +442,7 @@ impl Checker {
         let params_tuple = self.new_tuple(params);
         let results_tuple = self.new_tuple(results);
 
-        self.tc_objs.new_t_signature(Some(scope_key), recv_okey, params_tuple, results_tuple, variadic)
+        self.new_t_signature(Some(scope_key), recv_okey, params_tuple, results_tuple, variadic)
     }
 
     /// Collect receiver parameter (adapted from goscript's collect_params for GoX Receiver).
@@ -468,14 +468,14 @@ impl Checker {
         
         // Final type is T or *T
         let recv_type = if r.is_pointer {
-            self.tc_objs.new_t_pointer(base_type)
+            self.new_t_pointer(base_type)
         } else {
             base_type
         };
 
         // Create param var and declare (like goscript's collect_params)
         let recv_name = self.resolve_ident(&r.name).to_string();
-        let par = self.tc_objs.new_param_var(0, Some(self.pkg), recv_name, Some(recv_type));
+        let par = self.new_param_var(0, Some(self.pkg), recv_name, Some(recv_type));
         self.declare(scope_key, par);
 
         vec![par]
@@ -505,7 +505,7 @@ impl Checker {
 
             if param.names.is_empty() {
                 // Anonymous parameter
-                let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(param_type));
+                let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(param_type));
                 // Record implicit object (like goscript: self.result.record_implicit(fkey, par))
                 self.result.record_implicit(param.ty.span, var);
                 vars.push(var);
@@ -517,7 +517,7 @@ impl Checker {
                     if name_str.is_empty() {
                         // This is an invalid case, but continue like goscript
                     }
-                    let var = self.tc_objs.new_param_var(0, Some(self.pkg), name_str, Some(param_type));
+                    let var = self.new_param_var(0, Some(self.pkg), name_str, Some(param_type));
                     self.declare(scope_key, var);
                     vars.push(var);
                 }
@@ -536,7 +536,7 @@ impl Checker {
         let variadic = variadic_ok && !vars.is_empty() && !params.is_empty();
         if variadic {
             let last = vars[vars.len() - 1];
-            let t = self.tc_objs.new_t_slice(self.lobj(last).typ().unwrap());
+            let t = self.new_t_slice(self.lobj(last).typ().unwrap());
             self.lobj_mut(last).set_type(Some(t));
             // Note: goscript also calls record_type_and_value for the ellipsis expression,
             // but GoX uses TypeExpr (not Expr), so we skip this recording
@@ -564,11 +564,11 @@ impl Checker {
 
             if let Some(name) = &result.name {
                 let name_str = self.resolve_ident(name).to_string();
-                let var = self.tc_objs.new_param_var(0, Some(self.pkg), name_str, Some(result_type));
+                let var = self.new_param_var(0, Some(self.pkg), name_str, Some(result_type));
                 self.declare(scope_key, var);
                 vars.push(var);
             } else {
-                let var = self.tc_objs.new_param_var(0, Some(self.pkg), String::new(), Some(result_type));
+                let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(result_type));
                 vars.push(var);
             }
         }
@@ -578,14 +578,14 @@ impl Checker {
 
     /// Creates a new tuple type.
     pub fn new_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
-        self.tc_objs.new_t_tuple(vars)
+        self.new_t_tuple(vars)
     }
 
     /// Creates a new comma-ok tuple type from the given types.
     pub fn new_comma_ok_tuple(&mut self, types: &[TypeKey; 2]) -> TypeKey {
-        let var0 = self.tc_objs.new_var(0, None, "".to_string(), Some(types[0]));
-        let var1 = self.tc_objs.new_var(0, None, "".to_string(), Some(types[1]));
-        self.tc_objs.new_t_tuple(vec![var0, var1])
+        let var0 = self.new_var(0, None, "".to_string(), Some(types[0]));
+        let var1 = self.new_var(0, None, "".to_string(), Some(types[1]));
+        self.new_t_tuple(vec![var0, var1])
     }
 
     /// Type-checks the type expression (or nil value) and returns the type, or None for nil.
@@ -602,7 +602,7 @@ impl Checker {
             }
             OperandMode::TypeExpr => x.typ,
             _ => {
-                if x.mode == OperandMode::Value && x.is_nil(&self.tc_objs) {
+                if x.mode == OperandMode::Value && x.is_nil(self.objs()) {
                     None
                 } else {
                     self.error(e.span, "is not a type".to_string());
@@ -619,7 +619,7 @@ impl Checker {
     /// Type-checks a struct type.
     fn struct_type(&mut self, s: &ast::StructType, fctx: &mut FilesContext) -> TypeKey {
         if s.fields.is_empty() {
-            return self.tc_objs.new_t_struct(Vec::new(), None);
+            return self.new_t_struct(Vec::new(), None);
         }
 
         let mut fields: Vec<ObjKey> = Vec::new();
@@ -640,10 +640,10 @@ impl Checker {
                 let embedded_name = self.get_embedded_field_name(&field.ty);
                 
                 // Check embedded field constraints
-                let (underlying, is_ptr) = lookup::try_deref(field_type, &self.tc_objs);
-                let underlying_type = typ::underlying_type(underlying, &self.tc_objs);
+                let (underlying, is_ptr) = lookup::try_deref(field_type, self.objs());
+                let underlying_type = typ::underlying_type(underlying, self.objs());
                 
-                let is_valid = match &self.tc_objs.types[underlying_type] {
+                let is_valid = match &self.otype(underlying_type) {
                     Type::Basic(_) if underlying_type == invalid_type => false,
                     Type::Pointer(_) => {
                         self.error(field.ty.span, "embedded field type cannot be a pointer".to_string());
@@ -657,7 +657,7 @@ impl Checker {
                 };
 
                 let final_type = if is_valid { field_type } else { invalid_type };
-                let fld = self.tc_objs.new_field(
+                let fld = self.new_field(
                     0,
                     Some(self.pkg),
                     embedded_name.clone(),
@@ -680,7 +680,7 @@ impl Checker {
                 // Named fields
                 for name in &field.names {
                     let name_str = self.resolve_ident(name).to_string();
-                    let fld = self.tc_objs.new_field(
+                    let fld = self.new_field(
                         0,
                         Some(self.pkg),
                         name_str.clone(),
@@ -704,7 +704,7 @@ impl Checker {
             }
         }
 
-        self.tc_objs.new_t_struct(fields, tags)
+        self.new_t_struct(fields, tags)
     }
 
     /// Adds a field to the fields list and updates tags.
@@ -742,11 +742,11 @@ impl Checker {
     /// Aligned with goscript's interface_type: uses info_from_type_lit to collect all methods.
     fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>, fctx: &mut FilesContext) -> TypeKey {
         if iface.elems.is_empty() {
-            return self.tc_objs.new_t_empty_interface();
+            return self.new_t_empty_interface();
         }
 
         // Create the interface type first (methods will be added later)
-        let itype = self.tc_objs.new_t_interface(vec![], vec![]);
+        let itype = self.new_t_interface(vec![], vec![]);
 
         // Collect embedded interface idents for delayed processing (like goscript)
         let mut embedded_idents: Vec<Ident> = Vec::new();
@@ -797,7 +797,7 @@ impl Checker {
 
         // Compute method set using info_from_type_lit (like goscript)
         let (tname, path) = if let Some(d) = def {
-            if let Some(named) = self.tc_objs.types[d].try_as_named() {
+            if let Some(named) = self.otype(d).try_as_named() {
                 let obj = named.obj().clone();
                 (obj, obj.map(|o| vec![o]).unwrap_or_default())
             } else {
@@ -807,12 +807,12 @@ impl Checker {
             (None, vec![])
         };
         
-        let scope = self.octx.scope.unwrap_or(self.tc_objs.universe().scope());
+        let scope = self.octx.scope.unwrap_or(self.universe().scope());
         let info = self.info_from_type_lit(scope, iface, tname, &path, fctx);
         
         if info.is_none() || info.as_ref().unwrap().is_empty() {
             // Empty interface or error - exit early
-            if let Some(iface_detail) = self.tc_objs.types[itype].try_as_interface() {
+            if let Some(iface_detail) = self.otype(itype).try_as_interface() {
                 iface_detail.set_empty_complete();
             }
             return itype;
@@ -858,13 +858,13 @@ impl Checker {
                 let name = self.resolve_ident(&method_ast.name).to_string();
                 
                 // Create receiver
-                let recv_var = self.tc_objs.new_var(0, Some(self.pkg), String::new(), Some(recv_type));
+                let recv_var = self.new_var(0, Some(self.pkg), String::new(), Some(recv_type));
                 
                 // Create empty signature (will be fixed in phase 2)
-                let empty_tuple = self.tc_objs.new_t_tuple(vec![]);
-                let sig_type = self.tc_objs.new_t_signature(None, Some(recv_var), empty_tuple, empty_tuple, false);
+                let empty_tuple = self.new_t_tuple(vec![]);
+                let sig_type = self.new_t_signature(None, Some(recv_var), empty_tuple, empty_tuple, false);
 
-                let fun_key = self.tc_objs.new_func(0, Some(self.pkg), name.clone(), Some(sig_type));
+                let fun_key = self.new_func(0, Some(self.pkg), name.clone(), Some(sig_type));
                 
                 // Record definition for the method
                 self.result.record_def(method_ast.name.clone(), Some(fun_key));
@@ -877,7 +877,7 @@ impl Checker {
             };
             
             // Add to interface type
-            if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
+            if let Type::Interface(iface_detail) = &mut self.otype_mut(itype) {
                 if i < explicits {
                     iface_detail.methods_mut().push(fun);
                 }
@@ -904,40 +904,43 @@ impl Checker {
             
             // Update the method's signature, keeping the receiver
             let fun_key = minfo.func().unwrap();
-            let old_sig_type = self.tc_objs.lobjs[fun_key].typ().unwrap();
-            let recv = if let Type::Signature(old_sig) = &self.tc_objs.types[old_sig_type] {
+            let old_sig_type = self.lobj(fun_key).typ().unwrap();
+            let recv = if let Type::Signature(old_sig) = &self.otype(old_sig_type) {
                 *old_sig.recv()
             } else {
                 None
             };
             
-            if let Type::Signature(sig) = &mut self.tc_objs.types[sig_type] {
+            if let Type::Signature(sig) = &mut self.otype_mut(sig_type) {
                 sig.set_recv(recv);
             }
             
             // Update the function's type to the new signature
-            self.tc_objs.lobjs[fun_key].set_type(Some(sig_type));
+            self.lobj_mut(fun_key).set_type(Some(sig_type));
         }
         self.octx = saved_context;
 
-        // Sort methods by name
-        if let Type::Interface(iface_detail) = &mut self.tc_objs.types[itype] {
-            let mut methods = iface_detail.methods().clone();
-            methods.sort_by(|a, b| {
-                let name_a = self.tc_objs.lobjs[*a].name();
-                let name_b = self.tc_objs.lobjs[*b].name();
-                name_a.cmp(name_b)
-            });
-            *iface_detail.methods_mut() = methods;
+        // Sort methods by name - collect data first to avoid borrow conflicts
+        if let Type::Interface(iface_detail) = &self.otype(itype) {
+            let mut methods: Vec<_> = iface_detail.methods().iter()
+                .map(|&k| (k, self.lobj(k).name().to_string()))
+                .collect();
+            methods.sort_by(|a, b| a.1.cmp(&b.1));
+            let sorted_methods: Vec<_> = methods.into_iter().map(|(k, _)| k).collect();
             
-            // Sort all_methods
-            let mut all = iface_detail.all_methods_mut();
-            if let Some(ref mut all_methods) = *all {
-                all_methods.sort_by(|a, b| {
-                    let name_a = self.tc_objs.lobjs[*a].name();
-                    let name_b = self.tc_objs.lobjs[*b].name();
-                    name_a.cmp(name_b)
-                });
+            let all_methods_opt = iface_detail.all_methods().clone();
+            let sorted_all = all_methods_opt.map(|all| {
+                let mut all_with_names: Vec<_> = all.iter()
+                    .map(|&k| (k, self.lobj(k).name().to_string()))
+                    .collect();
+                all_with_names.sort_by(|a, b| a.1.cmp(&b.1));
+                all_with_names.into_iter().map(|(k, _)| k).collect()
+            });
+            
+            // Now update with mutable borrow
+            if let Type::Interface(iface_detail) = &mut self.otype_mut(itype) {
+                *iface_detail.methods_mut() = sorted_methods;
+                *iface_detail.all_methods_mut() = sorted_all;
             }
         }
 

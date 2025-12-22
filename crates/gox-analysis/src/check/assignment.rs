@@ -43,7 +43,7 @@ impl Checker {
             None => return,
         };
 
-        if typ::is_untyped(xt, &self.tc_objs) {
+        if typ::is_untyped(xt, self.objs()) {
             if t.is_none() && xt == self.basic_type(BasicType::UntypedNil) {
                 self.error(DEFAULT_SPAN, format!("use of untyped nil in {}", note));
                 x.mode = OperandMode::Invalid;
@@ -52,8 +52,8 @@ impl Checker {
             // spec: "If an untyped constant is assigned to a variable of interface
             // type or the blank identifier, the constant is first converted to type
             // bool, rune, int, float64, or string respectively."
-            let target = if t.is_none() || typ::is_interface(t.unwrap(), &self.tc_objs) {
-                typ::untyped_default_type(xt, &self.tc_objs)
+            let target = if t.is_none() || typ::is_interface(t.unwrap(), self.objs()) {
+                typ::untyped_default_type(xt, self.objs())
             } else {
                 t.unwrap()
             };
@@ -87,26 +87,26 @@ impl Checker {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
-            self.tc_objs.lobjs[lhs].set_type(Some(invalid_type));
+            self.lobj_mut(lhs).set_type(Some(invalid_type));
             return;
         }
         
-        if self.tc_objs.lobjs[lhs].typ() == Some(invalid_type) {
+        if self.lobj(lhs).typ() == Some(invalid_type) {
             return;
         }
 
         // If the lhs doesn't have a type yet, use the type of x.
-        if self.tc_objs.lobjs[lhs].typ().is_none() {
-            self.tc_objs.lobjs[lhs].set_type(x.typ);
+        if self.lobj(lhs).typ().is_none() {
+            self.lobj_mut(lhs).set_type(x.typ);
         }
 
         // rhs must be a constant
         if let OperandMode::Constant(ref _val) = x.mode {
-            let t = self.tc_objs.lobjs[lhs].typ();
+            let t = self.lobj(lhs).typ();
             self.assignment(x, t, "constant declaration", fctx);
             if x.mode != OperandMode::Invalid {
                 if let OperandMode::Constant(ref v) = x.mode {
-                    self.tc_objs.lobjs[lhs].set_const_val(v.clone());
+                    self.lobj_mut(lhs).set_const_val(v.clone());
                 }
             }
         } else {
@@ -119,38 +119,38 @@ impl Checker {
         let invalid_type = self.invalid_type();
         
         if x.invalid() || x.typ == Some(invalid_type) {
-            if self.tc_objs.lobjs[lhs].typ().is_none() {
-                self.tc_objs.lobjs[lhs].set_type(Some(invalid_type));
+            if self.lobj(lhs).typ().is_none() {
+                self.lobj_mut(lhs).set_type(Some(invalid_type));
             }
             return None;
         }
         
-        if self.tc_objs.lobjs[lhs].typ() == Some(invalid_type) {
+        if self.lobj(lhs).typ() == Some(invalid_type) {
             return None;
         }
 
         // If the lhs doesn't have a type yet, use the type of x.
-        if self.tc_objs.lobjs[lhs].typ().is_none() {
+        if self.lobj(lhs).typ().is_none() {
             let xt = x.typ.unwrap();
-            let lhs_type = if typ::is_untyped(xt, &self.tc_objs) {
+            let lhs_type = if typ::is_untyped(xt, self.objs()) {
                 // convert untyped types to default types
                 if xt == self.basic_type(BasicType::UntypedNil) {
                     self.error(DEFAULT_SPAN, format!("use of untyped nil in {}", msg));
                     invalid_type
                 } else {
-                    typ::untyped_default_type(xt, &self.tc_objs)
+                    typ::untyped_default_type(xt, self.objs())
                 }
             } else {
                 xt
             };
 
-            self.tc_objs.lobjs[lhs].set_type(Some(lhs_type));
+            self.lobj_mut(lhs).set_type(Some(lhs_type));
             if lhs_type == invalid_type {
                 return None;
             }
         }
 
-        let t = self.tc_objs.lobjs[lhs].typ();
+        let t = self.lobj(lhs).typ();
         self.assignment(x, t, msg, fctx);
         if x.mode != OperandMode::Invalid {
             x.typ
@@ -256,8 +256,8 @@ impl Checker {
         
         let mut invalidate_lhs = || {
             for &okey in lhs.iter() {
-                if self.tc_objs.lobjs[okey].typ().is_none() {
-                    self.tc_objs.lobjs[okey].set_type(Some(invalid_type));
+                if self.lobj(okey).typ().is_none() {
+                    self.lobj_mut(okey).set_type(Some(invalid_type));
                 }
             }
         };
@@ -372,16 +372,16 @@ impl Checker {
                 // Check if variable already exists in current scope
                 if let Some(okey) = self.scope(scope_key).lookup(&name) {
                     self.result.record_use(ident.clone(), okey);
-                    if self.tc_objs.lobjs[okey].entity_type().is_var() {
+                    if self.lobj(okey).entity_type().is_var() {
                         lhs_vars.push(okey);
                     } else {
                         self.error(l.span, format!("cannot assign to {}", name));
-                        let dummy = self.tc_objs.new_var(0, Some(self.pkg), "_".to_string(), None);
+                        let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
                         lhs_vars.push(dummy);
                     }
                 } else {
                     // Declare new variable
-                    let okey = self.tc_objs.new_var(0, Some(self.pkg), name.clone(), None);
+                    let okey = self.new_var(0, Some(self.pkg), name.clone(), None);
                     if name != "_" {
                         new_vars.push(okey);
                     }
@@ -390,7 +390,7 @@ impl Checker {
                 }
             } else {
                 self.error(l.span, "non-name on left side of :=".to_string());
-                let dummy = self.tc_objs.new_var(0, Some(self.pkg), "_".to_string(), None);
+                let dummy = self.new_var(0, Some(self.pkg), "_".to_string(), None);
                 lhs_vars.push(dummy);
             }
         }
@@ -426,18 +426,18 @@ impl Checker {
         };
 
         // Identical types are always assignable
-        if typ::identical(xt, t, &self.tc_objs) {
+        if typ::identical(xt, t, self.objs()) {
             return true;
         }
 
         // Check underlying types
-        let xu = typ::underlying_type(xt, &self.tc_objs);
-        let tu = typ::underlying_type(t, &self.tc_objs);
-        let ut_x = self.otype(xu).underlying_val(&self.tc_objs);
-        let ut_t = self.otype(tu).underlying_val(&self.tc_objs);
+        let xu = typ::underlying_type(xt, self.objs());
+        let tu = typ::underlying_type(t, self.objs());
+        let ut_x = self.otype(xu).underlying_val(self.objs());
+        let ut_t = self.otype(tu).underlying_val(self.objs());
 
         // x is untyped
-        if typ::is_untyped(xt, &self.tc_objs) {
+        if typ::is_untyped(xt, self.objs()) {
             match ut_t {
                 Type::Basic(detail) => {
                     // untyped constant representable as t
@@ -453,10 +453,10 @@ impl Checker {
                 }
                 Type::Interface(detail) => {
                     // untyped nil or empty interface
-                    return x.is_nil(&self.tc_objs) || detail.is_empty();
+                    return x.is_nil(self.objs()) || detail.is_empty();
                 }
                 Type::Pointer(_) | Type::Signature(_) | Type::Slice(_) | Type::Map(_) | Type::Chan(_) => {
-                    return x.is_nil(&self.tc_objs);
+                    return x.is_nil(self.objs());
                 }
                 _ => {}
             }
@@ -464,16 +464,16 @@ impl Checker {
 
         // x is typed
         // x's type V and T have identical underlying types and at least one is not a named type
-        if typ::identical(xu, tu, &self.tc_objs) {
-            let x_is_named = !typ::identical(xt, xu, &self.tc_objs);
-            let t_is_named = !typ::identical(t, tu, &self.tc_objs);
+        if typ::identical(xu, tu, self.objs()) {
+            let x_is_named = !typ::identical(xt, xu, self.objs());
+            let t_is_named = !typ::identical(t, tu, self.objs());
             if !x_is_named || !t_is_named {
                 return true;
             }
         }
 
         // T is an interface type and x implements T
-        if typ::is_interface(t, &self.tc_objs) {
+        if typ::is_interface(t, self.objs()) {
             if self.implements(xt, t) {
                 return true;
             }
@@ -486,9 +486,9 @@ impl Checker {
         if let (Type::Chan(xc), Type::Chan(tc)) = (ut_x, ut_t) {
             use crate::typ::ChanDir;
             if xc.dir() == ChanDir::SendRecv {
-                if typ::identical(xc.elem(), tc.elem(), &self.tc_objs) {
-                    let x_is_named = !typ::identical(xt, xu, &self.tc_objs);
-                    let t_is_named = !typ::identical(t, tu, &self.tc_objs);
+                if typ::identical(xc.elem(), tc.elem(), self.objs()) {
+                    let x_is_named = !typ::identical(xt, xu, self.objs());
+                    let t_is_named = !typ::identical(t, tu, self.objs());
                     if !x_is_named || !t_is_named {
                         return true;
                     }
@@ -501,7 +501,7 @@ impl Checker {
 
     /// Checks if a constant value is representable as the target type.
     fn is_representable(&self, val: &crate::constant::Value, target: TypeKey) -> bool {
-        if let crate::typ::Type::Basic(basic) = &self.tc_objs.types[target] {
+        if let crate::typ::Type::Basic(basic) = &self.otype(target) {
             return val.representable(basic, None);
         }
         false
