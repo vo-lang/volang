@@ -411,9 +411,8 @@ impl Checker {
 
     /// Main statement checking wrapper - handles delayed actions.
     fn stmt(&mut self, stmt: &Stmt, ctx: &StmtContext) {
-        let pos = stmt.span.start.0 as usize;
         if self.trace() {
-            self.trace_begin(pos, "stmt");
+            self.trace_stmt(stmt);
         }
 
         let begin_scope = self.octx.scope;
@@ -425,7 +424,7 @@ impl Checker {
         debug_assert_eq!(begin_scope, self.octx.scope);
 
         if self.trace() {
-            self.trace_end(pos, "stmt");
+            self.trace_stmt_end();
         }
     }
 

@@ -852,9 +852,8 @@ impl Checker {
         e: &Expr,
         hint: Option<TypeKey>,
     ) {
-        let pos = e.span.start.0 as usize;
         if self.trace() {
-            self.trace_begin(pos, "expr");
+            self.trace_expr(e);
         }
 
         self.raw_internal(x, e, hint);
@@ -881,7 +880,7 @@ impl Checker {
         }
 
         if self.trace() {
-            self.trace_end(pos, "expr");
+            self.trace_expr_end();
         }
     }
 

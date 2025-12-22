@@ -11,6 +11,7 @@ mod conversion;
 mod decl;
 pub mod errors;
 mod expr;
+pub(crate) mod format;
 mod initorder;
 mod interface;
 mod label;

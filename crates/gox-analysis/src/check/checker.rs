@@ -267,26 +267,41 @@ impl Checker {
     /// Print a trace message with current indentation.
     fn trace_print(&self, msg: &str) {
         let indent = *self.trace_indent.borrow();
-        let prefix = "  ".repeat(indent);
+        let prefix = ".  ".repeat(indent);
         eprintln!("{}{}", prefix, msg);
     }
 
-    /// Begin a trace block (increases indentation).
-    pub fn trace_begin(&self, pos: usize, msg: &str) {
+    /// Begin a trace block for an expression.
+    pub fn trace_expr(&self, expr: &gox_syntax::ast::Expr) {
         if self.trace_enabled {
-            self.trace_print(&format!(">> {} (pos:{})", msg, pos));
+            let s = super::format::format_expr(expr, &self.interner);
+            self.trace_print(&format!("expr[ {} ]", s));
             *self.trace_indent.borrow_mut() += 1;
         }
     }
 
-    /// End a trace block (decreases indentation).
-    pub fn trace_end(&self, pos: usize, msg: &str) {
+    /// End a trace block for an expression.
+    pub fn trace_expr_end(&self) {
         if self.trace_enabled {
-            {
-                let indent = &mut *self.trace_indent.borrow_mut();
-                *indent = indent.saturating_sub(1);
-            }
-            self.trace_print(&format!("<< {} (pos:{})", msg, pos));
+            let indent = &mut *self.trace_indent.borrow_mut();
+            *indent = indent.saturating_sub(1);
+        }
+    }
+
+    /// Begin a trace block for a statement.
+    pub fn trace_stmt(&self, stmt: &gox_syntax::ast::Stmt) {
+        if self.trace_enabled {
+            let s = super::format::format_stmt(stmt, &self.interner);
+            self.trace_print(&format!("stmt[ {} ]", s));
+            *self.trace_indent.borrow_mut() += 1;
+        }
+    }
+
+    /// End a trace block for a statement.
+    pub fn trace_stmt_end(&self) {
+        if self.trace_enabled {
+            let indent = &mut *self.trace_indent.borrow_mut();
+            *indent = indent.saturating_sub(1);
         }
     }
 
