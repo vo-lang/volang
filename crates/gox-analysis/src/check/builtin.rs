@@ -219,7 +219,7 @@ impl Checker {
                 // Only record signature when argument is not constant
                 let arg_type = x.typ.unwrap_or(self.invalid_type());
                 let is_constant = matches!(x.mode, OperandMode::Constant(_));
-                let ok = self.builtin_assert(x);
+                let ok = self.builtin_assert(x, call_span);
                 if ok && !is_constant {
                     // Only record when the argument is not constant
                     record_sig(self, None, &[arg_type], false);
@@ -320,7 +320,7 @@ impl Checker {
             Type::Basic(detail) => {
                 if detail.info() == BasicInfo::IsString {
                     if let OperandMode::Constant(v) = &x.mode {
-                        OperandMode::Constant(Value::with_u64(v.str_as_string().len() as u64))
+                        OperandMode::Constant(crate::constant::make_uint64(v.str_as_string().len() as u64))
                     } else {
                         OperandMode::Value
                     }
@@ -337,7 +337,7 @@ impl Checker {
                     // the expression s does not contain channel receives or
                     // function calls"
                     OperandMode::Constant(if let Some(len) = detail.len() {
-                        Value::with_u64(len)
+                        crate::constant::make_uint64(len)
                     } else {
                         Value::Unknown
                     })
@@ -603,15 +603,15 @@ impl Checker {
     }
 
     /// assert(pred bool) - GoX extension
-    fn builtin_assert(&mut self, x: &mut Operand) -> bool {
+    fn builtin_assert(&mut self, x: &mut Operand, call_span: Span) -> bool {
         if !typ::is_boolean(x.typ.unwrap_or(self.invalid_type()), self.objs()) {
-            self.error_code(TypeError::AssertNotBool, Span::default());
+            self.error_code(TypeError::AssertNotBool, call_span);
             return false;
         }
 
         // If argument is a constant false, report error
         if let OperandMode::Constant(Value::Bool(false)) = &x.mode {
-            self.error_code(TypeError::AssertFailed, Span::default());
+            self.error_code(TypeError::AssertFailed, call_span);
             // Safe to continue - compile-time assertion failure
         }
 

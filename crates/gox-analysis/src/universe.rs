@@ -362,7 +362,7 @@ impl Universe {
                 ConstValue::Bool(false),
                 false,
             ),
-            ("iota", BasicType::UntypedInt, ConstValue::with_i64(0), true),
+            ("iota", BasicType::UntypedInt, crate::constant::make_int64(0), true),
         ];
 
         for (name, typ, val, is_iota) in consts {

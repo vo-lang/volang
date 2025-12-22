@@ -27,7 +27,7 @@ use gox_common::span::Span;
 use gox_common_core::ExprId;
 use gox_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
 
-use crate::constant::Value;
+use crate::constant::{Value, int_from_literal, float_from_literal, make_int64, make_string, make_bool, unary_op, binary_op, shift, compare};
 use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
@@ -161,7 +161,7 @@ impl Checker {
                     } else {
                         0
                     };
-                    *v = Value::unary_op(op, v, prec);
+                    *v = unary_op(op, v, prec as u32);
                     // Typed constants must be representable in
                     // their type after each constant operation.
                     if tval.is_typed(self.objs()) {
@@ -496,7 +496,7 @@ impl Checker {
 
         match (&mut x.mode, &y.mode) {
             (OperandMode::Constant(vx), OperandMode::Constant(vy)) => {
-                *vx = Value::with_bool(Value::compare(vx, op, vy));
+                *vx = make_bool(compare(vx, op, vy));
             }
             _ => {
                 x.mode = OperandMode::Value;
@@ -580,7 +580,7 @@ impl Checker {
                     x.typ = Some(self.basic_type(BasicType::UntypedInt));
                 }
                 // x is a constant so xval != nil and it must be of Int kind.
-                *xv = Value::shift(&xv.to_int(), op, s);
+                *xv = shift(&xv.to_int(), op, s as u32);
                 // Typed constants must be representable in their type
                 if typ::is_typed(x.typ.unwrap(), self.objs()) {
                     if let Some(expr) = e {
@@ -696,7 +696,7 @@ impl Checker {
         match (&mut x.mode, &y.mode) {
             (OperandMode::Constant(vx), OperandMode::Constant(vy)) => {
                 let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
-                *vx = Value::binary_op(vx, op, vy);
+                *vx = binary_op(vx, op, vy);
                 // Typed constants must be representable in their type
                 if typ::is_typed(ty, self.objs()) {
                     if let Some(expr) = e {
@@ -902,24 +902,22 @@ impl Checker {
             }
             ExprKind::IntLit(lit) => {
                 let raw = self.resolve_symbol(lit.raw);
-                let val = raw.parse::<i64>().unwrap_or(0);
-                x.mode = OperandMode::Constant(Value::with_i64(val));
+                x.mode = OperandMode::Constant(int_from_literal(raw));
                 x.typ = Some(self.basic_type(BasicType::UntypedInt));
             }
             ExprKind::FloatLit(lit) => {
                 let raw = self.resolve_symbol(lit.raw);
-                let val = raw.parse::<f64>().unwrap_or(0.0);
-                x.mode = OperandMode::Constant(Value::with_f64(val));
+                x.mode = OperandMode::Constant(float_from_literal(raw));
                 x.typ = Some(self.basic_type(BasicType::UntypedFloat));
             }
             ExprKind::RuneLit(lit) => {
                 // Rune literals have a parsed value
                 let val = lit.value as i64;
-                x.mode = OperandMode::Constant(Value::with_i64(val));
+                x.mode = OperandMode::Constant(make_int64(val));
                 x.typ = Some(self.basic_type(BasicType::UntypedRune));
             }
             ExprKind::StringLit(lit) => {
-                x.mode = OperandMode::Constant(Value::with_str(lit.value.clone()));
+                x.mode = OperandMode::Constant(make_string(lit.value.clone()));
                 x.typ = Some(self.basic_type(BasicType::UntypedString));
             }
             ExprKind::Paren(inner) => {

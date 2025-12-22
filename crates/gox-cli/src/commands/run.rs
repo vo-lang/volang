@@ -1,8 +1,9 @@
 //! `gox run` command - Run a GoX program.
 
 use std::path::Path;
+use gox_common::diagnostics::DiagnosticEmitter;
 use gox_common::vfs::{FileSet, RealFs};
-use gox_analysis::analyze_project;
+use gox_analysis::{analyze_project, AnalysisError};
 use gox_module::VfsConfig;
 use gox_codegen_vm::compile_project;
 use gox_runtime_vm::extern_fn::StdMode;
@@ -160,7 +161,15 @@ fn compile_source_file(path: &Path) -> Result<Module, Box<dyn std::error::Error>
     let vfs = vfs_config.to_vfs();
     
     let project = analyze_project(file_set, &vfs).map_err(|e| {
-        println!("[GOX:ERROR:{}]", e);
+        // Use DiagnosticEmitter for rich error output with source code
+        if let AnalysisError::Check(ref diags, ref source_map) = e {
+            let emitter = DiagnosticEmitter::new(source_map);
+            eprintln!(); // blank line before errors
+            emitter.emit_all(diags);
+            println!("[GOX:ERROR:type check failed: {} error(s)]", diags.error_count());
+        } else {
+            println!("[GOX:ERROR:{}]", e);
+        }
         format!("analysis error: {}", e)
     })?;
     

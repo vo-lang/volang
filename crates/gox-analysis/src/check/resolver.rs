@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use gox_common::span::Span;
 use gox_syntax::ast::{Decl, Expr, FuncDecl, TypeExpr};
 
-use crate::constant::Value;
 use crate::objects::{ObjKey, PackageKey, ScopeKey};
 
 use super::checker::Checker;
@@ -385,7 +384,7 @@ impl Checker {
                             Some(self.pkg),
                             name_str.to_string(),
                             None,
-                            Value::with_i64(iota as i64),
+                            crate::constant::make_int64(iota as i64),
                         );
 
                         let init_expr = last_values.get(i).cloned();

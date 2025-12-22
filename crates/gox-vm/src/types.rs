@@ -1,7 +1,6 @@
 //! Type metadata and type system.
 
 use alloc::{string::{String, ToString}, vec, vec::Vec};
-use hashbrown::HashMap;
 use gox_common_core::{RuntimeTypeId, SlotType, ValueKind};
 
 /// Type ID (index into type table).

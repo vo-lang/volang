@@ -496,7 +496,7 @@ impl Checker {
                                 Some(self.pkg),
                                 self.resolve_ident(name).to_string(),
                                 None,
-                                ConstValue::with_i64(iota as i64),
+                                crate::constant::make_int64(iota as i64),
                             );
 
                             let init = current_spec

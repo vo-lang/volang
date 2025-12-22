@@ -6,8 +6,8 @@ use crate::gc::{Gc, GcRef, NULL_REF};
 use crate::instruction::{Instruction, Opcode};
 use crate::extern_fn::{ExternCtx, ExternFn, ExternRegistry, ExternResult};
 use crate::objects::{self, array, channel, closure, interface, map, slice, string};
-use crate::types::{TypeId, TypeTable};
-use gox_common_core::{RuntimeTypeId, ValueKind};
+use crate::types::TypeTable;
+use gox_common_core::ValueKind;
 
 use alloc::{format, string::{String, ToString}, vec::Vec};
 

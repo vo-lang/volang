@@ -39,7 +39,8 @@ enum GoVal {
 impl GoVal {
     fn from_const(v: &Value) -> GoVal {
         match v {
-            Value::Int(i) => {
+            Value::Int64(i) => GoVal::Int64(*i),
+            Value::IntBig(i) => {
                 if let Some(val) = i.to_i64() {
                     GoVal::Int64(val)
                 } else if let Some(val) = i.to_u64() {
@@ -669,7 +670,7 @@ impl Checker {
                     self.assignment(x, None, "switch expression");
                 } else {
                     // Missing switch expression is equivalent to true
-                    x.mode = OperandMode::Constant(Value::with_bool(true));
+                    x.mode = OperandMode::Constant(crate::constant::make_bool(true));
                     x.typ = Some(self.basic_type(BasicType::Bool));
                 }
                 self.multiple_defaults(&ss.cases);

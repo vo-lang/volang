@@ -263,8 +263,9 @@ impl<'a> Parser<'a> {
                 } else {
                     self.parse_call_args()?
                 };
+                let rparen_end = self.current.span.end; // Save RParen's end before advancing
                 self.expect(TokenKind::RParen)?;
-                let span = Span::new(start, self.current.span.start);
+                let span = Span::new(start, rparen_end);
                 Ok(self.make_expr(ExprKind::Call(Box::new(CallExpr { func: left, args, spread })), span))
             }
             // Index or slice expression

@@ -8,7 +8,6 @@
 
 use gox_common::span::Span;
 
-use crate::obj::ConstValue;
 use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
@@ -44,7 +43,7 @@ impl Checker {
                         s = c.to_string()
                     }
                 }
-                *v = ConstValue::with_str(s);
+                *v = crate::constant::make_string(s);
                 true
             } else {
                 false

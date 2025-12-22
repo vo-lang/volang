@@ -6,7 +6,7 @@ use gox_analysis::{Builtin, ConstValue, Selection, Type, TypeAndValue, TypeKey, 
 use gox_analysis::operand::OperandMode;
 use gox_common::Symbol;
 use gox_common_core::SlotType;
-use gox_syntax::ast::{Expr, TypeExpr, TypeExprKind};
+use gox_syntax::ast::{Expr, TypeExpr};
 use std::collections::HashMap;
 
 use gox_common_core::{ExprId, TypeExprId};

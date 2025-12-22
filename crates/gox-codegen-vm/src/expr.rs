@@ -43,21 +43,9 @@ pub fn compile_expr(
         ExprKind::Selector(sel) => compile_selector(&sel.expr, sel.sel.symbol, expr, ctx, func, info),
         ExprKind::Receive(inner) => compile_receive(inner, expr, ctx, func, info),
         ExprKind::CompositeLit(lit) => compile_composite_lit(&lit.ty, &lit.elems, expr, ctx, func, info),
-        ExprKind::IntLit(lit) => {
-            let s = info.symbol_str(lit.raw);
-            let val: i64 = parse_int_literal(s);
-            compile_int_lit(val, func)
-        }
-        ExprKind::FloatLit(lit) => {
-            let s = info.symbol_str(lit.raw);
-            let val: f64 = s.parse().unwrap_or(0.0);
-            compile_float_lit(val, ctx, func)
-        }
-        ExprKind::StringLit(lit) => {
-            compile_string_lit(&lit.value, ctx, func)
-        }
-        ExprKind::RuneLit(lit) => {
-            compile_int_lit(lit.value as i64, func)
+        // Literals are always constants, handled by expr_const_value above
+        ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_) | ExprKind::RuneLit(_) => {
+            unreachable!("literals should have constant values from analysis")
         }
         _ => todo!("expr {:?}", std::mem::discriminant(&expr.kind)),
     }
@@ -118,7 +106,8 @@ fn compile_struct_deep_copy(
 fn compile_const_value(val: &ConstValue, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16> {
     match val {
         ConstValue::Bool(b) => compile_int_lit(if *b { 1 } else { 0 }, func),
-        ConstValue::Int(i) => compile_int_lit(i.try_into().unwrap_or(0), func),
+        ConstValue::Int64(i) => compile_int_lit(*i, func),
+        ConstValue::IntBig(i) => compile_int_lit(i.try_into().unwrap_or(0), func),
         ConstValue::Rat(r) => compile_float_lit(r.to_f64().unwrap_or(0.0), ctx, func),
         ConstValue::Float(f) => compile_float_lit(*f, ctx, func),
         ConstValue::Str(s) => compile_string_lit(s, ctx, func),
@@ -126,18 +115,6 @@ fn compile_const_value(val: &ConstValue, ctx: &mut CodegenContext, func: &mut Fu
     }
 }
 
-fn parse_int_literal(s: &str) -> i64 {
-    let s = s.replace("_", "");
-    if s.starts_with("0x") || s.starts_with("0X") {
-        i64::from_str_radix(&s[2..], 16).unwrap_or(0)
-    } else if s.starts_with("0o") || s.starts_with("0O") {
-        i64::from_str_radix(&s[2..], 8).unwrap_or(0)
-    } else if s.starts_with("0b") || s.starts_with("0B") {
-        i64::from_str_radix(&s[2..], 2).unwrap_or(0)
-    } else {
-        s.parse().unwrap_or(0)
-    }
-}
 
 fn compile_int_lit(value: i64, func: &mut FuncBuilder) -> Result<u16> {
     let dst = func.alloc_temp(1);

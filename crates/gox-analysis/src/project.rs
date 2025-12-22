@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gox_common::diagnostics::DiagnosticSink;
+use gox_common::source::SourceMap;
 use gox_common::symbol::SymbolInterner;
 use gox_common::vfs::FileSet;
 use gox_module::vfs::Vfs;
@@ -24,8 +25,8 @@ use crate::objects::{PackageKey, TCObjects, TypeKey};
 pub enum AnalysisError {
     /// Parse error.
     Parse(String),
-    /// Type check error with collected diagnostics.
-    Check(DiagnosticSink),
+    /// Type check error with collected diagnostics and source map for formatting.
+    Check(DiagnosticSink, SourceMap),
     /// Import error.
     Import(String),
     /// Cycle detected.
@@ -36,7 +37,15 @@ impl AnalysisError {
     /// Returns the diagnostics if this is a Check error.
     pub fn diagnostics(&self) -> Option<&DiagnosticSink> {
         match self {
-            AnalysisError::Check(diags) => Some(diags),
+            AnalysisError::Check(diags, _) => Some(diags),
+            _ => None,
+        }
+    }
+
+    /// Returns the source map if this is a Check error.
+    pub fn source_map(&self) -> Option<&SourceMap> {
+        match self {
+            AnalysisError::Check(_, source_map) => Some(source_map),
             _ => None,
         }
     }
@@ -44,7 +53,7 @@ impl AnalysisError {
     /// Takes the diagnostics if this is a Check error.
     pub fn take_diagnostics(&mut self) -> Option<DiagnosticSink> {
         match self {
-            AnalysisError::Check(diags) => Some(std::mem::take(diags)),
+            AnalysisError::Check(diags, _) => Some(std::mem::take(diags)),
             _ => None,
         }
     }
@@ -54,7 +63,7 @@ impl std::fmt::Debug for AnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnalysisError::Parse(msg) => f.debug_tuple("Parse").field(msg).finish(),
-            AnalysisError::Check(diags) => f.debug_tuple("Check")
+            AnalysisError::Check(diags, _) => f.debug_tuple("Check")
                 .field(&format!("{} errors, {} warnings", diags.error_count(), diags.warning_count()))
                 .finish(),
             AnalysisError::Import(msg) => f.debug_tuple("Import").field(msg).finish(),
@@ -67,10 +76,15 @@ impl std::fmt::Display for AnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnalysisError::Parse(msg) => write!(f, "parse error: {}", msg),
-            AnalysisError::Check(diags) => {
+            AnalysisError::Check(diags, source_map) => {
                 writeln!(f, "type check failed: {} error(s)", diags.error_count())?;
                 for diag in diags.iter() {
-                    writeln!(f, "  - {}", diag.message)?;
+                    if let Some(label) = diag.labels.first() {
+                        let pos = source_map.format_span(label.span);
+                        writeln!(f, "  - {} at {}", diag.message, pos)?;
+                    } else {
+                        writeln!(f, "  - {}", diag.message)?;
+                    }
                 }
                 Ok(())
             }
@@ -153,14 +167,14 @@ impl Project {
 struct ProjectState {
     tc_objs: TCObjects,
     interner: SymbolInterner,
+    /// Source map for all parsed files.
+    source_map: SourceMap,
     /// Package cache: import_path -> PackageKey.
     cache: HashMap<String, PackageKey>,
     /// Packages currently being processed (for cycle detection).
     in_progress: HashSet<String>,
     /// Checked packages in dependency order.
     checked_packages: Vec<PackageKey>,
-    /// Current source file base offset for parsing.
-    parse_base: u32,
     /// Type checking results from main package.
     type_info: Option<crate::check::TypeInfo>,
 }
@@ -185,10 +199,10 @@ pub fn analyze_project_with_options(
     let state = Rc::new(RefCell::new(ProjectState {
         tc_objs: TCObjects::new(),
         interner: SymbolInterner::new(),
+        source_map: SourceMap::new(),
         cache: HashMap::new(),
         in_progress: HashSet::new(),
         checked_packages: Vec::new(),
-        parse_base: 0,
         type_info: None,
     }));
     
@@ -225,17 +239,19 @@ pub fn analyze_project_with_options(
             Ok(_) => {}
             Err(_) => {
                 let diags = checker.diagnostics.take();
-                return Err(AnalysisError::Check(diags));
+                let source_map = std::mem::take(&mut state_ref.source_map);
+                return Err(AnalysisError::Check(diags, source_map));
             }
         }
     }
     
     // Extract final state
     let final_state = Rc::try_unwrap(state)
-        .map_err(|_| {
+        .map_err(|rc| {
             let mut diags = DiagnosticSink::new();
             diags.error("internal error: state still borrowed");
-            AnalysisError::Check(diags)
+            let source_map = std::mem::take(&mut rc.borrow_mut().source_map);
+            AnalysisError::Check(diags, source_map)
         })?
         .into_inner();
     
@@ -283,7 +299,8 @@ pub fn analyze_single_file_with_options(
         Ok(_) => {}
         Err(_) => {
             let diags = checker.diagnostics.take();
-            return Err(AnalysisError::Check(diags));
+            // No source map available for pre-parsed files
+            return Err(AnalysisError::Check(diags, SourceMap::new()));
         }
     }
     
@@ -319,8 +336,13 @@ fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec
     let mut parsed_files = Vec::new();
     
     for (path, content) in &files.files {
-        let state_ref = state.borrow_mut();
-        let base = state_ref.parse_base;
+        let mut state_ref = state.borrow_mut();
+        // Add file to source map and get base offset
+        let file_name = path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let file_id = state_ref.source_map.add_file_with_path(file_name, path.clone(), content.as_str());
+        let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
         let interner = state_ref.interner.clone();
         drop(state_ref);
         
@@ -328,7 +350,6 @@ fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec
         
         let mut state_ref = state.borrow_mut();
         state_ref.interner = new_interner;
-        state_ref.parse_base = base + content.len() as u32 + 1;
         
         if diags.has_errors() {
             return Err(AnalysisError::Parse(format!("{}: parse errors", path.display())));
@@ -347,8 +368,13 @@ fn parse_vfs_package(
     let mut parsed_files = Vec::new();
     
     for vfs_file in &vfs_pkg.files {
-        let state_ref = state.borrow_mut();
-        let base = state_ref.parse_base;
+        let mut state_ref = state.borrow_mut();
+        // Add file to source map and get base offset
+        let file_name = vfs_file.path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| vfs_file.path.to_string_lossy().into_owned());
+        let file_id = state_ref.source_map.add_file_with_path(file_name, vfs_file.path.clone(), vfs_file.content.as_str());
+        let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
         let interner = state_ref.interner.clone();
         drop(state_ref);
         
@@ -356,7 +382,6 @@ fn parse_vfs_package(
         
         let mut state_ref = state.borrow_mut();
         state_ref.interner = new_interner;
-        state_ref.parse_base = base + vfs_file.content.len() as u32 + 1;
         
         if diags.has_errors() {
             return Err(AnalysisError::Parse(format!("{:?}: parse errors", vfs_file.path)));
