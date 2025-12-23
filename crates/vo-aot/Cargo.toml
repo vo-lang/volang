@@ -1,0 +1,28 @@
+[package]
+name = "vo-aot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AOT (Ahead-Of-Time) compilation for Vo using Cranelift"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-vm = { path = "../vo-vm" }
+vo-runtime-native = { path = "../vo-runtime-native" }
+vo-codegen-cranelift = { path = "../vo-codegen-cranelift" }
+
+# Cranelift dependencies (only object for AOT output)
+cranelift-codegen = "0.113"
+cranelift-object = "0.113"
+cranelift-native = "0.113"
+cranelift-module = "0.113"
+
+target-lexicon = "0.12"
+anyhow = "1.0"
+
+[dev-dependencies]
+cranelift-jit = "0.113"
+vo-syntax = { path = "../vo-syntax" }
+vo-analysis = { path = "../vo-analysis" }
+vo-codegen-vm = { path = "../vo-codegen-vm" }
+vo-common-core = { path = "../vo-common-core" }

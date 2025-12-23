@@ -1,0 +1,27 @@
+[package]
+name = "vo-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JIT compilation backend for Vo using Cranelift"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-common-core = { path = "../vo-common-core" }
+vo-vm = { path = "../vo-vm" }
+vo-runtime-core = { path = "../vo-runtime-core" }
+vo-runtime-native = { path = "../vo-runtime-native" }
+vo-codegen-cranelift = { path = "../vo-codegen-cranelift" }
+
+# Cranelift dependencies
+cranelift-codegen = "0.113"
+cranelift-jit = "0.113"
+cranelift-native = "0.113"
+cranelift-module = "0.113"
+
+anyhow = "1.0"
+
+[dev-dependencies]
+vo-syntax = { path = "../vo-syntax" }
+vo-analysis = { path = "../vo-analysis" }
+vo-codegen-vm = { path = "../vo-codegen-vm" }

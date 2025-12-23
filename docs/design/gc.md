@@ -1,4 +1,4 @@
-# GoX GC Design
+# Vo GC Design
 
 This document describes the garbage collector design with a phased implementation approach.
 

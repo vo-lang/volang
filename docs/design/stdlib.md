@@ -1,8 +1,8 @@
-# GoX Standard Library
+# Vo Standard Library
 
 ## Overview
 
-GoX stdlib contains **26 packages** organized in three layers:
+Vo stdlib contains **26 packages** organized in three layers:
 
 | Layer | Characteristics | Count |
 |-------|-----------------|-------|
@@ -12,14 +12,14 @@ GoX stdlib contains **26 packages** organized in three layers:
 
 ## Function Implementation Types
 
-Stdlib functions are declared in GoX source (`stdlib/*/xxx.gox`) with three implementation types:
+Stdlib functions are declared in Vo source (`stdlib/*/xxx.vo`) with three implementation types:
 
 ```
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│    Pure GoX     │  │   GoX + extern  │  │   Pure extern   │
+│    Pure Vo     │  │   Vo + extern  │  │   Pure extern   │
 │                 │  │                 │  │   (no body)     │
 │ func F() {      │  │ func F() {      │  │                 │
-│     // GoX code │  │     // GoX code │  │ func F()        │
+│     // Vo code │  │     // Vo code │  │ func F()        │
 │ }               │  │     extern_f()  │  │                 │
 │                 │  │ }               │  │                 │
 │ e.g. HasPrefix  │  │ e.g. Contains   │  │ e.g. Index      │
@@ -28,13 +28,13 @@ Stdlib functions are declared in GoX source (`stdlib/*/xxx.gox`) with three impl
 
 ### Syntax
 
-```gox
-// Pure GoX — fully implemented in GoX
+```vo
+// Pure Vo — fully implemented in Vo
 func HasPrefix(s, prefix string) bool {
     return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
-// GoX + extern — GoX logic calling extern functions
+// Vo + extern — Vo logic calling extern functions
 func Contains(s, substr string) bool {
     return Index(s, substr) >= 0
 }
@@ -46,10 +46,10 @@ func ToLower(s string) string
 
 ## Design Principles
 
-### 1. GoX-First
+### 1. Vo-First
 
-Prefer GoX implementation. Use `extern` only when:
-- **Cannot implement in GoX**: syscalls, Unicode tables, runtime internals
+Prefer Vo implementation. Use `extern` only when:
+- **Cannot implement in Vo**: syscalls, Unicode tables, runtime internals
 - **Performance critical**: string search, regex, sorting algorithms
 
 ### 2. Extern Implementation Architecture
@@ -60,14 +60,14 @@ extern func Index(s, substr string) int
      ┌─────────────────┴─────────────────┐
      ▼                                   ▼
 ┌─────────────────────┐       ┌─────────────────────┐
-│  gox-runtime-vm     │       │ gox-runtime-native  │
+│  vo-runtime-vm     │       │ vo-runtime-native  │
 │  (VM Binding)       │       │ (AOT C ABI)         │
 └─────────┬───────────┘       └─────────┬───────────┘
           │                             │
           └──────────┬──────────────────┘
                      ▼
           ┌─────────────────────┐
-          │  gox-runtime-core   │
+          │  vo-runtime-core   │
           │  (Pure Logic)       │
           └─────────────────────┘
 ```
@@ -76,16 +76,16 @@ extern func Index(s, substr string) int
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| **Core** | `gox-runtime-core` | Pure business logic, no GC/VM dependency |
-| **VM Binding** | `gox-runtime-vm` | `ExternCtx` wrapper for VM interpreter |
-| **AOT Binding** | `gox-runtime-native` | `extern "C"` wrapper for Cranelift AOT |
+| **Core** | `vo-runtime-core` | Pure business logic, no GC/VM dependency |
+| **VM Binding** | `vo-runtime-vm` | `ExternCtx` wrapper for VM interpreter |
+| **AOT Binding** | `vo-runtime-native` | `extern "C"` wrapper for Cranelift AOT |
 
 #### Example: `strings.Index`
 
 **Step 1: Core Layer** — Pure logic, works with Rust types
 
 ```rust
-// gox-runtime-core/src/stdlib/strings.rs
+// vo-runtime-core/src/stdlib/strings.rs
 pub fn index(s: &str, substr: &str) -> i64 {
     s.find(substr).map(|i| i as i64).unwrap_or(-1)
 }
@@ -94,11 +94,11 @@ pub fn index(s: &str, substr: &str) -> i64 {
 **Step 2a: VM Binding** — Unwrap from `ExternCtx`, call Core, return result
 
 ```rust
-// gox-runtime-vm/src/stdlib/strings.rs
+// vo-runtime-vm/src/stdlib/strings.rs
 pub fn extern_index(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let substr = ctx.arg_str(1);
-    let result = gox_runtime_core::stdlib::strings::index(s, substr);
+    let result = vo_runtime_core::stdlib::strings::index(s, substr);
     ctx.ret_i64(0, result);
     ExternResult::Ok(1)
 }
@@ -107,12 +107,12 @@ pub fn extern_index(ctx: &mut ExternCtx) -> ExternResult {
 **Step 2b: AOT Binding** — C ABI wrapper for Cranelift
 
 ```rust
-// gox-runtime-native/src/ffi/strings.rs
+// vo-runtime-native/src/ffi/strings.rs
 #[no_mangle]
-pub unsafe extern "C" fn gox_strings_index(s: GcRef, substr: GcRef) -> i64 {
-    let s_str = gox_runtime_core::objects::string::as_str(s);
-    let substr_str = gox_runtime_core::objects::string::as_str(substr);
-    gox_runtime_core::stdlib::strings::index(s_str, substr_str)
+pub unsafe extern "C" fn vo_strings_index(s: GcRef, substr: GcRef) -> i64 {
+    let s_str = vo_runtime_core::objects::string::as_str(s);
+    let substr_str = vo_runtime_core::objects::string::as_str(substr);
+    vo_runtime_core::stdlib::strings::index(s_str, substr_str)
 }
 ```
 
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn gox_strings_index(s: GcRef, substr: GcRef) -> i64 {
 
 ## Std Mode
 
-Similar to Rust's `no_std`, GoX supports two modes:
+Similar to Rust's `no_std`, Vo supports two modes:
 
 | Mode | Available Packages | Use Case |
 |------|-------------------|----------|
@@ -176,14 +176,14 @@ Similar to Rust's `no_std`, GoX supports two modes:
 | `std full` | core + std | Default |
 
 ```
-// gox.mod
+// vo.mod
 module myapp
 std full    // or: std core
 ```
 
 ```bash
-gox build main.gox              # Uses gox.mod setting
-gox build --std=core main.gox   # Force core mode
+vo build main.vo              # Uses vo.mod setting
+vo build --std=core main.vo   # Force core mode
 ```
 
 ## Rust Implementation Examples
@@ -191,7 +191,7 @@ gox build --std=core main.gox   # Force core mode
 ### Core Layer (pure logic)
 
 ```rust
-// gox-runtime-core/src/stdlib/strings.rs
+// vo-runtime-core/src/stdlib/strings.rs
 pub fn index(s: &str, substr: &str) -> i64 {
     s.find(substr).map(|i| i as i64).unwrap_or(-1)
 }
@@ -200,11 +200,11 @@ pub fn index(s: &str, substr: &str) -> i64 {
 ### VM Binding
 
 ```rust
-// gox-runtime-vm/src/stdlib/strings.rs
+// vo-runtime-vm/src/stdlib/strings.rs
 fn extern_index(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
     let substr = ctx.arg_str(1);
-    ctx.ret_i64(0, gox_runtime_core::stdlib::strings::index(s, substr));
+    ctx.ret_i64(0, vo_runtime_core::stdlib::strings::index(s, substr));
     ExternResult::Ok(1)
 }
 ```
@@ -212,9 +212,9 @@ fn extern_index(ctx: &mut ExternCtx) -> ExternResult {
 ### C ABI (AOT)
 
 ```rust
-// gox-runtime-core/src/ffi.rs
+// vo-runtime-core/src/ffi.rs
 #[no_mangle]
-pub unsafe extern "C" fn gox_strings_index(s: GcRef, substr: GcRef) -> i64 {
+pub unsafe extern "C" fn vo_strings_index(s: GcRef, substr: GcRef) -> i64 {
     crate::stdlib::strings::index(string::as_str(s), string::as_str(substr))
 }
 ```
@@ -222,19 +222,19 @@ pub unsafe extern "C" fn gox_strings_index(s: GcRef, substr: GcRef) -> i64 {
 ## Adding New Functions
 
 ```
-Can it be implemented in GoX?
-  ├─ Yes → Implement in stdlib/pkg/pkg.gox
+Can it be implemented in Vo?
+  ├─ Yes → Implement in stdlib/pkg/pkg.vo
   └─ No  → Needs syscalls or GC access?
             ├─ Yes → Implement in VM layer
             └─ No  → Implement in Core layer + VM binding
 ```
 
-### Step 1: GoX Declaration
+### Step 1: Vo Declaration
 
-```gox
-// stdlib/strings/strings.gox
+```vo
+// stdlib/strings/strings.vo
 
-// Pure GoX
+// Pure Vo
 func NewFunc(s string) bool {
     return len(s) > 0
 }
@@ -246,7 +246,7 @@ func NewExternFunc(s string) int
 ### Step 2: Core Layer (if extern)
 
 ```rust
-// gox-runtime-core/src/stdlib/strings.rs
+// vo-runtime-core/src/stdlib/strings.rs
 pub fn new_extern_func(s: &str) -> i64 {
     // Pure logic, no GC dependency
 }
@@ -255,10 +255,10 @@ pub fn new_extern_func(s: &str) -> i64 {
 ### Step 3: VM Binding (if extern)
 
 ```rust
-// gox-runtime-vm/src/stdlib/strings.rs
+// vo-runtime-vm/src/stdlib/strings.rs
 fn extern_new_extern_func(ctx: &mut ExternCtx) -> ExternResult {
     let s = ctx.arg_str(0);
-    ctx.ret_i64(0, gox_runtime_core::stdlib::strings::new_extern_func(s));
+    ctx.ret_i64(0, vo_runtime_core::stdlib::strings::new_extern_func(s));
     ExternResult::Ok(1)
 }
 
@@ -269,8 +269,8 @@ registry.register("strings.NewExternFunc", extern_new_extern_func);
 ### Step 4: C ABI (optional, for AOT)
 
 ```rust
-// gox-runtime-core/src/ffi.rs
+// vo-runtime-core/src/ffi.rs
 #[no_mangle]
-pub unsafe extern "C" fn gox_strings_new_extern_func(s: GcRef) -> i64 {
+pub unsafe extern "C" fn vo_strings_new_extern_func(s: GcRef) -> i64 {
     crate::stdlib::strings::new_extern_func(string::as_str(s))
 }

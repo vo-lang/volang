@@ -1,0 +1,18 @@
+[package]
+name = "vo-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Semantic analysis and type checking for the Vo programming language"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-common-core = { path = "../vo-common-core" }
+vo-syntax = { path = "../vo-syntax" }
+vo-module = { path = "../vo-module" }
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+ordered-float = "4.2"
+
+[dev-dependencies]

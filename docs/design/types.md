@@ -1,13 +1,13 @@
-# GoX Type System
+# Vo Type System
 
-This document defines the memory layout of all runtime data structures in GoX.
+This document defines the memory layout of all runtime data structures in Vo.
 
 > **Memory Model**: See `docs/design/memory-model.md` for escape analysis and allocation decisions.
 > **GC Scanning**: See `docs/design/gc-object-scanning.md` for detailed GC scanning rules.
 
 ## 1. Memory Model
 
-GoX uses escape analysis to determine stack vs heap allocation for value types.
+Vo uses escape analysis to determine stack vs heap allocation for value types.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

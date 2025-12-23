@@ -6,7 +6,7 @@
 
 ## Overview
 
-Refactor GoX from **pure heap struct allocation** to **escape-analysis-driven stack/heap allocation**.
+Refactor Vo from **pure heap struct allocation** to **escape-analysis-driven stack/heap allocation**.
 
 ## Goals
 
@@ -19,7 +19,7 @@ Refactor GoX from **pure heap struct allocation** to **escape-analysis-driven st
 
 | Phase | Document | Description | Est. Lines |
 |-------|----------|-------------|------------|
-| P1 | [2025-12-22-mm-p1-escape-analysis.md](2025-12-22-mm-p1-escape-analysis.md) | Implement escape analysis in gox-analysis | ~500 |
+| P1 | [2025-12-22-mm-p1-escape-analysis.md](2025-12-22-mm-p1-escape-analysis.md) | Implement escape analysis in vo-analysis | ~500 |
 | P2 | [2025-12-22-mm-p2-codegen.md](2025-12-22-mm-p2-codegen.md) | Modify codegen for stack/heap allocation | ~1100 |
 | P3 | [2025-12-22-mm-p3-runtime.md](2025-12-22-mm-p3-runtime.md) | Add BoxedInt/Float/Bool, update GC | ~300 |
 | P4 | [2025-12-22-mm-p4-testing.md](2025-12-22-mm-p4-testing.md) | Testing and validation | ~300 |

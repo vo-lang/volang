@@ -102,7 +102,7 @@ Pass 2: Generate Code
 
 ## 6. Implementation
 
-**CodegenContext** (`gox-codegen-vm/src/context.rs`):
+**CodegenContext** (`vo-codegen-vm/src/context.rs`):
 ```rust
 pub struct CodegenContext {
     struct_type_ids: HashMap<TypeKey, u16>,
@@ -112,7 +112,7 @@ pub struct CodegenContext {
 }
 ```
 
-**TypeMeta** (`gox-vm/src/types.rs`):
+**TypeMeta** (`vo-vm/src/types.rs`):
 ```rust
 pub struct TypeMeta {
     pub size_slots: usize,
@@ -123,7 +123,7 @@ pub struct TypeMeta {
 }
 ```
 
-**Module** (`gox-vm/src/bytecode.rs`):
+**Module** (`vo-vm/src/bytecode.rs`):
 ```rust
 pub struct Module {
     pub struct_metas: Vec<TypeMeta>,

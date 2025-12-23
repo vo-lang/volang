@@ -3,7 +3,7 @@
 Version: 1.0  
 Status: Draft
 
-This document specifies the error-handling model for Gox, designed to be fully compatible with Go programmers while providing concise syntax sugar for common patterns.
+This document specifies the error-handling model for Vo, designed to be fully compatible with Go programmers while providing concise syntax sugar for common patterns.
 
 ---
 

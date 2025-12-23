@@ -1,0 +1,13 @@
+[package]
+name = "vo-common-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types for Vo (no_std compatible)"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+num_enum = { version = "0.7", default-features = false }

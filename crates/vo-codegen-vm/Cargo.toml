@@ -1,0 +1,17 @@
+[package]
+name = "vo-codegen-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custom VM bytecode generation for Vo"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-common-core = { path = "../vo-common-core" }
+vo-syntax = { path = "../vo-syntax" }
+vo-analysis = { path = "../vo-analysis" }
+vo-vm = { path = "../vo-vm" }
+num-traits = "0.2"
+
+[dev-dependencies]
+vo-runtime-vm = { path = "../vo-runtime-vm" }

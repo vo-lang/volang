@@ -1,4 +1,4 @@
-# Backend P5: gox-codegen-cranelift
+# Backend P5: vo-codegen-cranelift
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
@@ -25,13 +25,13 @@ use cranelift_module::{FuncId, Module, DataId};
 /// 编译上下文
 pub struct CompileContext<'a> {
     /// Bytecode 模块
-    bytecode: &'a gox_vm::bytecode::Module,
+    bytecode: &'a vo_vm::bytecode::Module,
     
     /// 调用约定
     call_conv: CallConv,
     
-    /// GoX 函数 -> Cranelift FuncId
-    gox_funcs: HashMap<u32, FuncId>,
+    /// Vo 函数 -> Cranelift FuncId
+    vo_funcs: HashMap<u32, FuncId>,
     
     /// Runtime 函数 -> FuncId
     runtime_funcs: HashMap<RuntimeFunc, FuncId>,
@@ -41,21 +41,21 @@ pub struct CompileContext<'a> {
 }
 
 impl<'a> CompileContext<'a> {
-    pub fn new(bytecode: &'a gox_vm::bytecode::Module, call_conv: CallConv) -> Self;
+    pub fn new(bytecode: &'a vo_vm::bytecode::Module, call_conv: CallConv) -> Self;
     
-    /// 声明所有 GoX 函数
-    pub fn declare_all_gox_functions<M: Module>(&mut self, module: &mut M) -> Result<()> {
+    /// 声明所有 Vo 函数
+    pub fn declare_all_vo_functions<M: Module>(&mut self, module: &mut M) -> Result<()> {
         for (idx, func_def) in self.bytecode.functions.iter().enumerate() {
-            let sig = self.make_gox_func_signature(func_def);
+            let sig = self.make_vo_func_signature(func_def);
             let func_id = module.declare_function(&func_def.name, Linkage::Local, &sig)?;
-            self.gox_funcs.insert(idx as u32, func_id);
+            self.vo_funcs.insert(idx as u32, func_id);
         }
         Ok(())
     }
     
-    /// 获取 GoX 函数
-    pub fn get_gox_func(&self, func_idx: u32) -> Option<FuncId> {
-        self.gox_funcs.get(&func_idx).copied()
+    /// 获取 Vo 函数
+    pub fn get_vo_func(&self, func_idx: u32) -> Option<FuncId> {
+        self.vo_funcs.get(&func_idx).copied()
     }
     
     /// 获取或声明 runtime 函数
@@ -180,10 +180,10 @@ impl RuntimeFunc {
     /// 符号名
     pub fn symbol_name(&self) -> &'static str {
         match self {
-            RuntimeFunc::GcAlloc => "gox_rt_alloc",
-            RuntimeFunc::GcReadSlot => "gox_gc_read_slot",
-            RuntimeFunc::GcWriteSlot => "gox_gc_write_slot",
-            RuntimeFunc::GcWriteBarrier => "gox_rt_write_barrier",
+            RuntimeFunc::GcAlloc => "vo_rt_alloc",
+            RuntimeFunc::GcReadSlot => "vo_gc_read_slot",
+            RuntimeFunc::GcWriteSlot => "vo_gc_write_slot",
+            RuntimeFunc::GcWriteBarrier => "vo_rt_write_barrier",
             // ...
         }
     }
@@ -229,7 +229,7 @@ pub struct FunctionTranslator {
     /// PC -> Block 映射 (跳转目标)
     blocks: HashMap<usize, Block>,
     
-    /// GoX 函数 FuncRef 缓存
+    /// Vo 函数 FuncRef 缓存
     func_refs: HashMap<u32, FuncRef>,
     
     /// Runtime 函数 FuncRef 缓存
@@ -469,10 +469,10 @@ impl FunctionTranslator {
 
 ### context.rs
 - [ ] CompileContext 结构
-- [ ] declare_all_gox_functions
-- [ ] get_gox_func
+- [ ] declare_all_vo_functions
+- [ ] get_vo_func
 - [ ] get_or_declare_runtime_func
-- [ ] make_gox_func_signature
+- [ ] make_vo_func_signature
 
 ### runtime.rs
 - [ ] RuntimeFunc 枚举 (~70 个)
@@ -514,7 +514,7 @@ impl FunctionTranslator {
 - [ ] Debug
 
 ### translate.rs - 辅助
-- [ ] get_gox_func_ref
+- [ ] get_vo_func_ref
 - [ ] get_runtime_func_ref
 - [ ] is_block_terminated
 

@@ -68,7 +68,7 @@ Current Type is a full struct; comparing two types requires deep comparison of t
 Introduce three core ID types:
 
 ```rust
-// ===== gox-common-core =====
+// ===== vo-common-core =====
 
 /// Expression unique ID (assigned by Parser)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,7 +86,7 @@ pub struct TypeId(pub u32);
 Add unique ID to `Expr`:
 
 ```rust
-// ===== gox-syntax/src/ast.rs =====
+// ===== vo-syntax/src/ast.rs =====
 
 pub struct Expr {
     pub id: ExprId,        // New: unique ID
@@ -112,7 +112,7 @@ impl Parser {
 ### 2.3 TypeInterner - Type Deduplication and Mapping
 
 ```rust
-// ===== gox-analysis/src/types.rs =====
+// ===== vo-analysis/src/types.rs =====
 
 /// Type Interner - type deduplication + fast lookup
 pub struct TypeInterner {
@@ -350,11 +350,11 @@ fn get_field_offset(ctx: &CodegenContext, expr: &Expr, field_sym: Symbol) -> Opt
 
 | Phase | Content | Affected Crate |
 |-------|---------|----------------|
-| **Phase 1** | Add `ExprId`, `TypeId` to gox-common-core | `gox-common-core` |
-| **Phase 2** | Add `id` field to `Expr`, Parser assigns ID | `gox-syntax` |
-| **Phase 3** | Implement `TypeInterner`, refactor `TypeCheckResult` | `gox-analysis` |
-| **Phase 4** | Modify type checking to use intern/bind | `gox-analysis` |
-| **Phase 5** | Codegen uses new interfaces, remove string operations | `gox-codegen-vm` |
+| **Phase 1** | Add `ExprId`, `TypeId` to vo-common-core | `vo-common-core` |
+| **Phase 2** | Add `id` field to `Expr`, Parser assigns ID | `vo-syntax` |
+| **Phase 3** | Implement `TypeInterner`, refactor `TypeCheckResult` | `vo-analysis` |
+| **Phase 4** | Modify type checking to use intern/bind | `vo-analysis` |
+| **Phase 5** | Codegen uses new interfaces, remove string operations | `vo-codegen-vm` |
 
 ---
 

@@ -10,7 +10,7 @@
 
 ## Overview
 
-从零重写 GoX 后端，实现新内存模型（逃逸分析驱动的栈/堆分配）。
+从零重写 Vo 后端，实现新内存模型（逃逸分析驱动的栈/堆分配）。
 
 **核心原则**：
 - 旧代码只作参考，不拷贝
@@ -28,12 +28,12 @@
 
 | Phase | Document | Crate | Description | Est. Modules |
 |-------|----------|-------|-------------|--------------|
-| P1 | [backend-p1-runtime-core.md](2025-12-23-backend-p1-runtime-core.md) | gox-runtime-core | 共享数据结构 + GC + 对象操作 | 28 |
-| P2 | [backend-p2-vm.md](2025-12-23-backend-p2-vm.md) | gox-vm | Bytecode 格式 + VM 解释器 | 36 |
-| P3 | [backend-p3-codegen-vm.md](2025-12-23-backend-p3-codegen-vm.md) | gox-codegen-vm | AST → Bytecode | 44 |
-| P4 | [backend-p4-runtime-native.md](2025-12-23-backend-p4-runtime-native.md) | gox-runtime-native | JIT/AOT Runtime | 35 |
-| P5 | [backend-p5-codegen-cranelift.md](2025-12-23-backend-p5-codegen-cranelift.md) | gox-codegen-cranelift | Bytecode → Cranelift IR | 34 |
-| P6 | [backend-p6-aot-jit.md](2025-12-23-backend-p6-aot-jit.md) | gox-aot + gox-jit | 编译器入口 | 9 |
+| P1 | [backend-p1-runtime-core.md](2025-12-23-backend-p1-runtime-core.md) | vo-runtime-core | 共享数据结构 + GC + 对象操作 | 28 |
+| P2 | [backend-p2-vm.md](2025-12-23-backend-p2-vm.md) | vo-vm | Bytecode 格式 + VM 解释器 | 36 |
+| P3 | [backend-p3-codegen-vm.md](2025-12-23-backend-p3-codegen-vm.md) | vo-codegen-vm | AST → Bytecode | 44 |
+| P4 | [backend-p4-runtime-native.md](2025-12-23-backend-p4-runtime-native.md) | vo-runtime-native | JIT/AOT Runtime | 35 |
+| P5 | [backend-p5-codegen-cranelift.md](2025-12-23-backend-p5-codegen-cranelift.md) | vo-codegen-cranelift | Bytecode → Cranelift IR | 34 |
+| P6 | [backend-p6-aot-jit.md](2025-12-23-backend-p6-aot-jit.md) | vo-aot + vo-jit | 编译器入口 | 9 |
 
 **Total**: ~186 模块
 
@@ -133,7 +133,7 @@ pub struct IfaceDispatchEntry {
 
 **决策**: 栈 struct 的嵌套字段内联展开
 
-```gox
+```vo
 type Inner struct { a int; b string }
 type Outer struct { inner Inner; c int }
 var o Outer
@@ -161,8 +161,8 @@ var o Outer
 
 ## Success Criteria
 
-1. 所有 `test_data/*.gox` 测试通过 (VM)
-2. 所有 `test_data/*.gox` 测试通过 (JIT/AOT)
+1. 所有 `test_data/*.vo` 测试通过 (VM)
+2. 所有 `test_data/*.vo` 测试通过 (JIT/AOT)
 3. 逃逸分析正确：栈变量不逃逸，堆变量正确分配
 4. GC 正确：无内存泄漏，无悬挂指针
 5. 并发正确：goroutine + channel + select 工作正常
@@ -182,10 +182,10 @@ var o Outer
 
 | 模块 | 参考文件 | 注意事项 |
 |------|----------|----------|
-| GC | `gox-runtime-core/src/gc.rs` | 保留现有 GC 逻辑 |
-| 对象布局 | `gox-runtime-core/src/objects/` | 新增 Boxed 类型 |
-| 指令集 | `gox-vm/src/instruction.rs` | 新增栈操作指令 |
-| VM 执行 | `gox-vm/src/vm.rs` | 重点参考 |
-| Codegen | `gox-codegen-vm/src/` | 需要集成逃逸分析 |
-| Cranelift 翻译 | `gox-codegen-cranelift/src/translate.rs` | stack_map 处理 |
-| Runtime 符号 | `gox-runtime-native/src/symbols.rs` | 函数注册 |
+| GC | `vo-runtime-core/src/gc.rs` | 保留现有 GC 逻辑 |
+| 对象布局 | `vo-runtime-core/src/objects/` | 新增 Boxed 类型 |
+| 指令集 | `vo-vm/src/instruction.rs` | 新增栈操作指令 |
+| VM 执行 | `vo-vm/src/vm.rs` | 重点参考 |
+| Codegen | `vo-codegen-vm/src/` | 需要集成逃逸分析 |
+| Cranelift 翻译 | `vo-codegen-cranelift/src/translate.rs` | stack_map 处理 |
+| Runtime 符号 | `vo-runtime-native/src/symbols.rs` | 函数注册 |

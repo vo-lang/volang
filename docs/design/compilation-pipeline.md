@@ -1,4 +1,4 @@
-# GoX Compilation Pipeline
+# Vo Compilation Pipeline
 
 ## Overview
 
@@ -9,13 +9,13 @@
 └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
 ```
 
-## Phase 1: File Collection (gox-common)
+## Phase 1: File Collection (vo-common)
 
 **Input**: Project root directory  
 **Output**: `FileSet`
 
 ```rust
-// gox-common/src/vfs.rs
+// vo-common/src/vfs.rs
 
 pub trait FileSystem {
     fn read_file(&self, path: &Path) -> io::Result<String>;
@@ -32,7 +32,7 @@ pub struct FileSet {
 }
 ```
 
-## Phase 2: Parsing & Analysis (gox-analysis)
+## Phase 2: Parsing & Analysis (vo-analysis)
 
 **Input**: `FileSet`  
 **Output**: `Project`
@@ -40,7 +40,7 @@ pub struct FileSet {
 ### 2.1 Parse each file
 
 ```rust
-// gox-syntax::parse() already exists
+// vo-syntax::parse() already exists
 
 struct ParsedPackage {
     name: String,
@@ -52,7 +52,7 @@ struct ParsedPackage {
 ### 2.2 Resolve imports, build dependency graph
 
 ```rust
-// gox-analysis/src/imports.rs
+// vo-analysis/src/imports.rs
 
 enum ImportPath {
     /// "./mylib" - relative to current package directory
@@ -73,7 +73,7 @@ fn resolve_import(pkg_dir: &Path, import_str: &str) -> ImportPath {
 ### 2.3 Topological sort, type check in order
 
 ```rust
-// gox-analysis/src/project.rs
+// vo-analysis/src/project.rs
 
 struct TypedPackage {
     name: String,
@@ -91,13 +91,13 @@ struct Project {
 pub fn analyze_project(file_set: FileSet) -> Result<Project, AnalysisError>;
 ```
 
-## Phase 3: Code Generation (gox-codegen-vm)
+## Phase 3: Code Generation (vo-codegen-vm)
 
 **Input**: `Project`  
 **Output**: `Module`
 
 ```rust
-// gox-codegen-vm/src/lib.rs
+// vo-codegen-vm/src/lib.rs
 
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let mut module = Module::new(&project.main_package);
@@ -114,13 +114,13 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
 }
 ```
 
-## Phase 4: Output (gox-vm)
+## Phase 4: Output (vo-vm)
 
 **Input**: `Module`  
-**Output**: `.goxc` binary file
+**Output**: `.voc` binary file
 
 ```rust
-// gox-vm/src/bytecode.rs (read/write already exist)
+// vo-vm/src/bytecode.rs (read/write already exist)
 
 module.write(&mut file)?;      // Serialize to file
 Module::read(&mut file)?;      // Deserialize from file
@@ -129,19 +129,19 @@ Module::read(&mut file)?;      // Deserialize from file
 ## CLI Usage
 
 ```rust
-// gox-cli/src/main.rs
+// vo-cli/src/main.rs
 
-// gox build ./myproject
+// vo build ./myproject
 fn cmd_build(path: &str) -> Result<()> {
     let vfs = RealFs;
     let file_set = vfs.collect_files(path)?;
     let project = analyze_project(file_set)?;
     let module = compile_project(&project)?;
-    module.write_to_file(&format!("{}.goxc", project.main_package))?;
+    module.write_to_file(&format!("{}.voc", project.main_package))?;
     Ok(())
 }
 
-// gox run myproject.goxc
+// vo run myproject.voc
 fn cmd_run(path: &str) -> Result<()> {
     let module = Module::read_from_file(path)?;
     let mut vm = create_vm();
@@ -155,11 +155,11 @@ fn cmd_run(path: &str) -> Result<()> {
 
 | Phase | Crate | File | Content |
 |-------|-------|------|---------|
-| 1 | gox-common | `vfs.rs` | FileSystem trait, RealFs, MemoryFs |
-| 2 | gox-syntax | `lib.rs` | parse() (existing) |
-| 2 | gox-analysis | `project.rs` | Project, analyze_project() |
-| 2 | gox-analysis | `imports.rs` | Import path resolution |
-| 2 | gox-analysis | `deps.rs` | Dependency graph, topological sort |
-| 3 | gox-codegen-vm | `lib.rs` | compile_project() |
-| 4 | gox-vm | `bytecode.rs` | Module::read/write (existing) |
-| CLI | gox-cli | `main.rs` | build/run commands |
+| 1 | vo-common | `vfs.rs` | FileSystem trait, RealFs, MemoryFs |
+| 2 | vo-syntax | `lib.rs` | parse() (existing) |
+| 2 | vo-analysis | `project.rs` | Project, analyze_project() |
+| 2 | vo-analysis | `imports.rs` | Import path resolution |
+| 2 | vo-analysis | `deps.rs` | Dependency graph, topological sort |
+| 3 | vo-codegen-vm | `lib.rs` | compile_project() |
+| 4 | vo-vm | `bytecode.rs` | Module::read/write (existing) |
+| CLI | vo-cli | `main.rs` | build/run commands |

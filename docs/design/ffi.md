@@ -1,19 +1,19 @@
-# GoX FFI Design
+# Vo FFI Design
 
-This document describes the Foreign Function Interface (FFI) for calling extern (Rust) functions from GoX code.
+This document describes the Foreign Function Interface (FFI) for calling extern (Rust) functions from Vo code.
 
 ## 1. Overview
 
-- Extern functions use the same `CALL` instruction as GoX functions (unified calling)
+- Extern functions use the same `CALL` instruction as Vo functions (unified calling)
 - Wrapper types hide VM internals from extern function developers
 - Proc macro enables ergonomic function definition and auto-registration
 
-## 2. GoX-Side Declaration
+## 2. Vo-Side Declaration
 
 Declare extern functions without body:
 
 ```go
-// std/fmt.gox
+// std/fmt.vo
 package fmt
 
 extern func Println(a ...interface{}) (n int, err error)
@@ -22,7 +22,7 @@ extern func Sprintf(format string, a ...interface{}) string
 ```
 
 ```go
-// std/os.gox
+// std/os.vo
 package os
 
 type File struct { handle int }
@@ -33,7 +33,7 @@ extern func (f *File) Read(b []byte) (n int, err error)
 extern func (f *File) Close() error
 ```
 
-Usage in GoX code:
+Usage in Vo code:
 
 ```go
 import "fmt"
@@ -54,22 +54,22 @@ func main() {
 ### 3.1 Proc Macro
 
 ```rust
-use gox_ffi::prelude::*;
+use vo_ffi::prelude::*;
 
-#[gox_extern("fmt.Println")]
-fn println(args: GoxVariadic) -> (i64, Option<GoxError>) {
+#[vo_extern("fmt.Println")]
+fn println(args: VoVariadic) -> (i64, Option<VoError>) {
     let s = args.format_default();
     println!("{}", s);
     (s.len() as i64, None)
 }
 
-#[gox_extern("os.ReadFile")]
-fn read_file(path: GoxString) -> Result<Vec<u8>, GoxError> {
+#[vo_extern("os.ReadFile")]
+fn read_file(path: VoString) -> Result<Vec<u8>, VoError> {
     std::fs::read(path.as_str()).map_err(Into::into)
 }
 
-#[gox_extern("os.File.Read")]
-fn file_read(file: GoxObject, buf: GoxSlice<u8>) -> Result<i64, GoxError> {
+#[vo_extern("os.File.Read")]
+fn file_read(file: VoObject, buf: VoSlice<u8>) -> Result<i64, VoError> {
     // ...
 }
 ```
@@ -80,29 +80,29 @@ Extern function developers use these wrapper types (not raw VM internals):
 
 ```rust
 /// Generic value type
-pub enum GoxValue<'a> {
+pub enum VoValue<'a> {
     Nil,
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(GoxString<'a>),
-    Slice(GoxSlice<'a>),
-    Map(GoxMap<'a>),
-    Struct(GoxStruct<'a>),
-    Object(GoxObject<'a>),
-    Interface(GoxInterface<'a>),
+    String(VoString<'a>),
+    Slice(VoSlice<'a>),
+    Map(VoMap<'a>),
+    Struct(VoStruct<'a>),
+    Object(VoObject<'a>),
+    Interface(VoInterface<'a>),
 }
 
 /// String wrapper
-pub struct GoxString<'a> { ... }
-impl GoxString<'_> {
+pub struct VoString<'a> { ... }
+impl VoString<'_> {
     pub fn as_str(&self) -> &str;
     pub fn len(&self) -> usize;
 }
 
 /// Slice wrapper
-pub struct GoxSlice<'a, T = GoxValue<'a>> { ... }
-impl<'a, T> GoxSlice<'a, T> {
+pub struct VoSlice<'a, T = VoValue<'a>> { ... }
+impl<'a, T> VoSlice<'a, T> {
     pub fn len(&self) -> usize;
     pub fn get(&self, idx: usize) -> T;
     pub fn as_slice(&self) -> &[T];  // for primitive T
@@ -110,28 +110,28 @@ impl<'a, T> GoxSlice<'a, T> {
 }
 
 /// Struct wrapper (value type, references stack slots)
-pub struct GoxStruct<'a> { ... }
-impl GoxStruct<'_> {
-    pub fn field(&self, idx: usize) -> GoxValue;
+pub struct VoStruct<'a> { ... }
+impl VoStruct<'_> {
+    pub fn field(&self, idx: usize) -> VoValue;
     pub fn field_count(&self) -> usize;
 }
 
 /// Object wrapper (reference type)
-pub struct GoxObject<'a> { ... }
+pub struct VoObject<'a> { ... }
 
 /// Map wrapper
-pub struct GoxMap<'a> { ... }
-impl<'a> GoxMap<'a> {
-    pub fn get(&self, key: GoxValue) -> Option<GoxValue<'a>>;
+pub struct VoMap<'a> { ... }
+impl<'a> VoMap<'a> {
+    pub fn get(&self, key: VoValue) -> Option<VoValue<'a>>;
     pub fn len(&self) -> usize;
-    pub fn iter(&self) -> impl Iterator<Item = (GoxValue<'a>, GoxValue<'a>)>;
+    pub fn iter(&self) -> impl Iterator<Item = (VoValue<'a>, VoValue<'a>)>;
 }
 
 /// Variadic arguments
-pub struct GoxVariadic<'a> { ... }
-impl GoxVariadic<'_> {
+pub struct VoVariadic<'a> { ... }
+impl VoVariadic<'_> {
     pub fn len(&self) -> usize;
-    pub fn get(&self, idx: usize) -> GoxValue;
+    pub fn get(&self, idx: usize) -> VoValue;
     pub fn format_default(&self) -> String;
     pub fn format_with(&self, fmt: &str) -> String;
 }
@@ -146,21 +146,21 @@ The proc macro automatically handles type conversion:
 | `i64`, `i32` | `args.get(n).as_int()` |
 | `f64`, `f32` | `args.get(n).as_float()` |
 | `bool` | `args.get(n).as_bool()` |
-| `GoxString` | `args.get(n).as_string()` |
-| `GoxSlice<T>` | `args.get(n).as_slice()` |
-| `GoxMap` | `args.get(n).as_map()` |
-| `GoxStruct` | `args.get(n).as_struct()` |
-| `GoxObject` | `args.get(n).as_object()` |
-| `GoxValue` | `args.get(n)` |
-| `GoxVariadic` | `args.rest(n)` |
+| `VoString` | `args.get(n).as_string()` |
+| `VoSlice<T>` | `args.get(n).as_slice()` |
+| `VoMap` | `args.get(n).as_map()` |
+| `VoStruct` | `args.get(n).as_struct()` |
+| `VoObject` | `args.get(n).as_object()` |
+| `VoValue` | `args.get(n)` |
+| `VoVariadic` | `args.rest(n)` |
 
 | Rust Return | Conversion |
 |-------------|------------|
 | `()` | `Ok(vec![])` |
-| `T` | `Ok(vec![T.into_gox()])` |
-| `(T, U)` | `Ok(vec![T.into_gox(), U.into_gox()])` |
-| `Result<T, GoxError>` | Success → values, Error → panic |
-| `Option<GoxError>` | `None` → nil, `Some(e)` → error |
+| `T` | `Ok(vec![T.into_vo()])` |
+| `(T, U)` | `Ok(vec![T.into_vo(), U.into_vo()])` |
+| `Result<T, VoError>` | Success → values, Error → panic |
+| `Option<VoError>` | `None` → nil, `Some(e)` → error |
 
 ### 3.4 Extern Context
 
@@ -171,32 +171,32 @@ pub struct ExternCtx<'a> { ... }
 
 impl ExternCtx<'_> {
     // Allocation
-    pub fn new_string(&mut self, s: &str) -> GoxString;
-    pub fn new_slice<T>(&mut self, data: &[T]) -> GoxSlice<T>;
-    pub fn new_byte_slice(&mut self, data: &[u8]) -> GoxSlice<u8>;
-    pub fn new_error(&mut self, msg: String) -> GoxError;
+    pub fn new_string(&mut self, s: &str) -> VoString;
+    pub fn new_slice<T>(&mut self, data: &[T]) -> VoSlice<T>;
+    pub fn new_byte_slice(&mut self, data: &[u8]) -> VoSlice<u8>;
+    pub fn new_error(&mut self, msg: String) -> VoError;
     
     // Type info
-    pub fn type_of(&self, val: &GoxValue) -> TypeId;
+    pub fn type_of(&self, val: &VoValue) -> TypeId;
 }
 
 // Usage
-#[gox_extern("mypackage.NewThing")]
-fn new_thing(ctx: &mut ExternCtx, name: GoxString) -> GoxObject {
-    ctx.new_object(TYPE_THING, &[name.into_gox()])
+#[vo_extern("mypackage.NewThing")]
+fn new_thing(ctx: &mut ExternCtx, name: VoString) -> VoObject {
+    ctx.new_object(TYPE_THING, &[name.into_vo()])
 }
 ```
 
 ## 4. Auto-Registration
 
-The `#[gox_extern]` macro automatically registers functions using the `inventory` crate:
+The `#[vo_extern]` macro automatically registers functions using the `inventory` crate:
 
 ```rust
 // Generated by macro
 inventory::submit! {
     ExternEntry {
         name: "fmt.Println",
-        func: __gox_wrapper_println,
+        func: __vo_wrapper_println,
     }
 }
 
@@ -223,7 +223,7 @@ fn init_vm() -> Vm {
 During extern function execution, GC is paused:
 
 ```rust
-fn exec_extern_call(vm: &mut Vm, extern_fn: ExternFn, args: GoxArgs) -> GoxResult {
+fn exec_extern_call(vm: &mut Vm, extern_fn: ExternFn, args: VoArgs) -> VoResult {
     vm.gc.pause();
     let result = extern_fn(&mut vm.extern_ctx, args);
     vm.gc.resume();
@@ -239,8 +239,8 @@ This ensures all GcRef values remain valid during the call.
 
 ```rust
 enum Callable {
-    GoxFunc { func_id: FuncId },
-    ExternFunc { func: fn(&mut ExternCtx, GoxArgs) -> GoxResult },
+    VoFunc { func_id: FuncId },
+    ExternFunc { func: fn(&mut ExternCtx, VoArgs) -> VoResult },
     Closure { func_id: FuncId, upvalues: Vec<GcRef> },
 }
 ```
@@ -248,16 +248,16 @@ enum Callable {
 ### Arguments Wrapper
 
 ```rust
-pub struct GoxArgs<'a> {
+pub struct VoArgs<'a> {
     ctx: &'a ExternCtx,
     raw: &'a [u64],
     offsets: &'a [ArgOffset],  // Start position and type of each arg
 }
 
-impl<'a> GoxArgs<'a> {
-    pub fn get(&self, idx: usize) -> GoxValue<'a>;
+impl<'a> VoArgs<'a> {
+    pub fn get(&self, idx: usize) -> VoValue<'a>;
     pub fn len(&self) -> usize;
-    pub fn rest(&self, from: usize) -> GoxVariadic<'a>;
+    pub fn rest(&self, from: usize) -> VoVariadic<'a>;
 }
 ```
 
@@ -265,9 +265,9 @@ impl<'a> GoxArgs<'a> {
 
 | Aspect | Design |
 |--------|--------|
-| GoX syntax | `extern func Name(params) returns` |
-| Rust syntax | `#[gox_extern("pkg.Name")] fn name(...)` |
-| Wrapper types | `GoxString`, `GoxSlice`, `GoxStruct`, etc. |
+| Vo syntax | `extern func Name(params) returns` |
+| Rust syntax | `#[vo_extern("pkg.Name")] fn name(...)` |
+| Wrapper types | `VoString`, `VoSlice`, `VoStruct`, etc. |
 | Type conversion | Automatic via proc macro |
 | Registration | Auto via `inventory` crate |
 | GC safety | Pause during extern call |

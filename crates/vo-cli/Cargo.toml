@@ -1,0 +1,24 @@
+[package]
+name = "vo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for the Vo compiler"
+
+[[bin]]
+name = "vo"
+path = "src/main.rs"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-syntax = { path = "../vo-syntax" }
+vo-analysis = { path = "../vo-analysis" }
+vo-codegen-vm = { path = "../vo-codegen-vm" }
+vo-module = { path = "../vo-module" }
+vo-vm = { path = "../vo-vm" }
+vo-runtime-vm = { path = "../vo-runtime-vm" }
+vo-runtime-native = { path = "../vo-runtime-native" }
+vo-jit = { path = "../vo-jit" }
+clap = { version = "4.4", features = ["derive"] }
+
+[dev-dependencies]

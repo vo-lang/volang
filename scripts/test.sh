@@ -1,12 +1,12 @@
 #!/bin/bash
-# GoX Integration Test Runner
+# Vo Integration Test Runner
 #
 # Usage:
 #   ./test.sh              # Run all tests (both VM and JIT modes)
 #   ./test.sh vm           # Run only VM mode tests
 #   ./test.sh jit          # Run only JIT mode tests
 #   ./test.sh -v           # Verbose mode (show all output)
-#   ./test.sh <file.gox>   # Run a single test file
+#   ./test.sh <file.vo>   # Run a single test file
 #
 # Configuration: test_data/tests.yaml
 
@@ -17,7 +17,7 @@ cd "$SCRIPT_DIR/.."
 
 TEST_DIR="test_data"
 CONFIG="$TEST_DIR/_tests.yaml"
-BIN="target/debug/gox"
+BIN="target/debug/vo"
 MODE="${1:-both}"
 VERBOSE=false
 
@@ -35,26 +35,26 @@ if [[ "$1" == "-v" || "$1" == "--verbose" ]]; then
     VERBOSE=true
     MODE="${2:-both}"
 elif [[ "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "GoX Integration Test Runner"
+    echo "Vo Integration Test Runner"
     echo ""
     echo "Usage:"
     echo "  ./test.sh              # Run all tests (both VM and JIT modes)"
     echo "  ./test.sh vm           # Run only VM mode tests"
     echo "  ./test.sh jit          # Run only JIT mode tests"
     echo "  ./test.sh -v           # Verbose mode"
-    echo "  ./test.sh <file.gox>   # Run a single test file"
+    echo "  ./test.sh <file.vo>   # Run a single test file"
     exit 0
 elif [[ -f "$1" ]]; then
     # Single file mode
     echo "Running single test: $1"
-    cargo build -q -p gox-cli || exit 1
+    cargo build -q -p vo-cli || exit 1
     "$BIN" run "$1" --mode=vm
     exit $?
 fi
 
 # Build CLI
-echo -e "${DIM}Building gox-cli...${NC}"
-cargo build -q -p gox-cli || exit 1
+echo -e "${DIM}Building vo-cli...${NC}"
+cargo build -q -p vo-cli || exit 1
 
 # Check if config exists
 if [[ ! -f "$CONFIG" ]]; then
@@ -104,7 +104,7 @@ run_test() {
     
     # Check output for result tags
     local has_error=false
-    if echo "$output" | grep -q "\[GOX:PANIC:\|\[GOX:ERROR:"; then
+    if echo "$output" | grep -q "\[VO:PANIC:\|\[VO:ERROR:"; then
         has_error=true
     fi
     
@@ -131,28 +131,28 @@ run_test() {
     fi
     
     # Normal test handling
-    if echo "$output" | grep -q "\[GOX:OK\]"; then
+    if echo "$output" | grep -q "\[VO:OK\]"; then
         if [[ "$mode" == "vm" ]]; then
             vm_passed=$((vm_passed + 1))
         else
             jit_passed=$((jit_passed + 1))
         fi
         passed_list="$passed_list  ${GREEN}✓${NC} $file [$mode]\n"
-    elif echo "$output" | grep -q "\[GOX:PANIC:"; then
+    elif echo "$output" | grep -q "\[VO:PANIC:"; then
         if [[ "$mode" == "vm" ]]; then
             vm_failed=$((vm_failed + 1))
         else
             jit_failed=$((jit_failed + 1))
         fi
-        local panic_msg=$(echo "$output" | grep -o "\[GOX:PANIC:[^]]*\]" | head -1)
+        local panic_msg=$(echo "$output" | grep -o "\[VO:PANIC:[^]]*\]" | head -1)
         failed_list="$failed_list  ${RED}✗${NC} $file [$mode] $panic_msg\n"
-    elif echo "$output" | grep -q "\[GOX:ERROR:"; then
+    elif echo "$output" | grep -q "\[VO:ERROR:"; then
         if [[ "$mode" == "vm" ]]; then
             vm_failed=$((vm_failed + 1))
         else
             jit_failed=$((jit_failed + 1))
         fi
-        local error_msg=$(echo "$output" | grep -o "\[GOX:ERROR:[^]]*\]" | head -1)
+        local error_msg=$(echo "$output" | grep -o "\[VO:ERROR:[^]]*\]" | head -1)
         failed_list="$failed_list  ${RED}✗${NC} $file [$mode] $error_msg\n"
     else
         # No tag found - assume success if no error
@@ -169,7 +169,7 @@ run_test() {
     fi
 }
 
-echo -e "${BOLD}Running GoX integration tests...${NC}\n"
+echo -e "${BOLD}Running Vo integration tests...${NC}\n"
 
 # Read and parse YAML
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -247,7 +247,7 @@ if [[ -n "$failed_list" ]]; then
 fi
 
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}${BOLD}                   GoX Test Results                       ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${NC}${BOLD}                   Vo Test Results                       ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╠══════════════════════════════════════════════════════════╣${NC}"
 printf "${CYAN}║${NC}  VM:  ${GREEN}%3d passed${NC}  ${RED}%3d failed${NC}                             ${CYAN}║${NC}\n" "$vm_passed" "$vm_failed"
 printf "${CYAN}║${NC}  JIT: ${GREEN}%3d passed${NC}  ${RED}%3d failed${NC}                             ${CYAN}║${NC}\n" "$jit_passed" "$jit_failed"

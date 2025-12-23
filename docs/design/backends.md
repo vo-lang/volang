@@ -1,26 +1,26 @@
-# GoX Compilation Backends
+# Vo Compilation Backends
 
-This document describes the compilation backend architecture for GoX.
+This document describes the compilation backend architecture for Vo.
 
 ## Overview
 
-GoX supports multiple compilation backends to target different execution environments:
+Vo supports multiple compilation backends to target different execution environments:
 
 ```
                      ┌─────────────────┐
-                     │   gox-syntax    │
-                     │   gox-analysis  │
+                     │   vo-syntax    │
+                     │   vo-analysis  │
                      └────────┬────────┘
                               │
                      ┌────────▼────────┐
-                     │  gox-codegen-vm │  ← Bytecode generation
+                     │  vo-codegen-vm │  ← Bytecode generation
                      └────────┬────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
         │                     │                     │
         ▼                     ▼                     ▼
    ┌─────────┐        ┌─────────────┐       ┌─────────────┐
-   │ gox-vm  │        │   gox-jit   │       │ gox-aot  │
+   │ vo-vm  │        │   vo-jit   │       │ vo-aot  │
    │ (interp)│        │ (Cranelift) │       │ (Cranelift) │
    └─────────┘        └─────────────┘       └──────┬──────┘
         │                     │                    │
@@ -33,12 +33,12 @@ GoX supports multiple compilation backends to target different execution environ
 
 | Backend | Use Case | Startup | Peak Perf | Distribution |
 |---------|----------|---------|-----------|--------------|
-| `gox-vm` | Development, debugging | Fast | Low | Bytecode |
-| `gox-jit` | Long-running apps | Medium | High | Bytecode |
-| `gox-aot` | Production deployment | Instant | High | Executable |
-| `gox-wasm` | Web, sandboxed envs | Fast | Medium | .wasm file |
+| `vo-vm` | Development, debugging | Fast | Low | Bytecode |
+| `vo-jit` | Long-running apps | Medium | High | Bytecode |
+| `vo-aot` | Production deployment | Instant | High | Executable |
+| `vo-wasm` | Web, sandboxed envs | Fast | Medium | .wasm file |
 
-## 1. VM Interpreter (`gox-vm`)
+## 1. VM Interpreter (`vo-vm`)
 
 Pure bytecode interpreter. No native code generation.
 
@@ -49,10 +49,10 @@ Pure bytecode interpreter. No native code generation.
 
 **Usage:**
 ```bash
-gox run main.gox
+vo run main.vo
 ```
 
-## 2. JIT Compiler (`gox-jit`)
+## 2. JIT Compiler (`vo-jit`)
 
 Transparent JIT compilation using Cranelift. Hot functions are compiled to native code at runtime.
 
@@ -68,10 +68,10 @@ Transparent JIT compilation using Cranelift. Hot functions are compiled to nativ
 
 **Usage:**
 ```bash
-gox run --jit main.gox
+vo run --jit main.vo
 ```
 
-## 3. Native Compiler (`gox-aot`)
+## 3. Native Compiler (`vo-aot`)
 
 AOT (Ahead-Of-Time) compilation to standalone executables.
 
@@ -82,15 +82,15 @@ AOT (Ahead-Of-Time) compilation to standalone executables.
 
 **Output:**
 - Object files (.o)
-- Linked with `gox-runtime-core` to produce executable
+- Linked with `vo-runtime-core` to produce executable
 
 **Usage:**
 ```bash
-gox build main.gox -o main
+vo build main.vo -o main
 ./main
 ```
 
-## 4. WebAssembly Compiler (`gox-wasm`)
+## 4. WebAssembly Compiler (`vo-wasm`)
 
 Compilation to WebAssembly for browser or WASI environments.
 
@@ -100,17 +100,17 @@ Compilation to WebAssembly for browser or WASI environments.
 
 **Usage:**
 ```bash
-gox build --wasm main.gox -o main.wasm
+vo build --wasm main.vo -o main.wasm
 ```
 
 ## Implementation Status
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| `gox-vm` | ✅ Complete | Production ready |
-| `gox-jit` | 🚧 Scaffold | Cranelift integration pending |
-| `gox-aot` | 🚧 Scaffold | Cranelift integration pending |
-| `gox-wasm` | 🚧 Scaffold | Cranelift integration pending |
+| `vo-vm` | ✅ Complete | Production ready |
+| `vo-jit` | 🚧 Scaffold | Cranelift integration pending |
+| `vo-aot` | 🚧 Scaffold | Cranelift integration pending |
+| `vo-wasm` | 🚧 Scaffold | Cranelift integration pending |
 
 ## Cranelift Integration
 
@@ -147,7 +147,7 @@ Each VM opcode maps to Cranelift IR instructions:
 
 ## Runtime Requirements
 
-All backends require the GoX runtime for:
+All backends require the Vo runtime for:
 - Garbage collection
 - Goroutine scheduling  
 - Built-in functions (`println`, `make`, etc.)

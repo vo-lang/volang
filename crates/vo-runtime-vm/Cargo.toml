@@ -1,0 +1,18 @@
+[package]
+name = "vo-runtime-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VM runtime implementation for Vo"
+
+[features]
+default = ["std"]
+std = ["vo-vm/std", "dep:regex"]  # Include std packages (os, fmt, time, etc.)
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-runtime-core = { path = "../vo-runtime-core" }
+vo-vm = { path = "../vo-vm", default-features = false }
+regex = { version = "1", optional = true }
+
+[dev-dependencies]

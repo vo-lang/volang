@@ -1,4 +1,4 @@
-# Backend P1: gox-runtime-core
+# Backend P1: vo-runtime-core
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
@@ -301,12 +301,12 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef) {
 
 ```rust
 #[no_mangle]
-pub extern "C" fn gox_string_len(s: GcRef) -> i64 {
+pub extern "C" fn vo_string_len(s: GcRef) -> i64 {
     string::len(s) as i64
 }
 
 #[no_mangle]
-pub extern "C" fn gox_string_index(s: GcRef, i: i64) -> u8 {
+pub extern "C" fn vo_string_index(s: GcRef, i: i64) -> u8 {
     string::index(s, i as usize)
 }
 

@@ -6,7 +6,7 @@
 
 ---
 
-## P1: gox-runtime-core
+## P1: vo-runtime-core
 
 VM 和 JIT 共享的核心运行时。
 
@@ -125,7 +125,7 @@ closure::set_upvalue(c, idx, val)
 
 ---
 
-## P2: gox-vm
+## P2: vo-vm
 
 Bytecode 定义和 VM 解释器。
 
@@ -247,7 +247,7 @@ impl Vm {
 
 ---
 
-## P3: gox-codegen-vm
+## P3: vo-codegen-vm
 
 AST → Bytecode 编译。
 
@@ -321,7 +321,7 @@ impl TypeInfo {
 
 ---
 
-## P4: gox-runtime-native
+## P4: vo-runtime-native
 
 JIT/AOT 专用运行时。
 
@@ -347,39 +347,39 @@ impl RuntimeSymbols {
 
 ```rust
 // === GC ===
-fn gox_rt_alloc(vk: u8, type_id: u16, slots: usize) -> GcRef;
-fn gox_gc_read_slot(obj: GcRef, idx: usize) -> u64;
-fn gox_gc_write_slot(obj: GcRef, idx: usize, val: u64);
+fn vo_rt_alloc(vk: u8, type_id: u16, slots: usize) -> GcRef;
+fn vo_gc_read_slot(obj: GcRef, idx: usize) -> u64;
+fn vo_gc_write_slot(obj: GcRef, idx: usize, val: u64);
 
 // === 全局变量 ===
-fn gox_rt_get_global(idx: u32) -> u64;
-fn gox_rt_set_global(idx: u32, val: u64);
+fn vo_rt_get_global(idx: u32) -> u64;
+fn vo_rt_set_global(idx: u32, val: u64);
 
 // === 函数表 ===
-fn gox_func_table_ptr() -> *const *const u8;
-fn gox_set_func_ptr(idx: u32, ptr: *const u8);
+fn vo_func_table_ptr() -> *const *const u8;
+fn vo_set_func_ptr(idx: u32, ptr: *const u8);
 
 // === Goroutine ===
-fn gox_go_spawn(func_ptr: *const u8, args: *const u64, argc: u32);
-fn gox_yield();
+fn vo_go_spawn(func_ptr: *const u8, args: *const u64, argc: u32);
+fn vo_yield();
 
 // === Channel ===
-fn gox_chan_new(cap: usize, elem_vk: u8) -> GcRef;
-fn gox_chan_send(ch: GcRef, val: u64);
-fn gox_chan_recv(ch: GcRef) -> u64;
-fn gox_chan_close(ch: GcRef);
+fn vo_chan_new(cap: usize, elem_vk: u8) -> GcRef;
+fn vo_chan_send(ch: GcRef, val: u64);
+fn vo_chan_recv(ch: GcRef) -> u64;
+fn vo_chan_close(ch: GcRef);
 
 // === Select ===
-fn gox_select_start(case_count: u32, has_default: u32);
-fn gox_select_add_recv(ch: GcRef);
-fn gox_select_add_send(ch: GcRef, val: u64);
-fn gox_select_exec() -> i32;
+fn vo_select_start(case_count: u32, has_default: u32);
+fn vo_select_add_recv(ch: GcRef);
+fn vo_select_add_send(ch: GcRef, val: u64);
+fn vo_select_exec() -> i32;
 
 // === Defer/Panic ===
-fn gox_defer_push(func_ptr: *const u8, args: *const u64, argc: u32);
-fn gox_defer_pop();
-fn gox_panic(val: GcRef);
-fn gox_recover() -> GcRef;
+fn vo_defer_push(func_ptr: *const u8, args: *const u64, argc: u32);
+fn vo_defer_pop();
+fn vo_panic(val: GcRef);
+fn vo_recover() -> GcRef;
 
 // === Stack Map ===
 fn register_stack_map(return_addr: usize, entry: StackMapEntry);
@@ -408,7 +408,7 @@ pub struct Channel {
 
 ---
 
-## P5: gox-codegen-cranelift
+## P5: vo-codegen-cranelift
 
 Bytecode → Cranelift IR 翻译。
 
@@ -451,7 +451,7 @@ impl FunctionTranslator {
 
 ---
 
-## P6: gox-aot + gox-jit
+## P6: vo-aot + vo-jit
 
 编译器入口。
 

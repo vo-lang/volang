@@ -1,8 +1,8 @@
-# GoX Parser Implementation Guide
+# Vo Parser Implementation Guide
 
-This document provides detailed implementation guidance for the GoX parser, based on the [Language Specification](./language_spec.md).
+This document provides detailed implementation guidance for the Vo parser, based on the [Language Specification](./language_spec.md).
 
-> **Naming Convention**: In the Rust codebase, the GoX `object` type is internally named **`obx`** (e.g., `TokenKind::Obx`, `Type::Obx`) to avoid confusion with Rust's `Object` trait and other common naming patterns. When reading the source code, remember that `obx` = GoX `object`.
+> **Naming Convention**: In the Rust codebase, the Vo `object` type is internally named **`obx`** (e.g., `TokenKind::Obx`, `Type::Obx`) to avoid confusion with Rust's `Object` trait and other common naming patterns. When reading the source code, remember that `obx` = Vo `object`.
 
 ---
 
@@ -28,7 +28,7 @@ The parser consumes tokens from the Lexer and produces an Abstract Syntax Tree (
 ### 1.3 Module Organization
 
 ```
-crates/gox-syntax/src/
+crates/vo-syntax/src/
 ├── lexer.rs    # Lexer with automatic semicolon insertion
 ├── token.rs    # Token and TokenKind definitions
 ├── ast.rs      # AST node definitions
@@ -184,7 +184,7 @@ VarSpec     ::= IdentList Type? ( "=" ExprList )? ;
 ```
 
 Supports both single and grouped declarations:
-```gox
+```vo
 var x int
 var (
     a = 1
@@ -643,7 +643,7 @@ pub enum Type {
     Chan(Box<ChanType>),
     Func(Box<FuncType>),
     Struct(Box<StructType>),
-    Obx(Box<ObxType>),      // GoX object type
+    Obx(Box<ObxType>),      // Vo object type
     Interface(Box<InterfaceType>),
 }
 ```
@@ -683,17 +683,17 @@ Future recovery points:
 
 ### 11.1 Test Files
 
-Place `.gox` files in `tests/test_data/`:
+Place `.vo` files in `tests/test_data/`:
 
 ```
-crates/gox-syntax/tests/test_data/
-├── hello.gox
-├── fibonacci.gox
-├── control_flow.gox
-├── structs.gox
-├── objects.gox
-├── interfaces.gox
-├── channels.gox
+crates/vo-syntax/tests/test_data/
+├── hello.vo
+├── fibonacci.vo
+├── control_flow.vo
+├── structs.vo
+├── objects.vo
+├── interfaces.vo
+├── channels.vo
 └── ...
 ```
 
@@ -705,7 +705,7 @@ fn test_parse_all_test_files() {
     let test_dir = Path::new("tests/test_data");
     for entry in fs::read_dir(test_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension() == Some("gox".as_ref()) {
+        if path.extension() == Some("vo".as_ref()) {
             let source = fs::read_to_string(&path).unwrap();
             let result = parser::parse(&source);
             assert!(result.is_ok(), "Failed to parse {:?}: {:?}", path, result);

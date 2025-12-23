@@ -13,7 +13,7 @@ Comprehensive testing to validate the new memory model works correctly.
 
 ### 4.1 Escape Analysis Unit Tests
 
-Location: `gox-analysis/src/check/escape_test.rs` (new)
+Location: `vo-analysis/src/check/escape_test.rs` (new)
 
 ```rust
 #[test]
@@ -54,7 +54,7 @@ fn test_escape_size_threshold() {
 
 ### 4.2 Codegen Unit Tests
 
-Location: `gox-codegen-vm/src/tests/escape_test.rs` (new)
+Location: `vo-codegen-vm/src/tests/escape_test.rs` (new)
 
 ```rust
 #[test]
@@ -84,29 +84,29 @@ Location: `test_data/escape/` (new directory)
 
 | Test File | Description |
 |-----------|-------------|
-| `stack_struct.gox` | Non-escaping struct operations |
-| `heap_struct.gox` | Escaping struct operations |
-| `closure_capture.gox` | Closure variable capture |
-| `interface_boxing.gox` | Interface boxing of struct |
-| `array_slice.gox` | Array slicing |
-| `nested_struct.gox` | Nested struct escape propagation |
-| `boxed_primitives.gox` | Boxed int/float/bool |
-| `mixed_escape.gox` | Mix of escaping and non-escaping |
+| `stack_struct.vo` | Non-escaping struct operations |
+| `heap_struct.vo` | Escaping struct operations |
+| `closure_capture.vo` | Closure variable capture |
+| `interface_boxing.vo` | Interface boxing of struct |
+| `array_slice.vo` | Array slicing |
+| `nested_struct.vo` | Nested struct escape propagation |
+| `boxed_primitives.vo` | Boxed int/float/bool |
+| `mixed_escape.vo` | Mix of escaping and non-escaping |
 
 ### 4.4 Regression Tests
 
 Re-enable previously skipped tests after implementation:
 
-- `defer_stmt.gox`
-- `select_stmt.gox`
-- `slice_map.gox`
+- `defer_stmt.vo`
+- `select_stmt.vo`
+- `slice_map.vo`
 - etc.
 
 ## Test File Examples
 
-### stack_struct.gox
+### stack_struct.vo
 
-```gox
+```vo
 package main
 
 type Point struct {
@@ -118,13 +118,13 @@ func main() {
     p.x = 10
     p.y = 20
     assert(p.x + p.y == 30)
-    println("[GOX:OK]")
+    println("[VO:OK]")
 }
 ```
 
-### closure_capture.gox
+### closure_capture.vo
 
-```gox
+```vo
 package main
 
 func main() {
@@ -139,13 +139,13 @@ func main() {
     x = 100
     assert(f() == 100)  // Closure sees updated value
     
-    println("[GOX:OK]")
+    println("[VO:OK]")
 }
 ```
 
-### boxed_primitives.gox
+### boxed_primitives.vo
 
-```gox
+```vo
 package main
 
 func main() {
@@ -162,7 +162,7 @@ func main() {
     double()
     assert(y == 3.0)
     
-    println("[GOX:OK]")
+    println("[VO:OK]")
 }
 ```
 

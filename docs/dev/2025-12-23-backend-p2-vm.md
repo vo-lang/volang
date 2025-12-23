@@ -1,4 +1,4 @@
-# Backend P2: gox-vm
+# Backend P2: vo-vm
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
@@ -7,7 +7,7 @@
 
 ## Overview
 
-定义 bytecode 格式和 VM 解释器。这是 GoX 的核心执行引擎。
+定义 bytecode 格式和 VM 解释器。这是 Vo 的核心执行引擎。
 
 **核心原则**：
 - 8 字节固定指令格式
@@ -250,7 +250,7 @@ impl Module {
 }
 
 /// 文件格式
-/// Magic: "GOXB" (4 bytes)
+/// Magic: "VOB" (4 bytes)
 /// Version: u32
 /// struct_types: [TypeMeta]
 /// interface_types: [TypeMeta]

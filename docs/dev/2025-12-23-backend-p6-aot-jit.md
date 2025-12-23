@@ -1,4 +1,4 @@
-# Backend P6: gox-aot + gox-jit
+# Backend P6: vo-aot + vo-jit
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
@@ -9,10 +9,10 @@
 
 编译器入口，组装前面各模块完成编译。
 
-- **gox-aot**: 生成 .o 目标文件
-- **gox-jit**: 内存编译并执行
+- **vo-aot**: 生成 .o 目标文件
+- **vo-jit**: 内存编译并执行
 
-## gox-aot
+## vo-aot
 
 ```rust
 /// AOT 编译器
@@ -29,7 +29,7 @@ impl AotCompiler {
 }
 ```
 
-## gox-jit
+## vo-jit
 
 ```rust
 /// JIT 编译器
@@ -72,7 +72,7 @@ pub struct Closure {
 // JIT 生成的代码
 let closure = slots[a];
 let func_id = closure.func_id;
-let table_ptr = gox_func_table_ptr();        // 获取表指针
+let table_ptr = vo_func_table_ptr();        // 获取表指针
 let func_ptr = table_ptr[func_id];           // 查表
 call_indirect(func_ptr, closure, args...);   // closure 作为第一个参数
 ```
@@ -95,12 +95,12 @@ set_func_ptr(idx, ptr);                       // 4. 填充表
 
 ## Tasks Checklist
 
-### gox-aot
+### vo-aot
 - [ ] AotCompiler::new()
 - [ ] compile_module()
 - [ ] finish() → .o 文件
 
-### gox-jit
+### vo-jit
 - [ ] JitCompiler::new() + 符号注册
 - [ ] compile_module()
 - [ ] init_runtime()

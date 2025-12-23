@@ -1,10 +1,10 @@
-# GoX Programming Language
+# Vo Programming Language
 
-GoX is a statically typed, Go-like programming language with multiple compilation backends.
+Vo is a statically typed, Go-like programming language with multiple compilation backends.
 
 ## Overview
 
-GoX provides familiar Go syntax with simplified error handling and flexible compilation targets.
+Vo provides familiar Go syntax with simplified error handling and flexible compilation targets.
 
 ### Key Features
 
@@ -18,39 +18,39 @@ GoX provides familiar Go syntax with simplified error handling and flexible comp
 ## Project Structure
 
 ```
-gox/
+vo/
 ├── crates/
 │   │
 │   │  # ─────────── Frontend ───────────
-│   ├── gox-common/           # Shared types, errors, spans
-│   ├── gox-syntax/           # Lexer, parser, AST
-│   ├── gox-analysis/         # Type checking, semantic analysis
-│   ├── gox-module/           # Module/package management
+│   ├── vo-common/           # Shared types, errors, spans
+│   ├── vo-syntax/           # Lexer, parser, AST
+│   ├── vo-analysis/         # Type checking, semantic analysis
+│   ├── vo-module/           # Module/package management
 │   │
 │   │  # ─────────── Code Generation ───────────
-│   ├── gox-codegen-vm/       # VM bytecode generation
-│   ├── gox-codegen-cranelift/# Shared Cranelift IR translation
+│   ├── vo-codegen-vm/       # VM bytecode generation
+│   ├── vo-codegen-cranelift/# Shared Cranelift IR translation
 │   │
 │   │  # ─────────── VM ───────────
-│   ├── gox-vm/               # VM core (interpreter, bytecode)
+│   ├── vo-vm/               # VM core (interpreter, bytecode)
 │   │
 │   │  # ─────────── Native Backends ───────────
-│   ├── gox-jit/              # JIT compilation (Cranelift)
-│   ├── gox-aot/              # AOT → native object files
+│   ├── vo-jit/              # JIT compilation (Cranelift)
+│   ├── vo-aot/              # AOT → native object files
 │   │
 │   │  # ─────────── Runtime ───────────
-│   ├── gox-runtime-core/     # Core runtime (GC, objects, FFI)
-│   ├── gox-runtime-native/   # Native runtime symbols (AOT/JIT)
-│   ├── gox-runtime-vm/       # VM runtime + native functions
+│   ├── vo-runtime-core/     # Core runtime (GC, objects, FFI)
+│   ├── vo-runtime-native/   # Native runtime symbols (AOT/JIT)
+│   ├── vo-runtime-vm/       # VM runtime + native functions
 │   │
 │   │  # ─────────── Web ───────────
-│   ├── gox-web/              # WASM bindings (run GoX in browsers)
+│   ├── vo-web/              # WASM bindings (run Vo in browsers)
 │   │
 │   │  # ─────────── Tools ───────────
-│   ├── gox-cli/              # Command-line interface
-│   └── gox-tests/            # Integration tests
+│   ├── vo-cli/              # Command-line interface
+│   └── vo-tests/            # Integration tests
 │
-├── stdlib/                   # GoX standard library
+├── stdlib/                   # Vo standard library
 │   ├── fmt/
 │   ├── strings/
 │   ├── bytes/
@@ -68,32 +68,32 @@ gox/
 ## Crate Dependencies
 
 ```
-                              gox-cli
+                              vo-cli
                                  │
             ┌────────────────────┼────────────────────┐
             │                    │                    │
             ▼                    ▼                    ▼
-     gox-codegen-vm         gox-jit              gox-aot
+     vo-codegen-vm         vo-jit              vo-aot
             │                    │                    │
             │                    └────────┬───────────┘
             ▼                             ▼
-         gox-vm              gox-codegen-cranelift (shared)
+         vo-vm              vo-codegen-cranelift (shared)
             │                             │
             ▼                             ▼
-    gox-runtime-vm              gox-runtime-native
+    vo-runtime-vm              vo-runtime-native
             │                             │
             └──────────┬──────────────────┘
                        ▼
-               gox-runtime-core
+               vo-runtime-core
                        │
                        ▼
-                 gox-analysis ◄──────── gox-module
+                 vo-analysis ◄──────── vo-module
                        │
                        ▼
-                  gox-syntax
+                  vo-syntax
                        │
                        ▼
-                  gox-common
+                  vo-common
 ```
 
 ## Building
@@ -105,33 +105,33 @@ cargo build --release
 ## Usage
 
 ```bash
-# Run a GoX program (VM interpreter)
-gox run program.gox
+# Run a Vo program (VM interpreter)
+vo run program.vo
 
 # Run with JIT compilation (planned)
-gox run --jit program.gox
+vo run --jit program.vo
 
 # Compile to native executable (planned)
-gox build program.gox
+vo build program.vo
 ```
 
 ### Web (WASM)
 
-GoX can run in browsers via WebAssembly using `gox-web`:
+Vo can run in browsers via WebAssembly using `vo-web`:
 
 ```javascript
-import init, { GoxVM, compile_and_run } from 'gox-web';
+import init, { VoVM, compile_and_run } from 'vo-web';
 
 await init();
 const output = compile_and_run(`
     package main
-    func main() { println("Hello from GoX!") }
+    func main() { println("Hello from Vo!") }
 `);
 ```
 
 ## Language Example
 
-```gox
+```vo
 package main
 
 type User struct {
@@ -156,9 +156,9 @@ func main() {
 
 ### Error Handling
 
-GoX provides simplified error handling with `fail`, `errdefer`, and `?`:
+Vo provides simplified error handling with `fail`, `errdefer`, and `?`:
 
-```gox
+```vo
 func readConfig(path string) (Config, error) {
     file := open(path)?           // propagate error with ?
     errdefer file.Close()          // cleanup on error only

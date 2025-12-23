@@ -1,4 +1,4 @@
-# GoX Memory Model and Instruction Set Specification
+# Vo Memory Model and Instruction Set Specification
 
 **Version**: 2.0 (Memory Model Refactoring)  
 **Status**: Draft  
@@ -17,7 +17,7 @@
 
 ## 1. Overview
 
-This document specifies the GoX memory model and instruction set architecture. The key design principle is **escape-analysis-driven allocation**: values are allocated on the stack by default, and only escape to the heap when necessary.
+This document specifies the Vo memory model and instruction set architecture. The key design principle is **escape-analysis-driven allocation**: values are allocated on the stack by default, and only escape to the heap when necessary.
 
 ### 1.1 Design Goals
 
@@ -161,13 +161,13 @@ var x int    // slot 0: value
 ```
 
 **Struct** (non-escaping, flattened):
-```gox
+```vo
 type Point struct { x, y int }
 var p Point  // slot 0: p.x, slot 1: p.y
 ```
 
 **Nested Struct** (flattened):
-```gox
+```vo
 type Inner struct { a int; b string }
 type Outer struct { inner Inner; c int }
 var o Outer
@@ -177,12 +177,12 @@ var o Outer
 ```
 
 **Array** (non-escaping):
-```gox
+```vo
 var arr [3]int  // slot 0: arr[0], slot 1: arr[1], slot 2: arr[2]
 ```
 
 **Interface**: 2 slots
-```gox
+```vo
 var i interface{}
 // slot 0: header (iface_type_id:16 | value_kind:8 | value_type_id:16 | ...)
 // slot 1: data (immediate value or GcRef)
@@ -242,7 +242,7 @@ pub struct GcHeader {
 
 Global variables are treated as **always escaped** and allocated on the heap. The global table stores GcRefs to heap objects.
 
-```gox
+```vo
 var globalPoint Point  // Heap-allocated, globals[i] = GcRef
 ```
 
@@ -287,7 +287,7 @@ When assigning a value to an interface:
 
 If any nested field triggers escape, the **entire root variable** escapes:
 
-```gox
+```vo
 type Outer struct { inner Inner }
 var o Outer
 p := &o.inner    // o escapes (not just inner)

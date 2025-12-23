@@ -1,6 +1,6 @@
-# GoX Type Checker Design
+# Vo Type Checker Design
 
-This document describes the design of the GoX type checker, including core challenges, solutions, implementation phases, and testing strategies.
+This document describes the design of the Vo type checker, including core challenges, solutions, implementation phases, and testing strategies.
 
 ---
 
@@ -20,11 +20,11 @@ Main responsibilities:
 - **Symbol Resolution**: Bind identifiers to their declarations
 - **Constant Evaluation**: Compute constant expressions at compile time
 
-### 1.2 GoX Type System Characteristics
+### 1.2 Vo Type System Characteristics
 
-GoX is a statically typed language with a type system based on Go but simplified:
+Vo is a statically typed language with a type system based on Go but simplified:
 
-| Feature | GoX | Go |
+| Feature | Vo | Go |
 |---------|-----|-----|
 | Generics | ❌ | ✅ |
 | Pointers | ❌ | ✅ |
@@ -41,9 +41,9 @@ Key concepts:
 
 ### 2.1 Challenge 1: Forward References
 
-**Problem**: GoX allows using types before they are declared:
+**Problem**: Vo allows using types before they are declared:
 
-```gox
+```vo
 var x MyInt      // MyInt declared below
 type MyInt int
 ```
@@ -60,7 +60,7 @@ This ensures all type information is available when checking function bodies.
 
 **Problem**: Type definitions may form illegal cycles:
 
-```gox
+```vo
 type A B
 type B A  // illegal cycle
 
@@ -83,9 +83,9 @@ Rule: If the path from type A back to itself consists entirely of value types (s
 
 ### 2.3 Challenge 3: Untyped Constants
 
-**Problem**: GoX constants have complex type inference rules:
+**Problem**: Vo constants have complex type inference rules:
 
-```gox
+```vo
 const x = 42        // untyped int
 const y = 3.14      // untyped float
 const z = x + y     // untyped float (promotion)
@@ -105,7 +105,7 @@ var b byte = 256    // ERROR: 256 exceeds byte range
 
 **Problem**: Need to determine if a type implements an interface:
 
-```gox
+```vo
 interface Reader {
     Read(buf []byte) int
 }
@@ -133,7 +133,7 @@ var r Reader = File{}  // Does File implement Reader?
 
 **Problem**: Named types create new type identities:
 
-```gox
+```vo
 type MyInt int
 
 var a int = 42
@@ -158,7 +158,7 @@ Assignability rules:
 
 **Problem**: Built-in functions have special type rules that cannot be expressed with regular function signatures:
 
-```gox
+```vo
 len(slice)      // returns int
 len(map)        // returns int
 len(string)     // returns int
@@ -362,7 +362,7 @@ Each phase has independent unit tests:
 
 ### 5.2 Integration Tests
 
-Use the existing `gox-tests` framework, adding type checker output verification:
+Use the existing `vo-tests` framework, adding type checker output verification:
 
 ```
 === SOURCE ===
@@ -402,7 +402,7 @@ ERROR: cannot use string as int (line 2)
 
 ```
 crates/
-├── gox-types/          # Type system core
+├── vo-types/          # Type system core
 │   ├── src/
 │   │   ├── lib.rs
 │   │   ├── types.rs    # Type definitions
@@ -418,9 +418,9 @@ crates/
 ### 6.2 Dependencies
 
 ```
-gox-types
-├── gox-syntax (AST, Span)
-└── gox-common (Symbol, Diagnostics)
+vo-types
+├── vo-syntax (AST, Span)
+└── vo-common (Symbol, Diagnostics)
 ```
 
 ### 6.3 API Design
@@ -444,6 +444,6 @@ The returned `TypedFile` contains:
 | M2 | Phase 2 complete | Type resolution, cycle detection |
 | M3 | Phase 3 basic | Basic expression and statement checking |
 | M4 | Phase 3 complete | Built-in functions, full test coverage |
-| M5 | Integration | Integration with gox-tests |
+| M5 | Integration | Integration with vo-tests |
 
 Each milestone should have corresponding tests passing to ensure correctness of incremental development.

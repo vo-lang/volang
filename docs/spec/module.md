@@ -1,25 +1,25 @@
-# GoX Module Specification (Transitive Closure Model)
+# Vo Module Specification (Transitive Closure Model)
 
 Version: 1.0  
 Status: Draft
 
 ## 1. Overview
 
-GoX uses a deterministic module system with pinned versions and offline builds.
-Dependencies are declared in `gox.mod`, and transitive dependencies are discovered by recursively reading each dependency's own `gox.mod`. There is no version solving: any version disagreement is a hard error.
+Vo uses a deterministic module system with pinned versions and offline builds.
+Dependencies are declared in `vo.mod`, and transitive dependencies are discovered by recursively reading each dependency's own `vo.mod`. There is no version solving: any version disagreement is a hard error.
 
 **Core Properties:**
 
 - Exact versions only (including optional pre-release/build metadata)
-- `gox build` never accesses the network
-- Transitive dependency closure is computed from `gox.mod` files
+- `vo build` never accesses the network
+- Transitive dependency closure is computed from `vo.mod` files
 - A module path may appear with only one version in the entire closure
 
 ## 2. Module Definition
 
-### 2.1 The `gox.mod` File
+### 2.1 The `vo.mod` File
 
-Every module has a `gox.mod` at its root containing:
+Every module has a `vo.mod` at its root containing:
 
 - Exactly one `module` line
 - Zero or more `require` lines (direct dependencies)
@@ -64,23 +64,23 @@ A typical project:
 
 ```
 myproject/
-├── gox.mod
-├── main.gox
+├── vo.mod
+├── main.vo
 ├── util/
-│   └── helper.gox
-└── .goxdeps/
+│   └── helper.vo
+└── .vodeps/
     └── github.com/
         └── foo/
             └── bar@v1.2.3/
-                ├── gox.mod
+                ├── vo.mod
                 └── ...
 ```
 
 **Rules:**
 
-- `.goxdeps/` is a local cache; it is not committed to VCS.
-- Each cached dependency module lives at: `.goxdeps/<module-path>@<version>/`
-- The cached module root must contain its own `gox.mod`.
+- `.vodeps/` is a local cache; it is not committed to VCS.
+- Each cached dependency module lives at: `.vodeps/<module-path>@<version>/`
+- The cached module root must contain its own `vo.mod`.
 
 ## 4. Standard Library
 
@@ -96,8 +96,8 @@ myproject/
 
 Given a root module R:
 
-1. Read `R/gox.mod`
-2. For each `require M V`, load module `M@V` from `.goxdeps/M@V/gox.mod`
+1. Read `R/vo.mod`
+2. For each `require M V`, load module `M@V` from `.vodeps/M@V/vo.mod`
 3. Recursively repeat for each loaded module's `require` lines
 4. Maintain a visited set to avoid infinite recursion
 
@@ -112,16 +112,16 @@ A module path may appear at **only one version** across the entire closure.
 
 ### 5.3 Offline Build Rule
 
-`gox build` must not download anything.
+`vo build` must not download anything.
 
-- If any required module directory is missing from `.goxdeps`, the build fails.
-- The error should indicate the missing `(module, version)` and suggest `gox get`.
+- If any required module directory is missing from `.vodeps`, the build fails.
+- The error should indicate the missing `(module, version)` and suggest `vo get`.
 
 ## 6. Imports and Resolution
 
 ### 6.1 Import Syntax
 
-GoX uses the `@` symbol to distinguish external dependencies from local/standard library packages:
+Vo uses the `@` symbol to distinguish external dependencies from local/standard library packages:
 
 ```go
 import (
@@ -133,7 +133,7 @@ import (
     "utils"
     "handlers/api"
     
-    // External dependencies (@ marker, must be declared in gox.mod)
+    // External dependencies (@ marker, must be declared in vo.mod)
     @"gin"
     @"jwt"
 )
@@ -143,14 +143,14 @@ import (
 
 ```go
 import "path"              // Standard library or local package
-import @"alias"            // External dependency (defined in gox.mod)
+import @"alias"            // External dependency (defined in vo.mod)
 import name "path"         // With alias
 import name @"alias"       // External dependency with alias
 import . "path"            // Dot import (import all exported names)
 import _ "path"            // Blank import (init only)
 ```
 
-### 6.2 Dependency Declaration in gox.mod
+### 6.2 Dependency Declaration in vo.mod
 
 ```
 module myproject
@@ -170,8 +170,8 @@ Format: `require <alias> <module-path> <version>`
 For an import path `P`:
 
 1. **External dependency** (`@"P"` form)
-   - Look up alias `P` in the gox.mod require list
-   - If found: map to `.goxdeps/<module-path>@<version>/`
+   - Look up alias `P` in the vo.mod require list
+   - If found: map to `.vodeps/<module-path>@<version>/`
    - If not found: error (undeclared external dependency)
 
 2. **Standard library** (`"P"` where P is a known stdlib package)
@@ -183,9 +183,9 @@ For an import path `P`:
    - Supports nesting: `"handlers/api"` → `./handlers/api/`
    - If not found: error
 
-### 6.4 Projects Without gox.mod
+### 6.4 Projects Without vo.mod
 
-The `gox.mod` file is optional. When a project has no `gox.mod`:
+The `vo.mod` file is optional. When a project has no `vo.mod`:
 
 - `@"xxx"` will fail (no alias definitions to look up)
 - `"xxx"` works normally: resolves as stdlib → project directory
@@ -198,16 +198,16 @@ No special code handling is required—the resolution algorithm naturally handle
 **Project structure:**
 ```
 myproject/
-├── gox.mod
-├── main.gox
+├── vo.mod
+├── main.vo
 ├── utils/
-│   └── strings.gox
+│   └── strings.vo
 └── handlers/
     └── api/
-        └── handler.gox
+        └── handler.vo
 ```
 
-**gox.mod:**
+**vo.mod:**
 ```
 module myproject
 
@@ -215,7 +215,7 @@ require gin github.com/gin-gonic/gin v1.9.0
 require validator github.com/go-playground/validator v10.0.0
 ```
 
-**main.gox:**
+**main.vo:**
 ```go
 package main
 
@@ -234,9 +234,9 @@ import (
 | Benefit | Description |
 |---------|-------------|
 | **Clear distinction** | `@` marker instantly shows external vs local |
-| **No URL in source** | Library migration only requires changing gox.mod |
+| **No URL in source** | Library migration only requires changing vo.mod |
 | **No ambiguity** | stdlib `fmt` and external `@"fmt"` (if any) don't conflict |
-| **Compile-time check** | `@"xxx"` must be declared in gox.mod |
+| **Compile-time check** | `@"xxx"` must be declared in vo.mod |
 | **IDE friendly** | Easy to implement syntax highlighting and autocomplete |
 
 ## 7. Package Rules
@@ -244,7 +244,7 @@ import (
 These rules define how directories form packages; they are required for deterministic builds.
 
 1. A directory corresponds to a single package.
-2. All `.gox` files in the same directory must declare the same `package <name>`.
+2. All `.vo` files in the same directory must declare the same `package <name>`.
 3. Package name matching the directory name is **recommended** but not required.
 4. Multiple files in a directory are compiled together as one package.
 5. Files are processed in **alphabetical order** by filename.
@@ -256,12 +256,12 @@ These rules define how directories form packages; they are required for determin
 
 ### 7.2 Test Files
 
-Files with the `_test.gox` suffix are only compiled during testing:
+Files with the `_test.vo` suffix are only compiled during testing:
 
 ```
 util/
-├── helper.gox       # Always compiled
-└── helper_test.gox  # Only compiled for tests
+├── helper.vo       # Always compiled
+└── helper_test.vo  # Only compiled for tests
 ```
 
 Test files may declare either:
@@ -271,7 +271,7 @@ Test files may declare either:
 
 ## 8. Internal Packages
 
-GoX supports Go-style internal visibility:
+Vo supports Go-style internal visibility:
 
 - Any package whose import path contains `/internal/` is restricted.
 - Let the "internal parent" be the path segment immediately before `/internal/`.
@@ -365,41 +365,41 @@ Files are included only when the build tags match.
 
 ## 13. CLI Commands
 
-### 13.1 `gox init <module-path>`
+### 13.1 `vo init <module-path>`
 
-Creates a new `gox.mod` in the current directory:
+Creates a new `vo.mod` in the current directory:
 
 ```bash
-$ gox init github.com/myuser/myproject
+$ vo init github.com/myuser/myproject
 ```
 
-Creates `gox.mod`:
+Creates `vo.mod`:
 
 ```
 module github.com/myuser/myproject
 ```
 
-### 13.2 `gox get <module-path>@<version>`
+### 13.2 `vo get <module-path>@<version>`
 
-- Downloads the module source to `.goxdeps/<module>@<version>/`
-- Ensures `.goxdeps/<module>@<version>/gox.mod` exists
-- Adds (or updates) a direct `require` line in the root `gox.mod`
+- Downloads the module source to `.vodeps/<module>@<version>/`
+- Ensures `.vodeps/<module>@<version>/vo.mod` exists
+- Adds (or updates) a direct `require` line in the root `vo.mod`
 - Does **not** resolve or upgrade other dependencies
 
 ```bash
-$ gox get github.com/foo/bar@v1.2.3
+$ vo get github.com/foo/bar@v1.2.3
 ```
 
-### 13.3 `gox build`
+### 13.3 `vo build`
 
-- Reads root `gox.mod`
-- Computes transitive closure by reading dependency `gox.mod` files
+- Reads root `vo.mod`
+- Computes transitive closure by reading dependency `vo.mod` files
 - Enforces single-version-per-module rule
 - Resolves imports using the algorithm in §6
 - **Never downloads modules** during the build
 
 ```bash
-$ gox build
+$ vo build
 ```
 
 ## 14. Not Supported (By Design)
@@ -411,15 +411,15 @@ $ gox build
 | Multiple versions of the same module in one build | Not supported |
 | `replace`/`exclude`/overrides | Not supported |
 | Vendor shadowing | Not supported |
-| Implicit network access during `gox build` | Not supported |
+| Implicit network access during `vo build` | Not supported |
 
 ## 15. Typical Errors
 
 ### Missing Cached Module
 
 ```
-error: cannot find module github.com/foo/bar@v1.2.3 in .goxdeps
-  run: gox get github.com/foo/bar@v1.2.3
+error: cannot find module github.com/foo/bar@v1.2.3 in .vodeps
+  run: vo get github.com/foo/bar@v1.2.3
 ```
 
 ### Version Conflict

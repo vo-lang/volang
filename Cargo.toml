@@ -2,35 +2,35 @@
 resolver = "2"
 members = [
   # Core (no_std)
-  "crates/gox-common-core",
+  "crates/vo-common-core",
   
   # Frontend
-  "crates/gox-common",
-  "crates/gox-syntax",
-  "crates/gox-analysis",
-  "crates/gox-module",
+  "crates/vo-common",
+  "crates/vo-syntax",
+  "crates/vo-analysis",
+  "crates/vo-module",
   
   # Code Generation
-  "crates/gox-codegen-vm",
-  "crates/gox-codegen-cranelift",
+  "crates/vo-codegen-vm",
+  "crates/vo-codegen-cranelift",
   
   # VM
-  "crates/gox-vm",
+  "crates/vo-vm",
   
   # Native Backends (Cranelift)
-  "crates/gox-jit",
-  "crates/gox-aot",
+  "crates/vo-jit",
+  "crates/vo-aot",
   
   # Runtime
-  "crates/gox-runtime-core",
-  "crates/gox-runtime-native",
-  "crates/gox-runtime-vm",
+  "crates/vo-runtime-core",
+  "crates/vo-runtime-native",
+  "crates/vo-runtime-vm",
   
   # Web (WASM)
-  "crates/gox-web",
+  "crates/vo-web",
   
   # Tools
-  "crates/gox-cli",
+  "crates/vo-cli",
 ]
 
 [workspace.package]

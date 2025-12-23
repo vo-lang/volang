@@ -1,10 +1,10 @@
-# GoX VM Design
+# Vo VM Design
 
-This document describes the GoX VM architecture, instruction set, and execution model.
+This document describes the Vo VM architecture, instruction set, and execution model.
 
 ## 1. Overview
 
-GoX VM is a register-based bytecode interpreter.
+Vo VM is a register-based bytecode interpreter.
 
 ### Design Principles
 
@@ -252,7 +252,7 @@ JUMP_IF_NOT   s, offset      # if !s then jump
 
 ### 4.8 Function Call
 
-Unified CALL instruction handles both GoX functions and extern functions:
+Unified CALL instruction handles both Vo functions and extern functions:
 
 ```asm
 CALL          callable, arg_start, arg_count, ret_start
@@ -264,7 +264,7 @@ Callable types (determined at runtime):
 
 ```rust
 enum Callable {
-    GoxFunc { func_id: FuncId },
+    VoFunc { func_id: FuncId },
     ExternFunc { extern_fn: ExternFn },
     Closure { func_id: FuncId, upvalues: Vec<GcRef> },
 }
@@ -278,7 +278,7 @@ CALL execution:
 ```rust
 fn exec_call(vm: &mut Vm, callable: &Callable, args: &[u64], ret: &mut [u64]) {
     match callable {
-        GoxFunc { func_id } => {
+        VoFunc { func_id } => {
             // Push new call frame, execute bytecode
         }
         ExternFunc { extern_fn } => {
@@ -288,7 +288,7 @@ fn exec_call(vm: &mut Vm, callable: &Callable, args: &[u64], ret: &mut [u64]) {
             vm.gc.resume();
         }
         Closure { func_id, upvalues } => {
-            // Set up upvalues, then execute like GoxFunc
+            // Set up upvalues, then execute like VoFunc
         }
     }
 }
@@ -438,7 +438,7 @@ fn scan(obj: &GcObject) {
 
 ```
 ┌─────────────────────────────────────────┐
-│  Magic: "GOXB" (4 bytes)                │
+│  Magic: "VOB" (4 bytes)                │
 │  Version (4 bytes)                      │
 ├─────────────────────────────────────────┤
 │  Type Table                             │

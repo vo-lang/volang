@@ -3,7 +3,7 @@
 ## Current Structure
 
 ```
-gox-analysis/src/check/
+vo-analysis/src/check/
 ├── mod.rs      (568 lines)  - TypeChecker struct, scope management, entry points
 ├── expr.rs     (1167 lines) - Expression checking, type predicates
 ├── stmt.rs     (687 lines)  - Statement checking
@@ -480,28 +480,28 @@ impl TypeInterner {
 
 ## Part 6: Rewrite Strategy (Break Everything, Fix Later)
 
-### Phase 1: gox-common-core
+### Phase 1: vo-common-core
 - Add `ExprId`, `TypeId` to `types.rs`
 
-### Phase 2: gox-syntax  
+### Phase 2: vo-syntax  
 - Add `id: ExprId` to `Expr`
 - Parser assigns ID when creating expressions
 
-### Phase 3: gox-analysis - TypeInterner
+### Phase 3: vo-analysis - TypeInterner
 - Create `type_interner.rs`
 
-### Phase 4: gox-analysis - Rewrite check/ (BREAK)
+### Phase 4: vo-analysis - Rewrite check/ (BREAK)
 - Rewrite `mod.rs`: TypeChecker uses `&mut TypeInterner`
 - Rewrite `expr.rs`: All `check_*` return `TypeId`
 - Rewrite `stmt.rs`: Use `TypeId` throughout
 - Rewrite `builtin.rs`: Return `TypeId`
 - **Will not compile until complete**
 
-### Phase 5: gox-analysis - Update lib.rs
+### Phase 5: vo-analysis - Update lib.rs
 - `TypeCheckResult` contains `TypeInterner`
 - Remove old `expr_types: HashMap<(u32,u32), Type>`
 
-### Phase 6: gox-codegen-vm Rewrite
+### Phase 6: vo-codegen-vm Rewrite
 - Rewrite type access to use `TypeInterner`
 - Remove string-based `method_table`
 - See Part 6.5 below
@@ -663,25 +663,25 @@ let method_key = format!("{}.{}", type_name, method);
 
 | File | Action | Changes |
 |------|--------|---------|
-| `gox-common-core/src/types.rs` | Modify | Add `ExprId`, `TypeId` |
-| `gox-syntax/src/ast.rs` | Modify | Add `id: ExprId` to `Expr` |
-| `gox-syntax/src/parser/expr.rs` | Modify | Assign `ExprId` when parsing |
-| `gox-analysis/src/type_interner.rs` | **Create** | `TypeInterner` implementation |
-| `gox-analysis/src/check/mod.rs` | Modify | See Part 1 |
-| `gox-analysis/src/check/expr.rs` | Modify | See Part 2 |
-| `gox-analysis/src/check/stmt.rs` | Modify | See Part 3 |
-| `gox-analysis/src/check/builtin.rs` | Modify | See Part 4 |
-| `gox-analysis/src/lib.rs` | Modify | Update `TypeCheckResult` |
-| `gox-codegen-vm/src/context.rs` | **Rewrite** | See Part 6.5.1, delete old functions |
-| `gox-codegen-vm/src/expr.rs` | Modify | Replace `lookup_expr_type` calls |
-| `gox-codegen-vm/src/stmt.rs` | Modify | Replace type lookups |
-| `gox-codegen-vm/src/lib.rs` | Modify | Update method_table building |
+| `vo-common-core/src/types.rs` | Modify | Add `ExprId`, `TypeId` |
+| `vo-syntax/src/ast.rs` | Modify | Add `id: ExprId` to `Expr` |
+| `vo-syntax/src/parser/expr.rs` | Modify | Assign `ExprId` when parsing |
+| `vo-analysis/src/type_interner.rs` | **Create** | `TypeInterner` implementation |
+| `vo-analysis/src/check/mod.rs` | Modify | See Part 1 |
+| `vo-analysis/src/check/expr.rs` | Modify | See Part 2 |
+| `vo-analysis/src/check/stmt.rs` | Modify | See Part 3 |
+| `vo-analysis/src/check/builtin.rs` | Modify | See Part 4 |
+| `vo-analysis/src/lib.rs` | Modify | Update `TypeCheckResult` |
+| `vo-codegen-vm/src/context.rs` | **Rewrite** | See Part 6.5.1, delete old functions |
+| `vo-codegen-vm/src/expr.rs` | Modify | Replace `lookup_expr_type` calls |
+| `vo-codegen-vm/src/stmt.rs` | Modify | Replace type lookups |
+| `vo-codegen-vm/src/lib.rs` | Modify | Update method_table building |
 
 ---
 
 ## Part 8: Estimated Line Changes
 
-### gox-analysis
+### vo-analysis
 
 | File | Lines Before | Est. Lines After | Change Type |
 |------|--------------|------------------|-------------|
@@ -691,7 +691,7 @@ let method_key = format!("{}.{}", type_name, method);
 | `check/stmt.rs` | 687 | ~650 | Refactor |
 | `check/builtin.rs` | 248 | ~250 | Minor |
 
-### gox-codegen-vm
+### vo-codegen-vm
 
 | File | Lines Before | Est. Lines After | Change Type |
 |------|--------------|------------------|-------------|
@@ -704,5 +704,5 @@ let method_key = format!("{}.{}", type_name, method);
 
 | Crate | Before | After | Net |
 |-------|--------|-------|-----|
-| gox-analysis | ~2670 | ~2700 | +30 (add TypeInterner) |
-| gox-codegen-vm | ~6135 | ~5800 | -335 (remove string ops) |
+| vo-analysis | ~2670 | ~2700 | +30 (add TypeInterner) |
+| vo-codegen-vm | ~6135 | ~5800 | -335 (remove string ops) |

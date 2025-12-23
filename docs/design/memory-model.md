@@ -1,8 +1,8 @@
-# GoX Memory Model Design
+# Vo Memory Model Design
 
 ## 1. Overview
 
-GoX adopts a Go-like memory model: value types are stack-allocated by default, with static escape analysis determining heap allocation.
+Vo adopts a Go-like memory model: value types are stack-allocated by default, with static escape analysis determining heap allocation.
 
 ## 2. Type Classification
 
@@ -50,7 +50,7 @@ Each local variable marked with `escapes: bool`
 
 Nested struct/array fields of an escaping variable also escape (allocated on heap as part of parent):
 
-```gox
+```vo
 type Inner struct { x int }
 type Outer struct { 
     inner Inner 
@@ -167,7 +167,7 @@ Interface is a value type (2 slots: `type_info + data`):
 
 ## 8. Comparison with Go
 
-| | Go | GoX |
+| | Go | Vo |
 |---|---|---|
 | Pointer syntax | `*T` for any type | Only `*StructType` |
 | Escape analysis | Static, precise | Static, simplified |

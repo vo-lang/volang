@@ -197,13 +197,13 @@ fn scan_struct_with_interface(gc: &mut Gc, obj: GcRef, slot_types: &[SlotType]) 
 }
 ```
 
-## SlotType (defined in gox-common-core)
+## SlotType (defined in vo-common-core)
 
 Since interface requires dynamic checking, struct slot_types use `SlotType` instead of simple `bool`.
-`SlotType` is defined in `gox-common-core/src/types.rs`, used for both stack and heap scanning:
+`SlotType` is defined in `vo-common-core/src/types.rs`, used for both stack and heap scanning:
 
 ```rust
-// gox-common-core/src/types.rs
+// vo-common-core/src/types.rs
 #[repr(u8)]
 pub enum SlotType {
     Value = 0,       // non-pointer, skip
@@ -317,10 +317,10 @@ gc.collect(|gc, obj| gc_types::scan_object(gc, obj))
 
 ## Implementation Location
 
-- `gox-common-core/src/types.rs`: `ValueKind`, `SlotType` enum definitions
-- `gox-runtime-core/src/gc_types.rs`: `scan_object`, `STRUCT_SLOT_TYPES`
-- `gox-common-core/src/types.rs`: `needs_gc(ValueKind)`
-- `gox-codegen-vm/src/types.rs`: slot_types generation
+- `vo-common-core/src/types.rs`: `ValueKind`, `SlotType` enum definitions
+- `vo-runtime-core/src/gc_types.rs`: `scan_object`, `STRUCT_SLOT_TYPES`
+- `vo-common-core/src/types.rs`: `needs_gc(ValueKind)`
+- `vo-codegen-vm/src/types.rs`: slot_types generation
 
 ## Properties
 

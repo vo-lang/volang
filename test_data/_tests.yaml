@@ -1,8 +1,8 @@
-# GoX Integration Test Configuration
+# Vo Integration Test Configuration
 #
 # Format:
 #   tests:
-#     - file: path/to/test.gox   # Relative to test_data/
+#     - file: path/to/test.vo   # Relative to test_data/
 #       mode: [vm, jit]          # Which modes to run
 #       skip: true               # Optional: skip this test
 #       skip: "reason"           # Optional: skip with reason
@@ -12,209 +12,209 @@
 
 tests:
   # Runtime tests (VM only)
-  - file: channel_send.gox
+  - file: channel_send.vo
     mode: [vm]
-  - file: clone_immediate_read.gox
+  - file: clone_immediate_read.vo
     mode: [vm]
-  - file: complex_literal.gox
+  - file: complex_literal.vo
     mode: [vm]
-  - file: const_fold.gox
+  - file: const_fold.vo
     mode: [vm]
-  - file: const.gox
+  - file: const.vo
     mode: [vm]
-  - file: constant.gox
+  - file: constant.vo
     mode: [vm]
-  - file: debug_clone.gox
+  - file: debug_clone.vo
     mode: [vm]
-  - file: debug_sequence.gox
+  - file: debug_sequence.vo
     mode: [vm]
-  - file: defer_stmt.gox
+  - file: defer_stmt.vo
     mode: [vm]
     skip: "type check failed"
-  - file: embed_interface_impl.gox
+  - file: embed_interface_impl.vo
     mode: [vm]
     skip: "closure calls not yet supported"
-  - file: embed_interface.gox
+  - file: embed_interface.vo
     mode: [vm]
-  - file: embed_method.gox
+  - file: embed_method.vo
     mode: [vm]
     skip: "closure calls not yet supported"
-  - file: embed_pointer.gox
+  - file: embed_pointer.vo
     mode: [vm]
-  - file: embed_shadow.gox
+  - file: embed_shadow.vo
     mode: [vm]
-  - file: embed_struct.gox
+  - file: embed_struct.vo
     mode: [vm]
-  - file: fib_goroutine.gox
+  - file: fib_goroutine.vo
     mode: [vm]
-  - file: field_offset_debug.gox
+  - file: field_offset_debug.vo
     mode: [vm]
-  - file: go_stmt.gox
+  - file: go_stmt.vo
     mode: [vm]
-  - file: init_call_error.gox
+  - file: init_call_error.vo
     mode: [vm]
     expect_error: true
-  - file: interface_conversion.gox
+  - file: interface_conversion.vo
     mode: [vm]
-  - file: interface_method_set.gox
+  - file: interface_method_set.vo
     mode: [vm]
-  - file: interface_pointer.gox
+  - file: interface_pointer.vo
     mode: [vm]
-  - file: interface.gox
+  - file: interface.vo
     mode: [vm]
-  - file: local_type.gox
+  - file: local_type.vo
     mode: [vm]
-  - file: map.gox
+  - file: map.vo
     mode: [vm]
-  - file: method_dispatch_bug.gox
+  - file: method_dispatch_bug.vo
     mode: [vm]
-  - file: minimal_bug.gox
+  - file: minimal_bug.vo
     mode: [vm]
-  - file: minimal_bug2.gox
+  - file: minimal_bug2.vo
     mode: [vm]
-  - file: multi_init.gox
+  - file: multi_init.vo
     mode: [vm]
     skip: "type check failed"
-  - file: multi_type_method.gox
+  - file: multi_type_method.vo
     mode: [vm]
-  - file: nested_clone_test.gox
+  - file: nested_clone_test.vo
     mode: [vm]
-  - file: nested_struct_bug.gox
+  - file: nested_struct_bug.vo
     mode: [vm]
-  - file: point_then_rect.gox
+  - file: point_then_rect.vo
     mode: [vm]
-  - file: pointer_basic.gox
+  - file: pointer_basic.vo
     mode: [vm]
-  - file: pointer_comprehensive.gox
+  - file: pointer_comprehensive.vo
     mode: [vm]
-  - file: pointer_embedded.gox
+  - file: pointer_embedded.vo
     mode: [vm]
     skip: "closure calls not yet supported"
-  - file: pointer_method_call.gox
+  - file: pointer_method_call.vo
     mode: [vm]
-  - file: range_string.gox
+  - file: range_string.vo
     mode: [vm]
-  - file: rect_only_sum.gox
+  - file: rect_only_sum.vo
     mode: [vm]
-  - file: rect_only.gox
+  - file: rect_only.vo
     mode: [vm]
-  - file: rune_literal.gox
+  - file: rune_literal.vo
     mode: [vm]
-  - file: select_stmt.gox
+  - file: select_stmt.vo
     mode: [vm]
     skip: "type check failed"
-  - file: setfield_getfield_test.gox
+  - file: setfield_getfield_test.vo
     mode: [vm]
-  - file: setfield_test.gox
+  - file: setfield_test.vo
     mode: [vm]
-  - file: simple_clone_test.gox
+  - file: simple_clone_test.vo
     mode: [vm]
-  - file: slice_map.gox
+  - file: slice_map.vo
     mode: [vm]
     skip: "assertion failed"
-  - file: slice.gox
+  - file: slice.vo
     mode: [vm]
-  - file: struct_method_simple.gox
+  - file: struct_method_simple.vo
     mode: [vm]
-  - file: struct_object.gox
+  - file: struct_object.vo
     mode: [vm]
-  - file: switch_stmt.gox
+  - file: switch_stmt.vo
     mode: [vm]
-  - file: type_debug.gox
+  - file: type_debug.vo
     mode: [vm]
-  - file: value_receiver_bug.gox
+  - file: value_receiver_bug.vo
     mode: [vm]
-  - file: var_dependency.gox
+  - file: var_dependency.vo
     mode: [vm]
-  - file: var_init_complex.gox
+  - file: var_init_complex.vo
     mode: [vm]
-  - file: var_init_func.gox
+  - file: var_init_func.vo
     mode: [vm]
-  - file: var_init_order.gox
+  - file: var_init_order.vo
     mode: [vm]
 
   # JIT-only tests (all skipped - JIT not ready)
-  - file: jit/bitwise_ops.gox
+  - file: jit/bitwise_ops.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/boolean_ops.gox
+  - file: jit/boolean_ops.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/channel_basic.gox
+  - file: jit/channel_basic.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/comparisons.gox
+  - file: jit/comparisons.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/control_flow.gox
+  - file: jit/control_flow.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/float_ops.gox
+  - file: jit/float_ops.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/for_loop.gox
+  - file: jit/for_loop.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/modulo_ops.gox
+  - file: jit/modulo_ops.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/multi_return.gox
+  - file: jit/multi_return.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/native_math.gox
+  - file: jit/native_math.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/native_strings.gox
+  - file: jit/native_strings.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/negative_numbers.gox
+  - file: jit/negative_numbers.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/nested_calls.gox
+  - file: jit/nested_calls.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/recursion.gox
+  - file: jit/recursion.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/simple_arithmetic.gox
+  - file: jit/simple_arithmetic.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/string_const.gox
+  - file: jit/string_const.vo
     mode: [jit]
     skip: "JIT not ready"
-  - file: jit/type_conversion.gox
+  - file: jit/type_conversion.vo
     mode: [jit]
     skip: "JIT not ready"
 
   # Stdlib tests (all skipped - stdlib not ready)
-  - file: stdlib/base64.gox
+  - file: stdlib/base64.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/bytes.gox
+  - file: stdlib/bytes.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/errors.gox
+  - file: stdlib/errors.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/hex.gox
+  - file: stdlib/hex.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/math.gox
+  - file: stdlib/math.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/regexp.gox
+  - file: stdlib/regexp.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/sort.gox
+  - file: stdlib/sort.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/strconv.gox
+  - file: stdlib/strconv.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/strings.gox
+  - file: stdlib/strings.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
-  - file: stdlib/unicode.gox
+  - file: stdlib/unicode.vo
     mode: [vm, jit]
     skip: "stdlib not ready"
 

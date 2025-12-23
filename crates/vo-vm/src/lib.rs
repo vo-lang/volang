@@ -1,0 +1,44 @@
+//! Custom virtual machine runtime for Vo.
+//!
+//! This crate provides a register-based bytecode VM with:
+//! - Incremental-ready garbage collector (Phase 1: stop-the-world)
+//! - Fiber-based concurrency (goroutines)
+//! - Full Go-like type system support
+//! - Zero-copy native function interface
+//!
+//! # Features
+//! - `std` (default): Enable std features like bytecode loading from io::Read
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+// Re-export alloc types for internal use
+
+pub mod types;
+pub mod instruction;
+pub mod fiber;
+pub mod bytecode;
+pub mod vm;
+pub mod extern_fn;
+pub mod value;
+
+// Re-export from vo-runtime-core
+pub use vo_runtime_core::gc;
+pub use vo_runtime_core::objects;
+
+#[cfg(feature = "multithread")]
+pub mod scheduler;
+
+pub use gc::{Gc, GcRef, GcHeader, GcColor, NULL_REF};
+pub use types::{TypeId, TypeMeta, TypeTable};
+pub use instruction::{Instruction, Opcode};
+pub use fiber::{Fiber, FiberId, FiberStatus, CallFrame, Scheduler};
+pub use bytecode::{Module, FunctionDef, Constant, BytecodeError};
+pub use vm::{Vm, VmResult};
+
+// Zero-copy extern API (extern = calls from Vo to outside)
+pub use extern_fn::{ExternFn, ExternCtx, ExternResult, ExternRegistry, ValueKind};
+
+// Typed value for extern functions
+pub use value::VoValue;

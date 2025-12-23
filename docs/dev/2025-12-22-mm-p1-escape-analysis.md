@@ -6,7 +6,7 @@
 
 ## Overview
 
-Implement static escape analysis in `gox-analysis` to determine which variables need heap allocation.
+Implement static escape analysis in `vo-analysis` to determine which variables need heap allocation.
 
 ## Escape Rules
 
@@ -32,7 +32,7 @@ Implement static escape analysis in `gox-analysis` to determine which variables 
 
 If a struct or **any of its nested fields** triggers escape, the entire root struct escapes.
 
-```gox
+```vo
 type Inner struct { x int }
 type Outer struct { inner Inner }
 
@@ -204,7 +204,7 @@ pub fn check(...) -> TypeInfo {
 
 ## Testing
 
-```gox
+```vo
 func test_no_escape() {
     var s Point  // should NOT escape
     s.x = 1

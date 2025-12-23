@@ -1,4 +1,4 @@
-# Backend P4: gox-runtime-native
+# Backend P4: vo-runtime-native
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
@@ -19,7 +19,7 @@
 ### 1. 全局 GC (gc_global.rs)
 
 ```rust
-use gox_runtime_core::gc::{Gc, GcRef};
+use vo_runtime_core::gc::{Gc, GcRef};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
@@ -62,44 +62,44 @@ pub fn set_func_ptr(func_id: u32, ptr: *const u8) {
 
 ```rust
 #[no_mangle]
-pub extern "C" fn gox_rt_alloc(value_kind: u8, type_id: u16, slots: u16) -> GcRef {
+pub extern "C" fn vo_rt_alloc(value_kind: u8, type_id: u16, slots: u16) -> GcRef {
     GLOBAL_GC.lock().alloc(value_kind, type_id, slots)
 }
 
 #[no_mangle]
-pub extern "C" fn gox_gc_read_slot(obj: GcRef, idx: usize) -> u64 {
+pub extern "C" fn vo_gc_read_slot(obj: GcRef, idx: usize) -> u64 {
     Gc::read_slot(obj, idx)
 }
 
 #[no_mangle]
-pub extern "C" fn gox_gc_write_slot(obj: GcRef, idx: usize, val: u64) {
+pub extern "C" fn vo_gc_write_slot(obj: GcRef, idx: usize, val: u64) {
     Gc::write_slot(obj, idx, val)
 }
 
 #[no_mangle]
-pub extern "C" fn gox_rt_write_barrier(parent: GcRef, child: GcRef) {
+pub extern "C" fn vo_rt_write_barrier(parent: GcRef, child: GcRef) {
     GLOBAL_GC.lock().write_barrier(parent, child)
 }
 
 #[no_mangle]
-pub extern "C" fn gox_rt_get_global(idx: usize) -> u64 {
+pub extern "C" fn vo_rt_get_global(idx: usize) -> u64 {
     GLOBALS.lock()[idx]
 }
 
 #[no_mangle]
-pub extern "C" fn gox_rt_set_global(idx: usize, val: u64) {
+pub extern "C" fn vo_rt_set_global(idx: usize, val: u64) {
     GLOBALS.lock()[idx] = val;
 }
 
 #[no_mangle]
-pub extern "C" fn gox_func_table_ptr() -> *const *const u8 {
+pub extern "C" fn vo_func_table_ptr() -> *const *const u8 {
     FUNC_TABLE.read().as_ptr()
 }
 ```
 
 **⚠️ 注意**：
-- `gox_gc_read_slot` / `gox_gc_write_slot` 是静态方法，不需要锁
-- 但 `gox_rt_alloc` 需要锁 GC
+- `vo_gc_read_slot` / `vo_gc_write_slot` 是静态方法，不需要锁
+- 但 `vo_rt_alloc` 需要锁 GC
 
 ### 2. 符号注册 (symbols.rs)
 
@@ -119,89 +119,89 @@ impl RuntimeSymbols {
     pub fn new() -> Self {
         let symbols = vec![
             // GC (5)
-            RuntimeSymbol { name: "gox_rt_alloc", ptr: gox_rt_alloc as *const u8 },
-            RuntimeSymbol { name: "gox_gc_read_slot", ptr: gox_gc_read_slot as *const u8 },
-            RuntimeSymbol { name: "gox_gc_write_slot", ptr: gox_gc_write_slot as *const u8 },
-            RuntimeSymbol { name: "gox_rt_write_barrier", ptr: gox_rt_write_barrier as *const u8 },
-            RuntimeSymbol { name: "gox_rt_mark_gray", ptr: gox_rt_mark_gray as *const u8 },
+            RuntimeSymbol { name: "vo_rt_alloc", ptr: vo_rt_alloc as *const u8 },
+            RuntimeSymbol { name: "vo_gc_read_slot", ptr: vo_gc_read_slot as *const u8 },
+            RuntimeSymbol { name: "vo_gc_write_slot", ptr: vo_gc_write_slot as *const u8 },
+            RuntimeSymbol { name: "vo_rt_write_barrier", ptr: vo_rt_write_barrier as *const u8 },
+            RuntimeSymbol { name: "vo_rt_mark_gray", ptr: vo_rt_mark_gray as *const u8 },
             
             // Globals (2)
-            RuntimeSymbol { name: "gox_rt_get_global", ptr: gox_rt_get_global as *const u8 },
-            RuntimeSymbol { name: "gox_rt_set_global", ptr: gox_rt_set_global as *const u8 },
+            RuntimeSymbol { name: "vo_rt_get_global", ptr: vo_rt_get_global as *const u8 },
+            RuntimeSymbol { name: "vo_rt_set_global", ptr: vo_rt_set_global as *const u8 },
             
             // String (11)
-            RuntimeSymbol { name: "gox_string_len", ptr: ffi::gox_string_len as *const u8 },
-            RuntimeSymbol { name: "gox_string_index", ptr: ffi::gox_string_index as *const u8 },
-            RuntimeSymbol { name: "gox_rt_string_concat", ptr: gox_rt_string_concat as *const u8 },
-            RuntimeSymbol { name: "gox_rt_string_slice", ptr: gox_rt_string_slice as *const u8 },
-            RuntimeSymbol { name: "gox_string_eq", ptr: ffi::gox_string_eq as *const u8 },
+            RuntimeSymbol { name: "vo_string_len", ptr: ffi::vo_string_len as *const u8 },
+            RuntimeSymbol { name: "vo_string_index", ptr: ffi::vo_string_index as *const u8 },
+            RuntimeSymbol { name: "vo_rt_string_concat", ptr: vo_rt_string_concat as *const u8 },
+            RuntimeSymbol { name: "vo_rt_string_slice", ptr: vo_rt_string_slice as *const u8 },
+            RuntimeSymbol { name: "vo_string_eq", ptr: ffi::vo_string_eq as *const u8 },
             // ... 更多 string 函数
             
             // Array (4)
-            RuntimeSymbol { name: "gox_rt_array_create", ptr: gox_rt_array_create as *const u8 },
-            RuntimeSymbol { name: "gox_array_len", ptr: ffi::gox_array_len as *const u8 },
-            RuntimeSymbol { name: "gox_array_get", ptr: ffi::gox_array_get as *const u8 },
-            RuntimeSymbol { name: "gox_array_set", ptr: ffi::gox_array_set as *const u8 },
+            RuntimeSymbol { name: "vo_rt_array_create", ptr: vo_rt_array_create as *const u8 },
+            RuntimeSymbol { name: "vo_array_len", ptr: ffi::vo_array_len as *const u8 },
+            RuntimeSymbol { name: "vo_array_get", ptr: ffi::vo_array_get as *const u8 },
+            RuntimeSymbol { name: "vo_array_set", ptr: ffi::vo_array_set as *const u8 },
             
             // Slice (7)
-            RuntimeSymbol { name: "gox_rt_slice_create", ptr: gox_rt_slice_create as *const u8 },
-            RuntimeSymbol { name: "gox_slice_len", ptr: ffi::gox_slice_len as *const u8 },
-            RuntimeSymbol { name: "gox_slice_cap", ptr: ffi::gox_slice_cap as *const u8 },
-            RuntimeSymbol { name: "gox_slice_get", ptr: ffi::gox_slice_get as *const u8 },
-            RuntimeSymbol { name: "gox_slice_set", ptr: ffi::gox_slice_set as *const u8 },
-            RuntimeSymbol { name: "gox_rt_slice_append", ptr: gox_rt_slice_append as *const u8 },
-            RuntimeSymbol { name: "gox_rt_slice_slice", ptr: gox_rt_slice_slice as *const u8 },
+            RuntimeSymbol { name: "vo_rt_slice_create", ptr: vo_rt_slice_create as *const u8 },
+            RuntimeSymbol { name: "vo_slice_len", ptr: ffi::vo_slice_len as *const u8 },
+            RuntimeSymbol { name: "vo_slice_cap", ptr: ffi::vo_slice_cap as *const u8 },
+            RuntimeSymbol { name: "vo_slice_get", ptr: ffi::vo_slice_get as *const u8 },
+            RuntimeSymbol { name: "vo_slice_set", ptr: ffi::vo_slice_set as *const u8 },
+            RuntimeSymbol { name: "vo_rt_slice_append", ptr: vo_rt_slice_append as *const u8 },
+            RuntimeSymbol { name: "vo_rt_slice_slice", ptr: vo_rt_slice_slice as *const u8 },
             
             // Closure (6)
-            RuntimeSymbol { name: "gox_rt_closure_create", ptr: gox_rt_closure_create as *const u8 },
-            RuntimeSymbol { name: "gox_closure_func_id", ptr: ffi::gox_closure_func_id as *const u8 },
-            RuntimeSymbol { name: "gox_closure_get_upvalue", ptr: ffi::gox_closure_get_upvalue as *const u8 },
-            RuntimeSymbol { name: "gox_closure_set_upvalue", ptr: ffi::gox_closure_set_upvalue as *const u8 },
-            RuntimeSymbol { name: "gox_rt_upval_box_create", ptr: gox_rt_upval_box_create as *const u8 },
-            RuntimeSymbol { name: "gox_upval_box_get", ptr: ffi::gox_upval_box_get as *const u8 },
-            RuntimeSymbol { name: "gox_upval_box_set", ptr: ffi::gox_upval_box_set as *const u8 },
+            RuntimeSymbol { name: "vo_rt_closure_create", ptr: vo_rt_closure_create as *const u8 },
+            RuntimeSymbol { name: "vo_closure_func_id", ptr: ffi::vo_closure_func_id as *const u8 },
+            RuntimeSymbol { name: "vo_closure_get_upvalue", ptr: ffi::vo_closure_get_upvalue as *const u8 },
+            RuntimeSymbol { name: "vo_closure_set_upvalue", ptr: ffi::vo_closure_set_upvalue as *const u8 },
+            RuntimeSymbol { name: "vo_rt_upval_box_create", ptr: vo_rt_upval_box_create as *const u8 },
+            RuntimeSymbol { name: "vo_upval_box_get", ptr: ffi::vo_upval_box_get as *const u8 },
+            RuntimeSymbol { name: "vo_upval_box_set", ptr: ffi::vo_upval_box_set as *const u8 },
             
             // Interface (3)
-            RuntimeSymbol { name: "gox_interface_unbox_type", ptr: ffi::gox_interface_unbox_type as *const u8 },
-            RuntimeSymbol { name: "gox_interface_unbox_data", ptr: ffi::gox_interface_unbox_data as *const u8 },
-            RuntimeSymbol { name: "gox_interface_is_nil", ptr: ffi::gox_interface_is_nil as *const u8 },
+            RuntimeSymbol { name: "vo_interface_unbox_type", ptr: ffi::vo_interface_unbox_type as *const u8 },
+            RuntimeSymbol { name: "vo_interface_unbox_data", ptr: ffi::vo_interface_unbox_data as *const u8 },
+            RuntimeSymbol { name: "vo_interface_is_nil", ptr: ffi::vo_interface_is_nil as *const u8 },
             
             // Function table
-            RuntimeSymbol { name: "gox_func_table_ptr", ptr: gox_func_table_ptr as *const u8 },
+            RuntimeSymbol { name: "vo_func_table_ptr", ptr: vo_func_table_ptr as *const u8 },
             
             // Extern dispatch
-            RuntimeSymbol { name: "gox_extern_call", ptr: extern_dispatch::gox_extern_call as *const u8 },
+            RuntimeSymbol { name: "vo_extern_call", ptr: extern_dispatch::vo_extern_call as *const u8 },
             
             // Goroutine (6)
-            RuntimeSymbol { name: "gox_go_spawn", ptr: goroutine::gox_go_spawn as *const u8 },
-            RuntimeSymbol { name: "gox_yield", ptr: goroutine::gox_yield as *const u8 },
-            RuntimeSymbol { name: "gox_chan_new", ptr: goroutine::gox_chan_new as *const u8 },
-            RuntimeSymbol { name: "gox_chan_send", ptr: goroutine::gox_chan_send as *const u8 },
-            RuntimeSymbol { name: "gox_chan_recv", ptr: goroutine::gox_chan_recv as *const u8 },
-            RuntimeSymbol { name: "gox_chan_close", ptr: goroutine::gox_chan_close as *const u8 },
+            RuntimeSymbol { name: "vo_go_spawn", ptr: goroutine::vo_go_spawn as *const u8 },
+            RuntimeSymbol { name: "vo_yield", ptr: goroutine::vo_yield as *const u8 },
+            RuntimeSymbol { name: "vo_chan_new", ptr: goroutine::vo_chan_new as *const u8 },
+            RuntimeSymbol { name: "vo_chan_send", ptr: goroutine::vo_chan_send as *const u8 },
+            RuntimeSymbol { name: "vo_chan_recv", ptr: goroutine::vo_chan_recv as *const u8 },
+            RuntimeSymbol { name: "vo_chan_close", ptr: goroutine::vo_chan_close as *const u8 },
             
             // Defer/Panic (4)
-            RuntimeSymbol { name: "gox_defer_push", ptr: goroutine::gox_defer_push as *const u8 },
-            RuntimeSymbol { name: "gox_defer_pop", ptr: goroutine::gox_defer_pop as *const u8 },
-            RuntimeSymbol { name: "gox_panic", ptr: goroutine::gox_panic as *const u8 },
-            RuntimeSymbol { name: "gox_recover", ptr: goroutine::gox_recover as *const u8 },
+            RuntimeSymbol { name: "vo_defer_push", ptr: goroutine::vo_defer_push as *const u8 },
+            RuntimeSymbol { name: "vo_defer_pop", ptr: goroutine::vo_defer_pop as *const u8 },
+            RuntimeSymbol { name: "vo_panic", ptr: goroutine::vo_panic as *const u8 },
+            RuntimeSymbol { name: "vo_recover", ptr: goroutine::vo_recover as *const u8 },
             
             // Select (4)
-            RuntimeSymbol { name: "gox_select_start", ptr: goroutine::gox_select_start as *const u8 },
-            RuntimeSymbol { name: "gox_select_add_send", ptr: goroutine::gox_select_add_send as *const u8 },
-            RuntimeSymbol { name: "gox_select_add_recv", ptr: goroutine::gox_select_add_recv as *const u8 },
-            RuntimeSymbol { name: "gox_select_exec", ptr: goroutine::gox_select_exec as *const u8 },
+            RuntimeSymbol { name: "vo_select_start", ptr: goroutine::vo_select_start as *const u8 },
+            RuntimeSymbol { name: "vo_select_add_send", ptr: goroutine::vo_select_add_send as *const u8 },
+            RuntimeSymbol { name: "vo_select_add_recv", ptr: goroutine::vo_select_add_recv as *const u8 },
+            RuntimeSymbol { name: "vo_select_exec", ptr: goroutine::vo_select_exec as *const u8 },
             
             // Iterator (3)
-            RuntimeSymbol { name: "gox_iter_begin", ptr: goroutine::gox_iter_begin as *const u8 },
-            RuntimeSymbol { name: "gox_iter_next", ptr: goroutine::gox_iter_next as *const u8 },
-            RuntimeSymbol { name: "gox_iter_end", ptr: goroutine::gox_iter_end as *const u8 },
+            RuntimeSymbol { name: "vo_iter_begin", ptr: goroutine::vo_iter_begin as *const u8 },
+            RuntimeSymbol { name: "vo_iter_next", ptr: goroutine::vo_iter_next as *const u8 },
+            RuntimeSymbol { name: "vo_iter_end", ptr: goroutine::vo_iter_end as *const u8 },
             
             // Debug (4)
-            RuntimeSymbol { name: "gox_debug_print", ptr: debug::gox_debug_print as *const u8 },
-            RuntimeSymbol { name: "gox_assert_begin", ptr: debug::gox_assert_begin as *const u8 },
-            RuntimeSymbol { name: "gox_assert_arg", ptr: debug::gox_assert_arg as *const u8 },
-            RuntimeSymbol { name: "gox_assert_end", ptr: debug::gox_assert_end as *const u8 },
+            RuntimeSymbol { name: "vo_debug_print", ptr: debug::vo_debug_print as *const u8 },
+            RuntimeSymbol { name: "vo_assert_begin", ptr: debug::vo_assert_begin as *const u8 },
+            RuntimeSymbol { name: "vo_assert_arg", ptr: debug::vo_assert_arg as *const u8 },
+            RuntimeSymbol { name: "vo_assert_end", ptr: debug::vo_assert_end as *const u8 },
         ];
         
         Self { symbols }
@@ -214,8 +214,8 @@ impl RuntimeSymbols {
 ```
 
 **⚠️ 注意**：
-- 区分 `gox_rt_*` (需要 GC) 和 `gox_*` (不需要 GC)
-- `gox_rt_*` 函数在本模块实现，`gox_*` 从 `runtime-core/ffi.rs` 导入
+- 区分 `vo_rt_*` (需要 GC) 和 `vo_*` (不需要 GC)
+- `vo_rt_*` 函数在本模块实现，`vo_*` 从 `runtime-core/ffi.rs` 导入
 
 ### 3. Stack Map (stack_map.rs)
 
@@ -348,36 +348,36 @@ impl Channel {
 
 ```rust
 #[no_mangle]
-pub extern "C" fn gox_go_spawn(func_ptr: *const u8, arg_ptr: *const u64, arg_count: u32) {
+pub extern "C" fn vo_go_spawn(func_ptr: *const u8, arg_ptr: *const u64, arg_count: u32) {
     let args = unsafe { std::slice::from_raw_parts(arg_ptr, arg_count as usize) };
     SCHEDULER.spawn(func_ptr, args);
 }
 
 #[no_mangle]
-pub extern "C" fn gox_yield() {
+pub extern "C" fn vo_yield() {
     SCHEDULER.yield_current();
 }
 
 #[no_mangle]
-pub extern "C" fn gox_chan_new(capacity: i64) -> GcRef {
+pub extern "C" fn vo_chan_new(capacity: i64) -> GcRef {
     // 分配 Channel 对象
     // ...
 }
 
 #[no_mangle]
-pub extern "C" fn gox_chan_send(ch: GcRef, val: u64) {
+pub extern "C" fn vo_chan_send(ch: GcRef, val: u64) {
     // 可能阻塞
     // ...
 }
 
 #[no_mangle]
-pub extern "C" fn gox_chan_recv(ch: GcRef) -> u64 {
+pub extern "C" fn vo_chan_recv(ch: GcRef) -> u64 {
     // 可能阻塞
     // ...
 }
 
 #[no_mangle]
-pub extern "C" fn gox_chan_close(ch: GcRef) {
+pub extern "C" fn vo_chan_close(ch: GcRef) {
     // ...
 }
 ```
@@ -396,7 +396,7 @@ thread_local! {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_defer_push(func_ptr: *const u8, arg_ptr: *const u64, arg_count: u32) {
+pub extern "C" fn vo_defer_push(func_ptr: *const u8, arg_ptr: *const u64, arg_count: u32) {
     DEFER_STACK.with(|stack| {
         let args = unsafe { std::slice::from_raw_parts(arg_ptr, arg_count as usize) };
         stack.borrow_mut().push(DeferEntry {
@@ -407,7 +407,7 @@ pub extern "C" fn gox_defer_push(func_ptr: *const u8, arg_ptr: *const u64, arg_c
 }
 
 #[no_mangle]
-pub extern "C" fn gox_defer_pop() {
+pub extern "C" fn vo_defer_pop() {
     DEFER_STACK.with(|stack| {
         if let Some(entry) = stack.borrow_mut().pop() {
             // 调用 deferred 函数
@@ -417,7 +417,7 @@ pub extern "C" fn gox_defer_pop() {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_panic(val: GcRef) {
+pub extern "C" fn vo_panic(val: GcRef) {
     PANIC_VALUE.with(|pv| {
         *pv.borrow_mut() = Some(val);
     });
@@ -430,11 +430,11 @@ pub extern "C" fn gox_panic(val: GcRef) {
     });
     
     // 真正 panic
-    panic!("GoX panic");
+    panic!("Vo panic");
 }
 
 #[no_mangle]
-pub extern "C" fn gox_recover() -> GcRef {
+pub extern "C" fn vo_recover() -> GcRef {
     PANIC_VALUE.with(|pv| {
         pv.borrow_mut().take().unwrap_or(std::ptr::null_mut())
     })
@@ -461,7 +461,7 @@ pub enum SelectCase {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_select_start(case_count: u32, has_default: u32) {
+pub extern "C" fn vo_select_start(case_count: u32, has_default: u32) {
     SELECT_STATE.with(|s| {
         *s.borrow_mut() = Some(SelectState {
             cases: Vec::with_capacity(case_count as usize),
@@ -471,21 +471,21 @@ pub extern "C" fn gox_select_start(case_count: u32, has_default: u32) {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_select_add_recv(chan: GcRef) {
+pub extern "C" fn vo_select_add_recv(chan: GcRef) {
     SELECT_STATE.with(|s| {
         s.borrow_mut().as_mut().unwrap().cases.push(SelectCase::Recv { chan });
     });
 }
 
 #[no_mangle]
-pub extern "C" fn gox_select_add_send(chan: GcRef, val: u64) {
+pub extern "C" fn vo_select_add_send(chan: GcRef, val: u64) {
     SELECT_STATE.with(|s| {
         s.borrow_mut().as_mut().unwrap().cases.push(SelectCase::Send { chan, val });
     });
 }
 
 #[no_mangle]
-pub extern "C" fn gox_select_exec() -> i32 {
+pub extern "C" fn vo_select_exec() -> i32 {
     SELECT_STATE.with(|s| {
         let state = s.borrow_mut().take().unwrap();
         do_select(state)  // 可能阻塞（协程切换）
@@ -504,9 +504,9 @@ fn do_select(state: SelectState) -> i32 {
 **VM vs JIT**：
 | | VM | JIT |
 |---|---|---|
-| SelectBegin | `fiber.select_state = Some(...)` | `gox_select_start(...)` |
-| SelectRecv/Send | 填充 `select_state` | `gox_select_add_*` |
-| SelectEnd | 执行，可能切换 Fiber | `gox_select_exec()`（阻塞或协程切换） |
+| SelectBegin | `fiber.select_state = Some(...)` | `vo_select_start(...)` |
+| SelectRecv/Send | 填充 `select_state` | `vo_select_add_*` |
+| SelectEnd | 执行，可能切换 Fiber | `vo_select_exec()`（阻塞或协程切换） |
 
 ### 7. Extern Dispatch (extern_dispatch.rs)
 
@@ -523,7 +523,7 @@ pub fn register_extern(extern_id: u32, f: ExternFn) {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_extern_call(
+pub extern "C" fn vo_extern_call(
     extern_id: u32,
     args: *const u64,
     arg_count: u32,
@@ -570,7 +570,7 @@ pub fn register_all() {
 
 ```rust
 #[no_mangle]
-pub extern "C" fn gox_debug_print(val: u64, kind: u8) {
+pub extern "C" fn vo_debug_print(val: u64, kind: u8) {
     let vk = ValueKind::from_u8(kind);
     match vk {
         ValueKind::Int => println!("{}", val as i64),
@@ -586,17 +586,17 @@ pub extern "C" fn gox_debug_print(val: u64, kind: u8) {
 }
 
 #[no_mangle]
-pub extern "C" fn gox_assert_begin() {
+pub extern "C" fn vo_assert_begin() {
     // 开始收集 assert 参数
 }
 
 #[no_mangle]
-pub extern "C" fn gox_assert_arg(val: u64, kind: u8) {
+pub extern "C" fn vo_assert_arg(val: u64, kind: u8) {
     // 收集一个参数
 }
 
 #[no_mangle]
-pub extern "C" fn gox_assert_end(passed: bool) {
+pub extern "C" fn vo_assert_end(passed: bool) {
     if !passed {
         // 打印收集的参数
         panic!("assertion failed");
@@ -611,14 +611,14 @@ pub extern "C" fn gox_assert_end(passed: bool) {
 - [ ] GLOBALS / GLOBALS_IS_REF
 - [ ] FUNC_TABLE
 - [ ] init_* 函数
-- [ ] gox_rt_alloc
-- [ ] gox_gc_read_slot / gox_gc_write_slot
-- [ ] gox_rt_write_barrier
-- [ ] gox_rt_get_global / gox_rt_set_global
-- [ ] gox_func_table_ptr
-- [ ] gox_rt_string_* (需要 GC 的 string 操作)
-- [ ] gox_rt_array_* / gox_rt_slice_*
-- [ ] gox_rt_closure_* / gox_rt_upval_box_*
+- [ ] vo_rt_alloc
+- [ ] vo_gc_read_slot / vo_gc_write_slot
+- [ ] vo_rt_write_barrier
+- [ ] vo_rt_get_global / vo_rt_set_global
+- [ ] vo_func_table_ptr
+- [ ] vo_rt_string_* (需要 GC 的 string 操作)
+- [ ] vo_rt_array_* / vo_rt_slice_*
+- [ ] vo_rt_closure_* / vo_rt_upval_box_*
 - [ ] collect_garbage
 
 ### symbols.rs
@@ -636,23 +636,23 @@ pub extern "C" fn gox_assert_end(passed: bool) {
 - [ ] Goroutine 结构
 - [ ] Scheduler
 - [ ] Channel (Mutex<ChannelState>)
-- [ ] gox_go_spawn
-- [ ] gox_yield
-- [ ] gox_chan_*
+- [ ] vo_go_spawn
+- [ ] vo_yield
+- [ ] vo_chan_*
 
 ### defer/panic
 - [ ] DEFER_STACK
-- [ ] gox_defer_push / gox_defer_pop
-- [ ] gox_panic / gox_recover
+- [ ] vo_defer_push / vo_defer_pop
+- [ ] vo_panic / vo_recover
 
 ### select
 - [ ] SelectState
-- [ ] gox_select_*
+- [ ] vo_select_*
 
 ### extern_dispatch.rs
 - [ ] ExternFn 类型
 - [ ] register_extern
-- [ ] gox_extern_call
+- [ ] vo_extern_call
 
 ### extern_fns/
 - [ ] math 函数
@@ -660,8 +660,8 @@ pub extern "C" fn gox_assert_end(passed: bool) {
 - [ ] 其他 stdlib
 
 ### debug.rs
-- [ ] gox_debug_print
-- [ ] gox_assert_*
+- [ ] vo_debug_print
+- [ ] vo_assert_*
 
 ## 单元测试
 
@@ -669,7 +669,7 @@ pub extern "C" fn gox_assert_end(passed: bool) {
 #[test]
 fn test_gc_global() {
     init_gc();
-    let obj = gox_rt_alloc(ValueKind::Struct as u8, 0, 2);
+    let obj = vo_rt_alloc(ValueKind::Struct as u8, 0, 2);
     assert!(!obj.is_null());
 }
 

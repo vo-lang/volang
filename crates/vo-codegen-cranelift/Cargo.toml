@@ -1,0 +1,19 @@
+[package]
+name = "vo-codegen-cranelift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared Cranelift code generation for Vo AOT and JIT compilation"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+vo-common-core = { path = "../vo-common-core" }
+vo-vm = { path = "../vo-vm" }
+vo-runtime-native = { path = "../vo-runtime-native" }
+
+# Cranelift dependencies
+cranelift-codegen = "0.113"
+cranelift-frontend = "0.113"
+cranelift-module = "0.113"
+
+anyhow = "1.0"

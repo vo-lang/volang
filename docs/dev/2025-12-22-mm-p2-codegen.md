@@ -15,10 +15,10 @@ Modify codegen to generate different code based on escape analysis results:
 
 ### 问题1: TypeInfo 无法访问逃逸信息
 
-`gox-codegen-vm/src/type_info.rs` 使用 `TypeQuery` 包装，但无法访问 `escaped_vars`:
+`vo-codegen-vm/src/type_info.rs` 使用 `TypeQuery` 包装，但无法访问 `escaped_vars`:
 
 ```rust
-// gox-codegen-vm/src/type_info.rs:150-162
+// vo-codegen-vm/src/type_info.rs:150-162
 pub struct TypeInfo<'a> {
     pub query: TypeQuery<'a>,
     pub expr_types: &'a HashMap<ExprId, TypeAndValue>,
@@ -31,7 +31,7 @@ pub struct TypeInfo<'a> {
 ### 问题2: LocalVar 不追踪栈/堆状态
 
 ```rust
-// gox-codegen-vm/src/func.rs:17-22
+// vo-codegen-vm/src/func.rs:17-22
 pub struct LocalVar {
     pub symbol: Symbol,
     pub slot: u16,
@@ -43,7 +43,7 @@ pub struct LocalVar {
 ### 问题3: struct 总是堆分配
 
 ```rust
-// gox-codegen-vm/src/stmt.rs:142-149
+// vo-codegen-vm/src/stmt.rs:142-149
 if is_struct {
     let ty = info.query.get_type(type_key.unwrap());
     for name in &spec.names {
@@ -57,7 +57,7 @@ if is_struct {
 ### 问题4: 字段访问总是用 GetField/SetField
 
 ```rust
-// gox-codegen-vm/src/expr.rs:782-792
+// vo-codegen-vm/src/expr.rs:782-792
 // 总是用堆访问
 let (current, byte_offset) = traverse_to_field(indices, base_reg, func);
 func.emit_with_flags(Opcode::GetField, 3, dst + j as u16, current, slot_offset);
@@ -69,7 +69,7 @@ func.emit_with_flags(Opcode::GetField, 3, dst + j as u16, current, slot_offset);
 
 #### 2.1.1 扩展 TypeInfo
 
-**文件**: `gox-codegen-vm/src/type_info.rs`
+**文件**: `vo-codegen-vm/src/type_info.rs`
 
 ```rust
 pub struct TypeInfo<'a> {
@@ -99,7 +99,7 @@ impl<'a> TypeInfo<'a> {
 
 #### 2.1.2 扩展 LocalVar
 
-**文件**: `gox-codegen-vm/src/func.rs`
+**文件**: `vo-codegen-vm/src/func.rs`
 
 ```rust
 pub struct LocalVar {
@@ -153,7 +153,7 @@ pub struct TypeInfo<'a> {
 }
 ```
 
-或者，传入完整的 `gox_analysis::TypeInfo` 引用。
+或者，传入完整的 `vo_analysis::TypeInfo` 引用。
 
 ### Phase 2.2: stmt.rs 修改 (~200 lines)
 
@@ -193,7 +193,7 @@ if is_struct {
 类似处理，但需要从 RHS 表达式推断类型和逃逸状态。
 
 对于 `:=` 的复合字面量情况:
-```gox
+```vo
 s := Point{x: 1, y: 2}  // s 是否逃逸?
 ```
 
@@ -300,7 +300,7 @@ UnaryOp::Addr => {
 
 ### Phase 2.6: Cranelift 修改 (~250 lines)
 
-**文件**: `gox-codegen-cranelift/src/translate.rs`
+**文件**: `vo-codegen-cranelift/src/translate.rs`
 
 Cranelift 不直接处理逃逸分析，它翻译 bytecode。关键是 bytecode 已经包含正确的指令:
 
@@ -316,14 +316,14 @@ Cranelift 不直接处理逃逸分析，它翻译 bytecode。关键是 bytecode 
 ## Data Flow Diagram
 
 ```
-gox-analysis
+vo-analysis
 ├── TypeInfo
 │   ├── escaped_vars: HashSet<ObjKey>  ← 逃逸分析结果
 │   └── defs: HashMap<Ident, ObjKey>   ← 定义映射
 │
 └── is_escaped(ObjKey) -> bool
         ↓
-gox-codegen-vm
+vo-codegen-vm
 ├── TypeInfo (wrapper)
 │   ├── escaped_vars: &HashSet<ObjKey>  ← 引用
 │   └── is_escaped(ObjKey) -> bool      ← 委托

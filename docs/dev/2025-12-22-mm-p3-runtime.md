@@ -13,7 +13,7 @@ Update runtime to support:
 
 ## Modifications
 
-### 3.1 gox-common-core/src/types.rs
+### 3.1 vo-common-core/src/types.rs
 
 Add new ValueKind variants:
 
@@ -41,7 +41,7 @@ pub fn is_heap_type(value_kind: ValueKind) -> bool {
 }
 ```
 
-### 3.2 gox-runtime-core/src/gc.rs
+### 3.2 vo-runtime-core/src/gc.rs
 
 GcHeader already has `slots` field in design. Verify implementation:
 
@@ -57,7 +57,7 @@ pub struct GcHeader {
 }
 ```
 
-### 3.3 gox-runtime-core/src/gc_types.rs
+### 3.3 vo-runtime-core/src/gc_types.rs
 
 Update `scan_object` to handle boxed types:
 
@@ -76,7 +76,7 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef) {
 }
 ```
 
-### 3.4 gox-vm/src/vm.rs
+### 3.4 vo-vm/src/vm.rs
 
 May need updates for boxed value instructions:
 
@@ -104,26 +104,26 @@ All boxed primitives have the same simple layout:
 
 ## Tasks Checklist
 
-### gox-common-core/src/types.rs
+### vo-common-core/src/types.rs
 - [ ] Add `ValueKind::BoxedInt`
 - [ ] Add `ValueKind::BoxedFloat`
 - [ ] Add `ValueKind::BoxedBool`
 - [ ] Add `is_heap_type()` function
 - [ ] Update `needs_gc()` if needed
 
-### gox-runtime-core/src/gc.rs
+### vo-runtime-core/src/gc.rs
 - [ ] Verify GcHeader has `slots` field
 - [ ] Update `alloc()` signature if needed
 
-### gox-runtime-core/src/gc_types.rs
+### vo-runtime-core/src/gc_types.rs
 - [ ] Add boxed types to `scan_object`
 
-### gox-vm/src/vm.rs
+### vo-vm/src/vm.rs
 - [ ] Handle boxed value allocation (if different from struct)
 
 ## Testing
 
-```gox
+```vo
 func test_boxed_int() {
     x := 42
     f := func() int { return x }  // x escapes → BoxedInt

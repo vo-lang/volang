@@ -563,216 +563,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
-name = "gox-analysis"
-version = "0.1.0"
-dependencies = [
- "gox-common",
- "gox-common-core",
- "gox-module",
- "gox-syntax",
- "num-bigint",
- "num-rational",
- "num-traits",
- "ordered-float",
-]
-
-[[package]]
-name = "gox-aot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "cranelift-object",
- "gox-analysis",
- "gox-codegen-cranelift",
- "gox-codegen-vm",
- "gox-common",
- "gox-common-core",
- "gox-runtime-native",
- "gox-syntax",
- "gox-vm",
- "target-lexicon",
-]
-
-[[package]]
-name = "gox-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "gox-analysis",
- "gox-codegen-vm",
- "gox-common",
- "gox-jit",
- "gox-module",
- "gox-runtime-native",
- "gox-runtime-vm",
- "gox-syntax",
- "gox-vm",
-]
-
-[[package]]
-name = "gox-codegen-cranelift"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-module",
- "gox-common",
- "gox-common-core",
- "gox-runtime-native",
- "gox-vm",
-]
-
-[[package]]
-name = "gox-codegen-vm"
-version = "0.1.0"
-dependencies = [
- "gox-analysis",
- "gox-common",
- "gox-common-core",
- "gox-runtime-vm",
- "gox-syntax",
- "gox-vm",
- "num-traits",
-]
-
-[[package]]
-name = "gox-common"
-version = "0.1.0"
-dependencies = [
- "codespan-reporting",
- "gox-common-core",
- "rustc-hash 1.1.0",
- "serde",
- "string-interner",
- "termcolor",
- "thiserror",
-]
-
-[[package]]
-name = "gox-common-core"
-version = "0.1.0"
-dependencies = [
- "num_enum",
-]
-
-[[package]]
-name = "gox-jit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "gox-analysis",
- "gox-codegen-cranelift",
- "gox-codegen-vm",
- "gox-common",
- "gox-common-core",
- "gox-runtime-core",
- "gox-runtime-native",
- "gox-syntax",
- "gox-vm",
-]
-
-[[package]]
-name = "gox-module"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "gox-common",
- "tempfile",
-]
-
-[[package]]
-name = "gox-runtime-core"
-version = "0.1.0"
-dependencies = [
- "base64",
- "gox-common",
- "gox-common-core",
- "indexmap",
- "libm",
- "once_cell",
- "regex",
- "serde_json",
-]
-
-[[package]]
-name = "gox-runtime-native"
-version = "0.1.0"
-dependencies = [
- "backtrace",
- "corosensei",
- "crossbeam-deque",
- "gox-common-core",
- "gox-runtime-core",
- "libffi",
- "once_cell",
- "parking_lot",
-]
-
-[[package]]
-name = "gox-runtime-vm"
-version = "0.1.0"
-dependencies = [
- "gox-common",
- "gox-runtime-core",
- "gox-vm",
- "regex",
-]
-
-[[package]]
-name = "gox-syntax"
-version = "0.1.0"
-dependencies = [
- "gox-common",
- "gox-common-core",
- "logos",
- "num-bigint",
- "num-rational",
- "num-traits",
- "pretty_assertions",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "gox-vm"
-version = "0.1.0"
-dependencies = [
- "crossbeam-deque",
- "gox-common-core",
- "gox-runtime-core",
- "hashbrown 0.14.5",
- "indexmap",
- "num_enum",
- "parking_lot",
-]
-
-[[package]]
-name = "gox-web"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "gox-analysis",
- "gox-codegen-vm",
- "gox-common",
- "gox-runtime-vm",
- "gox-syntax",
- "gox-vm",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "web-sys",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1449,6 +1239,216 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vo-analysis"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "ordered-float",
+ "vo-common",
+ "vo-common-core",
+ "vo-module",
+ "vo-syntax",
+]
+
+[[package]]
+name = "vo-aot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "cranelift-object",
+ "target-lexicon",
+ "vo-analysis",
+ "vo-codegen-cranelift",
+ "vo-codegen-vm",
+ "vo-common",
+ "vo-common-core",
+ "vo-runtime-native",
+ "vo-syntax",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "vo-analysis",
+ "vo-codegen-vm",
+ "vo-common",
+ "vo-jit",
+ "vo-module",
+ "vo-runtime-native",
+ "vo-runtime-vm",
+ "vo-syntax",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-codegen-cranelift"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-module",
+ "vo-common",
+ "vo-common-core",
+ "vo-runtime-native",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-codegen-vm"
+version = "0.1.0"
+dependencies = [
+ "num-traits",
+ "vo-analysis",
+ "vo-common",
+ "vo-common-core",
+ "vo-runtime-vm",
+ "vo-syntax",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-common"
+version = "0.1.0"
+dependencies = [
+ "codespan-reporting",
+ "rustc-hash 1.1.0",
+ "serde",
+ "string-interner",
+ "termcolor",
+ "thiserror",
+ "vo-common-core",
+]
+
+[[package]]
+name = "vo-common-core"
+version = "0.1.0"
+dependencies = [
+ "num_enum",
+]
+
+[[package]]
+name = "vo-jit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "vo-analysis",
+ "vo-codegen-cranelift",
+ "vo-codegen-vm",
+ "vo-common",
+ "vo-common-core",
+ "vo-runtime-core",
+ "vo-runtime-native",
+ "vo-syntax",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-module"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "tempfile",
+ "vo-common",
+]
+
+[[package]]
+name = "vo-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "indexmap",
+ "libm",
+ "once_cell",
+ "regex",
+ "serde_json",
+ "vo-common",
+ "vo-common-core",
+]
+
+[[package]]
+name = "vo-runtime-native"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "corosensei",
+ "crossbeam-deque",
+ "libffi",
+ "once_cell",
+ "parking_lot",
+ "vo-common-core",
+ "vo-runtime-core",
+]
+
+[[package]]
+name = "vo-runtime-vm"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "vo-common",
+ "vo-runtime-core",
+ "vo-vm",
+]
+
+[[package]]
+name = "vo-syntax"
+version = "0.1.0"
+dependencies = [
+ "logos",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "pretty_assertions",
+ "serde",
+ "thiserror",
+ "vo-common",
+ "vo-common-core",
+]
+
+[[package]]
+name = "vo-vm"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-deque",
+ "hashbrown 0.14.5",
+ "indexmap",
+ "num_enum",
+ "parking_lot",
+ "vo-common-core",
+ "vo-runtime-core",
+]
+
+[[package]]
+name = "vo-web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "js-sys",
+ "vo-analysis",
+ "vo-codegen-vm",
+ "vo-common",
+ "vo-runtime-vm",
+ "vo-syntax",
+ "vo-vm",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-sys",
+]
 
 [[package]]
 name = "walkdir"

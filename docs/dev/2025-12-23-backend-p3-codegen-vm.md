@@ -1,9 +1,9 @@
-# Backend P3: gox-codegen-vm
+# Backend P3: vo-codegen-vm
 
 **Parent**: [2025-12-23-backend-rewrite-plan.md](2025-12-23-backend-rewrite-plan.md)  
 **Status**: Not Started  
 **Est. Modules**: 44  
-**Depends On**: P2 (vm), gox-analysis (逃逸分析)
+**Depends On**: P2 (vm), vo-analysis (逃逸分析)
 
 ## Overview
 
@@ -188,7 +188,7 @@ impl<'a> TypeInfo<'a> {
 }
 ```
 
-**⚠️ 关键**：`escaped_vars` 来自 `gox-analysis/src/check/escape.rs`，必须在编译前运行逃逸分析。
+**⚠️ 关键**：`escaped_vars` 来自 `vo-analysis/src/check/escape.rs`，必须在编译前运行逃逸分析。
 
 ### 4. 表达式编译 (expr.rs)
 
@@ -676,7 +676,7 @@ pub fn generate_entry(ctx: &mut CodegenContext) -> u32 {
 
 #### 值接收器
 
-```gox
+```vo
 func (p Point) Move() { p.x += 1 }
 ```
 
@@ -700,7 +700,7 @@ Copy 0 + field_offset, value
 
 #### 指针接收器
 
-```gox
+```vo
 func (p *Point) Set(x int) { p.x = x }
 ```
 
@@ -722,7 +722,7 @@ PtrSet 0, field_offset, value
 
 #### 隐式转换 (indirect)
 
-Go/GoX 支持值/指针接收器之间的隐式转换：
+Go/Vo 支持值/指针接收器之间的隐式转换：
 
 | 调用方式 | receiver 类型 | 方法 receiver | indirect | 操作 |
 |----------|---------------|---------------|----------|------|

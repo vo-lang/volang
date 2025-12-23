@@ -1,0 +1,802 @@
+//! Statement compilation.
+
+use vo_analysis::{BasicType, Type};
+use vo_common_core::SlotType;
+use vo_syntax::ast::{AssignOp, CaseClause, Expr, ExprKind, ForClause, Stmt, StmtKind};
+use vo_vm::instruction::Opcode;
+
+fn is_float_type(ty: Option<&Type>) -> bool {
+    match ty {
+        Some(Type::Basic(b)) => matches!(b.typ(), BasicType::Float32 | BasicType::Float64),
+        _ => false,
+    }
+}
+
+fn compound_assign_opcode(op: AssignOp, is_float: bool) -> Opcode {
+    match op {
+        AssignOp::Add if is_float => Opcode::AddF64,
+        AssignOp::Add => Opcode::AddI64,
+        AssignOp::Sub if is_float => Opcode::SubF64,
+        AssignOp::Sub => Opcode::SubI64,
+        AssignOp::Mul if is_float => Opcode::MulF64,
+        AssignOp::Mul => Opcode::MulI64,
+        AssignOp::Div if is_float => Opcode::DivF64,
+        AssignOp::Div => Opcode::DivI64,
+        AssignOp::Rem => Opcode::ModI64,
+        AssignOp::And => Opcode::Band,
+        AssignOp::Or => Opcode::Bor,
+        AssignOp::Xor => Opcode::Bxor,
+        AssignOp::AndNot => Opcode::Band,
+        AssignOp::Shl => Opcode::Shl,
+        AssignOp::Shr => Opcode::Shr,
+        AssignOp::Assign => unreachable!(),
+    }
+}
+
+use crate::context::CodegenContext;
+use crate::error::Result;
+use crate::expr::{alloc_empty_struct, compile_expr, compile_expr_value};
+use crate::func::FuncBuilder;
+use crate::type_info::TypeInfo;
+
+pub fn compile_stmt(
+    stmt: &Stmt,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    match &stmt.kind {
+        StmtKind::Expr(expr) => {
+            compile_expr(expr, ctx, func, info)?;
+            Ok(())
+        }
+        StmtKind::Assign(assign) => compile_assign(&assign.lhs, assign.op, &assign.rhs, ctx, func, info),
+        StmtKind::ShortVar(decl) => compile_short_var_decl(&decl.names, &decl.values, ctx, func, info),
+        StmtKind::Return(ret) => compile_return(&ret.values, ctx, func, info),
+        StmtKind::If(if_stmt) => compile_if(
+            if_stmt.init.as_deref(),
+            &if_stmt.cond,
+            &if_stmt.then.stmts,
+            if_stmt.else_.as_deref(),
+            ctx, func, info,
+        ),
+        StmtKind::For(for_stmt) => compile_for(&for_stmt.clause, &for_stmt.body.stmts, ctx, func, info),
+        StmtKind::Block(block) => compile_block(&block.stmts, ctx, func, info),
+        StmtKind::Break(_) => compile_break(func),
+        StmtKind::Continue(_) => compile_continue(func),
+        StmtKind::IncDec(inc_dec) => compile_inc_dec(&inc_dec.expr, inc_dec.is_inc, ctx, func, info),
+        StmtKind::Send(send) => compile_send(&send.chan, &send.value, ctx, func, info),
+        StmtKind::Go(go) => compile_async_call(&go.call, Opcode::Go, ctx, func, info),
+        StmtKind::Defer(defer) => compile_async_call(&defer.call, Opcode::DeferPush, ctx, func, info),
+        StmtKind::Select(select) => compile_select(&select.cases, ctx, func, info),
+        StmtKind::Switch(switch) => compile_switch(
+            switch.init.as_deref(),
+            switch.tag.as_ref(),
+            &switch.cases,
+            ctx, func, info,
+        ),
+        StmtKind::Empty => Ok(()),
+        StmtKind::Var(decl) => compile_var_decl(decl, ctx, func, info),
+        StmtKind::Type(_) => Ok(()), // Type declarations are compile-time only
+        _ => todo!("statement {:?}", std::mem::discriminant(&stmt.kind)),
+    }
+}
+
+fn emit_zero_init(func: &mut FuncBuilder, dst: u16, slot_types: &[SlotType]) {
+    for (i, slot_type) in slot_types.iter().enumerate() {
+        let slot = dst + i as u16;
+        match slot_type {
+            SlotType::Value => func.emit_op(Opcode::LoadInt, slot, 0, 0),
+            SlotType::GcRef => func.emit_op(Opcode::LoadNil, slot, 0, 0),
+            SlotType::Interface0 => func.emit_op(Opcode::LoadInt, slot, 0, 0),
+            SlotType::Interface1 => func.emit_op(Opcode::LoadNil, slot, 0, 0),
+        };
+    }
+}
+
+fn define_local_with_init(
+    name: vo_common::Symbol,
+    slot_types: &[SlotType],
+    src: Option<u16>,
+    func: &mut FuncBuilder,
+) -> u16 {
+    let slots = slot_types.len() as u16;
+    let dst = func.define_local(name, slots, slot_types);
+    if let Some(src) = src {
+        func.emit_op(Opcode::Mov, dst, src, 0);
+    } else {
+        emit_zero_init(func, dst, slot_types);
+    }
+    dst
+}
+
+fn compile_var_decl(
+    decl: &vo_syntax::ast::VarDecl,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    for spec in &decl.specs {
+        if spec.values.is_empty() {
+            // No initializer - allocate and zero-initialize
+            // Check if this is an interface type
+            let type_key = spec.ty.as_ref().and_then(|ty| info.type_expr_type_key(ty));
+            let is_interface = type_key
+                .map(|k| info.query.get_type(k))
+                .map(|t| info.is_interface(t))
+                .unwrap_or(false);
+            
+            if is_interface {
+                // Interface variable: use define_local_interface to set iface_type_id
+                let iface_type_id = ctx.type_id_for_interface(type_key.unwrap());
+                for name in &spec.names {
+                    func.define_local_interface(name.symbol, iface_type_id as u32);
+                }
+            } else {
+                // Check if this is a struct type - need to allocate heap object
+                let is_struct = type_key
+                    .map(|k| info.query.get_type(k))
+                    .map(|t| info.is_struct_type(t))
+                    .unwrap_or(false);
+                
+                if is_struct {
+                    // Struct variable: allocate heap object
+                    let ty = info.query.get_type(type_key.unwrap());
+                    for name in &spec.names {
+                        let src = alloc_empty_struct(ty, ctx, func, info)?;
+                        let slot_types = &[SlotType::GcRef];
+                        define_local_with_init(name.symbol, slot_types, Some(src), func);
+                    }
+                } else {
+                    let slot_types = if let Some(ty) = &spec.ty {
+                        info.type_expr_slot_types(ty)
+                    } else {
+                        vec![SlotType::Value]
+                    };
+                    for name in &spec.names {
+                        define_local_with_init(name.symbol, &slot_types, None, func);
+                    }
+                }
+            }
+        } else {
+            // Has initializer
+            // Check if lhs is interface and rhs is concrete (boxing)
+            let lhs_type_key = spec.ty.as_ref().and_then(|ty| info.type_expr_type_key(ty));
+            let lhs_is_interface = lhs_type_key
+                .map(|k| info.query.get_type(k))
+                .map(|t| info.is_interface(t))
+                .unwrap_or(false);
+            
+            for (name, value) in spec.names.iter().zip(spec.values.iter()) {
+                let rhs_ty = info.expr_type(value);
+                let rhs_is_interface = rhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+                let is_box_iface = lhs_is_interface && !rhs_is_interface;
+                
+                if is_box_iface {
+                    // Interface boxing: InitInterface first, then BoxInterface
+                    let iface_type_id = ctx.type_id_for_interface(lhs_type_key.unwrap());
+                    let dst = func.define_local_interface(name.symbol, iface_type_id as u32);
+                    
+                    // Compile rhs value
+                    let src = compile_expr_value(value, ctx, func, info)?;
+                    
+                    // Register dispatch table
+                    if let Some(rhs_type_key) = info.expr_type_key(value) {
+                        register_iface_dispatch_if_needed(lhs_type_key.unwrap(), rhs_type_key, ctx, info);
+                    }
+                    
+                    // Box the value
+                    emit_box_interface(dst, src, rhs_ty, value, ctx, func, info);
+                } else {
+                    let src = compile_expr_value(value, ctx, func, info)?;
+                    let slot_types = info.expr_type(value)
+                        .map(|t| info.type_slot_types(t))
+                        .unwrap_or_else(|| vec![SlotType::Value]);
+                    define_local_with_init(name.symbol, &slot_types, Some(src), func);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compile_assign(
+    lhs: &[Expr],
+    op: AssignOp,
+    rhs: &[Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
+        let lhs_ty = info.expr_type(l);
+        let rhs_ty = info.expr_type(r);
+        
+        // Determine interface assignment type
+        let lhs_is_iface = lhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+        let rhs_is_iface = rhs_ty.map(|t| info.is_interface(t)).unwrap_or(false);
+        let is_box_iface = lhs_is_iface && !rhs_is_iface;  // concrete -> interface
+        let is_iface_to_iface = lhs_is_iface && rhs_is_iface;  // interface -> interface
+        
+        // For simple assignment (=), use compile_expr_value for struct deep copy
+        // For compound assignment (+=, etc.), use compile_expr (no copy needed)
+        let src = if op == AssignOp::Assign {
+            compile_expr_value(r, ctx, func, info)?
+        } else {
+            compile_expr(r, ctx, func, info)?
+        };
+
+        // If boxing to interface, register dispatch table
+        if is_box_iface && op == AssignOp::Assign {
+            if let (Some(lhs_type_key), Some(rhs_type_key)) = (info.expr_type_key(l), info.expr_type_key(r)) {
+                register_iface_dispatch_if_needed(lhs_type_key, rhs_type_key, ctx, info);
+            }
+        }
+
+        match &l.kind {
+            ExprKind::Ident(ident) => {
+                let is_float = is_float_type(lhs_ty);
+                if let Some(local) = func.lookup_local(ident.symbol) {
+                    let dst = local.slot;
+                    if op == AssignOp::Assign {
+                        if is_box_iface {
+                            // Box concrete value into interface
+                            emit_box_interface(dst, src, rhs_ty, r, ctx, func, info);
+                        } else if is_iface_to_iface {
+                            // Interface to interface: copy 2 slots
+                            func.emit_mov_slots(dst, src, 2);
+                        } else {
+                            func.emit_op(Opcode::Mov, dst, src, 0);
+                        }
+                    } else {
+                        let opcode = compound_assign_opcode(op, is_float);
+                        func.emit_op(opcode, dst, dst, src);
+                    }
+                } else if let Some(idx) = ctx.get_global_index(ident.symbol) {
+                    func.emit_op(Opcode::SetGlobal, idx as u16, src, 0);
+                }
+            }
+            ExprKind::Index(idx_expr) => {
+                let base = compile_expr(&idx_expr.expr, ctx, func, info)?;
+                let index = compile_expr(&idx_expr.index, ctx, func, info)?;
+                let ty = info.expr_type(&idx_expr.expr);
+                let opcode = match ty {
+                    Some(Type::Slice(_)) => Opcode::SliceSet,
+                    Some(Type::Array(_)) => Opcode::ArraySet,
+                    Some(Type::Map(_)) => Opcode::MapSet,
+                    _ => Opcode::SliceSet,
+                };
+                func.emit_op(opcode, base, index, src);
+            }
+            ExprKind::Selector(sel) => {
+                let base_reg = compile_expr(&sel.expr, ctx, func, info)?;
+                
+                // Get selection info - all valid selector expressions should have this recorded by analysis
+                let selection = info.expr_selection(&sel.expr)
+                    .expect("selector expression should have selection info from analysis");
+                let indices = selection.indices();
+                
+                // Traverse to the final field
+                let (current, byte_offset) = crate::expr::traverse_to_field(indices, base_reg, func);
+                
+                // Set the field value (handle compound assignment)
+                let field_ty = info.expr_type(l);
+                let is_float = is_float_type(field_ty);
+                let final_src = match op {
+                    AssignOp::Assign => src,
+                    _ => {
+                        let old_val = func.alloc_temp(1);
+                        func.emit_with_flags(Opcode::GetField, 3, old_val, current, byte_offset);
+                        let new_val = func.alloc_temp(1);
+                        let opcode = compound_assign_opcode(op, is_float);
+                        func.emit_op(opcode, new_val, old_val, src);
+                        new_val
+                    }
+                };
+                func.emit_with_flags(Opcode::SetField, 3, current, byte_offset, final_src);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn compile_short_var_decl(
+    names: &[vo_common::Ident],
+    values: &[Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    for (name, value) in names.iter().zip(values.iter()) {
+        let src = compile_expr_value(value, ctx, func, info)?;
+        let slot_types = info.expr_type(value)
+            .map(|t| info.type_slot_types(t))
+            .unwrap_or_else(|| vec![SlotType::Value]);
+        define_local_with_init(name.symbol, &slot_types, Some(src), func);
+    }
+    Ok(())
+}
+
+fn compile_return(
+    values: &[Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    if values.is_empty() {
+        func.emit_op(Opcode::Return, 0, 0, 0);
+    } else {
+        // Allocate contiguous slots for return values first
+        let ret_start = func.current_slot();
+        let ret_slots: Vec<u16> = (0..values.len())
+            .map(|_| func.alloc_temp(1))
+            .collect();
+        
+        // Compile each value and move to return slot
+        for (i, value) in values.iter().enumerate() {
+            let src = compile_expr(value, ctx, func, info)?;
+            if src != ret_slots[i] {
+                func.emit_op(Opcode::Mov, ret_slots[i], src, 0);
+            }
+        }
+        
+        func.emit_op(Opcode::Return, ret_start, values.len() as u16, 0);
+    }
+    Ok(())
+}
+
+fn compile_if(
+    init: Option<&Stmt>,
+    cond: &Expr,
+    body: &[Stmt],
+    else_branch: Option<&Stmt>,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    func.push_scope();
+
+    if let Some(init) = init {
+        compile_stmt(init, ctx, func, info)?;
+    }
+
+    let cond_reg = compile_expr(cond, ctx, func, info)?;
+    let else_jump = func.emit_op(Opcode::JumpIfNot, cond_reg, 0, 0);
+
+    for stmt in body {
+        compile_stmt(stmt, ctx, func, info)?;
+    }
+
+    if let Some(else_stmt) = else_branch {
+        let end_jump = func.emit_op(Opcode::Jump, 0, 0, 0);
+        func.patch_jump(else_jump);
+        compile_stmt(else_stmt, ctx, func, info)?;
+        func.patch_jump(end_jump);
+    } else {
+        func.patch_jump(else_jump);
+    }
+
+    func.pop_scope();
+    Ok(())
+}
+
+fn compile_for(
+    clause: &ForClause,
+    body: &[Stmt],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    func.push_scope();
+
+    match clause {
+        ForClause::Cond(cond) => {
+            let loop_start = func.code_pos();
+            func.push_loop(Some(loop_start));
+
+            let mut exit_jump = None;
+            if let Some(cond) = cond {
+                let cond_reg = compile_expr(cond, ctx, func, info)?;
+                exit_jump = Some(func.emit_op(Opcode::JumpIfNot, cond_reg, 0, 0));
+            }
+
+            for stmt in body {
+                compile_stmt(stmt, ctx, func, info)?;
+            }
+
+            let back_offset = loop_start as i32 - func.code_pos() as i32;
+            func.emit_op(Opcode::Jump, 0, back_offset as u16, (back_offset >> 16) as u16);
+
+            if let Some(exit) = exit_jump {
+                func.patch_jump(exit);
+            }
+        }
+        ForClause::Three { init, cond, post } => {
+            if let Some(init) = init {
+                compile_stmt(init, ctx, func, info)?;
+            }
+
+            let loop_start = func.code_pos();
+            // For three-part for loop, continue should jump to post, not cond
+            // So we use None here and set it later
+            func.push_loop(None);
+
+            let mut exit_jump = None;
+            if let Some(cond) = cond {
+                let cond_reg = compile_expr(cond, ctx, func, info)?;
+                exit_jump = Some(func.emit_op(Opcode::JumpIfNot, cond_reg, 0, 0));
+            }
+
+            for stmt in body {
+                compile_stmt(stmt, ctx, func, info)?;
+            }
+
+            // Patch continue jumps to here (before post statement)
+            let post_pos = func.code_pos();
+            if let Some(loop_ctx) = func.current_loop_mut() {
+                for patch_pos in std::mem::take(&mut loop_ctx.continue_patches) {
+                    func.patch_jump_to(patch_pos, post_pos);
+                }
+            }
+
+            if let Some(post) = post {
+                compile_stmt(post, ctx, func, info)?;
+            }
+
+            let back_offset = loop_start as i32 - func.code_pos() as i32;
+            func.emit_op(Opcode::Jump, 0, back_offset as u16, (back_offset >> 16) as u16);
+
+            if let Some(exit) = exit_jump {
+                func.patch_jump(exit);
+            }
+        }
+        // TODO rewrite
+        ForClause::Range { key, value, define, expr } => {
+            // Compile the container expression
+            let container = compile_expr(expr, ctx, func, info)?;
+            
+            // Determine iterator type based on container type
+            let container_ty = info.expr_type(expr);
+            let iter_type: u16 = match container_ty {
+                Some(Type::Slice(_)) => 0,
+                Some(Type::Map(_)) => 1,
+                Some(Type::Basic(b)) if b.typ() == BasicType::Str => 2,
+                Some(Type::Array(_)) => 0, // Arrays iterate like slices
+                _ => 0,
+            };
+            
+            // IterBegin: a=container, b=iter_type
+            func.emit_op(Opcode::IterBegin, container, iter_type, 0);
+            
+            let loop_start = func.code_pos();
+            func.push_loop(Some(loop_start));
+            
+            // Allocate registers for key and value
+            let key_reg = func.alloc_temp(1);
+            let value_reg = func.alloc_temp(1);
+            
+            // IterNext: a=key_dest, b=value_dest, c=done_offset (patch later)
+            let iter_next_pos = func.emit_op(Opcode::IterNext, key_reg, value_reg, 0);
+            
+            // Helper to extract symbol from Expr (must be Ident)
+            let get_symbol = |e: &Expr| -> Option<vo_common::symbol::Symbol> {
+                match &e.kind {
+                    ExprKind::Ident(ident) => Some(ident.symbol),
+                    _ => None,
+                }
+            };
+            
+            // Bind key and value to local variables if defined
+            if *define {
+                if let Some(k) = key {
+                    if let Some(sym) = get_symbol(k) {
+                        // For range loops, key/value are already in temp registers
+                        // Just bind the symbol to that register
+                        func.bind_local(sym, key_reg, 1, &[SlotType::Value]);
+                    }
+                }
+                if let Some(v) = value {
+                    if let Some(sym) = get_symbol(v) {
+                        func.bind_local(sym, value_reg, 1, &[SlotType::Value]);
+                    }
+                }
+            } else {
+                // Assignment to existing variables
+                if let Some(k) = key {
+                    if let Some(sym) = get_symbol(k) {
+                        if let Some(local) = func.lookup_local(sym) {
+                            let local_slot = local.slot;
+                            if local_slot != key_reg {
+                                func.emit_op(Opcode::Mov, local_slot, key_reg, 0);
+                            }
+                        }
+                    }
+                }
+                if let Some(v) = value {
+                    if let Some(sym) = get_symbol(v) {
+                        if let Some(local) = func.lookup_local(sym) {
+                            let local_slot = local.slot;
+                            if local_slot != value_reg {
+                                func.emit_op(Opcode::Mov, local_slot, value_reg, 0);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Compile loop body
+            for stmt in body {
+                compile_stmt(stmt, ctx, func, info)?;
+            }
+            
+            // Jump back to IterNext
+            let back_offset = loop_start as i32 - func.code_pos() as i32;
+            func.emit_op(Opcode::Jump, 0, back_offset as u16, (back_offset >> 16) as u16);
+            
+            // Patch IterNext's done_offset to jump here
+            let loop_end = func.code_pos();
+            let done_offset = loop_end as i32 - iter_next_pos as i32;
+            func.patch_jump_c(iter_next_pos, done_offset as u16);
+            
+            // IterEnd
+            func.emit_op(Opcode::IterEnd, 0, 0, 0);
+        }
+    }
+
+    if let Some(loop_ctx) = func.pop_loop() {
+        let end_pos = func.code_pos();
+        for break_pos in loop_ctx.break_patches {
+            func.patch_jump_to(break_pos, end_pos);
+        }
+    }
+
+    func.pop_scope();
+    Ok(())
+}
+
+fn compile_block(
+    stmts: &[Stmt],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    func.push_scope();
+    for stmt in stmts {
+        compile_stmt(stmt, ctx, func, info)?;
+    }
+    func.pop_scope();
+    Ok(())
+}
+
+fn compile_break(func: &mut FuncBuilder) -> Result<()> {
+    let pos = func.emit_op(Opcode::Jump, 0, 0, 0);
+    if let Some(loop_ctx) = func.current_loop_mut() {
+        loop_ctx.break_patches.push(pos);
+    }
+    Ok(())
+}
+
+fn compile_continue(func: &mut FuncBuilder) -> Result<()> {
+    if let Some(loop_ctx) = func.current_loop() {
+        if let Some(target) = loop_ctx.continue_target {
+            let current = func.code_pos();
+            let offset = target as i32 - current as i32;
+            func.emit_op(Opcode::Jump, 0, offset as u16, (offset >> 16) as u16);
+        } else {
+            // Deferred patching - target not yet known
+            let pos = func.emit_op(Opcode::Jump, 0, 0, 0);
+            func.current_loop_mut().unwrap().continue_patches.push(pos);
+        }
+    }
+    Ok(())
+}
+
+fn compile_inc_dec(
+    expr: &Expr,
+    is_inc: bool,
+    _ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    _info: &TypeInfo,
+) -> Result<()> {
+    if let ExprKind::Ident(ident) = &expr.kind {
+        if let Some(local) = func.lookup_local(ident.symbol) {
+            let dst = local.slot;
+            let one = func.alloc_temp(1);
+            func.emit_op(Opcode::LoadInt, one, 1, 0);
+            if is_inc {
+                func.emit_op(Opcode::AddI64, dst, dst, one);
+            } else {
+                func.emit_op(Opcode::SubI64, dst, dst, one);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compile_send(
+    chan: &Expr,
+    value: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    let chan_reg = compile_expr(chan, ctx, func, info)?;
+    let val_reg = compile_expr(value, ctx, func, info)?;
+    func.emit_op(Opcode::ChanSend, chan_reg, val_reg, 0);
+    Ok(())
+}
+
+fn compile_async_call(
+    call: &Expr,
+    opcode: Opcode,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    if let ExprKind::Call(call_expr) = &call.kind {
+        if let ExprKind::Ident(ident) = &call_expr.func.kind {
+            if let Some(func_idx) = ctx.get_func_index(ident.symbol) {
+                let args_start = func.current_slot();
+                let arg_slots: Vec<u16> = (0..call_expr.args.len())
+                    .map(|_| func.alloc_temp(1))
+                    .collect();
+                
+                for (i, arg) in call_expr.args.iter().enumerate() {
+                    let src = compile_expr(arg, ctx, func, info)?;
+                    func.emit_mov_slots(arg_slots[i], src, 1);
+                }
+                func.emit_op(opcode, func_idx as u16, args_start, call_expr.args.len() as u16);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compile_select(
+    cases: &[vo_syntax::ast::SelectCase],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    // Simple implementation: only handle default case for now
+    for case in cases {
+        if case.comm.is_none() {
+            // Default case - execute its body
+            for stmt in &case.body {
+                compile_stmt(stmt, ctx, func, info)?;
+            }
+            return Ok(());
+        }
+    }
+    // TODO: implement full select with channel operations
+    Ok(())
+}
+
+fn compile_switch(
+    init: Option<&Stmt>,
+    tag: Option<&Expr>,
+    cases: &[CaseClause],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<()> {
+    func.push_scope();
+
+    if let Some(init) = init {
+        compile_stmt(init, ctx, func, info)?;
+    }
+
+    let tag_reg = if let Some(tag) = tag {
+        compile_expr(tag, ctx, func, info)?
+    } else {
+        let reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadInt, reg, 1, 0);
+        reg
+    };
+
+    let mut end_jumps = Vec::new();
+    let mut default_case: Option<&CaseClause> = None;
+
+    for case in cases {
+        if case.exprs.is_empty() {
+            default_case = Some(case);
+            continue;
+        }
+
+        let mut case_jumps = Vec::new();
+        for expr in &case.exprs {
+            let expr_reg = compile_expr(expr, ctx, func, info)?;
+            let cmp_reg = func.alloc_temp(1);
+            func.emit_op(Opcode::EqI64, cmp_reg, tag_reg, expr_reg);
+            let jump = func.emit_op(Opcode::JumpIf, cmp_reg, 0, 0);
+            case_jumps.push(jump);
+        }
+
+        let skip_body = func.emit_op(Opcode::Jump, 0, 0, 0);
+
+        for jump in case_jumps {
+            func.patch_jump(jump);
+        }
+
+        for stmt in &case.body {
+            compile_stmt(stmt, ctx, func, info)?;
+        }
+        let end_jump = func.emit_op(Opcode::Jump, 0, 0, 0);
+        end_jumps.push(end_jump);
+
+        func.patch_jump(skip_body);
+    }
+
+    if let Some(default) = default_case {
+        for stmt in &default.body {
+            compile_stmt(stmt, ctx, func, info)?;
+        }
+    }
+
+    for jump in end_jumps {
+        func.patch_jump(jump);
+    }
+
+    func.pop_scope();
+    Ok(())
+}
+
+/// Emit BoxInterface instruction to box a concrete value into an interface.
+pub(crate) fn emit_box_interface(
+    dst: u16,
+    src: u16,
+    rhs_ty: Option<&Type>,
+    rhs_expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) {
+    let value_kind = rhs_ty.map(|t| info.value_kind(t)).unwrap_or(vo_common_core::ValueKind::Nil) as u8;
+    // Only Named types (structs) have type IDs; for primitives use 0
+    let is_named = rhs_ty.map(|t| matches!(t, Type::Named(_))).unwrap_or(false);
+    let value_type_id = if is_named {
+        info.expr_type_key(rhs_expr).map(|k| ctx.type_id_for_struct(k)).unwrap_or(0)
+    } else {
+        0
+    };
+    func.emit_with_flags(Opcode::BoxInterface, value_kind, dst, value_type_id, src);
+}
+
+/// Register interface dispatch table entry if not already registered.
+/// This is called when assigning a concrete type to an interface variable.
+pub(crate) fn register_iface_dispatch_if_needed(
+    iface_type_key: vo_analysis::TypeKey,
+    concrete_type_key: vo_analysis::TypeKey,
+    ctx: &mut CodegenContext,
+    info: &TypeInfo,
+) {
+    // Get type IDs
+    let iface_type_id = ctx.get_interface_type_id(iface_type_key);
+    let concrete_type_id = ctx.get_struct_type_id(concrete_type_key);
+    
+    // Both must be registered
+    let (Some(iface_id), Some(concrete_id)) = (iface_type_id, concrete_type_id) else {
+        return;
+    };
+    
+    // Build method mapping: for each interface method, find the corresponding concrete method
+    let Some(method_mapping) = info.build_iface_method_mapping(concrete_type_key, iface_type_key) else {
+        return;
+    };
+    
+    // Convert method ObjKeys to func_ids
+    let mut method_funcs = Vec::with_capacity(method_mapping.len());
+    for (_method_name, method_obj) in method_mapping {
+        // Look up the func_id by ObjKey
+        if let Some(func_idx) = ctx.get_func_by_objkey(method_obj) {
+            method_funcs.push(func_idx);
+        } else {
+            // Method not found - this shouldn't happen if type checking passed
+            return;
+        }
+    }
+    
+    // Register the dispatch entry
+    ctx.register_iface_dispatch(concrete_id, iface_id, method_funcs);
+}

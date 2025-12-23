@@ -1,0 +1,13 @@
+[package]
+name = "vo-module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Module system for Vo: vo.mod parsing, dependency resolution, and import path resolution"
+
+[dependencies]
+vo-common = { path = "../vo-common" }
+dirs = "5.0"
+
+[dev-dependencies]
+tempfile = "3.10"

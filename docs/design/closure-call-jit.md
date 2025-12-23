@@ -1,8 +1,8 @@
-# GoX JIT ClosureCall Design
+# Vo JIT ClosureCall Design
 
 ## Overview
 
-This document describes the implementation of closure calls (ClosureCall) in the GoX JIT compiler. The design is inspired by Go 1.1+ and uses a function pointer table for indirect calls.
+This document describes the implementation of closure calls (ClosureCall) in the Vo JIT compiler. The design is inspired by Go 1.1+ and uses a function pointer table for indirect calls.
 
 ## Background
 
@@ -30,7 +30,7 @@ func_value → [code_ptr | context_data...]
 
 The `code_ptr` is obtained by dereferencing, and context is passed via a register (e.g., R0).
 
-## GoX Design
+## Vo Design
 
 ### Data Structures
 
@@ -44,7 +44,7 @@ The `code_ptr` is obtained by dereferencing, and context is passed via a registe
          │ inline load
          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│           Function Pointer Table GOX_FUNC_TABLE (global)     │
+│           Function Pointer Table VO_FUNC_TABLE (global)     │
 ├─────────────────────────────────────────────────────────────┤
 │  [0] ptr_0  │  [1] ptr_1  │  [2] ptr_2  │  ...  │ [N-1]    │
 └─────────────┴─────────────┴─────────────┴───────┴──────────┘
@@ -58,7 +58,7 @@ The `code_ptr` is obtained by dereferencing, and context is passed via a registe
 
 ### Comparison with Go
 
-| Aspect | Go 1.1+ | GoX |
+| Aspect | Go 1.1+ | Vo |
 |--------|---------|-----|
 | func value structure | `*{code_ptr, data...}` | `GcRef{func_id, upvals...}` |
 | code pointer storage | distributed in func values | centralized in global table |
@@ -101,7 +101,7 @@ pub fn set_func_ptr(func_id: u32, ptr: *const u8) {
 
 /// Get function table pointer (for JIT symbol registration)
 #[no_mangle]
-pub extern "C" fn gox_func_table_ptr() -> *const *const u8 {
+pub extern "C" fn vo_func_table_ptr() -> *const *const u8 {
     unsafe { FUNC_TABLE }
 }
 ```
@@ -111,16 +111,16 @@ pub extern "C" fn gox_func_table_ptr() -> *const *const u8 {
 ```rust
 pub fn compile_module(&mut self, bytecode: &BytecodeModule) -> Result<()> {
     // Initialize function table
-    gox_runtime_native::init_func_table(bytecode.functions.len());
+    vo_runtime_native::init_func_table(bytecode.functions.len());
     
     // ... compile all functions ...
     
     // Populate function table
     self.module.finalize_definitions()?;
     for (idx, _func_def) in bytecode.functions.iter().enumerate() {
-        let func_id = compile_ctx.get_gox_func(idx as u32).unwrap();
+        let func_id = compile_ctx.get_vo_func(idx as u32).unwrap();
         let code_ptr = self.module.get_finalized_function(func_id);
-        gox_runtime_native::set_func_ptr(idx as u32, code_ptr);
+        vo_runtime_native::set_func_ptr(idx as u32, code_ptr);
     }
     
     Ok(())
@@ -214,7 +214,7 @@ Compared to Go's ~10 cycles, the extra ~3 cycles come from the additional table 
 ## TODO
 
 - [ ] Implement `init_func_table` and `set_func_ptr` in gc_global.rs
-- [ ] Register `GOX_FUNC_TABLE` symbol in JIT builder
+- [ ] Register `VO_FUNC_TABLE` symbol in JIT builder
 - [ ] Populate function table after JIT compilation
 - [ ] Implement ClosureCall translation with `call_indirect`
 - [ ] Modify closure function compilation to receive closure as first arg

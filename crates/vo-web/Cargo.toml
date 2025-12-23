@@ -1,0 +1,56 @@
+[package]
+name = "vo-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for Vo VM - run Vo in browsers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["std", "compiler"]
+# Standard library support (enables source compilation)
+std = [
+    "vo-common",
+    "vo-syntax",
+    "vo-analysis",
+    "vo-codegen-vm",
+    "vo-runtime-vm",
+    "console_error_panic_hook",
+    "web-sys",
+]
+# Enable Vo source code compilation (requires std)
+compiler = ["std"]
+# Minimal: only bytecode execution, no_std compatible
+# Use: cargo build --no-default-features
+
+[dependencies]
+# Core VM (always required, no_std compatible)
+vo-vm = { path = "../vo-vm" }
+
+# Optional: std-only dependencies
+vo-common = { path = "../vo-common", optional = true }
+vo-syntax = { path = "../vo-syntax", optional = true }
+vo-analysis = { path = "../vo-analysis", optional = true }
+vo-codegen-vm = { path = "../vo-codegen-vm", optional = true }
+vo-runtime-vm = { path = "../vo-runtime-vm", optional = true }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# Optional std dependencies
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["console"]
+optional = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true

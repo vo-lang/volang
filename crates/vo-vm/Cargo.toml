@@ -1,0 +1,24 @@
+[package]
+name = "vo-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custom virtual machine runtime for Vo"
+
+[features]
+default = ["std"]
+std = []  # Enable std features (bytecode loading from files, etc.)
+multithread = ["parking_lot", "crossbeam-deque"]
+
+[dependencies]
+vo-common-core = { path = "../vo-common-core" }
+num_enum = { version = "0.7", default-features = false }
+vo-runtime-core = { path = "../vo-runtime-core" }
+hashbrown = "0.14"
+indexmap = "2"
+
+# Multi-threaded M:N scheduler (optional)
+parking_lot = { version = "0.12", optional = true }
+crossbeam-deque = { version = "0.8", optional = true }
+
+[dev-dependencies]
