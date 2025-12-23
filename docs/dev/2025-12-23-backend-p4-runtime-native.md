@@ -180,8 +180,9 @@ impl RuntimeSymbols {
             RuntimeSymbol { name: "vo_chan_recv", ptr: goroutine::vo_chan_recv as *const u8 },
             RuntimeSymbol { name: "vo_chan_close", ptr: goroutine::vo_chan_close as *const u8 },
             
-            // Defer/Panic (4)
+            // Defer/Panic (5)
             RuntimeSymbol { name: "vo_defer_push", ptr: goroutine::vo_defer_push as *const u8 },
+            RuntimeSymbol { name: "vo_errdefer_push", ptr: goroutine::vo_errdefer_push as *const u8 },
             RuntimeSymbol { name: "vo_defer_pop", ptr: goroutine::vo_defer_pop as *const u8 },
             RuntimeSymbol { name: "vo_panic", ptr: goroutine::vo_panic as *const u8 },
             RuntimeSymbol { name: "vo_recover", ptr: goroutine::vo_recover as *const u8 },
@@ -390,18 +391,33 @@ pub extern "C" fn vo_chan_close(ch: GcRef) {
 
 ```rust
 /// Defer 栈 (每个 goroutine 有一个)
+/// 与 VM 统一：使用 0 参数 closure
 thread_local! {
     static DEFER_STACK: RefCell<Vec<DeferEntry>> = RefCell::new(Vec::new());
     static PANIC_VALUE: RefCell<Option<GcRef>> = RefCell::new(None);
 }
 
+pub struct DeferEntry {
+    pub closure: GcRef,       // 0 参数 closure
+    pub is_errdefer: bool,
+}
+
 #[no_mangle]
-pub extern "C" fn vo_defer_push(func_ptr: *const u8, arg_ptr: *const u64, arg_count: u32) {
+pub extern "C" fn vo_defer_push(closure: GcRef) {
     DEFER_STACK.with(|stack| {
-        let args = unsafe { std::slice::from_raw_parts(arg_ptr, arg_count as usize) };
         stack.borrow_mut().push(DeferEntry {
-            func_ptr,
-            args: args.to_vec(),
+            closure,
+            is_errdefer: false,
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn vo_errdefer_push(closure: GcRef) {
+    DEFER_STACK.with(|stack| {
+        stack.borrow_mut().push(DeferEntry {
+            closure,
+            is_errdefer: true,
         });
     });
 }
@@ -410,8 +426,8 @@ pub extern "C" fn vo_defer_push(func_ptr: *const u8, arg_ptr: *const u64, arg_co
 pub extern "C" fn vo_defer_pop() {
     DEFER_STACK.with(|stack| {
         if let Some(entry) = stack.borrow_mut().pop() {
-            // 调用 deferred 函数
-            call_func(entry.func_ptr, &entry.args);
+            // 通过 func_table 调用 closure
+            call_closure(entry.closure);
         }
     });
 }

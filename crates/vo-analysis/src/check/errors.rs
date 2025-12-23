@@ -178,6 +178,8 @@ pub enum TypeError {
     TypeNotExpression = 2518,
     /// Previous case (for duplicate case reporting).
     PreviousCase = 2519,
+    /// errdefer in function without error return.
+    ErrDeferNoErrorReturn = 2520,
 
     // === Builtin Function (2600-2699) ===
     /// First argument to append must be slice.
@@ -406,6 +408,9 @@ impl TypeError {
             TypeError::UnusedVar => "declared but not used",
             TypeError::NoNewVars => "no new variables on left side of :=",
             TypeError::UnusedLabel => "label declared but not used",
+            
+            // Errdefer
+            TypeError::ErrDeferNoErrorReturn => "errdefer requires function with error return value",
         }
     }
 

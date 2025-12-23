@@ -84,7 +84,7 @@ pub struct Gc {
 }
 
 impl Gc {
-    pub fn alloc(&mut self, value_kind: u8, type_id: u16, slots: u16) -> GcRef;
+    pub fn alloc(&mut self, value_kind: u8, meta_id: u32, slots: u16) -> GcRef;
     pub fn read_slot(obj: GcRef, idx: usize) -> u64;   // 静态方法
     pub fn write_slot(obj: GcRef, idx: usize, val: u64);
     pub fn mark_gray(&mut self, obj: GcRef);
@@ -121,7 +121,7 @@ string::concat(gc, a, b) -> GcRef
 string::slice_of(gc, s, start, end) -> GcRef
 
 // Array (元素类型信息在 GcHeader)
-array::create(gc, elem_kind, elem_meta_id, elem_slots, len) -> GcRef
+array::create(gc, elem_kind, elem_meta_id, len) -> GcRef  // elem_slots 通过 meta_id 查询
 array::get(arr, idx) -> u64
 array::set(arr, idx, val)
 array::len(arr) -> usize
@@ -130,7 +130,7 @@ array::len(arr) -> usize
 slice::create(gc, array, start, len, cap) -> GcRef
 slice::get(s, idx) -> u64
 slice::set(s, idx, val)
-slice::append(gc, elem_kind, elem_type_id, elem_bytes, s, val) -> GcRef
+slice::append(gc, s, val) -> GcRef  // elem 信息从 slice.array 的 GcHeader 读取
 
 // Closure
 closure::create(gc, func_id, cap_count) -> GcRef

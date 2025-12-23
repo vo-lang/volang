@@ -181,8 +181,8 @@ pub struct InterfaceMeta {
 #### 4.1 String (objects/string.rs)
 
 ```rust
-/// String 布局: [byte_array_ref] (1 slot)
-/// byte_array 是一个 Array<u8>
+/// String 布局: [array: GcRef, start, len] (3 slots)
+/// array 是一个 Array<u8>，支持 slice 语义
 
 pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef;
 pub fn len(s: GcRef) -> usize;
@@ -196,18 +196,20 @@ pub fn cmp(a: GcRef, b: GcRef) -> i32;
 #### 4.2 Array (objects/array.rs)
 
 ```rust
-/// Array 布局: [elem_kind:8 | elem_type_id:16 | elem_bytes:8 | len:32] + [data...]
-/// 第一个 slot 是元信息，后面是数据
+/// Array 布局: [header, data...] (2+N slots)
+/// header = [len:48 | elem_slots:16]
+/// 元素类型信息在 GcHeader.value_kind (is_array=1, kind=元素类型)
+/// 元素的 meta_id 在 GcHeader.meta_id (Struct/Interface 元素时)
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_type_id: u16, elem_bytes: usize, len: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, len: usize) -> GcRef;
 pub fn len(arr: GcRef) -> usize;
 pub fn get(arr: GcRef, idx: usize) -> u64;
 pub fn set(arr: GcRef, idx: usize, val: u64);
 ```
 
 **⚠️ 注意**：
-- `elem_bytes` 决定紧凑存储：1/2/4/8 字节
-- 对于 GcRef 元素，始终 8 字节
+- `elem_slots` 决定每个元素占用的 slot 数（struct 可能占多个）
+- 元素类型信息存在 GcHeader 中，GC 扫描时使用
 
 #### 4.3 Slice (objects/slice.rs)
 
@@ -219,7 +221,7 @@ pub fn len(s: GcRef) -> usize;
 pub fn cap(s: GcRef) -> usize;
 pub fn get(s: GcRef, idx: usize) -> u64;
 pub fn set(s: GcRef, idx: usize, val: u64);
-pub fn append(gc: &mut Gc, elem_kind: u8, elem_type_id: u16, elem_bytes: usize, s: GcRef, val: u64) -> GcRef;
+pub fn append(gc: &mut Gc, s: GcRef, val: u64) -> GcRef;  // elem 信息从 slice.array 的 GcHeader 读取
 pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef;
 ```
 

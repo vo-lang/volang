@@ -7,8 +7,8 @@ description = "Vo language runtime core - shared data structures for VM and JIT"
 
 [features]
 default = ["std"]
-std = ["indexmap"]
+std = []
 
 [dependencies]
 vo-common-core = { path = "../vo-common-core" }
-indexmap = { version = "2", optional = true }
+hashbrown = "0.15"

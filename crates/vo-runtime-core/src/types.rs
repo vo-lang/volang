@@ -5,14 +5,6 @@ use alloc::{string::String, vec::Vec};
 
 use vo_common_core::types::SlotType;
 
-/// Generic type metadata.
-#[derive(Debug, Clone)]
-pub struct TypeMeta {
-    pub name: String,
-    pub slot_count: u16,
-    pub slot_types: Vec<SlotType>,
-}
-
 /// Struct-specific metadata.
 #[derive(Debug, Clone)]
 pub struct StructMeta {

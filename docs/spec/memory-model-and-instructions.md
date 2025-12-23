@@ -73,7 +73,7 @@ pub enum ValueKind {
     Map = 18,
     Channel = 19,
     Closure = 20,
-    Pointer = 22,       // *T - pointer to escaped value
+    Pointer = 22,       // *T - explicit pointer type (reference semantics)
 }
 ```
 
@@ -101,7 +101,21 @@ Reference types are always represented as a single GcRef slot pointing to a heap
 | `map[K]V` | Hash map |
 | `chan T` | Channel |
 | `func(...)` | Closure with captures |
-| `Pointer` | Escaped value on heap |
+| `*T` | Explicit pointer (reference semantics) |
+
+#### 2.2.3 Boxed Value Types
+
+When a value type (struct/array) escapes, it is **boxed** on the heap but retains **value semantics**:
+
+| Physical State | Semantic | Assignment |
+|----------------|----------|------------|
+| Stack struct/array | Value | `CopyN` (copy slots) |
+| Boxed struct/array | Value | `PtrClone` (deep copy) |
+| Pointer (*T) | Reference | `Copy` (copy pointer only) |
+
+**Key distinction**: Boxed struct and Pointer are both GcRef physically, but:
+- **Boxed struct**: value semantics → assignment deep copies
+- **Pointer (*T)**: reference semantics → assignment copies pointer only
 
 ### 2.3 Helper Methods
 
@@ -295,14 +309,48 @@ A local variable **escapes** (requires heap allocation) if any of the following 
 
 When assigning a value to an interface:
 - **Basic types** (int, float, bool): stored directly in interface's data slot, **no escape**
-- **Reference types** (slice, map, chan, closure, pointer): already GcRef, no escape concept
-- **Value types** (struct, array): must escape to heap first, data slot stores GcRef
+- **Reference types** (slice, map, chan, closure, pointer): already GcRef, copy directly
+- **Value types** (struct, array): already boxed (escape analysis ensures this), **deep copy** to interface's data slot
 
-#### 4.1.4 Size Threshold
+---
+
+## 4.2 Assignment Semantics
+
+### 4.2.1 Regular Assignment
+
+| Type | Operation | Description |
+|------|-----------|-------------|
+| Primitive (int/float/bool) | `Copy` | Copy single slot |
+| Struct/Array (stack) | `CopyN` | Copy all slots |
+| Struct/Array (boxed) | `PtrClone` | Deep copy (value semantics) |
+| Pointer (*T) | `Copy` | Copy pointer (reference semantics) |
+| Reference types (string/slice/map/chan/closure) | `Copy` | Copy GcRef (shared underlying) |
+
+### 4.2.2 Interface-to-Interface Assignment
+
+```rust
+// dst.slot0 unchanged (target interface type is fixed at compile time)
+// dst.slot1 depends on src.slot0.value_kind:
+let vk = src.slot0 & 0xFF;
+dst.slot1 = if vk == Struct || vk == Array {
+    ptr_clone(src.slot1)  // deep copy (value semantics)
+} else {
+    src.slot1  // direct copy
+};
+```
+
+| src.slot0.value_kind | dst.slot1 Operation |
+|----------------------|---------------------|
+| Primitive | `Copy` |
+| Reference types | `Copy` |
+| Pointer | `Copy` |
+| **Struct/Array** | `PtrClone` (deep copy) |
+
+#### 4.2.3 Size Threshold
 
 - `struct` or `array` larger than **256 slots** → always escapes
 
-### 4.2 Nested Escape Propagation
+### 4.3 Nested Escape Propagation
 
 If any nested field triggers escape, the **entire root variable** escapes:
 
@@ -312,7 +360,7 @@ var o Outer
 p := &o.inner    // o escapes (not just inner)
 ```
 
-### 4.3 Non-Escape Cases
+### 4.4 Non-Escape Cases
 
 - Package-level variables are **not** considered "captured" by closures (they're already global)
 - Variables only used within the declaring function without triggering any escape rule
@@ -468,7 +516,7 @@ For stack-allocated arrays with dynamic indices.
 | `Call` | a, b, c, flags | Call `functions[a]`, args at `b`, arg_slots=`c`, ret_slots=`flags` |
 | `CallExtern` | a, b, c, flags | Call extern function, arg_slots=`c`, ret_slots=`flags` |
 | `CallClosure` | a, b, c, flags | Call closure at `slots[a]`, args at `b`, arg_slots=`c`, ret_slots=`flags` |
-| `CallIface` | a, b, c, flags | Call interface method: iface at `a`, method=`b`, args at `c`, arg_slots/ret_slots in flags |
+| `CallIface` | a, b, c, flags | Call interface method: iface at `a`, args at `b`, `c`=(arg_slots<<8\|ret_slots), `flags`=method_idx |
 | `Return` | a, b | Return values starting at `a`, ret_slots=`b` |
 
 #### 5.2.15 STR: String Operations
@@ -582,10 +630,41 @@ Note: `DeferPop` removed. Defers are executed automatically by `Return`.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `IfaceInit` | a, b, c | Init interface at `a`, type_id=`b \| (c << 16)` |
-| `IfaceBox` | a, b, flags, c | Box value: `iface[a].data = slots[b]`, vk=`flags`, type_id=`c` |
-| `IfaceUnbox` | a, b, c | Unbox: `slots[a] = iface[b].data`, expected_type=`c` |
-| `IfaceAssert` | a, b, c, flags | Type assert: `slots[a] = slots[b].(type c)`, ok at `flags` |
+| `IfaceInit` | a, b, c | Init nil interface at `slots[a..a+2]`, iface_meta_id=`b \| (c << 16)` |
+| `IfaceAssign` | a, b, flags | Assign value to interface: dst=`slots[a..a+2]`, src=`slots[b]`, vk=`flags`. See below. |
+| `IfaceAssert` | a, b, c, flags | Type assert: `slots[a..] = slots[b..b+2].(type c)`, ok at `slots[flags]` |
+
+**IfaceAssign Semantics**:
+
+The `value_meta_id` is read from the GcHeader of the source value (for Pointer/Struct/Array).
+
+```rust
+match vk {
+    Struct | Array => {
+        // Boxed value type → deep copy (value semantics)
+        let src_ref = slots[b] as GcRef;
+        let new_ref = gc.ptr_clone(src_ref);
+        let meta_id = gc.get_header(src_ref).meta_id;
+        slots[a] = (iface_meta_id << 32) | (meta_id << 8) | vk;
+        slots[a+1] = new_ref;
+    }
+    Interface => {
+        // Interface → Interface: copy slot0's value info, deep copy slot1 if needed
+        let src_vk = slots[b] & 0xFF;
+        slots[a] = (iface_meta_id << 32) | (slots[b] & 0xFFFFFFFF);
+        slots[a+1] = if src_vk == Struct || src_vk == Array {
+            gc.ptr_clone(slots[b+1])
+        } else {
+            slots[b+1]
+        };
+    }
+    _ => {
+        // Primitive, reference types, Pointer → direct copy
+        slots[a] = (iface_meta_id << 32) | vk;
+        slots[a+1] = slots[b];
+    }
+}
+```
 
 #### 5.2.26 CONV: Type Conversion
 

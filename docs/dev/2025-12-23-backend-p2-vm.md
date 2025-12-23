@@ -105,7 +105,7 @@ pub enum Opcode {
     Call,         // call functions[a], args at b, arg_slots=c, ret_slots=flags
     CallExtern,   // call extern[a], args at b, arg_slots=c, ret_slots=flags
     CallClosure,  // call slots[a], args at b, arg_slots=c, ret_slots=flags
-    CallIface,    // call iface at a, method=flags, args at b, c=(ret_slots<<8|arg_slots)
+    CallIface,    // call iface at a, args at b, c=(arg_slots<<8|ret_slots), flags=method_idx
     Return,       // return values at a, ret_slots=b
     
     // === STR: 字符串操作 ===
@@ -174,9 +174,9 @@ pub enum Opcode {
     
     // === IFACE: Interface 操作 (interface 占 slots[a] 和 slots[a+1]) ===
     IfaceInit,    // slots[a..a+2] = nil interface, iface_meta_id=b | (c << 16)
-    IfaceBox,     // slots[a..a+2] = box(slots[b]), vk=flags, value_meta_id=c
-    IfaceUnbox,   // slots[a] = unbox(slots[b..b+2]), expected_vk=c
-    IfaceAssert,  // slots[a..a+2], ok = slots[b..b+2].(type c), ok_reg=flags
+    IfaceAssign,  // 统一赋值: dst=slots[a..a+2], src_slots=b, src_vk=c, src_meta_id=flags<<16|...
+                  // 处理所有情况: 值→iface, iface→iface, Struct/Array 深拷贝
+    IfaceAssert,  // slots[a..], ok = slots[b..b+2].(type c), ok_reg=flags
     
     // === CONV: 类型转换 ===
     ConvI2F,      // slots[a] = float64(slots[b])
@@ -199,15 +199,22 @@ pub enum Opcode {
 
 以下操作通过 `CallExtern` 调用 runtime-core 函数实现：
 
-| 类别 | 函数 | 说明 |
+| 类别 | 函数 | 签名 |
 |------|------|------|
-| **String** | `vo_string_create` | 从常量创建字符串 |
-| **Array** | `vo_array_create` | 创建数组 |
-| **Slice** | `vo_slice_create` | 创建切片 |
-| **Map** | `vo_map_create` | 创建 map |
-| **Channel** | `vo_channel_create` | 创建 channel |
-| **Closure** | `vo_closure_create` | 创建闭包 |
-| **Debug** | `vo_print` | 打印值 |
+| **String** | `vo_string_create` | `(bytes_ptr, len) -> GcRef` |
+| **Array** | `vo_array_create` | `(elem_kind, elem_meta_id, len) -> GcRef` |
+| **Slice** | `vo_slice_create` | `(elem_kind, elem_meta_id, len, cap) -> GcRef` |
+| **Map** | `vo_map_create` | `(key_kind, key_meta_id, val_kind, val_meta_id) -> GcRef` |
+| **Channel** | `vo_channel_create` | `(elem_kind, elem_meta_id, cap) -> GcRef` |
+| **Closure** | `vo_closure_create` | `(func_id, capture_count) -> GcRef` |
+| **Debug** | `vo_print` | `(value, type_kind) -> ()` |
+
+**注**：`elem_slots` / `key_slots` / `val_slots` 通过 `meta_id` 从 `struct_metas` 表查询，不在参数中传递。
+
+**参数说明**：
+- `elem_kind` / `key_kind` / `val_kind` - ValueKind 枚举值
+- `elem_meta_id` / `key_meta_id` / `val_meta_id` - 类型 ID（Struct/Interface 时使用）
+- `elem_slots` - 元素占用的 slot 数（用于索引计算）
 
 **设计原则**：
 - **分配操作** → CallExtern（内存分配开销大，函数调用开销可忽略）
@@ -336,6 +343,7 @@ pub struct Fiber {
     pub stack: Vec<u64>,
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
+    pub defer_state: Option<DeferState>,  // Return 时暂存
     pub iter_stack: Vec<Iterator>,
     pub panic_value: Option<GcRef>,
 }
@@ -396,7 +404,7 @@ enum ExecResult {
 
 ```rust
 Opcode::Call => {
-    // a=func_id, b=arg_start, c=arg_count, flags=ret_count
+    // a=func_id, b=arg_start, c=arg_slots, flags=ret_slots
     let func = &module.functions[a as usize];
     
     // 复制参数（避免帧切换后覆盖）
@@ -416,7 +424,7 @@ Opcode::Call => {
 
 ```rust
 Opcode::CallClosure => {
-    // a=closure_reg, b=arg_start, c=arg_count, flags=ret_count
+    // a=closure_reg, b=arg_start, c=arg_slots, flags=ret_slots
     let closure = self.read_reg(fiber_id, a) as GcRef;
     let func_id = closure::func_id(closure);
     let func = &module.functions[func_id as usize];
@@ -441,22 +449,83 @@ Opcode::CallClosure => {
 
 ```rust
 Opcode::CallIface => {
-    // a=iface_reg, b=method_idx, c=arg_start
-    // flags 低 4 位 = arg_count, 高 4 位 = ret_count
-    let (slot0, slot1) = self.read_interface(fiber_id, a);
+    // a=iface_reg, b=arg_start, c=(arg_slots<<8|ret_slots), flags=method_idx
+    let arg_slots = (inst.c >> 8) as usize;
+    let ret_slots = (inst.c & 0xFF) as usize;
+    let method_idx = inst.flags as usize;
+    
+    let (slot0, slot1) = self.read_interface(fiber_id, inst.a);
     let concrete_type_id = extract_concrete_type(slot0);
     let iface_type_id = extract_iface_type(slot0);
     
     // 查 dispatch table
     let entry = module.find_dispatch(concrete_type_id, iface_type_id);
-    let func_id = entry.method_funcs[b as usize];
+    let func_id = entry.method_funcs[method_idx];
     
     // 像普通函数一样调用，但 receiver 是 slot1
     // ...
+```
+
+#### 7.4 Return 实现
+
+```rust
+Opcode::Return => {
+    // a=ret_start, b=ret_count
+    let ret_start = inst.a as usize;
+    let ret_count = inst.b as usize;
+    
+    // 1. 暂存返回值
+    let ret_vals: Vec<u64> = (0..ret_count)
+        .map(|i| self.read_reg(fiber_id, (ret_start + i) as u16))
+        .collect();
+    
+    // 2. 收集当前帧的 defer（LIFO 顺序）
+    let frame_depth = fiber.frames.len();
+    let mut pending: Vec<DeferEntry> = fiber.defer_stack
+        .drain_filter(|d| d.frame_depth == frame_depth)
+        .collect();
+    pending.reverse();  // LIFO
+    
+    // 3. 检查是否有 errdefer，若有则运行时判断 error return
+    // 注: 编译器保证有 errdefer 的函数必有 error 返回值
+    let has_errdefer = pending.iter().any(|d| d.is_errdefer);
+    let is_error = if has_errdefer && ret_count > 0 {
+        ret_vals[ret_count - 1] != 0
+    } else {
+        false
+    };
+    
+    // 4. 过滤 errdefer
+    if !is_error {
+        pending.retain(|d| !d.is_errdefer);
+    }
+    
+    // 5. 如果有 defer，进入 defer 执行模式
+    if !pending.is_empty() {
+        let caller_frame = &fiber.frames[fiber.frames.len() - 2];
+        fiber.defer_state = Some(DeferState {
+            pending,
+            ret_vals,
+            caller_ret_reg: caller_frame.ret_reg,
+            caller_ret_count: ret_count,
+            is_error_return: is_error,
+        });
+        
+        // 执行第一个 defer closure
+        let first = fiber.defer_state.as_mut().unwrap().pending.pop().unwrap();
+        // CallClosure(first.closure, no args)
+        // ...
+    } else {
+        // 6. 无 defer，直接返回
+        let caller_frame = fiber.frames.pop().unwrap();
+        for (i, val) in ret_vals.into_iter().enumerate() {
+            self.write_reg(fiber_id, caller_frame.ret_reg + i as u16, val);
+        }
+    }
 }
 ```
 
-#### 7.4 Defer 实现
+#### 7.5 Defer 数据结构
 
 ```rust
 /// Defer 条目 - 统一用 closure
@@ -477,14 +546,16 @@ pub struct DeferState {
 ```
 
 **执行流程**：
-1. `DeferPush`: 保存 closure 到 `defer_stack`
+1. `DeferPush` / `ErrDeferPush`: 保存 closure 到 `defer_stack`
 2. `Return` 时:
-   - 判定是否 error return（最后返回值非 nil）
    - 收集当前帧的 defers（LIFO）
-   - errdefer 只在 error return 时执行
+   - 若存在 errdefer，检查最后一个返回值是否非 nil → is_error
+   - errdefer 只在 is_error=true 时执行
    - 逐个 CallClosure 执行
 3. defer closure 返回后继续执行下一个
 4. 全部执行完，写入暂存的返回值给 caller
+
+**Codegen 约束**：`errdefer` 只能在有 error 返回值的函数中使用，否则编译错误。
 
 **Codegen 注意**：`defer foo(x, y)` 需包装为：
 ```vo
@@ -493,7 +564,7 @@ closure := func() { foo(x, y) }
 DeferPush closure
 ```
 
-#### 7.5 GC 根扫描
+#### 7.6 GC 根扫描
 
 ```rust
 impl Vm {
@@ -532,7 +603,27 @@ impl Vm {
             }
             
             // 3. 扫描 defer_stack
-            // 4. 扫描 iter_stack
+            for entry in &fiber.defer_stack {
+                gc.mark_gray(entry.closure);
+            }
+            
+            // 4. 扫描 defer_state
+            if let Some(state) = &fiber.defer_state {
+                for entry in &state.pending {
+                    gc.mark_gray(entry.closure);
+                }
+            }
+            
+            // 5. 扫描 iter_stack
+            for iter in &fiber.iter_stack {
+                match iter {
+                    Iterator::Slice { arr, .. } => gc.mark_gray(*arr),
+                    Iterator::Map { map, .. } => gc.mark_gray(*map),
+                    Iterator::String { s, .. } => gc.mark_gray(*s),
+                    Iterator::Channel { ch, .. } => gc.mark_gray(*ch),
+                    Iterator::IntRange { .. } => {}
+                }
+            }
         }
     }
 }
@@ -581,8 +672,8 @@ impl Vm {
 - [ ] exec Array/Slice
 - [ ] exec String
 - [ ] exec Map
-- [ ] exec Interface (IfaceInit, IfaceBox, IfaceUnbox, IfaceAssert)
-- [ ] exec Closure (ClosureNew, ClosureGet, ClosureSet)
+- [ ] exec Interface (IfaceInit, IfaceAssign, IfaceAssert)
+- [ ] exec Closure (ClosureGet, ClosureSet) — ClosureNew 用 CallExtern
 - [ ] exec Goroutine (GoCall, Yield)
 - [ ] exec Channel
 - [ ] exec Select

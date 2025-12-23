@@ -481,6 +481,58 @@ StmtKind::For(for_stmt) => {
 }
 ```
 
+#### 5.4 Defer / Errdefer
+
+```rust
+// defer 语句
+StmtKind::Defer(defer_stmt) => {
+    // 1. 将 defer 调用包装成 0 参数 closure
+    let closure_reg = compile_defer_closure(&defer_stmt.call, ctx, func, info)?;
+    
+    // 2. 压入 defer 栈
+    func.emit_op(Opcode::DeferPush, closure_reg, 0, 0);
+}
+
+// errdefer 语句
+StmtKind::Errdefer(errdefer_stmt) => {
+    // 注: analysis 阶段已检查函数必须有 error 返回值
+    
+    // 1. 将 errdefer 调用包装成 0 参数 closure
+    let closure_reg = compile_defer_closure(&errdefer_stmt.call, ctx, func, info)?;
+    
+    // 2. 压入 errdefer 栈
+    func.emit_op(Opcode::ErrDeferPush, closure_reg, 0, 0);
+}
+
+/// 将 defer/errdefer 调用包装成 0 参数 closure
+fn compile_defer_closure(
+    call: &CallExpr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfo,
+) -> Result<u16, CodegenError> {
+    // 1. 编译所有参数表达式，得到捕获变量列表
+    let mut captures = Vec::new();
+    for arg in &call.args {
+        let reg = compile_expr(arg, ctx, func, info)?;
+        captures.push(reg);
+    }
+    
+    // 2. 生成一个内部 closure 函数：无参数，调用原函数
+    let inner_func_id = ctx.generate_defer_wrapper(call.func, &captures)?;
+    
+    // 3. 创建 closure 对象
+    let closure_reg = func.alloc_temp(1);
+    // CallExtern vo_closure_create(func_id, cap_count) -> GcRef
+    func.emit_op(Opcode::LoadInt, closure_reg, inner_func_id as u16, 0);
+    // ... 创建 closure 并设置 captures
+    
+    Ok(closure_reg)
+}
+```
+
+**注**：`errdefer` 只能在有 error 返回值的函数中使用，此检查在 analysis 阶段完成（TypeError::ErrDeferNoErrorReturn）。
+
 ### 6. 函数编译 (func_compile.rs)
 
 ```rust
@@ -656,8 +708,7 @@ pub fn generate_entry(ctx: &mut CodegenContext) -> u32 {
 | 操作 | 指令 |
 |------|------|
 | 声明 (nil) | `IfaceInit` |
-| 装箱 | `IfaceBox` |
-| 拆箱 | `IfaceUnbox` |
+| 赋值 (值/iface→iface) | `IfaceAssign` |
 | 类型断言 | `IfaceAssert` |
 | 方法调用 | `CallIface` |
 
@@ -816,7 +867,7 @@ fn compile_method_call(receiver_expr, method, args) {
 - [ ] go
 - [ ] send/recv
 - [ ] select
-- [ ] defer
+- [ ] defer / errdefer (⚠️ errdefer 只允许在有 error 返回值的函数中，否则编译错误)
 - [ ] range
 
 ### func_compile.rs

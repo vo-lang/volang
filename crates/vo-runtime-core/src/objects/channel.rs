@@ -3,11 +3,10 @@
 //! Channel layout: [state_ptr, elem_kind, capacity] (3 slots)
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::VecDeque;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+
 #[cfg(feature = "std")]
-use std::collections::VecDeque;
+use std::{boxed::Box, collections::VecDeque, vec::Vec};
 
 use crate::gc::{Gc, GcRef};
 use vo_common_core::types::ValueKind;
@@ -105,7 +104,6 @@ impl ChannelState {
     }
 }
 
-#[cfg(feature = "std")]
 pub fn create(gc: &mut Gc, elem_kind: u8, cap: usize) -> GcRef {
     let chan = gc.alloc(ValueKind::Channel as u8, 0, SLOT_COUNT);
     let state = Box::new(ChannelState::new(cap));
@@ -115,7 +113,6 @@ pub fn create(gc: &mut Gc, elem_kind: u8, cap: usize) -> GcRef {
     chan
 }
 
-#[cfg(feature = "std")]
 pub fn get_state(chan: GcRef) -> &'static mut ChannelState {
     let ptr = Gc::read_slot(chan, SLOT_STATE) as *mut ChannelState;
     unsafe { &mut *ptr }
@@ -129,16 +126,12 @@ pub fn capacity(chan: GcRef) -> usize {
     Gc::read_slot(chan, SLOT_CAP) as usize
 }
 
-#[cfg(feature = "std")]
 pub fn len(chan: GcRef) -> usize { get_state(chan).len() }
 
-#[cfg(feature = "std")]
 pub fn is_closed(chan: GcRef) -> bool { get_state(chan).is_closed() }
 
-#[cfg(feature = "std")]
 pub fn close(chan: GcRef) { get_state(chan).close(); }
 
-#[cfg(feature = "std")]
 pub unsafe fn drop_inner(chan: GcRef) {
     let ptr = Gc::read_slot(chan, SLOT_STATE) as *mut ChannelState;
     if !ptr.is_null() {

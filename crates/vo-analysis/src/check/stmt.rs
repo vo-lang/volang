@@ -548,6 +548,28 @@ impl Checker {
 
             StmtKind::ErrDefer(eds) => {
                 // Vo extension: errdefer runs only on error return
+                // Check that function has error return value
+                if let Some(sig_key) = self.octx.sig {
+                    let sig = self.otype(sig_key).try_as_signature().unwrap();
+                    let results = self.otype(sig.results()).try_as_tuple().unwrap();
+                    let vars = results.vars();
+                    let error_type = self.universe().error_type();
+                    let has_error_return = if let Some(last_var) = vars.last() {
+                        let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
+                        // Check if last return type is assignable to error interface
+                        crate::typ::identical(last_type, error_type, self.objs())
+                            || self.implements(last_type, error_type)
+                    } else {
+                        false
+                    };
+                    if !has_error_return {
+                        self.error_code_msg(
+                            TypeError::ErrDeferNoErrorReturn,
+                            eds.call.span,
+                            "errdefer requires function with error return value".to_string(),
+                        );
+                    }
+                }
                 self.suspended_call("errdefer", &eds.call);
             }
 

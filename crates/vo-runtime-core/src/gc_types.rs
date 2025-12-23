@@ -1,7 +1,7 @@
 //! GC object scanning by type.
 
 use crate::gc::{Gc, GcRef};
-use crate::objects::{array, closure, interface, slice, string};
+use crate::objects::{array, channel, closure, interface, map, slice, string};
 use crate::types::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind};
 
@@ -52,7 +52,10 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             }
         }
 
-        ValueKind::Struct => {
+        // Struct and Pointer have identical physical layout (GcRef pointing to heap data).
+        // They differ only in assignment semantics (value vs reference), which GC ignores.
+        // Both need to scan their fields for GC references.
+        ValueKind::Struct | ValueKind::Pointer => {
             let meta_id = gc_header.meta_id() as usize;
             if meta_id < struct_metas.len() {
                 let meta = &struct_metas[meta_id];
@@ -91,18 +94,38 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         }
 
         ValueKind::Map => {
-            // Map inner HashMap scanning is handled separately
-            // Key/value GC refs need to be scanned via iterator
+            // Only scan values - keys are comparable types (no slice/map/func), so no GC refs
+            let val_kind = map::val_kind(obj);
+            if val_kind.is_ref_type() {
+                let len = map::len(obj);
+                for i in 0..len {
+                    if let Some((_, v)) = map::iter_at(obj, i) {
+                        if v != 0 {
+                            gc.mark_gray(v as GcRef);
+                        }
+                    }
+                }
+            }
         }
 
         ValueKind::Channel => {
-            // Channel state managed externally
+            // Scan buffer and waiting_senders values
+            let elem_kind = channel::elem_kind(obj);
+            if elem_kind.is_ref_type() {
+                let state = channel::get_state(obj);
+                for &val in &state.buffer {
+                    if val != 0 {
+                        gc.mark_gray(val as GcRef);
+                    }
+                }
+                for &(_, val) in &state.waiting_senders {
+                    if val != 0 {
+                        gc.mark_gray(val as GcRef);
+                    }
+                }
+            }
         }
 
-        ValueKind::Pointer => {
-            // Pointer points to escaped value, but the escaped value itself
-            // has its own GcHeader with the original type - it will be scanned separately
-        }
 
         _ => {}
     }
