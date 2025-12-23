@@ -87,22 +87,17 @@ pub struct GcHeader {
     pub gen: u8,          // GcGen: Young/Old/Touched
     pub slots: u16,       // 数据 slot 数量
     pub meta_id: [u8; 3], // 24-bit 元数据索引
-    pub value_kind: u8,   // [is_array:1 | kind:7]
+    pub value_kind: u8,   // ValueKind 枚举值
 }
 
-/// value_kind 字段拆分:
-/// - bit 7 (0x80): is_array 标记
-///   - 1 = Array 对象, kind 是元素类型
-///   - 0 = 普通对象, kind 是对象类型
-/// - bit 0-6: ValueKind 值 (0-127)
-///
-/// meta_id 含义随 kind 变化:
-/// - Struct: struct_metas[] 索引
-/// - Interface: interface_metas[] 索引
-/// - Array (is_array=1):
-///   - 元素是 Struct/Interface 时: 元素的 meta_id
-///   - 元素是简单类型时: 0
+/// meta_id 含义随 value_kind 变化:
+/// - Array, Slice, Channel: elem_meta_id（元素的 meta_id）
+/// - Struct, Pointer: 指向对象的 meta_id
+/// - Interface: 接口类型的 meta_id
+/// - Map: 0（key/val 类型信息存在 Container 数据里）
 /// - 其他: 0
+///
+/// 注：不含 GcRef 的 Struct 元素，meta_id = 0（codegen 知道不需要扫描）
 
 /// GC 对象
 #[repr(C)]
@@ -182,8 +177,13 @@ pub struct InterfaceMeta {
 #### 4.1 String (objects/string.rs)
 
 ```rust
-/// String 布局: [array: GcRef, start, len] (3 slots)
-/// array 是一个 Array<u8>，支持 slice 语义
+/// String 布局 (Rust struct)
+#[repr(C)]
+pub struct StringData {
+    pub array: GcRef,  // 指向 Array<u8>
+    pub start: usize,
+    pub len: usize,
+}
 
 pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef;
 pub fn len(s: GcRef) -> usize;
@@ -197,35 +197,51 @@ pub fn cmp(a: GcRef, b: GcRef) -> i32;
 #### 4.2 Array (objects/array.rs)
 
 ```rust
-/// Array 布局: [header, data...] (1+len×elem_slots slots)
-/// header = [len:48 | elem_slots:16]
-/// 元素类型信息在 GcHeader.value_kind (is_array=1, kind=元素类型)
-/// 元素的 meta_id 在 GcHeader.meta_id (Struct/Interface 元素时)
+/// Array 布局 (Rust struct + 动态数据)
+/// GcHeader.value_kind = ValueKind::Array
+/// GcHeader.meta_id = elem_meta_id（元素需要 GC 扫描时）
+#[repr(C)]
+pub struct ArrayHeader {
+    pub len: usize,
+    pub elem_size: u16,  // 字节数，不是 slot 数
+    // data: [u8; len * elem_size] 紧跟其后
+}
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, len: usize) -> GcRef;
-// elem_slots 通过 (elem_kind, elem_meta_id) 从 struct_metas 查询
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_size: u16, len: usize) -> GcRef;
 pub fn len(arr: GcRef) -> usize;
-pub fn get(arr: GcRef, idx: usize) -> u64;
+pub fn get(arr: GcRef, idx: usize) -> u64;           // 简单类型 (<= 8 bytes)
 pub fn set(arr: GcRef, idx: usize, val: u64);
+pub fn get_n(arr: GcRef, idx: usize, dest: &mut [u8]); // 复合类型
+pub fn set_n(arr: GcRef, idx: usize, src: &[u8]);
 ```
 
-**⚠️ 注意**：
-- `elem_slots` 从 `(elem_kind, elem_meta_id)` 推断
-- 元素类型信息存在 GcHeader 中，GC 扫描时使用
+**⚠️ 注意**：`elem_size` 由调用者（VM）从 `struct_metas` 查询后传入（字节数）
 
 #### 4.3 Slice (objects/slice.rs)
 
 ```rust
-/// Slice 布局: [array_ref, start, len, cap] (4 slots)
+/// Slice 布局 (Rust struct)
+/// GcHeader.value_kind = ValueKind::Slice
+/// GcHeader.meta_id = 0（元素类型信息从 Array 的 GcHeader 读取）
+#[repr(C)]
+pub struct SliceData {
+    pub array: GcRef,
+    pub start: usize,
+    pub len: usize,
+    pub cap: usize,
+}
 
-/// 创建新 slice（分配底层 array）
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, len: usize, cap: usize) -> GcRef;
-/// 从已有 array/slice 创建 view
-pub fn from_array(gc: &mut Gc, array: GcRef, start: usize, len: usize, cap: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_size: u16, len: usize, cap: usize) -> GcRef;
+/// 从已有 array 创建 view
+pub fn from_array_range(gc: &mut Gc, arr: GcRef, start: usize, len: usize, cap: usize) -> GcRef;
+/// 从整个 array 创建 slice
+pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef;
 pub fn len(s: GcRef) -> usize;
 pub fn cap(s: GcRef) -> usize;
-pub fn get(s: GcRef, idx: usize) -> u64;
+pub fn get(s: GcRef, idx: usize) -> u64;           // 简单类型
 pub fn set(s: GcRef, idx: usize, val: u64);
+pub fn get_n(s: GcRef, idx: usize, dest: &mut [u8]); // 复合类型
+pub fn set_n(s: GcRef, idx: usize, src: &[u8]);
 pub fn append(gc: &mut Gc, s: GcRef, val: u64) -> GcRef;  // elem 信息从 slice.array 的 GcHeader 读取
 pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef;
 ```
@@ -233,57 +249,76 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef;
 #### 4.4 Channel (objects/channel.rs)
 
 ```rust
-/// Channel 布局: [state_ptr] (1 slot)
-/// state_ptr 指向内部 ChannelState（包含 buffer、waiters 等）
+/// Channel 布局 (Rust struct)
+/// GcHeader.value_kind = ValueKind::Channel
+/// GcHeader.meta_id = 0
+#[repr(C)]
+pub struct ChannelData {
+    pub state: *mut ChannelState,  // 包含 buffer、waiters 等
+    pub elem_kind: u8,
+    pub elem_meta_id: u32,
+    pub cap: usize,
+}
 
 pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, cap: usize) -> GcRef;
-pub fn send(ch: GcRef, val: u64);      // 阻塞发送
-pub fn recv(ch: GcRef) -> (u64, bool); // 阻塞接收，返回 (value, ok)
+pub fn get_state(ch: GcRef) -> &mut ChannelState;
+pub fn try_send(ch: GcRef, val: u64) -> Result<(), ChannelError>;  // ChanSend
+pub fn try_recv(ch: GcRef) -> Result<(u64, bool), ChannelError>;   // ChanRecv, (val, ok)
 pub fn close(ch: GcRef);
 pub fn is_closed(ch: GcRef) -> bool;
+pub fn len(ch: GcRef) -> usize;
+pub fn capacity(ch: GcRef) -> usize;
 ```
 
-**⚠️ 注意**：Channel 的阻塞语义由 VM/Runtime 层实现，这里只是接口定义。
+**⚠️ 注意**：阻塞的 send/recv 由 VM/Runtime 层通过 `ChannelState.try_send/try_recv` 实现。
 
 #### 4.5 Map (objects/map.rs)
 
 ```rust
-/// Map 使用 hash table 实现
-/// 布局: [key_kind, val_kind, len, cap, ...buckets...]
+/// Map 布局 (Rust struct)
+/// GcHeader.value_kind = ValueKind::Map
+/// GcHeader.meta_id = 0
+/// GC 扫描时需要扫描 key 和 value（都可能是 GcRef）
+#[repr(C)]
+pub struct MapData {
+    pub inner: *mut HashMap<u64, u64>,
+    pub key_kind: u8,
+    pub key_meta_id: u32,
+    pub val_kind: u8,
+    pub val_meta_id: u32,
+}
 
 pub fn create(gc: &mut Gc, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32) -> GcRef;
 pub fn len(m: GcRef) -> usize;
-pub fn get(m: GcRef, key: u64) -> (u64, bool);  // (value, found)
-pub fn set(gc: &mut Gc, m: GcRef, key: u64, val: u64);
+pub fn get(m: GcRef, key: u64) -> Option<u64>;
+pub fn get_with_ok(m: GcRef, key: u64) -> (u64, bool);  // (value, found)
+pub fn set(m: GcRef, key: u64, val: u64);
 pub fn delete(m: GcRef, key: u64);
+pub fn iter_at(m: GcRef, idx: usize) -> Option<(u64, u64)>;  // IterNext for map
 ```
 
-**⚠️ 注意**：
-- struct 作为 key 需要实现 hash，见 `StructHash` 指令
-- Map 需要 std，用 `#[cfg(feature = "std")]` gate
 
-#### 4.5 Closure (objects/closure.rs)
+#### 4.6 Closure (objects/closure.rs)
 
 ```rust
-/// Closure 布局: [func_id, upval_count, upval[0], upval[1], ...]
+/// Closure 布局 (Rust struct + 动态 upvalues)
+/// GcHeader.value_kind = ValueKind::Closure
+/// GcHeader.meta_id = 0
+#[repr(C)]
+pub struct ClosureHeader {
+    pub func_id: u32,
+    pub upval_count: u32,
+    // upvalues: [GcRef] 紧跟其后
+}
 
 pub fn create(gc: &mut Gc, func_id: u32, upval_count: usize) -> GcRef;
 pub fn func_id(c: GcRef) -> u32;
 pub fn upval_count(c: GcRef) -> usize;
-pub fn get_upvalue(c: GcRef, idx: usize) -> u64;
-pub fn set_upvalue(c: GcRef, idx: usize, val: u64);
-
-/// Upval Box - 用于引用捕获
-pub fn create_upval_box(gc: &mut Gc) -> GcRef;
-pub fn get_upval_box(uv: GcRef) -> u64;
-pub fn set_upval_box(uv: GcRef, val: u64);
+pub fn get_upvalue(c: GcRef, idx: usize) -> GcRef;  // ClosureGet
+pub fn set_upvalue(c: GcRef, idx: usize, val: GcRef); // ClosureSet
 ```
 
-**⚠️ 关键**：
-- `upval` 可以是值（值捕获）或 `UpvalBox`（引用捕获）
-- `UpvalBox` 是一个 1-slot 的 GcObject，用于共享可变状态
-
-#### 4.6 Channel (objects/channel.rs)
+#### 4.7 ChannelState (内部状态机)
 
 ```rust
 /// Channel 状态机 - VM 和 JIT 共享核心逻辑
@@ -337,11 +372,26 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef) {
                 // Interface1 需要动态检查
             }
         }
+        ValueKind::Array => {
+            // 扫描元素（如果元素可能含 GcRef）
+            let header = Gc::read_slot(obj, 0);
+            let len = (header >> 16) as usize;
+            let elem_slots = (header & 0xFFFF) as usize;
+            let elem_kind = ValueKind::from_u8(gc_header.kind());
+            if elem_kind.may_contain_gc_refs() {
+                for i in 0..len {
+                    for j in 0..elem_slots {
+                        let child = Gc::read_slot(obj, 1 + i * elem_slots + j);
+                        if child != 0 { gc.mark_gray(child as GcRef); }
+                    }
+                }
+            }
+        }
         ValueKind::Closure => {
             // 扫描所有 upvalues
-            let count = closure::upval_count(obj);
+            let count = Gc::read_slot(obj, 1) as usize;  // upval_count 在 slot 1
             for i in 0..count {
-                let uv = closure::get_upvalue(obj, i);
+                let uv = Gc::read_slot(obj, 2 + i);      // upvalues 从 slot 2 开始
                 if uv != 0 { gc.mark_gray(uv as GcRef); }
             }
         }
@@ -416,8 +466,6 @@ pub extern "C" fn vo_string_index(s: GcRef, i: i64) -> u8 {
 
 ### objects/closure.rs
 - [ ] create, func_id, upval_count
-- [ ] get_upvalue, set_upvalue
-- [ ] create_upval_box, get_upval_box, set_upval_box
 
 ### objects/channel.rs
 - [ ] ChannelState 结构

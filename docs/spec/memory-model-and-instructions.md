@@ -216,19 +216,14 @@ pub struct GcHeader {
     pub gen: u8,           // Generation (Young/Old)
     pub slots: u16,        // Number of data slots
     pub meta_id: [u8; 3],  // 24-bit metadata index
-    pub value_kind: u8,    // [is_array:1 | kind:7]
+    pub value_kind: u8,    // ValueKind 枚举值
 }
 
-// value_kind 字段:
-// - bit 7 (0x80): is_array 标记
-//   - 1 = Array 对象, kind 是元素类型
-//   - 0 = 普通对象, kind 是对象类型
-// - bit 0-6: ValueKind 值
-//
-// meta_id 含义:
-// - Struct: struct_metas[] 索引
-// - Interface: interface_metas[] 索引  
-// - Array of Struct/Interface: 元素的 meta_id
+// meta_id 含义随 value_kind 变化:
+// - Array, Slice, Channel: elem_meta_id（元素的 meta_id）
+// - Struct, Pointer: 指向对象的 meta_id
+// - Interface: 接口类型的 meta_id
+// - Map: 0（key/val 类型信息存在 Container 数据里）
 // - 其他: 0
 ```
 
@@ -257,7 +252,7 @@ pub struct GcHeader {
 **Escaped Array**:
 ```
 ┌─────────────────────────────────────────────────┐
-│ GcHeader (is_array=1, kind=elem_kind)     │
+│ GcHeader (value_kind=Array)               │
 ├─────────────────────────────────────────────────┤
 │ Array header: [len:48 | elem_slots:16]    │
 ├─────────────────────────────────────────────────┤
@@ -266,8 +261,8 @@ pub struct GcHeader {
 │ ...                                       │
 └─────────────────────────────────────────────────┘
 
-// GcHeader.value_kind = 0x80 | elem_kind (is_array=1)
-// GcHeader.meta_id = elem_meta_id (元素是 Struct/Interface 时)
+// GcHeader.value_kind = ValueKind::Array
+// GcHeader.meta_id = elem_meta_id（元素是 Struct 且需要 GC 扫描时）
 // Array header slot 0: [len:48 | elem_slots:16]
 ```
 
@@ -542,13 +537,14 @@ For escaped arrays allocated on the heap.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
+| `ArrayNew` | a, b, c, flags | `slots[a] = new [elem_kind]T`, b=elem_meta_id, c=len_reg, flags=elem_kind |
 | `ArrayGet` | a, b, c | `slots[a] = slots[b][slots[c]]` |
 | `ArraySet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `ArrayGetN` | a, b, c, flags | `slots[a..a+flags] = slots[b][slots[c]]`, flags=elem_slots |
 | `ArraySetN` | a, b, c, flags | `slots[a][slots[b]] = slots[c..c+flags]`, flags=elem_slots |
 | `ArrayLen` | a, b | `slots[a] = len(slots[b])` |
 
-Note: `ArrayNew` uses CallExtern (`vo_array_create`).
+`ArrayNew` 编码: a=dst, b=elem_meta_id_low16, c=len_reg, flags=elem_kind。elem_slots 从 struct_metas 查询。
 
 #### 5.2.17 SLICE: Slice Operations
 
@@ -558,33 +554,37 @@ Note: `ArrayNew` uses CallExtern (`vo_array_create`).
 | `SliceSet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `SliceGetN` | a, b, c, flags | `slots[a..a+flags] = slots[b][slots[c]]`, flags=elem_slots |
 | `SliceSetN` | a, b, c, flags | `slots[a][slots[b]] = slots[c..c+flags]`, flags=elem_slots |
+| `SliceNew` | a, b, c, flags | `slots[a] = make([]T, len, cap)`, 见下方编码 |
 | `SliceLen` | a, b | `slots[a] = len(slots[b])` |
 | `SliceCap` | a, b | `slots[a] = cap(slots[b])` |
 | `SliceSlice` | a, b, c, flags | `slots[a] = slots[b][slots[c]:slots[flags]]` |
 | `SliceAppend` | a, b, c | `slots[a] = append(slots[b], slots[c])` |
 
-Note: `SliceNew` uses CallExtern (`vo_slice_create`).
+`SliceNew` 编码: a=dst, b=elem_meta_id_low16, c=len_reg, flags=elem_kind。cap 从下一个 slot 读取。
 
 #### 5.2.18 MAP: Map Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
+| `MapNew` | a, b | `slots[a] = make(map[K]V)`, b=type_info_reg |
 | `MapGet` | a, b, c, flags | `slots[a] = slots[b][slots[c]]`, flags=1 时 ok 写到 `slots[a+1]` |
 | `MapSet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `MapDelete` | a, b | `delete(slots[a], slots[b])` |
 | `MapLen` | a, b | `slots[a] = len(slots[b])` |
 
-Note: `MapNew` uses CallExtern (`vo_map_create`).
+`MapNew` 用两条指令: `LoadConst r, <packed_u64>` + `MapNew dst, r`。
+packed_u64 格式: `[key_kind:8 | key_meta_id:24 | val_kind:8 | val_meta_id:24]`
 
 #### 5.2.19 CHAN: Channel Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
+| `ChanNew` | a, b, c, flags | `slots[a] = make(chan T, cap)`, b=elem_meta_id, c=cap_reg, flags=elem_kind |
 | `ChanSend` | a, b | `slots[a] <- slots[b]` |
 | `ChanRecv` | a, b, c, flags | `slots[a] = <-slots[b]`, flags=1 时 ok 写到 `slots[c]` |
 | `ChanClose` | a | `close(slots[a])` |
 
-Note: `ChanNew` uses CallExtern (`vo_channel_create`).
+`ChanNew` 编码: a=dst, b=elem_meta_id_low16, c=cap_reg, flags=elem_kind。
 
 #### 5.2.20 SELECT: Select Statement
 
@@ -690,15 +690,13 @@ The following operations are implemented via `CallExtern` calling runtime-core f
 | Category | Function | Description |
 |----------|----------|-------------|
 | **String** | `vo_string_create` | Create string from constant |
-| **Array** | `vo_array_create` | Create array |
-| **Slice** | `vo_slice_create` | Create slice |
-| **Map** | `vo_map_create` | Create map |
-| **Channel** | `vo_channel_create` | Create channel |
 | **Closure** | `vo_closure_create` | Create closure |
 | **Debug** | `vo_print` | Print value |
 
+**Note**: `ArrayNew`, `SliceNew`, `MapNew`, `ChanNew` 使用专用 opcode（VM 可访问 struct_metas 查询 elem_slots）。
+
 **Design Principles**:
-- **Allocation operations** → CallExtern (memory allocation overhead dominates, function call overhead negligible)
+- **Container 创建** → Opcode（VM 需要访问 Module.struct_metas）
 - **Read operations** → Keep as instructions (high frequency, lightweight)
 - **VM state operations** → Keep as instructions (require internal state)
 

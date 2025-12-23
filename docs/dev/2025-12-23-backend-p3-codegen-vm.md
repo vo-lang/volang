@@ -692,7 +692,7 @@ pub fn generate_entry(ctx: &mut CodegenContext) -> u32 {
 
 | 操作 | 栈上 (不逃逸) | 堆上 (逃逸) |
 |------|---------------|-------------|
-| 声明 | 分配多 slot | `CallExtern(vo_array_create)` |
+| 声明 | 分配多 slot | `ArrayNew` |
 | 静态索引 | `Copy` (编译期偏移) | `ArrayGet/Set` |
 | 动态索引 | `SlotGet/Set` | `ArrayGet/Set` |
 | 多 slot 元素 | `SlotGetN/SetN` | `ArrayGetN/SetN` |
@@ -703,10 +703,10 @@ pub fn generate_entry(ctx: &mut CodegenContext) -> u32 {
 
 | 类型 | 创建 | 读 | 写 | 其他 |
 |------|------|----|----|------|
-| Slice | `CallExtern(vo_slice_create)` | `SliceGet/GetN` | `SliceSet/SetN` | `SliceLen/Cap/Slice/Append` |
+| Slice | `SliceNew` | `SliceGet/GetN` | `SliceSet/SetN` | `SliceLen/Cap/Slice/Append` |
 | String | `CallExtern(vo_string_create)` | `StrIndex` | ❌ | `StrLen/Concat/Slice/Eq/Lt...` |
-| Map | `CallExtern(vo_map_create)` | `MapGet` | `MapSet` | `MapLen/Delete` |
-| Chan | `CallExtern(vo_channel_create)` | `ChanRecv` | `ChanSend` | `ChanClose` |
+| Map | `LoadConst` + `MapNew` | `MapGet` | `MapSet` | `MapLen/Delete` |
+| Chan | `ChanNew` | `ChanRecv` | `ChanSend` | `ChanClose` |
 
 ### Interface
 

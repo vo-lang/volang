@@ -200,29 +200,35 @@ pub enum Opcode {
 - flags 字段用途因指令而异（返回值数量、slot 数量等）
 - imm32 用于跳转偏移，由 b 和 c 组合
 
-### 2.1 内置 CallExtern 函数
+### 2.1 Container 创建指令
+
+Container 创建使用专用 opcode（VM 可访问 `Module.struct_metas` 查询 `elem_slots`）：
+
+| 指令 | 编码 | 说明 |
+|------|------|------|
+| `ArrayNew` | `a=dst, b=elem_meta_id, c=len_reg, flags=elem_kind` | 创建数组 |
+| `SliceNew` | `a=dst, b=elem_meta_id, c=len_reg, flags=elem_kind` | 创建切片（cap 从下一 slot 读取） |
+| `ChanNew` | `a=dst, b=elem_meta_id, c=cap_reg, flags=elem_kind` | 创建通道 |
+| `MapNew` | `a=dst, b=type_info_reg` | 创建映射（类型信息打包在寄存器） |
+
+**MapNew 用两条指令**：
+```
+LoadConst r, <packed_u64>   // packed: [key_kind:8|key_meta_id:24|val_kind:8|val_meta_id:24]
+MapNew    dst, r
+```
+
+### 2.2 内置 CallExtern 函数
 
 以下操作通过 `CallExtern` 调用 runtime-core 函数实现：
 
 | 类别 | 函数 | 签名 |
 |------|------|------|
 | **String** | `vo_string_create` | `(bytes_ptr, len) -> GcRef` |
-| **Array** | `vo_array_create` | `(elem_kind, elem_meta_id, len) -> GcRef` |
-| **Slice** | `vo_slice_create` | `(elem_kind, elem_meta_id, len, cap) -> GcRef` |
-| **Map** | `vo_map_create` | `(key_kind, key_meta_id, val_kind, val_meta_id) -> GcRef` |
-| **Channel** | `vo_channel_create` | `(elem_kind, elem_meta_id, cap) -> GcRef` |
 | **Closure** | `vo_closure_create` | `(func_id, capture_count) -> GcRef` |
 | **Debug** | `vo_print` | `(value, type_kind) -> ()` |
 
-**注**：`elem_slots` / `key_slots` / `val_slots` 通过 `meta_id` 从 `struct_metas` 表查询，不在参数中传递。
-
-**参数说明**：
-- `elem_kind` / `key_kind` / `val_kind` - ValueKind 枚举值
-- `elem_meta_id` / `key_meta_id` / `val_meta_id` - 类型 ID（Struct/Interface 时使用）
-- `elem_slots` - 元素占用的 slot 数（用于索引计算）
-
 **设计原则**：
-- **分配操作** → CallExtern（内存分配开销大，函数调用开销可忽略）
+- **Container 创建** → Opcode（VM 需要访问 Module.struct_metas 查询 elem_slots）
 - **读取操作** → 保留指令（高频、轻量）
 - **VM 状态操作** → 保留指令（需要内部状态）
 

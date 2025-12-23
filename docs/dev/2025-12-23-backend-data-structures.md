@@ -61,17 +61,14 @@ pub struct GcHeader {
     pub gen: u8,         // GcGen
     pub slots: u16,      // 数据 slot 数
     pub meta_id: [u8; 3], // 24-bit 元数据索引
-    pub value_kind: u8,  // [is_array:1 | kind:7]
+    pub value_kind: u8,  // ValueKind 枚举值
 }
 
-/// value_kind 字段说明:
-/// - bit 7 (is_array): 1 = Array 对象, 0 = 其他
-/// - bit 0-6 (kind): 元素/值的 ValueKind
-///
-/// meta_id 含义随 kind 变化:
-/// - Struct: struct_metas 索引
-/// - Interface: interface_metas 索引
-/// - Array of Struct/Interface: 元素的 meta_id
+/// meta_id 含义随 value_kind 变化:
+/// - Array, Slice, Channel: elem_meta_id（元素的 meta_id）
+/// - Struct, Pointer: 指向对象的 meta_id
+/// - Interface: 接口类型的 meta_id
+/// - Map: 0（key/val 类型信息存在 Container 数据里）
 /// - 其他: 0
 
 /// GC 引用 - 指向堆对象数据区（GcHeader 之后）的指针
@@ -95,16 +92,33 @@ impl Gc {
 
 ### 堆对象布局 (objects.rs)
 
-| 类型 | 布局 | slots |
-|------|------|-------|
-| **String** | `{ array: GcRef, start, len }` | 3 |
-| **Array** | `{ header, data... }` header=`[len:48 \| elem_slots:16]` 元素类型在 GcHeader | 1+len×elem_slots |
-| **Slice** | `{ array: GcRef, start, len, cap }` | 4 |
-| **Map** | `{ inner_ptr, key_kind, val_kind }` | 3 |
-| **Closure** | `{ func_id, cap_count, captures... }` | 2+N |
-| **Channel** | `{ state_ptr }` | 1 |
-| **Escaped Primitive** | `{ value }` (GcHeader.value_kind=Int/Float/Bool) | 1 |
-| **Struct** | `{ field0, field1, ... }` | N |
+所有 GcObject 使用 Rust struct 布局（不是 slot 数组），GC 根据 value_kind 调用特定扫描逻辑。
+
+```rust
+// String
+struct StringData { array: GcRef, start: usize, len: usize }
+
+// Array (动态大小)
+struct ArrayHeader { len: usize, elem_size: u16 }  // data: [u8; len * elem_size] 紧跟其后
+
+// Slice
+struct SliceData { array: GcRef, start: usize, len: usize, cap: usize }
+
+// Map
+struct MapData { inner: *mut HashMap, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32 }
+
+// Channel
+struct ChannelData { state: *mut ChannelState, elem_kind: u8, elem_meta_id: u32, cap: usize }
+
+// Closure (动态大小)
+struct ClosureHeader { func_id: u32, upval_count: u32 }  // upvalues 紧跟其后
+
+// Escaped Primitive (GcHeader.value_kind=Int/Float/Bool)
+struct EscapedPrimitive { value: u64 }
+
+// Struct (按 StructMeta 布局)
+struct StructData { fields: [u64; N] }
+```
 
 **Interface** (栈上 2 slots):
 ```
@@ -126,22 +140,24 @@ string::len(s) -> usize
 string::concat(gc, a, b) -> GcRef
 string::slice_of(gc, s, start, end) -> GcRef
 
-// Array - elem_slots 通过 (elem_kind, elem_meta_id) 推断
-array::create(gc, elem_kind, elem_meta_id, len) -> GcRef
+// Array - elem_size (字节数) 由调用者从 struct_metas 查询后传入
+array::create(gc, elem_kind, elem_meta_id, elem_size, len) -> GcRef
 array::get(arr, idx) -> u64
 array::set(arr, idx, val)
 array::len(arr) -> usize
 
-// Slice
-slice::create(gc, array, start, len, cap) -> GcRef
+// Slice - elem_size (字节数) 由调用者从 struct_metas 查询后传入
+slice::create(gc, elem_kind, elem_meta_id, elem_size, len, cap) -> GcRef
+slice::from_array_range(gc, arr, start, len, cap) -> GcRef
+slice::from_array(gc, arr) -> GcRef
 slice::get(s, idx) -> u64
 slice::set(s, idx, val)
 slice::append(gc, s, val) -> GcRef  // elem 信息从 slice.array 的 GcHeader 读取
 
-// Closure
-closure::create(gc, func_id, cap_count) -> GcRef
-closure::get_upvalue(c, idx) -> u64
-closure::set_upvalue(c, idx, val)
+// Closure - upvalues 通过 Gc::read_slot/write_slot 访问
+closure::create(gc, func_id, upval_count) -> GcRef
+closure::func_id(c) -> u32
+closure::upval_count(c) -> usize
 ```
 
 ---
