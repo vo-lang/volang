@@ -8,7 +8,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-mod types;
+pub mod types;
 pub mod utf8;
 
 pub use types::{ExprId, TypeExprId, TypeId, ValueKind, SlotType, RuntimeTypeId};

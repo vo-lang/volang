@@ -14,18 +14,23 @@ VM 和 JIT 共享的核心运行时。
 
 ```rust
 /// 值类型标识 - 区分所有运行时类型
+/// 参考: docs/spec/memory-model-and-instructions.md
 #[repr(u8)]
 pub enum ValueKind {
-    // 基础类型 (1 slot)
-    Nil = 0, Bool, Int, Int8, Int16, Int32, Int64,
-    Uint, Uint8, Uint16, Uint32, Uint64, Float32, Float64, FuncPtr,
+    // === 基础类型 (1 slot, 无 GC) ===
+    Nil = 0, Bool = 1,
+    Int = 2, Int8 = 3, Int16 = 4, Int32 = 5, Int64 = 6,
+    Uint = 7, Uint8 = 8, Uint16 = 9, Uint32 = 10, Uint64 = 11,
+    Float32 = 12, Float64 = 13, FuncPtr = 14,
     
-    // 引用类型 (1 slot GcRef)
-    String, Array, Slice, Map, Channel, Closure, Struct, Pointer,
+    // === 复合值类型 (多 slot) ===
+    Array = 16,         // [N]T - 元素内联
+    Struct = 21,        // 字段内联
+    Interface = 23,     // 2 slots: header + data
     
-    // 特殊
-    Interface,  // 2 slots
-    BoxedInt, BoxedFloat, BoxedBool,  // 逃逸的基础类型
+    // === 引用类型 (1 slot GcRef) ===
+    String = 15, Slice = 17, Map = 18, Channel = 19,
+    Closure = 20, Pointer = 22,  // Pointer 统一表示所有逃逸值
 }
 
 /// 栈 slot 类型 - GC 扫描用
@@ -49,15 +54,25 @@ pub struct TypeMeta {
 
 ```rust
 /// GC 对象头 - 8 字节，紧跟数据
+/// 布局: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
 #[repr(C)]
 pub struct GcHeader {
     pub mark: u8,        // GcColor
     pub gen: u8,         // GcGen
-    pub value_kind: u8,  // ValueKind
-    pub flags: u8,
-    pub type_id: u16,    // RuntimeTypeId (Struct 用)
     pub slots: u16,      // 数据 slot 数
+    pub meta_id: [u8; 3], // 24-bit 元数据索引
+    pub value_kind: u8,  // [is_array:1 | kind:7]
 }
+
+/// value_kind 字段说明:
+/// - bit 7 (is_array): 1 = Array 对象, 0 = 其他
+/// - bit 0-6 (kind): 元素/值的 ValueKind
+///
+/// meta_id 含义随 kind 变化:
+/// - Struct: struct_metas 索引
+/// - Interface: interface_metas 索引
+/// - Array of Struct/Interface: 元素的 meta_id
+/// - 其他: 0
 
 pub type GcRef = *mut u64;
 
@@ -82,17 +97,17 @@ impl Gc {
 | 类型 | 布局 | slots |
 |------|------|-------|
 | **String** | `{ array: GcRef, start, len }` | 3 |
-| **Array** | `{ elem_kind, elem_type_id, elem_bytes, len, data... }` | 4+N |
+| **Array** | `{ header, data... }` header=`[len:48 \| elem_slots:16]` 元素类型在 GcHeader | 2+N |
 | **Slice** | `{ array: GcRef, start, len, cap }` | 4 |
 | **Map** | `{ inner_ptr, key_kind, val_kind }` | 3 |
 | **Closure** | `{ func_id, cap_count, captures... }` | 2+N |
 | **Channel** | `{ state_ptr }` | 1 |
-| **BoxedInt/Float/Bool** | `{ value }` | 1 |
+| **Escaped Primitive** | `{ value }` (GcHeader.value_kind=Int/Float/Bool) | 1 |
 | **Struct** | `{ field0, field1, ... }` | N |
 
 **Interface** (栈上 2 slots):
 ```
-slot[0]: header = pack(iface_type_id:16, value_type_id:16, value_kind:8, ...)
+slot[0]: header = pack(iface_meta_id:24, reserved:8, value_meta_id:24, value_kind:8)
 slot[1]: data   = 值或 GcRef
 ```
 
@@ -105,8 +120,8 @@ string::len(s) -> usize
 string::concat(gc, a, b) -> GcRef
 string::slice_of(gc, s, start, end) -> GcRef
 
-// Array
-array::create(gc, elem_kind, elem_type_id, elem_bytes, len) -> GcRef
+// Array (元素类型信息在 GcHeader)
+array::create(gc, elem_kind, elem_meta_id, elem_slots, len) -> GcRef
 array::get(arr, idx) -> u64
 array::set(arr, idx, val)
 array::len(arr) -> usize
@@ -209,9 +224,7 @@ pub struct CallFrame {
 
 pub struct DeferEntry {
     pub frame_depth: usize,
-    pub func_id: u32,
-    pub arg_count: u8,
-    pub args: [u64; 8],
+    pub closure: GcRef,      // 0 参数 closure
     pub is_errdefer: bool,
 }
 

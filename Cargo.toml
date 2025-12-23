@@ -10,27 +10,28 @@ members = [
   "crates/vo-analysis",
   "crates/vo-module",
   
-  # Code Generation
-  "crates/vo-codegen-vm",
-  "crates/vo-codegen-cranelift",
+  # Code Generation (backup - pending rewrite)
+  # "crates/vo-codegen-vm",
+  # "crates/vo-codegen-cranelift",
   
-  # VM
-  "crates/vo-vm",
+  # VM (backup - pending rewrite)
+  # "crates/vo-vm",
   
-  # Native Backends (Cranelift)
-  "crates/vo-jit",
-  "crates/vo-aot",
+  # Native Backends (backup - pending rewrite)
+  # "crates/vo-jit",
+  # "crates/vo-aot",
   
   # Runtime
   "crates/vo-runtime-core",
-  "crates/vo-runtime-native",
-  "crates/vo-runtime-vm",
+  # (backup - pending rewrite)
+  # "crates/vo-runtime-native",
+  # "crates/vo-runtime-vm",
   
-  # Web (WASM)
-  "crates/vo-web",
+  # Web (WASM) - depends on backup crates
+  # "crates/vo-web",
   
-  # Tools
-  "crates/vo-cli",
+  # Tools - depends on backup crates
+  # "crates/vo-cli",
 ]
 
 [workspace.package]

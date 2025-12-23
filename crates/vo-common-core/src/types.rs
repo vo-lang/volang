@@ -1,4 +1,5 @@
-//! Common type definitions shared across the Vo compiler.
+//! Common type definitions shared across the Vo compiler and runtime.
+//! Reference: docs/spec/memory-model-and-instructions.md
 
 use num_enum::TryFromPrimitive;
 
@@ -34,22 +35,33 @@ impl TypeId {
 // Runtime Types
 // =============================================================================
 
-/// Runtime type ID - index into meta tables.
-/// Only meaningful for Struct and Interface:
+/// Meta ID - 24-bit index into meta tables.
+/// Stored in GcHeader as 3 bytes.
+///
+/// Meaning depends on value_kind:
 /// - Struct: indexes struct_metas[]
 /// - Interface: indexes interface_metas[]
-pub type RuntimeTypeId = u16;
+/// - Array (is_array=1): element's meta_id if element is Struct/Interface
+/// - Others: 0
+pub type MetaId = u32;
 
-pub const INVALID_RUNTIME_TYPE_ID: RuntimeTypeId = u16::MAX;
+pub const INVALID_META_ID: MetaId = 0xFF_FFFF; // 24-bit max
+pub const META_ID_MASK: MetaId = 0xFF_FFFF;    // 24-bit mask
+
+// Backward compatibility alias
+pub type RuntimeTypeId = MetaId;
+pub const INVALID_RUNTIME_TYPE_ID: RuntimeTypeId = INVALID_META_ID;
 
 /// Value kind - runtime classification of Vo values.
 ///
-/// Layout: primitives (0-14) followed by reference types (15+).
-/// This allows `needs_gc()` to use a simple comparison.
+/// Layout:
+/// - Primitives (0-14): 1 slot, no GC
+/// - Compound value types (16, 21, 23): multi-slot, may contain GC refs
+/// - Reference types (15, 17-20, 22): 1 slot GcRef, heap allocated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TryFromPrimitive)]
 #[repr(u8)]
 pub enum ValueKind {
-    // Primitives (no GC needed)
+    // === Primitive Types (1 slot, no GC) ===
     Nil = 0,
     Bool = 1,
     Int = 2,
@@ -64,18 +76,20 @@ pub enum ValueKind {
     Uint64 = 11,
     Float32 = 12,
     Float64 = 13,
-    FuncPtr = 14,   // bare function pointer (no captures, no GC)
+    FuncPtr = 14,
 
-    // Reference types (need GC)
-    String = 15,
+    // === Compound Value Types (multi-slot, may contain GC refs) ===
     Array = 16,
+    Struct = 21,
+    Interface = 23,
+
+    // === Reference Types (1 slot GcRef, heap allocated) ===
+    String = 15,
     Slice = 17,
     Map = 18,
     Channel = 19,
-    Closure = 20,   // closure with captures
-    Struct = 21,
-    Pointer = 22,   // *StructType
-    Interface = 23,
+    Closure = 20,
+    Pointer = 22,
 }
 
 impl ValueKind {
@@ -84,19 +98,39 @@ impl ValueKind {
         Self::try_from(v).unwrap_or(ValueKind::Nil)
     }
 
-    /// Whether this type needs GC scanning.
     #[inline]
-    pub fn needs_gc(&self) -> bool {
-        (*self as u8) >= Self::String as u8
+    pub fn is_ref_type(&self) -> bool {
+        matches!(
+            self,
+            Self::String
+                | Self::Slice
+                | Self::Map
+                | Self::Channel
+                | Self::Closure
+                | Self::Pointer
+        )
     }
 
-    /// Whether this type has a RuntimeTypeId (only Struct/Interface).
     #[inline]
-    pub fn has_type_id(&self) -> bool {
-        matches!(self, Self::Struct | Self::Interface)
+    pub fn is_value_type(&self) -> bool {
+        !self.is_ref_type()
     }
 
-    /// Is this an integer type?
+    #[inline]
+    pub fn may_contain_gc_refs(&self) -> bool {
+        (*self as u8) > Self::FuncPtr as u8
+    }
+
+    pub fn fixed_slot_count(&self) -> u16 {
+        match self {
+            Self::Array | Self::Struct => {
+                panic!("Array/Struct have variable slot count, use TypeMeta")
+            }
+            Self::Interface => 2,
+            _ => 1,
+        }
+    }
+
     pub fn is_integer(&self) -> bool {
         matches!(
             self,
@@ -113,27 +147,14 @@ impl ValueKind {
         )
     }
 
-    /// Is this a floating-point type?
     pub fn is_float(&self) -> bool {
         matches!(self, Self::Float32 | Self::Float64)
     }
 
-    /// Is this a numeric type (integer or float)?
     pub fn is_numeric(&self) -> bool {
         self.is_integer() || self.is_float()
     }
 
-    /// Number of register slots needed for this type.
-    /// Interface needs 2 slots (type_id + data), others need 1.
-    pub fn slot_count(&self) -> u16 {
-        if *self == Self::Interface {
-            2
-        } else {
-            1
-        }
-    }
-
-    /// Byte size for array element storage.
     pub fn elem_bytes(&self) -> usize {
         match self {
             Self::Bool | Self::Int8 | Self::Uint8 => 1,
@@ -144,31 +165,34 @@ impl ValueKind {
     }
 }
 
-/// Slot type for GC scanning.
+/// Slot type for GC stack scanning.
+///
+/// Interface0 and Interface1 are paired:
+/// - Interface0: header slot (contains value_kind)
+/// - Interface1: data slot (scan depends on Interface0's value_kind)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SlotType {
-    /// Non-pointer value (int, float, bool). No scanning needed.
     #[default]
     Value = 0,
-    /// GC-managed pointer (string, slice, map, struct, *T, closure, chan). Must be scanned.
     GcRef = 1,
-    /// First slot of interface (packed type info). Not a pointer, skip.
     Interface0 = 2,
-    /// Second slot of interface (data). May be pointer depending on value_kind.
     Interface1 = 3,
 }
 
 impl SlotType {
-    /// Check if this slot type needs GC scanning.
-    /// Note: Interface1 requires runtime check of value_kind.
-    #[inline]
-    pub fn needs_scan(&self) -> bool {
-        matches!(self, SlotType::GcRef | SlotType::Interface1)
-    }
-
     #[inline]
     pub fn from_u8(v: u8) -> Self {
         Self::try_from(v).unwrap_or(SlotType::Value)
+    }
+
+    #[inline]
+    pub fn is_gc_ref(&self) -> bool {
+        matches!(self, SlotType::GcRef)
+    }
+
+    #[inline]
+    pub fn is_interface_data(&self) -> bool {
+        matches!(self, SlotType::Interface1)
     }
 }

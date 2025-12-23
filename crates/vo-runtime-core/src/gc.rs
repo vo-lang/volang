@@ -1,288 +1,248 @@
-//! GC types and C ABI functions.
-//!
-//! This module provides the core GC types that are shared across all backends.
-//! The actual GC implementation lives in vo-vm, but these types define the
-//! stable ABI for Cranelift-generated code to call.
+//! Garbage collector core.
 
-use alloc::alloc::{alloc, dealloc, Layout};
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-/// GC color for tri-color marking.
+#[cfg(feature = "std")]
+use std::alloc as heap_alloc;
+#[cfg(not(feature = "std"))]
+use alloc::alloc as heap_alloc;
+
+use vo_common_core::types::{ValueKind, META_ID_MASK};
+
+/// GC object header - 8 bytes.
+/// Layout: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
+///
+/// value_kind field:
+/// - bit 7 (0x80): is_array flag
+///   - 1 = Array object, kind bits are element type
+///   - 0 = Normal object, kind bits are object type
+/// - bit 0-6: ValueKind value (0-127)
+///
+/// meta_id meaning depends on kind:
+/// - Struct: struct_metas[] index
+/// - Interface: interface_metas[] index
+/// - Array of Struct/Interface: element's meta_id
+/// - Others: 0
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GcHeader {
+    pub mark: u8,
+    pub gen: u8,
+    pub slots: u16,
+    pub meta_id_low: u16,   // lower 16 bits of meta_id
+    pub meta_id_high: u8,   // upper 8 bits of meta_id
+    pub value_kind: u8,     // [is_array:1 | kind:7]
+}
+
+pub const IS_ARRAY_FLAG: u8 = 0x80;
+pub const VALUE_KIND_MASK: u8 = 0x7F;
+
+impl GcHeader {
+    pub const SIZE: usize = 8;
+
+    pub fn new(value_kind: u8, meta_id: u32, slots: u16) -> Self {
+        Self {
+            mark: GcColor::White as u8,
+            gen: GcGen::Young as u8,
+            slots,
+            meta_id_low: (meta_id & 0xFFFF) as u16,
+            meta_id_high: ((meta_id >> 16) & 0xFF) as u8,
+            value_kind,
+        }
+    }
+
+    #[inline]
+    pub fn meta_id(&self) -> u32 {
+        (self.meta_id_low as u32) | ((self.meta_id_high as u32) << 16)
+    }
+
+    #[inline]
+    pub fn set_meta_id(&mut self, meta_id: u32) {
+        self.meta_id_low = (meta_id & 0xFFFF) as u16;
+        self.meta_id_high = ((meta_id >> 16) & 0xFF) as u8;
+    }
+
+    #[inline]
+    pub fn is_array(&self) -> bool {
+        (self.value_kind & IS_ARRAY_FLAG) != 0
+    }
+
+    #[inline]
+    pub fn kind(&self) -> ValueKind {
+        ValueKind::from_u8(self.value_kind & VALUE_KIND_MASK)
+    }
+
+    #[inline]
+    pub fn value_kind(&self) -> ValueKind {
+        self.kind()
+    }
+}
+
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcColor {
     White = 0,
     Gray = 1,
     Black = 2,
 }
 
-/// GC generation for generational collection.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcGen {
     Young = 0,
     Old = 1,
     Touched = 2,
 }
 
-/// GC state machine for incremental collection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GcState {
-    Pause,
-    Propagate,
-    Atomic,
-    Sweep,
-}
+/// GC reference - pointer to GcObject data (after header).
+pub type GcRef = *mut u64;
 
-/// Object header (8 bytes).
-///
-/// Layout: mark:u8 | gen:u8 | value_kind:u8 | flags:u8 | type_id:u16 | _pad:u16
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct GcHeader {
-    pub mark: u8,
-    pub gen: u8,
-    pub value_kind: u8,   // ValueKind
-    pub flags: u8,
-    pub type_id: u16,     // RuntimeTypeId (only for Struct/Interface)
-    pub _pad: u16,
-}
-
-impl GcHeader {
-    pub fn new(value_kind: u8, type_id: u16) -> Self {
-        Self {
-            mark: GcColor::White as u8,
-            gen: GcGen::Young as u8,
-            value_kind,
-            flags: 0,
-            type_id,
-            _pad: 0,
-        }
-    }
-}
-
-/// A GC-managed object.
-#[repr(C)]
-pub struct GcObject {
-    pub header: GcHeader,
-    // Variable-length data follows (accessed via pointer arithmetic)
-}
-
-/// Pointer to a GC object.
-/// 
-/// GcRef is a raw pointer that is safe to send between threads because:
-/// 1. The pointer itself is just a number (address)
-/// 2. Actual access to GC objects must go through proper synchronization
-/// 3. The GC system ensures objects aren't freed while referenced
-pub type GcRef = *mut GcObject;
-
-/// Null GC reference.
-pub const NULL_REF: GcRef = core::ptr::null_mut();
-
-// SAFETY: GcRef is just a pointer value. Thread safety is ensured by:
-// - GC operations are synchronized at a higher level
-// - Object access goes through Gc methods that handle synchronization
-unsafe impl Send for GcObject {}
-unsafe impl Sync for GcObject {}
-
-/// Type ID alias.
-pub type TypeId = u32;
-
-/// Check if a u64 value is potentially a GC reference.
-#[inline]
-pub fn is_gc_ref(val: u64) -> bool {
-    val != 0
-}
-
-/// Object entry in the GC tracking list.
-struct ObjectEntry {
+/// Entry in the all_objects list.
+struct GcObjectEntry {
     ptr: GcRef,
     size_bytes: usize,
 }
 
-/// The garbage collector.
+/// Garbage collector.
 pub struct Gc {
-    all_objects: Vec<ObjectEntry>,
+    all_objects: Vec<GcObjectEntry>,
     gray_queue: Vec<GcRef>,
-    #[allow(dead_code)]
-    state: GcState,
-    current_white: u8,
-    
-    // Generational (reserved for Phase 4)
-    #[allow(dead_code)]
-    young_list: Vec<GcRef>,
-    #[allow(dead_code)]
-    old_list: Vec<GcRef>,
-    
-    // Statistics
     total_bytes: usize,
     threshold: usize,
-    
-    // Parameters
-    pause: usize,
-    #[allow(dead_code)]
-    stepmul: usize,
-    
-    // Pause control
-    pause_count: u32,
 }
 
 impl Gc {
+    const INITIAL_THRESHOLD: usize = 1024 * 1024;
+
     pub fn new() -> Self {
         Self {
             all_objects: Vec::new(),
             gray_queue: Vec::new(),
-            state: GcState::Pause,
-            current_white: 0,
-            young_list: Vec::new(),
-            old_list: Vec::new(),
             total_bytes: 0,
-            threshold: 1024 * 1024, // 1MB
-            pause: 200,
-            stepmul: 200,
-            pause_count: 0,
+            threshold: Self::INITIAL_THRESHOLD,
         }
     }
-    
-    /// Allocate a GC object with given number of data slots.
-    pub fn alloc(&mut self, value_kind: u8, type_id: u16, size_slots: usize) -> GcRef {
-        let size_bytes = core::mem::size_of::<GcHeader>() + size_slots * 8;
-        let layout = Layout::from_size_align(size_bytes, 8).unwrap();
-        
-        let ptr = unsafe {
-            let ptr = alloc(layout) as *mut GcObject;
-            if ptr.is_null() {
-                panic!("GC allocation failed");
-            }
-            (*ptr).header = GcHeader::new(value_kind, type_id);
-            // Zero-initialize data slots
-            let data_ptr = Self::get_data_ptr(ptr);
-            for i in 0..size_slots {
-                *data_ptr.add(i) = 0;
-            }
-            ptr
-        };
-        
-        self.all_objects.push(ObjectEntry { ptr, size_bytes });
-        self.total_bytes += size_bytes;
-        
-        ptr
-    }
-    
-    /// Get the header of an object.
-    #[inline]
-    pub fn get_header(obj: GcRef) -> &'static GcHeader {
-        unsafe { &(*obj).header }
-    }
-    
-    /// Get data slot pointer for an object.
-    #[inline]
-    pub fn get_data_ptr(obj: GcRef) -> *mut u64 {
+
+    /// Allocate a new GC object.
+    /// value_kind: [is_array:1 | kind:7]
+    /// meta_id: 24-bit metadata index
+    pub fn alloc(&mut self, value_kind: u8, meta_id: u32, slots: u16) -> GcRef {
+        let header_size = GcHeader::SIZE;
+        let data_size = (slots as usize) * 8;
+        let total_size = header_size + data_size;
+
+        let layout = core::alloc::Layout::from_size_align(total_size, 8).unwrap();
+        let ptr = unsafe { heap_alloc::alloc_zeroed(layout) };
+
+        if ptr.is_null() {
+            panic!("GC allocation failed");
+        }
+
+        let header = GcHeader::new(value_kind, meta_id & META_ID_MASK, slots);
         unsafe {
-            (obj as *mut u8).add(core::mem::size_of::<GcHeader>()) as *mut u64
+            core::ptr::write(ptr as *mut GcHeader, header);
         }
+
+        let data_ptr = unsafe { ptr.add(header_size) as GcRef };
+
+        self.all_objects.push(GcObjectEntry {
+            ptr: data_ptr,
+            size_bytes: total_size,
+        });
+        self.total_bytes += total_size;
+
+        data_ptr
     }
-    
-    /// Read a data slot.
+
+    /// Read a slot from a GC object.
     #[inline]
     pub fn read_slot(obj: GcRef, idx: usize) -> u64 {
-        unsafe { *Self::get_data_ptr(obj).add(idx) }
+        unsafe { *obj.add(idx) }
     }
-    
-    /// Write a data slot.
+
+    /// Write a slot to a GC object.
     #[inline]
     pub fn write_slot(obj: GcRef, idx: usize, val: u64) {
-        unsafe { *Self::get_data_ptr(obj).add(idx) = val; }
+        unsafe { *obj.add(idx) = val }
     }
-    
-    /// Pause GC (for native calls).
-    pub fn pause_gc(&mut self) {
-        self.pause_count += 1;
+
+    /// Get the header of a GC object.
+    #[inline]
+    pub fn header(obj: GcRef) -> &'static GcHeader {
+        unsafe { &*((obj as *const u8).sub(GcHeader::SIZE) as *const GcHeader) }
     }
-    
-    /// Resume GC.
-    pub fn resume_gc(&mut self) {
-        debug_assert!(self.pause_count > 0);
-        self.pause_count -= 1;
+
+    /// Get mutable header of a GC object.
+    #[inline]
+    pub fn header_mut(obj: GcRef) -> &'static mut GcHeader {
+        unsafe { &mut *((obj as *mut u8).sub(GcHeader::SIZE) as *mut GcHeader) }
     }
-    
-    /// Check if GC is paused.
-    pub fn is_paused(&self) -> bool {
-        self.pause_count > 0
-    }
-    
-    /// Mark an object as gray.
+
+    /// Mark an object as gray (pending scan).
     pub fn mark_gray(&mut self, obj: GcRef) {
         if obj.is_null() {
             return;
         }
-        unsafe {
-            if (*obj).header.mark == self.current_white {
-                (*obj).header.mark = GcColor::Gray as u8;
-                self.gray_queue.push(obj);
-            }
+        let header = Self::header_mut(obj);
+        if header.mark == GcColor::White as u8 {
+            header.mark = GcColor::Gray as u8;
+            self.gray_queue.push(obj);
         }
     }
-    
-    /// Check if GC should run based on memory threshold.
+
+    /// Write barrier for incremental GC.
+    pub fn write_barrier(&mut self, _parent: GcRef, child: GcRef) {
+        self.mark_gray(child);
+    }
+
+    /// Check if GC should run.
     pub fn should_collect(&self) -> bool {
-        self.total_bytes > self.threshold && self.pause_count == 0
+        self.total_bytes >= self.threshold
     }
-    
-    /// Force full collection (Phase 1: stop-the-world).
-    pub fn collect<F>(&mut self, mut scan_fn: F)
+
+    /// Run garbage collection.
+    pub fn collect<F>(&mut self, mut scan_object: F)
     where
-        F: FnMut(&mut Self, GcRef),
+        F: FnMut(&mut Gc, GcRef),
     {
-        if self.pause_count > 0 {
-            return;
-        }
-        
-        // Propagate: scan all gray objects
         while let Some(obj) = self.gray_queue.pop() {
-            scan_fn(self, obj);
-            unsafe {
-                (*obj).header.mark = GcColor::Black as u8;
+            let header = Self::header_mut(obj);
+            if header.mark == GcColor::Gray as u8 {
+                header.mark = GcColor::Black as u8;
+                scan_object(self, obj);
             }
         }
-        
-        // Sweep: free white objects
-        let white = self.current_white;
+
         let mut new_objects = Vec::new();
-        
+        let mut freed_bytes = 0;
+
         for entry in self.all_objects.drain(..) {
-            unsafe {
-                if (*entry.ptr).header.mark == white {
-                    // Garbage - free it
-                    let layout = Layout::from_size_align(entry.size_bytes, 8).unwrap();
-                    dealloc(entry.ptr as *mut u8, layout);
-                    self.total_bytes -= entry.size_bytes;
-                } else {
-                    // Alive - reset to white for next GC
-                    (*entry.ptr).header.mark = white;
-                    new_objects.push(entry);
-                }
+            let header = Self::header(entry.ptr);
+            if header.mark == GcColor::Black as u8 {
+                Self::header_mut(entry.ptr).mark = GcColor::White as u8;
+                new_objects.push(entry);
+            } else {
+                freed_bytes += entry.size_bytes;
+                let raw_ptr = unsafe { (entry.ptr as *mut u8).sub(GcHeader::SIZE) };
+                let layout =
+                    core::alloc::Layout::from_size_align(entry.size_bytes, 8).unwrap();
+                unsafe { heap_alloc::dealloc(raw_ptr, layout) };
             }
         }
-        
+
         self.all_objects = new_objects;
-        
-        // Adjust threshold
-        self.threshold = (self.total_bytes * self.pause / 100).max(1024 * 1024);
+        self.total_bytes -= freed_bytes;
+
+        if self.total_bytes > self.threshold / 2 {
+            self.threshold *= 2;
+        }
     }
-    
-    /// Write barrier (Phase 3+, currently no-op).
-    #[inline]
-    pub fn write_barrier(&mut self, _parent: GcRef, _child: GcRef) {
-        // Phase 1: no-op
-    }
-    
-    /// Get total allocated bytes.
+
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
-    
-    /// Get number of live objects.
+
     pub fn object_count(&self) -> usize {
         self.all_objects.len()
     }
@@ -291,53 +251,5 @@ impl Gc {
 impl Default for Gc {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Drop for Gc {
-    fn drop(&mut self) {
-        // Free all objects
-        for entry in self.all_objects.drain(..) {
-            unsafe {
-                let layout = Layout::from_size_align(entry.size_bytes, 8).unwrap();
-                dealloc(entry.ptr as *mut u8, layout);
-            }
-        }
-    }
-}
-
-// =============================================================================
-// Note: All C ABI functions have been moved to vo-runtime-native/src/gc_global.rs
-// because they are only used by JIT/AOT, not by VM.
-// VM uses the Rust methods directly (Gc::read_slot, Gc::write_slot, etc.)
-// =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_alloc() {
-        let mut gc = Gc::new();
-        let obj = gc.alloc(1, 0, 2); // value_kind=1, type_id=0, size_slots=2
-        assert!(!obj.is_null());
-        assert_eq!(gc.object_count(), 1);
-        
-        // Write and read slots
-        Gc::write_slot(obj, 0, 42);
-        Gc::write_slot(obj, 1, 100);
-        assert_eq!(Gc::read_slot(obj, 0), 42);
-        assert_eq!(Gc::read_slot(obj, 1), 100);
-    }
-    
-    #[test]
-    fn test_slot_access() {
-        let mut gc = Gc::new();
-        let obj = gc.alloc(1, 0, 2); // value_kind=1, type_id=0, size_slots=2
-        assert!(!obj.is_null());
-        
-        // Test using Rust methods directly (VM style)
-        Gc::write_slot(obj, 0, 42);
-        assert_eq!(Gc::read_slot(obj, 0), 42);
     }
 }

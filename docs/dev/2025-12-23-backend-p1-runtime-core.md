@@ -19,26 +19,28 @@
 
 ```rust
 /// 值类型标签 - 区分所有类型
+/// 参考: docs/spec/memory-model-and-instructions.md
 #[repr(u8)]
 pub enum ValueKind {
-    // 基础类型 (1 slot, 无 GC)
+    // === 基础类型 (1 slot, 无 GC) ===
     Nil = 0, Bool = 1, 
     Int = 2, Int8 = 3, Int16 = 4, Int32 = 5, Int64 = 6,
     Uint = 7, Uint8 = 8, Uint16 = 9, Uint32 = 10, Uint64 = 11,
     Float32 = 12, Float64 = 13, 
-    FuncPtr = 14,       // 裸函数指针
+    FuncPtr = 14,       // 裸函数指针（无捕获）
     
-    // 引用类型 (1 slot GcRef)
-    String = 15, Slice = 17, Map = 18, Channel = 19, 
-    Closure = 20, Pointer = 22,
-    
-    // 复合值类型 (多 slot)
-    Array = 16,         // 元素内联
+    // === 复合值类型 (多 slot, 可能含 GC 引用) ===
+    Array = 16,         // [N]T - 元素内联
     Struct = 21,        // 字段内联
     Interface = 23,     // 2 slots: header + data
     
-    // Boxed 基础类型 (逃逸的基础类型)
-    BoxedInt = 24, BoxedFloat = 25, BoxedBool = 26,
+    // === 引用类型 (1 slot GcRef, 堆分配) ===
+    String = 15,
+    Slice = 17,
+    Map = 18,
+    Channel = 19,
+    Closure = 20,       // 带捕获的闭包
+    Pointer = 22,       // *T - 指向逃逸值的指针（统一表示所有逃逸值）
 }
 
 /// Slot 类型 - 用于 GC 扫描
@@ -51,7 +53,25 @@ pub enum SlotType {
 }
 ```
 
-**⚠️ 注意**：
+**⚠️ 关键设计 - Pointer 统一表示逃逸值**：
+
+逃逸的基础类型（int/float/bool）和逃逸的 struct/array 都用 `Pointer` 表示：
+- 栈上变量类型：`SlotType::GcRef`，值是 `Pointer`
+- 堆对象 `GcHeader.value_kind`：记录**原始类型**（Int/Float/Bool/Struct/Array）
+- **没有独立的 BoxedInt/BoxedFloat/BoxedBool 类型**
+
+示例：
+```
+// 逃逸的 int
+栈上: slot_type = GcRef, value = GcRef 指向堆
+堆上: GcHeader { value_kind: Int, slots: 1 }, data: [42]
+
+// 逃逸的 struct Point { x, y int }
+栈上: slot_type = GcRef, value = GcRef 指向堆
+堆上: GcHeader { value_kind: Struct, meta_id: 0, slots: 2 }, data: [x, y]
+```
+
+**其他注意**：
 - `ValueKind` 存在 GcHeader 里，决定对象如何扫描
 - `SlotType` 存在 FunctionDef.slot_types 里，决定栈如何扫描
 - 两者配合使用，不要搞混
@@ -60,15 +80,29 @@ pub enum SlotType {
 
 ```rust
 /// GC 对象头 - 8 字节
+/// 布局: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
 #[repr(C)]
 pub struct GcHeader {
-    pub mark: u8,        // GcColor: White/Gray/Black
-    pub gen: u8,         // GcGen: Young/Old/Touched
-    pub value_kind: u8,  // ValueKind
-    pub flags: u8,       // 保留
-    pub type_id: u16,    // RuntimeTypeId (仅 Struct 有效)
-    pub slots: u16,      // 数据 slot 数量
+    pub mark: u8,         // GcColor: White/Gray/Black
+    pub gen: u8,          // GcGen: Young/Old/Touched
+    pub slots: u16,       // 数据 slot 数量
+    pub meta_id: [u8; 3], // 24-bit 元数据索引
+    pub value_kind: u8,   // [is_array:1 | kind:7]
 }
+
+/// value_kind 字段拆分:
+/// - bit 7 (0x80): is_array 标记
+///   - 1 = Array 对象, kind 是元素类型
+///   - 0 = 普通对象, kind 是对象类型
+/// - bit 0-6: ValueKind 值 (0-127)
+///
+/// meta_id 含义随 kind 变化:
+/// - Struct: struct_metas[] 索引
+/// - Interface: interface_metas[] 索引
+/// - Array (is_array=1):
+///   - 元素是 Struct/Interface 时: 元素的 meta_id
+///   - 元素是简单类型时: 0
+/// - 其他: 0
 
 /// GC 对象
 #[repr(C)]
@@ -94,7 +128,7 @@ pub struct Gc {
 ```rust
 impl Gc {
     /// 分配对象
-    pub fn alloc(&mut self, value_kind: u8, type_id: u16, slots: u16) -> GcRef;
+    pub fn alloc(&mut self, value_kind: u8, meta_id: u32, slots: u16) -> GcRef;
     
     /// 读写 slot (静态方法，不需要 &self)
     pub fn read_slot(obj: GcRef, idx: usize) -> u64;
@@ -320,7 +354,7 @@ pub extern "C" fn vo_string_index(s: GcRef, i: i64) -> u8 {
 ## Tasks Checklist
 
 ### types.rs
-- [ ] ValueKind 枚举（包含 Boxed 类型）
+- [ ] ValueKind 枚举（无 Boxed 类型，Pointer 统一表示逃逸值）
 - [ ] SlotType 枚举
 - [ ] ValueKind 辅助方法 (is_ref_type, may_contain_gc_refs)
 - [ ] TypeMeta / StructMeta / InterfaceMeta

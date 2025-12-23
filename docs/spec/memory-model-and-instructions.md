@@ -184,7 +184,7 @@ var arr [3]int  // slot 0: arr[0], slot 1: arr[1], slot 2: arr[2]
 **Interface**: 2 slots
 ```vo
 var i interface{}
-// slot 0: header (iface_type_id:16 | value_kind:8 | value_type_id:16 | ...)
+// slot 0: header (iface_meta_id:24 | reserved:8 | value_meta_id:24 | value_kind:8)
 // slot 1: data (immediate value or GcRef)
 ```
 
@@ -195,14 +195,27 @@ Escaped values are allocated on the heap with a GC header.
 #### 3.2.1 GcHeader
 
 ```rust
+/// GC 对象头 - 8 字节
+/// 布局: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
 pub struct GcHeader {
-    pub mark: u8,           // GC mark bit
-    pub gen: u8,            // Generation
-    pub value_kind: u8,     // ValueKind of the contained value
-    pub _pad: u8,
-    pub type_id: u16,       // RuntimeTypeId (for struct/interface)
-    pub _pad2: u16,
+    pub mark: u8,          // GC mark bit (White/Gray/Black)
+    pub gen: u8,           // Generation (Young/Old)
+    pub slots: u16,        // Number of data slots
+    pub meta_id: [u8; 3],  // 24-bit metadata index
+    pub value_kind: u8,    // [is_array:1 | kind:7]
 }
+
+// value_kind 字段:
+// - bit 7 (0x80): is_array 标记
+//   - 1 = Array 对象, kind 是元素类型
+//   - 0 = 普通对象, kind 是对象类型
+// - bit 0-6: ValueKind 值
+//
+// meta_id 含义:
+// - Struct: struct_metas[] 索引
+// - Interface: interface_metas[] 索引  
+// - Array of Struct/Interface: 元素的 meta_id
+// - 其他: 0
 ```
 
 #### 3.2.2 Heap Object Layout
@@ -229,13 +242,19 @@ pub struct GcHeader {
 
 **Escaped Array**:
 ```
-┌─────────────────────────────┐
-│ GcHeader (value_kind=Array) │
-├─────────────────────────────┤
-│ element 0                   │
-│ element 1                   │
-│ ...                         │
-└─────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│ GcHeader (is_array=1, kind=elem_kind)     │
+├─────────────────────────────────────────────────┤
+│ Array header: [len:48 | elem_slots:16]    │
+├─────────────────────────────────────────────────┤
+│ element 0                                 │
+│ element 1                                 │
+│ ...                                       │
+└─────────────────────────────────────────────────┘
+
+// GcHeader.value_kind = 0x80 | elem_kind (is_array=1)
+// GcHeader.meta_id = elem_meta_id (元素是 Struct/Interface 时)
+// Array header slot 0: [len:48 | elem_slots:16]
 ```
 
 ### 3.3 Global Variables
@@ -456,11 +475,10 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `StrNew` | a, b | `slots[a] = string(constants[b])` |
-| `StrConcat` | a, b, c | `slots[a] = slots[b] + slots[c]` |
 | `StrLen` | a, b | `slots[a] = len(slots[b])` |
 | `StrIndex` | a, b, c | `slots[a] = slots[b][slots[c]]` |
-| `StrSlice` | a, b, c, flags | `slots[a] = slots[b][slots[c]:flags]` |
+| `StrConcat` | a, b, c | `slots[a] = slots[b] + slots[c]` |
+| `StrSlice` | a, b, c, flags | `slots[a] = slots[b][slots[c]:slots[flags]]` |
 | `StrEq` | a, b, c | `slots[a] = slots[b] == slots[c]` |
 | `StrNe` | a, b, c | `slots[a] = slots[b] != slots[c]` |
 | `StrLt` | a, b, c | `slots[a] = slots[b] < slots[c]` |
@@ -468,47 +486,53 @@ For stack-allocated arrays with dynamic indices.
 | `StrGt` | a, b, c | `slots[a] = slots[b] > slots[c]` |
 | `StrGe` | a, b, c | `slots[a] = slots[b] >= slots[c]` |
 
+Note: `StrNew` uses CallExtern (`vo_string_new`).
+
 #### 5.2.16 ARRAY: Heap Array Operations
 
 For escaped arrays allocated on the heap.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ArrayNew` | a, b, c | `slots[a] = new [c]T`, elem_vk=`b` |
 | `ArrayGet` | a, b, c | `slots[a] = slots[b][slots[c]]` |
 | `ArraySet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `ArrayLen` | a, b | `slots[a] = len(slots[b])` |
+
+Note: `ArrayNew` uses CallExtern (`vo_array_create`).
 
 #### 5.2.17 SLICE: Slice Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `SliceNew` | a, b, c, flags | `slots[a] = make([]T, len=b, cap=c)`, elem_vk=`flags` |
 | `SliceGet` | a, b, c | `slots[a] = slots[b][slots[c]]` |
 | `SliceSet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `SliceLen` | a, b | `slots[a] = len(slots[b])` |
 | `SliceCap` | a, b | `slots[a] = cap(slots[b])` |
-| `SliceSlice` | a, b, c, flags | `slots[a] = slots[b][slots[c]:flags]` |
-| `SliceAppend` | a, b, c, flags | `slots[a] = append(slots[b], slots[c])`, elem_vk=`flags` |
+| `SliceSlice` | a, b, c, flags | `slots[a] = slots[b][slots[c]:slots[flags]]` |
+| `SliceAppend` | a, b, c | `slots[a] = append(slots[b], slots[c])` |
+
+Note: `SliceNew` uses CallExtern (`vo_slice_create`).
 
 #### 5.2.18 MAP: Map Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `MapNew` | a, b, c | `slots[a] = make(map)`, key_vk=`b`, val_vk=`c` |
-| `MapGet` | a, b, c | `slots[a] = slots[b][slots[c]]` |
+| `MapGet` | a, b, c, flags | `slots[a] = slots[b][slots[c]]`, flags=1 时 ok 写到 `slots[a+1]` |
 | `MapSet` | a, b, c | `slots[a][slots[b]] = slots[c]` |
 | `MapDelete` | a, b | `delete(slots[a], slots[b])` |
 | `MapLen` | a, b | `slots[a] = len(slots[b])` |
+
+Note: `MapNew` uses CallExtern (`vo_map_create`).
 
 #### 5.2.19 CHAN: Channel Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ChanNew` | a, b, c | `slots[a] = make(chan T, cap=c)`, elem_vk=`b` |
 | `ChanSend` | a, b | `slots[a] <- slots[b]` |
-| `ChanRecv` | a, b, c | `slots[a] = <-slots[b]`, ok at `c` |
+| `ChanRecv` | a, b, c, flags | `slots[a] = <-slots[b]`, flags=1 时 ok 写到 `slots[c]` |
 | `ChanClose` | a | `close(slots[a])` |
+
+Note: `ChanNew` uses CallExtern (`vo_channel_create`).
 
 #### 5.2.20 SELECT: Select Statement
 
@@ -531,28 +555,28 @@ For escaped arrays allocated on the heap.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ClosureNew` | a, b, c | `slots[a] = closure(func=b, cap_count=c)` |
-| `ClosureGet` | a, b | `slots[a] = closure.captures[b]` |
-| `ClosureSet` | a, b | `closure.captures[a] = slots[b]` |
+| `ClosureGet` | a, b | `slots[a] = slots[0].captures[b]` (closure 隐式在 r0) |
+| `ClosureSet` | a, b | `slots[0].captures[a] = slots[b]` (closure 隐式在 r0) |
 
-Note: `Upval*` instructions are removed. Escaped variables are heap-allocated directly, and closures capture GcRefs.
+Note: `ClosureNew` uses CallExtern (`vo_closure_create`). Escaped variables are heap-allocated directly, and closures capture GcRefs.
 
 #### 5.2.23 GO: Goroutine
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `GoCall` | a, b, c | `go functions[a](args at b, arg_slots=c)` |
+| `GoCall` | a | `go slots[a]()` (0 参数 closure，与 defer 一致) |
 | `Yield` | - | Yield current goroutine |
 
 #### 5.2.24 DEFER: Defer and Error Handling
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `DeferPush` | a, b, c | Push defer: func=`a`, args at `b`, arg_slots=`c` |
-| `DeferPop` | - | Pop and execute defers |
-| `ErrDeferPush` | a, b, c | Push errdefer: func=`a`, args at `b`, arg_slots=`c` |
+| `DeferPush` | a | Push defer: closure=`slots[a]` (0 参数 closure) |
+| `ErrDeferPush` | a | Push errdefer: closure=`slots[a]` (只在 error return 时执行) |
 | `Panic` | a | `panic(slots[a])` |
 | `Recover` | a | `slots[a] = recover()` |
+
+Note: `DeferPop` removed. Defers are executed automatically by `Return`.
 
 #### 5.2.25 IFACE: Interface Operations
 
@@ -574,12 +598,26 @@ Note: `Upval*` instructions are removed. Escaped variables are heap-allocated di
 
 #### 5.2.27 DEBUG: Debug Operations
 
-| Opcode | Operands | Description |
-|--------|----------|-------------|
-| `Print` | a, b | Print `slots[a]`, value_kind=`b` |
-| `AssertBegin` | a, b, c | If `!slots[a]`: begin assert, argc=`b`, line=`c` |
-| `AssertArg` | a, b | Print assert arg `slots[a]`, vk=`b` |
-| `AssertEnd` | - | End assert, terminate if failed |
+Note: `Print` uses CallExtern (`vo_print`). Assert is implemented using `JumpIf` + `CallExtern(print)` + `Panic`.
+
+### 5.3 Built-in CallExtern Functions
+
+The following operations are implemented via `CallExtern` calling runtime-core functions:
+
+| Category | Function | Description |
+|----------|----------|-------------|
+| **String** | `vo_string_create` | Create string from constant |
+| **Array** | `vo_array_create` | Create array |
+| **Slice** | `vo_slice_create` | Create slice |
+| **Map** | `vo_map_create` | Create map |
+| **Channel** | `vo_channel_create` | Create channel |
+| **Closure** | `vo_closure_create` | Create closure |
+| **Debug** | `vo_print` | Print value |
+
+**Design Principles**:
+- **Allocation operations** → CallExtern (memory allocation overhead dominates, function call overhead negligible)
+- **Read operations** → Keep as instructions (high frequency, lightweight)
+- **VM state operations** → Keep as instructions (require internal state)
 
 ---
 

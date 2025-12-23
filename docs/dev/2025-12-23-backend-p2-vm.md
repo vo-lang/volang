@@ -102,27 +102,47 @@ pub enum Opcode {
     JumpIfNot,    // if !slots[a]: pc += sign_extend(b | (c << 16))
     
     // === CALL: 函数调用 ===
-    Call,         // call functions[a], args at b, argc=c, retc=flags
-    CallExtern,   // call extern function
-    CallClosure,  // call closure at slots[a]
-    CallIface,    // call interface method: iface at a, method=b, args at c
-    Return,       // return values at a, count=b
+    Call,         // call functions[a], args at b, arg_slots=c, ret_slots=flags
+    CallExtern,   // call extern[a], args at b, arg_slots=c, ret_slots=flags
+    CallClosure,  // call slots[a], args at b, arg_slots=c, ret_slots=flags
+    CallIface,    // call iface at a, method=flags, args at b, c=(ret_slots<<8|arg_slots)
+    Return,       // return values at a, ret_slots=b
     
     // === STR: 字符串操作 ===
-    StrNew, StrConcat, StrLen, StrIndex, StrSlice,
+    StrLen,       // slots[a] = len(slots[b])
+    StrIndex,     // slots[a] = slots[b][slots[c]]
+    StrConcat,    // slots[a] = slots[b] + slots[c]
+    StrSlice,     // slots[a] = slots[b][slots[c]:slots[flags]]
     StrEq, StrNe, StrLt, StrLe, StrGt, StrGe,
+    // 注: StrNew 用 CallExtern
     
     // === ARRAY: 堆数组操作 ===
-    ArrayNew, ArrayGet, ArraySet, ArrayLen,
+    ArrayGet,     // slots[a] = slots[b][slots[c]]
+    ArraySet,     // slots[a][slots[b]] = slots[c]
+    ArrayLen,     // slots[a] = len(slots[b])
+    // 注: ArrayNew 用 CallExtern
     
     // === SLICE: 切片操作 ===
-    SliceNew, SliceGet, SliceSet, SliceLen, SliceCap, SliceSlice, SliceAppend,
+    SliceGet,     // slots[a] = slots[b][slots[c]]
+    SliceSet,     // slots[a][slots[b]] = slots[c]
+    SliceLen,     // slots[a] = len(slots[b])
+    SliceCap,     // slots[a] = cap(slots[b])
+    SliceSlice,   // slots[a] = slots[b][slots[c]:slots[flags]]
+    SliceAppend,  // slots[a] = append(slots[b], slots[c])
+    // 注: SliceNew 用 CallExtern
     
     // === MAP: Map 操作 ===
-    MapNew, MapGet, MapSet, MapDelete, MapLen,
+    MapGet,       // slots[a] = slots[b][slots[c]], flags=1 时 ok 写到 slots[a+1]
+    MapSet,       // slots[a][slots[b]] = slots[c]
+    MapDelete,    // delete(slots[a], slots[b])
+    MapLen,       // slots[a] = len(slots[b])
+    // 注: MapNew 用 CallExtern
     
     // === CHAN: Channel 操作 ===
-    ChanNew, ChanSend, ChanRecv, ChanClose,
+    ChanSend,     // slots[a] <- slots[b]
+    ChanRecv,     // slots[a] = <-slots[b], flags=1 时 ok 写到 slots[c]
+    ChanClose,    // close(slots[a])
+    // 注: ChanNew 用 CallExtern
     
     // === SELECT: Select 语句 ===
     SelectBegin,  // begin select, case_count=a, has_default=b
@@ -131,30 +151,32 @@ pub enum Opcode {
     SelectEnd,    // execute select, chosen index → slots[a]
     
     // === ITER: 迭代器 (for-range) ===
-    IterBegin, IterNext, IterEnd,
+    IterBegin,    // 开始迭代 slots[a], type=b (Slice/Map/String/IntRange/Channel)
+    IterNext,     // slots[a], slots[b] = next; 失败跳 pc+=c
+                  // Channel: slots[a]=value, slots[b]=unused, ok=false 时跳转
+    IterEnd,      // 结束迭代，弹出 iter_stack
     
     // === CLOSURE: 闭包操作 ===
-    ClosureNew,   // slots[a] = closure(func=b, cap_count=c)
-    ClosureGet,   // slots[a] = closure.captures[b]
-    ClosureSet,   // closure.captures[a] = slots[b]
-    // 注: 无 Upval 指令，逃逸变量直接堆分配，closure 捕获 GcRef
+    ClosureGet,   // slots[a] = slots[0].captures[b]  (closure 隐式在 r0)
+    ClosureSet,   // slots[0].captures[a] = slots[b]  (closure 隐式在 r0)
+    // 注: ClosureNew 用 CallExtern，无 Upval 指令
     
     // === GO: Goroutine ===
-    GoCall,       // go functions[a](args at b, argc=c)
+    GoCall,       // go slots[a]()  (0 参数 closure，与 defer 一致)
     Yield,
     
     // === DEFER: Defer 和错误处理 ===
-    DeferPush,    // push defer: func=a, args at b, argc=c
-    DeferPop,     // pop and execute defers
-    ErrDeferPush, // push errdefer (executes only on error)
+    DeferPush,    // push defer: closure=slots[a]
+    ErrDeferPush, // push errdefer: closure=slots[a]
     Panic,        // panic(slots[a])
     Recover,      // slots[a] = recover()
+    // 注: defer 统一用 0 参数 closure，Return 时自动执行
     
-    // === IFACE: Interface 操作 ===
-    IfaceInit,    // init interface at a, type_id=b | (c << 16)
-    IfaceBox,     // box value: iface[a].data = slots[b], vk=flags, type_id=c
-    IfaceUnbox,   // unbox: slots[a] = iface[b].data, expected_type=c
-    IfaceAssert,  // type assert: slots[a] = slots[b].(type c), ok at flags
+    // === IFACE: Interface 操作 (interface 占 slots[a] 和 slots[a+1]) ===
+    IfaceInit,    // slots[a..a+2] = nil interface, iface_meta_id=b | (c << 16)
+    IfaceBox,     // slots[a..a+2] = box(slots[b]), vk=flags, value_meta_id=c
+    IfaceUnbox,   // slots[a] = unbox(slots[b..b+2]), expected_vk=c
+    IfaceAssert,  // slots[a..a+2], ok = slots[b..b+2].(type c), ok_reg=flags
     
     // === CONV: 类型转换 ===
     ConvI2F,      // slots[a] = float64(slots[b])
@@ -163,10 +185,8 @@ pub enum Opcode {
     ConvI64I32,   // slots[a] = int32(slots[b])
     
     // === DEBUG: 调试操作 ===
-    Print,        // print slots[a], value_kind=b
-    AssertBegin,  // if !slots[a]: begin assert, argc=b, line=c
-    AssertArg,    // print assert arg slots[a], vk=b
-    AssertEnd,    // end assert, terminate if failed
+    // 注: Print 用 CallExtern
+    // 注: assert 用 JumpIf + CallExtern(print) + Panic 组合实现
 }
 ```
 
@@ -174,6 +194,25 @@ pub enum Opcode {
 - Opcode 值经过精心安排，同类指令连续
 - flags 字段用途因指令而异（返回值数量、slot 数量等）
 - imm32 用于跳转偏移，由 b 和 c 组合
+
+### 2.1 内置 CallExtern 函数
+
+以下操作通过 `CallExtern` 调用 runtime-core 函数实现：
+
+| 类别 | 函数 | 说明 |
+|------|------|------|
+| **String** | `vo_string_create` | 从常量创建字符串 |
+| **Array** | `vo_array_create` | 创建数组 |
+| **Slice** | `vo_slice_create` | 创建切片 |
+| **Map** | `vo_map_create` | 创建 map |
+| **Channel** | `vo_channel_create` | 创建 channel |
+| **Closure** | `vo_closure_create` | 创建闭包 |
+| **Debug** | `vo_print` | 打印值 |
+
+**设计原则**：
+- **分配操作** → CallExtern（内存分配开销大，函数调用开销可忽略）
+- **读取操作** → 保留指令（高频、轻量）
+- **VM 状态操作** → 保留指令（需要内部状态）
 
 ### 3. Bytecode 模块 (bytecode.rs)
 
@@ -223,8 +262,8 @@ pub struct IfaceDispatchEntry {
 /// Bytecode 模块
 pub struct Module {
     pub name: String,
-    pub struct_types: Vec<TypeMeta>,
-    pub interface_types: Vec<TypeMeta>,
+    pub struct_metas: Vec<TypeMeta>,
+    pub interface_metas: Vec<TypeMeta>,
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -274,12 +313,11 @@ pub struct CallFrame {
     pub ret_count: u16,
 }
 
-/// Defer 条目
+/// Defer 条目 - 统一用 closure
 pub struct DeferEntry {
     pub frame_depth: usize,
-    pub func_id: u32,
-    pub arg_count: u8,
-    pub args: [u64; 8],  // 最多 8 个参数
+    pub closure: GcRef,      // 0 参数 closure
+    pub is_errdefer: bool,
 }
 
 /// 迭代器
@@ -288,6 +326,7 @@ pub enum Iterator {
     Map { map: GcRef, pos: usize },
     String { s: GcRef, byte_pos: usize },
     IntRange { cur: i64, end: i64, step: i64 },
+    Channel { ch: GcRef },  // for v := range ch
 }
 
 /// Fiber (协程)
@@ -420,12 +459,10 @@ Opcode::CallIface => {
 #### 7.4 Defer 实现
 
 ```rust
-/// Defer 条目 - 固定 8 个参数槽
+/// Defer 条目 - 统一用 closure
 pub struct DeferEntry {
     pub frame_depth: usize,    // 关联的调用帧深度
-    pub func_id: u32,          // defer 的函数
-    pub arg_count: u8,         // 参数数量 (≤8)
-    pub args: [u64; 8],        // 固定 8 个参数槽
+    pub closure: GcRef,        // 0 参数 closure
     pub is_errdefer: bool,     // 是否是 errdefer
 }
 
@@ -440,14 +477,21 @@ pub struct DeferState {
 ```
 
 **执行流程**：
-1. `DeferPush`: 保存 func_id + 参数到 `defer_stack`
+1. `DeferPush`: 保存 closure 到 `defer_stack`
 2. `Return` 时:
    - 判定是否 error return（最后返回值非 nil）
    - 收集当前帧的 defers（LIFO）
    - errdefer 只在 error return 时执行
-   - 逐个推入调用帧执行
-3. defer 函数返回后继续执行下一个
+   - 逐个 CallClosure 执行
+3. defer closure 返回后继续执行下一个
 4. 全部执行完，写入暂存的返回值给 caller
+
+**Codegen 注意**：`defer foo(x, y)` 需包装为：
+```vo
+// 生成一个 0 参数 closure，捕获 x, y
+closure := func() { foo(x, y) }
+DeferPush closure
+```
 
 #### 7.5 GC 根扫描
 
