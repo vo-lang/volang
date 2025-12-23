@@ -12,7 +12,15 @@ pub const SLOT_LEN: usize = 2;
 pub const SLOT_CAP: usize = 3;
 pub const SLOT_COUNT: u16 = 4;
 
-pub fn create(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize, capacity: usize) -> GcRef {
+/// Create a new slice with a new underlying array.
+/// elem_slots must be provided by caller (queried from struct_metas).
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, length: usize, capacity: usize) -> GcRef {
+    let arr = array::create(gc, elem_kind, elem_meta_id, elem_slots, capacity);
+    from_array_range(gc, arr, 0, length, capacity)
+}
+
+/// Create slice from existing array with range.
+pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize, capacity: usize) -> GcRef {
     let s = gc.alloc(ValueKind::Slice as u8, 0, SLOT_COUNT);
     Gc::write_slot(s, SLOT_ARRAY, arr as u64);
     Gc::write_slot(s, SLOT_START, start_off as u64);
@@ -21,9 +29,10 @@ pub fn create(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize, capacity
     s
 }
 
+/// Create slice from entire array.
 pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
     let length = array::len(arr);
-    create(gc, arr, 0, length, length)
+    from_array_range(gc, arr, 0, length, length)
 }
 
 pub fn array_ref(s: GcRef) -> GcRef { Gc::read_slot(s, SLOT_ARRAY) as GcRef }
@@ -43,7 +52,7 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize) -> GcRe
     let arr = array_ref(s);
     let base = start(s);
     let old_cap = cap(s);
-    create(gc, arr, base + new_start, new_end - new_start, old_cap - new_start)
+    from_array_range(gc, arr, base + new_start, new_end - new_start, old_cap - new_start)
 }
 
 /// Append a value to slice.
@@ -52,7 +61,7 @@ pub fn append(gc: &mut Gc, ek: u8, emi: u32, es: u16, s: GcRef, val: u64) -> GcR
     if s.is_null() {
         let new_arr = array::create(gc, ek, emi, es, 4);
         array::set(new_arr, 0, val);
-        return create(gc, new_arr, 0, 1, 4);
+        return from_array_range(gc, new_arr, 0, 1, 4);
     }
     let cur_len = len(s);
     let cur_cap = cap(s);
@@ -70,6 +79,6 @@ pub fn append(gc: &mut Gc, ek: u8, emi: u32, es: u16, s: GcRef, val: u64) -> GcR
         let old_start = start(s);
         for i in 0..cur_len { array::set(new_arr, i, array::get(old_arr, old_start + i)); }
         array::set(new_arr, cur_len, val);
-        create(gc, new_arr, 0, cur_len + 1, new_cap)
+        from_array_range(gc, new_arr, 0, cur_len + 1, new_cap)
     }
 }

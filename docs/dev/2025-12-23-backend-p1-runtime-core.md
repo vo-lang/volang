@@ -111,7 +111,8 @@ pub struct GcObject {
     // data: [u64; slots] 紧跟其后
 }
 
-pub type GcRef = *mut GcObject;
+/// GC 引用 - 指向堆对象数据区（GcHeader 之后）的指针
+pub type GcRef = *mut u64;
 
 /// GC 主结构
 pub struct Gc {
@@ -196,19 +197,20 @@ pub fn cmp(a: GcRef, b: GcRef) -> i32;
 #### 4.2 Array (objects/array.rs)
 
 ```rust
-/// Array 布局: [header, data...] (2+N slots)
+/// Array 布局: [header, data...] (1+len×elem_slots slots)
 /// header = [len:48 | elem_slots:16]
 /// 元素类型信息在 GcHeader.value_kind (is_array=1, kind=元素类型)
 /// 元素的 meta_id 在 GcHeader.meta_id (Struct/Interface 元素时)
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, len: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, len: usize) -> GcRef;
+// elem_slots 通过 (elem_kind, elem_meta_id) 从 struct_metas 查询
 pub fn len(arr: GcRef) -> usize;
 pub fn get(arr: GcRef, idx: usize) -> u64;
 pub fn set(arr: GcRef, idx: usize, val: u64);
 ```
 
 **⚠️ 注意**：
-- `elem_slots` 决定每个元素占用的 slot 数（struct 可能占多个）
+- `elem_slots` 从 `(elem_kind, elem_meta_id)` 推断
 - 元素类型信息存在 GcHeader 中，GC 扫描时使用
 
 #### 4.3 Slice (objects/slice.rs)
@@ -216,7 +218,10 @@ pub fn set(arr: GcRef, idx: usize, val: u64);
 ```rust
 /// Slice 布局: [array_ref, start, len, cap] (4 slots)
 
-pub fn create(gc: &mut Gc, array: GcRef, start: usize, len: usize, cap: usize) -> GcRef;
+/// 创建新 slice（分配底层 array）
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, len: usize, cap: usize) -> GcRef;
+/// 从已有 array/slice 创建 view
+pub fn from_array(gc: &mut Gc, array: GcRef, start: usize, len: usize, cap: usize) -> GcRef;
 pub fn len(s: GcRef) -> usize;
 pub fn cap(s: GcRef) -> usize;
 pub fn get(s: GcRef, idx: usize) -> u64;
@@ -225,13 +230,28 @@ pub fn append(gc: &mut Gc, s: GcRef, val: u64) -> GcRef;  // elem 信息从 slic
 pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef;
 ```
 
-#### 4.4 Map (objects/map.rs)
+#### 4.4 Channel (objects/channel.rs)
+
+```rust
+/// Channel 布局: [state_ptr] (1 slot)
+/// state_ptr 指向内部 ChannelState（包含 buffer、waiters 等）
+
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, cap: usize) -> GcRef;
+pub fn send(ch: GcRef, val: u64);      // 阻塞发送
+pub fn recv(ch: GcRef) -> (u64, bool); // 阻塞接收，返回 (value, ok)
+pub fn close(ch: GcRef);
+pub fn is_closed(ch: GcRef) -> bool;
+```
+
+**⚠️ 注意**：Channel 的阻塞语义由 VM/Runtime 层实现，这里只是接口定义。
+
+#### 4.5 Map (objects/map.rs)
 
 ```rust
 /// Map 使用 hash table 实现
 /// 布局: [key_kind, val_kind, len, cap, ...buckets...]
 
-pub fn create(gc: &mut Gc, key_kind: u8, val_kind: u8) -> GcRef;
+pub fn create(gc: &mut Gc, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32) -> GcRef;
 pub fn len(m: GcRef) -> usize;
 pub fn get(m: GcRef, key: u64) -> (u64, bool);  // (value, found)
 pub fn set(gc: &mut Gc, m: GcRef, key: u64, val: u64);
@@ -307,8 +327,8 @@ pub fn scan_object(gc: &mut Gc, obj: GcRef) {
             if child != 0 { gc.mark_gray(child as GcRef); }
         }
         ValueKind::Struct => {
-            // 查 struct_metas[type_id].slot_types
-            let slot_types = get_struct_slot_types(header.type_id);
+            // 查 struct_metas[meta_id].slot_types
+            let slot_types = get_struct_slot_types(header.meta_id);
             for (i, &st) in slot_types.iter().enumerate() {
                 if st == SlotType::GcRef {
                     let child = Gc::read_slot(obj, i);

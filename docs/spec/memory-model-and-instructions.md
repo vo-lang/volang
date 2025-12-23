@@ -425,7 +425,7 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `PtrNew` | a, b, c, flags | `slots[a] = alloc(value_kind=flags, type_id=b, size=c)` with zero-init |
+| `PtrNew` | a, b, c, flags | `slots[a] = alloc(value_kind=flags, meta_id=b\|(c<<16))` size 从 struct_metas 查询 |
 | `PtrClone` | a, b | `slots[a] = clone(slots[b])` - allocate + memcpy |
 | `PtrGet` | a, b, c | `slots[a] = heap[slots[b]].offset[c]` (single slot) |
 | `PtrSet` | a, b, c | `heap[slots[a]].offset[b] = slots[c]` (single slot) |
@@ -534,7 +534,7 @@ For stack-allocated arrays with dynamic indices.
 | `StrGt` | a, b, c | `slots[a] = slots[b] > slots[c]` |
 | `StrGe` | a, b, c | `slots[a] = slots[b] >= slots[c]` |
 
-Note: `StrNew` uses CallExtern (`vo_string_new`).
+Note: String creation uses CallExtern (`vo_string_create`).
 
 #### 5.2.16 ARRAY: Heap Array Operations
 
@@ -789,20 +789,20 @@ pub enum Opcode {
     Call = 100, CallExtern, CallClosure, CallIface, Return,
     
     // STR
-    StrNew = 110, StrConcat, StrLen, StrIndex, StrSlice,
+    StrConcat = 110, StrLen, StrIndex, StrSlice,
     StrEq, StrNe, StrLt, StrLe, StrGt, StrGe,
     
     // ARRAY
-    ArrayNew = 125, ArrayGet, ArraySet, ArrayLen,
+    ArrayGet = 125, ArraySet, ArrayGetN, ArraySetN, ArrayLen,
     
     // SLICE
-    SliceNew = 135, SliceGet, SliceSet, SliceLen, SliceCap, SliceSlice, SliceAppend,
+    SliceGet = 135, SliceSet, SliceGetN, SliceSetN, SliceLen, SliceCap, SliceSlice, SliceAppend,
     
     // MAP
-    MapNew = 145, MapGet, MapSet, MapDelete, MapLen,
+    MapGet = 145, MapSet, MapDelete, MapLen,
     
     // CHAN
-    ChanNew = 155, ChanSend, ChanRecv, ChanClose,
+    ChanSend = 155, ChanRecv, ChanClose,
     
     // SELECT
     SelectBegin = 165, SelectSend, SelectRecv, SelectEnd,
@@ -811,16 +811,16 @@ pub enum Opcode {
     IterBegin = 175, IterNext, IterEnd,
     
     // CLOSURE
-    ClosureNew = 185, ClosureGet, ClosureSet,
+    ClosureGet = 185, ClosureSet,
     
     // GO
     GoCall = 195, Yield,
     
     // DEFER
-    DeferPush = 200, DeferPop, ErrDeferPush, Panic, Recover,
+    DeferPush = 200, ErrDeferPush, Panic, Recover,
     
     // IFACE
-    IfaceInit = 210, IfaceBox, IfaceUnbox, IfaceAssert,
+    IfaceInit = 210, IfaceAssign, IfaceAssert,
     
     // CONV
     ConvI2F = 220, ConvF2I, ConvI32I64, ConvI64I32,
@@ -851,8 +851,8 @@ pub enum Opcode {
 | `UpvalSet` | `PtrSet` on captured GcRef |
 | `CallInterface` | `CallIface` |
 | `InitInterface` | `IfaceInit` |
-| `BoxInterface` | `IfaceBox` |
-| `UnboxInterface` | `IfaceUnbox` |
+| `BoxInterface` | `IfaceAssign` |
+| `UnboxInterface` | `IfaceAssert` |
 | `TypeAssert` | `IfaceAssert` |
 
 ### B.2 New Instructions

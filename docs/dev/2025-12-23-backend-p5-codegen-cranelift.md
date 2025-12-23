@@ -146,9 +146,9 @@ pub enum RuntimeFunc {
     ChanRecv,
     ChanClose,
     
-    // Defer/Panic (4)
+    // Defer/Panic (3)
     DeferPush,
-    DeferPop,
+    ErrDeferPush,
     Panic,
     Recover,
     
@@ -194,9 +194,9 @@ impl RuntimeFunc {
         
         match self {
             RuntimeFunc::GcAlloc => {
-                // (value_kind: i8, type_id: i16, slots: i16) -> GcRef
+                // (value_kind: i8, meta_id: i32) -> GcRef, slots 从 struct_metas 查询
                 sig.params.push(AbiParam::new(I8));
-                sig.params.push(AbiParam::new(I32));  // type_id + slots packed
+                sig.params.push(AbiParam::new(I32));  // meta_id (24位)
                 sig.returns.push(AbiParam::new(I64));
             }
             RuntimeFunc::GcReadSlot => {

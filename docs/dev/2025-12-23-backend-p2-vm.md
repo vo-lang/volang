@@ -68,7 +68,7 @@ pub enum Opcode {
     GlobalSet,    // globals[a] = slots[b]
     
     // === PTR: 堆指针操作 ===
-    PtrNew,       // slots[a] = alloc(value_kind=flags, type_id=b, size=c)
+    PtrNew,       // slots[a] = alloc(vk=flags, meta_id=b|(c<<16)), size 从 struct_metas 查询
     PtrClone,     // slots[a] = clone(slots[b])
     PtrGet,       // slots[a] = heap[slots[b]].offset[c]
     PtrSet,       // heap[slots[a]].offset[b] = slots[c]
@@ -178,7 +178,8 @@ pub enum Opcode {
     
     // === IFACE: Interface 操作 (interface 占 slots[a] 和 slots[a+1]) ===
     IfaceInit,    // slots[a..a+2] = nil interface, iface_meta_id=b | (c << 16)
-    IfaceAssign,  // 统一赋值: dst=slots[a..a+2], src_slots=b, src_vk=c, src_meta_id=flags<<16|...
+    IfaceAssign,  // dst=slots[a..a+2], src=slots[b], vk=flags
+                  // value_meta_id 从 src 的 GcHeader 运行时读取
                   // 处理所有情况: 值→iface, iface→iface, Struct/Array 深拷贝
     IfaceAssert,  // slots[a..], ok = slots[b..b+2].(type c), ok_reg=flags
     
@@ -260,13 +261,13 @@ pub struct GlobalDef {
     pub name: String,
     pub slots: u16,
     pub value_kind: u8,
-    pub type_id: u16,
+    pub meta_id: u16,
 }
 
 /// Interface 方法分派
 pub struct IfaceDispatchEntry {
-    pub concrete_type_id: u16,
-    pub iface_type_id: u16,
+    pub concrete_meta_id: u16,
+    pub iface_meta_id: u16,
     pub method_funcs: Vec<u32>,  // 每个方法的 func_id
 }
 
@@ -459,11 +460,11 @@ Opcode::CallIface => {
     let method_idx = inst.flags as usize;
     
     let (slot0, slot1) = self.read_interface(fiber_id, inst.a);
-    let concrete_type_id = extract_concrete_type(slot0);
-    let iface_type_id = extract_iface_type(slot0);
+    let concrete_meta_id = extract_concrete_meta(slot0);
+    let iface_meta_id = extract_iface_meta(slot0);
     
     // 查 dispatch table
-    let entry = module.find_dispatch(concrete_type_id, iface_type_id);
+    let entry = module.find_dispatch(concrete_meta_id, iface_meta_id);
     let func_id = entry.method_funcs[method_idx];
     
     // 像普通函数一样调用，但 receiver 是 slot1
@@ -615,6 +616,15 @@ impl Vm {
             if let Some(state) = &fiber.defer_state {
                 for entry in &state.pending {
                     gc.mark_gray(entry.closure);
+                }
+                // 扫描暂存的返回值 - 类型从 FunctionDef.slot_types 查询
+                let func_id = fiber.frames.last().unwrap().func_id;
+                let func_def = &module.functions[func_id as usize];
+                let ret_start = func_def.slot_types.len() - func_def.ret_slots as usize;
+                for (i, &val) in state.ret_vals.iter().enumerate() {
+                    if func_def.slot_types[ret_start + i] == SlotType::GcRef && val != 0 {
+                        gc.mark_gray(val as GcRef);
+                    }
                 }
             }
             

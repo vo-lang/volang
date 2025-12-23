@@ -102,12 +102,13 @@ pub unsafe extern "C" fn vo_array_set(arr: GcRef, idx: usize, val: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn vo_slice_create(
     gc: *mut Gc,
-    arr: GcRef,
-    start: usize,
+    elem_kind: u8,
+    elem_meta_id: u32,
+    elem_slots: u16,
     len: usize,
     cap: usize,
 ) -> GcRef {
-    slice::create(&mut *gc, arr, start, len, cap)
+    slice::create(&mut *gc, elem_kind, elem_meta_id, elem_slots, len, cap)
 }
 
 #[no_mangle]
@@ -158,8 +159,8 @@ pub unsafe extern "C" fn vo_slice_append(
 
 #[cfg(feature = "std")]
 #[no_mangle]
-pub unsafe extern "C" fn vo_map_create(gc: *mut Gc, key_kind: u8, val_kind: u8) -> GcRef {
-    map::create(&mut *gc, key_kind, val_kind)
+pub unsafe extern "C" fn vo_map_create(gc: *mut Gc, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32) -> GcRef {
+    map::create(&mut *gc, key_kind, key_meta_id, val_kind, val_meta_id)
 }
 
 #[cfg(feature = "std")]
@@ -248,8 +249,8 @@ pub unsafe extern "C" fn vo_upval_box_set(uv: GcRef, val: u64) {
 
 #[cfg(feature = "std")]
 #[no_mangle]
-pub unsafe extern "C" fn vo_channel_create(gc: *mut Gc, elem_kind: u8, capacity: usize) -> GcRef {
-    channel::create(&mut *gc, elem_kind, capacity)
+pub unsafe extern "C" fn vo_channel_create(gc: *mut Gc, elem_kind: u8, elem_meta_id: u32, capacity: usize) -> GcRef {
+    channel::create(&mut *gc, elem_kind, elem_meta_id, capacity)
 }
 
 #[cfg(feature = "std")]

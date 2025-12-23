@@ -88,8 +88,8 @@ fn closure_func(closure: GcRef, arg0, arg1, ...) {
 
 ```rust
 pub struct IfaceDispatchEntry {
-    pub concrete_type_id: u16,
-    pub iface_type_id: u16,
+    pub concrete_meta_id: u16,
+    pub iface_meta_id: u16,
     pub method_funcs: Vec<u32>,  // 每个方法对应的 func_id
 }
 ```

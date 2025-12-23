@@ -62,8 +62,9 @@ pub fn set_func_ptr(func_id: u32, ptr: *const u8) {
 
 ```rust
 #[no_mangle]
-pub extern "C" fn vo_rt_alloc(value_kind: u8, type_id: u16, slots: u16) -> GcRef {
-    GLOBAL_GC.lock().alloc(value_kind, type_id, slots)
+pub extern "C" fn vo_rt_alloc(value_kind: u8, meta_id: u32) -> GcRef {
+    let slots = lookup_slots(value_kind, meta_id);  // 从 Module.struct_metas 查询
+    GLOBAL_GC.lock().alloc(value_kind, meta_id, slots)
 }
 
 #[no_mangle]

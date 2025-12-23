@@ -13,8 +13,9 @@ use vo_common_core::types::ValueKind;
 
 pub const SLOT_STATE: usize = 0;
 pub const SLOT_ELEM_KIND: usize = 1;
-pub const SLOT_CAP: usize = 2;
-pub const SLOT_COUNT: u16 = 3;
+pub const SLOT_ELEM_META_ID: usize = 2;
+pub const SLOT_CAP: usize = 3;
+pub const SLOT_COUNT: u16 = 4;
 
 pub type GoId = u64;
 
@@ -104,13 +105,18 @@ impl ChannelState {
     }
 }
 
-pub fn create(gc: &mut Gc, elem_kind: u8, cap: usize) -> GcRef {
+pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, cap: usize) -> GcRef {
     let chan = gc.alloc(ValueKind::Channel as u8, 0, SLOT_COUNT);
     let state = Box::new(ChannelState::new(cap));
     Gc::write_slot(chan, SLOT_STATE, Box::into_raw(state) as u64);
     Gc::write_slot(chan, SLOT_ELEM_KIND, elem_kind as u64);
+    Gc::write_slot(chan, SLOT_ELEM_META_ID, elem_meta_id as u64);
     Gc::write_slot(chan, SLOT_CAP, cap as u64);
     chan
+}
+
+pub fn elem_meta_id(chan: GcRef) -> u32 {
+    Gc::read_slot(chan, SLOT_ELEM_META_ID) as u32
 }
 
 pub fn get_state(chan: GcRef) -> &'static mut ChannelState {

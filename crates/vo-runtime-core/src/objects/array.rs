@@ -37,7 +37,7 @@ fn data_slots(length: usize, elem_slots: usize) -> usize {
 /// Create a new array.
 /// elem_kind: element ValueKind
 /// elem_meta_id: element's meta_id (for Struct/Interface elements)
-/// elem_slots: slots per element (1 for primitives, N for structs)
+/// elem_slots: slots per element (caller must provide - queried from struct_metas)
 /// length: number of elements
 pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, length: usize) -> GcRef {
     let total_slots = DATA_START + data_slots(length, elem_slots as usize);
@@ -47,6 +47,12 @@ pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, le
     let header = pack_header(length, elem_slots);
     Gc::write_slot(arr, 0, header);
     arr
+}
+
+/// Create array - FFI version without elem_slots (for CallExtern).
+/// elem_slots will be looked up from struct_metas by the caller.
+pub fn create_ffi(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, length: usize, elem_slots: u16) -> GcRef {
+    create(gc, elem_kind, elem_meta_id, elem_slots, length)
 }
 
 /// Get array header slot

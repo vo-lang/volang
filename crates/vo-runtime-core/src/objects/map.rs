@@ -15,17 +15,21 @@ use vo_common_core::types::ValueKind;
 
 pub const SLOT_INNER: usize = 0;
 pub const SLOT_KEY_KIND: usize = 1;
-pub const SLOT_VAL_KIND: usize = 2;
-pub const SLOT_COUNT: u16 = 3;
+pub const SLOT_KEY_META_ID: usize = 2;
+pub const SLOT_VAL_KIND: usize = 3;
+pub const SLOT_VAL_META_ID: usize = 4;
+pub const SLOT_COUNT: u16 = 5;
 
 type MapInner = HashMap<u64, u64>;
 
-pub fn create(gc: &mut Gc, key_kind: u8, val_kind: u8) -> GcRef {
+pub fn create(gc: &mut Gc, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32) -> GcRef {
     let m = gc.alloc(ValueKind::Map as u8, 0, SLOT_COUNT);
     let inner = Box::new(MapInner::new());
     Gc::write_slot(m, SLOT_INNER, Box::into_raw(inner) as u64);
     Gc::write_slot(m, SLOT_KEY_KIND, key_kind as u64);
+    Gc::write_slot(m, SLOT_KEY_META_ID, key_meta_id as u64);
     Gc::write_slot(m, SLOT_VAL_KIND, val_kind as u64);
+    Gc::write_slot(m, SLOT_VAL_META_ID, val_meta_id as u64);
     m
 }
 

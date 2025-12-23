@@ -74,6 +74,7 @@ pub struct GcHeader {
 /// - Array of Struct/Interface: 元素的 meta_id
 /// - 其他: 0
 
+/// GC 引用 - 指向堆对象数据区（GcHeader 之后）的指针
 pub type GcRef = *mut u64;
 
 pub struct Gc {
@@ -97,7 +98,7 @@ impl Gc {
 | 类型 | 布局 | slots |
 |------|------|-------|
 | **String** | `{ array: GcRef, start, len }` | 3 |
-| **Array** | `{ header, data... }` header=`[len:48 \| elem_slots:16]` 元素类型在 GcHeader | 2+N |
+| **Array** | `{ header, data... }` header=`[len:48 \| elem_slots:16]` 元素类型在 GcHeader | 1+len×elem_slots |
 | **Slice** | `{ array: GcRef, start, len, cap }` | 4 |
 | **Map** | `{ inner_ptr, key_kind, val_kind }` | 3 |
 | **Closure** | `{ func_id, cap_count, captures... }` | 2+N |
@@ -113,6 +114,11 @@ slot[1]: data   = 值或 GcRef
 
 ### 对象操作接口
 
+**elem_slots 推断**：通过 `(vk, meta_id)` 从 `Module.struct_metas` 查询：
+- 简单类型 → 1 slot
+- Struct → `struct_metas[meta_id].size_slots`
+- Interface → 2 slots
+
 ```rust
 // String
 string::create(gc, bytes) -> GcRef
@@ -120,8 +126,8 @@ string::len(s) -> usize
 string::concat(gc, a, b) -> GcRef
 string::slice_of(gc, s, start, end) -> GcRef
 
-// Array (元素类型信息在 GcHeader)
-array::create(gc, elem_kind, elem_meta_id, len) -> GcRef  // elem_slots 通过 meta_id 查询
+// Array - elem_slots 通过 (elem_kind, elem_meta_id) 推断
+array::create(gc, elem_kind, elem_meta_id, len) -> GcRef
 array::get(arr, idx) -> u64
 array::set(arr, idx, val)
 array::len(arr) -> usize
@@ -161,6 +167,8 @@ pub enum Opcode {
     // 见 spec 完整列表
     Nop, LoadNil, LoadInt, Copy, CopyN,
     GlobalGet, GlobalSet,
+    // PtrNew: a=dst, b=meta_id_low16, c=meta_id_high8, flags=vk
+    // meta_id = b | (c << 16) → 24 bits, size 从 struct_metas 查询
     PtrNew, PtrGet, PtrSet, PtrClone,
     AddI, SubI, MulI, DivI, ...
     Call, CallClosure, CallIface, Return,
@@ -189,12 +197,12 @@ pub struct GlobalDef {
     pub name: String,
     pub slots: u16,
     pub value_kind: u8,
-    pub type_id: u16,
+    pub meta_id: u16,
 }
 
 pub struct IfaceDispatchEntry {
-    pub concrete_type_id: u16,
-    pub iface_type_id: u16,
+    pub concrete_meta_id: u16,
+    pub iface_meta_id: u16,
     pub method_funcs: Vec<u32>,
 }
 
@@ -273,8 +281,8 @@ pub struct CodegenContext {
     extern_indices: HashMap<Symbol, u32>,
     global_indices: HashMap<Symbol, u32>,
     const_indices: HashMap<ConstKey, u16>,
-    struct_type_ids: HashMap<TypeKey, u16>,
-    interface_type_ids: HashMap<TypeKey, u16>,
+    struct_meta_ids: HashMap<TypeKey, u16>,
+    interface_meta_ids: HashMap<TypeKey, u16>,
     iface_dispatch_registered: HashSet<(u16, u16)>,
 }
 
@@ -360,7 +368,7 @@ impl RuntimeSymbols {
 
 ```rust
 // === GC ===
-fn vo_rt_alloc(vk: u8, type_id: u16, slots: usize) -> GcRef;
+fn vo_rt_alloc(vk: u8, meta_id: u32, slots: usize) -> GcRef;
 fn vo_gc_read_slot(obj: GcRef, idx: usize) -> u64;
 fn vo_gc_write_slot(obj: GcRef, idx: usize, val: u64);
 

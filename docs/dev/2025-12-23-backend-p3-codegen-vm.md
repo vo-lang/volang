@@ -37,8 +37,8 @@ pub struct CodegenContext {
     const_indices: HashMap<ConstKey, u16>,
     
     // 类型 ID 分配
-    struct_type_ids: HashMap<TypeKey, u16>,
-    interface_type_ids: HashMap<TypeKey, u16>,
+    struct_meta_ids: HashMap<TypeKey, u16>,
+    interface_meta_ids: HashMap<TypeKey, u16>,
     
     // Interface dispatch 跟踪
     iface_dispatch_registered: HashSet<(u16, u16)>,
@@ -336,11 +336,10 @@ ExprKind::CompositeLit(lit) => {
     if info.is_struct_type(ty) {
         // 检查目标变量是否逃逸
         // (这里需要上下文信息，简化处理：总是堆分配)
-        let type_id = ctx.register_struct_type(info.type_key(ty)?);
-        let slots = info.struct_size_slots(ty);
+        let meta_id = ctx.register_struct_type(info.type_key(ty)?);
         
-        // 分配
-        func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, type_id, 0);
+        // 分配: PtrNew(a=dst, b=meta_id_low16, c=meta_id_high8, flags=vk)
+        func.emit_ptr_new(dst, ValueKind::Struct, meta_id as u32);
         
         // 初始化字段
         for elem in &lit.elems {
@@ -378,9 +377,8 @@ StmtKind::Decl(DeclKind::Var(var_decl)) => {
                 if escapes {
                     // ⚠️ 逃逸: 堆分配
                     let slot = func.define_local_heap(name.symbol);
-                    let type_id = ctx.register_struct_type(info.type_key(ty)?);
-                    let slots = info.struct_size_slots(ty);
-                    func.emit_with_flags(Opcode::PtrNew, slots as u8, slot, type_id, 0);
+                    let meta_id = ctx.register_struct_type(info.type_key(ty)?);
+                    func.emit_ptr_new(slot, ValueKind::Struct, meta_id as u32);
                 } else {
                     // ⚠️ 不逃逸: 栈分配 (扁平化)
                     let slot_types = info.struct_field_slot_types(ty);
