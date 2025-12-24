@@ -708,3 +708,86 @@ func main() int {
     let has_ptr_new = main_fn.code.iter().any(|i| i.op == 18); // PtrNew opcode
     assert!(!has_ptr_new, "non-escaped multi-slot struct should NOT use PtrNew");
 }
+
+#[test]
+fn test_vm_interface_method_call() {
+    let source = r#"
+package main
+
+type Adder interface {
+    Add() int
+}
+
+type MyNum struct {
+    value int
+}
+
+func (m MyNum) Add() int {
+    return m.value + 100
+}
+
+func main() int {
+    n := MyNum{value: 42}
+    var a Adder
+    a = n
+    return a.Add()
+}
+"#;
+    compile_and_run(source);
+}
+
+/// Test true nil interface equals nil
+#[test]
+fn test_vm_nil_interface() {
+    let source = r#"
+package main
+
+type error interface {
+    Error() string
+}
+
+func foo() error {
+    return nil  // true nil interface
+}
+
+func main() int {
+    if foo() != nil {
+        panic("WRONG: nil interface should equal nil")
+    }
+    return 0
+}
+"#;
+    compile_and_run(source);
+}
+
+/// Test typed nil interface (Go's classic gotcha)
+/// A nil pointer assigned to interface is NOT a nil interface
+#[test]
+fn test_vm_typed_nil_interface() {
+    let source = r#"
+package main
+
+type MyError struct{}
+
+func (e *MyError) Error() string { return "err" }
+
+type error interface {
+    Error() string
+}
+
+func foo() error {
+    var e *MyError = nil
+    return e
+}
+
+func main() int {
+    // typed nil: interface has type *MyError but value is nil
+    // so foo() != nil (NOT a nil interface)
+    if foo() == nil {
+        panic("WRONG: typed nil should NOT equal nil interface")
+    }
+    return 0
+}
+"#;
+    compile_and_run(source);
+}

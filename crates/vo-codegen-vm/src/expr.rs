@@ -73,6 +73,12 @@ pub fn compile_expr_to(
 
         // === Identifier ===
         ExprKind::Ident(ident) => {
+            // Handle nil literal
+            if info.project.interner.resolve(ident.symbol) == Some("nil") {
+                func.emit_op(Opcode::LoadNil, dst, 0, 0);
+                return Ok(());
+            }
+            
             if let Some(local) = func.lookup_local(ident.symbol) {
                 if local.is_heap {
                     // Escaped variable: slot contains GcRef to heap object

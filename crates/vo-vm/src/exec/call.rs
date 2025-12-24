@@ -108,8 +108,10 @@ pub fn exec_return(fiber: &mut Fiber, inst: &Instruction, _func: &FunctionDef) -
         return ExecResult::Done;
     }
 
-    for (i, val) in ret_vals.into_iter().enumerate() {
-        fiber.write_reg(frame.ret_reg + i as u16, val);
+    // Only write the number of return values that caller expects
+    let write_count = (frame.ret_count as usize).min(ret_vals.len());
+    for i in 0..write_count {
+        fiber.write_reg(frame.ret_reg + i as u16, ret_vals[i]);
     }
 
     ExecResult::Return

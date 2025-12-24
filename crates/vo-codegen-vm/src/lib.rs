@@ -321,13 +321,12 @@ fn compile_init_and_entry(
     // 3. Generate __entry__ function
     let mut entry_builder = FuncBuilder::new("__entry__");
     
-    // Call __init__
-    entry_builder.emit_op(vo_vm::instruction::Opcode::Call, 0, init_func_id as u16, 0);
+    // Call __init__ (a=func_id, b=arg_start, c=(arg_slots<<8)|ret_slots)
+    entry_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
     
     // Call main if exists
     if let Some(main_id) = main_func_id {
-        let c = (0u16 << 8) | 0u16; // 0 arg slots, 0 ret slots
-        entry_builder.emit_with_flags(vo_vm::instruction::Opcode::Call, 0, main_id as u16, 0, c);
+        entry_builder.emit_op(vo_vm::instruction::Opcode::Call, main_id as u16, 0, 0);
     }
     
     // Return
