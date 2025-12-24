@@ -1,0 +1,15 @@
+[package]
+name = "vo-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vo language virtual machine"
+
+[features]
+default = ["std"]
+std = ["vo-common-core/std", "vo-runtime-core/std"]
+
+[dependencies]
+vo-common-core = { path = "../vo-common-core" }
+vo-runtime-core = { path = "../vo-runtime-core" }
+hashbrown = "0.15"

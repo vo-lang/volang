@@ -1,0 +1,47 @@
+//! Instruction execution modules.
+
+mod load;
+mod copy;
+mod global;
+mod ptr;
+mod arith;
+mod cmp;
+mod bit;
+mod jump;
+mod call;
+mod string;
+mod array;
+mod slice;
+mod map;
+mod channel;
+mod closure;
+mod iface;
+mod defer;
+mod select;
+mod iter;
+mod goroutine;
+mod conv;
+mod extern_call;
+
+pub use load::*;
+pub use copy::*;
+pub use global::*;
+pub use ptr::*;
+pub use arith::*;
+pub use cmp::*;
+pub use bit::*;
+pub use jump::*;
+pub use call::*;
+pub use string::*;
+pub use array::*;
+pub use slice::*;
+pub use map::*;
+pub use channel::*;
+pub use closure::*;
+pub use iface::*;
+pub use defer::*;
+pub use select::*;
+pub use iter::*;
+pub use goroutine::*;
+pub use conv::*;
+pub use extern_call::*;

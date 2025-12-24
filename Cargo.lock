@@ -555,6 +555,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-vm"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "vo-common-core",
+ "vo-runtime-core",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

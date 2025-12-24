@@ -23,6 +23,9 @@ members = [
   
   # Runtime
   "crates/vo-runtime-core",
+  
+  # VM
+  "crates/vo-vm",
   # (backup - pending rewrite)
   # "crates/vo-runtime-native",
   # "crates/vo-runtime-vm",

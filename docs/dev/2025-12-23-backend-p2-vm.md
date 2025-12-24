@@ -369,13 +369,6 @@ pub enum Iterator {
     Channel { ch: GcRef },  // for v := range ch
 }
 
-/// Defer entry - uses closure uniformly
-pub struct DeferEntry {
-    pub frame_depth: usize,    // associated call frame depth
-    pub closure: GcRef,        // 0-arg closure
-    pub is_errdefer: bool,
-}
-
 /// Defer execution state (stored during Return)
 /// Go semantics: return value is determined before defer executes,
 /// so we must store ret_vals before running defer closures.
@@ -396,6 +389,7 @@ pub struct Fiber {
     pub defer_stack: Vec<DeferEntry>,
     pub defer_state: Option<DeferState>,  // active during Return with pending defers
     pub iter_stack: Vec<Iterator>,
+    pub select_state: Option<SelectState>,  // active during select
     pub panic_value: Option<GcRef>,
 }
 
