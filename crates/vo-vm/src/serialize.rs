@@ -63,10 +63,6 @@ impl ByteWriter {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn write_u64(&mut self, v: u64) {
-        self.data.extend_from_slice(&v.to_le_bytes());
-    }
-
     fn write_i64(&mut self, v: i64) {
         self.data.extend_from_slice(&v.to_le_bytes());
     }

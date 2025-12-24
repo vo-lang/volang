@@ -22,28 +22,40 @@ pub fn exec_iface_assign(
 
     let src = fiber.read_reg(inst.b);
 
-    let src_meta_id = match vk {
+    let iface_meta = &module.interface_metas[iface_meta_id as usize];
+    let empty_iface = iface_meta.method_names.is_empty();
+
+    let (value_meta, concrete_vk, concrete_meta_id) = match vk {
+        ValueKind::Interface => {
+            let src_value_meta = interface::unpack_value_meta(src);
+            let src_vk = src_value_meta.value_kind();
+            (src_value_meta, src_vk, src_value_meta.meta_id())
+        }
         ValueKind::Struct | ValueKind::Array | ValueKind::Pointer => {
-            if src != 0 {
+            let meta_id = if src != 0 {
                 Gc::header(src as GcRef).meta_id()
             } else {
                 0
-            }
+            };
+            (ValueMeta::new(meta_id, vk), vk, meta_id)
         }
-        ValueKind::Interface => {
-            interface::unpack_value_meta(src).meta_id()
-        }
-        _ => 0,
+        _ => (ValueMeta::new(0, vk), vk, 0),
     };
 
-    let itab_id = itab_cache.get_or_create(
-        src_meta_id,
-        iface_meta_id,
-        &module.struct_metas,
-        &module.interface_metas,
-    );
+    let itab_id = if empty_iface {
+        0
+    } else {
+        match concrete_vk {
+            ValueKind::Struct | ValueKind::Pointer => itab_cache.get_or_create(
+                concrete_meta_id,
+                iface_meta_id,
+                &module.struct_metas,
+                &module.interface_metas,
+            ),
+            _ => panic!("IfaceAssign requires concrete struct/pointer for non-empty interface"),
+        }
+    };
 
-    let value_meta = ValueMeta::new(src_meta_id, vk);
     let slot0 = interface::pack_slot0(itab_id, value_meta);
 
     let slot1 = match vk {
