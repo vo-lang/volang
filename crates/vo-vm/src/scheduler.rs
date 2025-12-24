@@ -70,6 +70,9 @@ impl Scheduler {
             if let Some(fiber) = self.get_fiber_mut(id) {
                 fiber.status = FiberStatus::Suspended;
             }
+            if !self.ready_queue.contains(&id) {
+                self.ready_queue.push_back(id);
+            }
         }
     }
 
