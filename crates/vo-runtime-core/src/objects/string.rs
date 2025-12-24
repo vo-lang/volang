@@ -1,33 +1,47 @@
 //! String object operations.
 //!
-//! String layout: [array_ref, start, len] (3 slots)
-//! - Slot 0: GcRef to byte array
-//! - Slot 1: start offset in array
-//! - Slot 2: length in bytes
+//! Layout: GcHeader + StringData
+//! String references an underlying byte array with start offset.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::array;
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
-pub const SLOT_ARRAY: usize = 0;
-pub const SLOT_START: usize = 1;
-pub const SLOT_LEN: usize = 2;
-pub const SLOT_COUNT: u16 = 3;
+#[repr(C)]
+pub struct StringData {
+    pub array: GcRef,
+    pub start: u32,
+    pub len: u32,
+}
+
+const DATA_SLOTS: u16 = 2;
+const _: () = assert!(core::mem::size_of::<StringData>() == DATA_SLOTS as usize * 8);
+
+impl StringData {
+    #[inline]
+    fn as_ref(s: GcRef) -> &'static Self {
+        unsafe { &*(s as *const Self) }
+    }
+
+    #[inline]
+    fn as_mut(s: GcRef) -> &'static mut Self {
+        unsafe { &mut *(s as *mut Self) }
+    }
+}
 
 pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
-    let arr = array::create(gc, ValueKind::Uint8 as u8, 0, 1, bytes.len());
+    let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len());
     let data_ptr = array::as_bytes_mut(arr);
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
-    }
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len()); }
     
-    let s = gc.alloc(ValueKind::String as u8, 0, SLOT_COUNT);
-    Gc::write_slot(s, SLOT_ARRAY, arr as u64);
-    Gc::write_slot(s, SLOT_START, 0);
-    Gc::write_slot(s, SLOT_LEN, bytes.len() as u64);
+    let s = gc.alloc(ValueMeta::new(0, ValueKind::String), DATA_SLOTS);
+    let data = StringData::as_mut(s);
+    data.array = arr;
+    data.start = 0;
+    data.len = bytes.len() as u32;
     s
 }
 
@@ -35,25 +49,17 @@ pub fn from_rust_str(gc: &mut Gc, s: &str) -> GcRef {
     create(gc, s.as_bytes())
 }
 
-pub fn len(s: GcRef) -> usize {
-    Gc::read_slot(s, SLOT_LEN) as usize
-}
-
-pub fn array_ref(s: GcRef) -> GcRef {
-    Gc::read_slot(s, SLOT_ARRAY) as GcRef
-}
-
-pub fn start(s: GcRef) -> usize {
-    Gc::read_slot(s, SLOT_START) as usize
-}
+#[inline]
+pub fn len(s: GcRef) -> usize { StringData::as_ref(s).len as usize }
+#[inline]
+pub fn array_ref(s: GcRef) -> GcRef { StringData::as_ref(s).array }
+#[inline]
+pub fn start(s: GcRef) -> usize { StringData::as_ref(s).start as usize }
 
 pub fn as_bytes(s: GcRef) -> &'static [u8] {
-    let arr = Gc::read_slot(s, SLOT_ARRAY) as GcRef;
-    let start_off = Gc::read_slot(s, SLOT_START) as usize;
-    let length = Gc::read_slot(s, SLOT_LEN) as usize;
-    
-    let data_ptr = unsafe { array::as_bytes(arr).add(start_off) };
-    unsafe { core::slice::from_raw_parts(data_ptr, length) }
+    let data = StringData::as_ref(s);
+    let ptr = unsafe { array::as_bytes(data.array).add(data.start as usize) };
+    unsafe { core::slice::from_raw_parts(ptr, data.len as usize) }
 }
 
 pub fn as_str(s: GcRef) -> &'static str {
@@ -74,50 +80,29 @@ pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
 }
 
 pub fn slice_of(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize) -> GcRef {
-    let array = Gc::read_slot(s, SLOT_ARRAY) as GcRef;
-    let base_start = Gc::read_slot(s, SLOT_START) as usize;
-    
-    let new_s = gc.alloc(ValueKind::String as u8, 0, SLOT_COUNT);
-    Gc::write_slot(new_s, SLOT_ARRAY, array as u64);
-    Gc::write_slot(new_s, SLOT_START, (base_start + new_start) as u64);
-    Gc::write_slot(new_s, SLOT_LEN, (new_end - new_start) as u64);
+    let src = StringData::as_ref(s);
+    let new_s = gc.alloc(ValueMeta::new(0, ValueKind::String), DATA_SLOTS);
+    let data = StringData::as_mut(new_s);
+    data.array = src.array;
+    data.start = src.start + new_start as u32;
+    data.len = (new_end - new_start) as u32;
     new_s
 }
 
 pub fn eq(a: GcRef, b: GcRef) -> bool {
-    if a == b {
-        return true;
-    }
-    if a.is_null() || b.is_null() {
-        return a.is_null() && b.is_null();
-    }
+    if a == b { return true; }
+    if a.is_null() || b.is_null() { return a.is_null() && b.is_null(); }
     as_bytes(a) == as_bytes(b)
 }
 
-pub fn ne(a: GcRef, b: GcRef) -> bool {
-    !eq(a, b)
-}
-
-pub fn lt(a: GcRef, b: GcRef) -> bool {
-    as_bytes(a) < as_bytes(b)
-}
-
-pub fn le(a: GcRef, b: GcRef) -> bool {
-    as_bytes(a) <= as_bytes(b)
-}
-
-pub fn gt(a: GcRef, b: GcRef) -> bool {
-    as_bytes(a) > as_bytes(b)
-}
-
-pub fn ge(a: GcRef, b: GcRef) -> bool {
-    as_bytes(a) >= as_bytes(b)
-}
+pub fn ne(a: GcRef, b: GcRef) -> bool { !eq(a, b) }
+pub fn lt(a: GcRef, b: GcRef) -> bool { as_bytes(a) < as_bytes(b) }
+pub fn le(a: GcRef, b: GcRef) -> bool { as_bytes(a) <= as_bytes(b) }
+pub fn gt(a: GcRef, b: GcRef) -> bool { as_bytes(a) > as_bytes(b) }
+pub fn ge(a: GcRef, b: GcRef) -> bool { as_bytes(a) >= as_bytes(b) }
 
 pub fn cmp(a: GcRef, b: GcRef) -> i32 {
-    let a_bytes = as_bytes(a);
-    let b_bytes = as_bytes(b);
-    match a_bytes.cmp(b_bytes) {
+    match as_bytes(a).cmp(as_bytes(b)) {
         core::cmp::Ordering::Less => -1,
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,

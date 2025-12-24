@@ -1,49 +1,72 @@
 //! Closure object operations.
 //!
-//! Closure layout: [func_id, upval_count, upval[0], upval[1], ...]
-//! - Slot 0: func_id (u32)
-//! - Slot 1: upvalue count
-//! - Slot 2+: captured values (GcRef to escaped variables)
+//! Layout: GcHeader + ClosureHeader + [upvalues...]
+//! - ClosureHeader: func_id, upval_count (1 slot)
+//! - Upvalues: upval_count slots (GcRef to escaped variables)
 
 use crate::gc::{Gc, GcRef};
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
-pub const SLOT_FUNC_ID: usize = 0;
-pub const SLOT_UPVAL_COUNT: usize = 1;
-pub const SLOT_UPVAL_START: usize = 2;
+#[repr(C)]
+pub struct ClosureHeader {
+    pub func_id: u32,
+    pub upval_count: u32,
+}
+
+const HEADER_SLOTS: usize = 1;
+const _: () = assert!(core::mem::size_of::<ClosureHeader>() == HEADER_SLOTS * 8);
+
+impl ClosureHeader {
+    #[inline]
+    fn as_ref(c: GcRef) -> &'static Self {
+        unsafe { &*(c as *const Self) }
+    }
+
+    #[inline]
+    fn as_mut(c: GcRef) -> &'static mut Self {
+        unsafe { &mut *(c as *mut Self) }
+    }
+}
 
 pub fn create(gc: &mut Gc, func_id: u32, upval_count: usize) -> GcRef {
-    let total_slots = SLOT_UPVAL_START + upval_count;
-    let c = gc.alloc(ValueKind::Closure as u8, 0, total_slots as u16);
-    Gc::write_slot(c, SLOT_FUNC_ID, func_id as u64);
-    Gc::write_slot(c, SLOT_UPVAL_COUNT, upval_count as u64);
+    let total_slots = HEADER_SLOTS + upval_count;
+    let c = gc.alloc(ValueMeta::new(0, ValueKind::Closure), total_slots as u16);
+    let header = ClosureHeader::as_mut(c);
+    header.func_id = func_id;
+    header.upval_count = upval_count as u32;
     c
 }
 
-pub fn func_id(c: GcRef) -> u32 {
-    Gc::read_slot(c, SLOT_FUNC_ID) as u32
+#[inline]
+pub fn func_id(c: GcRef) -> u32 { ClosureHeader::as_ref(c).func_id }
+#[inline]
+pub fn upval_count(c: GcRef) -> usize { ClosureHeader::as_ref(c).upval_count as usize }
+
+#[inline]
+fn upvals_ptr(c: GcRef) -> *mut u64 {
+    unsafe { (c as *mut u64).add(HEADER_SLOTS) }
 }
 
-pub fn upval_count(c: GcRef) -> usize {
-    Gc::read_slot(c, SLOT_UPVAL_COUNT) as usize
-}
-
+#[inline]
 pub fn get_upvalue(c: GcRef, idx: usize) -> u64 {
-    Gc::read_slot(c, SLOT_UPVAL_START + idx)
+    unsafe { *upvals_ptr(c).add(idx) }
 }
 
+#[inline]
 pub fn set_upvalue(c: GcRef, idx: usize, val: u64) {
-    Gc::write_slot(c, SLOT_UPVAL_START + idx, val);
+    unsafe { *upvals_ptr(c).add(idx) = val }
 }
 
-pub fn create_upval_box(gc: &mut Gc, value_kind: u8) -> GcRef {
-    gc.alloc(value_kind, 0, 1)
+pub fn create_upval_box(gc: &mut Gc, value_meta: ValueMeta) -> GcRef {
+    gc.alloc(value_meta, 1)
 }
 
+#[inline]
 pub fn get_upval_box(uv: GcRef) -> u64 {
-    Gc::read_slot(uv, 0)
+    unsafe { *uv }
 }
 
+#[inline]
 pub fn set_upval_box(uv: GcRef, val: u64) {
-    Gc::write_slot(uv, 0, val);
+    unsafe { *uv = val }
 }

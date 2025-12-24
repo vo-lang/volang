@@ -10,8 +10,9 @@
 2. [Type System](#2-type-system)
 3. [Memory Model](#3-memory-model)
 4. [Escape Analysis](#4-escape-analysis)
-5. [Instruction Set](#5-instruction-set)
-6. [Runtime Structures](#6-runtime-structures)
+5. [Assignment Semantics](#5-assignment-semantics)
+6. [Instruction Set](#6-instruction-set)
+7. [Runtime Structures](#7-runtime-structures)
 
 ---
 
@@ -25,15 +26,6 @@ This document specifies the Vo memory model and instruction set architecture. Th
 2. **Static escape analysis**: Determine allocation location at compile time
 3. **Unified pointer representation**: All escaped values are represented as `Pointer`
 4. **Simplified closure capture**: No delayed "upvalue promotion" - escaped variables are heap-allocated from the start
-
-### 1.2 Key Changes from Previous Model
-
-| Aspect | Old Model | New Model |
-|--------|-----------|-----------|
-| struct allocation | Always heap | Stack by default, heap if escaped |
-| array allocation | Always heap | Stack by default, heap if escaped |
-| closure capture | Upval box (delayed promotion) | Direct heap allocation via escape analysis |
-| nested struct | Separate heap objects | Flattened inline |
 
 ---
 
@@ -103,18 +95,18 @@ Reference types are always represented as a single GcRef slot pointing to a heap
 | `func(...)` | Closure with captures |
 | `*T` | Explicit pointer (reference semantics) |
 
-#### 2.2.3 Boxed Value Types
+#### 2.2.3 Boxed Types
 
-When a value type (struct/array) escapes, it is **boxed** on the heap but retains **value semantics**:
+**Boxed** refers to the physical state: heap-allocated with a GcHeader. Both escaped struct/array and pointer (*T) are boxed.
 
 | Physical State | Semantic | Assignment |
 |----------------|----------|------------|
 | Stack struct/array | Value | `CopyN` (copy slots) |
-| Boxed struct/array | Value | `PtrClone` (deep copy) |
-| Pointer (*T) | Reference | `Copy` (copy pointer only) |
+| Escaped struct/array (boxed) | Value | `PtrClone` (deep copy) |
+| Pointer *T (boxed) | Reference | `Copy` (copy pointer only) |
 
-**Key distinction**: Boxed struct and Pointer are both GcRef physically, but:
-- **Boxed struct**: value semantics → assignment deep copies
+**Key distinction**: Escaped struct and Pointer are both boxed (GcRef physically), but differ in semantics:
+- **Escaped struct/array**: value semantics → assignment deep copies
 - **Pointer (*T)**: reference semantics → assignment copies pointer only
 
 ### 2.3 Helper Methods
@@ -206,28 +198,57 @@ var i interface{}
 
 Escaped values are allocated on the heap with a GC header.
 
-#### 3.2.1 GcHeader
+#### 3.2.1 ValueMeta
 
 ```rust
-/// GC 对象头 - 8 字节
-/// 布局: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
-pub struct GcHeader {
-    pub mark: u8,          // GC mark bit (White/Gray/Black)
-    pub gen: u8,           // Generation (Young/Old)
-    pub slots: u16,        // Number of data slots
-    pub meta_id: [u8; 3],  // 24-bit metadata index
-    pub value_kind: u8,    // ValueKind 枚举值
+/// Value metadata - 4 bytes
+/// Layout: [meta_id:24 | value_kind:8]
+pub struct ValueMeta(u32);
+
+impl ValueMeta {
+    pub fn new(meta_id: u32, value_kind: ValueKind) -> Self {
+        Self((meta_id << 8) | (value_kind as u32))
+    }
+
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub fn to_raw(self) -> u32 {
+        self.0
+    }
+
+    pub fn value_kind(self) -> ValueKind {
+        ValueKind::from(self.0 as u8)
+    }
+
+    pub fn meta_id(self) -> u32 {
+        self.0 >> 8
+    }
 }
 
-// meta_id 含义随 value_kind 变化:
-// - Array, Slice, Channel: elem_meta_id（元素的 meta_id）
-// - Struct, Pointer: 指向对象的 meta_id
-// - Interface: 接口类型的 meta_id
-// - Map: 0（key/val 类型信息存在 Container 数据里）
-// - 其他: 0
+// meta_id meaning varies by value_kind:
+// - Array, Slice, Channel: elem_meta_id (element's meta_id)
+// - Struct, Pointer: meta_id of the pointed object
+// - Interface: meta_id of the interface type
+// - Map: 0 (key/val type info stored in Container data)
+// - Others: 0
 ```
 
-#### 3.2.2 Heap Object Layout
+#### 3.2.2 GcHeader
+
+```rust
+/// GC Object Header - 8 bytes
+/// Layout: [mark:8 | gen:8 | slots:16 | ValueMeta:32]
+pub struct GcHeader {
+    pub mark: u8,           // GC mark bit (White/Gray/Black)
+    pub gen: u8,            // Generation (Young/Old)
+    pub slots: u16,         // Number of data slots
+    pub value_meta: ValueMeta,
+}
+```
+
+#### 3.2.3 Heap Object Layout
 
 **Escaped Primitive** (BoxedInt, BoxedFloat, etc.):
 ```
@@ -262,16 +283,17 @@ pub struct GcHeader {
 └─────────────────────────────────────────────────┘
 
 // GcHeader.value_kind = ValueKind::Array
-// GcHeader.meta_id = elem_meta_id（元素是 Struct 且需要 GC 扫描时）
+// GcHeader.meta_id = elem_meta_id (when element is Struct and needs GC scanning)
 // Array header slot 0: [len:48 | elem_slots:16]
 ```
 
 ### 3.3 Global Variables
 
-Global variables are treated as **always escaped** and allocated on the heap. The global table stores GcRefs to heap objects.
+Global variables are stored in a dedicated `globals` array, accessed via `GlobalGet`/`GlobalSet` instructions. They are **not** heap-allocated escaped values.
 
 ```vo
-var globalPoint Point  // Heap-allocated, globals[i] = GcRef
+var globalCounter int   // globals[0] = value
+var globalPoint Point   // globals[1..3] = x, y (inline, multi-slot)
 ```
 
 ---
@@ -292,26 +314,42 @@ A local variable **escapes** (requires heap allocation) if any of the following 
 - Captured by a closure
 - Assigned to an interface
 - Pointer-receiver method called: `s.Method()` where `Method` has `*T` receiver
+- Larger than **256 slots**
 
 #### 4.1.3 Array
 
 - Captured by a closure
 - Assigned to an interface
 - Sliced: `arr[:]` or `arr[i:j]`
-- Dynamically indexed: `arr[i]` where `i` is not a compile-time constant
+- Larger than **256 slots**
 
 #### 4.1.5 Interface Assignment
 
 When assigning a value to an interface:
 - **Basic types** (int, float, bool): stored directly in interface's data slot, **no escape**
 - **Reference types** (slice, map, chan, closure, pointer): already GcRef, copy directly
-- **Value types** (struct, array): already boxed (escape analysis ensures this), **deep copy** to interface's data slot
+- **Value types** (struct, array): already escaped (escape analysis ensures this), **deep copy** to interface's data slot
+
+### 4.2 Nested Escape Propagation
+
+If any nested field triggers escape, the **entire root variable** escapes:
+
+```vo
+type Outer struct { inner Inner }
+var o Outer
+p := &o.inner    // o escapes (not just inner)
+```
+
+### 4.3 Non-Escape Cases
+
+- Package-level variables are **not** considered "captured" by closures (they're already global)
+- Variables only used within the declaring function without triggering any escape rule
 
 ---
 
-## 4.2 Assignment Semantics
+## 5. Assignment Semantics
 
-### 4.2.1 Regular Assignment
+### 5.1 Regular Assignment
 
 | Type | Operation | Description |
 |------|-----------|-------------|
@@ -321,7 +359,7 @@ When assigning a value to an interface:
 | Pointer (*T) | `Copy` | Copy pointer (reference semantics) |
 | Reference types (string/slice/map/chan/closure) | `Copy` | Copy GcRef (shared underlying) |
 
-### 4.2.2 Interface-to-Interface Assignment
+### 5.2 Interface-to-Interface Assignment
 
 ```rust
 // dst.slot0 unchanged (target interface type is fixed at compile time)
@@ -341,30 +379,11 @@ dst.slot1 = if vk == Struct || vk == Array {
 | Pointer | `Copy` |
 | **Struct/Array** | `PtrClone` (deep copy) |
 
-#### 4.2.3 Size Threshold
-
-- `struct` or `array` larger than **256 slots** → always escapes
-
-### 4.3 Nested Escape Propagation
-
-If any nested field triggers escape, the **entire root variable** escapes:
-
-```vo
-type Outer struct { inner Inner }
-var o Outer
-p := &o.inner    // o escapes (not just inner)
-```
-
-### 4.4 Non-Escape Cases
-
-- Package-level variables are **not** considered "captured" by closures (they're already global)
-- Variables only used within the declaring function without triggering any escape rule
-
 ---
 
-## 5. Instruction Set
+## 6. Instruction Set
 
-### 5.1 Instruction Format
+### 6.1 Instruction Format
 
 Each instruction is 8 bytes:
 
@@ -378,9 +397,9 @@ pub struct Instruction {
 }
 ```
 
-### 5.2 Opcode Categories
+### 6.2 Opcode Categories
 
-#### 5.2.1 LOAD: Load Immediate/Constant
+#### 6.2.1 LOAD: Load Immediate/Constant
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -391,14 +410,14 @@ pub struct Instruction {
 | `LoadInt` | a, b, c | `slots[a] = sign_extend(b \| (c << 16))` |
 | `LoadConst` | a, b | `slots[a] = constants[b]` |
 
-#### 5.2.2 COPY: Stack Slot Copy
+#### 6.2.2 COPY: Stack Slot Copy
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `Copy` | a, b | `slots[a] = slots[b]` (single slot) |
 | `CopyN` | a, b, c | `slots[a..a+c] = slots[b..b+c]` (multi-slot) |
 
-#### 5.2.3 SLOT: Stack Dynamic Indexing
+#### 6.2.3 SLOT: Stack Dynamic Indexing
 
 For stack-allocated arrays with dynamic indices.
 
@@ -409,14 +428,14 @@ For stack-allocated arrays with dynamic indices.
 | `SlotGetN` | a, b, c, flags | `slots[a..a+flags] = slots[b + slots[c]*flags..]` |
 | `SlotSetN` | a, b, c, flags | `slots[a + slots[b]*flags..] = slots[c..c+flags]` |
 
-#### 5.2.4 GLOBAL: Global Variable Access
+#### 6.2.4 GLOBAL: Global Variable Access
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `GlobalGet` | a, b | `slots[a] = globals[b]` |
 | `GlobalSet` | a, b | `globals[a] = slots[b]` |
 
-#### 5.2.5 PTR: Heap Pointer Operations
+#### 6.2.5 PTR: Heap Pointer Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -427,7 +446,7 @@ For stack-allocated arrays with dynamic indices.
 | `PtrGetN` | a, b, c, flags | `slots[a..a+flags] = heap[slots[b]].offset[c..]` |
 | `PtrSetN` | a, b, c, flags | `heap[slots[a]].offset[b..] = slots[c..c+flags]` |
 
-#### 5.2.6 ARITH: Integer Arithmetic
+#### 6.2.6 ARITH: Integer Arithmetic
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -438,7 +457,7 @@ For stack-allocated arrays with dynamic indices.
 | `ModI` | a, b, c | `slots[a] = slots[b] % slots[c]` |
 | `NegI` | a, b | `slots[a] = -slots[b]` |
 
-#### 5.2.7 ARITH: Float Arithmetic
+#### 6.2.7 ARITH: Float Arithmetic
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -448,7 +467,7 @@ For stack-allocated arrays with dynamic indices.
 | `DivF` | a, b, c | `slots[a] = slots[b] / slots[c]` |
 | `NegF` | a, b | `slots[a] = -slots[b]` |
 
-#### 5.2.8 CMP: Integer Comparison
+#### 6.2.8 CMP: Integer Comparison
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -459,7 +478,7 @@ For stack-allocated arrays with dynamic indices.
 | `GtI` | a, b, c | `slots[a] = slots[b] > slots[c]` |
 | `GeI` | a, b, c | `slots[a] = slots[b] >= slots[c]` |
 
-#### 5.2.9 CMP: Float Comparison
+#### 6.2.9 CMP: Float Comparison
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -470,7 +489,7 @@ For stack-allocated arrays with dynamic indices.
 | `GtF` | a, b, c | `slots[a] = slots[b] > slots[c]` |
 | `GeF` | a, b, c | `slots[a] = slots[b] >= slots[c]` |
 
-#### 5.2.10 CMP: Reference Comparison
+#### 6.2.10 CMP: Reference Comparison
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -478,7 +497,7 @@ For stack-allocated arrays with dynamic indices.
 | `NeRef` | a, b, c | `slots[a] = slots[b] != slots[c]` |
 | `IsNil` | a, b | `slots[a] = slots[b] == nil` |
 
-#### 5.2.11 BIT: Bitwise Operations
+#### 6.2.11 BIT: Bitwise Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -490,13 +509,13 @@ For stack-allocated arrays with dynamic indices.
 | `ShrS` | a, b, c | `slots[a] = slots[b] >> slots[c]` (arithmetic) |
 | `ShrU` | a, b, c | `slots[a] = slots[b] >>> slots[c]` (logical) |
 
-#### 5.2.12 LOGIC: Logical Operations
+#### 6.2.12 LOGIC: Logical Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `BoolNot` | a, b | `slots[a] = !slots[b]` |
 
-#### 5.2.13 JUMP: Control Flow
+#### 6.2.13 JUMP: Control Flow
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -504,7 +523,7 @@ For stack-allocated arrays with dynamic indices.
 | `JumpIf` | a, b, c | `if slots[a]: pc += sign_extend(b \| (c << 16))` |
 | `JumpIfNot` | a, b, c | `if !slots[a]: pc += sign_extend(b \| (c << 16))` |
 
-#### 5.2.14 CALL: Function Calls
+#### 6.2.14 CALL: Function Calls
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -514,10 +533,11 @@ For stack-allocated arrays with dynamic indices.
 | `CallIface` | a, b, c, flags | Call interface method: iface at `a`, args at `b`, `c`=(arg_slots<<8\|ret_slots), `flags`=method_idx |
 | `Return` | a, b | Return values starting at `a`, ret_slots=`b` |
 
-#### 5.2.15 STR: String Operations
+#### 6.2.15 STR: String Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
+| `StrNew` | a, b | `slots[a] = string_constants[b]` |
 | `StrLen` | a, b | `slots[a] = len(slots[b])` |
 | `StrIndex` | a, b, c | `slots[a] = slots[b][slots[c]]` |
 | `StrConcat` | a, b, c | `slots[a] = slots[b] + slots[c]` |
@@ -529,9 +549,7 @@ For stack-allocated arrays with dynamic indices.
 | `StrGt` | a, b, c | `slots[a] = slots[b] > slots[c]` |
 | `StrGe` | a, b, c | `slots[a] = slots[b] >= slots[c]` |
 
-Note: String creation uses CallExtern (`vo_string_create`).
-
-#### 5.2.16 ARRAY: Heap Array Operations
+#### 6.2.16 ARRAY: Heap Array Operations
 
 For escaped arrays allocated on the heap.
 
@@ -546,7 +564,7 @@ For escaped arrays allocated on the heap.
 
 `ArrayNew` 编码: a=dst, b=elem_meta_id_low16, c=len_reg, flags=elem_kind。elem_slots 从 struct_metas 查询。
 
-#### 5.2.17 SLICE: Slice Operations
+#### 6.2.17 SLICE: Slice Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -562,7 +580,7 @@ For escaped arrays allocated on the heap.
 
 `SliceNew` 编码: a=dst, b=elem_meta_id_low16, c=len_reg, flags=elem_kind。cap 从下一个 slot 读取。
 
-#### 5.2.18 MAP: Map Operations
+#### 6.2.18 MAP: Map Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -575,7 +593,7 @@ For escaped arrays allocated on the heap.
 `MapNew` 用两条指令: `LoadConst r, <packed_u64>` + `MapNew dst, r`。
 packed_u64 格式: `[key_kind:8 | key_meta_id:24 | val_kind:8 | val_meta_id:24]`
 
-#### 5.2.19 CHAN: Channel Operations
+#### 6.2.19 CHAN: Channel Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -586,7 +604,7 @@ packed_u64 格式: `[key_kind:8 | key_meta_id:24 | val_kind:8 | val_meta_id:24]`
 
 `ChanNew` 编码: a=dst, b=elem_meta_id_low16, c=cap_reg, flags=elem_kind。
 
-#### 5.2.20 SELECT: Select Statement
+#### 6.2.20 SELECT: Select Statement
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -595,7 +613,7 @@ packed_u64 格式: `[key_kind:8 | key_meta_id:24 | val_kind:8 | val_meta_id:24]`
 | `SelectRecv` | a, b, c | Add recv case: dst=`a`, chan=`b`, ok=`c` |
 | `SelectEnd` | a | Execute select, chosen index → `a` |
 
-#### 5.2.21 ITER: Iterator (for-range)
+#### 6.2.21 ITER: Iterator (for-range)
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -603,23 +621,24 @@ packed_u64 格式: `[key_kind:8 | key_meta_id:24 | val_kind:8 | val_meta_id:24]`
 | `IterNext` | a, b, c | `slots[a], slots[b] = next`, done_offset=`c` |
 | `IterEnd` | - | End iteration |
 
-#### 5.2.22 CLOSURE: Closure Operations
+#### 6.2.22 CLOSURE: Closure Operations
 
 | Opcode | Operands | Description |
-|--------|----------|-------------|
+|--------|----------|-----------|
+| `ClosureNew` | a, b, c | `slots[a] = new_closure(func_id=b, upval_count=c)` |
 | `ClosureGet` | a, b | `slots[a] = slots[0].captures[b]` (closure 隐式在 r0) |
 | `ClosureSet` | a, b | `slots[0].captures[a] = slots[b]` (closure 隐式在 r0) |
 
-Note: `ClosureNew` uses CallExtern (`vo_closure_create`). Escaped variables are heap-allocated directly, and closures capture GcRefs.
+Note: Escaped variables are heap-allocated directly, and closures capture GcRefs.
 
-#### 5.2.23 GO: Goroutine
+#### 6.2.23 GO: Goroutine
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `GoCall` | a | `go slots[a]()` (0 参数 closure，与 defer 一致) |
 | `Yield` | - | Yield current goroutine |
 
-#### 5.2.24 DEFER: Defer and Error Handling
+#### 6.2.24 DEFER: Defer and Error Handling
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -630,7 +649,7 @@ Note: `ClosureNew` uses CallExtern (`vo_closure_create`). Escaped variables are 
 
 Note: `DeferPop` removed. Defers are executed automatically by `Return`.
 
-#### 5.2.25 IFACE: Interface Operations
+#### 6.2.25 IFACE: Interface Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -670,7 +689,7 @@ match vk {
 }
 ```
 
-#### 5.2.26 CONV: Type Conversion
+#### 6.2.26 CONV: Type Conversion
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -679,32 +698,15 @@ match vk {
 | `ConvI32I64` | a, b | `slots[a] = int64(int32(slots[b]))` |
 | `ConvI64I32` | a, b | `slots[a] = int32(slots[b])` |
 
-#### 5.2.27 DEBUG: Debug Operations
+#### 6.2.27 DEBUG: Debug Operations
 
 Note: `Print` uses CallExtern (`vo_print`). Assert is implemented using `JumpIf` + `CallExtern(print)` + `Panic`.
 
-### 5.3 Built-in CallExtern Functions
-
-The following operations are implemented via `CallExtern` calling runtime-core functions:
-
-| Category | Function | Description |
-|----------|----------|-------------|
-| **String** | `vo_string_create` | Create string from constant |
-| **Closure** | `vo_closure_create` | Create closure |
-| **Debug** | `vo_print` | Print value |
-
-**Note**: `ArrayNew`, `SliceNew`, `MapNew`, `ChanNew` 使用专用 opcode（VM 可访问 struct_metas 查询 elem_slots）。
-
-**Design Principles**:
-- **Container 创建** → Opcode（VM 需要访问 Module.struct_metas）
-- **Read operations** → Keep as instructions (high frequency, lightweight)
-- **VM state operations** → Keep as instructions (require internal state)
-
 ---
 
-## 6. Runtime Structures
+## 7. Runtime Structures
 
-### 6.1 SlotType
+### 7.1 SlotType
 
 Used for GC stack scanning:
 
@@ -717,7 +719,7 @@ pub enum SlotType {
 }
 ```
 
-### 6.2 TypeMeta
+### 7.2 TypeMeta
 
 Runtime type metadata for struct types:
 
@@ -729,7 +731,7 @@ pub struct TypeMeta {
 }
 ```
 
-### 6.3 Closure Structure
+### 7.3 Closure Structure
 
 ```rust
 pub struct Closure {
@@ -738,124 +740,3 @@ pub struct Closure {
 }
 ```
 
----
-
-## Appendix A: Instruction Opcode Values
-
-```rust
-pub enum Opcode {
-    // LOAD
-    Nop = 0, LoadNil, LoadTrue, LoadFalse, LoadInt, LoadConst,
-    
-    // COPY
-    Copy = 10, CopyN,
-    
-    // SLOT
-    SlotGet = 15, SlotSet, SlotGetN, SlotSetN,
-    
-    // GLOBAL
-    GlobalGet = 20, GlobalSet,
-    
-    // PTR
-    PtrNew = 25, PtrClone, PtrGet, PtrSet, PtrGetN, PtrSetN,
-    
-    // ARITH (int)
-    AddI = 35, SubI, MulI, DivI, ModI, NegI,
-    
-    // ARITH (float)
-    AddF = 45, SubF, MulF, DivF, NegF,
-    
-    // CMP (int)
-    EqI = 55, NeI, LtI, LeI, GtI, GeI,
-    
-    // CMP (float)
-    EqF = 65, NeF, LtF, LeF, GtF, GeF,
-    
-    // CMP (ref)
-    EqRef = 75, NeRef, IsNil,
-    
-    // BIT
-    And = 80, Or, Xor, Not, Shl, ShrS, ShrU,
-    
-    // LOGIC
-    BoolNot = 90,
-    
-    // JUMP
-    Jump = 95, JumpIf, JumpIfNot,
-    
-    // CALL
-    Call = 100, CallExtern, CallClosure, CallIface, Return,
-    
-    // STR
-    StrConcat = 110, StrLen, StrIndex, StrSlice,
-    StrEq, StrNe, StrLt, StrLe, StrGt, StrGe,
-    
-    // ARRAY
-    ArrayGet = 125, ArraySet, ArrayGetN, ArraySetN, ArrayLen,
-    
-    // SLICE
-    SliceGet = 135, SliceSet, SliceGetN, SliceSetN, SliceLen, SliceCap, SliceSlice, SliceAppend,
-    
-    // MAP
-    MapGet = 145, MapSet, MapDelete, MapLen,
-    
-    // CHAN
-    ChanSend = 155, ChanRecv, ChanClose,
-    
-    // SELECT
-    SelectBegin = 165, SelectSend, SelectRecv, SelectEnd,
-    
-    // ITER
-    IterBegin = 175, IterNext, IterEnd,
-    
-    // CLOSURE
-    ClosureGet = 185, ClosureSet,
-    
-    // GO
-    GoCall = 195, Yield,
-    
-    // DEFER
-    DeferPush = 200, ErrDeferPush, Panic, Recover,
-    
-    // IFACE
-    IfaceInit = 210, IfaceAssign, IfaceAssert,
-    
-    // CONV
-    ConvI2F = 220, ConvF2I, ConvI32I64, ConvI64I32,
-    
-    // DEBUG
-    Print = 230, AssertBegin, AssertArg, AssertEnd,
-    
-    Invalid = 255,
-}
-```
-
----
-
-## Appendix B: Migration Notes
-
-### B.1 Removed Instructions
-
-| Instruction | Replacement |
-|-------------|-------------|
-| `Mov` | `Copy` |
-| `MovN` | `CopyN` |
-| `Alloc` | `PtrNew` |
-| `StructClone` | `PtrClone` |
-| `GetField` / `SetField` | `PtrGet` / `PtrSet` |
-| `GetFieldN` / `SetFieldN` | `PtrGetN` / `PtrSetN` |
-| `UpvalNew` | Removed (escape analysis) |
-| `UpvalGet` | `PtrGet` on captured GcRef |
-| `UpvalSet` | `PtrSet` on captured GcRef |
-| `CallInterface` | `CallIface` |
-| `InitInterface` | `IfaceInit` |
-| `BoxInterface` | `IfaceAssign` |
-| `UnboxInterface` | `IfaceAssert` |
-| `TypeAssert` | `IfaceAssert` |
-
-### B.2 New Instructions
-
-| Instruction | Purpose |
-|-------------|---------|
-| `SlotGet` / `SlotSet` | Stack array dynamic indexing |
-| `SlotGetN` / `SlotSetN` | Multi-slot stack dynamic indexing |

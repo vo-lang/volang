@@ -1,122 +1,109 @@
 //! Array object operations.
 //!
-//! Array layout: GcHeader + [header slot] + [data...]
+//! Layout: GcHeader + ArrayHeader + [elements...]
 //! - GcHeader: is_array=1, kind=elem_kind, meta_id=elem_meta_id
-//! - Slot 0 (array header): packed as [len:48 | elem_slots:16]
-//! - Slot 1+: element data
+//! - ArrayHeader: len, elem_slots (1 slot = 8 bytes)
+//! - Elements: len * elem_slots slots
 
 use crate::gc::{Gc, GcRef, IS_ARRAY_FLAG};
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
-pub const DATA_START: usize = 1;
-
-/// Pack array header: [len:48 | elem_slots:16]
-#[inline]
-fn pack_header(len: usize, elem_slots: u16) -> u64 {
-    ((len as u64) << 16) | (elem_slots as u64)
+#[repr(C)]
+pub struct ArrayHeader {
+    pub len: u32,
+    pub elem_slots: u16,
+    _reserved: u16,
 }
 
-/// Unpack length from array header
-#[inline]
-pub fn unpack_len(header: u64) -> usize {
-    (header >> 16) as usize
+const HEADER_SLOTS: usize = 1;
+const _: () = assert!(core::mem::size_of::<ArrayHeader>() == HEADER_SLOTS * 8);
+
+impl ArrayHeader {
+    #[inline]
+    fn as_ref(arr: GcRef) -> &'static Self {
+        unsafe { &*(arr as *const Self) }
+    }
+
+    #[inline]
+    fn as_mut(arr: GcRef) -> &'static mut Self {
+        unsafe { &mut *(arr as *mut Self) }
+    }
 }
 
-/// Unpack elem_slots from array header
-#[inline]
-pub fn unpack_elem_slots(header: u64) -> u16 {
-    header as u16
-}
-
-/// Calculate data slots needed for array
-#[inline]
-fn data_slots(length: usize, elem_slots: usize) -> usize {
-    length * elem_slots
-}
-
-/// Create a new array.
-/// elem_kind: element ValueKind
-/// elem_meta_id: element's meta_id (for Struct/Interface elements)
-/// elem_slots: slots per element (caller must provide - queried from struct_metas)
-/// length: number of elements
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, length: usize) -> GcRef {
-    let total_slots = DATA_START + data_slots(length, elem_slots as usize);
-    // GcHeader: is_array=1, kind=elem_kind, meta_id=elem_meta_id
-    let value_kind = IS_ARRAY_FLAG | elem_kind;
-    let arr = gc.alloc(value_kind, elem_meta_id, total_slots as u16);
-    let header = pack_header(length, elem_slots);
-    Gc::write_slot(arr, 0, header);
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, length: usize) -> GcRef {
+    let total_slots = HEADER_SLOTS + length * elem_slots as usize;
+    let array_meta = ValueMeta::from_raw(
+        (elem_meta.meta_id() << 8) | (IS_ARRAY_FLAG | elem_meta.value_kind() as u8) as u32
+    );
+    let arr = gc.alloc(array_meta, total_slots as u16);
+    let header = ArrayHeader::as_mut(arr);
+    header.len = length as u32;
+    header.elem_slots = elem_slots;
     arr
 }
 
-/// Create array - FFI version without elem_slots (for CallExtern).
-/// elem_slots will be looked up from struct_metas by the caller.
-pub fn create_ffi(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, length: usize, elem_slots: u16) -> GcRef {
-    create(gc, elem_kind, elem_meta_id, elem_slots, length)
-}
-
-/// Get array header slot
 #[inline]
-fn header(arr: GcRef) -> u64 {
-    Gc::read_slot(arr, 0)
-}
-
-/// Get array length
 pub fn len(arr: GcRef) -> usize {
-    unpack_len(header(arr))
+    ArrayHeader::as_ref(arr).len as usize
 }
 
-/// Get elem_slots (slots per element)
+#[inline]
 pub fn elem_slots(arr: GcRef) -> u16 {
-    unpack_elem_slots(header(arr))
+    ArrayHeader::as_ref(arr).elem_slots
 }
 
-/// Get element kind from GcHeader
+#[inline]
 pub fn elem_kind(arr: GcRef) -> ValueKind {
     Gc::header(arr).kind()
 }
 
-/// Get element meta_id from GcHeader
+#[inline]
 pub fn elem_meta_id(arr: GcRef) -> u32 {
     Gc::header(arr).meta_id()
 }
 
-/// Get single-slot element at index
+#[inline]
+pub fn elem_meta(arr: GcRef) -> ValueMeta {
+    ValueMeta::new(elem_meta_id(arr), elem_kind(arr))
+}
+
+#[inline]
+fn data_ptr(arr: GcRef) -> *mut u64 {
+    unsafe { (arr as *mut u64).add(HEADER_SLOTS) }
+}
+
+#[inline]
 pub fn get(arr: GcRef, idx: usize) -> u64 {
     let es = elem_slots(arr) as usize;
-    Gc::read_slot(arr, DATA_START + idx * es)
+    unsafe { *data_ptr(arr).add(idx * es) }
 }
 
-/// Set single-slot element at index
+#[inline]
 pub fn set(arr: GcRef, idx: usize, val: u64) {
     let es = elem_slots(arr) as usize;
-    Gc::write_slot(arr, DATA_START + idx * es, val);
+    unsafe { *data_ptr(arr).add(idx * es) = val }
 }
 
-/// Get multi-slot element at index
 pub fn get_n(arr: GcRef, idx: usize, dest: &mut [u64]) {
     let es = elem_slots(arr) as usize;
+    let ptr = unsafe { data_ptr(arr).add(idx * es) };
     for i in 0..es {
-        dest[i] = Gc::read_slot(arr, DATA_START + idx * es + i);
+        dest[i] = unsafe { *ptr.add(i) };
     }
 }
 
-/// Set multi-slot element at index
 pub fn set_n(arr: GcRef, idx: usize, src: &[u64]) {
     let es = elem_slots(arr) as usize;
+    let ptr = unsafe { data_ptr(arr).add(idx * es) };
     for i in 0..es {
-        Gc::write_slot(arr, DATA_START + idx * es + i, src[i]);
+        unsafe { *ptr.add(i) = src[i] };
     }
-}
-
-pub fn data_ptr(arr: GcRef) -> *mut u64 {
-    unsafe { (arr as *mut u64).add(DATA_START) }
 }
 
 pub fn as_bytes(arr: GcRef) -> *const u8 {
-    unsafe { (arr as *const u8).add(DATA_START * 8) }
+    data_ptr(arr) as *const u8
 }
 
 pub fn as_bytes_mut(arr: GcRef) -> *mut u8 {
-    unsafe { (arr as *mut u8).add(DATA_START * 8) }
+    data_ptr(arr) as *mut u8
 }

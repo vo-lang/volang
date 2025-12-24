@@ -4,7 +4,7 @@
 //! GcHeader.meta_id contains the MetaId for type metadata lookup.
 
 use crate::gc::{Gc, GcRef};
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
 /// Compute hash for a struct value (based on field values, not pointer).
 /// Uses FxHash algorithm - fast polynomial hash for integers.
@@ -23,9 +23,9 @@ pub fn hash(obj: GcRef, field_count: usize) -> u64 {
 /// Deep copy a struct: allocate new object with same type and copy all slots.
 pub fn clone(gc: &mut Gc, src: GcRef, size_slots: usize) -> GcRef {
     let header = Gc::header(src);
-    let meta_id = header.meta_id();
+    let value_meta = header.value_meta();
 
-    let dst = gc.alloc(ValueKind::Struct as u8, meta_id, size_slots as u16);
+    let dst = gc.alloc(value_meta, size_slots as u16);
 
     for i in 0..size_slots {
         let val = Gc::read_slot(src, i);
@@ -37,7 +37,7 @@ pub fn clone(gc: &mut Gc, src: GcRef, size_slots: usize) -> GcRef {
 
 /// Create a new struct with zero-initialized fields.
 pub fn create(gc: &mut Gc, meta_id: u32, size_slots: usize) -> GcRef {
-    gc.alloc(ValueKind::Struct as u8, meta_id, size_slots as u16)
+    gc.alloc(ValueMeta::new(meta_id, ValueKind::Struct), size_slots as u16)
 }
 
 /// Get field value.

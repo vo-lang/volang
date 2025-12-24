@@ -35,22 +35,51 @@ impl TypeId {
 // Runtime Types
 // =============================================================================
 
-/// Meta ID - 24-bit index into meta tables.
-/// Stored in GcHeader as 3 bytes.
-///
-/// Meaning depends on value_kind:
-/// - Struct: indexes struct_metas[]
-/// - Interface: indexes interface_metas[]
-/// - Array (is_array=1): element's meta_id if element is Struct/Interface
+/// Meta ID - 24-bit index.
+/// Meaning varies by value_kind:
+/// - Array, Slice, Channel: elem_meta_id (element's meta_id)
+/// - Struct, Pointer: meta_id of the pointed object
+/// - Interface: meta_id of the interface type
+/// - Map: 0 (key/val type info stored in Container data)
 /// - Others: 0
 pub type MetaId = u32;
 
 pub const INVALID_META_ID: MetaId = 0xFF_FFFF; // 24-bit max
 pub const META_ID_MASK: MetaId = 0xFF_FFFF;    // 24-bit mask
 
-// Backward compatibility alias
-pub type RuntimeTypeId = MetaId;
-pub const INVALID_RUNTIME_TYPE_ID: RuntimeTypeId = INVALID_META_ID;
+/// Value metadata - packed 32-bit representation.
+/// Layout: [meta_id:24 | value_kind:8]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ValueMeta(u32);
+
+impl ValueMeta {
+    pub const NIL: ValueMeta = ValueMeta(ValueKind::Nil as u32);
+
+    #[inline]
+    pub fn new(meta_id: u32, value_kind: ValueKind) -> Self {
+        Self(((meta_id & META_ID_MASK) << 8) | (value_kind as u32))
+    }
+
+    #[inline]
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[inline]
+    pub fn to_raw(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub fn value_kind(self) -> ValueKind {
+        ValueKind::from_u8(self.0 as u8)
+    }
+
+    #[inline]
+    pub fn meta_id(self) -> u32 {
+        self.0 >> 8
+    }
+}
 
 /// Value kind - runtime classification of Vo values.
 ///

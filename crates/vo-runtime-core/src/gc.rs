@@ -8,21 +8,19 @@ use std::alloc as heap_alloc;
 #[cfg(not(feature = "std"))]
 use alloc::alloc as heap_alloc;
 
-use vo_common_core::types::{ValueKind, META_ID_MASK};
+use vo_common_core::types::{ValueKind, ValueMeta};
 
 /// GC object header - 8 bytes.
-/// Layout: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
+/// Layout: [mark:8 | gen:8 | slots:16 | ValueMeta:32]
 ///
-/// value_kind field:
-/// - bit 7 (0x80): is_array flag
-///   - 1 = Array object, kind bits are element type
-///   - 0 = Normal object, kind bits are object type
-/// - bit 0-6: ValueKind value (0-127)
+/// ValueMeta contains:
+/// - meta_id (24 bits): meaning depends on value_kind
+/// - value_kind (8 bits): ValueKind enum, high bit is is_array flag
 ///
 /// meta_id meaning depends on kind:
 /// - Struct: struct_metas[] index
 /// - Interface: interface_metas[] index
-/// - Array of Struct/Interface: element's meta_id
+/// - Array (is_array=1): element's meta_id
 /// - Others: 0
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -30,9 +28,7 @@ pub struct GcHeader {
     pub mark: u8,
     pub gen: u8,
     pub slots: u16,
-    pub meta_id_low: u16,   // lower 16 bits of meta_id
-    pub meta_id_high: u8,   // upper 8 bits of meta_id
-    pub value_kind: u8,     // [is_array:1 | kind:7]
+    pub value_meta: ValueMeta,
 }
 
 pub const IS_ARRAY_FLAG: u8 = 0x80;
@@ -41,41 +37,43 @@ pub const VALUE_KIND_MASK: u8 = 0x7F;
 impl GcHeader {
     pub const SIZE: usize = 8;
 
-    pub fn new(value_kind: u8, meta_id: u32, slots: u16) -> Self {
+    pub fn new(value_meta: ValueMeta, slots: u16) -> Self {
         Self {
             mark: GcColor::White as u8,
             gen: GcGen::Young as u8,
             slots,
-            meta_id_low: (meta_id & 0xFFFF) as u16,
-            meta_id_high: ((meta_id >> 16) & 0xFF) as u8,
-            value_kind,
+            value_meta,
         }
     }
 
     #[inline]
     pub fn meta_id(&self) -> u32 {
-        (self.meta_id_low as u32) | ((self.meta_id_high as u32) << 16)
+        self.value_meta.meta_id()
     }
 
     #[inline]
     pub fn set_meta_id(&mut self, meta_id: u32) {
-        self.meta_id_low = (meta_id & 0xFFFF) as u16;
-        self.meta_id_high = ((meta_id >> 16) & 0xFF) as u8;
+        self.value_meta = ValueMeta::new(meta_id, self.value_meta.value_kind());
     }
 
     #[inline]
     pub fn is_array(&self) -> bool {
-        (self.value_kind & IS_ARRAY_FLAG) != 0
+        (self.value_meta.to_raw() as u8 & IS_ARRAY_FLAG) != 0
     }
 
     #[inline]
     pub fn kind(&self) -> ValueKind {
-        ValueKind::from_u8(self.value_kind & VALUE_KIND_MASK)
+        ValueKind::from_u8(self.value_meta.to_raw() as u8 & VALUE_KIND_MASK)
     }
 
     #[inline]
     pub fn value_kind(&self) -> ValueKind {
         self.kind()
+    }
+
+    #[inline]
+    pub fn value_meta(&self) -> ValueMeta {
+        self.value_meta
     }
 }
 
@@ -125,9 +123,7 @@ impl Gc {
     }
 
     /// Allocate a new GC object.
-    /// value_kind: [is_array:1 | kind:7]
-    /// meta_id: 24-bit metadata index
-    pub fn alloc(&mut self, value_kind: u8, meta_id: u32, slots: u16) -> GcRef {
+    pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
         let header_size = GcHeader::SIZE;
         let data_size = (slots as usize) * 8;
         let total_size = header_size + data_size;
@@ -139,7 +135,7 @@ impl Gc {
             panic!("GC allocation failed");
         }
 
-        let header = GcHeader::new(value_kind, meta_id & META_ID_MASK, slots);
+        let header = GcHeader::new(value_meta, slots);
         unsafe {
             core::ptr::write(ptr as *mut GcHeader, header);
         }

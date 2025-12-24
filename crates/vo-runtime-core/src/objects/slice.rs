@@ -1,83 +1,105 @@
 //! Slice object operations.
 //!
-//! Slice layout: [array_ref, start, len, cap] (4 slots)
+//! Layout: GcHeader + SliceData
+//! Slice references an underlying array with start offset.
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::array;
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
-pub const SLOT_ARRAY: usize = 0;
-pub const SLOT_START: usize = 1;
-pub const SLOT_LEN: usize = 2;
-pub const SLOT_CAP: usize = 3;
-pub const SLOT_COUNT: u16 = 4;
+#[repr(C)]
+pub struct SliceData {
+    pub array: GcRef,
+    pub start: u32,
+    pub len: u32,
+    pub cap: u32,
+    _pad: u32,
+}
 
-/// Create a new slice with a new underlying array.
-/// elem_slots must be provided by caller (queried from struct_metas).
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_slots: u16, length: usize, capacity: usize) -> GcRef {
-    let arr = array::create(gc, elem_kind, elem_meta_id, elem_slots, capacity);
+const DATA_SLOTS: u16 = 3;
+const _: () = assert!(core::mem::size_of::<SliceData>() == DATA_SLOTS as usize * 8);
+
+impl SliceData {
+    #[inline]
+    fn as_ref(s: GcRef) -> &'static Self {
+        unsafe { &*(s as *const Self) }
+    }
+
+    #[inline]
+    fn as_mut(s: GcRef) -> &'static mut Self {
+        unsafe { &mut *(s as *mut Self) }
+    }
+}
+
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, length: usize, capacity: usize) -> GcRef {
+    let arr = array::create(gc, elem_meta, elem_slots, capacity);
     from_array_range(gc, arr, 0, length, capacity)
 }
 
-/// Create slice from existing array with range.
 pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize, capacity: usize) -> GcRef {
-    let s = gc.alloc(ValueKind::Slice as u8, 0, SLOT_COUNT);
-    Gc::write_slot(s, SLOT_ARRAY, arr as u64);
-    Gc::write_slot(s, SLOT_START, start_off as u64);
-    Gc::write_slot(s, SLOT_LEN, length as u64);
-    Gc::write_slot(s, SLOT_CAP, capacity as u64);
+    let s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
+    let data = SliceData::as_mut(s);
+    data.array = arr;
+    data.start = start_off as u32;
+    data.len = length as u32;
+    data.cap = capacity as u32;
     s
 }
 
-/// Create slice from entire array.
 pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
     let length = array::len(arr);
     from_array_range(gc, arr, 0, length, length)
 }
 
-pub fn array_ref(s: GcRef) -> GcRef { Gc::read_slot(s, SLOT_ARRAY) as GcRef }
-pub fn start(s: GcRef) -> usize { Gc::read_slot(s, SLOT_START) as usize }
-pub fn len(s: GcRef) -> usize { Gc::read_slot(s, SLOT_LEN) as usize }
-pub fn cap(s: GcRef) -> usize { Gc::read_slot(s, SLOT_CAP) as usize }
+#[inline]
+pub fn array_ref(s: GcRef) -> GcRef { SliceData::as_ref(s).array }
+#[inline]
+pub fn start(s: GcRef) -> usize { SliceData::as_ref(s).start as usize }
+#[inline]
+pub fn len(s: GcRef) -> usize { SliceData::as_ref(s).len as usize }
+#[inline]
+pub fn cap(s: GcRef) -> usize { SliceData::as_ref(s).cap as usize }
+#[inline]
 pub fn elem_kind(s: GcRef) -> ValueKind { array::elem_kind(array_ref(s)) }
+#[inline]
 pub fn elem_meta_id(s: GcRef) -> u32 { array::elem_meta_id(array_ref(s)) }
+#[inline]
+pub fn elem_meta(s: GcRef) -> ValueMeta { array::elem_meta(array_ref(s)) }
+#[inline]
 pub fn elem_slots(s: GcRef) -> u16 { array::elem_slots(array_ref(s)) }
 
+#[inline]
 pub fn get(s: GcRef, idx: usize) -> u64 { array::get(array_ref(s), start(s) + idx) }
+#[inline]
 pub fn set(s: GcRef, idx: usize, val: u64) { array::set(array_ref(s), start(s) + idx, val); }
+
 pub fn get_n(s: GcRef, idx: usize, dest: &mut [u64]) { array::get_n(array_ref(s), start(s) + idx, dest); }
 pub fn set_n(s: GcRef, idx: usize, src: &[u64]) { array::set_n(array_ref(s), start(s) + idx, src); }
 
 pub fn slice_of(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize) -> GcRef {
-    let arr = array_ref(s);
-    let base = start(s);
-    let old_cap = cap(s);
-    from_array_range(gc, arr, base + new_start, new_end - new_start, old_cap - new_start)
+    let data = SliceData::as_ref(s);
+    from_array_range(gc, data.array, data.start as usize + new_start, new_end - new_start, data.cap as usize - new_start)
 }
 
-/// Append a value to slice.
-/// ek: element kind, emi: element meta_id, es: element slots
-pub fn append(gc: &mut Gc, ek: u8, emi: u32, es: u16, s: GcRef, val: u64) -> GcRef {
+pub fn append(gc: &mut Gc, em: ValueMeta, es: u16, s: GcRef, val: u64) -> GcRef {
     if s.is_null() {
-        let new_arr = array::create(gc, ek, emi, es, 4);
+        let new_arr = array::create(gc, em, es, 4);
         array::set(new_arr, 0, val);
         return from_array_range(gc, new_arr, 0, 1, 4);
     }
-    let cur_len = len(s);
-    let cur_cap = cap(s);
+    let data = SliceData::as_ref(s);
+    let cur_len = data.len as usize;
+    let cur_cap = data.cap as usize;
     if cur_len < cur_cap {
-        array::set(array_ref(s), start(s) + cur_len, val);
-        Gc::write_slot(s, SLOT_LEN, (cur_len + 1) as u64);
+        array::set(data.array, data.start as usize + cur_len, val);
+        SliceData::as_mut(s).len = (cur_len + 1) as u32;
         s
     } else {
         let new_cap = if cur_cap == 0 { 4 } else { cur_cap * 2 };
-        let aek = elem_kind(s) as u8;
-        let aemi = elem_meta_id(s);
+        let aem = elem_meta(s);
         let aes = elem_slots(s);
-        let new_arr = array::create(gc, aek, aemi, aes, new_cap);
-        let old_arr = array_ref(s);
-        let old_start = start(s);
-        for i in 0..cur_len { array::set(new_arr, i, array::get(old_arr, old_start + i)); }
+        let new_arr = array::create(gc, aem, aes, new_cap);
+        for i in 0..cur_len { array::set(new_arr, i, array::get(data.array, data.start as usize + i)); }
         array::set(new_arr, cur_len, val);
         from_array_range(gc, new_arr, 0, cur_len + 1, new_cap)
     }

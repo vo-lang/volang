@@ -80,17 +80,16 @@ pub enum SlotType {
 
 ```rust
 /// GC 对象头 - 8 字节
-/// 布局: [mark:8 | gen:8 | slots:16 | meta_id:24 | value_kind:8]
+/// 布局: [mark:8 | gen:8 | slots:16 | ValueMeta:32]
 #[repr(C)]
 pub struct GcHeader {
-    pub mark: u8,         // GcColor: White/Gray/Black
-    pub gen: u8,          // GcGen: Young/Old/Touched
-    pub slots: u16,       // 数据 slot 数量
-    pub meta_id: [u8; 3], // 24-bit 元数据索引
-    pub value_kind: u8,   // ValueKind 枚举值
+    pub mark: u8,           // GcColor: White/Gray/Black
+    pub gen: u8,            // GcGen: Young/Old/Touched
+    pub slots: u16,         // 数据 slot 数量
+    pub value_meta: ValueMeta,
 }
 
-/// meta_id 含义随 value_kind 变化:
+/// ValueMeta.meta_id 含义随 value_kind 变化:
 /// - Array, Slice, Channel: elem_meta_id（元素的 meta_id）
 /// - Struct, Pointer: 指向对象的 meta_id
 /// - Interface: 接口类型的 meta_id
@@ -124,7 +123,7 @@ pub struct Gc {
 ```rust
 impl Gc {
     /// 分配对象
-    pub fn alloc(&mut self, value_kind: u8, meta_id: u32, slots: u16) -> GcRef;
+    pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef;
     
     /// 读写 slot (静态方法，不需要 &self)
     pub fn read_slot(obj: GcRef, idx: usize) -> u64;
@@ -207,7 +206,7 @@ pub struct ArrayHeader {
     // data: [u8; len * elem_size] 紧跟其后
 }
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_size: u16, len: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_size: u16, len: usize) -> GcRef;
 pub fn len(arr: GcRef) -> usize;
 pub fn get(arr: GcRef, idx: usize) -> u64;           // 简单类型 (<= 8 bytes)
 pub fn set(arr: GcRef, idx: usize, val: u64);
@@ -231,7 +230,7 @@ pub struct SliceData {
     pub cap: usize,
 }
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, elem_size: u16, len: usize, cap: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_size: u16, len: usize, cap: usize) -> GcRef;
 /// 从已有 array 创建 view
 pub fn from_array_range(gc: &mut Gc, arr: GcRef, start: usize, len: usize, cap: usize) -> GcRef;
 /// 从整个 array 创建 slice
@@ -255,12 +254,11 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef;
 #[repr(C)]
 pub struct ChannelData {
     pub state: *mut ChannelState,  // 包含 buffer、waiters 等
-    pub elem_kind: u8,
-    pub elem_meta_id: u32,
+    pub elem_meta: ValueMeta,
     pub cap: usize,
 }
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, cap: usize) -> GcRef;
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, cap: usize) -> GcRef;
 pub fn get_state(ch: GcRef) -> &mut ChannelState;
 pub fn try_send(ch: GcRef, val: u64) -> Result<(), ChannelError>;  // ChanSend
 pub fn try_recv(ch: GcRef) -> Result<(u64, bool), ChannelError>;   // ChanRecv, (val, ok)
@@ -282,13 +280,11 @@ pub fn capacity(ch: GcRef) -> usize;
 #[repr(C)]
 pub struct MapData {
     pub inner: *mut HashMap<u64, u64>,
-    pub key_kind: u8,
-    pub key_meta_id: u32,
-    pub val_kind: u8,
-    pub val_meta_id: u32,
+    pub key_meta: ValueMeta,
+    pub val_meta: ValueMeta,
 }
 
-pub fn create(gc: &mut Gc, key_kind: u8, key_meta_id: u32, val_kind: u8, val_meta_id: u32) -> GcRef;
+pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta) -> GcRef;
 pub fn len(m: GcRef) -> usize;
 pub fn get(m: GcRef, key: u64) -> Option<u64>;
 pub fn get_with_ok(m: GcRef, key: u64) -> (u64, bool);  // (value, found)

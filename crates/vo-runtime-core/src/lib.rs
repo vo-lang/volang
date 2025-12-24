@@ -9,4 +9,4 @@ pub mod gc_types;
 pub mod objects;
 pub mod ffi;
 
-pub use vo_common_core::types::{RuntimeTypeId, SlotType, ValueKind};
+pub use vo_common_core::types::{MetaId, SlotType, ValueKind, ValueMeta};

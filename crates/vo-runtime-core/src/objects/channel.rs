@@ -1,6 +1,6 @@
 //! Channel object operations.
 //!
-//! Channel layout: [state_ptr, elem_kind, capacity] (3 slots)
+//! Layout: GcHeader + ChannelData
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -9,13 +9,29 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use std::{boxed::Box, collections::VecDeque, vec::Vec};
 
 use crate::gc::{Gc, GcRef};
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueMeta};
 
-pub const SLOT_STATE: usize = 0;
-pub const SLOT_ELEM_KIND: usize = 1;
-pub const SLOT_ELEM_META_ID: usize = 2;
-pub const SLOT_CAP: usize = 3;
-pub const SLOT_COUNT: u16 = 4;
+#[repr(C)]
+pub struct ChannelData {
+    pub state: *mut ChannelState,
+    pub elem_meta: ValueMeta,
+    pub cap: u32,
+}
+
+const DATA_SLOTS: u16 = 2;
+const _: () = assert!(core::mem::size_of::<ChannelData>() == DATA_SLOTS as usize * 8);
+
+impl ChannelData {
+    #[inline]
+    fn as_ref(c: GcRef) -> &'static Self {
+        unsafe { &*(c as *const Self) }
+    }
+
+    #[inline]
+    fn as_mut(c: GcRef) -> &'static mut Self {
+        unsafe { &mut *(c as *mut Self) }
+    }
+}
 
 pub type GoId = u64;
 
@@ -105,43 +121,35 @@ impl ChannelState {
     }
 }
 
-pub fn create(gc: &mut Gc, elem_kind: u8, elem_meta_id: u32, cap: usize) -> GcRef {
-    let chan = gc.alloc(ValueKind::Channel as u8, 0, SLOT_COUNT);
+pub fn create(gc: &mut Gc, elem_meta: ValueMeta, cap: usize) -> GcRef {
+    let chan = gc.alloc(ValueMeta::new(0, ValueKind::Channel), DATA_SLOTS);
     let state = Box::new(ChannelState::new(cap));
-    Gc::write_slot(chan, SLOT_STATE, Box::into_raw(state) as u64);
-    Gc::write_slot(chan, SLOT_ELEM_KIND, elem_kind as u64);
-    Gc::write_slot(chan, SLOT_ELEM_META_ID, elem_meta_id as u64);
-    Gc::write_slot(chan, SLOT_CAP, cap as u64);
+    let data = ChannelData::as_mut(chan);
+    data.state = Box::into_raw(state);
+    data.elem_meta = elem_meta;
+    data.cap = cap as u32;
     chan
 }
 
-pub fn elem_meta_id(chan: GcRef) -> u32 {
-    Gc::read_slot(chan, SLOT_ELEM_META_ID) as u32
-}
-
+#[inline]
+pub fn elem_meta(chan: GcRef) -> ValueMeta { ChannelData::as_ref(chan).elem_meta }
+#[inline]
+pub fn elem_kind(chan: GcRef) -> ValueKind { elem_meta(chan).value_kind() }
+#[inline]
+pub fn capacity(chan: GcRef) -> usize { ChannelData::as_ref(chan).cap as usize }
+#[inline]
 pub fn get_state(chan: GcRef) -> &'static mut ChannelState {
-    let ptr = Gc::read_slot(chan, SLOT_STATE) as *mut ChannelState;
-    unsafe { &mut *ptr }
-}
-
-pub fn elem_kind(chan: GcRef) -> ValueKind {
-    ValueKind::from_u8(Gc::read_slot(chan, SLOT_ELEM_KIND) as u8)
-}
-
-pub fn capacity(chan: GcRef) -> usize {
-    Gc::read_slot(chan, SLOT_CAP) as usize
+    unsafe { &mut *ChannelData::as_ref(chan).state }
 }
 
 pub fn len(chan: GcRef) -> usize { get_state(chan).len() }
-
 pub fn is_closed(chan: GcRef) -> bool { get_state(chan).is_closed() }
-
 pub fn close(chan: GcRef) { get_state(chan).close(); }
 
 pub unsafe fn drop_inner(chan: GcRef) {
-    let ptr = Gc::read_slot(chan, SLOT_STATE) as *mut ChannelState;
-    if !ptr.is_null() {
-        drop(Box::from_raw(ptr));
-        Gc::write_slot(chan, SLOT_STATE, 0);
+    let data = ChannelData::as_mut(chan);
+    if !data.state.is_null() {
+        drop(Box::from_raw(data.state));
+        data.state = core::ptr::null_mut();
     }
 }
