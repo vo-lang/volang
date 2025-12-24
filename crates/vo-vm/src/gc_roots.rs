@@ -14,8 +14,8 @@ impl Vm {
             return;
         }
 
-        scan_globals(&mut self.gc, &self.globals, &self.module.as_ref().unwrap().globals);
-        scan_fibers(&mut self.gc, &self.scheduler.fibers, &self.module.as_ref().unwrap().functions);
+        scan_globals(&mut self.state.gc, &self.state.globals, &self.module.as_ref().unwrap().globals);
+        scan_fibers(&mut self.state.gc, &self.scheduler.fibers, &self.module.as_ref().unwrap().functions);
     }
 }
 
