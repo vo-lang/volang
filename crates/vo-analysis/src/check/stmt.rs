@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use vo_common::diagnostics::Label;
 use vo_common::span::Span;
-use vo_common::symbol::Ident;
+use vo_syntax::ast::Ident;
 use vo_syntax::ast::{AssignOp, Block, Expr, ForClause, Stmt, StmtKind};
 use ordered_float::OrderedFloat;
 

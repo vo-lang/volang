@@ -3,8 +3,8 @@
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
-use vo_common::symbol::Ident;
-use vo_common_core::ExprId;
+use vo_syntax::ast::Ident;
+use vo_syntax::ast::ExprId;
 use vo_common_core::types::SlotType;
 
 /// Wrapper around Project for codegen queries.
@@ -45,7 +45,7 @@ impl<'a> TypeInfoWrapper<'a> {
             .unwrap_or(1)
     }
 
-    pub fn type_expr_type(&self, type_expr_id: vo_common_core::TypeExprId) -> Option<TypeKey> {
+    pub fn type_expr_type(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> Option<TypeKey> {
         self.project.type_info.type_exprs.get(&type_expr_id).copied()
     }
 
@@ -168,7 +168,7 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get slots and slot_types for a type expression (used for params/results).
     /// Returns (slots, slot_types) with default fallback if type is unknown.
-    pub fn type_expr_layout(&self, type_expr_id: vo_common_core::TypeExprId) -> (u16, Vec<SlotType>) {
+    pub fn type_expr_layout(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> (u16, Vec<SlotType>) {
         let type_key = self.project.type_info.type_exprs.get(&type_expr_id).copied();
         let slots = type_key.map(|t| self.type_slot_count(t)).unwrap_or(1);
         let slot_types = type_key

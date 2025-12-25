@@ -14,8 +14,8 @@ mod types;
 
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::span::{BytePos, Span};
-use vo_common::symbol::{Ident, SymbolInterner};
-use vo_common_core::{ExprId, TypeExprId};
+use vo_common::symbol::SymbolInterner;
+use crate::ast::{Ident, ExprId, IdentId, TypeExprId};
 
 use crate::ast::*;
 use crate::errors::SyntaxError;
@@ -47,6 +47,8 @@ pub struct Parser<'a> {
     next_expr_id: u32,
     /// Next type expression ID to allocate.
     next_type_expr_id: u32,
+    /// Next identifier ID to allocate.
+    next_ident_id: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -70,6 +72,7 @@ impl<'a> Parser<'a> {
             allow_composite_lit: true,
             next_expr_id: 0,
             next_type_expr_id: 0,
+            next_ident_id: 0,
         }
     }
 
@@ -90,6 +93,7 @@ impl<'a> Parser<'a> {
             allow_composite_lit: true,
             next_expr_id: 0,
             next_type_expr_id: 0,
+            next_ident_id: 0,
         }
     }
 
@@ -143,6 +147,13 @@ impl<'a> Parser<'a> {
             kind,
             span,
         }
+    }
+
+    /// Allocates a new IdentId.
+    fn alloc_ident_id(&mut self) -> IdentId {
+        let id = IdentId(self.next_ident_id);
+        self.next_ident_id += 1;
+        id
     }
 
     /// Parses a complete source file.
@@ -237,6 +248,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let dot_sym = self.interner.intern(".");
             Some(Ident {
+                id: self.alloc_ident_id(),
                 symbol: dot_sym,
                 span: dot_span,
             })
@@ -337,7 +349,11 @@ impl<'a> Parser<'a> {
     fn make_ident(&mut self, token: &Token) -> Ident {
         let text = &self.source[self.span_to_local_range(token.span)];
         let symbol = self.interner.intern(text);
-        Ident::new(symbol, token.span)
+        Ident {
+            id: self.alloc_ident_id(),
+            symbol,
+            span: token.span,
+        }
     }
 
     // =========================================================================

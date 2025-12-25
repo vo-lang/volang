@@ -4,7 +4,7 @@
 //! It handles type-checking of type expressions and resolves them to TypeKey values.
 
 
-use vo_common::symbol::Ident;
+use vo_syntax::ast::Ident;
 
 use crate::obj::EntityType;
 use crate::objects::{ObjKey, ScopeKey, TypeKey};
@@ -455,7 +455,7 @@ impl Checker {
 
         // Build TypeExpr for base type
         let base_type_expr = TypeExpr {
-            id: vo_common_core::TypeExprId::DUMMY,
+            id: vo_syntax::ast::TypeExprId::DUMMY,
             kind: TypeExprKind::Ident(r.ty.clone()),
             span: r.ty.span,
         };

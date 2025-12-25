@@ -1280,7 +1280,7 @@ fn compile_assign(
             // Get lhs and rhs sources
             let lhs_source = crate::expr::get_expr_source(lhs, ctx, func, info);
             let rhs_source = crate::expr::get_expr_source(rhs, ctx, func, info);
-            let lhs_type = info.get_def(ident).and_then(|o| info.obj_type(o));
+            let lhs_type = info.get_use(ident).or_else(|| info.get_def(ident)).and_then(|o| info.obj_type(o));
             
             match lhs_source {
                 ExprSource::Location(lhs_loc) => {

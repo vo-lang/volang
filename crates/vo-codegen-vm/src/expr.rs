@@ -33,12 +33,12 @@ pub fn get_expr_source(
     if let ExprKind::Ident(ident) = &expr.kind {
         // Check local variable
         if let Some(local) = func.lookup_local(ident.symbol) {
-            let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+            let type_key = info.get_use(ident).or_else(|| info.get_def(ident)).and_then(|o| info.obj_type(o));
             return ExprSource::Location(get_local_location(local, type_key, info));
         }
         // Check global variable
         if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
-            let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+            let type_key = info.get_use(ident).or_else(|| info.get_def(ident)).and_then(|o| info.obj_type(o));
             let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
             return ExprSource::Location(ValueLocation::Global { index: global_idx as u16, slots });
         }
@@ -1621,7 +1621,7 @@ fn compile_composite_lit(
 // === Helpers ===
 
 /// Get constant value from type info
-fn get_const_value<'a>(expr_id: vo_common_core::ExprId, info: &'a TypeInfoWrapper) -> Option<&'a vo_analysis::ConstValue> {
+fn get_const_value<'a>(expr_id: vo_syntax::ast::ExprId, info: &'a TypeInfoWrapper) -> Option<&'a vo_analysis::ConstValue> {
     let tv = info.project.type_info.types.get(&expr_id)?;
     if let vo_analysis::operand::OperandMode::Constant(val) = &tv.mode {
         Some(val)

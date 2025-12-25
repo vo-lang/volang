@@ -11,4 +11,4 @@
 pub mod types;
 pub mod utf8;
 
-pub use types::{ExprId, TypeExprId, TypeId, ValueKind, ValueMeta, SlotType, MetaId};
+pub use types::{ValueKind, ValueMeta, SlotType, MetaId};

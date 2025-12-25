@@ -11,7 +11,7 @@ use vo_syntax::ast::{
 };
 use crate::selection::SelectionKind;
 use std::collections::{HashMap, HashSet};
-use vo_common_core::ExprId;
+use vo_syntax::ast::ExprId;
 
 /// Escape analysis result.
 pub struct EscapeResult {

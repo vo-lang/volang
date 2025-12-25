@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use vo_common::span::Span;
-use vo_common::symbol::Ident;
+use vo_syntax::ast::Ident;
 use vo_syntax::ast::{Block, Stmt, StmtKind};
 
 use super::checker::Checker;

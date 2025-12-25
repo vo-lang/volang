@@ -5,7 +5,7 @@
 
 
 use vo_common::span::{BytePos, Span};
-use vo_common::symbol::Ident;
+use vo_syntax::ast::Ident;
 use vo_syntax::ast::Expr;
 
 use crate::objects::{ObjKey, TypeKey};

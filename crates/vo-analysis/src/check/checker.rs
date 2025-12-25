@@ -11,7 +11,7 @@ use std::rc::Rc;
 use vo_common::diagnostics::{Diagnostic, DiagnosticSink};
 use vo_common::span::Span;
 use vo_common::symbol::SymbolInterner;
-use vo_common_core::ExprId;
+use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{Expr, File};
 
 use super::errors::TypeError;
@@ -200,7 +200,7 @@ impl Checker {
     }
 
     /// Resolves an identifier to its string.
-    pub(crate) fn resolve_ident(&self, ident: &vo_common::symbol::Ident) -> &str {
+    pub(crate) fn resolve_ident(&self, ident: &vo_syntax::ast::Ident) -> &str {
         self.resolve_symbol(ident.symbol)
     }
 

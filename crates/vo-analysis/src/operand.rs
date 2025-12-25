@@ -10,7 +10,7 @@ use crate::typ::{self, BasicType};
 use crate::universe::Universe;
 use vo_common::span::Span;
 use vo_common::symbol::SymbolInterner;
-use vo_common_core::ExprId;
+use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Expr;
 use std::fmt::{self, Display, Write};
 

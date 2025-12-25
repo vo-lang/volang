@@ -139,64 +139,6 @@ impl fmt::Debug for SymbolInterner {
     }
 }
 
-/// An identifier with its symbol and source span.
-#[derive(Clone, Copy)]
-pub struct Ident {
-    /// The interned symbol for this identifier.
-    pub symbol: Symbol,
-    /// The source span where this identifier appears.
-    pub span: Span,
-}
-
-impl Ident {
-    /// Creates a new identifier.
-    #[inline]
-    pub const fn new(symbol: Symbol, span: Span) -> Self {
-        Self { symbol, span }
-    }
-
-    /// Creates a dummy identifier.
-    #[inline]
-    pub const fn dummy() -> Self {
-        Self {
-            symbol: Symbol::DUMMY,
-            span: Span::dummy(),
-        }
-    }
-
-    /// Returns true if this is a dummy identifier.
-    #[inline]
-    pub const fn is_dummy(&self) -> bool {
-        self.symbol.is_dummy()
-    }
-
-    /// Resolves this identifier to its string using the given interner.
-    #[inline]
-    pub fn as_str<'a>(&self, interner: &'a SymbolInterner) -> Option<&'a str> {
-        interner.resolve(self.symbol)
-    }
-}
-
-impl PartialEq for Ident {
-    fn eq(&self, other: &Self) -> bool {
-        self.symbol == other.symbol
-    }
-}
-
-impl Eq for Ident {}
-
-impl Hash for Ident {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.symbol.hash(state);
-    }
-}
-
-impl fmt::Debug for Ident {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Ident({:?} @ {:?})", self.symbol, self.span)
-    }
-}
-
 /// Pre-defined symbols for keywords and common identifiers.
 ///
 /// These are interned at startup for fast comparison.
@@ -395,36 +337,6 @@ mod tests {
     fn test_interner_resolve_dummy() {
         let interner = SymbolInterner::new();
         assert!(interner.resolve(Symbol::DUMMY).is_none());
-    }
-
-    #[test]
-    fn test_ident_basic() {
-        let ident = Ident::new(Symbol::from_raw(1), Span::from_u32(0, 5));
-        assert!(!ident.is_dummy());
-        
-        let dummy = Ident::dummy();
-        assert!(dummy.is_dummy());
-    }
-
-    #[test]
-    fn test_ident_equality() {
-        let ident1 = Ident::new(Symbol::from_raw(1), Span::from_u32(0, 5));
-        let ident2 = Ident::new(Symbol::from_raw(1), Span::from_u32(10, 15));
-        let ident3 = Ident::new(Symbol::from_raw(2), Span::from_u32(0, 5));
-        
-        // Same symbol, different spans - should be equal
-        assert_eq!(ident1, ident2);
-        // Different symbols - should not be equal
-        assert_ne!(ident1, ident3);
-    }
-
-    #[test]
-    fn test_ident_as_str() {
-        let mut interner = SymbolInterner::new();
-        let sym = interner.intern("myident");
-        let ident = Ident::new(sym, Span::from_u32(0, 7));
-        
-        assert_eq!(ident.as_str(&interner), Some("myident"));
     }
 
     #[test]

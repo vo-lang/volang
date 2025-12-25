@@ -526,7 +526,7 @@ impl Checker {
     /// Declares a package-level object.
     fn declare_pkg_obj(
         &mut self,
-        ident: &vo_common::symbol::Ident,
+        ident: &vo_syntax::ast::Ident,
         okey: ObjKey,
         dkey: crate::objects::DeclInfoKey,
     ) {

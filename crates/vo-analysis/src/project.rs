@@ -126,22 +126,22 @@ impl Project {
     }
 
     /// Gets the type of an expression by ExprId.
-    pub fn expr_type(&self, expr_id: vo_common_core::ExprId) -> Option<&crate::typ::Type> {
+    pub fn expr_type(&self, expr_id: vo_syntax::ast::ExprId) -> Option<&crate::typ::Type> {
         self.type_info.types.get(&expr_id).map(|tv| &self.tc_objs.types[tv.typ])
     }
 
     /// Gets the expression types map.
-    pub fn expr_types(&self) -> &HashMap<vo_common_core::ExprId, crate::check::TypeAndValue> {
+    pub fn expr_types(&self) -> &HashMap<vo_syntax::ast::ExprId, crate::check::TypeAndValue> {
         &self.type_info.types
     }
 
     /// Gets the type expression types map.
-    pub fn type_expr_types(&self) -> &HashMap<vo_common_core::TypeExprId, TypeKey> {
+    pub fn type_expr_types(&self) -> &HashMap<vo_syntax::ast::TypeExprId, TypeKey> {
         &self.type_info.type_exprs
     }
 
     /// Gets the selections map.
-    pub fn selections(&self) -> &HashMap<vo_common_core::ExprId, crate::selection::Selection> {
+    pub fn selections(&self) -> &HashMap<vo_syntax::ast::ExprId, crate::selection::Selection> {
         &self.type_info.selections
     }
 

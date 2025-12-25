@@ -130,7 +130,7 @@ fn collect_declarations(
                 Decl::Func(func_decl) => {
                     // Check if this is a method (has receiver)
                     let (recv_type, is_pointer_recv) = if let Some(recv) = &func_decl.receiver {
-                        let base_type = info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj));
+                        let base_type = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty)).and_then(|obj| info.obj_type(obj));
                         (base_type, recv.is_pointer)
                     } else {
                         (None, false)
@@ -194,7 +194,7 @@ fn compile_functions(
                 
                 // If this is a method, record the mapping
                 if let Some(recv) = &func_decl.receiver {
-                    if let Some(recv_type) = info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj)) {
+                    if let Some(recv_type) = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty)).and_then(|obj| info.obj_type(obj)) {
                         let method_name = project.interner.resolve(func_decl.name.symbol)
                             .unwrap_or("?").to_string();
                         method_mappings.push((recv_type, method_name, func_id));
@@ -239,7 +239,7 @@ fn compile_func_decl(
         let (slots, slot_types) = if recv.is_pointer {
             (1, vec![vo_common_core::types::SlotType::GcRef])
         } else {
-            let type_key = info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj));
+            let type_key = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty)).and_then(|obj| info.obj_type(obj));
             let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
             let slot_types = type_key
                 .map(|t| info.type_slot_types(t))
@@ -278,7 +278,7 @@ fn compile_func_decl(
     // Get receiver base type and is_pointer flag
     let (recv_base_type, is_pointer_recv) = func_decl.receiver.as_ref()
         .map(|recv| {
-            let base_type = info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj));
+            let base_type = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty)).and_then(|obj| info.obj_type(obj));
             (base_type, recv.is_pointer)
         })
         .unwrap_or((None, false));

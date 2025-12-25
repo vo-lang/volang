@@ -3,9 +3,100 @@
 //! This module defines the complete AST for the Vo programming language,
 //! covering all declarations, statements, expressions, and types.
 
+use std::fmt;
+use std::hash::{Hash, Hasher};
+
 use vo_common::span::Span;
-use vo_common::symbol::{Ident, Symbol};
-use vo_common_core::{ExprId, TypeExprId};
+use vo_common::symbol::{Symbol, SymbolInterner};
+
+// =============================================================================
+// AST Node IDs (assigned by Parser)
+// =============================================================================
+
+/// Expression unique ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ExprId(pub u32);
+
+impl ExprId {
+    pub const DUMMY: ExprId = ExprId(u32::MAX);
+}
+
+/// Type expression unique ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TypeExprId(pub u32);
+
+impl TypeExprId {
+    pub const DUMMY: TypeExprId = TypeExprId(u32::MAX);
+}
+
+/// Identifier unique ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct IdentId(pub u32);
+
+impl IdentId {
+    pub const DUMMY: IdentId = IdentId(u32::MAX);
+}
+
+/// An identifier with its symbol and source span.
+#[derive(Clone, Copy)]
+pub struct Ident {
+    /// Unique ID for this identifier.
+    pub id: IdentId,
+    /// The interned symbol for this identifier.
+    pub symbol: Symbol,
+    /// The source span where this identifier appears.
+    pub span: Span,
+}
+
+impl Ident {
+    /// Creates a new identifier (with DUMMY id).
+    #[inline]
+    pub const fn new(symbol: Symbol, span: Span) -> Self {
+        Self { id: IdentId::DUMMY, symbol, span }
+    }
+
+    /// Creates a dummy identifier.
+    #[inline]
+    pub const fn dummy() -> Self {
+        Self {
+            id: IdentId::DUMMY,
+            symbol: Symbol::DUMMY,
+            span: Span::dummy(),
+        }
+    }
+
+    /// Returns true if this is a dummy identifier.
+    #[inline]
+    pub const fn is_dummy(&self) -> bool {
+        self.symbol.is_dummy()
+    }
+
+    /// Resolves this identifier to its string using the given interner.
+    #[inline]
+    pub fn as_str<'a>(&self, interner: &'a SymbolInterner) -> Option<&'a str> {
+        interner.resolve(self.symbol)
+    }
+}
+
+impl PartialEq for Ident {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Ident {}
+
+impl Hash for Ident {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl fmt::Debug for Ident {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Ident({:?} @ {:?})", self.symbol, self.span)
+    }
+}
 
 /// A source file.
 #[derive(Debug, Clone)]

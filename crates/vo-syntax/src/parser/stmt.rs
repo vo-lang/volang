@@ -4,7 +4,7 @@ use super::{Parser, ParseResult};
 use crate::ast::*;
 use crate::token::TokenKind;
 use vo_common::span::Span;
-use vo_common::symbol::Ident;
+use crate::ast::Ident;
 
 impl<'a> Parser<'a> {
     /// Parses a statement.

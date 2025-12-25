@@ -24,7 +24,7 @@
 
 
 use vo_common::span::Span;
-use vo_common_core::ExprId;
+use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
 
 use crate::constant::{Value, int_from_literal, float_from_literal, make_int64, make_string, make_bool, unary_op, binary_op, shift, compare};
@@ -1445,7 +1445,7 @@ impl Checker {
         &mut self,
         x: &mut Operand,
         sel: &vo_syntax::ast::SelectorExpr,
-        expr_id: vo_common_core::ExprId,
+        expr_id: vo_syntax::ast::ExprId,
     ) {
         // If the identifier refers to a package, handle everything here
         // so we don't need a "package" mode for operands: package names
