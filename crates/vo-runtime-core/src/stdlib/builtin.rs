@@ -48,18 +48,14 @@ fn format_value(call: &ExternCallWithGc, slot: u16) -> String {
 /// vo_print - print values without newline (Go builtin print semantics)
 /// Args: [(value, kind), ...] - each argument is 2 slots
 fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
-    // flags contains arg_slots (each arg is 2 slots: value + kind)
-    // We read pairs from arg_start
+    let available = call.available_arg_slots();
     let mut slot = 0u16;
     let mut first = true;
     
-    // Read pairs until we hit uninitialized data or reasonable limit
-    // The caller passes arg_slots in flags, but we don't have direct access here
-    // For now, read up to 16 args (32 slots) and stop on Void kind
-    while slot < 32 {
+    // Read pairs until we hit end of available slots or Void kind
+    while (slot + 2) as usize <= available && slot < 32 {
         let kind_val = call.arg_u64(slot + 1) as u8;
         if kind_val == 0 && slot > 0 {
-            // Void kind after first arg means end of args
             break;
         }
         
@@ -73,8 +69,7 @@ fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
         
         slot += 2;
         
-        // Safety: if this is a single-arg call, break after first
-        if slot >= 2 && kind_val == ValueKind::Void as u8 {
+        if kind_val == ValueKind::Void as u8 {
             break;
         }
     }
@@ -84,10 +79,11 @@ fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
 
 /// vo_println - print values with newline (Go builtin println semantics)
 fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
+    let available = call.available_arg_slots();
     let mut slot = 0u16;
     let mut first = true;
     
-    while slot < 32 {
+    while (slot + 2) as usize <= available && slot < 32 {
         let kind_val = call.arg_u64(slot + 1) as u8;
         if kind_val == 0 && slot > 0 {
             break;
@@ -103,7 +99,7 @@ fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
         
         slot += 2;
         
-        if slot >= 2 && kind_val == ValueKind::Void as u8 {
+        if kind_val == ValueKind::Void as u8 {
             break;
         }
     }
@@ -118,12 +114,12 @@ fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
 fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
     let cond = call.arg_bool(0);
     if !cond {
-        // Format additional arguments as message (starting from slot 2)
+        let available = call.available_arg_slots();
         let mut msg = String::from("assertion failed");
         let mut slot = 2u16; // Skip cond (slot 0) and its kind (slot 1)
         let mut has_msg = false;
         
-        while slot < 32 {
+        while (slot + 2) as usize <= available && slot < 32 {
             let kind_val = call.arg_u64(slot + 1) as u8;
             if kind_val == 0 && slot > 2 {
                 break;
@@ -139,7 +135,7 @@ fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
             msg.push_str(&format_value(call, slot));
             slot += 2;
             
-            if slot >= 4 && kind_val == ValueKind::Void as u8 {
+            if kind_val == ValueKind::Void as u8 {
                 break;
             }
         }

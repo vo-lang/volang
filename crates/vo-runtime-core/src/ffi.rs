@@ -112,6 +112,18 @@ impl<'a> ExternCall<'a> {
 
     // ==================== Raw Slot Access ====================
 
+    /// Get the number of available slots from bp to end of stack.
+    #[inline]
+    pub fn available_slots(&self) -> usize {
+        self.stack.len().saturating_sub(self.bp)
+    }
+
+    /// Get the number of available argument slots from arg_start to end of stack.
+    #[inline]
+    pub fn available_arg_slots(&self) -> usize {
+        self.stack.len().saturating_sub(self.bp + self.arg_start as usize)
+    }
+
     /// Read a raw slot value.
     #[inline]
     pub fn slot(&self, offset: u16) -> u64 {
@@ -226,6 +238,13 @@ impl<'a> ExternCallWithGc<'a> {
     pub fn gc(&mut self) -> &mut Gc {
         self.gc
     }
+
+    // ==================== Slot info (delegated) ====================
+
+    #[inline]
+    pub fn available_slots(&self) -> usize { self.call.available_slots() }
+    #[inline]
+    pub fn available_arg_slots(&self) -> usize { self.call.available_arg_slots() }
 
     // ==================== Argument Reading (delegated) ====================
 

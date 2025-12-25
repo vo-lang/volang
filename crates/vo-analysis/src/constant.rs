@@ -717,8 +717,8 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
                     if *b == 0 {
                         Value::Unknown
                     } else {
-                        // Integer division produces rational
-                        make_rat(BigRational::new(i64_to_big(*a), i64_to_big(*b)))
+                        // Integer division (truncated, like Go)
+                        Value::Int64(a / b)
                     }
                 }
                 BinaryOp::Rem => {
@@ -745,7 +745,8 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
                     if b.is_zero() {
                         Value::Unknown
                     } else {
-                        make_rat(BigRational::new(a.clone(), b.clone()))
+                        // Integer division (truncated, like Go)
+                        make_int(a / b)
                     }
                 }
                 BinaryOp::Rem => {
