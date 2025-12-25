@@ -23,6 +23,16 @@ fn get_local_location(local: &LocalVar, type_key: Option<vo_analysis::objects::T
     }
 }
 
+/// Get the GcRef slot from a ValueLocation (for heap-based locations).
+/// Returns Some(slot) if the location holds a GcRef, None for stack values.
+fn get_gcref_slot(loc: &ValueLocation) -> Option<u16> {
+    match loc {
+        ValueLocation::HeapBoxed { slot, .. } => Some(*slot),
+        ValueLocation::Reference { slot } => Some(*slot),
+        ValueLocation::Stack { .. } => None,
+    }
+}
+
 /// Compile expression, return result slot.
 pub fn compile_expr(
     expr: &Expr,
@@ -325,40 +335,50 @@ fn compile_selector(
     if is_ptr {
         // Pointer receiver: load ptr, then PtrGetN
         let ptr_reg = compile_expr(&sel.expr, ctx, func, info)?;
-        if slots == 1 {
-            func.emit_op(Opcode::PtrGet, dst, ptr_reg, offset);
-        } else {
-            func.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, ptr_reg, offset);
-        }
+        func.emit_ptr_get(dst, ptr_reg, offset, slots);
     } else {
-        // Value receiver: check if on stack or heap
-        let root_var = find_root_var(&sel.expr, func);
+        // Value receiver: check storage location
+        let root_location = find_root_location(&sel.expr, func, info);
         
-        if let Some((local_slot, is_heap)) = root_var {
-            if is_heap {
-                // Heap variable: load GcRef, then PtrGetN
-                if slots == 1 {
-                    func.emit_op(Opcode::PtrGet, dst, local_slot, offset);
-                } else {
-                    func.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, local_slot, offset);
-                }
-            } else {
-                // Stack variable: direct slot access
-                let src_slot = local_slot + offset;
-                func.emit_copy(dst, src_slot, slots);
+        match root_location {
+            Some(ValueLocation::HeapBoxed { slot, .. }) => {
+                // Heap variable: use PtrGet with offset
+                func.emit_ptr_get(dst, slot, offset, slots);
             }
-        } else {
-            // Temporary value - compile receiver first
-            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-            let src_slot = recv_reg + offset;
-            func.emit_copy(dst, src_slot, slots);
+            Some(ValueLocation::Reference { slot }) => {
+                // Reference type: use PtrGet with offset
+                func.emit_ptr_get(dst, slot, offset, slots);
+            }
+            Some(ValueLocation::Stack { slot, .. }) => {
+                // Stack variable: direct slot access
+                func.emit_copy(dst, slot + offset, slots);
+            }
+            None => {
+                // Temporary value - compile receiver first
+                let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+                func.emit_copy(dst, recv_reg + offset, slots);
+            }
         }
     }
     
     Ok(())
 }
 
+/// Find root variable's ValueLocation for selector chain
+fn find_root_location(expr: &Expr, func: &FuncBuilder, info: &TypeInfoWrapper) -> Option<ValueLocation> {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            func.lookup_local(ident.symbol).map(|local| {
+                let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+                get_local_location(local, type_key, info)
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Find root variable for selector chain (only for direct field access, not nested)
+#[allow(dead_code)]
 fn find_root_var(expr: &Expr, func: &FuncBuilder) -> Option<(u16, bool)> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
@@ -1066,13 +1086,14 @@ fn compile_method_call(
         // Get the actual receiver type for slot calculation
         let actual_recv_type = promoted_type.unwrap_or(base_type);
         
-        // Check if receiver expression is an escaped struct/array (GcRef pointer)
-        let recv_is_heap = if let ExprKind::Ident(ident) = &sel.expr.kind {
-            func.lookup_local(ident.symbol)
-                .map(|l| l.is_heap && (info.is_struct(recv_type) || info.is_array(recv_type)))
-                .unwrap_or(false)
+        // Get receiver's ValueLocation if it's a local variable
+        let recv_location = if let ExprKind::Ident(ident) = &sel.expr.kind {
+            func.lookup_local(ident.symbol).map(|local| {
+                let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+                get_local_location(local, type_key, info)
+            })
         } else {
-            false
+            None
         };
         
         // Calculate receiver slots based on what method expects and actual receiver type
@@ -1110,20 +1131,12 @@ fn compile_method_call(
         };
         
         if method_expects_ptr {
-            // Method expects pointer: pass the original GcRef directly
-            if let ExprKind::Ident(ident) = &sel.expr.kind {
-                if let Some(local) = func.lookup_local(ident.symbol) {
-                    if local.is_heap {
-                        func.emit_copy(args_start, local.slot, 1);
-                    } else {
-                        let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                        func.emit_copy(args_start, recv_reg, 1);
-                    }
-                } else {
-                    let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                    func.emit_copy(args_start, recv_reg, 1);
-                }
+            // Method expects pointer: pass the GcRef directly
+            if let Some(gcref_slot) = recv_location.as_ref().and_then(get_gcref_slot) {
+                // Local variable with GcRef: copy directly
+                func.emit_copy(args_start, gcref_slot, 1);
             } else {
+                // Need to compile expression to get the GcRef
                 let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
                 func.emit_copy(args_start, recv_reg, 1);
             }
@@ -1131,6 +1144,7 @@ fn compile_method_call(
             // Method expects value: compile receiver and extract embedded field if needed
             let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
             let recv_is_ptr = info.is_pointer(recv_type);
+            let recv_is_heap = matches!(recv_location, Some(ValueLocation::HeapBoxed { .. }));
             if recv_is_heap || recv_is_ptr {
                 // Heap variable or pointer type: use PtrGetN to copy value from heap
                 let value_slots = info.type_slot_count(actual_recv_type);

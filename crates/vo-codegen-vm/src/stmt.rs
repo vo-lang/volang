@@ -1,12 +1,12 @@
 //! Statement compilation.
 
-use vo_syntax::ast::{Block, Expr, ExprKind, Stmt, StmtKind};
+use vo_syntax::ast::{Block, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
-use crate::func::{FuncBuilder, ValueLocation};
+use crate::func::FuncBuilder;
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Compile a statement.
