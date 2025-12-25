@@ -369,7 +369,7 @@ pub fn compile_stmt(
                             
                             // Prepare IterBegin args: a=meta, a+1=base_slot, a+2=len
                             let iter_args = func.alloc_temp(3);
-                            let meta = ((1u64) << 8) | (elem_slots as u64); // key_slots=1, val_slots=elem_slots
+                            let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
                             func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
                             func.emit_op(Opcode::LoadInt, iter_args + 1, arr_slot, 0);
                             func.emit_op(Opcode::LoadInt, iter_args + 2, arr_len as u16, (arr_len >> 16) as u16);
@@ -413,7 +413,7 @@ pub fn compile_stmt(
                             
                             // Prepare IterBegin args: a=meta, a+1=array_ref
                             let iter_args = func.alloc_temp(2);
-                            let meta = ((1u64) << 8) | (elem_slots as u64);
+                            let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
                             func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
                             func.emit_op(Opcode::Copy, iter_args + 1, arr_slot, 0);
                             
@@ -457,7 +457,7 @@ pub fn compile_stmt(
                         
                         // Prepare IterBegin args: a=meta, a+1=slice_ref
                         let iter_args = func.alloc_temp(2);
-                        let meta = ((1u64) << 8) | (elem_slots as u64);
+                        let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
                         func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
                         func.emit_op(Opcode::Copy, iter_args + 1, slice_reg, 0);
                         
@@ -496,7 +496,7 @@ pub fn compile_stmt(
                         
                         // Prepare IterBegin args: a=meta, a+1=string_ref
                         let iter_args = func.alloc_temp(2);
-                        let meta = ((1u64) << 8) | 1u64; // key_slots=1, val_slots=1
+                        let meta = crate::type_info::encode_iter_meta(1, 1);
                         func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
                         func.emit_op(Opcode::Copy, iter_args + 1, str_reg, 0);
                         
@@ -538,7 +538,7 @@ pub fn compile_stmt(
                         
                         // Prepare IterBegin args: a=meta, a+1=map_ref
                         let iter_args = func.alloc_temp(2);
-                        let meta = ((key_slots as u64) << 8) | (val_slots as u64);
+                        let meta = crate::type_info::encode_iter_meta(key_slots, val_slots);
                         func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
                         func.emit_op(Opcode::Copy, iter_args + 1, map_reg, 0);
                         
@@ -840,7 +840,7 @@ fn compile_go(
         }
         
         // CallClosure: a=func, b=args, c=(arg_slots<<8|ret_slots=0)
-        let c = (total_arg_slots << 8) | 0;
+        let c = crate::type_info::encode_call_args(total_arg_slots, 0);
         closure_builder.emit_op(Opcode::CallClosure, tmp_func, tmp_args, c);
         closure_builder.emit_op(Opcode::Return, 0, 0, 0);
         
@@ -1424,7 +1424,7 @@ fn compile_assign(
                 let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
                 
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots);
-                let meta = ((key_slots as u32) << 8) | (val_slots as u32);
+                let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
                 let (b, c) = crate::type_info::encode_i32(meta as i32);
                 func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
                 func.emit_copy(meta_and_key_reg + 1, index_reg, key_slots);
@@ -1592,7 +1592,7 @@ fn compile_compound_assign(
                 
                 // Build meta_and_key for MapGet/MapSet
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots);
-                let meta = ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | 0; // MapGet format
+                let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
                 let (b, c) = crate::type_info::encode_i32(meta as i32);
                 func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
                 func.emit_copy(meta_and_key_reg + 1, index_reg, key_slots);
@@ -1602,7 +1602,7 @@ fn compile_compound_assign(
                 func.emit_op(opcode, tmp, tmp, rhs_reg);
                 
                 // Rebuild meta for MapSet (different format)
-                let meta_set = ((key_slots as u32) << 8) | (val_slots as u32);
+                let meta_set = crate::type_info::encode_map_set_meta(key_slots, val_slots);
                 let (b2, c2) = crate::type_info::encode_i32(meta_set as i32);
                 func.emit_op(Opcode::LoadInt, meta_and_key_reg, b2, c2);
                 

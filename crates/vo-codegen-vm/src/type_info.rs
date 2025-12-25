@@ -594,3 +594,43 @@ pub fn encode_i32(val: i32) -> (u16, u16) {
     let bits = val as u32;
     ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
 }
+
+// === Meta encoding helpers ===
+
+/// Encode MapSet meta: (key_slots << 8) | val_slots
+#[inline]
+pub fn encode_map_set_meta(key_slots: u16, val_slots: u16) -> u32 {
+    ((key_slots as u32) << 8) | (val_slots as u32)
+}
+
+/// Encode MapGet meta: (key_slots << 16) | (val_slots << 1) | has_ok
+#[inline]
+pub fn encode_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 {
+    ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | (has_ok as u32)
+}
+
+/// Encode MapNew slots: (key_slots << 8) | val_slots
+#[inline]
+pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
+    ((key_slots as u16) << 8) | (val_slots as u16)
+}
+
+/// Encode Call args: (arg_slots << 8) | ret_slots
+#[inline]
+pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
+    (arg_slots << 8) | ret_slots
+}
+
+/// Encode func_id for Call instruction
+#[inline]
+pub fn encode_func_id(func_idx: u32) -> (u16, u8) {
+    let low = (func_idx & 0xFFFF) as u16;
+    let high = ((func_idx >> 16) & 0xFF) as u8;
+    (low, high)
+}
+
+/// Encode iterator meta: (key_slots << 8) | val_slots
+#[inline]
+pub fn encode_iter_meta(key_slots: u16, val_slots: u16) -> u64 {
+    ((key_slots as u64) << 8) | (val_slots as u64)
+}

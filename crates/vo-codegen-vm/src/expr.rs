@@ -391,7 +391,7 @@ fn compile_index(
         // meta_and_key: slots[c] = (key_slots << 16) | (val_slots << 1) | has_ok, key=slots[c+1..]
         let (key_slots, val_slots) = info.map_key_val_slots(container_type)
             .expect("map must have key/val slots");
-        let meta = ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | 0; // has_ok=0
+        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
         let meta_reg = func.alloc_temp(1 + key_slots);
         let (b, c) = encode_i32(meta as i32);
         func.emit_op(Opcode::LoadInt, meta_reg, b, c);
@@ -818,9 +818,8 @@ fn compile_call(
             }
             
             // Call: a=func_id, b=args_start, c=(arg_slots<<8|ret_slots), flags=func_id_high
-            let c = ((total_arg_slots as u16) << 8) | (ret_slots as u16);
-            let func_id_low = (func_idx & 0xFFFF) as u16;
-            let func_id_high = ((func_idx >> 16) & 0xFF) as u8;
+            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
+            let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
             func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
             
             // Copy result to dst if not already there
@@ -846,7 +845,7 @@ fn compile_call(
             }
             
             // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
-            let c = ((total_arg_slots as u16) << 8) | (ret_slots as u16);
+            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
             func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
             
             // Copy result to dst if needed
@@ -874,7 +873,7 @@ fn compile_call(
     }
     
     // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
-    let c = ((total_arg_slots as u16) << 8) | (ret_slots as u16);
+    let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
     func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
     
     // Copy result to dst if needed
@@ -1023,9 +1022,8 @@ fn compile_method_call(
             .unwrap_or(0);
         
         // Emit Call instruction
-        let c = ((arg_offset as u16) << 8) | (ret_slots as u16);
-        let func_id_low = (func_idx & 0xFFFF) as u16;
-        let func_id_high = ((func_idx >> 16) & 0xFF) as u8;
+        let c = crate::type_info::encode_call_args(arg_offset as u16, ret_slots as u16);
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
         func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
         
         // Copy result to dst if needed
@@ -1412,7 +1410,7 @@ fn compile_composite_lit(
         func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
         func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
         
-        let slots_arg = ((key_slots as u16) << 8) | (val_slots as u16);
+        let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
         func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
         
         // Set each key-value pair
@@ -1421,7 +1419,7 @@ fn compile_composite_lit(
                 // MapSet expects: a=map, b=meta_and_key, c=val
                 // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots as u16);
-                let meta = ((key_slots as u32) << 8) | (val_slots as u32);
+                let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
                 let (b, c) = crate::type_info::encode_i32(meta as i32);
                 func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
                 
