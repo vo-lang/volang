@@ -87,13 +87,20 @@ pub fn compile_expr_to(
 
         // === Binary operations ===
         ExprKind::Binary(bin) => {
+            // Check if this is a compile-time constant expression
+            if let Some(val) = get_const_value(expr.id, info) {
+                compile_const_value(val, dst, ctx, func)?;
+                return Ok(());
+            }
+            
             let left_reg = compile_expr(&bin.left, ctx, func, info)?;
             let right_reg = compile_expr(&bin.right, ctx, func, info)?;
 
-            // Get type to determine int/float operation
-            let type_key = info.expr_type(expr.id);
-            let is_float = type_key.map(|t| info.is_float(t)).unwrap_or(false);
-            let is_string = type_key.map(|t| info.is_string(t)).unwrap_or(false);
+            // Get operand type to determine int/float/string operation
+            // For comparison ops, expr type is bool, so we need operand type
+            let operand_type = info.expr_type(bin.left.id);
+            let is_float = operand_type.map(|t| info.is_float(t)).unwrap_or(false);
+            let is_string = operand_type.map(|t| info.is_string(t)).unwrap_or(false);
 
             let opcode = match (&bin.op, is_float, is_string) {
                 (BinaryOp::Add, false, false) => Opcode::AddI,
