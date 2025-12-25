@@ -217,7 +217,13 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::CallExtern => format!("CallExtern    r{}, extern_{}, args={}", a, b, c),
         Opcode::CallClosure => format!("CallClosure   r{}, r{}, args={}", a, b, c),
         Opcode::CallIface => format!("CallIface     r{}, r{}, method={}, args={}", a, b, c, flags),
-        Opcode::Return => "Return".to_string(),
+        Opcode::Return => {
+            if a == 0 && b == 0 {
+                "Return".to_string()
+            } else {
+                format!("Return        r{}, count={}", a, b)
+            }
+        }
 
         // STR
         Opcode::StrNew => format!("StrNew        r{}, const_{}", a, b),

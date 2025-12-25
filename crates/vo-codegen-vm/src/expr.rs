@@ -882,13 +882,31 @@ fn compile_method_call(
         func.emit_with_flags(Opcode::CallIface, call.args.len() as u8, dst, recv_reg, method_idx);
     } else {
         // Concrete method call: find function and use Call
-        // Compile arguments (receiver + args)
-        let total_args = 1 + call.args.len();
-        let args_start = func.alloc_temp(total_args as u16);
+        // Calculate total argument slots (receiver slots + other args slots)
+        let recv_slots = info.type_slot_count(recv_type);
+        let other_args_slots: u16 = call.args.iter()
+            .map(|arg| info.expr_type(arg.id).map(|t| info.type_slot_count(t)).unwrap_or(1))
+            .sum();
+        let total_arg_slots = recv_slots + other_args_slots;
+        let args_start = func.alloc_temp(total_arg_slots);
         
         // Copy receiver to args (slot 0)
-        let recv_slots = info.type_slot_count(recv_type);
-        func.emit_copy(args_start, recv_reg, recv_slots);
+        // Check if receiver is an escaped struct/array (GcRef pointer)
+        // In that case, recv_reg contains a GcRef and we need PtrGetN to read the value
+        let recv_is_heap = if let ExprKind::Ident(ident) = &sel.expr.kind {
+            func.lookup_local(ident.symbol)
+                .map(|l| l.is_heap && (info.is_struct(recv_type) || info.is_array(recv_type)))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        
+        if recv_is_heap {
+            // Receiver is escaped struct/array: use PtrGetN to read value from heap
+            func.emit_with_flags(Opcode::PtrGetN, recv_slots as u8, args_start, recv_reg, 0);
+        } else {
+            func.emit_copy(args_start, recv_reg, recv_slots);
+        }
         
         // Compile other arguments
         let mut arg_offset = recv_slots;
@@ -898,18 +916,39 @@ fn compile_method_call(
             arg_offset += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
         }
         
+        // Get method return type for ret_slots
+        let ret_slots = info.expr_type(_expr.id)
+            .map(|t| info.type_slot_count(t))
+            .unwrap_or(0);
+        
         // Look up method function
         if let Some(method_sym) = info.project.interner.get(method_name) {
+            // Helper to emit Call instruction with correct encoding
+            let emit_call = |func: &mut FuncBuilder, func_idx: usize| {
+                // Call: a=func_id_low, b=args_start, c=(arg_slots<<8)|ret_slots, flags=func_id_high
+                let c = ((arg_offset as u16) << 8) | (ret_slots as u16);
+                let func_id_low = (func_idx & 0xFFFF) as u16;
+                let func_id_high = ((func_idx >> 16) & 0xFF) as u8;
+                func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+            };
+            
             // Try exact type match first
             if let Some(func_idx) = ctx.get_func_index(Some(recv_type), method_sym) {
-                func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
+                emit_call(func, func_idx as usize);
+                // Copy result to dst if needed
+                if ret_slots > 0 && dst != args_start {
+                    func.emit_copy(dst, args_start, ret_slots);
+                }
                 return Ok(());
             }
             // If receiver is value type, try pointer type (Go allows value.PtrMethod())
             if !info.is_pointer(recv_type) {
                 if let Some(ptr_type) = info.pointer_to(recv_type) {
                     if let Some(func_idx) = ctx.get_func_index(Some(ptr_type), method_sym) {
-                        func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
+                        emit_call(func, func_idx as usize);
+                        if ret_slots > 0 && dst != args_start {
+                            func.emit_copy(dst, args_start, ret_slots);
+                        }
                         return Ok(());
                     }
                 }
@@ -918,7 +957,10 @@ fn compile_method_call(
             if info.is_pointer(recv_type) {
                 if let Some(base_type) = info.pointer_base(recv_type) {
                     if let Some(func_idx) = ctx.get_func_index(Some(base_type), method_sym) {
-                        func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
+                        emit_call(func, func_idx as usize);
+                        if ret_slots > 0 && dst != args_start {
+                            func.emit_copy(dst, args_start, ret_slots);
+                        }
                         return Ok(());
                     }
                 }
@@ -1107,8 +1149,8 @@ fn compile_builtin_call(
             let result_type = info.expr_type(call.args[0].id);
             if let Some(type_key) = result_type {
                 let slots = info.type_slot_count(type_key);
-                // PtrNew: a=dst, b=0 (zero init), c=slots
-                func.emit_op(Opcode::PtrNew, dst, 0, slots);
+                // PtrNew: a=dst, b=0 (zero init), flags=slots
+                func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, 0, 0);
             }
         }
         "append" => {

@@ -46,8 +46,8 @@ pub fn compile_stmt(
                         // Get ValueMeta index for PtrNew
                         let meta_idx = ctx.get_or_create_value_meta(type_key, slots, &slot_types);
                         
-                        // PtrNew: a=dst, b=meta_idx, c=slots
-                        func.emit_op(Opcode::PtrNew, slot, meta_idx, slots);
+                        // PtrNew: a=dst, b=meta_idx, flags=slots
+                        func.emit_with_flags(Opcode::PtrNew, slots as u8, slot, meta_idx, 0);
                         
                         // Initialize value
                         if i < spec.values.len() {
@@ -109,8 +109,8 @@ pub fn compile_stmt(
                         // Get ValueMeta index for PtrNew
                         let meta_idx = ctx.get_or_create_value_meta(type_key, slots, &slot_types);
                         
-                        // PtrNew: a=dst, b=meta_idx, c=slots
-                        func.emit_op(Opcode::PtrNew, slot, meta_idx, slots);
+                        // PtrNew: a=dst, b=meta_idx, flags=slots
+                        func.emit_with_flags(Opcode::PtrNew, slots as u8, slot, meta_idx, 0);
                         
                         // Initialize value
                         if i < short_var.values.len() {
