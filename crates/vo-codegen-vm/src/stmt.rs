@@ -1,6 +1,6 @@
 //! Statement compilation.
 
-use vo_syntax::ast::{Block, Stmt, StmtKind};
+use vo_syntax::ast::{Block, Expr, ExprKind, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -1335,7 +1335,7 @@ fn compile_assign(
             let field_name = info.project.interner.resolve(sel.sel.symbol)
                 .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
             
-            // Check if receiver is pointer or heap variable
+            // Check if receiver is pointer
             let is_ptr = info.is_pointer(recv_type);
             
             if is_ptr {
@@ -1343,27 +1343,49 @@ fn compile_assign(
                 let (offset, slots) = info.struct_field_offset_from_ptr(recv_type, field_name)
                     .ok_or_else(|| CodegenError::Internal(format!("field {} not found in ptr", field_name)))?;
                 
-                // Compile ptr, then PtrSet
                 let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
                 let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
                 func.emit_ptr_set(ptr_reg, offset, tmp, slots);
             } else {
                 // Value receiver: get field offset directly
-                let (offset, slots) = info.struct_field_offset(recv_type, field_name)
+                let (field_offset, slots) = info.struct_field_offset(recv_type, field_name)
                     .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
-                // Value receiver on stack - find root variable
-                if let ExprKind::Ident(ident) = &sel.expr.kind {
+                
+                // Check for nested selector (e.g., o.Inner.value = x)
+                if let ExprKind::Selector(_) = &sel.expr.kind {
+                    // Nested selector: compute total offset
+                    let (inner_offset, _, root_expr) = compute_selector_chain_offset(&sel.expr, info)?;
+                    let total_offset = inner_offset + field_offset;
+                    
+                    if let ExprKind::Ident(ident) = &root_expr.kind {
+                        let local_info = func.lookup_local(ident.symbol)
+                            .map(|l| (l.slot, l.is_heap));
+                        
+                        if let Some((base_slot, is_heap)) = local_info {
+                            if is_heap {
+                                let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                                func.emit_ptr_set(base_slot, total_offset, tmp, slots);
+                            } else {
+                                let target_slot = base_slot + total_offset;
+                                compile_expr_to(rhs, target_slot, ctx, func, info)?;
+                            }
+                        } else {
+                            return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                        }
+                    } else {
+                        return Err(CodegenError::InvalidLHS);
+                    }
+                } else if let ExprKind::Ident(ident) = &sel.expr.kind {
+                    // Simple selector: o.field = x
                     let local_info = func.lookup_local(ident.symbol)
                         .map(|l| (l.slot, l.is_heap));
                     
                     if let Some((base_slot, is_heap)) = local_info {
                         if is_heap {
-                            // Heap variable: use PtrSet
                             let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                            func.emit_ptr_set(base_slot, offset, tmp, slots);
+                            func.emit_ptr_set(base_slot, field_offset, tmp, slots);
                         } else {
-                            // Stack variable: direct slot write
-                            let target_slot = base_slot + offset;
+                            let target_slot = base_slot + field_offset;
                             compile_expr_to(rhs, target_slot, ctx, func, info)?;
                         }
                     } else {
@@ -1698,4 +1720,34 @@ fn is_rhs_escaped_struct(
         }
     }
     None
+}
+
+/// Compute total offset for a selector chain (e.g., o.Inner.value)
+/// Returns (total_offset, final_field_slots, root_expr)
+fn compute_selector_chain_offset<'a>(
+    expr: &'a Expr,
+    info: &TypeInfoWrapper,
+) -> Result<(u16, u16, &'a Expr), CodegenError> {
+    match &expr.kind {
+        ExprKind::Selector(sel) => {
+            let recv_type = info.expr_type(sel.expr.id)
+                .ok_or_else(|| CodegenError::Internal("selector recv has no type".to_string()))?;
+            
+            let field_name = info.project.interner.resolve(sel.sel.symbol)
+                .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
+            
+            let (field_offset, field_slots) = info.struct_field_offset(recv_type, field_name)
+                .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+            
+            // Recursively compute offset for nested selectors
+            if let ExprKind::Selector(_) = &sel.expr.kind {
+                let (inner_offset, _, root) = compute_selector_chain_offset(&sel.expr, info)?;
+                Ok((inner_offset + field_offset, field_slots, root))
+            } else {
+                // Base case: sel.expr is the root (Ident or other)
+                Ok((field_offset, field_slots, &sel.expr))
+            }
+        }
+        _ => Err(CodegenError::Internal("expected selector expression".to_string())),
+    }
 }
