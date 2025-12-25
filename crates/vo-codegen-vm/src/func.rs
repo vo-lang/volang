@@ -26,6 +26,7 @@ pub struct CaptureVar {
 /// Loop context for break/continue.
 struct LoopContext {
     continue_pc: usize,
+    continue_patches: Vec<usize>,  // for patching continue jumps later
     break_patches: Vec<usize>,
     label: Option<Symbol>,
 }
@@ -253,13 +254,17 @@ impl FuncBuilder {
     pub fn enter_loop(&mut self, continue_pc: usize, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
             continue_pc,
+            continue_patches: Vec::new(),
             break_patches: Vec::new(),
             label,
         });
     }
 
-    pub fn exit_loop(&mut self) -> Vec<usize> {
-        self.loop_stack.pop().map(|l| l.break_patches).unwrap_or_default()
+    /// Exit loop and return (break_patches, continue_patches)
+    pub fn exit_loop(&mut self) -> (Vec<usize>, Vec<usize>) {
+        self.loop_stack.pop()
+            .map(|l| (l.break_patches, l.continue_patches))
+            .unwrap_or_default()
     }
 
     pub fn emit_break(&mut self, _label: Option<Symbol>) {
@@ -270,8 +275,20 @@ impl FuncBuilder {
     }
 
     pub fn emit_continue(&mut self, _label: Option<Symbol>) {
-        if let Some(ctx) = self.loop_stack.last() {
-            self.emit_jump_to(Opcode::Jump, 0, ctx.continue_pc);
+        // Get continue_pc first to avoid borrow issues
+        let continue_pc = self.loop_stack.last().map(|ctx| ctx.continue_pc);
+        
+        if let Some(pc) = continue_pc {
+            if pc != 0 {
+                // continue_pc is known, jump directly
+                self.emit_jump_to(Opcode::Jump, 0, pc);
+            } else {
+                // continue_pc not yet known, emit placeholder and patch later
+                let jump_pc = self.emit_jump(Opcode::Jump, 0);
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.continue_patches.push(jump_pc);
+                }
+            }
         }
     }
 

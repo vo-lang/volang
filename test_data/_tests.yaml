@@ -127,7 +127,6 @@ tests:
     skip: "assertion failed"
   - file: slice.vo
     mode: [vm]
-    skip: "timeout"
   - file: struct_method_simple.vo
     mode: [vm]
   - file: struct_object.vo

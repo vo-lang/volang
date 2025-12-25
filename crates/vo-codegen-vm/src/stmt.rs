@@ -257,7 +257,7 @@ pub fn compile_stmt(
                     if let Some(j) = end_jump {
                         func.patch_jump(j, func.current_pc());
                     }
-                    let break_patches = func.exit_loop();
+                    let (break_patches, _) = func.exit_loop();
                     for pc in break_patches {
                         func.patch_jump(pc, func.current_pc());
                     }
@@ -270,7 +270,6 @@ pub fn compile_stmt(
                     }
 
                     let loop_start = func.current_pc();
-                    let post_pc = loop_start; // continue goes to post (will adjust)
 
                     let end_jump = if let Some(cond) = cond {
                         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -279,11 +278,12 @@ pub fn compile_stmt(
                         None
                     };
 
-                    func.enter_loop(post_pc, None);
+                    // continue_pc=0 means "patch later" - continue should go to post
+                    func.enter_loop(0, None);
                     compile_block(&for_stmt.body, ctx, func, info)?;
 
-                    // Post statement
-                    let actual_post_pc = func.current_pc();
+                    // Post statement - this is where continue should jump to
+                    let post_pc = func.current_pc();
                     if let Some(post) = post {
                         compile_stmt(post, ctx, func, info)?;
                     }
@@ -294,13 +294,17 @@ pub fn compile_stmt(
                         func.patch_jump(j, func.current_pc());
                     }
 
-                    let break_patches = func.exit_loop();
+                    let (break_patches, continue_patches) = func.exit_loop();
+                    
+                    // Patch break jumps to after loop
                     for pc in break_patches {
                         func.patch_jump(pc, func.current_pc());
                     }
-
-                    // Fix continue jumps to post
-                    let _ = actual_post_pc;
+                    
+                    // Patch continue jumps to post statement
+                    for pc in continue_patches {
+                        func.patch_jump(pc, post_pc);
+                    }
                 }
 
                 ForClause::Range { key, value, define, expr } => {
@@ -744,7 +748,7 @@ fn emit_iter_loop(
     
     func.emit_op(Opcode::IterEnd, 0, 0, 0);
     
-    let break_patches = func.exit_loop();
+    let (break_patches, _) = func.exit_loop();
     for pc in break_patches {
         func.patch_jump(pc, func.current_pc());
     }
