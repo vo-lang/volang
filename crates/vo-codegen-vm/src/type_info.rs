@@ -31,6 +31,20 @@ impl<'a> TypeInfoWrapper<'a> {
         self.project.type_info.types.get(&expr_id).map(|tv| tv.typ)
     }
 
+    /// Get slot count for an expression. Panics if expression has no type.
+    pub fn expr_slots(&self, expr_id: ExprId) -> u16 {
+        let type_key = self.expr_type(expr_id)
+            .expect("expression must have type during codegen");
+        self.type_slot_count(type_key)
+    }
+
+    /// Get slot count for an expression, returns 1 if type unknown (for optional contexts).
+    pub fn expr_slots_or_1(&self, expr_id: ExprId) -> u16 {
+        self.expr_type(expr_id)
+            .map(|t| self.type_slot_count(t))
+            .unwrap_or(1)
+    }
+
     pub fn type_expr_type(&self, type_expr_id: vo_common_core::TypeExprId) -> Option<TypeKey> {
         self.project.type_info.type_exprs.get(&type_expr_id).copied()
     }

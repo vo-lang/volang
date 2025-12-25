@@ -63,8 +63,7 @@ pub fn compile_expr(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let type_key = info.expr_type(expr.id);
-    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+    let slots = info.expr_slots(expr.id);
     let dst = func.alloc_temp(slots);
     compile_expr_to(expr, dst, ctx, func, info)?;
     Ok(dst)
@@ -592,8 +591,7 @@ fn compile_type_assert(
         .unwrap_or(0);
     
     // Get result slot count
-    let result_type = info.expr_type(expr.id);
-    let result_slots = result_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+    let result_slots = info.expr_slots(expr.id);
     
     // Check if this is a comma-ok form (v, ok := x.(T))
     // If result has more slots than target type, it includes ok bool
@@ -627,8 +625,7 @@ fn compile_receive(
         .expect("channel must have elem_slots");
     
     // Check if result includes ok bool (v, ok := <-ch)
-    let result_type = info.expr_type(expr.id);
-    let result_slots = result_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+    let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
     
     // ChanRecv: a=dst, b=chan, flags=(elem_slots<<1)|has_ok
@@ -891,8 +888,7 @@ fn compile_call(
     // Compile arguments - need to compute total arg slots
     let mut total_arg_slots = 0u16;
     for arg in &call.args {
-        let arg_type = info.expr_type(arg.id);
-        total_arg_slots += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+        total_arg_slots += info.expr_slots(arg.id);
     }
     
     // Check if calling a closure (local variable with Signature type)
@@ -903,8 +899,7 @@ fn compile_call(
             let args_start = func.alloc_temp(total_arg_slots);
             let mut offset = 0u16;
             for arg in &call.args {
-                let arg_type = info.expr_type(arg.id);
-                let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                let arg_slots = info.expr_slots(arg.id);
                 compile_expr_to(arg, args_start + offset, ctx, func, info)?;
                 offset += arg_slots;
             }
@@ -930,8 +925,7 @@ fn compile_call(
             let args_start = func.alloc_temp(total_arg_slots);
             let mut offset = 0u16;
             for arg in &call.args {
-                let arg_type = info.expr_type(arg.id);
-                let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                let arg_slots = info.expr_slots(arg.id);
                 compile_expr_to(arg, args_start + offset, ctx, func, info)?;
                 offset += arg_slots;
             }
@@ -958,8 +952,7 @@ fn compile_call(
     let args_start = func.alloc_temp(total_arg_slots);
     let mut offset = 0u16;
     for arg in &call.args {
-        let arg_type = info.expr_type(arg.id);
-        let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+        let arg_slots = info.expr_slots(arg.id);
         compile_expr_to(arg, args_start + offset, ctx, func, info)?;
         offset += arg_slots;
     }
@@ -1108,7 +1101,7 @@ fn compile_method_call(
         let actual_recv_slots = if method_expects_ptr { 1u16 } else { info.type_slot_count(actual_recv_type) };
         
         let other_args_slots: u16 = call.args.iter()
-            .map(|arg| info.expr_type(arg.id).map(|t| info.type_slot_count(t)).unwrap_or(1))
+            .map(|arg| info.expr_slots(arg.id))
             .sum();
         let total_arg_slots = actual_recv_slots + other_args_slots;
         let args_start = func.alloc_temp(total_arg_slots);
@@ -1167,8 +1160,7 @@ fn compile_method_call(
         let mut arg_offset = actual_recv_slots;
         for arg in &call.args {
             compile_expr_to(arg, args_start + arg_offset, ctx, func, info)?;
-            let arg_type = info.expr_type(arg.id);
-            arg_offset += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            arg_offset += info.expr_slots(arg.id);
         }
         
         // Get method return type for ret_slots
@@ -1216,15 +1208,13 @@ fn compile_call_args(
         // Non-variadic: pass arguments normally
         let mut total_slots = 0u16;
         for arg in &call.args {
-            let arg_type = info.expr_type(arg.id);
-            total_slots += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            total_slots += info.expr_slots(arg.id);
         }
         
         let args_start = func.alloc_temp(total_slots);
         let mut offset = 0u16;
         for arg in &call.args {
-            let arg_type = info.expr_type(arg.id);
-            let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            let arg_slots = info.expr_slots(arg.id);
             compile_expr_to(arg, args_start + offset, ctx, func, info)?;
             offset += arg_slots;
         }

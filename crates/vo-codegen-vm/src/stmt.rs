@@ -193,9 +193,7 @@ pub fn compile_stmt(
                 // Calculate total return slots needed
                 let mut total_ret_slots = 0u16;
                 for result in &ret.values {
-                    let type_key = info.expr_type(result.id);
-                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                    total_ret_slots += slots;
+                    total_ret_slots += info.expr_slots(result.id);
                 }
                 
                 // Allocate space for return values
@@ -204,8 +202,7 @@ pub fn compile_stmt(
                 // Compile return values
                 let mut offset = 0u16;
                 for result in &ret.values {
-                    let type_key = info.expr_type(result.id);
-                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                    let slots = info.expr_slots(result.id);
                     compile_expr_to(result, ret_start + offset, ctx, func, info)?;
                     offset += slots;
                 }
@@ -811,8 +808,7 @@ fn compile_go(
         // First, compute total arg slots
         let mut total_arg_slots = 0u16;
         for arg in &call_expr.args {
-            let arg_type = info.expr_type(arg.id);
-            total_arg_slots += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            total_arg_slots += info.expr_slots(arg.id);
         }
         
         // Compile function/closure reference
@@ -822,8 +818,7 @@ fn compile_go(
         let args_start = func.alloc_temp(total_arg_slots);
         let mut offset = 0u16;
         for arg in &call_expr.args {
-            let arg_type = info.expr_type(arg.id);
-            let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            let arg_slots = info.expr_slots(arg.id);
             crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
             offset += arg_slots;
         }
