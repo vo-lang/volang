@@ -126,17 +126,46 @@ fn collect_declarations(
     // Register all function names first (so calls can find them)
     for file in &project.files {
         for decl in &file.decls {
-            if let Decl::Func(func_decl) = decl {
-                // Check if this is a method (has receiver)
-                // For methods, we need the base type (not pointer)
-                let recv_type = if let Some(recv) = &func_decl.receiver {
-                    // Look up the type definition by name
-                    info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj))
-                } else {
-                    None
-                };
-                
-                ctx.register_func(recv_type, func_decl.name.symbol);
+            match decl {
+                Decl::Func(func_decl) => {
+                    // Check if this is a method (has receiver)
+                    // For methods, we need the base type (not pointer)
+                    let recv_type = if let Some(recv) = &func_decl.receiver {
+                        // Look up the type definition by name
+                        info.get_def(&recv.ty).and_then(|obj| info.obj_type(obj))
+                    } else {
+                        None
+                    };
+                    
+                    ctx.register_func(recv_type, func_decl.name.symbol);
+                }
+                Decl::Var(var_decl) => {
+                    // Register global variables (so functions can reference them)
+                    for spec in &var_decl.specs {
+                        for (i, name) in spec.names.iter().enumerate() {
+                            let type_key = if let Some(ty) = &spec.ty {
+                                info.project.type_info.type_exprs.get(&ty.id).copied()
+                            } else if i < spec.values.len() {
+                                info.expr_type(spec.values[i].id)
+                            } else {
+                                None
+                            };
+                            
+                            let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                            let value_kind = type_key.map(|t| info.value_kind(t)).unwrap_or(0);
+                            ctx.register_global(
+                                name.symbol,
+                                vo_vm::bytecode::GlobalDef {
+                                    name: project.interner.resolve(name.symbol).unwrap_or("?").to_string(),
+                                    slots,
+                                    value_kind,
+                                    meta_id: 0,
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -254,40 +283,28 @@ fn compile_init_and_entry(
     // 1. Generate __init__ function for global variable initialization
     let mut init_builder = FuncBuilder::new("__init__");
     
-    // Collect global variable declarations
+    // Initialize global variables (already registered in collect_declarations)
     for file in &project.files {
         for decl in &file.decls {
             if let Decl::Var(var_decl) = decl {
                 for spec in &var_decl.specs {
                     for (i, name) in spec.names.iter().enumerate() {
-                        // Get type
-                        let type_key = if let Some(ty) = &spec.ty {
-                            info.project.type_info.type_exprs.get(&ty.id).copied()
-                        } else if i < spec.values.len() {
-                            info.expr_type(spec.values[i].id)
-                        } else {
-                            None
-                        };
-                        
-                        let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                        let slot_types = type_key
-                            .map(|t| info.type_slot_types(t))
-                            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
-                        
-                        // Register global variable
-                        let value_kind = type_key.map(|t| info.value_kind(t)).unwrap_or(0);
-                        let global_idx = ctx.register_global(
-                            name.symbol,
-                            vo_vm::bytecode::GlobalDef {
-                                name: project.interner.resolve(name.symbol).unwrap_or("?").to_string(),
-                                slots,
-                                value_kind,
-                                meta_id: 0,
-                            },
-                        );
-                        
                         // Initialize if value provided
                         if i < spec.values.len() {
+                            let type_key = if let Some(ty) = &spec.ty {
+                                info.project.type_info.type_exprs.get(&ty.id).copied()
+                            } else {
+                                info.expr_type(spec.values[i].id)
+                            };
+                            
+                            let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                            let slot_types = type_key
+                                .map(|t| info.type_slot_types(t))
+                                .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+                            
+                            let global_idx = ctx.get_global_index(name.symbol)
+                                .ok_or_else(|| CodegenError::VariableNotFound(format!("{:?}", name.symbol)))?;
+                            
                             let tmp = init_builder.alloc_temp_typed(&slot_types);
                             crate::expr::compile_expr_to(&spec.values[i], tmp, ctx, &mut init_builder, info)?;
                             if slots == 1 {

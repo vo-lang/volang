@@ -9,6 +9,16 @@ use crate::expr::compile_expr_to;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
+fn is_float_type(type_key: vo_analysis::objects::TypeKey, info: &TypeInfoWrapper) -> bool {
+    use vo_analysis::typ::{underlying_type, BasicType, Type};
+    let underlying = underlying_type(type_key, &info.project.tc_objs);
+    if let Type::Basic(b) = &info.project.tc_objs.types[underlying] {
+        matches!(b.typ(), BasicType::Float32 | BasicType::Float64 | BasicType::UntypedFloat)
+    } else {
+        false
+    }
+}
+
 /// Compile a statement.
 pub fn compile_stmt(
     stmt: &Stmt,
@@ -146,8 +156,14 @@ pub fn compile_stmt(
 
         // === Assignment ===
         StmtKind::Assign(assign) => {
+            use vo_syntax::ast::AssignOp;
             for (lhs, rhs) in assign.lhs.iter().zip(assign.rhs.iter()) {
-                compile_assign(lhs, rhs, ctx, func, info)?;
+                if assign.op == AssignOp::Assign {
+                    compile_assign(lhs, rhs, ctx, func, info)?;
+                } else {
+                    // Compound assignment (+=, -=, etc.)
+                    compile_compound_assign(lhs, rhs, assign.op, ctx, func, info)?;
+                }
             }
         }
 
@@ -1485,9 +1501,222 @@ fn compile_assign(
         }
 
         _ => {
-            return Err(CodegenError::InvalidLHS);
+            return Err(CodegenError::Internal(format!("invalid LHS in assignment: {:?}", lhs.kind)));
         }
     }
 
     Ok(())
+}
+
+/// Compile compound assignment (+=, -=, *=, etc.)
+fn compile_compound_assign(
+    lhs: &vo_syntax::ast::Expr,
+    rhs: &vo_syntax::ast::Expr,
+    op: vo_syntax::ast::AssignOp,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    use vo_syntax::ast::{AssignOp, ExprKind};
+    
+    // Get the operation opcode based on AssignOp and type
+    let lhs_type = info.expr_type(lhs.id);
+    let is_float = lhs_type.map(|t| is_float_type(t, info)).unwrap_or(false);
+    
+    let opcode = match (op, is_float) {
+        (AssignOp::Add, false) => Opcode::AddI,
+        (AssignOp::Add, true) => Opcode::AddF,
+        (AssignOp::Sub, false) => Opcode::SubI,
+        (AssignOp::Sub, true) => Opcode::SubF,
+        (AssignOp::Mul, false) => Opcode::MulI,
+        (AssignOp::Mul, true) => Opcode::MulF,
+        (AssignOp::Div, false) => Opcode::DivI,
+        (AssignOp::Div, true) => Opcode::DivF,
+        (AssignOp::Rem, _) => Opcode::ModI,
+        (AssignOp::And, _) => Opcode::And,
+        (AssignOp::Or, _) => Opcode::Or,
+        (AssignOp::Xor, _) => Opcode::Xor,
+        (AssignOp::AndNot, _) => return Err(CodegenError::UnsupportedStmt("&^= not implemented".to_string())),
+        (AssignOp::Shl, _) => Opcode::Shl,
+        (AssignOp::Shr, _) => Opcode::ShrS,
+        (AssignOp::Assign, _) => unreachable!("plain assign handled separately"),
+    };
+    
+    match &lhs.kind {
+        ExprKind::Ident(ident) => {
+            let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.is_heap));
+            
+            if let Some((slot, is_heap)) = local_info {
+                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                if is_heap {
+                    // Heap: read, compute, write back
+                    let tmp = func.alloc_temp(1);
+                    func.emit_op(Opcode::PtrGet, tmp, slot, 0);
+                    func.emit_op(opcode, tmp, tmp, rhs_reg);
+                    func.emit_op(Opcode::PtrSet, slot, 0, tmp);
+                } else {
+                    // Stack: compute in place
+                    func.emit_op(opcode, slot, slot, rhs_reg);
+                }
+            } else if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
+                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                let tmp = func.alloc_temp(1);
+                func.emit_op(Opcode::GlobalGet, tmp, global_idx as u16, 0);
+                func.emit_op(opcode, tmp, tmp, rhs_reg);
+                func.emit_op(Opcode::GlobalSet, global_idx as u16, tmp, 0);
+            } else {
+                return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+            }
+        }
+        
+        ExprKind::Selector(sel) => {
+            let recv_type = info.expr_type(sel.expr.id)
+                .ok_or_else(|| CodegenError::Internal("selector recv has no type".to_string()))?;
+            
+            let field_name = info.project.interner.resolve(sel.sel.symbol)
+                .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
+            
+            let is_ptr = info.is_pointer(recv_type);
+            
+            if is_ptr {
+                let (offset, _slots) = info.struct_field_offset_from_ptr(recv_type, field_name)
+                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found in ptr", field_name)))?;
+                
+                let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
+                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                let tmp = func.alloc_temp(1);
+                func.emit_op(Opcode::PtrGet, tmp, ptr_reg, offset);
+                func.emit_op(opcode, tmp, tmp, rhs_reg);
+                func.emit_op(Opcode::PtrSet, ptr_reg, offset, tmp);
+            } else {
+                // Value receiver - need to handle nested selectors
+                let (base_slot, field_offset) = resolve_selector_slot(&sel.expr, info, func, ctx)?;
+                let (offset, _slots) = info.struct_field_offset(recv_type, field_name)
+                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                
+                let total_offset = field_offset + offset;
+                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                
+                match base_slot {
+                    SelectorBase::Stack(slot) => {
+                        let target = slot + total_offset;
+                        func.emit_op(opcode, target, target, rhs_reg);
+                    }
+                    SelectorBase::Heap(slot) => {
+                        let tmp = func.alloc_temp(1);
+                        func.emit_op(Opcode::PtrGet, tmp, slot, total_offset);
+                        func.emit_op(opcode, tmp, tmp, rhs_reg);
+                        func.emit_op(Opcode::PtrSet, slot, total_offset, tmp);
+                    }
+                    SelectorBase::Ptr(reg) => {
+                        let tmp = func.alloc_temp(1);
+                        func.emit_op(Opcode::PtrGet, tmp, reg, total_offset);
+                        func.emit_op(opcode, tmp, tmp, rhs_reg);
+                        func.emit_op(Opcode::PtrSet, reg, total_offset, tmp);
+                    }
+                }
+            }
+        }
+        
+        ExprKind::Index(idx) => {
+            let container_type = info.expr_type(idx.expr.id)
+                .ok_or_else(|| CodegenError::Internal("index container has no type".to_string()))?;
+            
+            let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
+            let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+            
+            if info.is_array(container_type) {
+                if let ExprKind::Ident(ident) = &idx.expr.kind {
+                    let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.is_heap));
+                    if let Some((slot, is_heap)) = local_info {
+                        let tmp = func.alloc_temp(1);
+                        if is_heap {
+                            func.emit_with_flags(Opcode::ArrayGet, 1, tmp, slot, index_reg);
+                            func.emit_op(opcode, tmp, tmp, rhs_reg);
+                            func.emit_with_flags(Opcode::ArraySet, 1, slot, index_reg, tmp);
+                        } else {
+                            func.emit_op(Opcode::SlotGet, tmp, slot, index_reg);
+                            func.emit_op(opcode, tmp, tmp, rhs_reg);
+                            func.emit_op(Opcode::SlotSet, slot, index_reg, tmp);
+                        }
+                    } else {
+                        return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                    }
+                } else {
+                    return Err(CodegenError::InvalidLHS);
+                }
+            } else if info.is_slice(container_type) {
+                let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
+                let tmp = func.alloc_temp(1);
+                func.emit_with_flags(Opcode::SliceGet, 1, tmp, container_reg, index_reg);
+                func.emit_op(opcode, tmp, tmp, rhs_reg);
+                func.emit_with_flags(Opcode::SliceSet, 1, container_reg, index_reg, tmp);
+            } else if info.is_map(container_type) {
+                let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
+                let tmp = func.alloc_temp(1);
+                func.emit_op(Opcode::MapGet, tmp, container_reg, index_reg);
+                func.emit_op(opcode, tmp, tmp, rhs_reg);
+                func.emit_op(Opcode::MapSet, container_reg, index_reg, tmp);
+            } else {
+                return Err(CodegenError::InvalidLHS);
+            }
+        }
+        
+        _ => {
+            return Err(CodegenError::InvalidLHS);
+        }
+    }
+    
+    Ok(())
+}
+
+enum SelectorBase {
+    Stack(u16),
+    Heap(u16),
+    Ptr(u16),
+}
+
+/// Resolve a selector expression to its base slot and accumulated offset.
+fn resolve_selector_slot(
+    expr: &vo_syntax::ast::Expr,
+    info: &TypeInfoWrapper,
+    func: &mut FuncBuilder,
+    ctx: &mut CodegenContext,
+) -> Result<(SelectorBase, u16), CodegenError> {
+    use vo_syntax::ast::ExprKind;
+    
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if let Some(local) = func.lookup_local(ident.symbol) {
+                if local.is_heap {
+                    Ok((SelectorBase::Heap(local.slot), 0))
+                } else {
+                    Ok((SelectorBase::Stack(local.slot), 0))
+                }
+            } else {
+                Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)))
+            }
+        }
+        ExprKind::Selector(sel) => {
+            let recv_type = info.expr_type(sel.expr.id)
+                .ok_or_else(|| CodegenError::Internal("selector recv has no type".to_string()))?;
+            
+            let field_name = info.project.interner.resolve(sel.sel.symbol)
+                .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
+            
+            if info.is_pointer(recv_type) {
+                // Pointer dereference - compile to get the pointer value
+                let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
+                let (offset, _) = info.struct_field_offset_from_ptr(recv_type, field_name)
+                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                Ok((SelectorBase::Ptr(ptr_reg), offset))
+            } else {
+                let (base, parent_offset) = resolve_selector_slot(&sel.expr, info, func, ctx)?;
+                let (offset, _) = info.struct_field_offset(recv_type, field_name)
+                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                Ok((base, parent_offset + offset))
+            }
+        }
+        _ => Err(CodegenError::InvalidLHS),
+    }
 }

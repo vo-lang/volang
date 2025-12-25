@@ -30,52 +30,67 @@ fn get_extern_fn(name: &str) -> Option<ExternFn> {
         "vo_print" => Some(vo_print),
         "vo_println" => Some(vo_println),
         "vo_copy" => Some(vo_copy),
+        // fmt package functions (variadic)
+        "fmt_Print" => Some(vo_print),
+        "fmt_Println" => Some(vo_println),
         _ => None,
     }
 }
 
 /// Print without newline.
+/// Args are passed as (value, value_kind) pairs.
 fn vo_print(ret: &mut [u64], args: &[u64]) -> ExternCallResult {
-    // args[0] is string pointer, args[1] is length (or just pointer for GcRef string)
-    // For now, just print a placeholder
-    if !args.is_empty() {
-        let ptr = args[0] as *const u8;
-        if !ptr.is_null() {
-            // Try to read as GcRef string
-            use vo_runtime_core::objects::string;
-            let gc_ref = args[0] as vo_runtime_core::gc::GcRef;
-            let s = string::as_str(gc_ref);
-            print!("{}", s);
-            if !ret.is_empty() {
-                ret[0] = s.len() as u64;
-            }
+    use vo_runtime_core::builtins::format_value;
+    use vo_common_core::types::ValueKind;
+    
+    let mut total_len = 0usize;
+    // args are (value, kind) pairs
+    let mut i = 0;
+    while i + 1 < args.len() {
+        let val = args[i];
+        let kind = ValueKind::from_u8(args[i + 1] as u8);
+        let s = format_value(val, kind);
+        if i > 0 {
+            print!(" ");
+            total_len += 1;
         }
+        print!("{}", s);
+        total_len += s.len();
+        i += 2;
+    }
+    
+    if !ret.is_empty() {
+        ret[0] = total_len as u64;
     }
     ExternCallResult::Ok
 }
 
 /// Print with newline.
+/// Args are passed as (value, value_kind) pairs.
 fn vo_println(ret: &mut [u64], args: &[u64]) -> ExternCallResult {
-    if !args.is_empty() {
-        let gc_ref = args[0] as vo_runtime_core::gc::GcRef;
-        if !gc_ref.is_null() {
-            use vo_runtime_core::objects::string;
-            let s = string::as_str(gc_ref);
-            println!("{}", s);
-            if !ret.is_empty() {
-                ret[0] = (s.len() + 1) as u64;
-            }
-        } else {
-            println!();
-            if !ret.is_empty() {
-                ret[0] = 1;
-            }
+    use vo_runtime_core::builtins::format_value;
+    use vo_common_core::types::ValueKind;
+    
+    let mut total_len = 0usize;
+    // args are (value, kind) pairs
+    let mut i = 0;
+    while i + 1 < args.len() {
+        let val = args[i];
+        let kind = ValueKind::from_u8(args[i + 1] as u8);
+        let s = format_value(val, kind);
+        if i > 0 {
+            print!(" ");
+            total_len += 1;
         }
-    } else {
-        println!();
-        if !ret.is_empty() {
-            ret[0] = 1;
-        }
+        print!("{}", s);
+        total_len += s.len();
+        i += 2;
+    }
+    println!();
+    total_len += 1;
+    
+    if !ret.is_empty() {
+        ret[0] = total_len as u64;
     }
     ExternCallResult::Ok
 }

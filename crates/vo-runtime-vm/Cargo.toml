@@ -8,3 +8,4 @@ description = "Runtime support for Vo VM interpreter"
 [dependencies]
 vo-vm = { path = "../vo-vm" }
 vo-runtime-core = { path = "../vo-runtime-core" }
+vo-common-core = { path = "../vo-common-core" }

@@ -8,6 +8,7 @@ pub mod gc;
 pub mod gc_types;
 pub mod objects;
 pub mod ffi;
+pub mod builtins;
 pub mod stdlib;
 
 pub use vo_common_core::types::{MetaId, SlotType, ValueKind, ValueMeta};

@@ -46,29 +46,10 @@ pub fn compile_expr_to(
 ) -> Result<(), CodegenError> {
     match &expr.kind {
         // === Literals (use constant values from type checking) ===
-        ExprKind::IntLit(_) | ExprKind::RuneLit(_) => {
-            let val = get_const_int(expr.id, info).unwrap_or(0);
-            if val >= i16::MIN as i64 && val <= i16::MAX as i64 {
-                // Small int - inline
-                let (b, c) = encode_i32(val as i32);
-                func.emit_op(Opcode::LoadInt, dst, b, c);
-            } else {
-                // Large int - from constant pool
-                let idx = ctx.const_int(val);
-                func.emit_op(Opcode::LoadConst, dst, idx, 0);
-            }
-        }
-
-        ExprKind::FloatLit(_) => {
-            let val = get_const_float(expr.id, info).unwrap_or(0.0);
-            let idx = ctx.const_float(val);
-            func.emit_op(Opcode::LoadConst, dst, idx, 0);
-        }
-
-        ExprKind::StringLit(_) => {
-            let val = get_const_string(expr.id, info).unwrap_or_default();
-            let idx = ctx.const_string(&val);
-            func.emit_op(Opcode::StrNew, dst, idx, 0);
+        ExprKind::IntLit(_) | ExprKind::RuneLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_) => {
+            let val = get_const_value(expr.id, info)
+                .ok_or_else(|| CodegenError::Internal("literal has no const value".to_string()))?;
+            compile_const_value(val, dst, ctx, func)?;
         }
 
         // === Identifier ===
@@ -76,6 +57,12 @@ pub fn compile_expr_to(
             // Handle nil literal
             if info.project.interner.resolve(ident.symbol) == Some("nil") {
                 func.emit_op(Opcode::LoadNil, dst, 0, 0);
+                return Ok(());
+            }
+            
+            // Check if this is a compile-time constant (const declaration)
+            if let Some(val) = get_const_value(expr.id, info) {
+                compile_const_value(val, dst, ctx, func)?;
                 return Ok(());
             }
             
@@ -908,6 +895,18 @@ fn compile_method_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    // Check if this is a package function call (e.g., fmt.Println) - which is always extern
+    if let ExprKind::Ident(_) = &sel.expr.kind {
+        if let Ok(extern_name) = get_extern_name(sel, info) {
+            let extern_id = ctx.get_or_register_extern(&extern_name);
+            let func_type = info.expr_type(call.func.id);
+            let is_variadic = func_type.map(|t| info.is_variadic(t)).unwrap_or(false);
+            let (args_start, total_slots) = compile_call_args(call, is_variadic, ctx, func, info)?;
+            func.emit_with_flags(Opcode::CallExtern, total_slots as u8, dst, extern_id as u16, args_start);
+            return Ok(());
+        }
+    }
+
     // Get receiver type
     let recv_type = info.expr_type(sel.expr.id)
         .ok_or_else(|| CodegenError::Internal("method receiver has no type".to_string()))?;
@@ -957,18 +956,93 @@ fn compile_method_call(
         
         // Look up method function
         if let Some(method_sym) = info.project.interner.get(method_name) {
+            // Try exact type match first
             if let Some(func_idx) = ctx.get_func_index(Some(recv_type), method_sym) {
-                // Call: a=dst, b=func_idx, c=args_start, flags=arg_slots
                 func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
                 return Ok(());
             }
+            // If receiver is value type, try pointer type (Go allows value.PtrMethod())
+            if !info.is_pointer(recv_type) {
+                if let Some(ptr_type) = info.pointer_to(recv_type) {
+                    if let Some(func_idx) = ctx.get_func_index(Some(ptr_type), method_sym) {
+                        func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
+                        return Ok(());
+                    }
+                }
+            }
+            // If receiver is pointer type, try base type (Go allows ptr.ValueMethod())
+            if info.is_pointer(recv_type) {
+                if let Some(base_type) = info.pointer_base(recv_type) {
+                    if let Some(func_idx) = ctx.get_func_index(Some(base_type), method_sym) {
+                        func.emit_with_flags(Opcode::Call, arg_offset as u8, dst, func_idx as u16, args_start);
+                        return Ok(());
+                    }
+                }
+            }
         }
         
-        // Method not found - could be on underlying type
+        // Method not found
         return Err(CodegenError::UnsupportedExpr(format!("method {} not found", method_name)));
     }
     
     Ok(())
+}
+
+/// Compile arguments and return (args_start, total_slots)
+fn compile_call_args(
+    call: &vo_syntax::ast::CallExpr,
+    is_variadic: bool,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(u16, u16), CodegenError> {
+    if is_variadic {
+        // Variadic: pass (value, value_kind) pairs
+        let total_slots = (call.args.len() * 2) as u16;
+        let args_start = func.alloc_temp(total_slots);
+        for (i, arg) in call.args.iter().enumerate() {
+            let slot = args_start + (i * 2) as u16;
+            compile_expr_to(arg, slot, ctx, func, info)?;
+            let arg_type = info.expr_type(arg.id);
+            let vk = arg_type.map(|t| info.value_kind(t)).unwrap_or(0) as i32;
+            let (b, c) = encode_i32(vk);
+            func.emit_op(Opcode::LoadInt, slot + 1, b, c);
+        }
+        Ok((args_start, total_slots))
+    } else {
+        // Non-variadic: pass arguments normally
+        let mut total_slots = 0u16;
+        for arg in &call.args {
+            let arg_type = info.expr_type(arg.id);
+            total_slots += arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+        }
+        
+        let args_start = func.alloc_temp(total_slots);
+        let mut offset = 0u16;
+        for arg in &call.args {
+            let arg_type = info.expr_type(arg.id);
+            let arg_slots = arg_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+            offset += arg_slots;
+        }
+        Ok((args_start, total_slots))
+    }
+}
+
+/// Get extern name for a package function call
+fn get_extern_name(
+    sel: &vo_syntax::ast::SelectorExpr,
+    info: &TypeInfoWrapper,
+) -> Result<String, CodegenError> {
+    if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
+        let pkg_path = info.package_path(pkg_ident)
+            .ok_or_else(|| CodegenError::Internal("cannot resolve package".to_string()))?;
+        let func_name = info.project.interner.resolve(sel.sel.symbol)
+            .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
+        Ok(format!("{}_{}", pkg_path.replace("/", "_"), func_name))
+    } else {
+        Err(CodegenError::Internal("expected package.func".to_string()))
+    }
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -1017,13 +1091,20 @@ fn compile_builtin_call(
         }
         "print" | "println" => {
             // CallExtern with vo_print/vo_println
+            // Each argument is passed as (value, value_kind) pair
             let extern_name = if name == "println" { "vo_println" } else { "vo_print" };
             let extern_id = _ctx.get_or_register_extern(extern_name);
             
-            // Compile arguments
-            let args_start = func.alloc_temp(call.args.len() as u16);
+            // Compile arguments: each arg becomes (value, value_kind)
+            let args_start = func.alloc_temp((call.args.len() * 2) as u16);
             for (i, arg) in call.args.iter().enumerate() {
-                compile_expr_to(arg, args_start + (i as u16), _ctx, func, info)?;
+                let slot = args_start + (i * 2) as u16;
+                compile_expr_to(arg, slot, _ctx, func, info)?;
+                // Store value_kind in next slot
+                let arg_type = info.expr_type(arg.id);
+                let vk = arg_type.map(|t| info.value_kind(t)).unwrap_or(0) as i32;
+                let (b, c) = encode_i32(vk);
+                func.emit_op(Opcode::LoadInt, slot + 1, b, c);
             }
             
             // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
@@ -1258,34 +1339,60 @@ fn compile_composite_lit(
 
 // === Helpers ===
 
-/// Get constant int value from type info
-fn get_const_int(expr_id: vo_common_core::ExprId, info: &TypeInfoWrapper) -> Option<i64> {
+/// Get constant value from type info
+fn get_const_value<'a>(expr_id: vo_common_core::ExprId, info: &'a TypeInfoWrapper) -> Option<&'a vo_analysis::ConstValue> {
     let tv = info.project.type_info.types.get(&expr_id)?;
     if let vo_analysis::operand::OperandMode::Constant(val) = &tv.mode {
-        val.int_val()
+        Some(val)
     } else {
         None
     }
 }
 
-/// Get constant float value from type info
-fn get_const_float(expr_id: vo_common_core::ExprId, info: &TypeInfoWrapper) -> Option<f64> {
-    let tv = info.project.type_info.types.get(&expr_id)?;
-    if let vo_analysis::operand::OperandMode::Constant(val) = &tv.mode {
-        Some(vo_analysis::constant::float64_val(val).0)
-    } else {
-        None
+/// Compile a constant value to the destination slot
+fn compile_const_value(
+    val: &vo_analysis::ConstValue,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+) -> Result<(), CodegenError> {
+    use vo_analysis::constant::Value;
+    match val {
+        Value::Bool(b) => {
+            let v = if *b { 1 } else { 0 };
+            func.emit_op(Opcode::LoadInt, dst, v, 0);
+        }
+        Value::Int64(i) => {
+            if *i >= i16::MIN as i64 && *i <= i16::MAX as i64 {
+                let (b, c) = encode_i32(*i as i32);
+                func.emit_op(Opcode::LoadInt, dst, b, c);
+            } else {
+                let idx = ctx.const_int(*i);
+                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+            }
+        }
+        Value::IntBig(big) => {
+            let idx = ctx.const_int(big.try_into().unwrap_or(i64::MAX));
+            func.emit_op(Opcode::LoadConst, dst, idx, 0);
+        }
+        Value::Float(f) => {
+            let idx = ctx.const_float(*f);
+            func.emit_op(Opcode::LoadConst, dst, idx, 0);
+        }
+        Value::Rat(r) => {
+            let f = vo_analysis::constant::float64_val(val).0;
+            let idx = ctx.const_float(f);
+            func.emit_op(Opcode::LoadConst, dst, idx, 0);
+        }
+        Value::Str(s) => {
+            let idx = ctx.const_string(s);
+            func.emit_op(Opcode::StrNew, dst, idx, 0);
+        }
+        Value::Unknown => {
+            return Err(CodegenError::Internal("unknown constant value".to_string()));
+        }
     }
-}
-
-/// Get constant string value from type info
-fn get_const_string(expr_id: vo_common_core::ExprId, info: &TypeInfoWrapper) -> Option<String> {
-    let tv = info.project.type_info.types.get(&expr_id)?;
-    if let vo_analysis::operand::OperandMode::Constant(val) = &tv.mode {
-        Some(vo_analysis::constant::string_val(val).to_string())
-    } else {
-        None
-    }
+    Ok(())
 }
 
 fn is_float_type(type_key: vo_analysis::objects::TypeKey, info: &TypeInfoWrapper) -> bool {

@@ -49,6 +49,29 @@ impl<'a> TypeInfoWrapper<'a> {
         self.type_info().get_use(ident)
     }
 
+    /// Check if an identifier refers to a package
+    pub fn is_package(&self, ident: &Ident) -> bool {
+        if let Some(obj) = self.get_use(ident) {
+            self.tc_objs().lobjs[obj].entity_type().is_pkg_name()
+        } else if let Some(obj) = self.get_def(ident) {
+            self.tc_objs().lobjs[obj].entity_type().is_pkg_name()
+        } else {
+            false
+        }
+    }
+
+    /// Get the package path for a package identifier
+    pub fn package_path(&self, ident: &Ident) -> Option<String> {
+        let obj = self.get_use(ident).or_else(|| self.get_def(ident))?;
+        let lobj = &self.tc_objs().lobjs[obj];
+        if lobj.entity_type().is_pkg_name() {
+            let pkg_key = lobj.pkg_name_imported();
+            Some(self.tc_objs().pkgs[pkg_key].path().to_string())
+        } else {
+            None
+        }
+    }
+
     // === Escape queries ===
 
     pub fn is_escaped(&self, obj: ObjKey) -> bool {
@@ -285,20 +308,41 @@ impl<'a> TypeInfoWrapper<'a> {
         None
     }
 
-    /// Get value kind for a type (for IfaceAssign flags)
+    /// Get value kind for a type (returns ValueKind enum value)
     pub fn value_kind(&self, type_key: TypeKey) -> u8 {
+        use vo_analysis::typ::BasicType;
+        use vo_common_core::types::ValueKind;
+        
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        match &self.tc_objs().types[underlying] {
-            Type::Basic(_) => 0,       // Value
-            Type::Pointer(_) => 1,     // GcRef
-            Type::Struct(_) => 0,      // Value (multi-slot)
-            Type::Array(_) => 0,       // Value (multi-slot)
-            Type::Slice(_) => 1,       // GcRef
-            Type::Map(_) => 1,         // GcRef
-            Type::Chan(_) => 1,        // GcRef
-            Type::Interface(_) => 2,   // Interface0
-            _ => 0,
-        }
+        let vk = match &self.tc_objs().types[underlying] {
+            Type::Basic(b) => match b.typ() {
+                BasicType::Bool | BasicType::UntypedBool => ValueKind::Bool,
+                BasicType::Int | BasicType::UntypedInt => ValueKind::Int,
+                BasicType::Int8 => ValueKind::Int8,
+                BasicType::Int16 => ValueKind::Int16,
+                BasicType::Int32 | BasicType::Rune | BasicType::UntypedRune => ValueKind::Int32,
+                BasicType::Int64 => ValueKind::Int64,
+                BasicType::Uint => ValueKind::Uint,
+                BasicType::Uint8 | BasicType::Byte => ValueKind::Uint8,
+                BasicType::Uint16 => ValueKind::Uint16,
+                BasicType::Uint32 => ValueKind::Uint32,
+                BasicType::Uint64 | BasicType::Uintptr => ValueKind::Uint64,
+                BasicType::Float32 => ValueKind::Float32,
+                BasicType::Float64 | BasicType::UntypedFloat => ValueKind::Float64,
+                BasicType::Str | BasicType::UntypedString => ValueKind::String,
+                _ => ValueKind::Void,
+            },
+            Type::Pointer(_) => ValueKind::Pointer,
+            Type::Struct(_) => ValueKind::Struct,
+            Type::Array(_) => ValueKind::Array,
+            Type::Slice(_) => ValueKind::Slice,
+            Type::Map(_) => ValueKind::Map,
+            Type::Chan(_) => ValueKind::Channel,
+            Type::Interface(_) => ValueKind::Interface,
+            Type::Signature(_) => ValueKind::Closure,
+            _ => ValueKind::Void,
+        };
+        vk as u8
     }
 
     /// Get method index in interface
@@ -358,6 +402,56 @@ impl<'a> TypeInfoWrapper<'a> {
         None
     }
 
+    /// Check if function signature is variadic
+    pub fn is_variadic(&self, type_key: TypeKey) -> bool {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
+            sig.variadic()
+        } else {
+            false
+        }
+    }
+
+    /// Get variadic element type (the element type of the ...T parameter)
+    pub fn variadic_elem_type(&self, type_key: TypeKey) -> Option<TypeKey> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
+            if sig.variadic() {
+                let params = sig.params();
+                if let Some(tuple) = self.tc_objs().types[params].try_as_tuple() {
+                    let vars = tuple.vars();
+                    if let Some(&last_var) = vars.last() {
+                        if let Some(param_type) = self.tc_objs().lobjs[last_var].typ() {
+                            // The last param is []T, get element type
+                            let underlying_param = typ::underlying_type(param_type, self.tc_objs());
+                            if let Type::Slice(s) = &self.tc_objs().types[underlying_param] {
+                                return Some(s.elem());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the number of fixed (non-variadic) parameters
+    pub fn fixed_param_count(&self, type_key: TypeKey) -> Option<usize> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
+            let params = sig.params();
+            if let Some(tuple) = self.tc_objs().types[params].try_as_tuple() {
+                let count = tuple.vars().len();
+                if sig.variadic() {
+                    return Some(count.saturating_sub(1));
+                } else {
+                    return Some(count);
+                }
+            }
+        }
+        None
+    }
+
     /// Check if type is an integer type
     pub fn is_int(&self, type_key: TypeKey) -> bool {
         use vo_analysis::typ::BasicType;
@@ -409,6 +503,29 @@ impl<'a> TypeInfoWrapper<'a> {
             matches!(b.typ(), BasicType::Bool | BasicType::UntypedBool)
         } else {
             false
+        }
+    }
+
+    /// Get pointer type for a given base type (for method lookup)
+    pub fn pointer_to(&self, base_type: TypeKey) -> Option<TypeKey> {
+        // Search for a pointer type that points to base_type
+        for (key, typ) in self.tc_objs().types.iter() {
+            if let Type::Pointer(p) = typ {
+                if p.base() == base_type {
+                    return Some(key);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get base type from pointer type
+    pub fn pointer_base(&self, ptr_type: TypeKey) -> Option<TypeKey> {
+        let underlying = typ::underlying_type(ptr_type, self.tc_objs());
+        if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
+            Some(p.base())
+        } else {
+            None
         }
     }
 }

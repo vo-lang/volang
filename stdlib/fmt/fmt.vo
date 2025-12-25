@@ -1,7 +1,15 @@
 package fmt
 
-func Print(s string) int
+// Print formats using the default formats and writes to standard output.
+// Returns the number of bytes written.
+func Print(a ...interface{}) int
 
-func Println(s string) int
+// Println formats using the default formats and writes to standard output.
+// A newline is appended. Returns the number of bytes written.
+func Println(a ...interface{}) int
 
-func Sprint(s string) string
+// Sprint formats using the default formats and returns the resulting string.
+func Sprint(a ...interface{}) string
+
+// Sprintf formats according to a format specifier and returns the resulting string.
+func Sprintf(format string, a ...interface{}) string
