@@ -183,7 +183,14 @@ fn compile_functions(
     for file in &project.files {
         for decl in &file.decls {
             if let Decl::Func(func_decl) = decl {
+                let func_name = project.interner.resolve(func_decl.name.symbol)
+                    .unwrap_or("unknown");
                 let func_id = compile_func_decl(func_decl, ctx, info)?;
+                
+                // Check if this is an init() function (no receiver, name is "init")
+                if func_decl.receiver.is_none() && func_name == "init" {
+                    ctx.register_init_function(func_id);
+                }
                 
                 // If this is a method, record the mapping
                 if let Some(recv) = &func_decl.receiver {
@@ -334,7 +341,7 @@ fn compile_init_and_entry(
     init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
     let init_func = init_builder.build();
     let init_func_id = ctx.add_function(init_func);
-    ctx.register_init_function(init_func_id);
+    // Note: __init__ is NOT registered as a user init function - it's handled separately
     
     // 2. Find main function
     let main_func_id = project.interner.get("main")
@@ -343,8 +350,13 @@ fn compile_init_and_entry(
     // 3. Generate __entry__ function
     let mut entry_builder = FuncBuilder::new("__entry__");
     
-    // Call __init__ (a=func_id, b=arg_start, c=(arg_slots<<8)|ret_slots)
+    // Call __init__ for global variable initialization
     entry_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
+    
+    // Call user-defined init() functions in declaration order
+    for &user_init_id in ctx.init_functions() {
+        entry_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
+    }
     
     // Call main if exists
     if let Some(main_id) = main_func_id {
