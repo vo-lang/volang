@@ -40,23 +40,51 @@ pub fn compile_stmt(
                     let escapes = obj_key.map(|k| info.is_escaped(k)).unwrap_or(false);
 
                     if escapes {
-                        // Heap allocation for escaped variable (any type)
+                        // Heap allocation for escaped variable
                         let slot = func.define_local_heap(name.symbol);
                         
-                        // Get ValueMeta index for PtrNew
-                        let meta_idx = ctx.get_or_create_value_meta(type_key, slots, &slot_types);
+                        // Check if this is an array type
+                        let is_array = type_key.map(|t| info.is_array(t)).unwrap_or(false);
                         
-                        // PtrNew: a=dst, b=meta_idx, flags=slots
-                        func.emit_with_flags(Opcode::PtrNew, slots as u8, slot, meta_idx, 0);
-                        
-                        // Initialize value
-                        if i < spec.values.len() {
-                            // Compile value to temp, then PtrSet
-                            let tmp = func.alloc_temp(slots);
-                            compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
-                            func.emit_ptr_set(slot, 0, tmp, slots);
+                        if is_array {
+                            // Array: use ArrayNew (different memory layout with ArrayHeader)
+                            let arr_len = type_key.and_then(|t| info.array_len(t)).unwrap_or(0);
+                            let elem_slots = type_key.and_then(|t| info.array_elem_slots(t)).unwrap_or(1);
+                            let elem_meta_idx = ctx.get_or_create_array_elem_meta(type_key.unwrap(), info);
+                            
+                            // ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_slots
+                            // Load elem_meta into a register
+                            let meta_reg = func.alloc_temp(1);
+                            func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
+                            
+                            // Load array length
+                            let len_reg = func.alloc_temp(1);
+                            let (b, c) = crate::type_info::encode_i32(arr_len as i32);
+                            func.emit_op(Opcode::LoadInt, len_reg, b, c);
+                            
+                            func.emit_with_flags(Opcode::ArrayNew, elem_slots as u8, slot, meta_reg, len_reg);
+                            
+                            // Initialize if value provided
+                            if i < spec.values.len() {
+                                // TODO: array literal initialization for escaped arrays
+                            }
+                            // else: ArrayNew already zero-initializes
+                        } else {
+                            // Struct/primitive: use PtrNew
+                            let meta_idx = ctx.get_or_create_value_meta(type_key, slots, &slot_types);
+                            
+                            // PtrNew: a=dst, b=meta_idx, flags=slots
+                            func.emit_with_flags(Opcode::PtrNew, slots as u8, slot, meta_idx, 0);
+                            
+                            // Initialize value
+                            if i < spec.values.len() {
+                                // Compile value to temp, then PtrSet
+                                let tmp = func.alloc_temp(slots);
+                                compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
+                                func.emit_ptr_set(slot, 0, tmp, slots);
+                            }
+                            // else: PtrNew already zero-initializes
                         }
-                        // else: PtrNew already zero-initializes
                     } else {
                         // Stack allocation
                         let slot = func.define_local_stack(name.symbol, slots, &slot_types);
@@ -1236,6 +1264,12 @@ fn compile_assign(
 
     match &lhs.kind {
         ExprKind::Ident(ident) => {
+            // Blank identifier: compile RHS for side effects only
+            if info.project.interner.resolve(ident.symbol) == Some("_") {
+                let _ = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                return Ok(());
+            }
+            
             // Copy local info to avoid borrow conflict
             let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.slots, l.is_heap));
             

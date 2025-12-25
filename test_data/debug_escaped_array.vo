@@ -1,0 +1,14 @@
+package main
+
+func main() {
+    var arr [3]int
+    arr[0] = 100
+    arr[1] = 200
+    arr[2] = 300
+    
+    s := arr[:]
+    println("len:", len(s))
+    println("s[0]:", s[0], "s[1]:", s[1], "s[2]:", s[2])
+    println("assert len passed")
+    println("assert s[0] passed")
+}

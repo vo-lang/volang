@@ -69,7 +69,16 @@ pub fn exec_slice_slice(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc) {
     let s = fiber.read_reg(inst.b) as GcRef;
     let lo = fiber.read_reg(inst.c) as usize;
     let hi = fiber.read_reg(inst.c + 1) as usize;
-    let result = slice::slice_of(gc, s, lo, hi);
+    
+    // flags: bit0 = 1 means input is array, 0 means slice
+    let is_array = (inst.flags & 1) != 0;
+    let result = if is_array {
+        // Input is array: create slice from array range
+        slice::from_array_range(gc, s, lo, hi - lo, hi - lo)
+    } else {
+        // Input is slice: use slice_of
+        slice::slice_of(gc, s, lo, hi)
+    };
     fiber.write_reg(inst.a, result as u64);
 }
 

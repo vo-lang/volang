@@ -362,22 +362,31 @@ fn compile_index(
     let container_type = info.expr_type(idx.expr.id)
         .ok_or_else(|| CodegenError::Internal("index container has no type".to_string()))?;
     
-    // Compile container
-    let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
-    
-    // Compile index
+    // Compile index first (needed for all cases)
     let index_reg = compile_expr(&idx.index, ctx, func, info)?;
     
     // Check if array, slice, map, or string
     if info.is_array(container_type) {
         let elem_slots = info.array_elem_slots(container_type)
             .expect("array must have elem_slots");
-        func.emit_with_flags(Opcode::ArrayGet, elem_slots as u8, dst, container_reg, index_reg);
+        
+        // Check if this is a stack array (non-escaped local variable)
+        if let Some(base_slot) = get_stack_array_base(&idx.expr, func, info) {
+            // Stack array: use SlotGetN
+            // SlotGetN: a=dst, b=base_slot, c=index_reg, flags=elem_slots
+            func.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst, base_slot, index_reg);
+        } else {
+            // Heap array (escaped): compile container and use ArrayGet
+            let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
+            func.emit_with_flags(Opcode::ArrayGet, elem_slots as u8, dst, container_reg, index_reg);
+        }
     } else if info.is_slice(container_type) {
+        let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
         let elem_slots = info.slice_elem_slots(container_type)
             .expect("slice must have elem_slots");
         func.emit_with_flags(Opcode::SliceGet, elem_slots as u8, dst, container_reg, index_reg);
     } else if info.is_map(container_type) {
+        let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
         // MapGet: a=dst, b=map, c=meta_and_key
         // meta_and_key: slots[c] = (key_slots << 16) | (val_slots << 1) | has_ok, key=slots[c+1..]
         let (key_slots, val_slots) = info.map_key_val_slots(container_type)
@@ -390,6 +399,7 @@ fn compile_index(
         func.emit_copy(meta_reg + 1, index_reg, key_slots);
         func.emit_op(Opcode::MapGet, dst, container_reg, meta_reg);
     } else if info.is_string(container_type) {
+        let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
         // String index: StrIndex
         func.emit_op(Opcode::StrIndex, dst, container_reg, index_reg);
     } else {
@@ -397,6 +407,43 @@ fn compile_index(
     }
     
     Ok(())
+}
+
+/// Get the base slot of a stack-allocated array, if applicable.
+/// Returns None if the array is escaped (heap-allocated) or not a simple variable.
+fn get_stack_array_base(
+    expr: &Expr,
+    func: &FuncBuilder,
+    _info: &TypeInfoWrapper,
+) -> Option<u16> {
+    // Only handle simple identifier case for now
+    if let ExprKind::Ident(ident) = &expr.kind {
+        // Check if it's a local variable
+        if let Some(local) = func.lookup_local(ident.symbol) {
+            // Only use SlotGetN for non-escaped (stack) arrays
+            if !local.is_heap {
+                return Some(local.slot);
+            }
+        }
+    }
+    None
+}
+
+/// Get the GcRef slot of an escaped variable without copying.
+/// For slice operations on escaped arrays, we need the GcRef, not a PtrClone.
+/// Returns None if not an escaped local variable.
+fn get_escaped_var_gcref(
+    expr: &Expr,
+    func: &FuncBuilder,
+) -> Option<u16> {
+    if let ExprKind::Ident(ident) = &expr.kind {
+        if let Some(local) = func.lookup_local(ident.symbol) {
+            if local.is_heap {
+                return Some(local.slot);
+            }
+        }
+    }
+    None
 }
 
 // === Slice expression (arr[lo:hi]) ===
@@ -455,12 +502,16 @@ fn compile_slice_expr(
         // SliceSlice: a=dst, b=slice, c=params_start, flags=0 (no max)
         func.emit_with_flags(Opcode::SliceSlice, 0, dst, container_reg, params_start);
     } else if info.is_array(container_type) {
-        // Array slicing creates a slice - this causes the array to escape
-        // For now, just create a slice from the array
-        let elem_slots = info.array_elem_slots(container_type)
-            .expect("array must have elem_slots");
-        func.emit_with_flags(Opcode::SliceSlice, 0, dst, container_reg, params_start);
-        let _ = elem_slots;
+        // Array slicing creates a slice - the array MUST be escaped
+        // For escaped arrays, we need the GcRef directly (not PtrClone copy)
+        // SliceSlice flags: bit0=1 means input is array
+        if let Some(gcref_slot) = get_escaped_var_gcref(&slice_expr.expr, func) {
+            // Use the GcRef directly without copying
+            func.emit_with_flags(Opcode::SliceSlice, 1, dst, gcref_slot, params_start);
+        } else {
+            // Fallback: container_reg should be GcRef for escaped array
+            func.emit_with_flags(Opcode::SliceSlice, 1, dst, container_reg, params_start);
+        }
     } else {
         return Err(CodegenError::Internal("slice on unsupported type".to_string()));
     }

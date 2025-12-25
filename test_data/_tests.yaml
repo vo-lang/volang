@@ -150,6 +150,10 @@ tests:
     mode: [vm]
   - file: var_init_order.vo
     mode: [vm]
+  - file: stack_array_iter.vo
+    mode: [vm]
+  - file: stack_vs_escaped_array.vo
+    mode: [vm]
 
   # JIT-only tests (all skipped - JIT not ready)
   - file: jit/bitwise_ops.vo

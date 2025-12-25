@@ -1,0 +1,12 @@
+package main
+
+func main() {
+    var arr [3]int
+    arr[0] = 100
+    arr[1] = 200
+    arr[2] = 300
+
+    // index 循环访问
+    v := arr[0]
+    println("arr[0] =", v)
+}

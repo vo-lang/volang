@@ -1,0 +1,65 @@
+package main
+
+func main() {
+    // ========== Test 1: 栈上数组 for-range ==========
+    var stackArr [5]int
+    stackArr[0] = 10
+    stackArr[1] = 20
+    stackArr[2] = 30
+    stackArr[3] = 40
+    stackArr[4] = 50
+
+    sumStack := 0
+    for _, v := range stackArr {
+        sumStack = sumStack + v
+    }
+    assert(sumStack == 150)
+    println("Test 1 - Stack array for-range sum:", sumStack)
+
+    // ========== Test 2: 栈上数组字面量 ==========
+    stackLit := [4]int{1, 2, 3, 4}
+    sumLit := 0
+    for _, v := range stackLit {
+        sumLit = sumLit + v
+    }
+    assert(sumLit == 10)
+    println("Test 2 - Stack literal for-range sum:", sumLit)
+
+    // ========== Test 3: 修改不影响迭代（值语义）==========
+    var stackArr3 [3]int
+    stackArr3[0] = 1
+    stackArr3[1] = 2
+    stackArr3[2] = 3
+
+    sumMod := 0
+    for _, v := range stackArr3 {
+        stackArr3[0] = 999
+        sumMod = sumMod + v
+    }
+    assert(sumMod == 6)
+    println("Test 3 - Value semantics (modified during iter):", sumMod)
+
+    println("All stack array tests passed!")
+
+    // ========== Test 4: 逃逸数组（通过 slice）==========
+    var escapedArr [3]int
+    escapedArr[0] = 100
+    escapedArr[1] = 200
+    escapedArr[2] = 300
+    
+    s := escapedArr[:]  // 这会让 escapedArr 逃逸
+    assert(len(s) == 3)
+    assert(s[0] == 100)
+    assert(s[1] == 200)
+    assert(s[2] == 300)
+    println("Test 4 - Escaped array slice: passed")
+
+    // ========== Test 5: blank identifier ==========
+    var arr5 [2]int
+    arr5[0] = 1
+    arr5[1] = 2
+    _ = arr5[:]
+    println("Test 5 - Blank identifier assignment: passed")
+
+    println("All tests passed!")
+}

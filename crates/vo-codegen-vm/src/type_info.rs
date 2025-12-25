@@ -270,6 +270,16 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
+    /// Get array element slot types
+    pub fn array_elem_slot_types(&self, type_key: TypeKey) -> Option<Vec<vo_common_core::types::SlotType>> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Array(a) = &self.tc_objs().types[underlying] {
+            Some(self.type_slot_types(a.elem()))
+        } else {
+            None
+        }
+    }
+
     /// Get slice element slot count
     pub fn slice_elem_slots(&self, type_key: TypeKey) -> Option<u16> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
