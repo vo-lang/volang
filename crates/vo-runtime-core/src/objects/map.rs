@@ -17,14 +17,17 @@ use std::boxed::Box;
 use hashbrown::HashMap;
 
 use crate::gc::{Gc, GcRef};
+use crate::objects::string;
 use vo_common_core::types::{ValueKind, ValueMeta};
 
 type SingleKeyMap = HashMap<u64, Box<[u64]>>;
 type MultiKeyMap = HashMap<Box<[u64]>, Box<[u64]>>;
+type StringKeyMap = HashMap<Box<[u8]>, (GcRef, Box<[u64]>)>;  // key=string content, val=(original GcRef, value)
 
 pub enum MapInner {
     SingleKey(SingleKeyMap),
     MultiKey(MultiKeyMap),
+    StringKey(StringKeyMap),  // For string keys: compare by content
 }
 
 #[repr(C)]
@@ -53,7 +56,10 @@ impl MapData {
 
 pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: u16, val_slots: u16) -> GcRef {
     let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);
-    let inner = if key_slots == 1 {
+    let inner = if key_meta.value_kind() == ValueKind::String {
+        // String keys: use content-based comparison
+        MapInner::StringKey(StringKeyMap::new())
+    } else if key_slots == 1 {
         MapInner::SingleKey(SingleKeyMap::new())
     } else {
         MapInner::MultiKey(MultiKeyMap::new())
@@ -89,6 +95,7 @@ pub fn len(m: GcRef) -> usize {
     match get_inner(m) {
         MapInner::SingleKey(map) => map.len(),
         MapInner::MultiKey(map) => map.len(),
+        MapInner::StringKey(map) => map.len(),
     }
 }
 
@@ -99,6 +106,11 @@ pub fn get(m: GcRef, key: &[u64]) -> Option<&'static [u64]> {
         }
         MapInner::MultiKey(map) => {
             map.get(key).map(|v| v.as_ref())
+        }
+        MapInner::StringKey(map) => {
+            let str_ref = key[0] as GcRef;
+            let str_bytes = string::as_bytes(str_ref);
+            map.get(str_bytes).map(|(_, v)| v.as_ref())
         }
     }
 }
@@ -117,6 +129,14 @@ pub fn get_with_ok(m: GcRef, key: &[u64]) -> (Option<&'static [u64]>, bool) {
                 None => (None, false),
             }
         }
+        MapInner::StringKey(map) => {
+            let str_ref = key[0] as GcRef;
+            let str_bytes = string::as_bytes(str_ref);
+            match map.get(str_bytes) {
+                Some((_, v)) => (Some(v.as_ref()), true),
+                None => (None, false),
+            }
+        }
     }
 }
 
@@ -130,6 +150,11 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64]) {
             let key_box: Box<[u64]> = key.into();
             map.insert(key_box, val_box);
         }
+        MapInner::StringKey(map) => {
+            let str_ref = key[0] as GcRef;
+            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            map.insert(str_bytes, (str_ref, val_box));
+        }
     }
 }
 
@@ -137,6 +162,11 @@ pub fn delete(m: GcRef, key: &[u64]) {
     match get_inner(m) {
         MapInner::SingleKey(map) => { map.remove(&key[0]); }
         MapInner::MultiKey(map) => { map.remove(key); }
+        MapInner::StringKey(map) => {
+            let str_ref = key[0] as GcRef;
+            let str_bytes = string::as_bytes(str_ref);
+            map.remove(str_bytes);
+        }
     }
 }
 
@@ -144,6 +174,11 @@ pub fn contains(m: GcRef, key: &[u64]) -> bool {
     match get_inner(m) {
         MapInner::SingleKey(map) => map.contains_key(&key[0]),
         MapInner::MultiKey(map) => map.contains_key(key),
+        MapInner::StringKey(map) => {
+            let str_ref = key[0] as GcRef;
+            let str_bytes = string::as_bytes(str_ref);
+            map.contains_key(str_bytes)
+        }
     }
 }
 
@@ -159,6 +194,14 @@ pub fn iter_at(m: GcRef, idx: usize) -> Option<(&'static [u64], &'static [u64])>
         }
         MapInner::MultiKey(map) => {
             map.iter().nth(idx).map(|(k, v)| (k.as_ref(), v.as_ref()))
+        }
+        MapInner::StringKey(map) => {
+            map.iter().nth(idx).map(|(_, (str_ref, v))| {
+                let k_slice: &'static [u64] = unsafe {
+                    core::slice::from_raw_parts(str_ref as *const GcRef as *const u64, 1)
+                };
+                (k_slice, v.as_ref())
+            })
         }
     }
 }
