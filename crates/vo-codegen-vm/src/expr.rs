@@ -1252,7 +1252,17 @@ fn compile_builtin_call(
             }
             let map_reg = compile_expr(&call.args[0], _ctx, func, info)?;
             let key_reg = compile_expr(&call.args[1], _ctx, func, info)?;
-            func.emit_op(Opcode::MapDelete, map_reg, key_reg, 0);
+            
+            // MapDelete expects: a=map, b=meta_and_key
+            // meta = key_slots, key at b+1
+            let map_type = info.expr_type(call.args[0].id);
+            let key_slots = map_type.and_then(|t| info.map_key_val_slots(t)).map(|(k, _)| k).unwrap_or(1);
+            
+            let meta_and_key_reg = func.alloc_temp(1 + key_slots);
+            func.emit_op(Opcode::LoadInt, meta_and_key_reg, key_slots, 0);
+            func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
+            
+            func.emit_op(Opcode::MapDelete, map_reg, meta_and_key_reg, 0);
         }
         "close" => {
             // close(chan)
@@ -1380,13 +1390,15 @@ fn compile_composite_lit(
         // Map literal: map[K]V{k1: v1, k2: v2, ...}
         let (key_slots, val_slots) = info.map_key_val_slots(type_key).unwrap_or((1, 1));
         
-        // Get key/val meta
+        // Get key/val meta with correct ValueKind
         let key_slot_types = info.map_key_slot_types(type_key)
             .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
         let val_slot_types = info.map_val_slot_types(type_key)
             .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
-        let key_meta_idx = ctx.get_or_create_value_meta(None, key_slots, &key_slot_types);
-        let val_meta_idx = ctx.get_or_create_value_meta(None, val_slots, &val_slot_types);
+        let key_kind = info.map_key_value_kind(type_key);
+        let val_kind = info.map_val_value_kind(type_key);
+        let key_meta_idx = ctx.get_or_create_value_meta_with_kind(None, key_slots, &key_slot_types, key_kind);
+        let val_meta_idx = ctx.get_or_create_value_meta_with_kind(None, val_slots, &val_slot_types, val_kind);
         
         // MapNew: a=dst, b=packed_meta, c=(key_slots<<8)|val_slots
         // packed_meta = (key_meta << 32) | val_meta
@@ -1406,14 +1418,6 @@ fn compile_composite_lit(
         // Set each key-value pair
         for elem in &lit.elems {
             if let Some(key) = &elem.key {
-                let key_expr = match key {
-                    vo_syntax::ast::CompositeLitKey::Expr(e) => e,
-                    vo_syntax::ast::CompositeLitKey::Ident(ident) => {
-                        // For map literals, the key should be an expression
-                        return Err(CodegenError::Internal(format!("map literal key should be expr, got ident {:?}", ident.symbol)));
-                    }
-                };
-                
                 // MapSet expects: a=map, b=meta_and_key, c=val
                 // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots as u16);
@@ -1422,7 +1426,32 @@ fn compile_composite_lit(
                 func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
                 
                 // Compile key into meta_and_key_reg+1
-                compile_expr_to(key_expr, meta_and_key_reg + 1, ctx, func, info)?;
+                // Handle both Expr and Ident (for bool literals like true/false)
+                match key {
+                    vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
+                        compile_expr_to(key_expr, meta_and_key_reg + 1, ctx, func, info)?;
+                    }
+                    vo_syntax::ast::CompositeLitKey::Ident(ident) => {
+                        // Ident as key: could be true/false or a variable
+                        let name = info.project.interner.resolve(ident.symbol).unwrap_or("");
+                        if name == "true" {
+                            func.emit_op(Opcode::LoadInt, meta_and_key_reg + 1, 1, 0);
+                        } else if name == "false" {
+                            func.emit_op(Opcode::LoadInt, meta_and_key_reg + 1, 0, 0);
+                        } else {
+                            // Variable reference - compile as identifier expression
+                            if let Some(local) = func.lookup_local(ident.symbol) {
+                                if local.is_heap {
+                                    func.emit_op(Opcode::Copy, meta_and_key_reg + 1, local.slot, 0);
+                                } else {
+                                    func.emit_copy(meta_and_key_reg + 1, local.slot, local.slots);
+                                }
+                            } else {
+                                return Err(CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol)));
+                            }
+                        }
+                    }
+                };
                 
                 // Compile value
                 let val_reg = compile_expr(&elem.value, ctx, func, info)?;

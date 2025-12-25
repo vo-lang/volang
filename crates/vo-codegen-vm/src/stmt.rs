@@ -1418,8 +1418,18 @@ fn compile_assign(
                 func.emit_with_flags(Opcode::SliceSet, elem_slots as u8, container_reg, index_reg, val_reg);
             } else if info.is_map(container_type) {
                 // Map: MapSet
+                // MapSet expects: a=map, b=meta_and_key, c=val
+                // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                func.emit_op(Opcode::MapSet, container_reg, index_reg, val_reg);
+                let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
+                
+                let meta_and_key_reg = func.alloc_temp(1 + key_slots);
+                let meta = ((key_slots as u32) << 8) | (val_slots as u32);
+                let (b, c) = crate::type_info::encode_i32(meta as i32);
+                func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
+                func.emit_copy(meta_and_key_reg + 1, index_reg, key_slots);
+                
+                func.emit_op(Opcode::MapSet, container_reg, meta_and_key_reg, val_reg);
             } else {
                 return Err(CodegenError::InvalidLHS);
             }
@@ -1578,10 +1588,25 @@ fn compile_compound_assign(
                 func.emit_with_flags(Opcode::SliceSet, 1, container_reg, index_reg, tmp);
             } else if info.is_map(container_type) {
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                let tmp = func.alloc_temp(1);
-                func.emit_op(Opcode::MapGet, tmp, container_reg, index_reg);
+                let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
+                
+                // Build meta_and_key for MapGet/MapSet
+                let meta_and_key_reg = func.alloc_temp(1 + key_slots);
+                let meta = ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | 0; // MapGet format
+                let (b, c) = crate::type_info::encode_i32(meta as i32);
+                func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
+                func.emit_copy(meta_and_key_reg + 1, index_reg, key_slots);
+                
+                let tmp = func.alloc_temp(val_slots);
+                func.emit_op(Opcode::MapGet, tmp, container_reg, meta_and_key_reg);
                 func.emit_op(opcode, tmp, tmp, rhs_reg);
-                func.emit_op(Opcode::MapSet, container_reg, index_reg, tmp);
+                
+                // Rebuild meta for MapSet (different format)
+                let meta_set = ((key_slots as u32) << 8) | (val_slots as u32);
+                let (b2, c2) = crate::type_info::encode_i32(meta_set as i32);
+                func.emit_op(Opcode::LoadInt, meta_and_key_reg, b2, c2);
+                
+                func.emit_op(Opcode::MapSet, container_reg, meta_and_key_reg, tmp);
             } else {
                 return Err(CodegenError::InvalidLHS);
             }

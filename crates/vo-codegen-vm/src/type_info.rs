@@ -250,6 +250,57 @@ impl<'a> TypeInfoWrapper<'a> {
         Some(self.type_slot_types(map_type.elem()))
     }
 
+    /// Get map key ValueKind
+    pub fn map_key_value_kind(&self, type_key: TypeKey) -> Option<vo_common_core::types::ValueKind> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let map_type = self.tc_objs().types[underlying].try_as_map()?;
+        Some(self.type_value_kind(map_type.key()))
+    }
+
+    /// Get map value ValueKind
+    pub fn map_val_value_kind(&self, type_key: TypeKey) -> Option<vo_common_core::types::ValueKind> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let map_type = self.tc_objs().types[underlying].try_as_map()?;
+        Some(self.type_value_kind(map_type.elem()))
+    }
+
+    /// Get ValueKind for a type
+    pub fn type_value_kind(&self, type_key: TypeKey) -> vo_common_core::types::ValueKind {
+        use vo_common_core::types::ValueKind;
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        match &self.tc_objs().types[underlying] {
+            Type::Basic(b) => {
+                use vo_analysis::typ::BasicType;
+                match b.typ() {
+                    BasicType::Bool | BasicType::UntypedBool => ValueKind::Bool,
+                    BasicType::Int | BasicType::UntypedInt => ValueKind::Int,
+                    BasicType::Int8 => ValueKind::Int8,
+                    BasicType::Int16 => ValueKind::Int16,
+                    BasicType::Int32 | BasicType::UntypedRune => ValueKind::Int32,
+                    BasicType::Int64 => ValueKind::Int64,
+                    BasicType::Uint => ValueKind::Uint,
+                    BasicType::Uint8 | BasicType::Byte => ValueKind::Uint8,
+                    BasicType::Uint16 => ValueKind::Uint16,
+                    BasicType::Uint32 => ValueKind::Uint32,
+                    BasicType::Uint64 | BasicType::Uintptr => ValueKind::Uint64,
+                    BasicType::Float32 => ValueKind::Float32,
+                    BasicType::Float64 | BasicType::UntypedFloat => ValueKind::Float64,
+                    BasicType::Str | BasicType::UntypedString => ValueKind::String,
+                    _ => ValueKind::Int,
+                }
+            }
+            Type::Pointer(_) => ValueKind::Pointer,
+            Type::Array(_) => ValueKind::Array,
+            Type::Slice(_) => ValueKind::Slice,
+            Type::Map(_) => ValueKind::Map,
+            Type::Struct(_) => ValueKind::Struct,
+            Type::Interface(_) => ValueKind::Interface,
+            Type::Chan(_) => ValueKind::Channel,
+            Type::Signature(_) => ValueKind::Closure,
+            _ => ValueKind::Int,
+        }
+    }
+
     /// Get object's type
     pub fn obj_type(&self, obj: ObjKey) -> Option<TypeKey> {
         self.tc_objs().lobjs[obj].typ()

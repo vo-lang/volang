@@ -235,17 +235,30 @@ impl CodegenContext {
         slots: u16,
         slot_types: &[vo_common_core::types::SlotType],
     ) -> u16 {
-        // Create ValueMeta constant
-        // ValueMeta format: meta_id:24 | value_kind:8
-        // For now, use a simple encoding: slots as meta_id, first slot_type as kind
-        use vo_common_core::types::SlotType;
+        self.get_or_create_value_meta_with_kind(_type_key, slots, slot_types, None)
+    }
+
+    /// Get or create ValueMeta with explicit ValueKind
+    pub fn get_or_create_value_meta_with_kind(
+        &mut self,
+        _type_key: Option<TypeKey>,
+        slots: u16,
+        slot_types: &[vo_common_core::types::SlotType],
+        value_kind: Option<vo_common_core::types::ValueKind>,
+    ) -> u16 {
+        use vo_common_core::types::{SlotType, ValueKind};
         
-        let kind = slot_types.first().copied().unwrap_or(SlotType::Value);
-        let kind_byte = match kind {
-            SlotType::Value => 0,
-            SlotType::GcRef => 1,
-            SlotType::Interface0 => 2,
-            SlotType::Interface1 => 3,
+        // Use explicit value_kind if provided, otherwise infer from slot_types
+        let kind_byte = if let Some(vk) = value_kind {
+            vk as u8
+        } else {
+            let kind = slot_types.first().copied().unwrap_or(SlotType::Value);
+            match kind {
+                SlotType::Value => ValueKind::Int as u8,
+                SlotType::GcRef => ValueKind::Pointer as u8,  // Default GcRef, use Pointer
+                SlotType::Interface0 => ValueKind::Interface as u8,
+                SlotType::Interface1 => ValueKind::Interface as u8,
+            }
         };
         
         // Simple ValueMeta: just encode slots and kind
