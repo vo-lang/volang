@@ -7,17 +7,7 @@ use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
 use crate::func::FuncBuilder;
-use crate::type_info::TypeInfoWrapper;
-
-fn is_float_type(type_key: vo_analysis::objects::TypeKey, info: &TypeInfoWrapper) -> bool {
-    use vo_analysis::typ::{underlying_type, BasicType, Type};
-    let underlying = underlying_type(type_key, &info.project.tc_objs);
-    if let Type::Basic(b) = &info.project.tc_objs.types[underlying] {
-        matches!(b.typ(), BasicType::Float32 | BasicType::Float64 | BasicType::UntypedFloat)
-    } else {
-        false
-    }
-}
+use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Compile a statement.
 pub fn compile_stmt(
@@ -64,11 +54,7 @@ pub fn compile_stmt(
                             // Compile value to temp, then PtrSet
                             let tmp = func.alloc_temp(slots);
                             compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
-                            if slots == 1 {
-                                func.emit_op(Opcode::PtrSet, slot, 0, tmp);
-                            } else {
-                                func.emit_with_flags(Opcode::PtrSetN, slots as u8, slot, 0, tmp);
-                            }
+                            func.emit_ptr_set(slot, 0, tmp, slots);
                         }
                         // else: PtrNew already zero-initializes
                     } else {
@@ -130,11 +116,7 @@ pub fn compile_stmt(
                         if i < short_var.values.len() {
                             let tmp = func.alloc_temp(slots);
                             compile_expr_to(&short_var.values[i], tmp, ctx, func, info)?;
-                            if slots == 1 {
-                                func.emit_op(Opcode::PtrSet, slot, 0, tmp);
-                            } else {
-                                func.emit_with_flags(Opcode::PtrSetN, slots as u8, slot, 0, tmp);
-                            }
+                            func.emit_ptr_set(slot, 0, tmp, slots);
                         }
                     } else {
                         let slot = func.define_local_stack(name.symbol, slots, &slot_types);
@@ -367,33 +349,7 @@ pub fn compile_stmt(
                             // IterBegin: a=iter_args, b=iter_type(6=StackArray)
                             func.emit_op(Opcode::IterBegin, iter_args, 6, 0);
                             
-                            // Loop start
-                            let loop_start = func.current_pc();
-                            func.enter_loop(loop_start, None);
-                            
-                            // IterNext: a=key_dst, b=val_dst, c=done_offset (to be patched)
-                            let iter_next_pc = func.current_pc();
-                            func.emit_op(Opcode::IterNext, key_slot, val_slot, 0); // c will be patched
-                            
-                            // Compile loop body
-                            compile_block(&for_stmt.body, ctx, func, info)?;
-                            
-                            // Jump back to loop start
-                            func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                            
-                            // Patch IterNext done_offset to here
-                            let loop_end = func.current_pc();
-                            let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                            func.patch_jump(iter_next_pc, done_offset as usize);
-                            
-                            // IterEnd
-                            func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                            
-                            // Patch breaks
-                            let break_patches = func.exit_loop();
-                            for pc in break_patches {
-                                func.patch_jump(pc, func.current_pc());
-                            }
+                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
                         } else {
                             // Heap array iteration
                             let arr_slot = if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
@@ -436,31 +392,12 @@ pub fn compile_stmt(
                             // IterBegin: a=iter_args, b=iter_type(0=HeapArray)
                             func.emit_op(Opcode::IterBegin, iter_args, 0, 0);
                             
-                            // Loop
-                            let loop_start = func.current_pc();
-                            func.enter_loop(loop_start, None);
-                            
-                            let iter_next_pc = func.current_pc();
-                            func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
-                            
-                            compile_block(&for_stmt.body, ctx, func, info)?;
-                            
-                            func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                            
-                            let loop_end = func.current_pc();
-                            let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                            func.patch_jump(iter_next_pc, done_offset as usize);
-                            
-                            func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                            
-                            let break_patches = func.exit_loop();
-                            for pc in break_patches {
-                                func.patch_jump(pc, func.current_pc());
-                            }
+                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
                         }
                     } else if info.is_slice(range_type.unwrap()) {
                         // Slice iteration
-                        let elem_slots = info.slice_elem_slots(range_type.unwrap()).unwrap_or(1) as u8;
+                        let elem_slots = info.slice_elem_slots(range_type.unwrap())
+                            .expect("slice must have elem_slots") as u8;
                         
                         // Compile slice expression
                         let slice_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -499,27 +436,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(1=Slice)
                         func.emit_op(Opcode::IterBegin, iter_args, 1, 0);
                         
-                        // Loop
-                        let loop_start = func.current_pc();
-                        func.enter_loop(loop_start, None);
-                        
-                        let iter_next_pc = func.current_pc();
-                        func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
-                        
-                        compile_block(&for_stmt.body, ctx, func, info)?;
-                        
-                        func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                        
-                        let loop_end = func.current_pc();
-                        let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                        func.patch_jump(iter_next_pc, done_offset as usize);
-                        
-                        func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                        
-                        let break_patches = func.exit_loop();
-                        for pc in break_patches {
-                            func.patch_jump(pc, func.current_pc());
-                        }
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
                     } else if info.is_string(range_type.unwrap()) {
                         // String iteration
                         let str_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -558,27 +475,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(3=String)
                         func.emit_op(Opcode::IterBegin, iter_args, 3, 0);
                         
-                        // Loop
-                        let loop_start = func.current_pc();
-                        func.enter_loop(loop_start, None);
-                        
-                        let iter_next_pc = func.current_pc();
-                        func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
-                        
-                        compile_block(&for_stmt.body, ctx, func, info)?;
-                        
-                        func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                        
-                        let loop_end = func.current_pc();
-                        let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                        func.patch_jump(iter_next_pc, done_offset as usize);
-                        
-                        func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                        
-                        let break_patches = func.exit_loop();
-                        for pc in break_patches {
-                            func.patch_jump(pc, func.current_pc());
-                        }
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
                     } else if info.is_map(range_type.unwrap()) {
                         // Map iteration
                         let map_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -620,33 +517,14 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(2=Map)
                         func.emit_op(Opcode::IterBegin, iter_args, 2, 0);
                         
-                        // Loop
-                        let loop_start = func.current_pc();
-                        func.enter_loop(loop_start, None);
-                        
-                        let iter_next_pc = func.current_pc();
-                        func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
-                        
-                        compile_block(&for_stmt.body, ctx, func, info)?;
-                        
-                        func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                        
-                        let loop_end = func.current_pc();
-                        let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                        func.patch_jump(iter_next_pc, done_offset as usize);
-                        
-                        func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                        
-                        let break_patches = func.exit_loop();
-                        for pc in break_patches {
-                            func.patch_jump(pc, func.current_pc());
-                        }
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
                     } else if info.is_chan(range_type.unwrap()) {
                         // Channel iteration: for v := range ch
                         let chan_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
                         
                         // Get element slot count from channel type
-                        let elem_slots = info.chan_elem_slots(range_type.unwrap()).unwrap_or(1);
+                        let elem_slots = info.chan_elem_slots(range_type.unwrap())
+                            .expect("channel must have elem_slots");
                         
                         // Define value variable (channels don't have key in for-range)
                         let val_slot = if let Some(v) = value {
@@ -678,28 +556,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(5=Channel)
                         func.emit_op(Opcode::IterBegin, iter_args, 5, 0);
                         
-                        // Loop
-                        let loop_start = func.current_pc();
-                        func.enter_loop(loop_start, None);
-                        
-                        let iter_next_pc = func.current_pc();
-                        // IterNext for channel: a=val_slot, returns done flag
-                        func.emit_op(Opcode::IterNext, val_slot, 0, 0);
-                        
-                        compile_block(&for_stmt.body, ctx, func, info)?;
-                        
-                        func.emit_jump_to(Opcode::Jump, 0, loop_start);
-                        
-                        let loop_end = func.current_pc();
-                        let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-                        func.patch_jump(iter_next_pc, done_offset as usize);
-                        
-                        func.emit_op(Opcode::IterEnd, 0, 0, 0);
-                        
-                        let break_patches = func.exit_loop();
-                        for pc in break_patches {
-                            func.patch_jump(pc, func.current_pc());
-                        }
+                        emit_iter_loop(val_slot, 0, &for_stmt.body, ctx, func, info)?;
                     } else {
                         return Err(CodegenError::UnsupportedStmt("for-range unsupported type".to_string()));
                     }
@@ -828,12 +685,42 @@ pub fn compile_stmt(
         StmtKind::Type(_type_decl) => {
             // Type declarations are compile-time, no runtime code needed
         }
-
-        _ => {
-            return Err(CodegenError::UnsupportedStmt(format!("{:?}", stmt.kind)));
-        }
     }
 
+    Ok(())
+}
+
+/// Execute the iteration loop body with standard loop control flow.
+/// This handles: enter_loop, IterNext, body, Jump back, patch done, IterEnd, exit_loop
+fn emit_iter_loop(
+    key_slot: u16,
+    val_slot: u16,
+    body: &Block,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let loop_start = func.current_pc();
+    func.enter_loop(loop_start, None);
+    
+    let iter_next_pc = func.current_pc();
+    func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
+    
+    compile_block(body, ctx, func, info)?;
+    
+    func.emit_jump_to(Opcode::Jump, 0, loop_start);
+    
+    let loop_end = func.current_pc();
+    let done_offset = (loop_end as i32) - (iter_next_pc as i32);
+    func.patch_jump(iter_next_pc, done_offset as usize);
+    
+    func.emit_op(Opcode::IterEnd, 0, 0, 0);
+    
+    let break_patches = func.exit_loop();
+    for pc in break_patches {
+        func.patch_jump(pc, func.current_pc());
+    }
+    
     Ok(())
 }
 
@@ -1079,10 +966,6 @@ fn compile_select(
     Ok(())
 }
 
-fn encode_i32(val: i32) -> (u16, u16) {
-    let bits = val as u32;
-    ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
-}
 
 /// Compile type switch statement
 fn compile_type_switch(
@@ -1190,11 +1073,7 @@ fn compile_type_switch(
                     let var_slot = func.define_local_stack(assign_name.symbol, slots, &slot_types);
                     
                     // Copy interface data to variable
-                    if slots == 1 {
-                        func.emit_op(Opcode::Copy, var_slot, iface_slot + 1, 0);
-                    } else {
-                        func.emit_with_flags(Opcode::CopyN, slots as u8, var_slot, iface_slot + 1, slots);
-                    }
+                    func.emit_copy(var_slot, iface_slot + 1, slots);
                 }
             }
         }
@@ -1379,11 +1258,7 @@ fn compile_assign(
                 } else if is_heap {
                     // Escaped variable: write via PtrSet
                     let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                    if slots == 1 {
-                        func.emit_op(Opcode::PtrSet, slot, 0, tmp);
-                    } else {
-                        func.emit_with_flags(Opcode::PtrSetN, slots as u8, slot, 0, tmp);
-                    }
+                    func.emit_ptr_set(slot, 0, tmp, slots);
                 } else {
                     // Stack variable: direct write
                     compile_expr_to(rhs, slot, ctx, func, info)?;
@@ -1415,11 +1290,7 @@ fn compile_assign(
                 // Compile ptr, then PtrSet
                 let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
                 let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                if slots == 1 {
-                    func.emit_op(Opcode::PtrSet, ptr_reg, offset, tmp);
-                } else {
-                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr_reg, offset, tmp);
-                }
+                func.emit_ptr_set(ptr_reg, offset, tmp, slots);
             } else {
                 // Value receiver: get field offset directly
                 let (offset, slots) = info.struct_field_offset(recv_type, field_name)
@@ -1433,11 +1304,7 @@ fn compile_assign(
                         if is_heap {
                             // Heap variable: use PtrSet
                             let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                            if slots == 1 {
-                                func.emit_op(Opcode::PtrSet, base_slot, offset, tmp);
-                            } else {
-                                func.emit_with_flags(Opcode::PtrSetN, slots as u8, base_slot, offset, tmp);
-                            }
+                            func.emit_ptr_set(base_slot, offset, tmp, slots);
                         } else {
                             // Stack variable: direct slot write
                             let target_slot = base_slot + offset;
@@ -1465,7 +1332,8 @@ fn compile_assign(
             
             if info.is_array(container_type) {
                 // Array: check if stack or heap
-                let elem_slots = info.array_elem_slots(container_type).unwrap_or(1);
+                let elem_slots = info.array_elem_slots(container_type)
+                    .expect("array must have elem_slots");
                 
                 if let ExprKind::Ident(ident) = &idx.expr.kind {
                     if let Some(local) = func.lookup_local(ident.symbol) {
@@ -1489,7 +1357,8 @@ fn compile_assign(
             } else if info.is_slice(container_type) {
                 // Slice: SliceSet
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                let elem_slots = info.slice_elem_slots(container_type).unwrap_or(1);
+                let elem_slots = info.slice_elem_slots(container_type)
+                    .expect("slice must have elem_slots");
                 func.emit_with_flags(Opcode::SliceSet, elem_slots as u8, container_reg, index_reg, val_reg);
             } else if info.is_map(container_type) {
                 // Map: MapSet
@@ -1521,7 +1390,7 @@ fn compile_compound_assign(
     
     // Get the operation opcode based on AssignOp and type
     let lhs_type = info.expr_type(lhs.id);
-    let is_float = lhs_type.map(|t| is_float_type(t, info)).unwrap_or(false);
+    let is_float = lhs_type.map(|t| info.is_float(t)).unwrap_or(false);
     
     let opcode = match (op, is_float) {
         (AssignOp::Add, false) => Opcode::AddI,

@@ -22,20 +22,6 @@ pub fn compile_expr(
     Ok(dst)
 }
 
-/// Compile expression with multiple return values, return (result_slot, slot_count).
-pub fn compile_expr_multi(
-    expr: &Expr,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(u16, u16), CodegenError> {
-    let type_key = info.expr_type(expr.id);
-    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-    let dst = func.alloc_temp(slots);
-    compile_expr_to(expr, dst, ctx, func, info)?;
-    Ok((dst, slots))
-}
-
 /// Compile expression to specified slot.
 pub fn compile_expr_to(
     expr: &Expr,
@@ -85,11 +71,7 @@ pub fn compile_expr_to(
                     }
                 } else {
                     // Stack variable: direct copy
-                    if local.slots == 1 {
-                        func.emit_op(Opcode::Copy, dst, local.slot, 0);
-                    } else {
-                        func.emit_with_flags(Opcode::CopyN, local.slots as u8, dst, local.slot, local.slots);
-                    }
+                    func.emit_copy(dst, local.slot, local.slots);
                 }
             } else if let Some(capture) = func.lookup_capture(ident.symbol) {
                 // Closure capture: use ClosureGet
@@ -110,8 +92,8 @@ pub fn compile_expr_to(
 
             // Get type to determine int/float operation
             let type_key = info.expr_type(expr.id);
-            let is_float = type_key.map(|t| is_float_type(t, info)).unwrap_or(false);
-            let is_string = type_key.map(|t| is_string_type(t, info)).unwrap_or(false);
+            let is_float = type_key.map(|t| info.is_float(t)).unwrap_or(false);
+            let is_string = type_key.map(|t| info.is_string(t)).unwrap_or(false);
 
             let opcode = match (&bin.op, is_float, is_string) {
                 (BinaryOp::Add, false, false) => Opcode::AddI,
@@ -175,7 +157,7 @@ pub fn compile_expr_to(
                 UnaryOp::Neg => {
                     let operand = compile_expr(&unary.operand, ctx, func, info)?;
                     let type_key = info.expr_type(expr.id);
-                    let is_float = type_key.map(|t| is_float_type(t, info)).unwrap_or(false);
+                    let is_float = type_key.map(|t| info.is_float(t)).unwrap_or(false);
                     let opcode = if is_float { Opcode::NegF } else { Opcode::NegI };
                     func.emit_op(opcode, dst, operand, 0);
                 }
@@ -256,10 +238,6 @@ pub fn compile_expr_to(
         // === Function literal (closure) ===
         ExprKind::FuncLit(func_lit) => {
             compile_func_lit(expr, func_lit, dst, ctx, func, info)?;
-        }
-
-        _ => {
-            return Err(CodegenError::UnsupportedExpr(format!("{:?}", expr.kind)));
         }
     }
 
@@ -343,11 +321,7 @@ fn compile_selector(
                     .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
                 
                 let src_slot = local_slot + offset;
-                if slots == 1 {
-                    func.emit_op(Opcode::Copy, dst, src_slot, 0);
-                } else {
-                    func.emit_with_flags(Opcode::CopyN, slots as u8, dst, src_slot, slots);
-                }
+                func.emit_copy(dst, src_slot, slots);
             }
         } else {
             // Temporary value - compile receiver first
@@ -356,11 +330,7 @@ fn compile_selector(
                 .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
             
             let src_slot = recv_reg + offset;
-            if slots == 1 {
-                func.emit_op(Opcode::Copy, dst, src_slot, 0);
-            } else {
-                func.emit_with_flags(Opcode::CopyN, slots as u8, dst, src_slot, slots);
-            }
+            func.emit_copy(dst, src_slot, slots);
         }
     }
     
@@ -400,25 +370,24 @@ fn compile_index(
     
     // Check if array, slice, map, or string
     if info.is_array(container_type) {
-        let elem_slots = info.array_elem_slots(container_type).unwrap_or(1);
+        let elem_slots = info.array_elem_slots(container_type)
+            .expect("array must have elem_slots");
         func.emit_with_flags(Opcode::ArrayGet, elem_slots as u8, dst, container_reg, index_reg);
     } else if info.is_slice(container_type) {
-        let elem_slots = info.slice_elem_slots(container_type).unwrap_or(1);
+        let elem_slots = info.slice_elem_slots(container_type)
+            .expect("slice must have elem_slots");
         func.emit_with_flags(Opcode::SliceGet, elem_slots as u8, dst, container_reg, index_reg);
     } else if info.is_map(container_type) {
         // MapGet: a=dst, b=map, c=meta_and_key
         // meta_and_key: slots[c] = (key_slots << 16) | (val_slots << 1) | has_ok, key=slots[c+1..]
-        let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
+        let (key_slots, val_slots) = info.map_key_val_slots(container_type)
+            .expect("map must have key/val slots");
         let meta = ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | 0; // has_ok=0
         let meta_reg = func.alloc_temp(1 + key_slots);
         let (b, c) = encode_i32(meta as i32);
         func.emit_op(Opcode::LoadInt, meta_reg, b, c);
         // Copy key to meta_reg+1
-        if key_slots == 1 {
-            func.emit_op(Opcode::Copy, meta_reg + 1, index_reg, 0);
-        } else {
-            func.emit_with_flags(Opcode::CopyN, key_slots as u8, meta_reg + 1, index_reg, key_slots);
-        }
+        func.emit_copy(meta_reg + 1, index_reg, key_slots);
         func.emit_op(Opcode::MapGet, dst, container_reg, meta_reg);
     } else if info.is_string(container_type) {
         // String index: StrIndex
@@ -488,7 +457,8 @@ fn compile_slice_expr(
     } else if info.is_array(container_type) {
         // Array slicing creates a slice - this causes the array to escape
         // For now, just create a slice from the array
-        let elem_slots = info.array_elem_slots(container_type).unwrap_or(1);
+        let elem_slots = info.array_elem_slots(container_type)
+            .expect("array must have elem_slots");
         func.emit_with_flags(Opcode::SliceSlice, 0, dst, container_reg, params_start);
         let _ = elem_slots;
     } else {
@@ -550,10 +520,10 @@ fn compile_receive(
     let chan_reg = compile_expr(chan_expr, ctx, func, info)?;
     
     // Get element type info
-    let chan_type = info.expr_type(chan_expr.id);
-    let elem_slots = chan_type
-        .and_then(|t| info.chan_elem_slots(t))
-        .unwrap_or(1);
+    let chan_type = info.expr_type(chan_expr.id)
+        .expect("channel expr must have type");
+    let elem_slots = info.chan_elem_slots(chan_type)
+        .expect("channel must have elem_slots");
     
     // Check if result includes ok bool (v, ok := <-ch)
     let result_type = info.expr_type(expr.id);
@@ -616,10 +586,7 @@ fn compile_conversion(
     Ok(())
 }
 
-fn encode_i32(val: i32) -> (u16, u16) {
-    let bits = val as u32;
-    ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
-}
+use crate::type_info::encode_i32;
 
 // === Function literal (closure) ===
 
@@ -742,10 +709,10 @@ fn compile_deref(
     let ptr_reg = compile_expr(operand, ctx, func, info)?;
     
     // Get element type slot count
-    let ptr_type = info.expr_type(operand.id);
-    let elem_slots = ptr_type
-        .and_then(|t| info.pointer_elem_slots(t))
-        .unwrap_or(1);
+    let ptr_type = info.expr_type(operand.id)
+        .expect("pointer expr must have type");
+    let elem_slots = info.pointer_elem_slots(ptr_type)
+        .expect("pointer must have elem_slots");
     
     if elem_slots == 1 {
         func.emit_op(Opcode::PtrGet, dst, ptr_reg, 0);
@@ -814,11 +781,7 @@ fn compile_call(
             
             // Copy result to dst if not already there
             if ret_slots > 0 {
-                if ret_slots == 1 {
-                    func.emit_op(Opcode::Copy, dst, args_start, 0);
-                } else {
-                    func.emit_with_flags(Opcode::CopyN, ret_slots as u8, dst, args_start, ret_slots);
-                }
+                func.emit_copy(dst, args_start, ret_slots);
             }
             return Ok(());
         }
@@ -844,11 +807,7 @@ fn compile_call(
             
             // Copy result to dst if needed
             if ret_slots > 0 {
-                if ret_slots == 1 {
-                    func.emit_op(Opcode::Copy, dst, args_start, 0);
-                } else {
-                    func.emit_with_flags(Opcode::CopyN, ret_slots as u8, dst, args_start, ret_slots);
-                }
+                func.emit_copy(dst, args_start, ret_slots);
             }
             
             return Ok(());
@@ -876,11 +835,7 @@ fn compile_call(
     
     // Copy result to dst if needed
     if ret_slots > 0 {
-        if ret_slots == 1 {
-            func.emit_op(Opcode::Copy, dst, args_start, 0);
-        } else {
-            func.emit_with_flags(Opcode::CopyN, ret_slots as u8, dst, args_start, ret_slots);
-        }
+        func.emit_copy(dst, args_start, ret_slots);
     }
     
     Ok(())
@@ -940,11 +895,7 @@ fn compile_method_call(
         
         // Copy receiver to args (slot 0)
         let recv_slots = info.type_slot_count(recv_type);
-        if recv_slots == 1 {
-            func.emit_op(Opcode::Copy, args_start, recv_reg, 0);
-        } else {
-            func.emit_with_flags(Opcode::CopyN, recv_slots as u8, args_start, recv_reg, recv_slots);
-        }
+        func.emit_copy(args_start, recv_reg, recv_slots);
         
         // Compile other arguments
         let mut arg_offset = recv_slots;
@@ -1072,7 +1023,7 @@ fn compile_builtin_call(
                     let len = info.array_len(type_key).unwrap_or(0);
                     let (b, c) = encode_i32(len as i32);
                     func.emit_op(Opcode::LoadInt, dst, b, c);
-                } else if is_string_type(type_key, info) {
+                } else if info.is_string(type_key) {
                     func.emit_op(Opcode::StrLen, dst, arg_reg, 0);
                 } else {
                     // Slice: SliceLen
@@ -1126,7 +1077,8 @@ fn compile_builtin_call(
             if let Some(type_key) = result_type {
                 if info.is_slice(type_key) {
                     // make([]T, len) or make([]T, len, cap)
-                    let elem_slots = info.slice_elem_slots(type_key).unwrap_or(1);
+                    let elem_slots = info.slice_elem_slots(type_key)
+                        .expect("slice must have elem_slots");
                     let len_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], _ctx, func, info)?
                     } else {
@@ -1174,8 +1126,10 @@ fn compile_builtin_call(
             let slice_reg = compile_expr(&call.args[0], _ctx, func, info)?;
             let elem_reg = compile_expr(&call.args[1], _ctx, func, info)?;
             
-            let slice_type = info.expr_type(call.args[0].id);
-            let elem_slots = slice_type.and_then(|t| info.slice_elem_slots(t)).unwrap_or(1);
+            let slice_type = info.expr_type(call.args[0].id)
+                .expect("append slice must have type");
+            let elem_slots = info.slice_elem_slots(slice_type)
+                .expect("slice must have elem_slots");
             
             // SliceAppend: a=dst, b=slice, c=elem, flags=elem_slots
             func.emit_with_flags(Opcode::SliceAppend, elem_slots as u8, dst, slice_reg, elem_reg);
@@ -1281,7 +1235,8 @@ fn compile_composite_lit(
         }
     } else if info.is_array(type_key) {
         // Array literal
-        let elem_slots = info.array_elem_slots(type_key).unwrap_or(1);
+        let elem_slots = info.array_elem_slots(type_key)
+            .expect("array must have elem_slots");
         
         for (i, elem) in lit.elems.iter().enumerate() {
             let offset = (i as u16) * elem_slots;
@@ -1290,7 +1245,8 @@ fn compile_composite_lit(
     } else if info.is_slice(type_key) {
         // Slice literal: []T{e1, e2, ...}
         // Create slice with make, then set elements
-        let elem_slots = info.slice_elem_slots(type_key).unwrap_or(1);
+        let elem_slots = info.slice_elem_slots(type_key)
+            .expect("slice must have elem_slots");
         let len = lit.elems.len() as u16;
         
         // SliceNew: a=dst, b=len, c=cap (use len as cap)
@@ -1395,22 +1351,3 @@ fn compile_const_value(
     Ok(())
 }
 
-fn is_float_type(type_key: vo_analysis::objects::TypeKey, info: &TypeInfoWrapper) -> bool {
-    use vo_analysis::typ::{underlying_type, BasicType, Type};
-    let underlying = underlying_type(type_key, &info.project.tc_objs);
-    if let Type::Basic(b) = &info.project.tc_objs.types[underlying] {
-        matches!(b.typ(), BasicType::Float32 | BasicType::Float64 | BasicType::UntypedFloat)
-    } else {
-        false
-    }
-}
-
-fn is_string_type(type_key: vo_analysis::objects::TypeKey, info: &TypeInfoWrapper) -> bool {
-    use vo_analysis::typ::{underlying_type, BasicType, Type};
-    let underlying = underlying_type(type_key, &info.project.tc_objs);
-    if let Type::Basic(b) = &info.project.tc_objs.types[underlying] {
-        matches!(b.typ(), BasicType::Str | BasicType::UntypedString)
-    } else {
-        false
-    }
-}

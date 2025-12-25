@@ -125,18 +125,6 @@ impl Project {
         &self.tc_objs.pkgs[self.main_package]
     }
 
-    /// Creates a TypeQuery for the main package.
-    pub fn query(&self) -> crate::query::TypeQuery<'_> {
-        let pkg = &self.tc_objs.pkgs[self.main_package];
-        crate::query::TypeQuery::new(&self.tc_objs, &self.interner, Some(*pkg.scope()))
-    }
-
-    /// Creates a TypeQuery for a specific package.
-    pub fn query_package(&self, pkg_key: PackageKey) -> crate::query::TypeQuery<'_> {
-        let pkg = &self.tc_objs.pkgs[pkg_key];
-        crate::query::TypeQuery::new(&self.tc_objs, &self.interner, Some(*pkg.scope()))
-    }
-
     /// Gets the type of an expression by ExprId.
     pub fn expr_type(&self, expr_id: vo_common_core::ExprId) -> Option<&crate::typ::Type> {
         self.type_info.types.get(&expr_id).map(|tv| &self.tc_objs.types[tv.typ])

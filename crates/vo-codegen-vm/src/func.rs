@@ -185,6 +185,35 @@ impl FuncBuilder {
         self.code.push(Instruction::with_flags(op, flags, a, b, c));
     }
 
+    // === Copy helpers ===
+
+    /// Emit Copy or CopyN based on slot count
+    pub fn emit_copy(&mut self, dst: u16, src: u16, slots: u16) {
+        if slots == 1 {
+            self.emit_op(Opcode::Copy, dst, src, 0);
+        } else {
+            self.emit_with_flags(Opcode::CopyN, slots as u8, dst, src, slots);
+        }
+    }
+
+    /// Emit PtrGet or PtrGetN based on slot count
+    pub fn emit_ptr_get(&mut self, dst: u16, ptr: u16, offset: u16, slots: u16) {
+        if slots == 1 {
+            self.emit_op(Opcode::PtrGet, dst, ptr, offset);
+        } else {
+            self.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, ptr, offset);
+        }
+    }
+
+    /// Emit PtrSet or PtrSetN based on slot count
+    pub fn emit_ptr_set(&mut self, ptr: u16, offset: u16, src: u16, slots: u16) {
+        if slots == 1 {
+            self.emit_op(Opcode::PtrSet, ptr, offset, src);
+        } else {
+            self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+        }
+    }
+
     // === Jump ===
 
     pub fn current_pc(&self) -> usize {

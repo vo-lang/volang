@@ -14,7 +14,6 @@ tests:
   # Runtime tests (VM only)
   - file: channel_send.vo
     mode: [vm]
-    skip: "crash"
   - file: clone_immediate_read.vo
     mode: [vm]
   - file: complex_literal.vo
@@ -44,33 +43,25 @@ tests:
     mode: [vm]
   - file: embed_shadow.vo
     mode: [vm]
-    skip: "InvalidLHS"
   - file: embed_struct.vo
     mode: [vm]
-    skip: "field name not found"
   - file: fib_goroutine.vo
     mode: [vm]
-    skip: "VariableNotFound"
   - file: field_offset_debug.vo
     mode: [vm]
   - file: go_stmt.vo
     mode: [vm]
-    skip: "VariableNotFound"
   - file: init_call_error.vo
     mode: [vm]
     expect_error: true
   - file: interface_conversion.vo
     mode: [vm]
-    skip: "VariableNotFound"
   - file: interface_method_set.vo
     mode: [vm]
-    skip: "address-of non-escaped"
   - file: interface_pointer.vo
     mode: [vm]
-    skip: "address-of non-escaped"
   - file: interface.vo
     mode: [vm]
-    skip: "panic"
   - file: local_type.vo
     mode: [vm]
   - file: map.vo
@@ -79,7 +70,6 @@ tests:
     mode: [vm]
   - file: minimal_bug.vo
     mode: [vm]
-    skip: "VariableNotFound"
   - file: minimal_bug2.vo
     mode: [vm]
   - file: multi_init.vo
@@ -95,19 +85,15 @@ tests:
     mode: [vm]
   - file: pointer_basic.vo
     mode: [vm]
-    skip: "address-of non-escaped"
   - file: pointer_comprehensive.vo
     mode: [vm]
-    skip: "address-of non-escaped"
   - file: pointer_embedded.vo
     mode: [vm]
     skip: "closure calls not yet supported"
   - file: pointer_method_call.vo
     mode: [vm]
-    skip: "address-of non-escaped"
   - file: range_string.vo
     mode: [vm]
-    skip: "panic"
   - file: rect_only_sum.vo
     mode: [vm]
   - file: rect_only.vo
@@ -128,14 +114,12 @@ tests:
     skip: "assertion failed"
   - file: slice.vo
     mode: [vm]
-    skip: "timeout"
   - file: struct_method_simple.vo
     mode: [vm]
   - file: struct_object.vo
     mode: [vm]
   - file: switch_stmt.vo
     mode: [vm]
-    skip: "timeout"
   - file: type_debug.vo
     mode: [vm]
   - file: value_receiver_bug.vo
@@ -237,7 +221,5 @@ tests:
   # Multi-file projects
   - file: proj_multifile/
     mode: [vm]
-    skip: "literal has no const value"
   - file: proj_taskman/
     mode: [vm]
-    skip: "type check failed"

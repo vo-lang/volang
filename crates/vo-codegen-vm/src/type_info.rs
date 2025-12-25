@@ -529,3 +529,9 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 }
+
+/// Encode i32 as two u16 values (low, high)
+pub fn encode_i32(val: i32) -> (u16, u16) {
+    let bits = val as u32;
+    ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
+}
