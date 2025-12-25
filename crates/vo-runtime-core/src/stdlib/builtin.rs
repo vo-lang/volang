@@ -45,27 +45,22 @@ fn format_value(call: &ExternCallWithGc, slot: u16) -> String {
     }
 }
 
-/// vo_print - print values without newline (Go builtin print semantics)
-/// Args: [(value, kind), ...] - each argument is 2 slots
-fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
+/// Format all (value, kind) pairs starting from `start_slot` into a space-separated string.
+fn format_args(call: &ExternCallWithGc, start_slot: u16) -> String {
     let available = call.available_arg_slots();
-    let mut slot = 0u16;
-    let mut first = true;
+    let mut result = String::new();
+    let mut slot = start_slot;
     
-    // Read pairs until we hit end of available slots or Void kind
     while (slot + 2) as usize <= available && slot < 32 {
         let kind_val = call.arg_u64(slot + 1) as u8;
-        if kind_val == 0 && slot > 0 {
+        if kind_val == 0 && slot > start_slot {
             break;
         }
         
-        if !first {
-            print!(" ");
+        if !result.is_empty() {
+            result.push(' ');
         }
-        first = false;
-        
-        let s = format_value(call, slot);
-        print!("{}", s);
+        result.push_str(&format_value(call, slot));
         
         slot += 2;
         
@@ -74,72 +69,32 @@ fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
         }
     }
     
+    result
+}
+
+/// vo_print - print values without newline (Go builtin print semantics)
+fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
+    print!("{}", format_args(call, 0));
     ExternResult::Ok
 }
 
 /// vo_println - print values with newline (Go builtin println semantics)
 fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
-    let available = call.available_arg_slots();
-    let mut slot = 0u16;
-    let mut first = true;
-    
-    while (slot + 2) as usize <= available && slot < 32 {
-        let kind_val = call.arg_u64(slot + 1) as u8;
-        if kind_val == 0 && slot > 0 {
-            break;
-        }
-        
-        if !first {
-            print!(" ");
-        }
-        first = false;
-        
-        let s = format_value(call, slot);
-        print!("{}", s);
-        
-        slot += 2;
-        
-        if kind_val == ValueKind::Void as u8 {
-            break;
-        }
-    }
-    
-    println!();
+    println!("{}", format_args(call, 0));
     ExternResult::Ok
 }
 
 /// vo_assert - assert condition with optional message
 /// Args: (cond bool, [(value, kind), ...])
-/// First arg is bool condition, rest are (value, value_kind) pairs like println
 fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
     let cond = call.arg_bool(0);
     if !cond {
-        let available = call.available_arg_slots();
-        let mut msg = String::from("assertion failed");
-        let mut slot = 2u16; // Skip cond (slot 0) and its kind (slot 1)
-        let mut has_msg = false;
-        
-        while (slot + 2) as usize <= available && slot < 32 {
-            let kind_val = call.arg_u64(slot + 1) as u8;
-            if kind_val == 0 && slot > 2 {
-                break;
-            }
-            
-            if !has_msg {
-                msg.push_str(": ");
-                has_msg = true;
-            } else {
-                msg.push(' ');
-            }
-            
-            msg.push_str(&format_value(call, slot));
-            slot += 2;
-            
-            if kind_val == ValueKind::Void as u8 {
-                break;
-            }
-        }
-        
+        let msg_part = format_args(call, 2);
+        let msg = if msg_part.is_empty() {
+            "assertion failed".to_string()
+        } else {
+            format!("assertion failed: {}", msg_part)
+        };
         return ExternResult::Panic(msg);
     }
     ExternResult::Ok
