@@ -81,14 +81,15 @@ pub fn exec_iter_begin(fiber: &mut Fiber, inst: &Instruction) {
 }
 
 pub fn exec_iter_next(fiber: &mut Fiber, inst: &Instruction) {
-    let done_offset = inst.c as i32;
+    // IterNext: a=key_slot, b/c=done_offset, flags=val_slot
+    let done_offset = inst.imm32();
 
     let iter = fiber.iter_stack.last_mut().expect("no active iterator");
 
     let frame = fiber.frames.last().expect("no active frame");
     let bp = frame.bp;
     let key_dst = bp + inst.a as usize;
-    let val_dst = bp + inst.b as usize;
+    let val_dst = bp + inst.flags as usize;
 
     let done = match iter {
         Iterator::HeapArray {

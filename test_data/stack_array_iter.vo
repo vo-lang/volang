@@ -1,0 +1,72 @@
+package main
+
+func main() {
+    // Test 1: 栈上数组 for-range 遍历（index + value）
+    var arr1 [5]int
+    arr1[0] = 10
+    arr1[1] = 20
+    arr1[2] = 30
+    arr1[3] = 40
+    arr1[4] = 50
+
+    sum1 := 0
+    for _, v := range arr1 {
+        sum1 = sum1 + v
+    }
+    assert(sum1 == 150)
+    println("Test 1 (with value):", sum1)
+
+    // Test 2: 栈上数组 for-range 遍历（index + value）
+    var arr2 [3]int
+    arr2[0] = 100
+    arr2[1] = 200
+    arr2[2] = 300
+
+    sum2 := 0
+    for _, v := range arr2 {
+        sum2 = sum2 + v
+    }
+    assert(sum2 == 600)
+    println("Test 2 (index + value):", sum2)
+
+    // Test 3: 栈上数组 for-range 遍历（只用 value）
+    var arr3 [4]int
+    arr3[0] = 1
+    arr3[1] = 2
+    arr3[2] = 3
+    arr3[3] = 4
+
+    product := 1
+    for _, v := range arr3 {
+        product = product * v
+    }
+    assert(product == 24)
+    println("Test 3 (value only):", product)
+
+    // Test 4: 使用字面量初始化的栈上数组
+    arr4 := [3]int{7, 8, 9}
+    sum4 := 0
+    for i, v := range arr4 {
+        sum4 = sum4 + i + v
+    }
+    // sum4 = (0+7) + (1+8) + (2+9) = 7 + 9 + 11 = 27
+    assert(sum4 == 27)
+    println("Test 4 (literal init):", sum4)
+
+    // Test 5: 修改数组不影响迭代（值语义）
+    var arr5 [3]int
+    arr5[0] = 1
+    arr5[1] = 2
+    arr5[2] = 3
+
+    sum5 := 0
+    for _, v := range arr5 {
+        arr5[0] = 999  // 修改数组
+        sum5 = sum5 + v
+    }
+    // 迭代使用原始值，不受修改影响
+    assert(sum5 == 6)
+    println("Test 5 (value semantics):", sum5)
+
+    println("All tests passed!")
+}

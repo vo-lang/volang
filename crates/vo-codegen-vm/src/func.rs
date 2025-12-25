@@ -230,14 +230,14 @@ impl FuncBuilder {
     /// Emit jump to known target.
     pub fn emit_jump_to(&mut self, op: Opcode, cond_reg: u16, target: usize) {
         let current = self.code.len() as i32;
-        let offset = target as i32 - current - 1;
+        let offset = target as i32 - current;
         let (b, c) = Self::encode_jump_offset(offset);
         self.code.push(Instruction::new(op, cond_reg, b, c));
     }
 
     /// Patch jump at pc to target.
     pub fn patch_jump(&mut self, pc: usize, target: usize) {
-        let offset = target as i32 - pc as i32 - 1;
+        let offset = target as i32 - pc as i32;
         let (b, c) = Self::encode_jump_offset(offset);
         self.code[pc].b = b;
         self.code[pc].c = c;

@@ -700,19 +700,19 @@ fn emit_iter_loop(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let loop_start = func.current_pc();
-    func.enter_loop(loop_start, None);
-    
+    // IterNext is the loop start (Jump back here, not IterBegin)
     let iter_next_pc = func.current_pc();
-    func.emit_op(Opcode::IterNext, key_slot, val_slot, 0);
+    func.enter_loop(iter_next_pc, None);
+    
+    // IterNext: a=key_slot, b/c=done_offset (patched), flags=val_slot
+    func.emit_with_flags(Opcode::IterNext, val_slot as u8, key_slot, 0, 0);
     
     compile_block(body, ctx, func, info)?;
     
-    func.emit_jump_to(Opcode::Jump, 0, loop_start);
+    func.emit_jump_to(Opcode::Jump, 0, iter_next_pc);
     
     let loop_end = func.current_pc();
-    let done_offset = (loop_end as i32) - (iter_next_pc as i32);
-    func.patch_jump(iter_next_pc, done_offset as usize);
+    func.patch_jump(iter_next_pc, loop_end);  // patch IterNext to jump to loop_end when done
     
     func.emit_op(Opcode::IterEnd, 0, 0, 0);
     
