@@ -326,22 +326,14 @@ pub fn compile_stmt(
                             .and_then(|t| info.array_len(t))
                             .unwrap_or(0) as u32;
                         
-                        // Check if array is on stack or heap
-                        let is_stack_array = if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
-                            func.lookup_local(ident.symbol)
-                                .map(|l| !l.is_heap)
-                                .unwrap_or(false)
-                        } else {
-                            false
+                        // Check if array is on stack or heap using ValueLocation
+                        let arr_source = crate::expr::get_expr_source(expr, ctx, func, info);
+                        let arr_slot = match arr_source {
+                            ExprSource::Location(ValueLocation::Stack { slot, .. }) => Some(slot),
+                            _ => None,
                         };
                         
-                        if is_stack_array {
-                            // Get array base slot
-                            let arr_slot = if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
-                                func.lookup_local(ident.symbol).map(|l| l.slot).unwrap_or(0)
-                            } else {
-                                0
-                            };
+                        if let Some(arr_slot) = arr_slot {
                             
                             // Define key and value variables
                             let key_slot = if let Some(k) = key {
@@ -667,13 +659,26 @@ pub fn compile_stmt(
                 func.emit_op(Opcode::SubI, reg, reg, one);
             }
             // Write back if needed (for lvalue expressions)
-            if let vo_syntax::ast::ExprKind::Ident(ident) = &inc_dec.expr.kind {
-                if let Some(local) = func.lookup_local(ident.symbol) {
-                    if local.is_heap {
-                        func.emit_op(Opcode::PtrSet, local.slot, 0, reg);
-                    } else if local.slot != reg {
-                        func.emit_op(Opcode::Copy, local.slot, reg, 0);
+            let expr_source = crate::expr::get_expr_source(&inc_dec.expr, ctx, func, info);
+            match expr_source {
+                ExprSource::Location(ValueLocation::HeapBoxed { slot, .. }) => {
+                    func.emit_op(Opcode::PtrSet, slot, 0, reg);
+                }
+                ExprSource::Location(ValueLocation::Stack { slot, .. }) => {
+                    if slot != reg {
+                        func.emit_op(Opcode::Copy, slot, reg, 0);
                     }
+                }
+                ExprSource::Location(ValueLocation::Global { index, .. }) => {
+                    func.emit_op(Opcode::GlobalSet, index, reg, 0);
+                }
+                ExprSource::Location(ValueLocation::Reference { slot }) => {
+                    if slot != reg {
+                        func.emit_op(Opcode::Copy, slot, reg, 0);
+                    }
+                }
+                ExprSource::NeedsCompile => {
+                    // Non-lvalue expression, nothing to write back
                 }
             }
         }
@@ -1508,28 +1513,34 @@ fn compile_compound_assign(
     
     match &lhs.kind {
         ExprKind::Ident(ident) => {
-            let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.is_heap));
+            let lhs_source = crate::expr::get_expr_source(lhs, ctx, func, info);
+            let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
             
-            if let Some((slot, is_heap)) = local_info {
-                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                if is_heap {
+            match lhs_source {
+                ExprSource::Location(ValueLocation::HeapBoxed { slot, .. }) => {
                     // Heap: read, compute, write back
                     let tmp = func.alloc_temp(1);
                     func.emit_op(Opcode::PtrGet, tmp, slot, 0);
                     func.emit_op(opcode, tmp, tmp, rhs_reg);
                     func.emit_op(Opcode::PtrSet, slot, 0, tmp);
-                } else {
+                }
+                ExprSource::Location(ValueLocation::Stack { slot, .. }) => {
                     // Stack: compute in place
                     func.emit_op(opcode, slot, slot, rhs_reg);
                 }
-            } else if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
-                let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                let tmp = func.alloc_temp(1);
-                func.emit_op(Opcode::GlobalGet, tmp, global_idx as u16, 0);
-                func.emit_op(opcode, tmp, tmp, rhs_reg);
-                func.emit_op(Opcode::GlobalSet, global_idx as u16, tmp, 0);
-            } else {
-                return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                ExprSource::Location(ValueLocation::Global { index, .. }) => {
+                    let tmp = func.alloc_temp(1);
+                    func.emit_op(Opcode::GlobalGet, tmp, index, 0);
+                    func.emit_op(opcode, tmp, tmp, rhs_reg);
+                    func.emit_op(Opcode::GlobalSet, index, tmp, 0);
+                }
+                ExprSource::Location(ValueLocation::Reference { slot }) => {
+                    // Reference: compute in place (single slot)
+                    func.emit_op(opcode, slot, slot, rhs_reg);
+                }
+                ExprSource::NeedsCompile => {
+                    return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                }
             }
         }
         
@@ -1594,24 +1605,23 @@ fn compile_compound_assign(
             let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
             
             if info.is_array(container_type) {
-                if let ExprKind::Ident(ident) = &idx.expr.kind {
-                    let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.is_heap));
-                    if let Some((slot, is_heap)) = local_info {
+                let container_source = crate::expr::get_expr_source(&idx.expr, ctx, func, info);
+                match container_source {
+                    ExprSource::Location(ValueLocation::HeapBoxed { slot, .. }) => {
                         let tmp = func.alloc_temp(1);
-                        if is_heap {
-                            func.emit_with_flags(Opcode::ArrayGet, 1, tmp, slot, index_reg);
-                            func.emit_op(opcode, tmp, tmp, rhs_reg);
-                            func.emit_with_flags(Opcode::ArraySet, 1, slot, index_reg, tmp);
-                        } else {
-                            func.emit_op(Opcode::SlotGet, tmp, slot, index_reg);
-                            func.emit_op(opcode, tmp, tmp, rhs_reg);
-                            func.emit_op(Opcode::SlotSet, slot, index_reg, tmp);
-                        }
-                    } else {
-                        return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                        func.emit_with_flags(Opcode::ArrayGet, 1, tmp, slot, index_reg);
+                        func.emit_op(opcode, tmp, tmp, rhs_reg);
+                        func.emit_with_flags(Opcode::ArraySet, 1, slot, index_reg, tmp);
                     }
-                } else {
-                    return Err(CodegenError::InvalidLHS);
+                    ExprSource::Location(ValueLocation::Stack { slot, .. }) => {
+                        let tmp = func.alloc_temp(1);
+                        func.emit_op(Opcode::SlotGet, tmp, slot, index_reg);
+                        func.emit_op(opcode, tmp, tmp, rhs_reg);
+                        func.emit_op(Opcode::SlotSet, slot, index_reg, tmp);
+                    }
+                    _ => {
+                        return Err(CodegenError::InvalidLHS);
+                    }
                 }
             } else if info.is_slice(container_type) {
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
