@@ -15,6 +15,17 @@ pub enum ValueLocation {
     HeapBoxed { slot: u16, value_slots: u16 },
     /// Reference type (slot holds GcRef which IS the value, 1 slot)
     Reference { slot: u16 },
+    /// Global variable
+    Global { index: u16, slots: u16 },
+}
+
+/// Expression value source - where an expression's value comes from.
+#[derive(Debug, Clone, Copy)]
+pub enum ExprSource {
+    /// Value is in a known location (variable)
+    Location(ValueLocation),
+    /// Value needs to be compiled (temporary result)
+    NeedsCompile,
 }
 
 /// Local variable info.
@@ -240,6 +251,9 @@ impl FuncBuilder {
             ValueLocation::Reference { slot } => {
                 self.emit_op(Opcode::Copy, dst, slot, 0);
             }
+            ValueLocation::Global { index, .. } => {
+                self.emit_op(Opcode::GlobalGet, dst, index, 0);
+            }
         }
     }
 
@@ -254,6 +268,9 @@ impl FuncBuilder {
             }
             ValueLocation::Reference { slot } => {
                 self.emit_op(Opcode::Copy, slot, src, 0);
+            }
+            ValueLocation::Global { index, .. } => {
+                self.emit_op(Opcode::GlobalSet, index, src, 0);
             }
         }
     }

@@ -6,7 +6,7 @@ use vo_vm::instruction::Opcode;
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
-use crate::func::FuncBuilder;
+use crate::func::{ExprSource, FuncBuilder, ValueLocation};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Compile a statement.
@@ -1277,60 +1277,75 @@ fn compile_assign(
                 return Ok(());
             }
             
-            // Copy local info to avoid borrow conflict
-            let local_info = func.lookup_local(ident.symbol).map(|l| (l.slot, l.slots, l.is_heap));
+            // Get lhs and rhs sources
+            let lhs_source = crate::expr::get_expr_source(lhs, ctx, func, info);
+            let rhs_source = crate::expr::get_expr_source(rhs, ctx, func, info);
+            let lhs_type = info.get_def(ident).and_then(|o| info.obj_type(o));
             
-            if let Some((slot, slots, is_heap)) = local_info {
-                // Check if assigning to interface variable
-                let lhs_type = info.get_def(ident).and_then(|o| info.obj_type(o));
-                let is_iface = lhs_type.map(|t| info.is_interface(t)).unwrap_or(false);
-                
-                if is_iface {
-                    // Interface assignment: use IfaceAssign
-                    let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                    let src_type = info.expr_type(rhs.id);
-                    let iface_meta_id = lhs_type.and_then(|t| ctx.get_interface_meta_id(t)).unwrap_or(0);
-                    
-                    // Get source value kind for flags
-                    let vk = src_type.map(|t| info.type_value_kind(t) as u8).unwrap_or(0);
-                    
-                    // IfaceAssign: a=dst, b=src, c=iface_meta_id, flags=vk
-                    func.emit_with_flags(Opcode::IfaceAssign, vk, slot, src_reg, iface_meta_id);
-                } else if is_heap {
-                    // Escaped variable (lhs is heap): write via PtrSet
-                    // Get actual struct slots from lhs type (not local.slots which is 1 for GcRef)
-                    let struct_slots = lhs_type.map(|t| info.type_slot_count(t)).unwrap_or(slots);
-                    
-                    // Check if rhs is escaped struct - need PtrClone (deep copy)
-                    let rhs_escaped = is_rhs_escaped_struct(rhs, func, info);
-                    if let Some(rhs_slot) = rhs_escaped {
-                        // Both are escaped: use PtrClone for deep copy, then copy GcRef
-                        let tmp = func.alloc_temp(1);
-                        func.emit_op(Opcode::PtrClone, tmp, rhs_slot, 0);
-                        func.emit_op(Opcode::Copy, slot, tmp, 0);
-                    } else {
-                        // rhs is stack: compile to temp, then PtrSetN
-                        let tmp = func.alloc_temp(struct_slots);
-                        compile_expr_to(rhs, tmp, ctx, func, info)?;
-                        func.emit_ptr_set(slot, 0, tmp, struct_slots);
+            match lhs_source {
+                ExprSource::Location(lhs_loc) => {
+                    // Check if assigning to interface variable
+                    let is_iface = lhs_type.map(|t| info.is_interface(t)).unwrap_or(false);
+                    if is_iface {
+                        let slot = match lhs_loc {
+                            ValueLocation::Stack { slot, .. } => slot,
+                            ValueLocation::HeapBoxed { slot, .. } => slot,
+                            ValueLocation::Reference { slot } => slot,
+                            ValueLocation::Global { index, .. } => index,
+                        };
+                        let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                        let src_type = info.expr_type(rhs.id);
+                        let iface_meta_id = lhs_type.and_then(|t| ctx.get_interface_meta_id(t)).unwrap_or(0);
+                        let vk = src_type.map(|t| info.type_value_kind(t) as u8).unwrap_or(0);
+                        func.emit_with_flags(Opcode::IfaceAssign, vk, slot, src_reg, iface_meta_id);
+                        return Ok(());
                     }
-                } else {
-                    // Stack variable (lhs is stack): check if rhs is escaped struct
-                    // If so, need to copy from heap to stack using PtrGetN
-                    let rhs_escaped = is_rhs_escaped_struct(rhs, func, info);
-                    if let Some(rhs_slot) = rhs_escaped {
-                        // rhs is escaped struct: use PtrGetN to copy heap -> stack
-                        func.emit_ptr_get(slot, rhs_slot, 0, slots);
-                    } else {
-                        // Normal case: direct write
-                        compile_expr_to(rhs, slot, ctx, func, info)?;
+                    
+                    // Handle value assignment based on lhs and rhs locations
+                    match (&lhs_loc, &rhs_source) {
+                        // Both HeapBoxed: deep copy via PtrClone
+                        (ValueLocation::HeapBoxed { slot: lhs_slot, .. }, 
+                         ExprSource::Location(ValueLocation::HeapBoxed { slot: rhs_slot, .. })) => {
+                            let tmp = func.alloc_temp(1);
+                            func.emit_op(Opcode::PtrClone, tmp, *rhs_slot, 0);
+                            func.emit_op(Opcode::Copy, *lhs_slot, tmp, 0);
+                        }
+                        // HeapBoxed lhs, other rhs: compile rhs, then PtrSet
+                        (ValueLocation::HeapBoxed { slot, value_slots }, _) => {
+                            let tmp = func.alloc_temp(*value_slots);
+                            compile_expr_to(rhs, tmp, ctx, func, info)?;
+                            func.emit_ptr_set(*slot, 0, tmp, *value_slots);
+                        }
+                        // Stack/Global lhs: use emit_store_value or compile directly
+                        (loc, ExprSource::Location(ValueLocation::HeapBoxed { slot: rhs_slot, value_slots })) => {
+                            // rhs is heap: need PtrGet then store
+                            let slots = match loc {
+                                ValueLocation::Stack { slots, .. } => *slots,
+                                ValueLocation::Global { slots, .. } => *slots,
+                                _ => *value_slots,
+                            };
+                            let tmp = func.alloc_temp(slots);
+                            func.emit_ptr_get(tmp, *rhs_slot, 0, slots);
+                            func.emit_store_value(*loc, tmp, slots);
+                        }
+                        // Simple case: compile rhs directly to lhs location
+                        (ValueLocation::Stack { slot, .. }, _) => {
+                            compile_expr_to(rhs, *slot, ctx, func, info)?;
+                        }
+                        (ValueLocation::Global { .. }, _) => {
+                            let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                            let slots = lhs_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                            func.emit_store_value(lhs_loc, tmp, slots);
+                        }
+                        (ValueLocation::Reference { slot }, _) => {
+                            let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                            func.emit_op(Opcode::Copy, *slot, tmp, 0);
+                        }
                     }
                 }
-            } else if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
-                let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                func.emit_op(Opcode::GlobalSet, global_idx as u16, tmp, 0);
-            } else {
-                return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                ExprSource::NeedsCompile => {
+                    return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                }
             }
         }
 
@@ -1382,6 +1397,10 @@ fn compile_assign(
                         let tmp = crate::expr::compile_expr(rhs, ctx, func, info)?;
                         func.emit_ptr_set(ptr_reg, total_offset, tmp, slots);
                     }
+                    SelectorTarget::Location(ValueLocation::Global { .. }) => {
+                        // Global variables don't have field selectors in this context
+                        return Err(CodegenError::Internal("global field selector not supported".to_string()));
+                    }
                 }
             }
         }
@@ -1398,28 +1417,27 @@ fn compile_assign(
             let val_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
             
             if info.is_array(container_type) {
-                // Array: check if stack or heap
+                // Array: check storage location
                 let elem_slots = info.array_elem_slots(container_type)
                     .expect("array must have elem_slots");
                 
-                if let ExprKind::Ident(ident) = &idx.expr.kind {
-                    if let Some(local) = func.lookup_local(ident.symbol) {
-                        if local.is_heap {
-                            // Heap array: ArraySet
-                            func.emit_with_flags(Opcode::ArraySet, elem_slots as u8, local.slot, index_reg, val_reg);
-                        } else {
-                            // Stack array: SlotSet/SlotSetN
-                            if elem_slots == 1 {
-                                func.emit_op(Opcode::SlotSet, local.slot, index_reg, val_reg);
-                            } else {
-                                func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, local.slot, index_reg, val_reg);
-                            }
-                        }
-                    } else {
-                        return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                let container_source = crate::expr::get_expr_source(&idx.expr, ctx, func, info);
+                match container_source {
+                    ExprSource::Location(ValueLocation::HeapBoxed { slot, .. }) => {
+                        // Heap array: ArraySet
+                        func.emit_with_flags(Opcode::ArraySet, elem_slots as u8, slot, index_reg, val_reg);
                     }
-                } else {
-                    return Err(CodegenError::InvalidLHS);
+                    ExprSource::Location(ValueLocation::Stack { slot, .. }) => {
+                        // Stack array: SlotSet/SlotSetN
+                        if elem_slots == 1 {
+                            func.emit_op(Opcode::SlotSet, slot, index_reg, val_reg);
+                        } else {
+                            func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, slot, index_reg, val_reg);
+                        }
+                    }
+                    _ => {
+                        return Err(CodegenError::InvalidLHS);
+                    }
                 }
             } else if info.is_slice(container_type) {
                 // Slice: SliceSet
@@ -1561,6 +1579,9 @@ fn compile_compound_assign(
                         func.emit_op(opcode, tmp, tmp, rhs_reg);
                         func.emit_op(Opcode::PtrSet, reg, total_offset, tmp);
                     }
+                    SelectorTarget::Location(ValueLocation::Global { .. }) => {
+                        return Err(CodegenError::Internal("global field selector not supported".to_string()));
+                    }
                 }
             }
         }
@@ -1632,8 +1653,6 @@ fn compile_compound_assign(
     Ok(())
 }
 
-use crate::func::ValueLocation;
-
 /// Selector target for assignment - either a ValueLocation or a compiled pointer register
 enum SelectorTarget {
     Location(ValueLocation),
@@ -1691,33 +1710,4 @@ fn resolve_selector_target(
         }
         _ => Err(CodegenError::InvalidLHS),
     }
-}
-
-/// Check if rhs is an escaped struct variable.
-/// Returns the slot of the escaped variable if so.
-fn is_rhs_escaped_struct(
-    rhs: &vo_syntax::ast::Expr,
-    func: &FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Option<u16> {
-    use vo_syntax::ast::ExprKind;
-    
-    if let ExprKind::Ident(ident) = &rhs.kind {
-        // Check if it's a local variable that is escaped
-        if let Some(local) = func.lookup_local(ident.symbol) {
-            if local.is_heap {
-                // Check if it's a struct or array (value type)
-                let obj_key = info.get_def(ident);
-                let type_key = obj_key.and_then(|o| info.obj_type(o));
-                let is_value_type = type_key.map(|t| {
-                    info.is_struct(t) || info.is_array(t)
-                }).unwrap_or(false);
-                
-                if is_value_type {
-                    return Some(local.slot);
-                }
-            }
-        }
-    }
-    None
 }

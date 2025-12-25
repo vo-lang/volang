@@ -5,7 +5,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{FuncBuilder, LocalVar, ValueLocation};
+use crate::func::{ExprSource, FuncBuilder, LocalVar, ValueLocation};
 use crate::type_info::TypeInfoWrapper;
 
 /// Get ValueLocation for a local variable based on its storage and type.
@@ -23,13 +23,36 @@ fn get_local_location(local: &LocalVar, type_key: Option<vo_analysis::objects::T
     }
 }
 
+/// Get ExprSource for an expression - determines where the value comes from.
+pub fn get_expr_source(
+    expr: &Expr,
+    ctx: &CodegenContext,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> ExprSource {
+    if let ExprKind::Ident(ident) = &expr.kind {
+        // Check local variable
+        if let Some(local) = func.lookup_local(ident.symbol) {
+            let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+            return ExprSource::Location(get_local_location(local, type_key, info));
+        }
+        // Check global variable
+        if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
+            let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
+            let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+            return ExprSource::Location(ValueLocation::Global { index: global_idx as u16, slots });
+        }
+    }
+    ExprSource::NeedsCompile
+}
+
 /// Get the GcRef slot from a ValueLocation (for heap-based locations).
-/// Returns Some(slot) if the location holds a GcRef, None for stack values.
+/// Returns Some(slot) if the location holds a GcRef, None for stack/global values.
 fn get_gcref_slot(loc: &ValueLocation) -> Option<u16> {
     match loc {
         ValueLocation::HeapBoxed { slot, .. } => Some(*slot),
         ValueLocation::Reference { slot } => Some(*slot),
-        ValueLocation::Stack { .. } => None,
+        ValueLocation::Stack { .. } | ValueLocation::Global { .. } => None,
     }
 }
 
@@ -77,28 +100,27 @@ pub fn compile_expr_to(
                 return Ok(());
             }
             
-            if let Some(local) = func.lookup_local(ident.symbol) {
-                let obj_key = info.get_def(ident);
-                let type_key = obj_key.and_then(|o| info.obj_type(o));
-                let loc = get_local_location(local, type_key, info);
-                func.emit_load_value(loc, dst);
-            } else if let Some(capture) = func.lookup_capture(ident.symbol) {
-                // Closure capture: use ClosureGet to get the GcRef, then dereference
-                // ClosureGet: a=dst, b=capture_index (closure implicit in r0)
-                func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
-                
-                // The capture slot holds a GcRef to the escaped variable's heap storage
-                // Need to dereference it to get the actual value
-                // Get captured variable's type to determine slot count
-                let obj_key = info.get_def(ident);
-                let type_key = obj_key.and_then(|o| info.obj_type(o));
-                let value_slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                func.emit_ptr_get(dst, dst, 0, value_slots);
-            } else if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
-                func.emit_op(Opcode::GlobalGet, dst, global_idx as u16, 0);
-            } else {
-                // Could be a function name, package, etc. - handle later
-                return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+            // Get expression source and load value
+            match get_expr_source(expr, ctx, func, info) {
+                ExprSource::Location(loc) => {
+                    func.emit_load_value(loc, dst);
+                }
+                ExprSource::NeedsCompile => {
+                    // Check closure capture
+                    if let Some(capture) = func.lookup_capture(ident.symbol) {
+                        // Closure capture: use ClosureGet to get the GcRef, then dereference
+                        func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
+                        
+                        // Get captured variable's type to determine slot count
+                        let obj_key = info.get_def(ident);
+                        let type_key = obj_key.and_then(|o| info.obj_type(o));
+                        let value_slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                        func.emit_ptr_get(dst, dst, 0, value_slots);
+                    } else {
+                        // Could be a function name, package, etc. - handle later
+                        return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                    }
+                }
             }
         }
 
@@ -356,6 +378,10 @@ fn compile_selector(
             Some(ValueLocation::Stack { slot, .. }) => {
                 // Stack variable: direct slot access
                 func.emit_copy(dst, slot + offset, slots);
+            }
+            Some(ValueLocation::Global { .. }) => {
+                // Global variables don't have field selectors through this path
+                return Err(CodegenError::Internal("global field selector not supported".to_string()));
             }
             None => {
                 // Temporary value - compile receiver first
