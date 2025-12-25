@@ -112,11 +112,39 @@ fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
     ExternResult::Ok
 }
 
-/// vo_assert - assert condition
+/// vo_assert - assert condition with optional message
+/// Args: (cond bool, [(value, kind), ...])
+/// First arg is bool condition, rest are (value, value_kind) pairs like println
 fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
     let cond = call.arg_bool(0);
     if !cond {
-        return ExternResult::Panic("assertion failed".to_string());
+        // Format additional arguments as message (starting from slot 2)
+        let mut msg = String::from("assertion failed");
+        let mut slot = 2u16; // Skip cond (slot 0) and its kind (slot 1)
+        let mut has_msg = false;
+        
+        while slot < 32 {
+            let kind_val = call.arg_u64(slot + 1) as u8;
+            if kind_val == 0 && slot > 2 {
+                break;
+            }
+            
+            if !has_msg {
+                msg.push_str(": ");
+                has_msg = true;
+            } else {
+                msg.push(' ');
+            }
+            
+            msg.push_str(&format_value(call, slot));
+            slot += 2;
+            
+            if slot >= 4 && kind_val == ValueKind::Void as u8 {
+                break;
+            }
+        }
+        
+        return ExternResult::Panic(msg);
     }
     ExternResult::Ok
 }
