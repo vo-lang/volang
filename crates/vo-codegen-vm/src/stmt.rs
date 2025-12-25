@@ -1682,17 +1682,7 @@ fn resolve_selector_target(
         ExprKind::Ident(ident) => {
             if let Some(local) = func.lookup_local(ident.symbol) {
                 let type_key = info.get_def(ident).and_then(|o| info.obj_type(o));
-                let loc = if local.is_heap {
-                    let is_value_type = type_key.map(|t| info.is_value_type(t)).unwrap_or(false);
-                    if is_value_type {
-                        let value_slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                        ValueLocation::HeapBoxed { slot: local.slot, value_slots }
-                    } else {
-                        ValueLocation::Reference { slot: local.slot }
-                    }
-                } else {
-                    ValueLocation::Stack { slot: local.slot, slots: local.slots }
-                };
+                let loc = crate::expr::get_local_location(local, type_key, info);
                 Ok((SelectorTarget::Location(loc), 0))
             } else {
                 Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)))

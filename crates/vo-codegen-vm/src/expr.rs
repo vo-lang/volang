@@ -9,7 +9,7 @@ use crate::func::{ExprSource, FuncBuilder, LocalVar, ValueLocation};
 use crate::type_info::TypeInfoWrapper;
 
 /// Get ValueLocation for a local variable based on its storage and type.
-fn get_local_location(local: &LocalVar, type_key: Option<vo_analysis::objects::TypeKey>, info: &TypeInfoWrapper) -> ValueLocation {
+pub fn get_local_location(local: &LocalVar, type_key: Option<vo_analysis::objects::TypeKey>, info: &TypeInfoWrapper) -> ValueLocation {
     if local.is_heap {
         let is_value_type = type_key.map(|t| info.is_value_type(t)).unwrap_or(false);
         if is_value_type {
