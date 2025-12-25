@@ -1124,8 +1124,12 @@ fn compile_builtin_call(
                     func.emit_op(Opcode::LoadInt, dst, b, c);
                 } else if info.is_string(type_key) {
                     func.emit_op(Opcode::StrLen, dst, arg_reg, 0);
+                } else if info.is_map(type_key) {
+                    func.emit_op(Opcode::MapLen, dst, arg_reg, 0);
+                } else if info.is_slice(type_key) {
+                    func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
                 } else {
-                    // Slice: SliceLen
+                    // Default to SliceLen
                     func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
                 }
             } else {
@@ -1376,8 +1380,28 @@ fn compile_composite_lit(
         // Map literal: map[K]V{k1: v1, k2: v2, ...}
         let (key_slots, val_slots) = info.map_key_val_slots(type_key).unwrap_or((1, 1));
         
-        // MapNew: a=dst
-        func.emit_op(Opcode::MapNew, dst, 0, 0);
+        // Get key/val meta
+        let key_slot_types = info.map_key_slot_types(type_key)
+            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+        let val_slot_types = info.map_val_slot_types(type_key)
+            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+        let key_meta_idx = ctx.get_or_create_value_meta(None, key_slots, &key_slot_types);
+        let val_meta_idx = ctx.get_or_create_value_meta(None, val_slots, &val_slot_types);
+        
+        // MapNew: a=dst, b=packed_meta, c=(key_slots<<8)|val_slots
+        // packed_meta = (key_meta << 32) | val_meta
+        let packed_reg = func.alloc_temp(1);
+        // Load key_meta, shift left 32, then OR with val_meta
+        func.emit_op(Opcode::LoadConst, packed_reg, key_meta_idx, 0);
+        let shift_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadInt, shift_reg, 32, 0);
+        func.emit_op(Opcode::Shl, packed_reg, packed_reg, shift_reg);
+        let val_meta_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
+        func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
+        
+        let slots_arg = ((key_slots as u16) << 8) | (val_slots as u16);
+        func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
         
         // Set each key-value pair
         for elem in &lit.elems {
@@ -1389,12 +1413,22 @@ fn compile_composite_lit(
                         return Err(CodegenError::Internal(format!("map literal key should be expr, got ident {:?}", ident.symbol)));
                     }
                 };
-                let key_reg = compile_expr(key_expr, ctx, func, info)?;
+                
+                // MapSet expects: a=map, b=meta_and_key, c=val
+                // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
+                let meta_and_key_reg = func.alloc_temp(1 + key_slots as u16);
+                let meta = ((key_slots as u32) << 8) | (val_slots as u32);
+                let (b, c) = crate::type_info::encode_i32(meta as i32);
+                func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
+                
+                // Compile key into meta_and_key_reg+1
+                compile_expr_to(key_expr, meta_and_key_reg + 1, ctx, func, info)?;
+                
+                // Compile value
                 let val_reg = compile_expr(&elem.value, ctx, func, info)?;
                 
-                // MapSet: a=map, b=key, c=val, flags=(key_slots<<4)|val_slots
-                let flags = ((key_slots as u8) << 4) | (val_slots as u8);
-                func.emit_with_flags(Opcode::MapSet, flags, dst, key_reg, val_reg);
+                // MapSet: a=map, b=meta_and_key, c=val
+                func.emit_op(Opcode::MapSet, dst, meta_and_key_reg, val_reg);
             }
         }
     } else {
