@@ -34,14 +34,14 @@ tests:
     skip: "type check failed"
   - file: embed_interface_impl.vo
     mode: [vm]
-    skip: "closure calls not yet supported"
+    skip: "method promotion not supported"
   - file: escape_struct_assign.vo
     mode: [vm]
   - file: embed_interface.vo
     mode: [vm]
   - file: embed_method.vo
     mode: [vm]
-    skip: "closure calls not yet supported"
+    skip: "method promotion not supported"
   - file: embed_pointer.vo
     mode: [vm]
   - file: embed_shadow.vo
@@ -101,7 +101,7 @@ tests:
     skip: "address-of non-escaped"
   - file: pointer_embedded.vo
     mode: [vm]
-    skip: "closure calls not yet supported"
+    skip: "method promotion not supported"
   - file: pointer_method_call.vo
     mode: [vm]
     skip: "address-of non-escaped"
