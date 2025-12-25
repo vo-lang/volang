@@ -46,7 +46,6 @@ tests:
     mode: [vm]
   - file: embed_shadow.vo
     mode: [vm]
-    skip: "InvalidLHS"
   - file: embed_struct.vo
     mode: [vm]
     skip: "field name not found"
@@ -81,7 +80,6 @@ tests:
     mode: [vm]
   - file: minimal_bug.vo
     mode: [vm]
-    skip: "VariableNotFound"
   - file: minimal_bug2.vo
     mode: [vm]
   - file: multi_init.vo
@@ -109,7 +107,6 @@ tests:
     skip: "address-of non-escaped"
   - file: range_string.vo
     mode: [vm]
-    skip: "panic"
   - file: rect_only_sum.vo
     mode: [vm]
   - file: rect_only.vo
@@ -137,7 +134,6 @@ tests:
     mode: [vm]
   - file: switch_stmt.vo
     mode: [vm]
-    skip: "timeout"
   - file: type_debug.vo
     mode: [vm]
   - file: value_receiver_bug.vo
