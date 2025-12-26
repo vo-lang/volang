@@ -275,6 +275,10 @@ fn test_iface_assign_empty_from_int() {
         method_names: vec![],
     }];
 
+    // Constant for IfaceAssign: (named_type_id << 32) | itab_id
+    // For primitive int: named_type_id = 0, itab_id = 0
+    let constants = vec![Constant::Int(0)];
+
     let (b_val, c_val) = imm32_parts(123);
 
     let func = FunctionDef {
@@ -286,13 +290,14 @@ fn test_iface_assign_empty_from_int() {
         slot_types: vec![SlotType::Value; 3],
         code: vec![
             Instruction::new(Opcode::LoadInt, 0, b_val, c_val),
+            // IfaceAssign: dst=1, src=0, const_idx=0, flags=value_kind
             Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int as u8, 1, 0, 0),
             Instruction::with_flags(Opcode::GlobalSetN, 2, 0, 1, 0),
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
     };
 
-    let vm = run_single_func_module(globals, vec![], vec![], iface_metas, func);
+    let vm = run_single_func_module(globals, constants, vec![], iface_metas, func);
     let slot0 = vm.state.globals[0];
     let slot1 = vm.state.globals[1];
 

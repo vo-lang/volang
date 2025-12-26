@@ -1,4 +1,8 @@
 //! Interface method table (itab) management.
+//!
+//! Unified itab table design:
+//! - VM init: copy module.itabs to vm.itabs
+//! - Runtime: new itabs are appended to vm.itabs
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -8,20 +12,26 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use crate::bytecode::{InterfaceMeta, NamedTypeMeta};
+use crate::bytecode::{InterfaceMeta, Itab, NamedTypeMeta};
 
-#[derive(Debug, Clone)]
-pub struct Itab {
-    pub methods: Vec<u32>,
-}
-
+/// Unified itab table with runtime cache for interface-to-interface assignments.
 #[derive(Debug, Default)]
 pub struct ItabCache {
-    cache: HashMap<(u32, u32), u32>,  // (named_type_id, iface_meta_id) -> itab_id
+    /// Cache for runtime-built itabs: (named_type_id, iface_meta_id) -> itab_id
+    cache: HashMap<(u32, u32), u32>,
+    /// Unified itab table: initialized from module.itabs, runtime itabs appended
     itabs: Vec<Itab>,
 }
 
 impl ItabCache {
+    /// Create from module's compile-time itabs
+    pub fn from_module_itabs(itabs: Vec<Itab>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            itabs,
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
@@ -33,6 +43,8 @@ impl ItabCache {
         self.itabs.get(itab_id as usize)
     }
 
+    /// Get or create itab for interface-to-interface assignment (runtime).
+    /// For concrete type assignments, itab_id is already in the constant.
     pub fn get_or_create(
         &mut self,
         named_type_id: u32,
@@ -46,7 +58,7 @@ impl ItabCache {
             return itab_id;
         }
 
-        let itab = self.build_itab(named_type_id, iface_meta_id, named_type_metas, interface_metas);
+        let itab = Self::build_itab(named_type_id, iface_meta_id, named_type_metas, interface_metas);
         let itab_id = self.itabs.len() as u32;
         self.itabs.push(itab);
         self.cache.insert(key, itab_id);
@@ -55,7 +67,6 @@ impl ItabCache {
     }
 
     fn build_itab(
-        &self,
         named_type_id: u32,
         iface_meta_id: u32,
         named_type_metas: &[NamedTypeMeta],

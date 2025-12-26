@@ -7,15 +7,17 @@ use vo_common_core::types::ValueKind;
 use vo_runtime_core::gc::{Gc, GcRef};
 use vo_runtime_core::objects::interface;
 
-use crate::bytecode::Module;
+use crate::bytecode::{Constant, Module};
 use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 use crate::itab::ItabCache;
 use crate::vm::ExecResult;
 
-/// IfaceAssign: a=dst (2 slots), b=src, c=iface_meta_id, flags=value_kind
-/// For now, named_type_id is embedded in the high bits of b (b = src_slot | (named_type_id << 8))
-/// Or use a preceding LoadInt to set up named_type_id
+/// IfaceAssign: a=dst (2 slots), b=src, c=const_idx, flags=value_kind
+///
+/// c points to Int64 constant:
+/// - Concrete type: (named_type_id << 32) | itab_id, itab built at compile time
+/// - Interface source: iface_meta_id (high 32 bits = 0), itab built at runtime
 pub fn exec_iface_assign(
     fiber: &mut Fiber,
     inst: &Instruction,
@@ -23,35 +25,38 @@ pub fn exec_iface_assign(
     itab_cache: &mut ItabCache,
     module: &Module,
 ) {
-    let iface_meta_id = inst.c as u32;
     let vk = ValueKind::from_u8(inst.flags);
-    // For now, named_type_id is 0 for non-interface sources (TODO: proper encoding)
-    let named_type_id = 0u32;
-
     let src = fiber.read_reg(inst.b);
 
-    let iface_meta = &module.interface_metas[iface_meta_id as usize];
-    let empty_iface = iface_meta.method_names.is_empty();
-
-    // For interface source, extract the original named_type_id and value_kind
-    let (actual_named_type_id, actual_vk) = match vk {
-        ValueKind::Interface => {
-            let src_named_type_id = interface::unpack_named_type_id(src);
-            let src_vk = interface::unpack_value_kind(src);
-            (src_named_type_id, src_vk)
-        }
-        _ => (named_type_id, vk),
+    // Unpack metadata from constant pool
+    let packed = match &module.constants[inst.c as usize] {
+        Constant::Int(v) => *v,
+        _ => panic!("IfaceAssign: expected Int64 constant"),
     };
+    let named_type_id = (packed >> 32) as u32;
+    let low = (packed & 0xFFFFFFFF) as u32;
 
-    let itab_id = if empty_iface || actual_named_type_id == 0 {
-        0
+    let (actual_named_type_id, actual_vk, itab_id) = if vk == ValueKind::Interface {
+        // Interface -> Interface: runtime itab lookup/creation
+        let src_slot0 = src;
+        let src_named_type_id = interface::unpack_named_type_id(src_slot0);
+        let src_vk = interface::unpack_value_kind(src_slot0);
+        let iface_meta_id = low;  // low = target iface_meta_id
+        
+        let itab_id = if src_named_type_id == 0 {
+            0  // primitive or nil
+        } else {
+            itab_cache.get_or_create(
+                src_named_type_id,
+                iface_meta_id,
+                &module.named_type_metas,
+                &module.interface_metas,
+            )
+        };
+        (src_named_type_id, src_vk, itab_id)
     } else {
-        itab_cache.get_or_create(
-            actual_named_type_id,
-            iface_meta_id,
-            &module.named_type_metas,
-            &module.interface_metas,
-        )
+        // Concrete type -> Interface: compile-time itab
+        (named_type_id, vk, low)  // low = itab_id
     };
 
     let slot0 = interface::pack_slot0(itab_id, actual_named_type_id, actual_vk);

@@ -80,12 +80,19 @@ pub struct InterfaceMeta {
     pub method_names: Vec<String>,
 }
 
+/// Itab: interface method table (method_idx -> func_id)
+#[derive(Debug, Clone, Default)]
+pub struct Itab {
+    pub methods: Vec<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
     pub struct_metas: Vec<StructMeta>,
     pub interface_metas: Vec<InterfaceMeta>,
     pub named_type_metas: Vec<NamedTypeMeta>,
+    pub itabs: Vec<Itab>,  // compile-time built itabs
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -100,6 +107,7 @@ impl Module {
             struct_metas: Vec::new(),
             interface_metas: Vec::new(),
             named_type_metas: Vec::new(),
+            itabs: Vec::new(),
             constants: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),

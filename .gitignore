@@ -33,3 +33,4 @@ target/
 tarpaulin-report.html
 *.goxc
 /.windsurf
+/.ref

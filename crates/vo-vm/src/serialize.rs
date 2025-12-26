@@ -23,7 +23,7 @@ use hashbrown::HashMap;
 use vo_common_core::types::{SlotType, ValueMeta};
 
 use crate::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, MethodInfo, Module, NamedTypeMeta, StructMeta,
+    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 use crate::instruction::Instruction;
 
@@ -211,6 +211,10 @@ impl Module {
             }
         });
 
+        w.write_vec(&self.itabs, |w, itab| {
+            w.write_vec(&itab.methods, |w, func_id| w.write_u32(*func_id));
+        });
+
         w.write_vec(&self.constants, |w, c| match c {
             Constant::Nil => w.write_u8(0),
             Constant::Bool(b) => {
@@ -319,6 +323,11 @@ impl Module {
             })
         })?;
 
+        let itabs = r.read_vec(|r| {
+            let methods = r.read_vec(|r| r.read_u32())?;
+            Ok(Itab { methods })
+        })?;
+
         let constants = r.read_vec(|r| {
             let tag = r.read_u8()?;
             match tag {
@@ -390,6 +399,7 @@ impl Module {
             struct_metas,
             interface_metas,
             named_type_metas,
+            itabs,
             constants,
             globals,
             functions,

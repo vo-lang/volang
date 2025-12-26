@@ -186,8 +186,10 @@ pub enum Opcode {
     // slot0 format: [itab_id:32 | named_type_id:24 | value_kind:8]
     // slot1: data (immediate value or GcRef)
     // nil check: value_kind == Void (same as Go: typed nil is NOT nil interface)
-    IfaceAssign,  // dst=slots[a..a+2], src=slots[b], named_type_id=c, flags=value_kind
-                  // - Computes itab_id from (named_type_id, iface_meta_id)
+    IfaceAssign,  // dst=slots[a..a+2], src=slots[b], c=const_idx, flags=value_kind
+                  // c points to Int64 constant:
+                  //   - 具体类型: (named_type_id << 32) | itab_id，编译时已建 itab
+                  //   - Interface 右值: iface_meta_id（高32位为0），运行时建 itab
                   // - Method set check done at compile time
                   // - Struct/Array: deep copy (ptr_clone)
                   // - Interface: copy slot0, deep copy slot1 if Struct/Array

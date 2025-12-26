@@ -726,27 +726,42 @@ Note: `DeferPop` removed. Defers are executed automatically by `Return`.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, named_type_id=`c`, flags=`value_kind` |
+| `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, c=`const_idx`, flags=`value_kind` |
 | `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`, target_id=`c`, flags=`assert_kind \| (has_ok << 2)` |
 
 **IfaceAssign Semantics**:
 
 ```rust
-// b = src value slot
-// c = named_type_id (compile-time known, 0 for primitives)
-// flags = value_kind
+// a = dst slot (interface occupies 2 slots: a, a+1)
+// b = src value slot (interface source: b, b+1)
+// c = constant pool index (Int64)
+//     - 具体类型: (named_type_id << 32) | itab_id，编译时已建 itab
+//     - Interface: iface_meta_id（高32位为0），运行时建 itab
+// flags = value_kind of source
 
 let vk = flags;
+let packed = constants[c].as_int64();
+let named_type_id = (packed >> 32) as u32;
+let low = (packed & 0xFFFFFFFF) as u32;
 
-// Get or create itab (lazy, cached)
-// Method set check done at compile time
-let itab_id = vm.get_or_create_itab(named_type_id, iface_meta_id);
+let (actual_named_type_id, actual_vk, itab_id) = if vk == Interface {
+    // Interface → Interface: 运行时查/建 itab
+    let src_slot0 = slots[b];
+    let src_named_type_id = (src_slot0 >> 8) & 0xFFFFFF;
+    let src_vk = src_slot0 & 0xFF;
+    let iface_meta_id = low;
+    let itab_id = vm.get_or_create_itab(src_named_type_id, iface_meta_id);
+    (src_named_type_id, src_vk, itab_id)
+} else {
+    // 具体类型 → Interface: 编译时已建 itab
+    (named_type_id, vk, low)
+};
 
 // Write slot0: [itab_id:32 | named_type_id:24 | value_kind:8]
-slots[a] = ((itab_id as u64) << 32) | ((named_type_id as u64) << 8) | (vk as u64);
+slots[a] = ((itab_id as u64) << 32) | ((actual_named_type_id as u64) << 8) | (actual_vk as u64);
 
 // Write slot1: deep copy if Struct/Array
-match vk {
+match actual_vk {
     Struct | Array => slots[a+1] = gc.ptr_clone(slots[b]),
     Interface => {
         let src_vk = slots[b] & 0xFF;
@@ -760,12 +775,54 @@ match vk {
 }
 ```
 
-**Itab Structure** (runtime, lazy built):
+**Source value types** (三种右值):
+| 右值类型 | named_type_id | itab | 说明 |
+|----------|---------------|------|------|
+| Primitive | 0 (from const) | 编译时构建 | int, float, bool, string, etc. |
+| Named type | from const | 编译时构建 | struct, type alias, etc. |
+| Interface | from src.slot0 | 运行时构建 | 需要 itab_cache |
+
+**常量格式** (Int64):
+- 具体类型右值: `(named_type_id << 32) | itab_id`，itab 编译时已构建
+- Interface 右值: `iface_meta_id`（高 32 位为 0），itab 运行时构建
+
+**Itab Structure**:
 ```rust
+// 字节码中
+struct Module {
+    itabs: Vec<Itab>,  // 编译时构建的 itabs
+    // ...
+}
+
+// VM 运行时
+struct VM {
+    itabs: Vec<Itab>,           // 初始化时从 module.itabs 拷贝，运行时追加
+    itab_cache: HashMap<(u32, u32), u32>,  // (named_type_id, iface_meta_id) -> itab_id
+}
+
 struct Itab {
     methods: Vec<u32>,  // method_idx -> func_id
 }
-// itab_cache: HashMap<(named_type_id, iface_meta_id), itab_id>
+```
+
+**运行时逻辑**:
+```rust
+let packed = constants[c].as_int64();
+let named_type_id = (packed >> 32) as u32;
+let low = (packed & 0xFFFFFFFF) as u32;
+
+let (actual_named_type_id, actual_vk, itab_id) = if vk == ValueKind::Interface {
+    // Interface → Interface: 运行时查/建 itab
+    let src_slot0 = slots[b];
+    let src_named_type_id = (src_slot0 >> 8) & 0xFFFFFF;
+    let src_vk = src_slot0 & 0xFF;
+    let iface_meta_id = low;
+    let itab_id = vm.get_or_create_itab(src_named_type_id, iface_meta_id);
+    (src_named_type_id, src_vk, itab_id)
+} else {
+    // 具体类型 → Interface: 编译时已建 itab
+    (named_type_id, vk, low)  // low = itab_id
+};
 ```
 
 **IfaceAssert Semantics**:

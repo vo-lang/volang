@@ -1,0 +1,12 @@
+package main
+
+type MyNum struct {
+    value int
+}
+
+func main() {
+    var a interface{}
+    n := MyNum{value: 42}
+    a = n
+    println("a:", a)
+}

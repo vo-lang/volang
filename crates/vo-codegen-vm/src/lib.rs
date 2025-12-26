@@ -56,11 +56,14 @@ fn register_types(
                 let type_name = project.interner.resolve(type_decl.name.symbol)
                     .unwrap_or("?");
                 
-                // Get the TypeKey from type checker using the type expression
-                if let Some(type_key) = info.type_expr_type(type_decl.ty.id) {
+                // Get underlying type key from type expression, and named type key from declaration name
+                let underlying_type_key = info.type_expr_type(type_decl.ty.id);
+                let named_type_key = info.get_def(&type_decl.name).and_then(|obj| info.obj_type(obj));
+                
+                if let (Some(underlying_key), Some(named_key)) = (underlying_type_key, named_type_key) {
                     match &type_decl.ty.kind {
                         TypeExprKind::Struct(struct_type) => {
-                            // Build StructMeta
+                            // Build StructMeta - keyed by underlying type
                             let mut field_names = Vec::new();
                             let mut field_offsets = Vec::new();
                             let mut slot_types = Vec::new();
@@ -89,19 +92,21 @@ fn register_types(
                                 field_offsets,
                                 slot_types: slot_types.clone(),
                             };
-                            let struct_meta_id = ctx.register_struct_meta(type_key, meta);
+                            // struct_meta uses underlying type key
+                            let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
                             
-                            // Also register NamedTypeMeta for this struct type
+                            // NamedTypeMeta - keyed by named type
                             let underlying_meta = ValueMeta::new(struct_meta_id as u32, vo_common_core::types::ValueKind::Struct);
                             let named_type_meta = NamedTypeMeta {
                                 name: type_name.to_string(),
                                 underlying_meta,
                                 methods: HashMap::new(),
                             };
-                            ctx.register_named_type_meta(type_key, named_type_meta);
+                            // named_type_meta uses named type key
+                            ctx.register_named_type_meta(named_key, named_type_meta);
                         }
                         TypeExprKind::Interface(iface_type) => {
-                            // Build InterfaceMeta
+                            // Build InterfaceMeta - keyed by underlying type
                             let mut method_names = Vec::new();
                             for elem in &iface_type.elems {
                                 if let vo_syntax::ast::InterfaceElem::Method(method) = elem {
@@ -115,7 +120,8 @@ fn register_types(
                                 name: type_name.to_string(),
                                 method_names,
                             };
-                            ctx.register_interface_meta(type_key, meta);
+                            // interface_meta uses underlying type key
+                            ctx.register_interface_meta(underlying_key, meta);
                         }
                         _ => {}
                     }
@@ -215,6 +221,9 @@ fn compile_functions(
     
     // Update NamedTypeMeta.methods with method func_ids
     update_named_type_methods(ctx, &method_mappings);
+    
+    // Build pending itabs now that methods are registered
+    ctx.finalize_itabs();
     
     Ok(())
 }

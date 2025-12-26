@@ -82,6 +82,8 @@ impl Vm {
     pub fn load(&mut self, module: Module) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
         self.state.globals = vec![0u64; total_global_slots];
+        // Initialize itab_cache from module's compile-time itabs
+        self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
         self.module = Some(module);
     }
 

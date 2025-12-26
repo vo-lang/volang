@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use vo_vm::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, MethodInfo, Module, NamedTypeMeta, StructMeta,
+    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 
 /// Package-level codegen context.
@@ -46,6 +46,10 @@ pub struct CodegenContext {
 
     /// init functions (in declaration order)
     init_functions: Vec<u32>,
+
+    /// Pending itab builds: (named_type_id, iface_meta_id, const_idx)
+    /// These are processed after all methods are registered
+    pending_itabs: Vec<(u16, u16, u16)>,
 }
 
 impl CodegenContext {
@@ -60,6 +64,7 @@ impl CodegenContext {
                     method_names: Vec::new(),
                 }],
                 named_type_metas: Vec::new(),
+                itabs: Vec::new(),
                 constants: Vec::new(),
                 globals: Vec::new(),
                 functions: Vec::new(),
@@ -78,6 +83,7 @@ impl CodegenContext {
             named_type_ids: HashMap::new(),
             objkey_to_func: HashMap::new(),
             init_functions: Vec::new(),
+            pending_itabs: Vec::new(),
         }
     }
 
@@ -126,6 +132,71 @@ impl CodegenContext {
     /// Get or default interface meta ID (for assignment)
     pub fn get_interface_meta_id_or_default(&self, type_key: TypeKey) -> u16 {
         self.interface_meta_ids.get(&type_key).copied().unwrap_or(0)
+    }
+
+    // === Itab and IfaceAssign constant ===
+
+    /// Register constant for IfaceAssign with concrete type source.
+    /// For non-empty interfaces, itab building is deferred until methods are registered.
+    /// Returns const_idx.
+    pub fn register_iface_assign_const_concrete(&mut self, named_type_id: u16, iface_meta_id: u16) -> u16 {
+        if iface_meta_id == 0 {
+            // Empty interface: no itab needed
+            let packed = ((named_type_id as i64) << 32) | 0;
+            self.const_int(packed)
+        } else {
+            // Non-empty interface: defer itab building
+            // Use add_const (not const_int) to get a unique index that can be updated later
+            let packed = ((named_type_id as i64) << 32) | 0;
+            let const_idx = self.add_const(Constant::Int(packed));
+            // Record for later: (named_type_id, iface_meta_id, const_idx)
+            self.pending_itabs.push((named_type_id, iface_meta_id, const_idx));
+            const_idx
+        }
+    }
+
+    /// Register constant for IfaceAssign with interface source.
+    /// packed = iface_meta_id (high 32 bits = 0)
+    pub fn register_iface_assign_const_interface(&mut self, iface_meta_id: u16) -> u16 {
+        let packed = iface_meta_id as i64;
+        self.const_int(packed)
+    }
+
+    /// Build pending itabs after all methods are registered.
+    /// Updates constants with correct itab_ids.
+    pub fn finalize_itabs(&mut self) {
+        let pending = std::mem::take(&mut self.pending_itabs);
+        for (named_type_id, iface_meta_id, const_idx) in pending {
+            let itab_id = self.build_itab(named_type_id, iface_meta_id);
+            // Update constant with correct itab_id
+            let packed = ((named_type_id as i64) << 32) | (itab_id as i64);
+            self.module.constants[const_idx as usize] = Constant::Int(packed);
+        }
+    }
+
+    fn build_itab(&mut self, named_type_id: u16, iface_meta_id: u16) -> u16 {
+        let named_type = &self.module.named_type_metas[named_type_id as usize];
+        let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
+
+        let methods: Vec<u32> = iface_meta
+            .method_names
+            .iter()
+            .map(|name| {
+                named_type
+                    .methods
+                    .get(name)
+                    .unwrap_or_else(|| panic!(
+                        "method '{}' not found in named type '{}' (id={}). Available methods: {:?}",
+                        name, named_type.name, named_type_id,
+                        named_type.methods.keys().collect::<Vec<_>>()
+                    ))
+                    .func_id
+            })
+            .collect();
+
+        let itab_id = self.module.itabs.len() as u16;
+        self.module.itabs.push(Itab { methods });
+        itab_id
     }
 
     // === Function registration ===

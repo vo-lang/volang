@@ -1308,6 +1308,16 @@ fn compile_assign(
                                 })
                         }).unwrap_or(0);
                         
+                        // Determine constant for IfaceAssign based on source type
+                        let const_idx = if src_vk == vo_common_core::ValueKind::Interface {
+                            // Interface -> Interface: constant = iface_meta_id
+                            ctx.register_iface_assign_const_interface(iface_meta_id)
+                        } else {
+                            // Concrete type -> Interface: register constant (itab built later)
+                            let named_type_id = src_type.and_then(|t| ctx.get_named_type_id(t)).unwrap_or(0);
+                            ctx.register_iface_assign_const_concrete(named_type_id, iface_meta_id)
+                        };
+                        
                         // For struct/array value types on stack, need to allocate heap first
                         let is_value_type = src_vk == vo_common_core::ValueKind::Struct || src_vk == vo_common_core::ValueKind::Array;
                         let rhs_is_heap = matches!(&rhs_source, ExprSource::Location(ValueLocation::HeapBoxed { .. }));
@@ -1330,12 +1340,21 @@ fn compile_assign(
                             func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
                             func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
                             
-                            // IfaceAssign with GcRef
-                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, iface_meta_id);
+                            // IfaceAssign with GcRef: c = const_idx
+                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+                        } else if is_value_type && rhs_is_heap {
+                            // Heap struct/array -> interface: use GcRef directly (with PtrClone for deep copy)
+                            if let ExprSource::Location(ValueLocation::HeapBoxed { slot: rhs_slot, .. }) = rhs_source {
+                                // IfaceAssign expects GcRef, VM will do ptr_clone
+                                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, rhs_slot, const_idx);
+                            } else {
+                                let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+                                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
+                            }
                         } else {
-                            // Already heap or non-value type: compile and assign directly
+                            // Non-value type (primitives, etc.): compile and assign directly
                             let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, iface_meta_id);
+                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
                         }
                         return Ok(());
                     }
