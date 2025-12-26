@@ -91,7 +91,11 @@ pub fn compile_stmt(
 
                         // Initialize
                         if i < spec.values.len() {
-                            compile_expr_to(&spec.values[i], slot, ctx, func, info)?;
+                            if info.is_interface(type_key) {
+                                compile_iface_init(&spec.values[i], slot, type_key, ctx, func, info)?;
+                            } else {
+                                compile_expr_to(&spec.values[i], slot, ctx, func, info)?;
+                            }
                         } else {
                             // Zero initialize
                             for j in 0..slots {
@@ -1267,74 +1271,17 @@ fn compile_assign(
             match lhs_source {
                 ExprSource::Location(lhs_loc) => {
                     // Check if assigning to interface variable
-                    let is_iface = info.is_interface(lhs_type);
-                    if is_iface {
-                        // For HeapBoxed interface, we need to use temp slots for IfaceAssign
-                        // then PtrSetN to write to heap
+                    if info.is_interface(lhs_type) {
+                        // For HeapBoxed interface, use temp slots then write to heap
                         let (dst_slot, is_heap_boxed, heap_gcref) = match lhs_loc {
                             ValueLocation::Stack { slot, .. } => (slot, false, 0),
-                            ValueLocation::HeapBoxed { slot, .. } => {
-                                // Allocate temp 2 slots for IfaceAssign result
-                                let tmp = func.alloc_temp(2);
-                                (tmp, true, slot)
-                            }
+                            ValueLocation::HeapBoxed { slot, .. } => (func.alloc_temp(2), true, slot),
                             ValueLocation::Reference { slot } => (slot, false, 0),
                             ValueLocation::Global { index, .. } => (index, false, 0),
                         };
-                        let src_type = info.expr_type(rhs.id);
-                        let src_vk = info.type_value_kind(src_type);
-                        let iface_meta_id = ctx.get_or_create_interface_meta_id(lhs_type, &info.project.tc_objs);
                         
-                        // Determine constant for IfaceAssign based on source type
-                        let const_idx = if src_vk == vo_common_core::ValueKind::Interface {
-                            // Interface -> Interface: constant = iface_meta_id
-                            ctx.register_iface_assign_const_interface(iface_meta_id)
-                        } else {
-                            // Concrete type -> Interface: register constant (itab built later)
-                            let named_type_id = ctx.get_named_type_id(src_type).unwrap_or(0);
-                            ctx.register_iface_assign_const_concrete(named_type_id, iface_meta_id)
-                        };
+                        compile_iface_init(rhs, dst_slot, lhs_type, ctx, func, info)?;
                         
-                        // For struct/array value types on stack, need to allocate heap first
-                        let is_value_type = src_vk == vo_common_core::ValueKind::Struct || src_vk == vo_common_core::ValueKind::Array;
-                        let rhs_is_heap = matches!(&rhs_source, ExprSource::Location(ValueLocation::HeapBoxed { .. }));
-                        
-                        if is_value_type && !rhs_is_heap {
-                            // Stack struct/array -> interface: allocate heap, copy, then IfaceAssign
-                            let src_slots = info.type_slot_count(src_type);
-                            let slot_types = info.type_slot_types(src_type);
-                            let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &slot_types);
-                            
-                            // Compile rhs to temp slots
-                            let tmp_data = func.alloc_temp(src_slots);
-                            compile_expr_to(rhs, tmp_data, ctx, func, info)?;
-                            
-                            // Allocate heap and copy
-                            let gcref_slot = func.alloc_temp(1);
-                            // PtrNew: dst=gcref_slot, meta_reg=temp (loaded from const pool), flags=slots
-                            let meta_reg = func.alloc_temp(1);
-                            func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                            func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-                            func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
-                            
-                            // IfaceAssign with GcRef: c = const_idx
-                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-                        } else if is_value_type && rhs_is_heap {
-                            // Heap struct/array -> interface: use GcRef directly (with PtrClone for deep copy)
-                            if let ExprSource::Location(ValueLocation::HeapBoxed { slot: rhs_slot, .. }) = rhs_source {
-                                // IfaceAssign expects GcRef, VM will do ptr_clone
-                                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, rhs_slot, const_idx);
-                            } else {
-                                let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
-                            }
-                        } else {
-                            // Non-value type (primitives, etc.): compile and assign directly
-                            let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-                            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
-                        }
-                        
-                        // For HeapBoxed interface, write temp slots to heap
                         if is_heap_boxed {
                             func.emit_ptr_set(heap_gcref, 0, dst_slot, 2);
                         }
@@ -1733,4 +1680,49 @@ fn resolve_selector_target(
         }
         _ => Err(CodegenError::InvalidLHS),
     }
+}
+
+/// Compile interface assignment: dst = src where dst is interface type
+/// Handles both concrete->interface and interface->interface
+fn compile_iface_init(
+    rhs: &vo_syntax::ast::Expr,
+    dst_slot: u16,
+    iface_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let src_type = info.expr_type(rhs.id);
+    let src_vk = info.type_value_kind(src_type);
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, &info.project.tc_objs);
+    
+    let const_idx = if src_vk == vo_common_core::ValueKind::Interface {
+        ctx.register_iface_assign_const_interface(iface_meta_id)
+    } else {
+        let named_type_id = ctx.get_named_type_id(src_type).unwrap_or(0);
+        ctx.register_iface_assign_const_concrete(named_type_id, iface_meta_id)
+    };
+    
+    let is_value_type = src_vk == vo_common_core::ValueKind::Struct || src_vk == vo_common_core::ValueKind::Array;
+    
+    if is_value_type {
+        let src_slots = info.type_slot_count(src_type);
+        let src_slot_types = info.type_slot_types(src_type);
+        let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+        
+        let tmp_data = func.alloc_temp(src_slots);
+        compile_expr_to(rhs, tmp_data, ctx, func, info)?;
+        
+        let gcref_slot = func.alloc_temp(1);
+        let meta_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
+        func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
+        
+        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+    } else {
+        let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
+    }
+    Ok(())
 }

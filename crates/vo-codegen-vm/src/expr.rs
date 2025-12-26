@@ -877,7 +877,7 @@ fn compile_call(
         let name = info.project.interner.resolve(ident.symbol);
         if let Some(name) = name {
             if is_builtin(name) {
-                return compile_builtin_call(name, call, dst, ctx, func, info);
+                return compile_builtin_call(expr, name, call, dst, ctx, func, info);
             }
         }
         
@@ -1356,6 +1356,7 @@ fn is_builtin(name: &str) -> bool {
 }
 
 fn compile_builtin_call(
+    expr: &vo_syntax::ast::Expr,
     name: &str,
     call: &vo_syntax::ast::CallExpr,
     dst: u16,
@@ -1427,7 +1428,8 @@ fn compile_builtin_call(
         }
         "make" => {
             // make([]T, len) or make([]T, len, cap) or make(map[K]V) or make(chan T)
-            let type_key = info.expr_type(call.args[0].id);
+            // Use the call expression's type, not the first arg (which is a type expr)
+            let type_key = info.expr_type(expr.id);
             
             if info.is_slice(type_key) {
                     // make([]T, len) or make([]T, len, cap)
@@ -1463,7 +1465,9 @@ fn compile_builtin_call(
         }
         "new" => {
             // new(T) - allocate zero value of T on heap
-            let type_key = info.expr_type(call.args[0].id);
+            // Use the call expression's type (pointer to T), not the first arg
+            let ptr_type_key = info.expr_type(expr.id);
+            let type_key = info.pointer_elem(ptr_type_key);
             let slots = info.type_slot_count(type_key);
             // PtrNew: a=dst, b=0 (zero init), flags=slots
             func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, 0, 0);

@@ -77,6 +77,15 @@ impl<'a> TypeInfoWrapper<'a> {
         self.type_info().is_escaped(obj)
     }
 
+    /// Get pointer element type
+    pub fn pointer_elem(&self, type_key: TypeKey) -> TypeKey {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
+            return p.base();
+        }
+        panic!("pointer_elem: not a pointer type")
+    }
+
     // === Closure captures ===
 
     pub fn get_closure_captures(&self, func_lit_id: ExprId) -> Option<&Vec<ObjKey>> {
