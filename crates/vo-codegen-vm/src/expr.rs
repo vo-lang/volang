@@ -912,7 +912,8 @@ fn compile_call(
         // First check if it's a known function
         if let Some(func_idx) = ctx.get_function_index(ident.symbol) {
             // Regular function call - compile args to contiguous slots
-            let args_start = func.alloc_temp(total_arg_slots);
+            // Allocate max(arg_slots, ret_slots) to ensure space for return values
+            let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
             let mut offset = 0u16;
             for arg in &call.args {
                 let arg_slots = info.expr_slots(arg.id);
@@ -937,8 +938,8 @@ fn compile_call(
             // Closure call - compile closure expression first
             let closure_reg = compile_expr(&call.func, ctx, func, info)?;
             
-            // Compile arguments
-            let args_start = func.alloc_temp(total_arg_slots);
+            // Compile arguments - allocate max(arg_slots, ret_slots) for return values
+            let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
             let mut offset = 0u16;
             for arg in &call.args {
                 let arg_slots = info.expr_slots(arg.id);
@@ -964,8 +965,8 @@ fn compile_call(
     // Non-ident function call (e.g., expression returning a closure)
     let closure_reg = compile_expr(&call.func, ctx, func, info)?;
     
-    // Compile arguments
-    let args_start = func.alloc_temp(total_arg_slots);
+    // Compile arguments - allocate max(arg_slots, ret_slots) for return values
+    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
     let mut offset = 0u16;
     for arg in &call.args {
         let arg_slots = info.expr_slots(arg.id);
@@ -1265,7 +1266,9 @@ fn compile_concrete_method(
     let recv_slots = if resolution.expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
     let other_args_slots: u16 = call.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
     let total_arg_slots = recv_slots + other_args_slots;
-    let args_start = func.alloc_temp(total_arg_slots);
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+    // Allocate max(arg_slots, ret_slots) to ensure space for return values
+    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
     
     // Emit receiver
     let embed_offset = compute_embed_offset(selection, is_promoted, base_type, info);
@@ -1283,7 +1286,6 @@ fn compile_concrete_method(
     }
     
     // Emit Call
-    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
     let c = crate::type_info::encode_call_args(arg_offset, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(resolution.func_idx);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
