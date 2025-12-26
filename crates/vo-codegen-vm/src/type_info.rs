@@ -45,12 +45,14 @@ impl<'a> TypeInfoWrapper<'a> {
 
     // === Definition/Use queries ===
 
-    pub fn get_def(&self, ident: &Ident) -> Option<ObjKey> {
+    pub fn get_def(&self, ident: &Ident) -> ObjKey {
         self.type_info().get_def(ident)
+            .expect("identifier must have definition during codegen")
     }
 
-    pub fn get_use(&self, ident: &Ident) -> Option<ObjKey> {
+    pub fn get_use(&self, ident: &Ident) -> ObjKey {
         self.type_info().get_use(ident)
+            .expect("identifier must have use during codegen")
     }
 
     /// Check if object is a package name
@@ -60,14 +62,13 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Check if an identifier refers to a package
     pub fn is_package(&self, ident: &Ident) -> bool {
-        self.get_use(ident).or_else(|| self.get_def(ident))
-            .map(|obj| self.obj_is_pkg(obj))
-            .unwrap_or(false)
+        let obj = self.get_use(ident);
+        self.obj_is_pkg(obj)
     }
 
     /// Get the package path for a package identifier
     pub fn package_path(&self, ident: &Ident) -> Option<String> {
-        let obj = self.get_use(ident).or_else(|| self.get_def(ident))?;
+        let obj = self.get_use(ident);
         if self.obj_is_pkg(obj) {
             let pkg_key = self.tc_objs().lobjs[obj].pkg_name_imported();
             Some(self.tc_objs().pkgs[pkg_key].path().to_string())

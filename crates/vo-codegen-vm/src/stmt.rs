@@ -36,7 +36,7 @@ pub fn compile_stmt(
 
                     // Check escape
                     let obj_key = info.get_def(name);
-                    let escapes = obj_key.map(|k| info.is_escaped(k)).unwrap_or(false);
+                    let escapes = info.is_escaped(obj_key);
 
                     if escapes {
                         // Heap allocation for escaped variable
@@ -129,7 +129,7 @@ pub fn compile_stmt(
                 if is_def {
                     // New variable
                     let obj_key = info.get_def(name);
-                    let escapes = obj_key.map(|k| info.is_escaped(k)).unwrap_or(false);
+                    let escapes = info.is_escaped(obj_key);
                     
                     // Pointer types are already GcRef, no need for heap wrapper
                     let is_pointer = type_key.map(|t| info.is_pointer(t)).expect("short var must have value");
@@ -1274,9 +1274,7 @@ fn compile_assign(
             // Get lhs and rhs sources
             let lhs_source = crate::expr::get_expr_source(lhs, ctx, func, info);
             let rhs_source = crate::expr::get_expr_source(rhs, ctx, func, info);
-            let lhs_type = info.get_use(ident).or_else(|| info.get_def(ident))
-                .map(|o| info.obj_type(o, "assignment lhs must have type"))
-                .expect("assignment lhs ident must resolve");
+            let lhs_type = info.obj_type(info.get_use(ident), "assignment lhs must have type");
             
             match lhs_source {
                 ExprSource::Location(lhs_loc) => {
@@ -1726,9 +1724,8 @@ fn resolve_selector_target(
     match &expr.kind {
         ExprKind::Ident(ident) => {
             if let Some(local) = func.lookup_local(ident.symbol) {
-                let type_key = info.get_def(ident)
-                    .map(|o| info.obj_type(o, "local var must have type"));
-                let loc = crate::expr::get_local_location(local, type_key, info);
+                let type_key = info.obj_type(info.get_def(ident), "local var must have type");
+                let loc = crate::expr::get_local_location(local, Some(type_key), info);
                 Ok((SelectorTarget::Location(loc), 0))
             } else {
                 Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)))

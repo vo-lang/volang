@@ -58,10 +58,8 @@ fn register_types(
                 
                 // Get underlying type key from type expression, and named type key from declaration name
                 let underlying_key = info.type_expr_type(type_decl.ty.id);
-                let named_type_key = info.get_def(&type_decl.name)
-                    .map(|obj| info.obj_type(obj, "type declaration must have type"));
-                
-                if let Some(named_key) = named_type_key {
+                let named_key = info.obj_type(info.get_def(&type_decl.name), "type declaration must have type");
+                {
                     match &type_decl.ty.kind {
                         TypeExprKind::Struct(struct_type) => {
                             // Build StructMeta - keyed by underlying type
@@ -144,9 +142,8 @@ fn collect_declarations(
                 Decl::Func(func_decl) => {
                     // Check if this is a method (has receiver)
                     let (recv_type, is_pointer_recv) = if let Some(recv) = &func_decl.receiver {
-                        let base_type = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty))
-                            .map(|obj| info.obj_type(obj, "method receiver must have type"));
-                        (base_type, recv.is_pointer)
+                        let base_type = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
+                        (Some(base_type), recv.is_pointer)
                     } else {
                         (None, false)
                     };
@@ -211,9 +208,7 @@ fn compile_functions(
                 // If this is a method, record the mapping
                 if let Some(recv) = &func_decl.receiver {
                     // recv.ty is the struct type (e.g., MyNum), recv.is_pointer indicates if it's *T
-                    let recv_type = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty))
-                        .map(|obj| info.obj_type(obj, "method receiver must have type"))
-                        .expect("method receiver ident must resolve");
+                    let recv_type = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
                     {
                         let method_name = project.interner.resolve(func_decl.name.symbol)
                             .unwrap_or("?").to_string();
@@ -272,9 +267,7 @@ fn compile_func_decl(
         let (slots, slot_types) = if recv.is_pointer {
             (1, vec![vo_common_core::types::SlotType::GcRef])
         } else {
-            let type_key = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty))
-                .map(|obj| info.obj_type(obj, "method receiver must have type"))
-                .expect("method receiver ident must resolve");
+            let type_key = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
             let slots = info.type_slot_count(type_key);
             let slot_types = info.type_slot_types(type_key);
             (slots, slot_types)
@@ -314,9 +307,8 @@ fn compile_func_decl(
     // Get receiver base type and is_pointer flag
     let (recv_base_type, is_pointer_recv) = func_decl.receiver.as_ref()
         .map(|recv| {
-            let base_type = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty))
-                .map(|obj| info.obj_type(obj, "method receiver must have type"));
-            (base_type, recv.is_pointer)
+            let base_type = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
+            (Some(base_type), recv.is_pointer)
         })
         .unwrap_or((None, false));
     let func_id = ctx.define_func(func_def, recv_base_type, is_pointer_recv, func_decl.name.symbol);
