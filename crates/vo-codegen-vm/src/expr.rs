@@ -604,7 +604,7 @@ fn compile_type_assert(
     
     // Get target type from the type assertion
     let target_type = type_assert.ty.as_ref()
-        .and_then(|ty| info.type_expr_type(ty.id));
+        .map(|ty| info.type_expr_type(ty.id));
     
     // Get target meta_id
     let target_meta_id = target_type

@@ -37,12 +37,10 @@ impl<'a> TypeInfoWrapper<'a> {
         self.type_slot_count(self.expr_type(expr_id))
     }
 
-    pub fn type_expr_type(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> Option<TypeKey> {
-        self.project.type_info.type_exprs.get(&type_expr_id).copied()
-    }
-
-    pub fn expr_mode(&self, expr_id: ExprId) -> Option<&vo_analysis::operand::OperandMode> {
-        self.type_info().expr_mode(expr_id)
+    pub fn type_expr_type(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> TypeKey {
+        self.project.type_info.type_exprs.get(&type_expr_id)
+            .copied()
+            .expect("type expression must have type during codegen")
     }
 
     // === Definition/Use queries ===
@@ -163,8 +161,7 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get slots and slot_types for a type expression (used for params/results).
     pub fn type_expr_layout(&self, type_expr_id: vo_syntax::ast::TypeExprId) -> (u16, Vec<SlotType>) {
-        let type_key = *self.project.type_info.type_exprs.get(&type_expr_id)
-            .expect("type expression must have type in type_exprs");
+        let type_key = self.type_expr_type(type_expr_id);
         let slots = self.type_slot_count(type_key);
         let slot_types = self.type_slot_types(type_key);
         (slots, slot_types)

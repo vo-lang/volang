@@ -57,11 +57,11 @@ fn register_types(
                     .unwrap_or("?");
                 
                 // Get underlying type key from type expression, and named type key from declaration name
-                let underlying_type_key = info.type_expr_type(type_decl.ty.id);
+                let underlying_key = info.type_expr_type(type_decl.ty.id);
                 let named_type_key = info.get_def(&type_decl.name)
                     .map(|obj| info.obj_type(obj, "type declaration must have type"));
                 
-                if let (Some(underlying_key), Some(named_key)) = (underlying_type_key, named_type_key) {
+                if let Some(named_key) = named_type_key {
                     match &type_decl.ty.kind {
                         TypeExprKind::Struct(struct_type) => {
                             // Build StructMeta - keyed by underlying type
@@ -79,12 +79,11 @@ fn register_types(
                                     field_offsets.push(offset);
                                     
                                     // Get field type and slot count
-                                    if let Some(field_type) = info.type_expr_type(field.ty.id) {
-                                        let slots = info.type_slot_count(field_type);
-                                        let slot_type_list = info.type_slot_types(field_type);
-                                        slot_types.extend(slot_type_list);
-                                        offset += slots;
-                                    }
+                                    let field_type = info.type_expr_type(field.ty.id);
+                                    let slots = info.type_slot_count(field_type);
+                                    let slot_type_list = info.type_slot_types(field_type);
+                                    slot_types.extend(slot_type_list);
+                                    offset += slots;
                                 }
                             }
                             

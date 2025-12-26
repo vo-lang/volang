@@ -1049,9 +1049,8 @@ fn compile_type_switch(
                 if let Some(type_expr) = type_opt {
                     // Get type's meta_id
                     let type_key = info.type_expr_type(type_expr.id);
-                    let meta_id = type_key
-                        .and_then(|t| ctx.get_struct_meta_id(t))
-                        .unwrap_or(0);
+                    let meta_id = ctx.get_struct_meta_id(type_key)
+                        .expect("type switch case type must have meta_id");
                     
                     // Compare with interface's meta_id
                     let cmp_reg = func.alloc_temp(1);
@@ -1096,10 +1095,8 @@ fn compile_type_switch(
             if !case.types.is_empty() {
                 if let Some(Some(type_expr)) = case.types.first() {
                     let type_key = info.type_expr_type(type_expr.id);
-                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                    let slot_types = type_key
-                        .map(|t| info.type_slot_types(t))
-                        .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+                    let slots = info.type_slot_count(type_key);
+                    let slot_types = info.type_slot_types(type_key);
                     
                     // Define local variable for the asserted value
                     let var_slot = func.define_local_stack(assign_name.symbol, slots, &slot_types);
