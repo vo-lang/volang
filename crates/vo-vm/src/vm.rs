@@ -718,7 +718,7 @@ impl Vm {
                 ExecResult::Continue
             }
             Opcode::IfaceAssert => {
-                exec::exec_iface_assert(fiber, inst)
+                exec::exec_iface_assert(fiber, inst, &mut state.itab_cache, module)
             }
 
             Opcode::ConvI2F => {

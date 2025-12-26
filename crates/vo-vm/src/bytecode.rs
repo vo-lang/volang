@@ -8,7 +8,7 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use vo_common_core::types::SlotType;
+use vo_common_core::types::{SlotType, ValueMeta};
 
 use crate::instruction::Instruction;
 
@@ -49,11 +49,22 @@ pub struct GlobalDef {
 
 #[derive(Debug, Clone)]
 pub struct StructMeta {
-    pub name: String,
     pub slot_types: Vec<SlotType>,
     pub field_names: Vec<String>,
     pub field_offsets: Vec<u16>,
-    pub methods: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub func_id: u32,
+    pub is_pointer_receiver: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedTypeMeta {
+    pub name: String,
+    pub underlying_meta: ValueMeta,
+    pub methods: HashMap<String, MethodInfo>,
 }
 
 impl StructMeta {
@@ -74,6 +85,7 @@ pub struct Module {
     pub name: String,
     pub struct_metas: Vec<StructMeta>,
     pub interface_metas: Vec<InterfaceMeta>,
+    pub named_type_metas: Vec<NamedTypeMeta>,
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -87,6 +99,7 @@ impl Module {
             name,
             struct_metas: Vec::new(),
             interface_metas: Vec::new(),
+            named_type_metas: Vec::new(),
             constants: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),

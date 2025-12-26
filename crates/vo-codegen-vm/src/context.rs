@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use vo_vm::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Module, StructMeta,
+    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 
 /// Package-level codegen context.
@@ -38,7 +38,10 @@ pub struct CodegenContext {
     /// Type meta_id: TypeKey -> interface_meta_id
     interface_meta_ids: HashMap<TypeKey, u16>,
 
-    /// ObjKey -> func_id (for StructMeta.methods)
+    /// Type meta_id: TypeKey -> named_type_id
+    named_type_ids: HashMap<TypeKey, u16>,
+
+    /// ObjKey -> func_id
     objkey_to_func: HashMap<ObjKey, u32>,
 
     /// init functions (in declaration order)
@@ -56,6 +59,7 @@ impl CodegenContext {
                     name: String::new(),
                     method_names: Vec::new(),
                 }],
+                named_type_metas: Vec::new(),
                 constants: Vec::new(),
                 globals: Vec::new(),
                 functions: Vec::new(),
@@ -71,6 +75,7 @@ impl CodegenContext {
             const_string: HashMap::new(),
             struct_meta_ids: HashMap::new(),
             interface_meta_ids: HashMap::new(),
+            named_type_ids: HashMap::new(),
             objkey_to_func: HashMap::new(),
             init_functions: Vec::new(),
         }
@@ -96,10 +101,21 @@ impl CodegenContext {
         self.struct_meta_ids.get(&type_key).copied()
     }
 
-    /// Update a StructMeta's methods map after function compilation
-    pub fn update_struct_meta_method(&mut self, meta_id: u16, method_name: String, func_id: u32) {
-        if let Some(meta) = self.module.struct_metas.get_mut(meta_id as usize) {
-            meta.methods.insert(method_name, func_id);
+    pub fn register_named_type_meta(&mut self, type_key: TypeKey, meta: NamedTypeMeta) -> u16 {
+        let id = self.module.named_type_metas.len() as u16;
+        self.module.named_type_metas.push(meta);
+        self.named_type_ids.insert(type_key, id);
+        id
+    }
+
+    pub fn get_named_type_id(&self, type_key: TypeKey) -> Option<u16> {
+        self.named_type_ids.get(&type_key).copied()
+    }
+
+    /// Update a NamedTypeMeta's methods map after function compilation
+    pub fn update_named_type_method(&mut self, named_type_id: u16, method_name: String, func_id: u32, is_pointer_receiver: bool) {
+        if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
+            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver });
         }
     }
 

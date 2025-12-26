@@ -8,7 +8,7 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use crate::bytecode::{InterfaceMeta, StructMeta};
+use crate::bytecode::{InterfaceMeta, NamedTypeMeta};
 
 #[derive(Debug, Clone)]
 pub struct Itab {
@@ -17,7 +17,7 @@ pub struct Itab {
 
 #[derive(Debug, Default)]
 pub struct ItabCache {
-    cache: HashMap<(u32, u32), u32>,
+    cache: HashMap<(u32, u32), u32>,  // (named_type_id, iface_meta_id) -> itab_id
     itabs: Vec<Itab>,
 }
 
@@ -35,18 +35,18 @@ impl ItabCache {
 
     pub fn get_or_create(
         &mut self,
-        meta_id: u32,
+        named_type_id: u32,
         iface_meta_id: u32,
-        struct_metas: &[StructMeta],
+        named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
     ) -> u32 {
-        let key = (meta_id, iface_meta_id);
+        let key = (named_type_id, iface_meta_id);
 
         if let Some(&itab_id) = self.cache.get(&key) {
             return itab_id;
         }
 
-        let itab = self.build_itab(meta_id, iface_meta_id, struct_metas, interface_metas);
+        let itab = self.build_itab(named_type_id, iface_meta_id, named_type_metas, interface_metas);
         let itab_id = self.itabs.len() as u32;
         self.itabs.push(itab);
         self.cache.insert(key, itab_id);
@@ -56,22 +56,24 @@ impl ItabCache {
 
     fn build_itab(
         &self,
-        meta_id: u32,
+        named_type_id: u32,
         iface_meta_id: u32,
-        struct_metas: &[StructMeta],
+        named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
     ) -> Itab {
-        let struct_meta = &struct_metas[meta_id as usize];
+        let named_type = &named_type_metas[named_type_id as usize];
         let iface_meta = &interface_metas[iface_meta_id as usize];
 
+        // Method set check done at compile time
         let methods: Vec<u32> = iface_meta
             .method_names
             .iter()
             .map(|name| {
-                *struct_meta
+                named_type
                     .methods
                     .get(name)
-                    .expect("method not found in struct")
+                    .expect("method not found in named type")
+                    .func_id
             })
             .collect();
 

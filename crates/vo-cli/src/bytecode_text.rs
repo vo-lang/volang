@@ -20,19 +20,34 @@ pub fn format_text(module: &Module) -> String {
         out.push_str("## Struct Types\n");
         for (i, s) in module.struct_metas.iter().enumerate() {
             out.push_str(&format!(
-                "# [{}] {} ({} slots)\n",
+                "# [{}] ({} slots)\n",
                 i,
-                s.name,
                 s.slot_count()
             ));
             for (j, name) in s.field_names.iter().enumerate() {
                 let offset = s.field_offsets.get(j).copied().unwrap_or(0);
                 out.push_str(&format!("#   {}: offset={}\n", name, offset));
             }
-            if !s.methods.is_empty() {
+        }
+        out.push('\n');
+    }
+
+    // Named types
+    if !module.named_type_metas.is_empty() {
+        out.push_str("## Named Types\n");
+        for (i, nt) in module.named_type_metas.iter().enumerate() {
+            out.push_str(&format!(
+                "# [{}] {} (underlying: meta_id={}, vk={})\n",
+                i,
+                nt.name,
+                nt.underlying_meta.meta_id(),
+                nt.underlying_meta.value_kind() as u8
+            ));
+            if !nt.methods.is_empty() {
                 out.push_str("#   methods:");
-                for (name, fid) in &s.methods {
-                    out.push_str(&format!(" {}=func_{}", name, fid));
+                for (name, info) in &nt.methods {
+                    let ptr_str = if info.is_pointer_receiver { "*" } else { "" };
+                    out.push_str(&format!(" {}{}=func_{}", ptr_str, name, info.func_id));
                 }
                 out.push('\n');
             }

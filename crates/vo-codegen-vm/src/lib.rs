@@ -45,7 +45,8 @@ fn register_types(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::{Decl, TypeExprKind};
-    use vo_vm::bytecode::{StructMeta, InterfaceMeta};
+    use vo_vm::bytecode::{StructMeta, InterfaceMeta, NamedTypeMeta};
+    use vo_common_core::types::ValueMeta;
     use std::collections::HashMap;
     
     // Iterate all type declarations
@@ -84,13 +85,20 @@ fn register_types(
                             }
                             
                             let meta = StructMeta {
-                                name: type_name.to_string(),
                                 field_names,
                                 field_offsets,
-                                slot_types,
-                                methods: HashMap::new(), // Methods added later
+                                slot_types: slot_types.clone(),
                             };
-                            ctx.register_struct_meta(type_key, meta);
+                            let struct_meta_id = ctx.register_struct_meta(type_key, meta);
+                            
+                            // Also register NamedTypeMeta for this struct type
+                            let underlying_meta = ValueMeta::new(struct_meta_id as u32, vo_common_core::types::ValueKind::Struct);
+                            let named_type_meta = NamedTypeMeta {
+                                name: type_name.to_string(),
+                                underlying_meta,
+                                methods: HashMap::new(),
+                            };
+                            ctx.register_named_type_meta(type_key, named_type_meta);
                         }
                         TypeExprKind::Interface(iface_type) => {
                             // Build InterfaceMeta
@@ -176,8 +184,8 @@ fn compile_functions(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Collect method info for StructMeta.methods update
-    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32)> = Vec::new();
+    // Collect method info for NamedTypeMeta.methods update
+    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool)> = Vec::new();
     
     // Iterate all files and compile function declarations
     for file in &project.files {
@@ -198,27 +206,27 @@ fn compile_functions(
                     if let Some(recv_type) = info.get_use(&recv.ty).or_else(|| info.get_def(&recv.ty)).and_then(|obj| info.obj_type(obj)) {
                         let method_name = project.interner.resolve(func_decl.name.symbol)
                             .unwrap_or("?").to_string();
-                        method_mappings.push((recv_type, method_name, func_id));
+                        method_mappings.push((recv_type, method_name, func_id, recv.is_pointer));
                     }
                 }
             }
         }
     }
     
-    // Update StructMeta.methods with method func_ids
-    update_struct_meta_methods(ctx, &method_mappings);
+    // Update NamedTypeMeta.methods with method func_ids
+    update_named_type_methods(ctx, &method_mappings);
     
     Ok(())
 }
 
-fn update_struct_meta_methods(
+fn update_named_type_methods(
     ctx: &mut CodegenContext,
-    method_mappings: &[(vo_analysis::objects::TypeKey, String, u32)],
+    method_mappings: &[(vo_analysis::objects::TypeKey, String, u32, bool)],
 ) {
     // Group methods by type_key
-    for (type_key, method_name, func_id) in method_mappings {
-        if let Some(meta_id) = ctx.get_struct_meta_id(*type_key) {
-            ctx.update_struct_meta_method(meta_id, method_name.clone(), *func_id);
+    for (type_key, method_name, func_id, is_pointer_receiver) in method_mappings {
+        if let Some(named_type_id) = ctx.get_named_type_id(*type_key) {
+            ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver);
         }
     }
 }

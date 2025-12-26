@@ -5,6 +5,7 @@
 //! - Version: u32 (4 bytes)
 //! - struct_metas: [StructMeta]
 //! - interface_metas: [InterfaceMeta]
+//! - named_type_metas: [NamedTypeMeta]
 //! - constants: [Constant]
 //! - globals: [GlobalDef]
 //! - functions: [FunctionDef]
@@ -19,10 +20,10 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use vo_common_core::types::SlotType;
+use vo_common_core::types::{SlotType, ValueMeta};
 
 use crate::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Module, StructMeta,
+    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 use crate::instruction::Instruction;
 
@@ -189,20 +190,25 @@ impl Module {
         w.write_string(&self.name);
 
         w.write_vec(&self.struct_metas, |w, m| {
-            w.write_string(&m.name);
             w.write_vec(&m.slot_types, |w, st| w.write_u8(*st as u8));
             w.write_vec(&m.field_names, |w, n| w.write_string(n));
             w.write_vec(&m.field_offsets, |w, o| w.write_u16(*o));
-            w.write_u32(m.methods.len() as u32);
-            for (name, func_id) in &m.methods {
-                w.write_string(name);
-                w.write_u32(*func_id);
-            }
         });
 
         w.write_vec(&self.interface_metas, |w, m| {
             w.write_string(&m.name);
             w.write_vec(&m.method_names, |w, n| w.write_string(n));
+        });
+
+        w.write_vec(&self.named_type_metas, |w, m| {
+            w.write_string(&m.name);
+            w.write_u32(m.underlying_meta.to_raw());
+            w.write_u32(m.methods.len() as u32);
+            for (name, info) in &m.methods {
+                w.write_string(name);
+                w.write_u32(info.func_id);
+                w.write_u8(info.is_pointer_receiver as u8);
+            }
         });
 
         w.write_vec(&self.constants, |w, c| match c {
@@ -279,23 +285,13 @@ impl Module {
         let name = r.read_string()?;
 
         let struct_metas = r.read_vec(|r| {
-            let name = r.read_string()?;
             let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             let field_names = r.read_vec(|r| r.read_string())?;
             let field_offsets = r.read_vec(|r| r.read_u16())?;
-            let method_count = r.read_u32()? as usize;
-            let mut methods = HashMap::new();
-            for _ in 0..method_count {
-                let n = r.read_string()?;
-                let id = r.read_u32()?;
-                methods.insert(n, id);
-            }
             Ok(StructMeta {
-                name,
                 slot_types,
                 field_names,
                 field_offsets,
-                methods,
             })
         })?;
 
@@ -303,6 +299,24 @@ impl Module {
             let name = r.read_string()?;
             let method_names = r.read_vec(|r| r.read_string())?;
             Ok(InterfaceMeta { name, method_names })
+        })?;
+
+        let named_type_metas = r.read_vec(|r| {
+            let name = r.read_string()?;
+            let underlying_meta = ValueMeta::from_raw(r.read_u32()?);
+            let method_count = r.read_u32()? as usize;
+            let mut methods = HashMap::new();
+            for _ in 0..method_count {
+                let n = r.read_string()?;
+                let func_id = r.read_u32()?;
+                let is_pointer_receiver = r.read_u8()? != 0;
+                methods.insert(n, MethodInfo { func_id, is_pointer_receiver });
+            }
+            Ok(NamedTypeMeta {
+                name,
+                underlying_meta,
+                methods,
+            })
         })?;
 
         let constants = r.read_vec(|r| {
@@ -375,6 +389,7 @@ impl Module {
             name,
             struct_metas,
             interface_metas,
+            named_type_metas,
             constants,
             globals,
             functions,

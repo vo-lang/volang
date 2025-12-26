@@ -49,11 +49,9 @@ fn test_ptr_struct_escape() {
 
     // Point struct meta (id 0)
     let struct_metas = vec![StructMeta {
-        name: "Point".into(),
         slot_types: vec![SlotType::Value, SlotType::Value],
         field_names: vec!["x".into(), "y".into()],
         field_offsets: vec![0, 1],
-        methods: Default::default(),
     }];
 
     // ValueMeta for Point struct (kind=Struct, meta_id=0)
@@ -231,11 +229,9 @@ fn test_ptr_nested_linked_list() {
     // slot 0: val (Value)
     // slot 1: next (GcRef/Pointer)
     let struct_metas = vec![StructMeta {
-        name: "Node".into(),
         slot_types: vec![SlotType::Value, SlotType::GcRef],
         field_names: vec!["val".into(), "next".into()],
         field_offsets: vec![0, 1],
-        methods: Default::default(),
     }];
     
     let node_meta = ValueMeta::new(0, ValueKind::Struct).to_raw() as i32;
