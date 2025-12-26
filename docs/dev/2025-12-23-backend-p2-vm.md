@@ -183,17 +183,19 @@ pub enum Opcode {
     // Note: defer uses 0-arg closure, executed automatically on Return
     
     // === IFACE: Interface operations (interface uses slots[a] and slots[a+1]) ===
-    // slot0 format: [itab_id:32 | value_meta:32]  (value_meta = meta_id:24 | value_kind:8)
+    // slot0 format: [itab_id:32 | named_type_id:24 | value_kind:8]
     // slot1: data (immediate value or GcRef)
     // nil check: value_kind == Void (same as Go: typed nil is NOT nil interface)
-    IfaceAssign,  // dst=slots[a..a+2], src=slots[b], iface_meta_id=c, vk=flags
-                  // - Computes itab_id from (src_meta_id, iface_meta_id)
+    IfaceAssign,  // dst=slots[a..a+2], src=slots[b], named_type_id=c, flags=value_kind
+                  // - Computes itab_id from (named_type_id, iface_meta_id)
+                  // - Method set check done at compile time
                   // - Struct/Array: deep copy (ptr_clone)
-                  // - Interface: copy value_meta, deep copy slot1 if Struct/Array
+                  // - Interface: copy slot0, deep copy slot1 if Struct/Array
                   // - Others: direct copy
-    IfaceAssert,  // a=dst, b=src_iface, c=target_meta_id
-                  // flags=0: no ok, panic on fail
-                  // flags>0: ok→slots[a+flags]
+    IfaceAssert,  // a=dst, b=src_iface, c=target_id
+                  // flags = assert_kind | (has_ok << 2)
+                  // assert_kind: 0=Primitive, 1=Named, 2=Interface
+                  // c meaning: Primitive→value_kind, Named→named_type_id, Interface→iface_meta_id
     
     // === CONV: Type conversion ===
     ConvI2F,      // slots[a] = float64(slots[b])
@@ -286,6 +288,7 @@ pub struct Module {
     pub name: String,
     pub struct_metas: Vec<StructMeta>,
     pub interface_metas: Vec<InterfaceMeta>,
+    pub named_type_metas: Vec<NamedTypeMeta>,  // index = named_type_id
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -293,14 +296,12 @@ pub struct Module {
     pub entry_func: u32,
 }
 
-/// Struct metadata (includes methods for itab building)
+/// Struct metadata (physical layout only)
 pub struct StructMeta {
-    pub name: String,
     pub size_slots: u16,
     pub slot_types: Vec<SlotType>,
     pub field_names: Vec<String>,
     pub field_offsets: Vec<u16>,
-    pub methods: HashMap<String, u32>,  // method_name -> func_id
 }
 
 /// Interface metadata
@@ -308,11 +309,27 @@ pub struct InterfaceMeta {
     pub name: String,
     pub method_names: Vec<String>,  // ordered method names
 }
+
+/// Method info for a named type
+pub struct MethodInfo {
+    pub func_id: u32,
+    pub is_pointer_receiver: bool,
+}
+
+/// Named type metadata (for itab building and type assertion)
+pub struct NamedTypeMeta {
+    pub name: String,
+    pub underlying_meta: ValueMeta,             // [struct_meta_id:24 | value_kind:8]
+    pub methods: HashMap<String, MethodInfo>,
+}
 ```
 
 **Key Points**:
 - `slot_types` must match `local_slots` length
-- `StructMeta.methods` used by VM to build itab at runtime
+- `NamedTypeMeta` used by VM to build itab at runtime and for type assertion
+- Methods belong to named type, not receiver form (T and *T share one namespace)
+- `is_pointer_receiver` determines method set: T only has value receiver methods, *T has all
+- `underlying_meta` provides access to physical layout (struct_meta_id) and value_kind
 
 ### 4. Serialization (bytecode.rs cont.)
 
@@ -330,6 +347,7 @@ impl Module {
 /// Version: u32
 /// struct_metas: [StructMeta]
 /// interface_metas: [InterfaceMeta]
+/// named_type_metas: [NamedTypeMeta]
 /// constants: [Constant]
 /// globals: [GlobalDef]
 /// functions: [FunctionDef]
@@ -419,7 +437,7 @@ pub struct Vm {
     pub scheduler: Scheduler,
     pub globals: Vec<u64>,
     // Itab cache (lazy built)
-    pub itab_cache: HashMap<(u32, u32), u32>,  // (meta_id, iface_meta_id) -> itab_id
+    pub itab_cache: HashMap<(u32, u32), u32>,  // (named_type_id, iface_meta_id) -> itab_id
     pub itabs: Vec<Itab>,                       // itab_id -> Itab
 }
 ```
@@ -524,9 +542,9 @@ Opcode::CallIface => {
 
 ```rust
 impl Vm {
-    /// Get or create itab for (meta_id, iface_meta_id) pair
-    fn get_or_create_itab(&mut self, meta_id: u32, iface_meta_id: u32) -> u32 {
-        let key = (meta_id, iface_meta_id);
+    /// Get or create itab for (named_type_id, iface_meta_id) tuple
+    fn get_or_create_itab(&mut self, named_type_id: u32, iface_meta_id: u32) -> u32 {
+        let key = (named_type_id, iface_meta_id);
         
         // Check cache
         if let Some(&itab_id) = self.itab_cache.get(&key) {
@@ -534,7 +552,7 @@ impl Vm {
         }
         
         // Build new itab
-        let itab = self.build_itab(meta_id, iface_meta_id);
+        let itab = self.build_itab(named_type_id, iface_meta_id);
         let itab_id = self.itabs.len() as u32;
         self.itabs.push(itab);
         self.itab_cache.insert(key, itab_id);
@@ -542,13 +560,17 @@ impl Vm {
         itab_id
     }
     
-    fn build_itab(&self, meta_id: u32, iface_meta_id: u32) -> Itab {
+    fn build_itab(&self, named_type_id: u32, iface_meta_id: u32) -> Itab {
         let module = self.module.as_ref().unwrap();
-        let struct_meta = &module.struct_metas[meta_id as usize];
+        let named_type = &module.named_type_metas[named_type_id as usize];
         let iface_meta = &module.interface_metas[iface_meta_id as usize];
         
+        // Method set check done at compile time
         let methods: Vec<u32> = iface_meta.method_names.iter()
-            .map(|name| *struct_meta.methods.get(name).expect("method not found"))
+            .map(|name| {
+                let info = named_type.methods.get(name).expect("method not found");
+                info.func_id
+            })
             .collect();
         
         Itab { methods }

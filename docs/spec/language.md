@@ -856,18 +856,47 @@ type E interface {
 
 ### 7.3 Type Method Sets
 
-The **method set** of a named type `T` is the set of all methods declared with receiver type `T`.
+The **method set** of a type determines which methods can be called on values of that type, and which interfaces the type implements.
+
+| Type | Method Set |
+|------|------------|
+| Named type `T` | All methods with receiver `T` |
+| Pointer type `*T` (where `T` is a struct) | All methods with receiver `T` or `*T` |
 
 ```vo
-type User struct { ... }
+type Point struct { x, y int }
 
-func (u User) Name() string { ... }
-func (u User) SetName(n string) { ... }
+func (p Point) Get() int { return p.x }    // receiver = Point
+func (p *Point) Set(x int) { p.x = x }     // receiver = *Point
 
-// Method set of User = {Name() string, SetName(string)}
+// Method set of Point = {Get}
+// Method set of *Point = {Get, Set}
 ```
 
-Only **named types** can have methods. You cannot define methods on built-in types, arrays, slices, maps, or function types directly.
+**Interface implementation**: A type `T` implements interface `I` if and only if the method set of `T` is a superset of the method set of `I`.
+
+```vo
+type Getter interface { Get() int }
+type Setter interface { Set(int) }
+
+var p Point
+var g Getter = p      // OK: Point has Get()
+var s Setter = p      // ERROR: Point doesn't have Set()
+var s2 Setter = &p    // OK: *Point has Set()
+```
+
+Any **named type** can have methods. You cannot define methods on built-in types or anonymous types directly.
+
+```vo
+type MyInt int
+func (m MyInt) Double() int { return int(m) * 2 }  // OK
+
+type MySlice []int
+func (s MySlice) Sum() int { ... }  // OK
+
+func (i int) Foo() {}      // ERROR: cannot define on built-in type
+func (a []int) Bar() {}    // ERROR: cannot define on anonymous type
+```
 
 ### 7.4 Method Declarations
 
@@ -882,7 +911,19 @@ A function declaration may omit the body. Such a declaration provides the signat
 extern func Sqrt(x float64) float64
 ```
 
-The receiver consists of a name and a **named type**. Anonymous types (arrays, slices, maps, func) are not allowed as receivers.
+The receiver consists of a name and a **named type**. Anonymous types (arrays, slices, maps, func) are not allowed as receivers. The receiver type can be `T` or `*T` (where `T` is a struct type).
+
+**Method name uniqueness**: Methods belong to the type, not to the receiver form. For a given type `T`, method names must be unique across both value receiver (`T`) and pointer receiver (`*T`) declarations.
+
+```vo
+type Point struct { x, y int }
+
+func (p Point) Foo() {}    // OK
+func (p *Point) Foo() {}   // ERROR: method Foo already declared for Point
+
+func (p Point) Get() int { return p.x }      // OK: value receiver
+func (p *Point) Set(x int) { p.x = x }       // OK: different method name
+```
 
 ```vo
 func (u User) Name() string {
@@ -897,6 +938,41 @@ func (a [4]int) Sum() int { ... }  // ERROR: receiver must be named type
 ```
 
 **Runtime**: Calling a method on a `nil` receiver is a runtime error.
+
+### 7.5 Method Calls
+
+When calling a method, the compiler automatically inserts address-of or dereference operations as needed:
+
+| Expression | Method Receiver | Transformation |
+|------------|-----------------|----------------|
+| `v.m()` | `T` | Direct call |
+| `v.m()` | `*T` (where `v` is addressable) | `(&v).m()` (auto address-of) |
+| `p.m()` | `*T` | Direct call |
+| `p.m()` | `T` | `(*p).m()` (auto dereference) |
+
+```vo
+type Point struct { x int }
+
+func (p Point) Get() int { return p.x }
+func (p *Point) Set(x int) { p.x = x }
+
+var v Point
+var p *Point = &v
+
+v.Get()     // direct: receiver is Point
+v.Set(10)   // transformed to (&v).Set(10)
+p.Get()     // transformed to (*p).Get()
+p.Set(20)   // direct: receiver is *Point
+```
+
+**Addressability requirement**: The auto address-of transformation `v.m()` → `(&v).m()` requires `v` to be addressable. Non-addressable values (e.g., function return values, map index expressions) cannot call pointer-receiver methods directly.
+
+```vo
+func getPoint() Point { return Point{} }
+
+getPoint().Get()    // OK: value receiver
+getPoint().Set(10)  // ERROR: cannot take address of getPoint()
+```
 
 ---
 

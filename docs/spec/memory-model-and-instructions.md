@@ -190,11 +190,12 @@ var arr [3]int  // slot 0: arr[0], slot 1: arr[1], slot 2: arr[2]
 **Interface**: 2 slots
 ```vo
 var i interface{}
-// slot 0: [itab_id:32 | value_meta:32]  (value_meta = meta_id:24 | value_kind:8)
+// slot 0: [itab_id:32 | named_type_id:24 | value_kind:8]
 // slot 1: data (immediate value or GcRef)
 //
 // itab_id: index into VM's itab table (for method dispatch)
-// value_meta: concrete type's ValueMeta
+// named_type_id: index into named_type_metas[] (for type assertion)
+// value_kind: concrete type's ValueKind (for nil check)
 //
 // nil check (same as Go):
 //   i == nil  ⟺  value_kind == Void
@@ -725,30 +726,24 @@ Note: `DeferPop` removed. Defers are executed automatically by `Return`.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, iface_meta_id=`c`, vk=`flags` |
-| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`, target_meta_id=`c`. flags=0: panic, flags>0: ok→`slots[a+flags]` |
+| `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, named_type_id=`c`, flags=`value_kind` |
+| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`, target_id=`c`, flags=`assert_kind \| (has_ok << 2)` |
 
 **IfaceAssign Semantics**:
 
 ```rust
-// c = target iface_meta_id (compile-time known)
-// flags = src value_kind
+// b = src value slot
+// c = named_type_id (compile-time known, 0 for primitives)
+// flags = value_kind
 
-// Get src_meta_id from source
-let src_meta_id = match vk {
-    Struct | Array | Pointer => gc.get_header(slots[b]).meta_id(),
-    Interface => unpack_value_meta(slots[b]).meta_id(),
-    _ => 0,  // primitives/refs don't need meta_id
-};
+let vk = flags;
 
 // Get or create itab (lazy, cached)
-let itab_id = vm.get_or_create_itab(src_meta_id, iface_meta_id);
+// Method set check done at compile time
+let itab_id = vm.get_or_create_itab(named_type_id, iface_meta_id);
 
-// Build value_meta
-let value_meta = ValueMeta::new(src_meta_id, vk);
-
-// Write slot0: [itab_id:32 | value_meta:32]
-slots[a] = ((itab_id as u64) << 32) | (value_meta.to_raw() as u64);
+// Write slot0: [itab_id:32 | named_type_id:24 | value_kind:8]
+slots[a] = ((itab_id as u64) << 32) | ((named_type_id as u64) << 8) | (vk as u64);
 
 // Write slot1: deep copy if Struct/Array
 match vk {
@@ -770,9 +765,51 @@ match vk {
 struct Itab {
     methods: Vec<u32>,  // method_idx -> func_id
 }
-// itab_cache: HashMap<(meta_id, iface_meta_id), itab_id>
-// No need to store meta_id in Itab - use slot0.value_meta.meta_id() directly
+// itab_cache: HashMap<(named_type_id, iface_meta_id), itab_id>
 ```
+
+**IfaceAssert Semantics**:
+
+```rust
+// a = dst, b = src_iface (2 slots), c = target_id
+// flags = assert_kind | (has_ok << 2)
+//   assert_kind: 0=Primitive, 1=Named, 2=Interface
+//   has_ok: whether to return ok bool instead of panic
+
+let assert_kind = flags & 0x3;
+let has_ok = (flags >> 2) != 0;
+
+let src_slot0 = slots[b];
+let src_named_type_id = (src_slot0 >> 8) & 0xFFFFFF;
+let src_vk = (src_slot0 & 0xFF) as ValueKind;
+
+let matches = match assert_kind {
+    0 => src_named_type_id == 0 && src_vk as u32 == c,  // Primitive: check value_kind
+    1 => src_named_type_id == c,                         // Named: check named_type_id
+    2 => {                                               // Interface: check method set
+        if src_named_type_id == 0 { false }
+        else {
+            let is_pointer = src_vk == ValueKind::Pointer;
+            itab_cache.try_build(src_named_type_id, c, is_pointer).is_ok()
+        }
+    }
+    _ => unreachable!(),
+};
+
+if matches {
+    // Copy value to dst (slots depend on target type)
+    if has_ok { slots[a + dst_slots] = 1; }
+} else if has_ok {
+    slots[a + dst_slots] = 0;
+} else {
+    panic!("type assertion failed");
+}
+```
+
+**Type Assertion Restrictions**:
+- Only supports: primitive types, named types, interfaces
+- Anonymous composite types (`[]int`, `map[K]V`, etc.) NOT supported
+- Use named type wrapper: `type IntSlice []int`
 
 #### 6.3.26 CONV: Type Conversion
 
@@ -806,20 +843,50 @@ pub enum SlotType {
 
 ### 7.2 StructMeta
 
-Runtime type metadata for struct types:
+Runtime type metadata for struct types (physical layout only):
 
 ```rust
 pub struct StructMeta {
-    pub name: String,
     pub size_slots: u16,
     pub slot_types: Vec<SlotType>,  // For GC scanning
     pub field_names: Vec<String>,
     pub field_offsets: Vec<u16>,
-    pub methods: HashMap<String, u32>,  // method_name -> func_id (for itab building)
 }
 ```
 
-### 7.3 Closure Structure
+### 7.3 NamedTypeMeta
+
+Runtime metadata for named types (used for itab building and type assertion):
+
+```rust
+pub struct MethodInfo {
+    pub func_id: u32,
+    pub is_pointer_receiver: bool,
+}
+
+pub struct NamedTypeMeta {
+    pub name: String,
+    pub underlying_meta: ValueMeta,             // [struct_meta_id:24 | value_kind:8]
+    pub methods: HashMap<String, MethodInfo>,   // method_name -> MethodInfo
+}
+```
+
+**Examples**:
+| Named Type | underlying_meta |
+|------------|-----------------|
+| `type Point struct {...}` | `ValueMeta(struct_meta_id, Struct)` |
+| `type MyInt int` | `ValueMeta(0, Int)` |
+| `type MySlice []int` | `ValueMeta(0, Slice)` |
+
+**Key points**:
+- Methods belong to the named type, not the receiver form (`T` and `*T` share one namespace)
+- `is_pointer_receiver` determines method set membership:
+  - `T` method set: methods where `is_pointer_receiver = false`
+  - `*T` method set: all methods
+- `named_type_id` (index into `named_type_metas[]`) is stored in interface slot0
+- `underlying_meta` provides access to physical layout (struct_meta_id) and value_kind
+
+### 7.4 Closure Structure
 
 ```rust
 /// Closure layout: GcHeader + ClosureHeader + [captures...]
