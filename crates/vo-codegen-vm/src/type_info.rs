@@ -190,21 +190,21 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         type_key: TypeKey,
         field_index: usize,
-    ) -> Option<(u16, u16)> {
+    ) -> (u16, u16) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Struct(s) = &self.tc_objs().types[underlying] {
             let mut offset = 0u16;
             for (i, &field_obj) in s.fields().iter().enumerate() {
                 let obj = &self.tc_objs().lobjs[field_obj];
-                let field_type = obj.typ()?;
+                let field_type = obj.typ().expect("struct field must have type");
                 let field_slots = self.type_slot_count(field_type);
                 if i == field_index {
-                    return Some((offset, field_slots));
+                    return (offset, field_slots);
                 }
                 offset += field_slots;
             }
         }
-        None
+        panic!("struct_field_offset_by_index: field {} not found", field_index)
     }
     
     /// Get struct field type by index (for method promotion)
@@ -212,14 +212,14 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         type_key: TypeKey,
         field_index: usize,
-    ) -> Option<TypeKey> {
+    ) -> TypeKey {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Struct(s) = &self.tc_objs().types[underlying] {
             if let Some(&field_obj) = s.fields().get(field_index) {
-                return Some(self.obj_type(field_obj, "struct field must have type"));
+                return self.obj_type(field_obj, "struct field must have type");
             }
         }
-        None
+        panic!("struct_field_type_by_index: field {} not found", field_index)
     }
 
     /// Compute field offset using selection indices (unified approach for all field access)
@@ -228,9 +228,9 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         base_type: TypeKey,
         indices: &[usize],
-    ) -> Option<(u16, u16)> {
+    ) -> (u16, u16) {
         if indices.is_empty() {
-            return None;
+            panic!("compute_field_offset_from_indices: empty indices");
         }
         
         let mut offset = 0u16;
@@ -238,17 +238,17 @@ impl<'a> TypeInfoWrapper<'a> {
         let mut final_slots = 1u16;
         
         for (i, &idx) in indices.iter().enumerate() {
-            let (field_offset, field_slots) = self.struct_field_offset_by_index(current_type, idx)?;
+            let (field_offset, field_slots) = self.struct_field_offset_by_index(current_type, idx);
             offset += field_offset;
             
             if i == indices.len() - 1 {
                 final_slots = field_slots;
             } else {
-                current_type = self.struct_field_type_by_index(current_type, idx)?;
+                current_type = self.struct_field_type_by_index(current_type, idx);
             }
         }
         
-        Some((offset, final_slots))
+        (offset, final_slots)
     }
 
     // === Type queries ===
@@ -298,12 +298,13 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get map key and value slot counts
-    pub fn map_key_val_slots(&self, type_key: TypeKey) -> Option<(u16, u16)> {
+    pub fn map_key_val_slots(&self, type_key: TypeKey) -> (u16, u16) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        let map_type = self.tc_objs().types[underlying].try_as_map()?;
+        let map_type = self.tc_objs().types[underlying].try_as_map()
+            .expect("map_key_val_slots: not a map type");
         let key_slots = self.type_slot_count(map_type.key());
         let val_slots = self.type_slot_count(map_type.elem());
-        Some((key_slots, val_slots))
+        (key_slots, val_slots)
     }
 
     /// Get map key slot types

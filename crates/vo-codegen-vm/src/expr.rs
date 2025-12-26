@@ -363,10 +363,11 @@ fn compile_selector(
         recv_type
     };
     
-    // Get field offset using selection indices (unified approach)
-    // Selection is recorded on the entire selector expression (expr.id)
+    // Get field offset: prefer Selection.indices() for promoted/embedded fields,
+    // fallback to field name lookup for simple cases.
+    // Selection handles embedded field promotion (e.g., Outer.X where X is from Inner).
     let (offset, slots) = info.get_selection(expr.id)
-        .and_then(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
+        .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
         .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
     
     if is_ptr {
@@ -455,8 +456,7 @@ fn compile_index(
         let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
         // MapGet: a=dst, b=map, c=meta_and_key
         // meta_and_key: slots[c] = (key_slots << 16) | (val_slots << 1) | has_ok, key=slots[c+1..]
-        let (key_slots, val_slots) = info.map_key_val_slots(container_type)
-            .expect("map must have key/val slots");
+        let (key_slots, val_slots) = info.map_key_val_slots(container_type);
         let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
         let meta_reg = func.alloc_temp(1 + key_slots);
         let (b, c) = encode_i32(meta as i32);
@@ -818,8 +818,7 @@ fn compile_addr_of(
                 }
             } else {
                 // Positional field
-                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i)
-                    .ok_or_else(|| CodegenError::Internal(format!("field index {} not found", i)))?;
+                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i);
                 
                 let tmp = func.alloc_temp(field_slots);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
@@ -1075,12 +1074,9 @@ fn compute_embed_offset(
     
     // Walk through indices except the last one (which is the method itself)
     for &idx in sel.indices().iter().take(sel.indices().len().saturating_sub(1)) {
-        if let Some((field_offset, _)) = info.struct_field_offset_by_index(current_type, idx) {
-            offset += field_offset;
-            if let Some(field_type) = info.struct_field_type_by_index(current_type, idx) {
-                current_type = field_type;
-            }
-        }
+        let (field_offset, _) = info.struct_field_offset_by_index(current_type, idx);
+        offset += field_offset;
+        current_type = info.struct_field_type_by_index(current_type, idx);
     }
     offset
 }
@@ -1505,9 +1501,7 @@ fn compile_builtin_call(
             // MapDelete expects: a=map, b=meta_and_key
             // meta = key_slots, key at b+1
             let map_type = info.expr_type(call.args[0].id);
-            let key_slots = info.map_key_val_slots(map_type)
-                .map(|(k, _)| k)
-                .expect("map must have key/val slots");
+            let (key_slots, _) = info.map_key_val_slots(map_type);
             
             let meta_and_key_reg = func.alloc_temp(1 + key_slots);
             func.emit_op(Opcode::LoadInt, meta_and_key_reg, key_slots, 0);
@@ -1596,8 +1590,7 @@ fn compile_composite_lit(
                 }
             } else {
                 // Positional field: use field index
-                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i)
-                    .ok_or_else(|| CodegenError::Internal(format!("field index {} not found", i)))?;
+                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i);
                 compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
                 positional_offset = offset + field_slots;
             }
@@ -1642,7 +1635,7 @@ fn compile_composite_lit(
         }
     } else if info.is_map(type_key) {
         // Map literal: map[K]V{k1: v1, k2: v2, ...}
-        let (key_slots, val_slots) = info.map_key_val_slots(type_key).unwrap_or((1, 1));
+        let (key_slots, val_slots) = info.map_key_val_slots(type_key);
         
         // Get key/val meta with correct ValueKind
         let key_slot_types = info.map_key_slot_types(type_key)

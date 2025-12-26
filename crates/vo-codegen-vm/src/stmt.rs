@@ -499,8 +499,7 @@ pub fn compile_stmt(
                         let map_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
                         
                         // Get key and value slot counts from map type
-                        let (key_slots, val_slots) = info.map_key_val_slots(range_type)
-                            .expect("map must have key/val slots");
+                        let (key_slots, val_slots) = info.map_key_val_slots(range_type);
                         
                         // Define key and value variables
                         let key_slot = if let Some(k) = key {
@@ -1409,7 +1408,7 @@ fn compile_assign(
             
             // Get field offset using selection indices (unified approach)
             let (field_offset, slots) = info.get_selection(lhs.id)
-                .and_then(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
+                .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
                 .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
             
             // If receiver is pointer type, use Ptr path directly
@@ -1486,7 +1485,7 @@ fn compile_assign(
                 // MapSet expects: a=map, b=meta_and_key, c=val
                 // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
+                let (key_slots, val_slots) = info.map_key_val_slots(container_type);
                 
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots);
                 let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
@@ -1658,7 +1657,7 @@ fn compile_compound_assign(
                 func.emit_with_flags(Opcode::SliceSet, 1, container_reg, index_reg, tmp);
             } else if info.is_map(container_type) {
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                let (key_slots, val_slots) = info.map_key_val_slots(container_type).unwrap_or((1, 1));
+                let (key_slots, val_slots) = info.map_key_val_slots(container_type);
                 
                 // Build meta_and_key for MapGet/MapSet
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots);
