@@ -168,21 +168,21 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         type_key: TypeKey,
         field_name: &str,
-    ) -> Option<(u16, u16)> {
+    ) -> (u16, u16) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Struct(s) = &self.tc_objs().types[underlying] {
             let mut offset = 0u16;
             for &field_obj in s.fields() {
                 let obj = &self.tc_objs().lobjs[field_obj];
-                let field_type = obj.typ()?;
+                let field_type = obj.typ().expect("struct field must have type");
                 let field_slots = self.type_slot_count(field_type);
                 if obj.name() == field_name {
-                    return Some((offset, field_slots));
+                    return (offset, field_slots);
                 }
                 offset += field_slots;
             }
         }
-        None
+        panic!("struct field {} not found during codegen", field_name)
     }
 
     /// Get struct field offset by index (for positional struct literals)
@@ -388,112 +388,113 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         ptr_type: TypeKey,
         field_name: &str,
-    ) -> Option<(u16, u16)> {
+    ) -> (u16, u16) {
         let underlying = typ::underlying_type(ptr_type, self.tc_objs());
         if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
             self.struct_field_offset(p.base(), field_name)
         } else {
-            None
+            panic!("struct_field_offset_from_ptr: not a pointer type")
         }
     }
 
     /// Get array element slot count
-    pub fn array_elem_slots(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn array_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Array(a) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_count(a.elem()))
+            self.type_slot_count(a.elem())
         } else {
-            None
+            panic!("array_elem_slots: not an array type")
         }
     }
 
     /// Get array element slot types
-    pub fn array_elem_slot_types(&self, type_key: TypeKey) -> Option<Vec<vo_common_core::types::SlotType>> {
+    pub fn array_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::types::SlotType> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Array(a) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_types(a.elem()))
+            self.type_slot_types(a.elem())
         } else {
-            None
+            panic!("array_elem_slot_types: not an array type")
         }
     }
 
     /// Get slice element slot count
-    pub fn slice_elem_slots(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn slice_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Slice(s) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_count(s.elem()))
+            self.type_slot_count(s.elem())
         } else {
-            None
+            panic!("slice_elem_slots: not a slice type")
         }
     }
 
     /// Get slice element slot types
-    pub fn slice_elem_slot_types(&self, type_key: TypeKey) -> Option<Vec<vo_common_core::types::SlotType>> {
+    pub fn slice_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::types::SlotType> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Slice(s) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_types(s.elem()))
+            self.type_slot_types(s.elem())
         } else {
-            None
+            panic!("slice_elem_slot_types: not a slice type")
         }
     }
 
     /// Get array length
-    pub fn array_len(&self, type_key: TypeKey) -> Option<u64> {
+    pub fn array_len(&self, type_key: TypeKey) -> u64 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Array(a) = &self.tc_objs().types[underlying] {
-            a.len()
+            a.len().expect("array must have length")
         } else {
-            None
+            panic!("array_len: not an array type")
         }
     }
 
     /// Get array element type
-    pub fn array_elem_type(&self, type_key: TypeKey) -> Option<TypeKey> {
+    pub fn array_elem_type(&self, type_key: TypeKey) -> TypeKey {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Array(a) = &self.tc_objs().types[underlying] {
-            Some(a.elem())
+            a.elem()
         } else {
-            None
+            panic!("array_elem_type: not an array type")
         }
     }
 
     /// Get pointer element slot count
-    pub fn pointer_elem_slots(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn pointer_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_count(p.base()))
+            self.type_slot_count(p.base())
         } else {
-            None
+            panic!("pointer_elem_slots: not a pointer type")
         }
     }
 
     /// Get method index in interface
-    pub fn get_interface_method_index(&self, iface_type: TypeKey, method_name: &str) -> Option<u16> {
+    pub fn get_interface_method_index(&self, iface_type: TypeKey, method_name: &str) -> u16 {
         let underlying = typ::underlying_type(iface_type, self.tc_objs());
         if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
             for (idx, method) in iface.methods().iter().enumerate() {
                 if self.obj_name(*method) == method_name {
-                    return Some(idx as u16);
+                    return idx as u16;
                 }
             }
         }
-        None
+        panic!("get_interface_method_index: method {} not found", method_name)
     }
 
     /// Get channel element slot count
-    pub fn chan_elem_slots(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn chan_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Chan(c) = &self.tc_objs().types[underlying] {
-            Some(self.type_slot_count(c.elem()))
+            self.type_slot_count(c.elem())
         } else {
-            None
+            panic!("chan_elem_slots: not a channel type")
         }
     }
 
-    /// Try to get signature details for a function type
-    pub fn try_as_signature(&self, type_key: TypeKey) -> Option<&typ::SignatureDetail> {
+    /// Get signature details for a function type
+    pub fn as_signature(&self, type_key: TypeKey) -> &typ::SignatureDetail {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         self.tc_objs().types[underlying].try_as_signature()
+            .expect("as_signature: not a signature type")
     }
 
     /// Check if function signature is variadic
@@ -550,12 +551,12 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get base type from pointer type
-    pub fn pointer_base(&self, ptr_type: TypeKey) -> Option<TypeKey> {
+    pub fn pointer_base(&self, ptr_type: TypeKey) -> TypeKey {
         let underlying = typ::underlying_type(ptr_type, self.tc_objs());
         if let Type::Pointer(p) = &self.tc_objs().types[underlying] {
-            Some(p.base())
+            p.base()
         } else {
-            None
+            panic!("pointer_base: not a pointer type")
         }
     }
 }

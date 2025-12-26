@@ -46,8 +46,8 @@ pub fn compile_stmt(
                         
                         if is_array {
                             // Array: use ArrayNew (different memory layout with ArrayHeader)
-                            let arr_len = info.array_len(type_key).expect("array must have length");
-                            let elem_slots = info.array_elem_slots(type_key).expect("array must have elem slots");
+                            let arr_len = info.array_len(type_key);
+                            let elem_slots = info.array_elem_slots(type_key);
                             let elem_meta_idx = ctx.get_or_create_array_elem_meta(type_key, info);
                             
                             // ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_slots
@@ -318,10 +318,8 @@ pub fn compile_stmt(
                     
                     if is_array {
                         // Get array info
-                        let elem_slots = info.array_elem_slots(range_type)
-                            .expect("array must have elem_slots") as u8;
-                        let arr_len = info.array_len(range_type)
-                            .expect("array must have length") as u32;
+                        let elem_slots = info.array_elem_slots(range_type) as u8;
+                        let arr_len = info.array_len(range_type) as u32;
                         
                         // Check if array is on stack or heap using ValueLocation
                         let arr_source = crate::expr::get_expr_source(expr, ctx, func, info);
@@ -348,9 +346,7 @@ pub fn compile_stmt(
                             let val_slot = if let Some(v) = value {
                                 if *define {
                                     if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                        let slot_types = info.array_elem_type(range_type)
-                                            .map(|et| info.type_slot_types(et))
-                                            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+                                        let slot_types = info.type_slot_types(info.array_elem_type(range_type));
                                         func.define_local_stack(ident.symbol, elem_slots as u16, &slot_types)
                                     } else { func.alloc_temp(elem_slots as u16) }
                                 } else {
@@ -419,8 +415,7 @@ pub fn compile_stmt(
                         }
                     } else if info.is_slice(range_type) {
                         // Slice iteration
-                        let elem_slots = info.slice_elem_slots(range_type)
-                            .expect("slice must have elem_slots") as u8;
+                        let elem_slots = info.slice_elem_slots(range_type) as u8;
                         
                         // Compile slice expression
                         let slice_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -547,8 +542,7 @@ pub fn compile_stmt(
                         let chan_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
                         
                         // Get element slot count from channel type
-                        let elem_slots = info.chan_elem_slots(range_type)
-                            .expect("channel must have elem_slots");
+                        let elem_slots = info.chan_elem_slots(range_type);
                         
                         // Define value variable (channels don't have key in for-range)
                         let val_slot = if let Some(v) = value {
@@ -623,8 +617,7 @@ pub fn compile_stmt(
             let chan_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
             let val_reg = crate::expr::compile_expr(&send_stmt.value, ctx, func, info)?;
             let chan_type = info.expr_type(send_stmt.chan.id);
-            let elem_slots = info.chan_elem_slots(chan_type)
-                .expect("channel must have elem_slots") as u8;
+            let elem_slots = info.chan_elem_slots(chan_type) as u8;
             func.emit_with_flags(Opcode::ChanSend, elem_slots, chan_reg, val_reg, 0);
         }
 
@@ -900,16 +893,14 @@ fn compile_select(
                 let chan_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
                 let val_reg = crate::expr::compile_expr(&send.value, ctx, func, info)?;
                 let chan_type = info.expr_type(send.chan.id);
-                let elem_slots = info.chan_elem_slots(chan_type)
-                    .expect("channel must have elem_slots") as u8;
+                let elem_slots = info.chan_elem_slots(chan_type) as u8;
                 func.emit_with_flags(Opcode::SelectSend, elem_slots, chan_reg, val_reg, case_idx as u16);
             }
             Some(CommClause::Recv(recv)) => {
                 // SelectRecv: a=dst_reg, b=chan_reg, flags=(elem_slots<<1|has_ok)
                 let chan_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
                 let chan_type = info.expr_type(recv.expr.id);
-                let elem_slots = info.chan_elem_slots(chan_type)
-                    .expect("channel must have elem_slots");
+                let elem_slots = info.chan_elem_slots(chan_type);
                 
                 // Allocate destination for received value
                 let has_ok = recv.lhs.len() > 1;
@@ -963,8 +954,7 @@ fn compile_select(
             if recv.define && !recv.lhs.is_empty() {
                 // Define the received value variable(s)
                 let chan_type = info.expr_type(recv.expr.id);
-                let elem_slots = info.chan_elem_slots(chan_type)
-                    .expect("channel must have elem_slots");
+                let elem_slots = info.chan_elem_slots(chan_type);
                 
                 for (i, name) in recv.lhs.iter().enumerate() {
                     if i == 0 {
@@ -1412,7 +1402,7 @@ fn compile_assign(
             
             // Get base type for field lookup (deref pointer if needed)
             let base_type = if is_ptr {
-                info.pointer_base(recv_type).unwrap_or(recv_type)
+                info.pointer_base(recv_type)
             } else {
                 recv_type
             };
@@ -1420,8 +1410,7 @@ fn compile_assign(
             // Get field offset using selection indices (unified approach)
             let (field_offset, slots) = info.get_selection(lhs.id)
                 .and_then(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-                .or_else(|| info.struct_field_offset(base_type, field_name))
-                .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
             
             // If receiver is pointer type, use Ptr path directly
             if is_ptr {
@@ -1467,8 +1456,7 @@ fn compile_assign(
             
             if info.is_array(container_type) {
                 // Array: check storage location
-                let elem_slots = info.array_elem_slots(container_type)
-                    .expect("array must have elem_slots");
+                let elem_slots = info.array_elem_slots(container_type);
                 
                 let container_source = crate::expr::get_expr_source(&idx.expr, ctx, func, info);
                 match container_source {
@@ -1491,8 +1479,7 @@ fn compile_assign(
             } else if info.is_slice(container_type) {
                 // Slice: SliceSet
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-                let elem_slots = info.slice_elem_slots(container_type)
-                    .expect("slice must have elem_slots");
+                let elem_slots = info.slice_elem_slots(container_type);
                 func.emit_with_flags(Opcode::SliceSet, elem_slots as u8, container_reg, index_reg, val_reg);
             } else if info.is_map(container_type) {
                 // Map: MapSet
@@ -1597,8 +1584,7 @@ fn compile_compound_assign(
             let is_ptr = info.is_pointer(recv_type);
             
             if is_ptr {
-                let (offset, _slots) = info.struct_field_offset_from_ptr(recv_type, field_name)
-                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found in ptr", field_name)))?;
+                let (offset, _slots) = info.struct_field_offset_from_ptr(recv_type, field_name);
                 
                 let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
                 let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
@@ -1609,8 +1595,7 @@ fn compile_compound_assign(
             } else {
                 // Value receiver - need to handle nested selectors
                 let (target, inner_offset) = resolve_selector_target(&sel.expr, info, func, ctx)?;
-                let (offset, _slots) = info.struct_field_offset(recv_type, field_name)
-                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                let (offset, _slots) = info.struct_field_offset(recv_type, field_name);
                 
                 let total_offset = inner_offset + offset;
                 let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
@@ -1739,13 +1724,11 @@ fn resolve_selector_target(
             if info.is_pointer(recv_type) {
                 // Pointer dereference - compile to get the pointer value
                 let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
-                let (offset, _) = info.struct_field_offset_from_ptr(recv_type, field_name)
-                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                let (offset, _) = info.struct_field_offset_from_ptr(recv_type, field_name);
                 Ok((SelectorTarget::CompiledPtr(ptr_reg), offset))
             } else {
                 let (base, parent_offset) = resolve_selector_target(&sel.expr, info, func, ctx)?;
-                let (offset, _) = info.struct_field_offset(recv_type, field_name)
-                    .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                let (offset, _) = info.struct_field_offset(recv_type, field_name);
                 Ok((base, parent_offset + offset))
             }
         }

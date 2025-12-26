@@ -358,7 +358,7 @@ fn compile_selector(
     
     // Get base type for field lookup (deref pointer if needed)
     let base_type = if is_ptr {
-        info.pointer_base(recv_type).unwrap_or(recv_type)
+        info.pointer_base(recv_type)
     } else {
         recv_type
     };
@@ -367,11 +367,7 @@ fn compile_selector(
     // Selection is recorded on the entire selector expression (expr.id)
     let (offset, slots) = info.get_selection(expr.id)
         .and_then(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-        .or_else(|| {
-            // Fallback to field_name lookup if no selection (shouldn't happen normally)
-            info.struct_field_offset(base_type, field_name)
-        })
-        .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+        .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
     
     if is_ptr {
         // Pointer receiver: load ptr, then PtrGetN
@@ -439,8 +435,7 @@ fn compile_index(
     
     // Check if array, slice, map, or string
     if info.is_array(container_type) {
-        let elem_slots = info.array_elem_slots(container_type)
-            .expect("array must have elem_slots");
+        let elem_slots = info.array_elem_slots(container_type);
         
         // Check if this is a stack array (non-escaped local variable)
         if let Some(base_slot) = get_stack_array_base(&idx.expr, ctx, func, info) {
@@ -454,8 +449,7 @@ fn compile_index(
         }
     } else if info.is_slice(container_type) {
         let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
-        let elem_slots = info.slice_elem_slots(container_type)
-            .expect("slice must have elem_slots");
+        let elem_slots = info.slice_elem_slots(container_type);
         func.emit_with_flags(Opcode::SliceGet, elem_slots as u8, dst, container_reg, index_reg);
     } else if info.is_map(container_type) {
         let container_reg = compile_expr(&idx.expr, ctx, func, info)?;
@@ -544,7 +538,7 @@ fn compile_slice_expr(
         } else if info.is_slice(container_type) {
             func.emit_op(Opcode::SliceLen, tmp, container_reg, 0);
         } else if info.is_array(container_type) {
-            let len = info.array_len(container_type).unwrap_or(0) as i32;
+            let len = info.array_len(container_type) as i32;
             let (b, c) = encode_i32(len);
             func.emit_op(Opcode::LoadInt, tmp, b, c);
         } else {
@@ -634,8 +628,7 @@ fn compile_receive(
     
     // Get element type info
     let chan_type = info.expr_type(chan_expr.id);
-    let elem_slots = info.chan_elem_slots(chan_type)
-        .expect("channel must have elem_slots");
+    let elem_slots = info.chan_elem_slots(chan_type);
     
     // Check if result includes ok bool (v, ok := <-ch)
     let result_slots = info.expr_slots(expr.id);
@@ -817,8 +810,7 @@ fn compile_addr_of(
                     let field_name = info.project.interner.resolve(field_ident.symbol)
                         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
                     
-                    let (offset, field_slots) = info.struct_field_offset(type_key, field_name)
-                        .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                    let (offset, field_slots) = info.struct_field_offset(type_key, field_name);
                     
                     let tmp = func.alloc_temp(field_slots);
                     compile_expr_to(&elem.value, tmp, ctx, func, info)?;
@@ -855,8 +847,7 @@ fn compile_deref(
     
     // Get element type slot count
     let ptr_type = info.expr_type(operand.id);
-    let elem_slots = info.pointer_elem_slots(ptr_type)
-        .expect("pointer must have elem_slots");
+    let elem_slots = info.pointer_elem_slots(ptr_type);
     
     if elem_slots == 1 {
         func.emit_op(Opcode::PtrGet, dst, ptr_reg, 0);
@@ -1041,8 +1032,7 @@ fn resolve_promoted_method(
     let method_type = info.project.tc_objs.lobjs[method_obj].typ()
         .ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} has no type", method_name)))?;
     
-    let sig = info.try_as_signature(method_type)
-        .ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} is not a function", method_name)))?;
+    let sig = info.as_signature(method_type);
     
     let recv_var = sig.recv()
         .ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} has no receiver", method_name)))?;
@@ -1052,7 +1042,7 @@ fn resolve_promoted_method(
     
     // Get defining type (strip pointer if needed)
     let defining_type = if info.is_pointer(recv_type_key) {
-        info.pointer_base(recv_type_key).unwrap_or(recv_type_key)
+        info.pointer_base(recv_type_key)
     } else {
         recv_type_key
     };
@@ -1252,7 +1242,7 @@ fn compile_concrete_method(
 ) -> Result<(), CodegenError> {
     // Get base type (strip pointer if receiver is *T)
     let base_type = if info.is_pointer(recv_type) {
-        info.pointer_base(recv_type).unwrap_or(recv_type)
+        info.pointer_base(recv_type)
     } else {
         recv_type
     };
@@ -1388,7 +1378,7 @@ fn compile_builtin_call(
             // Check type: string, array, slice, map
             if info.is_array(arg_type) {
                 // Array: len is known at compile time
-                let len = info.array_len(arg_type).expect("array must have length");
+                let len = info.array_len(arg_type);
                 let (b, c) = encode_i32(len as i32);
                 func.emit_op(Opcode::LoadInt, dst, b, c);
             } else if info.is_string(arg_type) {
@@ -1445,8 +1435,7 @@ fn compile_builtin_call(
             
             if info.is_slice(type_key) {
                     // make([]T, len) or make([]T, len, cap)
-                    let elem_slots = info.slice_elem_slots(type_key)
-                        .expect("slice must have elem_slots");
+                    let elem_slots = info.slice_elem_slots(type_key);
                     let len_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], _ctx, func, info)?
                     } else {
@@ -1492,8 +1481,7 @@ fn compile_builtin_call(
             let elem_reg = compile_expr(&call.args[1], _ctx, func, info)?;
             
             let slice_type = info.expr_type(call.args[0].id);
-            let elem_slots = info.slice_elem_slots(slice_type)
-                .expect("slice must have elem_slots");
+            let elem_slots = info.slice_elem_slots(slice_type);
             
             // SliceAppend: a=dst, b=slice, c=elem, flags=elem_slots
             func.emit_with_flags(Opcode::SliceAppend, elem_slots as u8, dst, slice_reg, elem_reg);
@@ -1602,8 +1590,7 @@ fn compile_composite_lit(
                     let field_name = info.project.interner.resolve(field_ident.symbol)
                         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
                     
-                    let (offset, _slots) = info.struct_field_offset(type_key, field_name)
-                        .ok_or_else(|| CodegenError::Internal(format!("field {} not found", field_name)))?;
+                    let (offset, _slots) = info.struct_field_offset(type_key, field_name);
                     
                     compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
                 }
@@ -1618,8 +1605,7 @@ fn compile_composite_lit(
         let _ = positional_offset; // suppress unused warning
     } else if info.is_array(type_key) {
         // Array literal
-        let elem_slots = info.array_elem_slots(type_key)
-            .expect("array must have elem_slots");
+        let elem_slots = info.array_elem_slots(type_key);
         
         for (i, elem) in lit.elems.iter().enumerate() {
             let offset = (i as u16) * elem_slots;
@@ -1628,13 +1614,11 @@ fn compile_composite_lit(
     } else if info.is_slice(type_key) {
         // Slice literal: []T{e1, e2, ...}
         // Create slice with make, then set elements
-        let elem_slots = info.slice_elem_slots(type_key)
-            .expect("slice must have elem_slots");
+        let elem_slots = info.slice_elem_slots(type_key);
         let len = lit.elems.len();
         
         // Get element meta
-        let elem_slot_types = info.slice_elem_slot_types(type_key)
-            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+        let elem_slot_types = info.slice_elem_slot_types(type_key);
         let elem_meta_idx = ctx.get_or_create_value_meta(None, elem_slots, &elem_slot_types);
         
         // Load elem_meta into register

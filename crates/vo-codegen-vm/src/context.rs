@@ -411,9 +411,8 @@ impl CodegenContext {
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
         // Get element type info
-        let elem_slots = info.array_elem_slots(array_type).unwrap_or(1) as u16;
-        let elem_slot_types = info.array_elem_slot_types(array_type)
-            .unwrap_or_else(|| vec![vo_common_core::types::SlotType::Value]);
+        let elem_slots = info.array_elem_slots(array_type);
+        let elem_slot_types = info.array_elem_slot_types(array_type);
         
         // Reuse get_or_create_value_meta for element type
         self.get_or_create_value_meta(None, elem_slots, &elem_slot_types)
