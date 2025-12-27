@@ -402,6 +402,7 @@ impl Module {
             struct_metas,
             interface_metas,
             named_type_metas,
+            runtime_types: Vec::new(),  // TODO: serialize runtime_types
             itabs,
             constants,
             globals,

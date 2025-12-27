@@ -18,6 +18,7 @@ use super::errors::TypeError;
 use super::type_info::TypeInfo;
 use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
+use crate::typ;
 use crate::operand::OperandMode;
 use crate::universe::Universe;
 use crate::importer::{Importer};
@@ -488,12 +489,15 @@ impl Checker {
     }
 
     /// Record all untyped expressions in the result.
+    /// Converts remaining untyped types to their default typed versions.
     fn record_untyped(&mut self) {
         let untyped: Vec<_> = self.untyped.drain().collect();
         for (id, info) in untyped {
             if info.mode != OperandMode::Invalid {
                 if let Some(typ) = info.typ {
-                    self.result.record_type_and_value(id, info.mode.clone(), typ);
+                    // Convert untyped to default type before recording
+                    let final_typ = typ::untyped_default_type(typ, self.objs());
+                    self.result.record_type_and_value(id, info.mode.clone(), final_typ);
                 }
             }
         }

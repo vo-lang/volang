@@ -2,47 +2,42 @@
 //!
 //! This module provides string interning to reduce memory usage and enable
 //! fast comparison of identifiers throughout the compiler.
+//!
+//! `Symbol` is a simple u32 wrapper that is `no_std` compatible.
+//! `SymbolInterner` requires the `std` feature.
 
-use std::fmt;
-use std::hash::{Hash, Hasher};
+use core::fmt;
 
+#[cfg(feature = "std")]
 use string_interner::{backend::StringBackend, DefaultSymbol, StringInterner};
-
-use crate::span::Span;
 
 /// An interned string symbol.
 ///
 /// Symbols are cheap to copy and compare (just a u32 comparison).
 /// To get the actual string, you need access to the `SymbolInterner`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Symbol(Option<DefaultSymbol>);
+pub struct Symbol(u32);
 
 impl Symbol {
+    /// A dummy symbol for uninitialized or placeholder values.
+    pub const DUMMY: Symbol = Symbol(u32::MAX);
+
     /// Creates a symbol from a raw u32 value.
-    /// 
-    /// # Safety
-    /// The caller must ensure the value corresponds to a valid interned symbol.
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn from_raw(raw: u32) -> Self {
-        use string_interner::Symbol as _;
-        Self(DefaultSymbol::try_from_usize(raw as usize))
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw u32 value of this symbol.
     #[inline]
-    pub fn as_u32(self) -> u32 {
-        use string_interner::Symbol as _;
-        self.0.map(|s| s.to_usize() as u32).unwrap_or(u32::MAX)
+    pub const fn as_u32(self) -> u32 {
+        self.0
     }
-
-    /// A dummy symbol for uninitialized or placeholder values.
-    pub const DUMMY: Symbol = Symbol(None);
 
     /// Returns true if this is a dummy symbol.
     #[inline]
     pub const fn is_dummy(self) -> bool {
-        self.0.is_none()
+        self.0 == u32::MAX
     }
 }
 
@@ -51,7 +46,7 @@ impl fmt::Debug for Symbol {
         if self.is_dummy() {
             write!(f, "Symbol(DUMMY)")
         } else {
-            write!(f, "Symbol({})", self.as_u32())
+            write!(f, "Symbol({})", self.0)
         }
     }
 }
@@ -61,10 +56,12 @@ impl fmt::Debug for Symbol {
 /// This is the central registry for all interned strings. It ensures that
 /// each unique string is stored only once, and provides fast lookup.
 #[derive(Clone)]
+#[cfg(feature = "std")]
 pub struct SymbolInterner {
     interner: StringInterner<StringBackend<DefaultSymbol>>,
 }
 
+#[cfg(feature = "std")]
 impl SymbolInterner {
     /// Creates a new empty interner.
     pub fn new() -> Self {
@@ -85,7 +82,8 @@ impl SymbolInterner {
     /// If the string was already interned, returns the existing symbol.
     #[inline]
     pub fn intern(&mut self, string: &str) -> Symbol {
-        Symbol(Some(self.interner.get_or_intern(string)))
+        use string_interner::Symbol as _;
+        Symbol(self.interner.get_or_intern(string).to_usize() as u32)
     }
 
     /// Interns a static string, returning its symbol.
@@ -93,7 +91,8 @@ impl SymbolInterner {
     /// This is more efficient for string literals.
     #[inline]
     pub fn intern_static(&mut self, string: &'static str) -> Symbol {
-        Symbol(Some(self.interner.get_or_intern_static(string)))
+        use string_interner::Symbol as _;
+        Symbol(self.interner.get_or_intern_static(string).to_usize() as u32)
     }
 
     /// Looks up a string without interning it.
@@ -101,7 +100,8 @@ impl SymbolInterner {
     /// Returns `Some(symbol)` if the string was already interned.
     #[inline]
     pub fn get(&self, string: &str) -> Option<Symbol> {
-        self.interner.get(string).map(|s| Symbol(Some(s)))
+        use string_interner::Symbol as _;
+        self.interner.get(string).map(|s| Symbol(s.to_usize() as u32))
     }
 
     /// Resolves a symbol to its string.
@@ -109,7 +109,12 @@ impl SymbolInterner {
     /// Returns `None` if the symbol is invalid or dummy.
     #[inline]
     pub fn resolve(&self, symbol: Symbol) -> Option<&str> {
-        symbol.0.and_then(|s| self.interner.resolve(s))
+        use string_interner::Symbol as _;
+        if symbol.is_dummy() {
+            return None;
+        }
+        DefaultSymbol::try_from_usize(symbol.0 as usize)
+            .and_then(|s| self.interner.resolve(s))
     }
 
     /// Returns the number of interned strings.
@@ -125,12 +130,14 @@ impl SymbolInterner {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for SymbolInterner {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "std")]
 impl fmt::Debug for SymbolInterner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SymbolInterner")
@@ -269,7 +276,7 @@ pub mod builtin_consts {
 /// The blank identifier.
 pub const BLANK: &str = "_";
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

@@ -1700,8 +1700,9 @@ pub fn compile_iface_assign(
     let const_idx = if src_vk == vo_common_core::ValueKind::Interface {
         ctx.register_iface_assign_const_interface(iface_meta_id)
     } else {
-        let named_type_id = ctx.get_named_type_id(src_type).unwrap_or(0);
-        ctx.register_iface_assign_const_concrete(named_type_id, iface_meta_id)
+        let rttid = ctx.get_or_create_rttid(src_type);
+        let named_type_id = ctx.get_named_type_id(src_type);
+        ctx.register_iface_assign_const_concrete(rttid, named_type_id, iface_meta_id)
     };
     
     let is_value_type = src_vk == vo_common_core::ValueKind::Struct || src_vk == vo_common_core::ValueKind::Array;

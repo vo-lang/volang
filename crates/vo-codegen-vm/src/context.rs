@@ -1,6 +1,9 @@
 //! Codegen context - manages module-level state.
 
 use std::collections::HashMap;
+
+/// Maximum value for 24-bit IDs (rttid, meta_id, etc.)
+const MAX_24BIT_ID: u32 = 0xFF_FFFF;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use vo_vm::bytecode::{
@@ -33,13 +36,19 @@ pub struct CodegenContext {
     const_string: HashMap<String, u16>,
 
     /// Type meta_id: TypeKey -> struct_meta_id
-    struct_meta_ids: HashMap<TypeKey, u16>,
+    struct_meta_ids: HashMap<TypeKey, u32>,
 
     /// Type meta_id: TypeKey -> interface_meta_id
-    interface_meta_ids: HashMap<TypeKey, u16>,
+    interface_meta_ids: HashMap<TypeKey, u32>,
 
     /// Type meta_id: TypeKey -> named_type_id
-    named_type_ids: HashMap<TypeKey, u16>,
+    named_type_ids: HashMap<TypeKey, u32>,
+
+    /// TypeKey -> rttid (runtime type id)
+    rttid_map: HashMap<TypeKey, u32>,
+
+    /// Pending types to build RuntimeType for (in order of rttid assignment)
+    pending_rttids: Vec<TypeKey>,
 
     /// ObjKey -> func_id
     objkey_to_func: HashMap<ObjKey, u32>,
@@ -47,9 +56,9 @@ pub struct CodegenContext {
     /// init functions (in declaration order)
     init_functions: Vec<u32>,
 
-    /// Pending itab builds: (named_type_id, iface_meta_id, const_idx)
+    /// Pending itab builds: (rttid, named_type_id, iface_meta_id, const_idx)
     /// These are processed after all methods are registered
-    pending_itabs: Vec<(u16, u16, u16)>,
+    pending_itabs: Vec<(u32, u32, u32, u16)>,
 }
 
 impl CodegenContext {
@@ -64,6 +73,7 @@ impl CodegenContext {
                     method_names: Vec::new(),
                 }],
                 named_type_metas: Vec::new(),
+                runtime_types: Vec::new(),
                 itabs: Vec::new(),
                 constants: Vec::new(),
                 globals: Vec::new(),
@@ -81,6 +91,8 @@ impl CodegenContext {
             struct_meta_ids: HashMap::new(),
             interface_meta_ids: HashMap::new(),
             named_type_ids: HashMap::new(),
+            rttid_map: HashMap::new(),
+            pending_rttids: Vec::new(),
             objkey_to_func: HashMap::new(),
             init_functions: Vec::new(),
             pending_itabs: Vec::new(),
@@ -89,51 +101,74 @@ impl CodegenContext {
 
     // === Type meta_id registration ===
 
-    pub fn register_struct_meta(&mut self, type_key: TypeKey, meta: StructMeta) -> u16 {
-        let id = self.module.struct_metas.len() as u16;
+    pub fn register_struct_meta(&mut self, type_key: TypeKey, meta: StructMeta) -> u32 {
+        let id = self.module.struct_metas.len() as u32;
         self.module.struct_metas.push(meta);
         self.struct_meta_ids.insert(type_key, id);
         id
     }
 
-    pub fn register_interface_meta(&mut self, type_key: TypeKey, meta: InterfaceMeta) -> u16 {
-        let id = self.module.interface_metas.len() as u16;
+    pub fn register_interface_meta(&mut self, type_key: TypeKey, meta: InterfaceMeta) -> u32 {
+        let id = self.module.interface_metas.len() as u32;
         self.module.interface_metas.push(meta);
         self.interface_meta_ids.insert(type_key, id);
         id
     }
 
-    pub fn get_struct_meta_id(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn get_struct_meta_id(&self, type_key: TypeKey) -> Option<u32> {
         self.struct_meta_ids.get(&type_key).copied()
     }
 
-    pub fn register_named_type_meta(&mut self, type_key: TypeKey, meta: NamedTypeMeta) -> u16 {
-        let id = self.module.named_type_metas.len() as u16;
+    pub fn register_named_type_meta(&mut self, type_key: TypeKey, meta: NamedTypeMeta) -> u32 {
+        let id = self.module.named_type_metas.len() as u32;
         self.module.named_type_metas.push(meta);
         self.named_type_ids.insert(type_key, id);
         id
     }
 
-    pub fn get_named_type_id(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn get_named_type_id(&self, type_key: TypeKey) -> Option<u32> {
         self.named_type_ids.get(&type_key).copied()
     }
 
+    // === RTTID registration ===
+
+    /// Get or create rttid for a type.
+    pub fn get_or_create_rttid(&mut self, type_key: TypeKey) -> u32 {
+        if let Some(&rttid) = self.rttid_map.get(&type_key) {
+            rttid
+        } else {
+            let rttid = self.pending_rttids.len() as u32;
+            self.rttid_map.insert(type_key, rttid);
+            self.pending_rttids.push(type_key);
+            rttid
+        }
+    }
+
+    pub fn get_rttid(&self, type_key: TypeKey) -> Option<u32> {
+        self.rttid_map.get(&type_key).copied()
+    }
+
+    /// Get pending type keys for building RuntimeTypes
+    pub fn pending_rttids(&self) -> &[TypeKey] {
+        &self.pending_rttids
+    }
+
     /// Update a NamedTypeMeta's methods map after function compilation
-    pub fn update_named_type_method(&mut self, named_type_id: u16, method_name: String, func_id: u32, is_pointer_receiver: bool) {
+    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
             meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver });
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present
-    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u16, method_name: String, func_id: u32, is_pointer_receiver: bool) {
+    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
             meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver });
         }
     }
 
     /// Get methods from a NamedTypeMeta
-    pub fn get_named_type_methods(&self, named_type_id: u16) -> Vec<(String, MethodInfo)> {
+    pub fn get_named_type_methods(&self, named_type_id: u32) -> Vec<(String, MethodInfo)> {
         if let Some(meta) = self.module.named_type_metas.get(named_type_id as usize) {
             meta.methods.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         } else {
@@ -142,22 +177,22 @@ impl CodegenContext {
     }
 
     /// Get a specific method from a NamedTypeMeta by name
-    pub fn get_method_from_named_type(&self, named_type_id: u16, method_name: &str) -> Option<MethodInfo> {
+    pub fn get_method_from_named_type(&self, named_type_id: u32, method_name: &str) -> Option<MethodInfo> {
         self.module.named_type_metas.get(named_type_id as usize)
             .and_then(|meta| meta.methods.get(method_name).cloned())
     }
 
     /// Iterate over all named type keys and their IDs
-    pub fn named_type_ids_iter(&self) -> impl Iterator<Item = (TypeKey, u16)> + '_ {
+    pub fn named_type_ids_iter(&self) -> impl Iterator<Item = (TypeKey, u32)> + '_ {
         self.named_type_ids.iter().map(|(&k, &v)| (k, v))
     }
 
-    pub fn get_interface_meta_id(&self, type_key: TypeKey) -> Option<u16> {
+    pub fn get_interface_meta_id(&self, type_key: TypeKey) -> Option<u32> {
         self.interface_meta_ids.get(&type_key).copied()
     }
 
     /// Get or create interface meta ID. Dynamically registers anonymous interfaces.
-    pub fn get_or_create_interface_meta_id(&mut self, type_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
+    pub fn get_or_create_interface_meta_id(&mut self, type_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
         let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
         
         // Check if already registered
@@ -191,12 +226,11 @@ impl CodegenContext {
 
     /// Get method index in interface meta (for CallIface)
     /// This uses the registered InterfaceMeta's method_names order, which matches itab building.
-    pub fn get_interface_method_index(&mut self, type_key: TypeKey, method_name: &str, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
-        let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
+    pub fn get_interface_method_index(&mut self, type_key: TypeKey, method_name: &str, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
         let iface_meta_id = self.get_or_create_interface_meta_id(type_key, tc_objs);
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
         iface_meta.method_names.iter().position(|n| n == method_name)
-            .map(|i| i as u16)
+            .map(|i| i as u32)
             .expect(&format!("method {} not found in interface - codegen bug", method_name))
     }
 
@@ -204,26 +238,29 @@ impl CodegenContext {
 
     /// Register constant for IfaceAssign with concrete type source.
     /// For non-empty interfaces, itab building is deferred until methods are registered.
+    /// rttid: runtime type id for slot0
+    /// named_type_id: for itab building (only Named types have methods)
     /// Returns const_idx.
-    pub fn register_iface_assign_const_concrete(&mut self, named_type_id: u16, iface_meta_id: u16) -> u16 {
+    pub fn register_iface_assign_const_concrete(&mut self, rttid: u32, named_type_id: Option<u32>, iface_meta_id: u32) -> u16 {
         if iface_meta_id == 0 {
             // Empty interface: no itab needed
-            let packed = ((named_type_id as i64) << 32) | 0;
+            let packed = ((rttid as i64) << 32) | 0;
             self.const_int(packed)
         } else {
             // Non-empty interface: defer itab building
-            // Use add_const (not const_int) to get a unique index that can be updated later
-            let packed = ((named_type_id as i64) << 32) | 0;
+            let packed = ((rttid as i64) << 32) | 0;
             let const_idx = self.add_const(Constant::Int(packed));
-            // Record for later: (named_type_id, iface_meta_id, const_idx)
-            self.pending_itabs.push((named_type_id, iface_meta_id, const_idx));
+            // Only Named types can have methods for itab
+            if let Some(ntid) = named_type_id {
+                self.pending_itabs.push((rttid, ntid, iface_meta_id, const_idx));
+            }
             const_idx
         }
     }
 
     /// Register constant for IfaceAssign with interface source.
     /// packed = iface_meta_id (high 32 bits = 0)
-    pub fn register_iface_assign_const_interface(&mut self, iface_meta_id: u16) -> u16 {
+    pub fn register_iface_assign_const_interface(&mut self, iface_meta_id: u32) -> u16 {
         let packed = iface_meta_id as i64;
         self.const_int(packed)
     }
@@ -232,18 +269,17 @@ impl CodegenContext {
     /// Updates constants with correct itab_ids.
     pub fn finalize_itabs(&mut self) {
         let pending = std::mem::take(&mut self.pending_itabs);
-        for (named_type_id, iface_meta_id, const_idx) in pending {
+        for (rttid, named_type_id, iface_meta_id, const_idx) in pending {
             let itab_id = self.build_itab(named_type_id, iface_meta_id);
-            // Update constant with correct itab_id
-            let packed = ((named_type_id as i64) << 32) | (itab_id as i64);
+            // Update constant with correct itab_id (use rttid, not named_type_id)
+            let packed = ((rttid as i64) << 32) | (itab_id as i64);
             self.module.constants[const_idx as usize] = Constant::Int(packed);
         }
     }
 
-    fn build_itab(&mut self, named_type_id: u16, iface_meta_id: u16) -> u16 {
+    fn build_itab(&mut self, named_type_id: u32, iface_meta_id: u32) -> u32 {
         let named_type = &self.module.named_type_metas[named_type_id as usize];
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
-
 
         let methods: Vec<u32> = iface_meta
             .method_names
@@ -261,7 +297,7 @@ impl CodegenContext {
             })
             .collect();
 
-        let itab_id = self.module.itabs.len() as u16;
+        let itab_id = self.module.itabs.len() as u32;
         self.module.itabs.push(Itab { methods });
         itab_id
     }
@@ -485,6 +521,27 @@ impl CodegenContext {
 
     pub fn set_entry_func(&mut self, func_id: u32) {
         self.module.entry_func = func_id;
+    }
+
+    pub fn set_runtime_types(&mut self, runtime_types: Vec<vo_common_core::RuntimeType>) {
+        self.module.runtime_types = runtime_types;
+    }
+
+    /// Check all IDs are within 24-bit limit. Returns error message if exceeded.
+    pub fn check_id_limits(&self) -> Result<(), String> {
+        if self.module.struct_metas.len() as u32 > MAX_24BIT_ID {
+            return Err(format!("too many struct types: {} exceeds 24-bit limit", self.module.struct_metas.len()));
+        }
+        if self.module.interface_metas.len() as u32 > MAX_24BIT_ID {
+            return Err(format!("too many interface types: {} exceeds 24-bit limit", self.module.interface_metas.len()));
+        }
+        if self.module.named_type_metas.len() as u32 > MAX_24BIT_ID {
+            return Err(format!("too many named types: {} exceeds 24-bit limit", self.module.named_type_metas.len()));
+        }
+        if self.pending_rttids.len() as u32 > MAX_24BIT_ID {
+            return Err(format!("too many runtime types: {} exceeds 24-bit limit", self.pending_rttids.len()));
+        }
+        Ok(())
     }
 
     pub fn finish(self) -> Module {

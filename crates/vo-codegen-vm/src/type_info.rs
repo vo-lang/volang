@@ -314,6 +314,11 @@ impl<'a> TypeInfoWrapper<'a> {
         self.is_struct(type_key) || self.is_array(type_key)
     }
 
+    /// Check if type is a named type (Type::Named)
+    pub fn is_named_type(&self, type_key: TypeKey) -> bool {
+        self.tc_objs().types[type_key].try_as_named().is_some()
+    }
+
     /// Get map key and value slot counts
     pub fn map_key_val_slots(&self, type_key: TypeKey) -> (u16, u16) {
         let underlying = typ::underlying_type(type_key, self.tc_objs());

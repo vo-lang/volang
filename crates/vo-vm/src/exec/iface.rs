@@ -1,6 +1,6 @@
 //! Interface instructions: IfaceAssign, IfaceAssert
 //!
-//! slot0 format: [itab_id:32 | named_type_id:24 | value_kind:8]
+//! slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
 //! slot1: data (immediate value or GcRef)
 
 use vo_common_core::types::ValueKind;
@@ -16,7 +16,7 @@ use crate::vm::ExecResult;
 /// IfaceAssign: a=dst (2 slots), b=src, c=const_idx, flags=value_kind
 ///
 /// c points to Int64 constant:
-/// - Concrete type: (named_type_id << 32) | itab_id, itab built at compile time
+/// - Concrete type: (rttid << 32) | itab_id, itab built at compile time
 /// - Interface source: iface_meta_id (high 32 bits = 0), itab built at runtime
 pub fn exec_iface_assign(
     fiber: &mut Fiber,
@@ -33,33 +33,33 @@ pub fn exec_iface_assign(
         Constant::Int(v) => *v,
         _ => panic!("IfaceAssign: expected Int64 constant"),
     };
-    let named_type_id = (packed >> 32) as u32;
+    let rttid = (packed >> 32) as u32;
     let low = (packed & 0xFFFFFFFF) as u32;
 
-    let (actual_named_type_id, actual_vk, itab_id) = if vk == ValueKind::Interface {
+    let (actual_rttid, actual_vk, itab_id) = if vk == ValueKind::Interface {
         // Interface -> Interface: runtime itab lookup/creation
         let src_slot0 = src;
-        let src_named_type_id = interface::unpack_named_type_id(src_slot0);
+        let src_rttid = interface::unpack_rttid(src_slot0);
         let src_vk = interface::unpack_value_kind(src_slot0);
         let iface_meta_id = low;  // low = target iface_meta_id
         
-        let itab_id = if src_named_type_id == 0 {
+        let itab_id = if src_rttid == 0 {
             0  // primitive or nil
         } else {
             itab_cache.get_or_create(
-                src_named_type_id,
+                src_rttid,
                 iface_meta_id,
                 &module.named_type_metas,
                 &module.interface_metas,
             )
         };
-        (src_named_type_id, src_vk, itab_id)
+        (src_rttid, src_vk, itab_id)
     } else {
         // Concrete type -> Interface: compile-time itab
-        (named_type_id, vk, low)  // low = itab_id
+        (rttid, vk, low)  // low = itab_id
     };
 
-    let slot0 = interface::pack_slot0(itab_id, actual_named_type_id, actual_vk);
+    let slot0 = interface::pack_slot0(itab_id, actual_rttid, actual_vk);
 
     let slot1 = match vk {
         ValueKind::Struct | ValueKind::Array => {
@@ -91,8 +91,10 @@ pub fn exec_iface_assign(
 }
 
 /// IfaceAssert: a=dst, b=src_iface (2 slots), c=target_id
-/// flags = assert_kind | (has_ok << 2)
-/// assert_kind: 0=Primitive, 1=Named, 2=Interface
+/// flags = assert_kind | (has_ok << 2) | (target_slots << 3)
+/// assert_kind: 0=rttid comparison, 1=interface method check
+/// For struct/array (determined by src_vk), copies value from GcRef to dst registers
+/// For interface (assert_kind=1), returns new interface with itab for target interface
 pub fn exec_iface_assert(
     fiber: &mut Fiber,
     inst: &Instruction,
@@ -103,50 +105,95 @@ pub fn exec_iface_assert(
     let slot1 = fiber.read_reg(inst.b + 1);
 
     let assert_kind = inst.flags & 0x3;
-    let has_ok = (inst.flags >> 2) != 0;
+    let has_ok = ((inst.flags >> 2) & 0x1) != 0;
+    let target_slots = (inst.flags >> 3) as u16;
     let target_id = inst.c as u32;
 
-    let src_named_type_id = interface::unpack_named_type_id(slot0);
+    let src_rttid = interface::unpack_rttid(slot0);
     let src_vk = interface::unpack_value_kind(slot0);
 
     let matches = match assert_kind {
         0 => {
-            // Primitive: check value_kind, named_type_id must be 0
-            src_named_type_id == 0 && src_vk as u32 == target_id
+            // Type comparison: check rttid
+            src_rttid == target_id
         }
         1 => {
-            // Named: check named_type_id
-            src_named_type_id == target_id
-        }
-        2 => {
-            // Interface: check if src's named type satisfies target interface
-            if src_named_type_id == 0 {
-                false
+            // Interface: check if src type satisfies target interface
+            let iface_meta = &module.interface_metas[target_id as usize];
+            if iface_meta.method_names.is_empty() {
+                true // empty interface always satisfied
             } else {
-                // Try to build itab - if succeeds, type satisfies interface
-                let iface_meta = &module.interface_metas[target_id as usize];
-                if iface_meta.method_names.is_empty() {
-                    true // empty interface always satisfied
+                // Look up RuntimeType to find named_type_id for method lookup
+                // TODO: should compare method signatures, not just names
+                if let Some(rt) = module.runtime_types.get(src_rttid as usize) {
+                    if let vo_common_core::RuntimeType::Named(named_type_id) = rt {
+                        let named_type = &module.named_type_metas[*named_type_id as usize];
+                        iface_meta.method_names.iter().all(|name| named_type.methods.contains_key(name))
+                    } else {
+                        false // non-named types can't implement interfaces with methods
+                    }
                 } else {
-                    let named_type = &module.named_type_metas[src_named_type_id as usize];
-                    iface_meta.method_names.iter().all(|name| named_type.methods.contains_key(name))
+                    false
                 }
             }
         }
         _ => false,
     };
 
-    if has_ok {
-        let ok_reg = inst.a + 1; // ok follows dst
-        fiber.write_reg(ok_reg, matches as u64);
-        if matches {
-            fiber.write_reg(inst.a, slot1);
+    // Helper to write successful result
+    let write_success = |fiber: &mut Fiber, itab_cache: &mut ItabCache| {
+        if assert_kind == 1 {
+            // Interface assertion: return new interface with itab for target interface
+            // Need to get named_type_id from runtime_types (rttid != named_type_id)
+            let named_type_id = if let Some(vo_common_core::RuntimeType::Named(id)) = module.runtime_types.get(src_rttid as usize) {
+                *id
+            } else {
+                0 // Should not happen for valid interface assertion
+            };
+            let new_itab_id = itab_cache.get_or_create(
+                named_type_id,
+                target_id,
+                &module.named_type_metas,
+                &module.interface_metas,
+            );
+            let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
+            fiber.write_reg(inst.a, new_slot0);
+            fiber.write_reg(inst.a + 1, slot1);
+        } else if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
+            // Concrete type assertion for struct/array: copy value from GcRef
+            let gc_ref = slot1 as GcRef;
+            let slots = target_slots.max(1);
+            if slot1 != 0 {
+                for i in 0..slots {
+                    let val = unsafe { *gc_ref.add(i as usize) };
+                    fiber.write_reg(inst.a + i, val);
+                }
+            } else {
+                for i in 0..slots {
+                    fiber.write_reg(inst.a + i, 0);
+                }
+            }
         } else {
-            fiber.write_reg(inst.a, 0);
+            // Concrete type assertion for other types: slot1 is the value
+            fiber.write_reg(inst.a, slot1);
+        }
+    };
+
+    if has_ok {
+        let ok_slot = if assert_kind == 1 { inst.a + 2 } else if target_slots > 1 { inst.a + target_slots } else { inst.a + 1 };
+        fiber.write_reg(ok_slot, matches as u64);
+        if matches {
+            write_success(fiber, itab_cache);
+        } else {
+            // Zero out destination on failure
+            let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+            for i in 0..dst_slots {
+                fiber.write_reg(inst.a + i, 0);
+            }
         }
         ExecResult::Continue
     } else if matches {
-        fiber.write_reg(inst.a, slot1);
+        write_success(fiber, itab_cache);
         ExecResult::Continue
     } else {
         ExecResult::Panic

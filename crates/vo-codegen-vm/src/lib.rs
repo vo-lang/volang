@@ -8,11 +8,13 @@ mod expr;
 mod func;
 mod stmt;
 mod type_info;
+mod type_interner;
 
 pub use context::CodegenContext;
 pub use error::CodegenError;
 pub use func::FuncBuilder;
 pub use type_info::TypeInfoWrapper;
+pub use type_interner::{TypeInterner, type_key_to_runtime_type};
 
 use vo_analysis::Project;
 use vo_syntax::ast::Decl;
@@ -35,6 +37,12 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     
     // 4. Generate __init__ and __entry__
     compile_init_and_entry(project, &mut ctx, &info)?;
+    
+    // 5. Build runtime_types after all codegen (all types have been assigned rttid)
+    build_runtime_types(project, &mut ctx, &info);
+    
+    // 6. Final check: all IDs within 24-bit limit
+    ctx.check_id_limits().map_err(CodegenError::Internal)?;
     
     Ok(ctx.finish())
 }
@@ -59,84 +67,109 @@ fn register_types(
                 // Get underlying type key from type expression, and named type key from declaration name
                 let underlying_key = info.type_expr_type(type_decl.ty.id);
                 let named_key = info.obj_type(info.get_def(&type_decl.name), "type declaration must have type");
-                {
-                    match &type_decl.ty.kind {
-                        TypeExprKind::Struct(struct_type) => {
-                            // Build StructMeta - keyed by underlying type
-                            let mut field_names = Vec::new();
-                            let mut field_offsets = Vec::new();
-                            let mut slot_types = Vec::new();
-                            let mut offset = 0u16;
-                            
-                            for field in &struct_type.fields {
-                                // Field may have multiple names sharing same type
-                                for name in &field.names {
-                                    let field_name = project.interner.resolve(name.symbol)
-                                        .unwrap_or("?");
-                                    field_names.push(field_name.to_string());
-                                    field_offsets.push(offset);
-                                    
-                                    // Get field type and slot count
-                                    let field_type = info.type_expr_type(field.ty.id);
-                                    let slots = info.type_slot_count(field_type);
-                                    let slot_type_list = info.type_slot_types(field_type);
-                                    slot_types.extend(slot_type_list);
-                                    offset += slots;
-                                }
+                
+                // Register type-specific metadata first
+                let underlying_meta = match &type_decl.ty.kind {
+                    TypeExprKind::Struct(struct_type) => {
+                        // Build StructMeta
+                        let mut field_names = Vec::new();
+                        let mut field_offsets = Vec::new();
+                        let mut slot_types = Vec::new();
+                        let mut offset = 0u16;
+                        
+                        for field in &struct_type.fields {
+                            for name in &field.names {
+                                let field_name = project.interner.resolve(name.symbol)
+                                    .unwrap_or("?");
+                                field_names.push(field_name.to_string());
+                                field_offsets.push(offset);
+                                
+                                let field_type = info.type_expr_type(field.ty.id);
+                                let slots = info.type_slot_count(field_type);
+                                let slot_type_list = info.type_slot_types(field_type);
+                                slot_types.extend(slot_type_list);
+                                offset += slots;
                             }
-                            
-                            let meta = StructMeta {
-                                field_names,
-                                field_offsets,
-                                slot_types: slot_types.clone(),
-                            };
-                            // struct_meta uses underlying type key
-                            let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
-                            
-                            // NamedTypeMeta - keyed by named type
-                            let underlying_meta = ValueMeta::new(struct_meta_id as u32, vo_common_core::types::ValueKind::Struct);
-                            let named_type_meta = NamedTypeMeta {
-                                name: type_name.to_string(),
-                                underlying_meta,
-                                methods: HashMap::new(),
-                            };
-                            // named_type_meta uses named type key
-                            ctx.register_named_type_meta(named_key, named_type_meta);
                         }
-                        TypeExprKind::Interface(_iface_type) => {
-                            // Build InterfaceMeta from type info (includes embedded interfaces)
-                            let tc_objs = &info.project.tc_objs;
-                            let method_names = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying_key] {
-                                // all_methods() returns Ref<Option<Vec<ObjKey>>>
-                                let all_methods_ref = iface.all_methods();
-                                if let Some(methods) = all_methods_ref.as_ref() {
-                                    methods.iter()
-                                        .map(|m| tc_objs.lobjs[*m].name().to_string())
-                                        .collect()
-                                } else {
-                                    // Fallback to direct methods if all_methods not computed
-                                    iface.methods().iter()
-                                        .map(|m| tc_objs.lobjs[*m].name().to_string())
-                                        .collect()
-                                }
-                            } else {
-                                Vec::new()
-                            };
-                            
-                            let meta = InterfaceMeta {
-                                name: type_name.to_string(),
-                                method_names,
-                            };
-                            // interface_meta uses underlying type key
-                            ctx.register_interface_meta(underlying_key, meta);
-                        }
-                        _ => {}
+                        
+                        let meta = StructMeta {
+                            field_names,
+                            field_offsets,
+                            slot_types,
+                        };
+                        let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
+                        ValueMeta::new(struct_meta_id as u32, vo_common_core::types::ValueKind::Struct)
                     }
-                }
+                    TypeExprKind::Interface(_) => {
+                        // Build InterfaceMeta
+                        let tc_objs = &info.project.tc_objs;
+                        let method_names = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying_key] {
+                            let all_methods_ref = iface.all_methods();
+                            if let Some(methods) = all_methods_ref.as_ref() {
+                                methods.iter()
+                                    .map(|m| tc_objs.lobjs[*m].name().to_string())
+                                    .collect()
+                            } else {
+                                iface.methods().iter()
+                                    .map(|m| tc_objs.lobjs[*m].name().to_string())
+                                    .collect()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        
+                        let meta = InterfaceMeta {
+                            name: type_name.to_string(),
+                            method_names,
+                        };
+                        let iface_meta_id = ctx.register_interface_meta(underlying_key, meta);
+                        ValueMeta::new(iface_meta_id as u32, vo_common_core::types::ValueKind::Interface)
+                    }
+                    _ => {
+                        // Other types: use underlying ValueKind, meta_id=0
+                        let underlying_vk = info.type_value_kind(underlying_key);
+                        ValueMeta::new(0, underlying_vk)
+                    }
+                };
+                
+                // All named types get NamedTypeMeta
+                let named_type_meta = NamedTypeMeta {
+                    name: type_name.to_string(),
+                    underlying_meta,
+                    methods: HashMap::new(),
+                };
+                ctx.register_named_type_meta(named_key, named_type_meta);
             }
         }
     }
+    
     Ok(())
+}
+
+fn build_runtime_types(
+    project: &Project,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) {
+    use std::collections::HashMap;
+    
+    let tc_objs = &info.project.tc_objs;
+    
+    // Build TypeKey -> named_type_id mapping (u32 for compatibility)
+    let named_type_ids: HashMap<vo_analysis::objects::TypeKey, u32> = ctx.named_type_ids_iter()
+        .map(|(tk, id)| (tk, id as u32))
+        .collect();
+    
+    // Build RuntimeType for each pending type (in rttid order)
+    let type_keys: Vec<_> = ctx.pending_rttids().to_vec();
+    let mut runtime_types = Vec::with_capacity(type_keys.len());
+    
+    for type_key in type_keys {
+        let rt = type_key_to_runtime_type(type_key, tc_objs, &project.interner, &named_type_ids);
+        runtime_types.push(rt);
+    }
+    
+    ctx.set_runtime_types(runtime_types);
 }
 
 fn collect_declarations(
@@ -277,7 +310,7 @@ fn propagate_promoted_methods(ctx: &mut CodegenContext, info: &TypeInfoWrapper) 
     let tc_objs = &info.project.tc_objs;
     
     // Collect all named type keys with their IDs
-    let named_types: Vec<(vo_analysis::objects::TypeKey, u16)> = ctx.named_type_ids_iter().collect();
+    let named_types: Vec<(vo_analysis::objects::TypeKey, u32)> = ctx.named_type_ids_iter().collect();
     
     for (named_type_key, outer_id) in named_types {
         // Get underlying type

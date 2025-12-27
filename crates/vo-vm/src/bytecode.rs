@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use hashbrown::HashMap;
 
 use vo_common_core::types::{SlotType, ValueMeta};
+use vo_common_core::RuntimeType;
 
 use crate::instruction::Instruction;
 
@@ -95,6 +96,7 @@ pub struct Module {
     pub struct_metas: Vec<StructMeta>,
     pub interface_metas: Vec<InterfaceMeta>,
     pub named_type_metas: Vec<NamedTypeMeta>,
+    pub runtime_types: Vec<RuntimeType>,  // rttid -> RuntimeType
     pub itabs: Vec<Itab>,  // compile-time built itabs
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
@@ -110,6 +112,7 @@ impl Module {
             struct_metas: Vec::new(),
             interface_metas: Vec::new(),
             named_type_metas: Vec::new(),
+            runtime_types: Vec::new(),
             itabs: Vec::new(),
             constants: Vec::new(),
             globals: Vec::new(),

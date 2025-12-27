@@ -694,6 +694,7 @@ name = "vo-common-core"
 version = "0.1.0"
 dependencies = [
  "num_enum",
+ "string-interner",
 ]
 
 [[package]]

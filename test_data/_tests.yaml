@@ -140,6 +140,8 @@ tests:
     mode: [vm]
   - file: slice_ops.vo
     mode: [vm]
+  - file: type_assertion.vo
+    mode: [vm]
 
   # JIT-only tests (all skipped - JIT not ready)
   - file: jit/bitwise_ops.vo

@@ -11,14 +11,13 @@
 pub mod source;
 pub mod span;
 pub mod diagnostics;
-pub mod symbol;
 pub mod vfs;
 
 pub use source::{SourceMap, SourceFile, FileId};
 pub use span::{Span, Spanned, BytePos};
 pub use diagnostics::{Diagnostic, DiagnosticSink, Severity, Label};
-pub use symbol::{Symbol, SymbolInterner};
 pub use vfs::{FileSystem, RealFs, MemoryFs, FileSet};
 
 // Re-export from vo-common-core for backwards compatibility
 pub use vo_common_core::ValueKind;
+pub use vo_common_core::symbol::{self, Symbol, SymbolInterner, kw, builtin_types, builtin_funcs, builtin_consts, BLANK};

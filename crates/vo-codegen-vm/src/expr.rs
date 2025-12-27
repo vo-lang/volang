@@ -593,22 +593,36 @@ fn compile_type_assert(
     let target_type = type_assert.ty.as_ref()
         .map(|ty| info.type_expr_type(ty.id));
     
-    // Get target meta_id
-    let target_meta_id = target_type
-        .and_then(|t| ctx.get_struct_meta_id(t))
-        .unwrap_or(0);
+    // All types use rttid now
+    // assert_kind: 0=rttid comparison, 1=interface method set check
+    let (assert_kind, target_id): (u8, u32) = if let Some(t) = target_type {
+        if info.is_interface(t) {
+            // Interface: assert_kind=1, target_id=iface_meta_id
+            let iface_meta_id = ctx.get_or_create_interface_meta_id(t, &info.project.tc_objs);
+            (1, iface_meta_id)
+        } else {
+            // All other types: assert_kind=0, target_id=rttid
+            let rttid = ctx.get_or_create_rttid(t);
+            (0, rttid)
+        }
+    } else {
+        (0, 0)
+    };
     
     // Get result slot count
     let result_slots = info.expr_slots(expr.id);
     
     // Check if this is a comma-ok form (v, ok := x.(T))
     // If result has more slots than target type, it includes ok bool
-    let target_slots = target_type.map(|t| info.type_slot_count(t)).unwrap_or(1);
-    let has_ok = result_slots > target_slots;
+    let target_slots = target_type.map(|t| info.type_slot_count(t)).unwrap_or(1) as u8;
+    let has_ok = result_slots > target_slots as u16;
     
-    // IfaceAssert: a=dst, b=src_iface, c=target_meta_id, flags=(ok_offset or 0 for panic)
-    let flags = if has_ok { target_slots as u8 } else { 0 };
-    func.emit_with_flags(Opcode::IfaceAssert, flags, dst, iface_reg, target_meta_id);
+    // IfaceAssert: a=dst, b=src_iface, c=target_id
+    // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
+    // For struct/array, VM copies value from GcRef to dst (value semantics)
+    let flags = assert_kind | (if has_ok { 1 << 2 } else { 0 }) | ((target_slots) << 3);
+    
+    func.emit_with_flags(Opcode::IfaceAssert, flags, dst, iface_reg, target_id as u16);
     
     Ok(())
 }
