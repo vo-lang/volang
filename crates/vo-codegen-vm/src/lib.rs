@@ -103,24 +103,41 @@ fn register_types(
                     TypeExprKind::Interface(_) => {
                         // Build InterfaceMeta
                         let tc_objs = &info.project.tc_objs;
-                        let method_names = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying_key] {
+                        let (method_names, methods) = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying_key] {
                             let all_methods_ref = iface.all_methods();
-                            if let Some(methods) = all_methods_ref.as_ref() {
-                                methods.iter()
-                                    .map(|m| tc_objs.lobjs[*m].name().to_string())
-                                    .collect()
+                            let method_objs: Vec<vo_analysis::objects::ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
+                                methods.iter().cloned().collect()
                             } else {
-                                iface.methods().iter()
-                                    .map(|m| tc_objs.lobjs[*m].name().to_string())
-                                    .collect()
-                            }
+                                iface.methods().iter().cloned().collect()
+                            };
+                            
+                            let names: Vec<String> = method_objs.iter()
+                                .map(|m| tc_objs.lobjs[*m].name().to_string())
+                                .collect();
+                            
+                            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs.iter()
+                                .map(|&m| {
+                                    let obj = &tc_objs.lobjs[m];
+                                    let name = obj.name().to_string();
+                                    let sig = if let Some(sig_type) = obj.typ() {
+                                        // Interface method type is Signature - convert to RuntimeType::Func
+                                        signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
+                                    } else {
+                                        vo_common_core::RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+                                    };
+                                    vo_vm::bytecode::InterfaceMethodMeta { name, signature: sig }
+                                })
+                                .collect();
+                            
+                            (names, metas)
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         
                         let meta = InterfaceMeta {
                             name: type_name.to_string(),
                             method_names,
+                            methods,
                         };
                         let iface_meta_id = ctx.register_interface_meta(underlying_key, meta);
                         ValueMeta::new(iface_meta_id as u32, vo_common_core::types::ValueKind::Interface)
@@ -238,7 +255,8 @@ fn compile_functions(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Collect method info for NamedTypeMeta.methods update
-    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool)> = Vec::new();
+    // (recv_type, method_name, func_id, is_pointer_receiver, signature)
+    let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool, vo_common_core::RuntimeType)> = Vec::new();
     
     // Iterate all files and compile function declarations
     for file in &project.files {
@@ -261,6 +279,9 @@ fn compile_functions(
                         let method_name = project.interner.resolve(func_decl.name.symbol)
                             .unwrap_or("?").to_string();
                         
+                        // Generate method signature (RuntimeType::Func)
+                        let signature = generate_method_signature(func_decl, info, &project.interner, ctx);
+                        
                         // For value receiver methods, generate a wrapper that accepts GcRef
                         // and dereferences it before calling the original method
                         let iface_func_id = if !recv.is_pointer {
@@ -270,7 +291,7 @@ fn compile_functions(
                         };
                         
                         // Register the wrapper (or original for pointer receiver) for interface dispatch
-                        method_mappings.push((recv_type, method_name, iface_func_id, recv.is_pointer));
+                        method_mappings.push((recv_type, method_name, iface_func_id, recv.is_pointer, signature));
                     }
                 }
             }
@@ -278,7 +299,7 @@ fn compile_functions(
     }
     
     // Update NamedTypeMeta.methods with method func_ids
-    update_named_type_methods(ctx, &method_mappings);
+    update_named_type_methods(ctx, &method_mappings, info);
     
     // Propagate promoted methods from embedded fields
     propagate_promoted_methods(ctx, info);
@@ -291,13 +312,158 @@ fn compile_functions(
 
 fn update_named_type_methods(
     ctx: &mut CodegenContext,
-    method_mappings: &[(vo_analysis::objects::TypeKey, String, u32, bool)],
+    method_mappings: &[(vo_analysis::objects::TypeKey, String, u32, bool, vo_common_core::RuntimeType)],
+    _info: &TypeInfoWrapper,
 ) {
     // Group methods by type_key
-    for (type_key, method_name, func_id, is_pointer_receiver) in method_mappings {
+    for (type_key, method_name, func_id, is_pointer_receiver, signature) in method_mappings {
         if let Some(named_type_id) = ctx.get_named_type_id(*type_key) {
-            ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver);
+            ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver, signature.clone());
         }
+    }
+}
+
+/// Generate RuntimeType::Func signature for a method (excluding receiver)
+fn generate_method_signature(
+    func_decl: &vo_syntax::ast::FuncDecl,
+    info: &TypeInfoWrapper,
+    interner: &vo_common::SymbolInterner,
+    ctx: &CodegenContext,
+) -> vo_common_core::RuntimeType {
+    use vo_common_core::RuntimeType;
+    
+    // Collect parameter types (excluding receiver)
+    let mut params = Vec::new();
+    for param in &func_decl.sig.params {
+        let param_type_key = info.type_expr_type(param.ty.id);
+        let param_rt = type_key_to_runtime_type_simple(param_type_key, info, interner, ctx);
+        // Each name in param.names represents one parameter of this type
+        for _ in &param.names {
+            params.push(param_rt.clone());
+        }
+    }
+    
+    // Collect result types
+    let mut results = Vec::new();
+    for result in &func_decl.sig.results {
+        let result_type_key = info.type_expr_type(result.ty.id);
+        let result_rt = type_key_to_runtime_type_simple(result_type_key, info, interner, ctx);
+        results.push(result_rt);
+    }
+    
+    RuntimeType::Func {
+        params,
+        results,
+        variadic: func_decl.sig.variadic,
+    }
+}
+
+/// Convert a Signature type to RuntimeType::Func with proper params/results
+fn signature_type_to_runtime_type(
+    sig_type: vo_analysis::objects::TypeKey,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    info: &TypeInfoWrapper,
+    ctx: &CodegenContext,
+) -> vo_common_core::RuntimeType {
+    use vo_analysis::typ::Type;
+    use vo_common_core::RuntimeType;
+    
+    if let Type::Signature(sig) = &tc_objs.types[sig_type] {
+        // Extract parameter types from params tuple
+        let params_tuple = sig.params();
+        let params: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[params_tuple] {
+            tuple.vars().iter()
+                .filter_map(|&v| {
+                    let obj = &tc_objs.lobjs[v];
+                    obj.typ().map(|t| type_key_to_runtime_type_simple(t, info, &vo_common::SymbolInterner::new(), ctx))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        
+        // Extract result types from results tuple
+        let results_tuple = sig.results();
+        let results: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[results_tuple] {
+            tuple.vars().iter()
+                .filter_map(|&v| {
+                    let obj = &tc_objs.lobjs[v];
+                    obj.typ().map(|t| type_key_to_runtime_type_simple(t, info, &vo_common::SymbolInterner::new(), ctx))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        
+        RuntimeType::Func {
+            params,
+            results,
+            variadic: sig.variadic(),
+        }
+    } else {
+        // Fallback for non-signature types
+        RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+    }
+}
+
+/// Simplified type_key to RuntimeType conversion for method signatures
+/// Uses ValueKind-based conversion for basic types, named_type_id for Named types
+fn type_key_to_runtime_type_simple(
+    type_key: vo_analysis::objects::TypeKey,
+    info: &TypeInfoWrapper,
+    _interner: &vo_common::SymbolInterner,
+    ctx: &CodegenContext,
+) -> vo_common_core::RuntimeType {
+    use vo_common_core::RuntimeType;
+    use vo_common_core::types::ValueKind;
+    
+    // Use ValueKind as a simple way to identify basic types
+    let vk = info.type_value_kind(type_key);
+    
+    match vk {
+        ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
+        ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
+        ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String => {
+            RuntimeType::Basic(vk)
+        }
+        ValueKind::Struct | ValueKind::Array => {
+            // Check if it's a Named type first
+            if let Some(id) = ctx.get_named_type_id(type_key) {
+                RuntimeType::Named(id)
+            } else {
+                // Anonymous struct/array - simplified representation
+                if vk == ValueKind::Struct {
+                    RuntimeType::Struct { fields: Vec::new() }
+                } else {
+                    RuntimeType::Array { len: 0, elem: Box::new(RuntimeType::Basic(ValueKind::Void)) }
+                }
+            }
+        }
+        ValueKind::Pointer => {
+            RuntimeType::Pointer(Box::new(RuntimeType::Basic(ValueKind::Void)))
+        }
+        ValueKind::Slice => {
+            RuntimeType::Slice(Box::new(RuntimeType::Basic(ValueKind::Void)))
+        }
+        ValueKind::Map => {
+            RuntimeType::Map {
+                key: Box::new(RuntimeType::Basic(ValueKind::Void)),
+                val: Box::new(RuntimeType::Basic(ValueKind::Void)),
+            }
+        }
+        ValueKind::Channel => {
+            RuntimeType::Chan {
+                dir: vo_common_core::ChanDir::Both,
+                elem: Box::new(RuntimeType::Basic(ValueKind::Void)),
+            }
+        }
+        ValueKind::Interface => {
+            RuntimeType::Interface { methods: Vec::new() }
+        }
+        ValueKind::Closure => {
+            RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
+        }
+        _ => RuntimeType::Basic(ValueKind::Void),
     }
 }
 
@@ -348,6 +514,7 @@ fn propagate_promoted_methods(ctx: &mut CodegenContext, info: &TypeInfoWrapper) 
                                     method_name,
                                     method_info.func_id,
                                     method_info.is_pointer_receiver,
+                                    method_info.signature.clone(),
                                 );
                             }
                         }

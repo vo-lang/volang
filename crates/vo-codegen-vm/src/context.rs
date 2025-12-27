@@ -71,6 +71,7 @@ impl CodegenContext {
                 interface_metas: vec![vo_vm::bytecode::InterfaceMeta {
                     name: String::new(),
                     method_names: Vec::new(),
+                    methods: Vec::new(),
                 }],
                 named_type_metas: Vec::new(),
                 runtime_types: Vec::new(),
@@ -154,16 +155,16 @@ impl CodegenContext {
     }
 
     /// Update a NamedTypeMeta's methods map after function compilation
-    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool) {
+    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature: vo_common_core::RuntimeType) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver });
+            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver, signature });
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present
-    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool) {
+    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature: vo_common_core::RuntimeType) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver });
+            meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver, signature });
         }
     }
 
@@ -201,25 +202,43 @@ impl CodegenContext {
         }
         
         // Build InterfaceMeta from type info (includes embedded interfaces)
-        let method_names = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
+        let (method_names, methods) = if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
             let all_methods_ref = iface.all_methods();
-            if let Some(methods) = all_methods_ref.as_ref() {
-                methods.iter()
-                    .map(|m| tc_objs.lobjs[*m].name().to_string())
-                    .collect()
+            let method_objs: Vec<ObjKey> = if let Some(methods) = all_methods_ref.as_ref() {
+                methods.iter().cloned().collect()
             } else {
-                // Fallback to direct methods
-                iface.methods().iter()
-                    .map(|m| tc_objs.lobjs[*m].name().to_string())
-                    .collect()
-            }
+                iface.methods().iter().cloned().collect()
+            };
+            
+            let names: Vec<String> = method_objs.iter()
+                .map(|m| tc_objs.lobjs[*m].name().to_string())
+                .collect();
+            
+            // Note: signatures are empty here - will be filled by VM at runtime if needed
+            // For anonymous interfaces created during codegen, we don't have full type info
+            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs.iter()
+                .map(|&m| {
+                    let obj = &tc_objs.lobjs[m];
+                    let name = obj.name().to_string();
+                    // Empty signature - anonymous interface methods use name-only matching
+                    let sig = vo_common_core::RuntimeType::Func { 
+                        params: Vec::new(), 
+                        results: Vec::new(), 
+                        variadic: false 
+                    };
+                    vo_vm::bytecode::InterfaceMethodMeta { name, signature: sig }
+                })
+                .collect();
+            
+            (names, metas)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         
         let meta = InterfaceMeta {
             name: String::new(), // Anonymous interface
             method_names,
+            methods,
         };
         self.register_interface_meta(underlying, meta)
     }

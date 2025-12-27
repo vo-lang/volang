@@ -62,6 +62,7 @@ pub struct StructMeta {
 pub struct MethodInfo {
     pub func_id: u32,
     pub is_pointer_receiver: bool,
+    pub signature: vo_common_core::RuntimeType,
 }
 
 #[derive(Debug, Clone)]
@@ -79,9 +80,16 @@ impl StructMeta {
 }
 
 #[derive(Debug, Clone)]
+pub struct InterfaceMethodMeta {
+    pub name: String,
+    pub signature: vo_common_core::RuntimeType,
+}
+
+#[derive(Debug, Clone)]
 pub struct InterfaceMeta {
     pub name: String,
     pub method_names: Vec<String>,
+    pub methods: Vec<InterfaceMethodMeta>,
 }
 
 /// Itab: interface method table (method_idx -> func_id)

@@ -303,7 +303,14 @@ impl Module {
         let interface_metas = r.read_vec(|r| {
             let name = r.read_string()?;
             let method_names = r.read_vec(|r| r.read_string())?;
-            Ok(InterfaceMeta { name, method_names })
+            // TODO: serialize InterfaceMethodMeta with signatures
+            let methods = method_names.iter().map(|n| {
+                crate::bytecode::InterfaceMethodMeta {
+                    name: n.clone(),
+                    signature: vo_common_core::RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false },
+                }
+            }).collect();
+            Ok(InterfaceMeta { name, method_names, methods })
         })?;
 
         let named_type_metas = r.read_vec(|r| {
@@ -315,7 +322,9 @@ impl Module {
                 let n = r.read_string()?;
                 let func_id = r.read_u32()?;
                 let is_pointer_receiver = r.read_u8()? != 0;
-                methods.insert(n, MethodInfo { func_id, is_pointer_receiver });
+                // TODO: serialize method signatures
+                let signature = vo_common_core::RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false };
+                methods.insert(n, MethodInfo { func_id, is_pointer_receiver, signature });
             }
             Ok(NamedTypeMeta {
                 name,

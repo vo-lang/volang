@@ -116,7 +116,8 @@ impl<'a> TypeInfoWrapper<'a> {
                     let field_type = self.obj_type(field_obj, "struct field must have type");
                     total += self.type_slot_count(field_type);
                 }
-                total
+                // Empty struct still needs 1 slot (zero-size types not supported)
+                total.max(1)
             }
             Type::Array(a) => {
                 let elem_slots = self.type_slot_count(a.elem());
@@ -155,6 +156,10 @@ impl<'a> TypeInfoWrapper<'a> {
                     let field_type = self.obj_type(field_obj, "struct field must have type");
                     types.extend(self.type_slot_types(field_type));
                 }
+                // Empty struct still needs 1 slot (consistent with type_slot_count)
+                if types.is_empty() {
+                    types.push(SlotType::Value);
+                }
                 types
             }
             Type::Array(a) => {
@@ -167,6 +172,15 @@ impl<'a> TypeInfoWrapper<'a> {
                 types
             }
             Type::Named(n) => self.type_slot_types(n.underlying()),
+            Type::Tuple(t) => {
+                let mut types = Vec::new();
+                for &var in t.vars() {
+                    if let Some(var_type) = self.tc_objs().lobjs[var].typ() {
+                        types.extend(self.type_slot_types(var_type));
+                    }
+                }
+                types
+            }
             other => panic!("type_slot_types: unhandled type {:?}", other),
         }
     }

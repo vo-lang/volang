@@ -173,4 +173,41 @@ impl InterfaceMethod {
     pub fn sig_mut(&mut self) -> &mut RuntimeType {
         &mut self.sig
     }
+    
+    /// Check if a concrete method signature matches this interface method.
+    /// Returns true if the concrete method can implement this interface method.
+    pub fn matches_signature(&self, concrete_sig: &RuntimeType) -> bool {
+        // Both must be Func types
+        match (&*self.sig, concrete_sig) {
+            (RuntimeType::Func { params: iface_params, results: iface_results, variadic: iface_variadic },
+             RuntimeType::Func { params: concrete_params, results: concrete_results, variadic: concrete_variadic }) => {
+                // Variadic must match
+                if iface_variadic != concrete_variadic {
+                    return false;
+                }
+                // Parameter count must match
+                if iface_params.len() != concrete_params.len() {
+                    return false;
+                }
+                // Result count must match
+                if iface_results.len() != concrete_results.len() {
+                    return false;
+                }
+                // All parameter types must be identical
+                for (iface_p, concrete_p) in iface_params.iter().zip(concrete_params.iter()) {
+                    if iface_p != concrete_p {
+                        return false;
+                    }
+                }
+                // All result types must be identical
+                for (iface_r, concrete_r) in iface_results.iter().zip(concrete_results.iter()) {
+                    if iface_r != concrete_r {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
 }
