@@ -1,0 +1,63 @@
+// Test: label statements - break/continue with labels
+package main
+
+func main() {
+	// 1. break with label - exit outer loop
+	count1 := 0
+outer1:
+	for i := 0; i < 5; i += 1 {
+		for j := 0; j < 5; j += 1 {
+			count1 += 1
+			if j == 2 {
+				break outer1
+			}
+		}
+	}
+	assert(count1 == 3, "break label")
+	
+	// 2. continue with label - skip to next outer iteration
+	count2 := 0
+outer2:
+	for i := 0; i < 3; i += 1 {
+		for j := 0; j < 3; j += 1 {
+			if j == 1 {
+				continue outer2
+			}
+			count2 += 1
+		}
+	}
+	// Each outer iteration: j=0 counted, j=1 continues to next outer
+	assert(count2 == 3, "continue label")
+	
+	// 3. Nested labels - break middle
+	result := 0
+outer3:
+	for a := 0; a < 3; a += 1 {
+	middle:
+		for b := 0; b < 3; b += 1 {
+			for c := 0; c < 3; c += 1 {
+				result += 1
+				if c == 1 {
+					break middle
+				}
+			}
+		}
+	}
+	// Each outer: middle broken at c=1, so 2 per outer = 6
+	assert(result == 6, "nested break middle")
+	
+	// 4. break without label (innermost)
+	count4 := 0
+	for i := 0; i < 3; i += 1 {
+		for j := 0; j < 3; j += 1 {
+			count4 += 1
+			if j == 1 {
+				break
+			}
+		}
+	}
+	// Each outer: j=0,1 then break = 2 per outer = 6
+	assert(count4 == 6, "break no label")
+	
+	println("label statement tests passed")
+}

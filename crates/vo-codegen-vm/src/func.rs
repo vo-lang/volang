@@ -50,7 +50,6 @@ struct LoopContext {
     continue_pc: usize,
     continue_patches: Vec<usize>,  // for patching continue jumps later
     break_patches: Vec<usize>,
-    #[allow(dead_code)]  // Reserved for labeled break/continue (future)
     label: Option<Symbol>,
 }
 
@@ -332,27 +331,37 @@ impl FuncBuilder {
             .unwrap_or_default()
     }
 
-    pub fn emit_break(&mut self, _label: Option<Symbol>) {
-        let pc = self.emit_jump(Opcode::Jump, 0);
-        if let Some(ctx) = self.loop_stack.last_mut() {
-            ctx.break_patches.push(pc);
+    /// Find loop index by label (from innermost to outermost)
+    fn find_loop_index(&self, label: Option<Symbol>) -> Option<usize> {
+        match label {
+            None => {
+                // No label: target innermost loop
+                if self.loop_stack.is_empty() { None } else { Some(self.loop_stack.len() - 1) }
+            }
+            Some(sym) => {
+                // Find loop with matching label
+                self.loop_stack.iter().rposition(|ctx| ctx.label == Some(sym))
+            }
         }
     }
 
-    pub fn emit_continue(&mut self, _label: Option<Symbol>) {
-        // Get continue_pc first to avoid borrow issues
-        let continue_pc = self.loop_stack.last().map(|ctx| ctx.continue_pc);
-        
-        if let Some(pc) = continue_pc {
-            if pc != 0 {
+    pub fn emit_break(&mut self, label: Option<Symbol>) {
+        let pc = self.emit_jump(Opcode::Jump, 0);
+        if let Some(idx) = self.find_loop_index(label) {
+            self.loop_stack[idx].break_patches.push(pc);
+        }
+    }
+
+    pub fn emit_continue(&mut self, label: Option<Symbol>) {
+        if let Some(idx) = self.find_loop_index(label) {
+            let continue_pc = self.loop_stack[idx].continue_pc;
+            if continue_pc != 0 {
                 // continue_pc is known, jump directly
-                self.emit_jump_to(Opcode::Jump, 0, pc);
+                self.emit_jump_to(Opcode::Jump, 0, continue_pc);
             } else {
                 // continue_pc not yet known, emit placeholder and patch later
                 let jump_pc = self.emit_jump(Opcode::Jump, 0);
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.continue_patches.push(jump_pc);
-                }
+                self.loop_stack[idx].continue_patches.push(jump_pc);
             }
         }
     }

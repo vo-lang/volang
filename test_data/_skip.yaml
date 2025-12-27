@@ -61,6 +61,8 @@ skips:
     skip: [jit]
   - file: for_stmt.vo
     skip: [jit]
+  - file: label_stmt.vo
+    skip: [jit]
   - file: go_stmt.vo
     skip: [vm, jit]
     reason: "VariableNotFound"

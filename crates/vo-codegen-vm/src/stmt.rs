@@ -48,6 +48,17 @@ pub fn compile_stmt(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    compile_stmt_with_label(stmt, ctx, func, info, None)
+}
+
+/// Compile a statement with optional label (for labeled loops).
+fn compile_stmt_with_label(
+    stmt: &Stmt,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    label: Option<vo_common::Symbol>,
+) -> Result<(), CodegenError> {
     match &stmt.kind {
         // === Variable declaration ===
         StmtKind::Var(var_decl) => {
@@ -371,7 +382,7 @@ pub fn compile_stmt(
                 ForClause::Cond(cond_opt) => {
                     // while-style: for cond { } or infinite: for { }
                     let loop_start = func.current_pc();
-                    func.enter_loop(loop_start, None);
+                    func.enter_loop(loop_start, label);
 
                     let end_jump = if let Some(cond) = cond_opt {
                         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -408,7 +419,7 @@ pub fn compile_stmt(
                     };
 
                     // continue_pc=0 means "patch later" - continue should go to post
-                    func.enter_loop(0, None);
+                    func.enter_loop(0, label);
                     compile_block(&for_stmt.body, ctx, func, info)?;
 
                     // Post statement - this is where continue should jump to
@@ -471,7 +482,7 @@ pub fn compile_stmt(
                             // IterBegin: a=iter_args, b=iter_type(6=StackArray)
                             func.emit_op(Opcode::IterBegin, iter_args, 6, 0);
                             
-                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
+                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
                         } else {
                             // Heap array iteration
                             let arr_slot = if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
@@ -495,7 +506,7 @@ pub fn compile_stmt(
                             // IterBegin: a=iter_args, b=iter_type(0=HeapArray)
                             func.emit_op(Opcode::IterBegin, iter_args, 0, 0);
                             
-                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
+                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
                         }
                     } else if info.is_slice(range_type) {
                         // Slice iteration
@@ -515,7 +526,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(1=Slice)
                         func.emit_op(Opcode::IterBegin, iter_args, 1, 0);
                         
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
                     } else if info.is_string(range_type) {
                         // String iteration
                         let str_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -532,7 +543,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(3=String)
                         func.emit_op(Opcode::IterBegin, iter_args, 3, 0);
                         
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
                     } else if info.is_map(range_type) {
                         // Map iteration
                         let map_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -552,7 +563,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(2=Map)
                         func.emit_op(Opcode::IterBegin, iter_args, 2, 0);
                         
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
                     } else if info.is_chan(range_type) {
                         // Channel iteration: for v := range ch
                         let chan_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
@@ -590,7 +601,7 @@ pub fn compile_stmt(
                         // IterBegin: a=iter_args, b=iter_type(5=Channel)
                         func.emit_op(Opcode::IterBegin, iter_args, 5, 0);
                         
-                        emit_iter_loop(val_slot, 0, &for_stmt.body, ctx, func, info)?;
+                        emit_iter_loop(val_slot, 0, &for_stmt.body, ctx, func, info, label)?;
                     } else {
                         return Err(CodegenError::UnsupportedStmt("for-range unsupported type".to_string()));
                     }
@@ -649,8 +660,8 @@ pub fn compile_stmt(
 
         // === Labeled statement ===
         StmtKind::Labeled(labeled) => {
-            // Just compile the inner statement (label is for break/continue)
-            compile_stmt(&labeled.stmt, ctx, func, info)?;
+            // Pass label to inner statement (for labeled break/continue)
+            compile_stmt_with_label(&labeled.stmt, ctx, func, info, Some(labeled.label.symbol))?;
         }
 
         // === Inc/Dec ===
@@ -744,10 +755,11 @@ fn emit_iter_loop(
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
+    label: Option<vo_common::Symbol>,
 ) -> Result<(), CodegenError> {
     // IterNext is the loop start (Jump back here, not IterBegin)
     let iter_next_pc = func.current_pc();
-    func.enter_loop(iter_next_pc, None);
+    func.enter_loop(iter_next_pc, label);
     
     // IterNext: a=key_slot, b/c=done_offset (patched), flags=val_slot
     func.emit_with_flags(Opcode::IterNext, val_slot as u8, key_slot, 0, 0);
