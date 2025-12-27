@@ -1,5 +1,7 @@
 //! Statement compilation.
 
+use vo_analysis::objects::TypeKey;
+use vo_common::symbol::Symbol;
 use vo_syntax::ast::{Block, Expr, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
@@ -8,6 +10,239 @@ use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
+
+// =============================================================================
+// StmtCompiler - Unified statement compilation context
+// =============================================================================
+
+/// Statement compiler - unified context for all statement compilation.
+/// Centralizes type decisions for variable allocation and initialization.
+pub struct StmtCompiler<'a, 'b> {
+    pub ctx: &'a mut CodegenContext,
+    pub func: &'a mut FuncBuilder,
+    pub info: &'b TypeInfoWrapper<'b>,
+}
+
+impl<'a, 'b> StmtCompiler<'a, 'b> {
+    pub fn new(
+        ctx: &'a mut CodegenContext,
+        func: &'a mut FuncBuilder,
+        info: &'b TypeInfoWrapper<'b>,
+    ) -> Self {
+        Self { ctx, func, info }
+    }
+
+    /// Define a local variable with optional initialization.
+    /// This is the single entry point for all variable definitions.
+    /// All type/escape decisions are centralized here.
+    pub fn define_local(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        escapes: bool,
+        init: Option<&Expr>,
+    ) -> Result<StorageKind, CodegenError> {
+        let storage = self.alloc_storage(sym, type_key, escapes)?;
+        
+        if let Some(expr) = init {
+            self.emit_init(storage, expr, type_key)?;
+        } else {
+            self.emit_zero_init(storage, type_key);
+        }
+        
+        Ok(storage)
+    }
+
+    /// Allocate storage for a variable based on type and escape analysis.
+    /// This is the single decision point for storage strategy.
+    fn alloc_storage(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        escapes: bool,
+    ) -> Result<StorageKind, CodegenError> {
+        let slots = self.info.type_slot_count(type_key);
+        let slot_types = self.info.type_slot_types(type_key);
+
+        if self.info.is_reference_type(type_key) {
+            // Reference types: 1 slot GcRef IS the value
+            let slot = self.func.define_local_reference(sym);
+            Ok(StorageKind::Reference { slot })
+        } else if escapes {
+            if self.info.is_array(type_key) {
+                self.alloc_escaped_array(sym, type_key)
+            } else {
+                self.alloc_escaped_boxed(sym, type_key, slots, &slot_types)
+            }
+        } else {
+            // Stack allocation
+            let slot = self.func.define_local_stack(sym, slots, &slot_types);
+            Ok(StorageKind::StackValue { slot, slots })
+        }
+    }
+
+    /// Allocate escaped array: [GcHeader][ArrayHeader][elems]
+    fn alloc_escaped_array(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+    ) -> Result<StorageKind, CodegenError> {
+        let elem_slots = self.info.array_elem_slots(type_key);
+        let gcref_slot = self.func.define_local_heap_array(sym, elem_slots);
+
+        let arr_len = self.info.array_len(type_key);
+        let elem_meta_idx = self.ctx.get_or_create_array_elem_meta(type_key, self.info);
+
+        // emit ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_slots
+        let meta_reg = self.func.alloc_temp(1);
+        self.func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
+
+        let len_reg = self.func.alloc_temp(1);
+        let (b, c) = encode_i32(arr_len as i32);
+        self.func.emit_op(Opcode::LoadInt, len_reg, b, c);
+
+        self.func.emit_with_flags(Opcode::ArrayNew, elem_slots as u8, gcref_slot, meta_reg, len_reg);
+
+        Ok(StorageKind::HeapArray { gcref_slot, elem_slots })
+    }
+
+    /// Allocate escaped boxed value (struct/primitive/interface): [GcHeader][data]
+    fn alloc_escaped_boxed(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        slots: u16,
+        slot_types: &[vo_common_core::types::SlotType],
+    ) -> Result<StorageKind, CodegenError> {
+        let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
+
+        let meta_idx = self.ctx.get_or_create_value_meta(Some(type_key), slots, slot_types);
+        let meta_reg = self.func.alloc_temp(1);
+        self.func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
+
+        Ok(StorageKind::HeapBoxed { gcref_slot, value_slots: slots })
+    }
+
+    /// Emit initialization for a variable.
+    fn emit_init(
+        &mut self,
+        storage: StorageKind,
+        expr: &Expr,
+        target_type: TypeKey,
+    ) -> Result<(), CodegenError> {
+        match storage {
+            StorageKind::HeapArray { gcref_slot, elem_slots } => {
+                compile_escaped_array_init(gcref_slot, expr, target_type, elem_slots, self.ctx, self.func, self.info)
+            }
+            StorageKind::HeapBoxed { gcref_slot, value_slots } => {
+                let tmp = self.func.alloc_temp(value_slots);
+                self.compile_value(expr, tmp, target_type)?;
+                self.func.emit_ptr_set(gcref_slot, 0, tmp, value_slots);
+                Ok(())
+            }
+            StorageKind::StackValue { slot, slots: _ } => {
+                self.compile_value(expr, slot, target_type)
+            }
+            StorageKind::Reference { slot } => {
+                compile_expr_to(expr, slot, self.ctx, self.func, self.info)
+            }
+            StorageKind::Global { .. } => {
+                unreachable!("define_local doesn't create Global storage")
+            }
+        }
+    }
+
+    /// Compile expression value with automatic interface conversion.
+    /// This is the single point for handling concrete-to-interface conversion.
+    pub fn compile_value(
+        &mut self,
+        expr: &Expr,
+        dst: u16,
+        target_type: TypeKey,
+    ) -> Result<(), CodegenError> {
+        let expr_type = self.info.expr_type(expr.id);
+        if self.info.is_interface(target_type) && !self.info.is_interface(expr_type) {
+            compile_iface_assign(dst, expr, target_type, self.ctx, self.func, self.info)
+        } else {
+            compile_expr_to(expr, dst, self.ctx, self.func, self.info)
+        }
+    }
+
+    /// Emit zero initialization for a variable.
+    fn emit_zero_init(&mut self, storage: StorageKind, _type_key: TypeKey) {
+        match storage {
+            StorageKind::HeapArray { .. } | StorageKind::HeapBoxed { .. } => {
+                // Heap allocations are already zero-initialized by PtrNew/ArrayNew
+            }
+            StorageKind::StackValue { slot, slots } => {
+                for i in 0..slots {
+                    self.func.emit_op(Opcode::LoadNil, slot + i, 0, 0);
+                }
+            }
+            StorageKind::Reference { slot } => {
+                self.func.emit_op(Opcode::LoadNil, slot, 0, 0);
+            }
+            StorageKind::Global { .. } => {
+                unreachable!("define_local doesn't create Global storage")
+            }
+        }
+    }
+
+    /// Define a local variable and initialize from an already-compiled slot.
+    /// Used for comma-ok cases where the value is already in a temp slot.
+    pub fn define_local_from_slot(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        escapes: bool,
+        src_slot: u16,
+    ) -> Result<StorageKind, CodegenError> {
+        let slots = self.info.type_slot_count(type_key);
+        let slot_types = self.info.type_slot_types(type_key);
+
+        if self.info.is_reference_type(type_key) {
+            let slot = self.func.define_local_reference(sym);
+            self.func.emit_copy(slot, src_slot, 1);
+            Ok(StorageKind::Reference { slot })
+        } else if escapes && !self.info.is_array(type_key) {
+            // HeapBoxed: allocate and copy from src_slot
+            let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
+            let meta_idx = self.ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+            let meta_reg = self.func.alloc_temp(1);
+            self.func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+            self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
+            self.func.emit_ptr_set(gcref_slot, 0, src_slot, slots);
+            Ok(StorageKind::HeapBoxed { gcref_slot, value_slots: slots })
+        } else {
+            // Stack: just copy
+            let slot = self.func.define_local_stack(sym, slots, &slot_types);
+            self.func.emit_copy(slot, src_slot, slots);
+            Ok(StorageKind::StackValue { slot, slots })
+        }
+    }
+
+    /// Store a value from an already-compiled slot to an existing storage.
+    /// Used for re-assignment in short var declarations.
+    pub fn store_from_slot(&mut self, storage: StorageKind, src_slot: u16, slots: u16) {
+        match storage {
+            StorageKind::StackValue { slot, .. } => {
+                self.func.emit_copy(slot, src_slot, slots);
+            }
+            StorageKind::HeapBoxed { gcref_slot, value_slots } => {
+                self.func.emit_ptr_set(gcref_slot, 0, src_slot, value_slots);
+            }
+            StorageKind::Reference { slot } => {
+                self.func.emit_copy(slot, src_slot, 1);
+            }
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================
+// Original functions
+// =============================================================================
 
 /// Get slot for a range variable (key or value).
 /// - If `define` is true: declare new variable
@@ -62,96 +297,19 @@ fn compile_stmt_with_label(
     match &stmt.kind {
         // === Variable declaration ===
         StmtKind::Var(var_decl) => {
+            let mut sc = StmtCompiler::new(ctx, func, info);
             for spec in &var_decl.specs {
                 for (i, name) in spec.names.iter().enumerate() {
-                    // Get type - must exist for valid code
-                    let type_key = if let Some(ty) = &spec.ty {
-                        info.type_expr_type(ty.id)
-                    } else if i < spec.values.len() {
-                        info.expr_type(spec.values[i].id)
-                    } else {
-                        panic!("variable declaration must have type annotation or initializer")
-                    };
+                    let type_key = spec.ty.as_ref()
+                        .map(|ty| info.type_expr_type(ty.id))
+                        .or_else(|| spec.values.get(i).map(|v| info.expr_type(v.id)))
+                        .expect("variable declaration must have type annotation or initializer");
 
-                    let slots = info.type_slot_count(type_key);
-                    let slot_types = info.type_slot_types(type_key);
-
-                    // Check escape
                     let obj_key = info.get_def(name);
                     let escapes = info.is_escaped(obj_key);
+                    let init = spec.values.get(i);
 
-                    if escapes && !info.is_reference_type(type_key) {
-                        // Heap allocation for escaped value types
-                        // StorageKind is now set correctly in define_local_heap_array/heap_boxed
-                        
-                        if info.is_array(type_key) {
-                            // Array: use ArrayNew (different memory layout with ArrayHeader)
-                            let elem_slots = info.array_elem_slots(type_key);
-                            let gcref_slot = func.define_local_heap_array(name.symbol, elem_slots);
-                            
-                            let arr_len = info.array_len(type_key);
-                            let elem_meta_idx = ctx.get_or_create_array_elem_meta(type_key, info);
-                            
-                            // ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_slots
-                            let meta_reg = func.alloc_temp(1);
-                            func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
-                            
-                            let len_reg = func.alloc_temp(1);
-                            let (b, c) = crate::type_info::encode_i32(arr_len as i32);
-                            func.emit_op(Opcode::LoadInt, len_reg, b, c);
-                            
-                            func.emit_with_flags(Opcode::ArrayNew, elem_slots as u8, gcref_slot, meta_reg, len_reg);
-                            
-                            // Initialize if value provided
-                            if i < spec.values.len() {
-                                compile_escaped_array_init(gcref_slot, &spec.values[i], type_key, elem_slots, ctx, func, info)?;
-                            }
-                        } else {
-                            // Struct/primitive/interface: use PtrNew
-                            let gcref_slot = func.define_local_heap_boxed(name.symbol, slots);
-                            
-                            let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
-                            let meta_reg = func.alloc_temp(1);
-                            func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                            func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
-                            
-                            // Initialize value
-                            if i < spec.values.len() {
-                                let tmp = func.alloc_temp(slots);
-                                if info.is_interface(type_key) {
-                                    compile_iface_assign(tmp, &spec.values[i], type_key, ctx, func, info)?;
-                                } else {
-                                    compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
-                                }
-                                func.emit_ptr_set(gcref_slot, 0, tmp, slots);
-                            }
-                        }
-                    } else if info.is_reference_type(type_key) {
-                        // Reference type: 1 slot GcRef IS the value
-                        let slot = func.define_local_reference(name.symbol);
-                        if i < spec.values.len() {
-                            compile_expr_to(&spec.values[i], slot, ctx, func, info)?;
-                        } else {
-                            func.emit_op(Opcode::LoadNil, slot, 0, 0);
-                        }
-                    } else {
-                        // Stack allocation
-                        let slot = func.define_local_stack(name.symbol, slots, &slot_types);
-
-                        // Initialize
-                        if i < spec.values.len() {
-                            if info.is_interface(type_key) {
-                                compile_iface_assign(slot, &spec.values[i], type_key, ctx, func, info)?;
-                            } else {
-                                compile_expr_to(&spec.values[i], slot, ctx, func, info)?;
-                            }
-                        } else {
-                            // Zero initialize
-                            for j in 0..slots {
-                                func.emit_op(Opcode::LoadNil, slot + j, 0, 0);
-                            }
-                        }
-                    }
+                    sc.define_local(name.symbol, type_key, escapes, init)?;
                 }
             }
         }
@@ -159,7 +317,6 @@ fn compile_stmt_with_label(
         // === Short variable declaration ===
         StmtKind::ShortVar(short_var) => {
             // Check for comma-ok case: v, ok := x.(T) or v, ok := <-ch or v, ok := m[k]
-            // In this case, values.len() == 1 but names.len() == 2, and values[0] has tuple type
             let is_comma_ok = short_var.values.len() == 1 
                 && short_var.names.len() == 2
                 && info.is_tuple(info.expr_type(short_var.values[0].id));
@@ -171,112 +328,50 @@ fn compile_stmt_with_label(
                 let tmp_base = func.alloc_temp(total_slots);
                 compile_expr_to(&short_var.values[0], tmp_base, ctx, func, info)?;
 
+                let mut sc = StmtCompiler::new(ctx, func, info);
                 let mut offset = 0u16;
                 for (i, name) in short_var.names.iter().enumerate() {
                     let elem_type = info.tuple_elem_type(tuple_type, i);
                     let elem_slots = info.type_slot_count(elem_type);
 
-                    // Skip blank identifier
                     if info.project.interner.resolve(name.symbol) == Some("_") {
                         offset += elem_slots;
                         continue;
                     }
 
-                    let slot_types = info.type_slot_types(elem_type);
                     let is_def = info.project.type_info.defs.contains_key(&name.id);
-
                     if is_def {
                         let obj_key = info.get_def(name);
                         let escapes = info.is_escaped(obj_key);
-
-                        if escapes && !info.is_reference_type(elem_type) {
-                            let slot = emit_heap_alloc_boxed(name.symbol, Some(elem_type), elem_slots, &slot_types, ctx, func);
-                            func.emit_ptr_set(slot, 0, tmp_base + offset, elem_slots);
-                        } else {
-                            let slot = func.define_local_stack(name.symbol, elem_slots, &slot_types);
-                            func.emit_copy(slot, tmp_base + offset, elem_slots);
-                        }
-                    } else {
-                        if let Some(local) = func.lookup_local(name.symbol) {
-                            let slot = local.storage.slot();
-                            func.emit_copy(slot, tmp_base + offset, elem_slots);
-                        }
+                        sc.define_local_from_slot(name.symbol, elem_type, escapes, tmp_base + offset)?;
+                    } else if let Some(local) = sc.func.lookup_local(name.symbol) {
+                        sc.store_from_slot(local.storage, tmp_base + offset, elem_slots);
                     }
                     offset += elem_slots;
                 }
             } else {
                 // Normal case: N variables = N expressions
+                let mut sc = StmtCompiler::new(ctx, func, info);
                 for (i, name) in short_var.names.iter().enumerate() {
                     if info.project.interner.resolve(name.symbol) == Some("_") {
                         continue;
                     }
 
-                    let type_key = if i < short_var.values.len() {
-                        Some(info.expr_type(short_var.values[i].id))
-                    } else {
-                        None
-                    };
-
-                    let slots = type_key.map(|t| info.type_slot_count(t)).expect("short var must have value");
-                    let slot_types = type_key
-                        .map(|t| info.type_slot_types(t))
+                    let type_key = short_var.values.get(i)
+                        .map(|v| info.expr_type(v.id))
                         .expect("short var must have value");
 
                     let is_def = info.project.type_info.defs.contains_key(&name.id);
-
                     if is_def {
                         let obj_key = info.get_def(name);
                         let escapes = info.is_escaped(obj_key);
-                        let tk = type_key.expect("short var must have value");
-
-                        if escapes && !info.is_reference_type(tk) {
-                            if info.is_array(tk) {
-                                // Array: use ArrayNew
-                                let elem_slots = info.array_elem_slots(tk);
-                                let gcref_slot = func.define_local_heap_array(name.symbol, elem_slots);
-                                
-                                let arr_len = info.array_len(tk);
-                                let elem_meta_idx = ctx.get_or_create_array_elem_meta(tk, info);
-                                
-                                let meta_reg = func.alloc_temp(1);
-                                func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
-                                
-                                let len_reg = func.alloc_temp(1);
-                                let (b, c) = crate::type_info::encode_i32(arr_len as i32);
-                                func.emit_op(Opcode::LoadInt, len_reg, b, c);
-                                
-                                func.emit_with_flags(Opcode::ArrayNew, elem_slots as u8, gcref_slot, meta_reg, len_reg);
-                                
-                                if i < short_var.values.len() {
-                                    compile_escaped_array_init(gcref_slot, &short_var.values[i], tk, elem_slots, ctx, func, info)?;
-                                }
-                            } else {
-                                // Struct/primitive: use PtrNew
-                                let gcref_slot = emit_heap_alloc_boxed(name.symbol, type_key, slots, &slot_types, ctx, func);
-
-                                if i < short_var.values.len() {
-                                    let tmp = func.alloc_temp(slots);
-                                    compile_expr_to(&short_var.values[i], tmp, ctx, func, info)?;
-                                    func.emit_ptr_set(gcref_slot, 0, tmp, slots);
-                                }
-                            }
-                        } else if info.is_reference_type(tk) {
-                            let slot = func.define_local_reference(name.symbol);
-                            if i < short_var.values.len() {
-                                compile_expr_to(&short_var.values[i], slot, ctx, func, info)?;
-                            }
-                        } else {
-                            let slot = func.define_local_stack(name.symbol, slots, &slot_types);
-                            if i < short_var.values.len() {
-                                compile_expr_to(&short_var.values[i], slot, ctx, func, info)?;
-                            }
-                        }
-                    } else {
-                        if let Some(local) = func.lookup_local(name.symbol) {
-                            let slot = local.storage.slot();
-                            if i < short_var.values.len() {
-                                compile_expr_to(&short_var.values[i], slot, ctx, func, info)?;
-                            }
+                        let init = short_var.values.get(i);
+                        sc.define_local(name.symbol, type_key, escapes, init)?;
+                    } else if let Some(local) = sc.func.lookup_local(name.symbol) {
+                        let storage = local.storage;
+                        if let Some(expr) = short_var.values.get(i) {
+                            let src = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
+                            sc.func.emit_storage_store(storage, src);
                         }
                     }
                 }
@@ -1528,20 +1623,3 @@ fn compile_escaped_array_init(
     Ok(())
 }
 
-/// Emit PtrNew for heap allocation of a boxed value type (struct/primitive/interface).
-/// Returns the GcRef slot. Uses StorageKind::HeapBoxed.
-fn emit_heap_alloc_boxed(
-    symbol: vo_common::symbol::Symbol,
-    type_key: Option<vo_analysis::objects::TypeKey>,
-    slots: u16,
-    slot_types: &[vo_common_core::types::SlotType],
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-) -> u16 {
-    let gcref_slot = func.define_local_heap_boxed(symbol, slots);
-    let meta_idx = ctx.get_or_create_value_meta(type_key, slots, slot_types);
-    let meta_reg = func.alloc_temp(1);
-    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-    func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
-    gcref_slot
-}
