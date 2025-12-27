@@ -1,6 +1,6 @@
 //! Statement compilation.
 
-use vo_syntax::ast::{Block, Stmt, StmtKind};
+use vo_syntax::ast::{Block, Expr, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -8,6 +8,38 @@ use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
 use crate::func::{ExprSource, FuncBuilder, ValueLocation};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
+
+/// Get slot for a range variable (key or value).
+/// - If `define` is true: declare new variable
+/// - If `define` is false: lookup existing variable
+fn range_var_slot(
+    var: Option<&Expr>,
+    define: bool,
+    slots: u16,
+    slot_types: &[vo_common_core::types::SlotType],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    match var {
+        Some(expr) => {
+            if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
+                if define {
+                    Ok(func.define_local_stack(ident.symbol, slots, slot_types))
+                } else {
+                    Ok(func.lookup_local(ident.symbol)
+                        .expect("range variable not found")
+                        .slot)
+                }
+            } else if define {
+                Ok(func.alloc_temp(slots))
+            } else {
+                crate::expr::compile_expr(expr, ctx, func, info)
+            }
+        }
+        None => Ok(func.alloc_temp(slots)),
+    }
+}
 
 /// Compile a statement.
 pub fn compile_stmt(
@@ -424,36 +456,10 @@ pub fn compile_stmt(
                         };
                         
                         if let Some(arr_slot) = arr_slot {
-                            
-                            // Define key and value variables
-                            let key_slot = if let Some(k) = key {
-                                if *define {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                        func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
-                                    } else { func.alloc_temp(1) }
-                                } else {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                        func.lookup_local(ident.symbol).expect("range key variable not found").slot
-                                    } else { crate::expr::compile_expr(k, ctx, func, info)? }
-                                }
-                            } else {
-                                func.alloc_temp(1) // dummy key slot
-                            };
-                            
-                            let val_slot = if let Some(v) = value {
-                                if *define {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                        let slot_types = info.type_slot_types(info.array_elem_type(range_type));
-                                        func.define_local_stack(ident.symbol, elem_slots as u16, &slot_types)
-                                    } else { func.alloc_temp(elem_slots as u16) }
-                                } else {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                        func.lookup_local(ident.symbol).expect("range value variable not found").slot
-                                    } else { crate::expr::compile_expr(v, ctx, func, info)? }
-                                }
-                            } else {
-                                func.alloc_temp(elem_slots as u16) // dummy value slot
-                            };
+                            // Stack array: define key and value slots
+                            let val_slot_types = info.type_slot_types(info.array_elem_type(range_type));
+                            let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
+                            let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
                             
                             // Prepare IterBegin args: a=meta, a+1=base_slot, a+2=len
                             let iter_args = func.alloc_temp(3);
@@ -476,34 +482,9 @@ pub fn compile_stmt(
                                 crate::expr::compile_expr(expr, ctx, func, info)?
                             };
                             
-                            // Define key and value variables
-                            let key_slot = if let Some(k) = key {
-                                if *define {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                        func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
-                                    } else { func.alloc_temp(1) }
-                                } else {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                        func.lookup_local(ident.symbol).expect("range key variable not found").slot
-                                    } else { crate::expr::compile_expr(k, ctx, func, info)? }
-                                }
-                            } else {
-                                func.alloc_temp(1)
-                            };
-                            
-                            let val_slot = if let Some(v) = value {
-                                if *define {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                        func.define_local_stack(ident.symbol, elem_slots as u16, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
-                                    } else { func.alloc_temp(elem_slots as u16) }
-                                } else {
-                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                        func.lookup_local(ident.symbol).expect("range value variable not found").slot
-                                    } else { crate::expr::compile_expr(v, ctx, func, info)? }
-                                }
-                            } else {
-                                func.alloc_temp(elem_slots as u16)
-                            };
+                            let val_slot_types = vec![vo_common_core::types::SlotType::Value; elem_slots as usize];
+                            let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
+                            let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
                             
                             // Prepare IterBegin args: a=meta, a+1=array_ref
                             let iter_args = func.alloc_temp(2);
@@ -519,48 +500,11 @@ pub fn compile_stmt(
                     } else if info.is_slice(range_type) {
                         // Slice iteration
                         let elem_slots = info.slice_elem_slots(range_type) as u8;
-                        
-                        // Compile slice expression
                         let slice_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
                         
-                        // Define key and value variables
-                        let key_slot = if let Some(k) = key {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
-                                } else { func.alloc_temp(1) }
-                            } else {
-                                // Assignment: lookup existing variable
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.lookup_local(ident.symbol)
-                                        .expect("range key variable not found")
-                                        .slot
-                                } else {
-                                    crate::expr::compile_expr(k, ctx, func, info)?
-                                }
-                            }
-                        } else {
-                            func.alloc_temp(1)
-                        };
-                        
-                        let val_slot = if let Some(v) = value {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.define_local_stack(ident.symbol, elem_slots as u16, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
-                                } else { func.alloc_temp(elem_slots as u16) }
-                            } else {
-                                // Assignment: lookup existing variable
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.lookup_local(ident.symbol)
-                                        .expect("range value variable not found")
-                                        .slot
-                                } else {
-                                    crate::expr::compile_expr(v, ctx, func, info)?
-                                }
-                            }
-                        } else {
-                            func.alloc_temp(elem_slots as u16)
-                        };
+                        let val_slot_types = vec![vo_common_core::types::SlotType::Value; elem_slots as usize];
+                        let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
+                        let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
                         
                         // Prepare IterBegin args: a=meta, a+1=slice_ref
                         let iter_args = func.alloc_temp(2);
@@ -576,34 +520,8 @@ pub fn compile_stmt(
                         // String iteration
                         let str_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
                         
-                        // Define key (byte index) and value (byte/rune)
-                        let key_slot = if let Some(k) = key {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
-                                } else { func.alloc_temp(1) }
-                            } else {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.lookup_local(ident.symbol).expect("range key variable not found").slot
-                                } else { crate::expr::compile_expr(k, ctx, func, info)? }
-                            }
-                        } else {
-                            func.alloc_temp(1)
-                        };
-                        
-                        let val_slot = if let Some(v) = value {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
-                                } else { func.alloc_temp(1) }
-                            } else {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.lookup_local(ident.symbol).expect("range value variable not found").slot
-                                } else { crate::expr::compile_expr(v, ctx, func, info)? }
-                            }
-                        } else {
-                            func.alloc_temp(1)
-                        };
+                        let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
+                        let val_slot = range_var_slot(value.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
                         
                         // Prepare IterBegin args: a=meta, a+1=string_ref
                         let iter_args = func.alloc_temp(2);
@@ -618,38 +536,12 @@ pub fn compile_stmt(
                     } else if info.is_map(range_type) {
                         // Map iteration
                         let map_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
-                        
-                        // Get key and value slot counts from map type
                         let (key_slots, val_slots) = info.map_key_val_slots(range_type);
                         
-                        // Define key and value variables
-                        let key_slot = if let Some(k) = key {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.define_local_stack(ident.symbol, key_slots as u16, &vec![vo_common_core::types::SlotType::Value; key_slots as usize])
-                                } else { func.alloc_temp(key_slots as u16) }
-                            } else {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.lookup_local(ident.symbol).expect("range key variable not found").slot
-                                } else { crate::expr::compile_expr(k, ctx, func, info)? }
-                            }
-                        } else {
-                            func.alloc_temp(key_slots as u16)
-                        };
-                        
-                        let val_slot = if let Some(v) = value {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.define_local_stack(ident.symbol, val_slots as u16, &vec![vo_common_core::types::SlotType::Value; val_slots as usize])
-                                } else { func.alloc_temp(val_slots as u16) }
-                            } else {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.lookup_local(ident.symbol).expect("range value variable not found").slot
-                                } else { crate::expr::compile_expr(v, ctx, func, info)? }
-                            }
-                        } else {
-                            func.alloc_temp(val_slots as u16)
-                        };
+                        let key_slot_types = vec![vo_common_core::types::SlotType::Value; key_slots as usize];
+                        let val_slot_types = vec![vo_common_core::types::SlotType::Value; val_slots as usize];
+                        let key_slot = range_var_slot(key.as_ref(), *define, key_slots as u16, &key_slot_types, ctx, func, info)?;
+                        let val_slot = range_var_slot(value.as_ref(), *define, val_slots as u16, &val_slot_types, ctx, func, info)?;
                         
                         // Prepare IterBegin args: a=meta, a+1=map_ref
                         let iter_args = func.alloc_temp(2);
