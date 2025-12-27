@@ -905,21 +905,16 @@ fn compile_call(
             let mut offset = 0u16;
             for (i, arg) in call.args.iter().enumerate() {
                 let param_type = param_types.get(i).copied();
-                let arg_type = info.expr_type(arg.id);
-                
-                // Check if need interface conversion
+                // Compile arg with automatic interface conversion
                 if let Some(pt) = param_type {
-                    if info.is_interface(pt) && !info.is_interface(arg_type) {
-                        // Concrete -> Interface conversion
-                        crate::stmt::compile_iface_assign(args_start + offset, arg, pt, ctx, func, info)?;
-                        offset += info.type_slot_count(pt);
-                        continue;
-                    }
+                    let slots = info.type_slot_count(pt);
+                    crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
+                    offset += slots;
+                } else {
+                    let arg_slots = info.expr_slots(arg.id);
+                    compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+                    offset += arg_slots;
                 }
-                
-                let arg_slots = info.expr_slots(arg.id);
-                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                offset += arg_slots;
             }
             
             // Call: a=func_id, b=args_start, c=(arg_slots<<8|ret_slots), flags=func_id_high

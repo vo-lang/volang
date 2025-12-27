@@ -161,14 +161,29 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         dst: u16,
         target_type: TypeKey,
     ) -> Result<(), CodegenError> {
-        let expr_type = self.info.expr_type(expr.id);
-        if self.info.is_interface(target_type) && !self.info.is_interface(expr_type) {
-            compile_iface_assign(dst, expr, target_type, self.ctx, self.func, self.info)
-        } else {
-            compile_expr_to(expr, dst, self.ctx, self.func, self.info)
-        }
+        compile_value_to(expr, dst, target_type, self.ctx, self.func, self.info)
     }
+}
 
+/// Compile expression to dst with automatic interface conversion.
+/// Standalone version of StmtCompiler::compile_value for use outside StmtCompiler.
+pub fn compile_value_to(
+    expr: &Expr,
+    dst: u16,
+    target_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let expr_type = info.expr_type(expr.id);
+    if info.is_interface(target_type) && !info.is_interface(expr_type) {
+        compile_iface_assign(dst, expr, target_type, ctx, func, info)
+    } else {
+        compile_expr_to(expr, dst, ctx, func, info)
+    }
+}
+
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     /// Emit zero initialization for a variable.
     fn emit_zero_init(&mut self, storage: StorageKind, _type_key: TypeKey) {
         match storage {
@@ -483,16 +498,9 @@ fn compile_stmt_with_label(
                 let mut offset = 0u16;
                 for (i, result) in ret.values.iter().enumerate() {
                     let ret_type = ret_types.get(i).copied();
-                    let expr_type = info.expr_type(result.id);
-                    
                     if let Some(rt) = ret_type {
                         let slots = info.type_slot_count(rt);
-                        // Check if return type is interface but expr is concrete
-                        if info.is_interface(rt) && !info.is_interface(expr_type) {
-                            compile_iface_assign(ret_start + offset, result, rt, ctx, func, info)?;
-                        } else {
-                            compile_expr_to(result, ret_start + offset, ctx, func, info)?;
-                        }
+                        compile_value_to(result, ret_start + offset, rt, ctx, func, info)?;
                         offset += slots;
                     } else {
                         let slots = info.expr_slots(result.id);
