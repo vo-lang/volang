@@ -163,27 +163,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     ) -> Result<(), CodegenError> {
         compile_value_to(expr, dst, target_type, self.ctx, self.func, self.info)
     }
-}
 
-/// Compile expression to dst with automatic interface conversion.
-/// Standalone version of StmtCompiler::compile_value for use outside StmtCompiler.
-pub fn compile_value_to(
-    expr: &Expr,
-    dst: u16,
-    target_type: TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    let expr_type = info.expr_type(expr.id);
-    if info.is_interface(target_type) && !info.is_interface(expr_type) {
-        compile_iface_assign(dst, expr, target_type, ctx, func, info)
-    } else {
-        compile_expr_to(expr, dst, ctx, func, info)
-    }
-}
-
-impl<'a, 'b> StmtCompiler<'a, 'b> {
     /// Emit zero initialization for a variable.
     fn emit_zero_init(&mut self, storage: StorageKind, _type_key: TypeKey) {
         match storage {
@@ -255,8 +235,26 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     }
 }
 
+/// Compile expression to dst with automatic interface conversion.
+/// Standalone version of StmtCompiler::compile_value for use outside StmtCompiler.
+pub fn compile_value_to(
+    expr: &Expr,
+    dst: u16,
+    target_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let expr_type = info.expr_type(expr.id);
+    if info.is_interface(target_type) && !info.is_interface(expr_type) {
+        compile_iface_assign(dst, expr, target_type, ctx, func, info)
+    } else {
+        compile_expr_to(expr, dst, ctx, func, info)
+    }
+}
+
 // =============================================================================
-// Original functions
+// Helper functions
 // =============================================================================
 
 /// Define or lookup a range variable (key or value) using StmtCompiler.
