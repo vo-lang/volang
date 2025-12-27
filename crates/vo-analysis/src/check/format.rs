@@ -90,6 +90,10 @@ fn write_expr(buf: &mut String, expr: &Expr, interner: &SymbolInterner) {
             if let Some(high) = &sl.high {
                 write_expr(buf, high, interner);
             }
+            if let Some(max) = &sl.max {
+                buf.push(':');
+                write_expr(buf, max, interner);
+            }
             buf.push(']');
         }
         ExprKind::Selector(sel) => {

@@ -64,20 +64,33 @@ pub fn exec_slice_cap(fiber: &mut Fiber, inst: &Instruction) {
     fiber.write_reg(inst.a, cap as u64);
 }
 
+/// SliceSlice: a[lo:hi] or a[lo:hi:max]
+/// flags: bit0 = input is array, bit1 = has max (three-index slice)
 #[inline]
 pub fn exec_slice_slice(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc) {
     let s = fiber.read_reg(inst.b) as GcRef;
     let lo = fiber.read_reg(inst.c) as usize;
     let hi = fiber.read_reg(inst.c + 1) as usize;
     
-    // flags: bit0 = 1 means input is array, 0 means slice
-    let is_array = (inst.flags & 1) != 0;
+    let is_array = (inst.flags & 0b01) != 0;
+    let has_max = (inst.flags & 0b10) != 0;
+    
     let result = if is_array {
         // Input is array: create slice from array range
-        slice::from_array_range(gc, s, lo, hi - lo, hi - lo)
+        let cap = if has_max {
+            fiber.read_reg(inst.c + 2) as usize - lo
+        } else {
+            hi - lo
+        };
+        slice::from_array_range(gc, s, lo, hi - lo, cap)
     } else {
-        // Input is slice: use slice_of
-        slice::slice_of(gc, s, lo, hi)
+        // Input is slice
+        if has_max {
+            let max = fiber.read_reg(inst.c + 2) as usize;
+            slice::slice_of_with_cap(gc, s, lo, hi, max)
+        } else {
+            slice::slice_of(gc, s, lo, hi)
+        }
     };
     fiber.write_reg(inst.a, result as u64);
 }

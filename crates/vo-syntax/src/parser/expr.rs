@@ -384,7 +384,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_index_or_slice(&mut self, expr: Expr, start: vo_common::span::BytePos) -> ParseResult<Expr> {
-        // Could be: a[i], a[low:high], a[low:], a[:high], a[:]
+        // Syntax: a[i] | a[low:high] | a[low:high:max]
+        // Three-index form requires high and max; low can be omitted.
         
         let low = if self.at(TokenKind::Colon) {
             None
@@ -393,17 +394,33 @@ impl<'a> Parser<'a> {
         };
         
         if self.eat(TokenKind::Colon) {
-            // Slice expression
-            let high = if self.at(TokenKind::RBracket) {
+            // Slice expression: a[low:high] or a[low:high:max]
+            let high = if self.at(TokenKind::Colon) || self.at(TokenKind::RBracket) {
                 None
             } else {
                 Some(self.parse_expr()?)
             };
+            
+            let max = if self.eat(TokenKind::Colon) {
+                // Three-index slice: a[low:high:max]
+                if high.is_none() {
+                    self.error("middle index required in 3-index slice");
+                    return Err(());
+                }
+                if self.at(TokenKind::RBracket) {
+                    self.error("final index required in 3-index slice");
+                    return Err(());
+                }
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            
             self.expect(TokenKind::RBracket)?;
             let span = Span::new(start, self.current.span.start);
-            Ok(self.make_expr(ExprKind::Slice(Box::new(SliceExpr { expr, low, high })), span))
+            Ok(self.make_expr(ExprKind::Slice(Box::new(SliceExpr { expr, low, high, max })), span))
         } else {
-            // Index expression
+            // Index expression: a[i]
             self.expect(TokenKind::RBracket)?;
             let index = low.ok_or_else(|| {
                 self.error("missing index in index expression");

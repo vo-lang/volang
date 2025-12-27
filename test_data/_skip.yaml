@@ -250,6 +250,8 @@ skips:
     skip: [jit]
   - file: switch_stmt.vo
     skip: [jit]
+  - file: three_index_slice.vo
+    skip: [jit]
   - file: type_switch.vo
     skip: [jit]
   - file: type_assertion.vo

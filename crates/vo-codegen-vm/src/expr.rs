@@ -510,7 +510,7 @@ fn get_escaped_var_gcref(
     }
 }
 
-// === Slice expression (arr[lo:hi]) ===
+// === Slice expression (arr[lo:hi] or arr[lo:hi:max]) ===
 
 fn compile_slice_expr(
     _expr: &Expr,
@@ -521,6 +521,7 @@ fn compile_slice_expr(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let container_type = info.expr_type(slice_expr.expr.id);
+    let has_max = slice_expr.max.is_some();
     
     // Compile container
     let container_reg = compile_expr(&slice_expr.expr, ctx, func, info)?;
@@ -553,27 +554,40 @@ fn compile_slice_expr(
         tmp
     };
     
-    // Prepare params: slots[c]=lo, slots[c+1]=hi
-    let params_start = func.alloc_temp(2);
+    // Compile max bound for three-index slice (default: no limit, use cap)
+    let max_reg = if let Some(max) = &slice_expr.max {
+        Some(compile_expr(max, ctx, func, info)?)
+    } else {
+        None
+    };
+    
+    // Prepare params: slots[c]=lo, slots[c+1]=hi, slots[c+2]=max (if present)
+    let param_count = if has_max { 3 } else { 2 };
+    let params_start = func.alloc_temp(param_count);
     func.emit_op(Opcode::Copy, params_start, lo_reg, 0);
     func.emit_op(Opcode::Copy, params_start + 1, hi_reg, 0);
+    if let Some(max_r) = max_reg {
+        func.emit_op(Opcode::Copy, params_start + 2, max_r, 0);
+    }
+    
+    // flags encoding:
+    //   bit0: 1 = input is array (not slice)
+    //   bit1: 1 = has max (three-index slice)
+    let flags_has_max = if has_max { 0b10 } else { 0 };
     
     if info.is_string(container_type) {
-        // StrSlice: a=dst, b=str, c=params_start
+        // StrSlice: a=dst, b=str, c=params_start (strings don't support 3-index)
         func.emit_op(Opcode::StrSlice, dst, container_reg, params_start);
     } else if info.is_slice(container_type) {
-        // SliceSlice: a=dst, b=slice, c=params_start, flags=0 (no max)
-        func.emit_with_flags(Opcode::SliceSlice, 0, dst, container_reg, params_start);
+        // SliceSlice: a=dst, b=slice, c=params_start
+        func.emit_with_flags(Opcode::SliceSlice, flags_has_max, dst, container_reg, params_start);
     } else if info.is_array(container_type) {
         // Array slicing creates a slice - the array MUST be escaped
-        // For escaped arrays, we need the GcRef directly (not PtrClone copy)
-        // SliceSlice flags: bit0=1 means input is array
+        let flags = 0b01 | flags_has_max; // bit0=1 for array
         if let Some(gcref_slot) = get_escaped_var_gcref(&slice_expr.expr, ctx, func, info) {
-            // Use the GcRef directly without copying
-            func.emit_with_flags(Opcode::SliceSlice, 1, dst, gcref_slot, params_start);
+            func.emit_with_flags(Opcode::SliceSlice, flags, dst, gcref_slot, params_start);
         } else {
-            // Fallback: container_reg should be GcRef for escaped array
-            func.emit_with_flags(Opcode::SliceSlice, 1, dst, container_reg, params_start);
+            func.emit_with_flags(Opcode::SliceSlice, flags, dst, container_reg, params_start);
         }
     } else {
         return Err(CodegenError::Internal("slice on unsupported type".to_string()));

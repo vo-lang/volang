@@ -1082,14 +1082,25 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
+                
+                // Three-index slice is not allowed for strings
+                if sl.max.is_some() && matches!(info, SliceInfo::String { .. }) {
+                    self.invalid_op(sl.expr.span, "3-index slice of string");
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
+                
                 x.mode = OperandMode::Value;
 
-                // Check slice indices
+                // Check slice indices: 0 <= low <= high <= max <= cap
                 if let Some(ref low) = sl.low {
                     let _ = self.index(low, length);
                 }
                 if let Some(ref high) = sl.high {
                     let _ = self.index(high, length);
+                }
+                if let Some(ref max) = sl.max {
+                    let _ = self.index(max, length);
                 }
             }
             ExprKind::Selector(sel) => {

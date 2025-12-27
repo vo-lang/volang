@@ -73,9 +73,16 @@ pub fn set(s: GcRef, offset: usize, val: u64) { array::set(array_ref(s), start(s
 pub fn get_n(s: GcRef, offset: usize, dest: &mut [u64]) { array::get_n(array_ref(s), start(s) + offset, dest); }
 pub fn set_n(s: GcRef, offset: usize, src: &[u64]) { array::set_n(array_ref(s), start(s) + offset, src); }
 
+/// Two-index slice: s[new_start:new_end] - capacity extends to original cap
 pub fn slice_of(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize) -> GcRef {
     let data = SliceData::as_ref(s);
     from_array_range(gc, data.array, data.start + new_start, new_end - new_start, data.cap - new_start)
+}
+
+/// Three-index slice: s[new_start:new_end:max] - capacity = max - new_start
+pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize, max: usize) -> GcRef {
+    let data = SliceData::as_ref(s);
+    from_array_range(gc, data.array, data.start + new_start, new_end - new_start, max - new_start)
 }
 
 pub fn append(gc: &mut Gc, em: ValueMeta, es: usize, s: GcRef, val: &[u64]) -> GcRef {

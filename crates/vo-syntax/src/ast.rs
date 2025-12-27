@@ -944,7 +944,10 @@ pub struct IndexExpr {
     pub index: Expr,
 }
 
-/// A slice expression.
+/// A slice expression: `a[low:high]` or `a[low:high:max]`.
+///
+/// The three-index form `a[low:high:max]` sets capacity to `max - low`.
+/// Constraint: `0 <= low <= high <= max <= cap(a)`.
 #[derive(Debug, Clone)]
 pub struct SliceExpr {
     /// The expression being sliced.
@@ -953,6 +956,8 @@ pub struct SliceExpr {
     pub low: Option<Expr>,
     /// The high bound, if any.
     pub high: Option<Expr>,
+    /// The max bound for capacity (three-index slice), if any.
+    pub max: Option<Expr>,
 }
 
 /// A selector expression.
