@@ -1,0 +1,107 @@
+package main
+
+// ============================================================================
+// Bug 1: Struct with fields causes "struct field name not found"
+// ============================================================================
+
+type WithField struct {
+    name string
+}
+
+func (w WithField) GetName() string {
+    return w.name
+}
+
+type Namer interface {
+    GetName() string
+}
+
+func bug1_struct_with_field() {
+    var w WithField = WithField{name: "test"}
+    var n Namer = w
+    result := n.GetName()
+    println(result)
+    println("Bug 1 PASSED")
+}
+
+// ============================================================================
+// Bug 2: Named interface -> interface{} -> Named interface crashes
+// ============================================================================
+
+type SimpleReader interface {
+    Read() string
+}
+
+type SimpleFile struct {}
+
+func (f SimpleFile) Read() string {
+    return "read"
+}
+
+func bug2_iface_roundtrip() {
+    println("bug2: step 1 - create SimpleFile")
+    var f SimpleFile = SimpleFile{}
+    
+    println("bug2: step 2 - assign to SimpleReader")
+    var r1 SimpleReader = f
+    
+    println("bug2: step 3 - call r1.Read()")
+    result1 := r1.Read()
+    println(result1)
+    
+    println("bug2: step 4 - assign SimpleReader to interface{}")
+    var e interface{} = r1
+    
+    println("bug2: step 5 - assert interface{} to SimpleReader")
+    var r2 SimpleReader = e.(SimpleReader)
+    
+    println("bug2: step 6 - call r2.Read()")
+    result2 := r2.Read()
+    println(result2)
+    
+    println("Bug 2 PASSED")
+}
+
+// ============================================================================
+// Bug 3: Struct with int field, method not found
+// ============================================================================
+
+type IntHolder struct {
+    val int
+}
+
+func (h IntHolder) GetVal() int {
+    return h.val
+}
+
+type IntValuer interface {
+    GetVal() int
+}
+
+func bug3_struct_with_int_field() {
+    var h IntHolder = IntHolder{val: 42}
+    var v IntValuer = h
+    result := v.GetVal()
+    println(result)
+    println("Bug 3 PASSED")
+}
+
+// ============================================================================
+// Main - run each bug test separately to isolate
+// ============================================================================
+
+func main() {
+    println("=== Testing Bug 1: struct with field ===")
+    bug1_struct_with_field()
+    
+    println("")
+    println("=== Testing Bug 2: iface roundtrip ===")
+    bug2_iface_roundtrip()
+    
+    println("")
+    println("=== Testing Bug 3: struct with int field ===")
+    bug3_struct_with_int_field()
+    
+    println("")
+    println("=== ALL BUGS FIXED ===")
+}

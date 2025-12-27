@@ -92,6 +92,11 @@ fn register_types(
                             }
                         }
                         
+                        // Empty struct still needs 1 slot for zero-size type workaround
+                        // field_names/field_offsets stay empty (no fields), but slot_types needs 1 slot
+                        if slot_types.is_empty() {
+                            slot_types.push(vo_common_core::types::SlotType::Value);
+                        }
                         let meta = StructMeta {
                             field_names,
                             field_offsets,

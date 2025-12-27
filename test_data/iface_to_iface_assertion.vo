@@ -1,0 +1,218 @@
+package main
+
+// ============================================================================
+// Interface to Interface Assertion Test Cases
+// ============================================================================
+
+// === Basic Interfaces ===
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type Closer interface {
+    Close()
+}
+
+// === Composite Interface (non-embedding, explicit methods) ===
+
+type ReadWriter interface {
+    Read() string
+    Write(s string)
+}
+
+type ReadWriteCloser interface {
+    Read() string
+    Write(s string)
+    Close()
+}
+
+// === Interfaces with same method name but different signatures ===
+
+type IntGetter interface {
+    Get() int
+}
+
+type StringGetter interface {
+    Get() string
+}
+
+// === Concrete types ===
+
+type File struct {}
+
+func (f File) Read() string {
+    return "file read"
+}
+
+func (f File) Write(s string) {
+}
+
+func (f File) Close() {
+}
+
+type Buffer struct {}
+
+func (b Buffer) Read() string {
+    return "buffer read"
+}
+
+func (b Buffer) Write(s string) {
+}
+
+type IntBox struct {}
+
+func (b IntBox) Get() int {
+    return 42
+}
+
+type StringBox struct {}
+
+func (b StringBox) Get() string {
+    return "hello"
+}
+
+// ============================================================================
+
+func assert(cond bool, msg string) {
+    if !cond {
+        panic(msg)
+    }
+}
+
+// Test 1: Basic interface method call
+func test1() {
+    var f File = File{}
+    var r Reader = f
+    result := r.Read()
+    assert(result == "file read", "test1: Read failed")
+    println("Test 1 PASSED: basic interface method call")
+}
+
+// Test 2: interface{} -> Reader
+func test2() {
+    var e interface{} = File{}
+    var r Reader = e.(Reader)
+    result := r.Read()
+    assert(result == "file read", "test2: Read failed")
+    println("Test 2 PASSED: interface{} -> Reader")
+}
+
+// Test 3: ReadWriteCloser -> Reader (superset to subset)
+func test3() {
+    var f File = File{}
+    var rwc ReadWriteCloser = f
+    var r Reader = rwc.(Reader)
+    result := r.Read()
+    assert(result == "file read", "test3: Read failed")
+    println("Test 3 PASSED: ReadWriteCloser -> Reader")
+}
+
+// Test 4: ReadWriteCloser -> Writer
+func test4() {
+    var f File = File{}
+    var rwc ReadWriteCloser = f
+    var w Writer = rwc.(Writer)
+    w.Write("test")
+    println("Test 4 PASSED: ReadWriteCloser -> Writer")
+}
+
+// Test 5: ReadWriteCloser -> Closer
+func test5() {
+    var f File = File{}
+    var rwc ReadWriteCloser = f
+    var c Closer = rwc.(Closer)
+    c.Close()
+    println("Test 5 PASSED: ReadWriteCloser -> Closer")
+}
+
+// Test 6: ReadWriteCloser -> ReadWriter
+func test6() {
+    var f File = File{}
+    var rwc ReadWriteCloser = f
+    var rw ReadWriter = rwc.(ReadWriter)
+    result := rw.Read()
+    assert(result == "file read", "test6: Read failed")
+    println("Test 6 PASSED: ReadWriteCloser -> ReadWriter")
+}
+
+// Test 7: Chain: interface{} -> ReadWriteCloser -> ReadWriter -> Reader
+func test7() {
+    var e interface{} = File{}
+    var rwc ReadWriteCloser = e.(ReadWriteCloser)
+    var rw ReadWriter = rwc.(ReadWriter)
+    var r Reader = rw.(Reader)
+    result := r.Read()
+    assert(result == "file read", "test7: chained assertion failed")
+    println("Test 7 PASSED: chained assertions")
+}
+
+// Test 8: Same interface assertion
+func test8() {
+    var r1 Reader = File{}
+    var r2 Reader = r1.(Reader)
+    result := r2.Read()
+    assert(result == "file read", "test8: same interface assertion failed")
+    println("Test 8 PASSED: same interface assertion")
+}
+
+// Test 9: Multiple concrete types implementing same interface
+func test9() {
+    var r1 Reader = File{}
+    var r2 Reader = Buffer{}
+    
+    result1 := r1.Read()
+    result2 := r2.Read()
+    
+    assert(result1 == "file read", "test9: File.Read failed")
+    assert(result2 == "buffer read", "test9: Buffer.Read failed")
+    println("Test 9 PASSED: multiple concrete types")
+}
+
+// Test 10: IntGetter interface directly
+func test10() {
+    var b IntBox = IntBox{}
+    var ig IntGetter = b
+    result := ig.Get()
+    assert(result == 42, "test10: IntGetter.Get failed")
+    println("Test 10 PASSED: IntGetter interface")
+}
+
+// Test 11: StringGetter interface
+func test11() {
+    var b StringBox = StringBox{}
+    var sg StringGetter = b
+    result := sg.Get()
+    assert(result == "hello", "test11: StringGetter.Get failed")
+    println("Test 11 PASSED: StringGetter interface")
+}
+
+// Test 12: File can be asserted to Closer
+func test12() {
+    var e interface{} = File{}
+    var c Closer = e.(Closer)
+    c.Close()
+    println("Test 12 PASSED: File -> Closer")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    
+    println("")
+    println("=== iface_to_iface_assertion: ALL 12 TESTS PASSED ===")
+}

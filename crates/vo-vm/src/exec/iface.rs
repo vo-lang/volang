@@ -46,8 +46,14 @@ pub fn exec_iface_assign(
         let itab_id = if src_rttid == 0 {
             0  // primitive or nil
         } else {
+            // Get named_type_id from runtime_types (rttid != named_type_id)
+            let named_type_id = if let Some(vo_common_core::RuntimeType::Named(id)) = module.runtime_types.get(src_rttid as usize) {
+                *id
+            } else {
+                0 // non-Named types don't have methods
+            };
             itab_cache.get_or_create(
-                src_rttid,
+                named_type_id,
                 iface_meta_id,
                 &module.named_type_metas,
                 &module.interface_metas,

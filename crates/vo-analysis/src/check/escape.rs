@@ -122,10 +122,16 @@ impl<'a> EscapeAnalyzer<'a> {
                     for value in &spec.values {
                         self.visit_expr(value);
                         // If var type is interface and value is not basic type, value escapes
+                        // But if value is also interface, it doesn't escape (interface-to-interface copy)
                         if is_interface_type {
-                            if let Some(root) = self.find_root_var(value) {
-                                if !self.is_basic_type(root) {
-                                    self.escaped.insert(root);
+                            let value_is_interface = self.type_info.types.get(&value.id)
+                                .map(|t| typ::is_interface(t.typ, self.tc_objs))
+                                .unwrap_or(false);
+                            if !value_is_interface {
+                                if let Some(root) = self.find_root_var(value) {
+                                    if !self.is_basic_type(root) {
+                                        self.escaped.insert(root);
+                                    }
                                 }
                             }
                         }
