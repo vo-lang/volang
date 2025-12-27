@@ -695,9 +695,18 @@ impl Checker {
                 }
             } else {
                 // var declaration
-                if r != 1 {
+                if r == 0 {
+                    // No init expressions
+                    if !has_type {
+                        // var x - no type and no init
+                        self.error_code(TypeError::MissingTypeOrInit, span);
+                    }
+                    // var x int - has type, OK
+                } else if r != 1 {
+                    // r >= 2 but l > r: more names than values
                     self.error_code(TypeError::MissingInitExpr, span);
                 }
+                // r == 1 and l > 1: N-to-1 assignment, OK
             }
         }
     }

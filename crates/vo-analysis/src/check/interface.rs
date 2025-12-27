@@ -466,43 +466,4 @@ impl Checker {
         (*rc).clone()
     }
 
-    /// Checks if type T implements interface I.
-    pub(crate) fn implements(&self, t: TypeKey, iface: TypeKey) -> bool {
-        self.missing_method(t, iface).is_none()
-    }
-
-    /// Computes method set of a type.
-    pub(crate) fn method_set(&self, _t: TypeKey) -> HashMap<String, ObjKey> {
-        // Full implementation would compute the method set for any type
-        HashMap::new()
-    }
-
-    /// Returns missing method info if T doesn't implement I.
-    /// Returns (method_name, have_type, want_type) or None if T implements I.
-    pub(crate) fn missing_method(
-        &self,
-        _t: TypeKey,
-        iface: TypeKey,
-    ) -> Option<(String, Option<TypeKey>, Option<TypeKey>)> {
-        let iface_detail = match &self.otype(iface) {
-            Type::Interface(i) => i,
-            _ => return None,
-        };
-
-        // Get all methods of the interface
-        let all_methods_ref = iface_detail.all_methods();
-        let all_methods = match all_methods_ref.as_ref() {
-            Some(m) => m,
-            None => return None,
-        };
-
-        if all_methods.is_empty() {
-            return None; // Empty interface, anything implements it
-        }
-
-        // For each method in the interface, check if t has it
-        // Full implementation would use lookup_field_or_method
-        // For now, just return None (assumes implementation)
-        None
-    }
 }

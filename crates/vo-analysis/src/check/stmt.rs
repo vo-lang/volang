@@ -340,8 +340,8 @@ impl Checker {
     /// Checks case types in a type switch.
     fn case_types(
         &mut self,
-        _x: &mut Operand,
-        _xtype: TypeKey,
+        x: &mut Operand,
+        xtype: TypeKey,
         types: &[Option<vo_syntax::ast::TypeExpr>],
         seen: &mut HashMap<Option<TypeKey>, Span>,
     ) -> Option<TypeKey> {
@@ -378,7 +378,7 @@ impl Checker {
 
             if let Some(t) = t {
                 // Type assertion check - verify t is a valid type for type switch
-                // (interface implementation check would go here)
+                self.type_assertion(x, xtype, t, span);
                 last_type = Some(t);
             }
         }
@@ -557,7 +557,7 @@ impl Checker {
                         let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
                         // Check if last return type is assignable to error interface
                         crate::typ::identical(last_type, error_type, self.objs())
-                            || self.implements(last_type, error_type)
+                            || crate::lookup::missing_method(last_type, error_type, true, self).is_none()
                     } else {
                         false
                     };
@@ -837,17 +837,72 @@ impl Checker {
                                 let x = &mut Operand::new();
                                 self.expr(x, &recv.expr);
                                 // Check receive expression is a channel receive
-                                if !x.invalid() {
+                                let elem_type = if !x.invalid() {
                                     let xtype = x.typ.unwrap();
                                     let under = typ::underlying_type(xtype, self.objs());
                                     if let Some(chan) = self.otype(under).try_as_chan() {
                                         if chan.dir() == ChanDir::SendOnly {
                                             self.error_code(TypeError::RecvFromSendOnly, recv.expr.span);
                                         }
-                                        // Assign received value to lhs variables if any
-                                        // (recv.lhs contains the identifiers, recv.define indicates :=)
+                                        Some(chan.elem())
                                     } else {
                                         self.error_code(TypeError::RecvFromNonChan, recv.expr.span);
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                
+                                // Handle lhs variables (v := <-ch or v, ok := <-ch)
+                                if !recv.lhs.is_empty() {
+                                    let scope_key = self.octx.scope.unwrap();
+                                    let bool_type = self.basic_type(BasicType::Bool);
+                                    
+                                    // Types for lhs: [elem_type, bool] for comma-ok
+                                    let rhs_types: [Option<TypeKey>; 2] = [
+                                        elem_type,
+                                        Some(bool_type),
+                                    ];
+                                    
+                                    if recv.define {
+                                        // Short variable declaration: v := <-ch or v, ok := <-ch
+                                        let mut new_vars = Vec::new();
+                                        for (i, ident) in recv.lhs.iter().enumerate() {
+                                            let name = self.resolve_symbol(ident.symbol).to_string();
+                                            let var_type = rhs_types.get(i).copied().flatten();
+                                            let okey = self.new_var(ident.span.start.to_usize(), Some(self.pkg), name.clone(), var_type);
+                                            self.result.record_def(ident.clone(), Some(okey));
+                                            if name != "_" {
+                                                new_vars.push(okey);
+                                            }
+                                        }
+                                        // Declare new variables in scope
+                                        for okey in new_vars {
+                                            self.declare(scope_key, okey);
+                                        }
+                                    } else {
+                                        // Assignment: v = <-ch or v, ok = <-ch
+                                        for (i, ident) in recv.lhs.iter().enumerate() {
+                                            let name = self.resolve_symbol(ident.symbol).to_string();
+                                            if name == "_" {
+                                                continue;
+                                            }
+                                            if let Some(var_type) = rhs_types.get(i).copied().flatten() {
+                                                // Look up existing variable and check assignment
+                                                if let Some(okey) = self.lookup(&name) {
+                                                    self.result.record_use(ident.clone(), okey);
+                                                    let lhs_type = self.lobj(okey).typ();
+                                                    if let Some(t) = lhs_type {
+                                                        let mut val = Operand::new();
+                                                        val.mode = OperandMode::Value;
+                                                        val.typ = Some(var_type);
+                                                        self.assignment(&mut val, Some(t), "assignment");
+                                                    }
+                                                } else {
+                                                    self.error_code_msg(TypeError::Undeclared, ident.span, format!("undeclared name: {}", name));
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

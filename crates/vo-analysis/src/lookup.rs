@@ -477,9 +477,12 @@ pub fn missing_method(
     static_: bool,
     checker: &mut Checker,
 ) -> Option<(ObjKey, bool)> {
-    // First, check if interface is empty
+    // First, check if intf is an interface type and if it's empty
     {
-        let ival = checker.tc_objs.types[intf].try_as_interface().unwrap();
+        let ival = match checker.tc_objs.types[intf].try_as_interface() {
+            Some(i) => i,
+            None => return None, // Not an interface type
+        };
         if ival.is_empty() {
             return None;
         }

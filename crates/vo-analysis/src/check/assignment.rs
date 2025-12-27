@@ -357,7 +357,7 @@ impl Checker {
 
     /// Checks if x is assignable to type t.
     /// Aligned with goscript/types/src/operand.rs::assignable_to
-    pub(crate) fn assignable_to(&self, x: &Operand, t: TypeKey, reason: &mut String) -> bool {
+    pub(crate) fn assignable_to(&mut self, x: &Operand, t: TypeKey, reason: &mut String) -> bool {
         let xt = match x.typ {
             Some(typ) => typ,
             None => return false,
@@ -412,7 +412,7 @@ impl Checker {
 
         // T is an interface type and x implements T
         if typ::is_interface(t, self.objs()) {
-            if self.implements(xt, t) {
+            if crate::lookup::missing_method(xt, t, true, self).is_none() {
                 return true;
             }
             *reason = "does not implement interface".to_string();
