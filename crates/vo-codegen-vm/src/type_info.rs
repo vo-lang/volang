@@ -329,6 +329,34 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
+    /// Get slice element type
+    pub fn slice_elem_type(&self, type_key: TypeKey) -> TypeKey {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Slice(s) = &self.tc_objs().types[underlying] {
+            s.elem()
+        } else {
+            panic!("slice_elem_type: not a slice type")
+        }
+    }
+
+    /// Get map key and value types
+    pub fn map_key_val_types(&self, type_key: TypeKey) -> (TypeKey, TypeKey) {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let map_type = self.tc_objs().types[underlying].try_as_map()
+            .expect("map_key_val_types: not a map type");
+        (map_type.key(), map_type.elem())
+    }
+
+    /// Get channel element type
+    pub fn chan_elem_type(&self, type_key: TypeKey) -> TypeKey {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Chan(c) = &self.tc_objs().types[underlying] {
+            c.elem()
+        } else {
+            panic!("chan_elem_type: not a channel type")
+        }
+    }
+
     /// Get array length
     pub fn array_len(&self, type_key: TypeKey) -> u64 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());

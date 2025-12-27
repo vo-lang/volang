@@ -244,35 +244,41 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
 // Original functions
 // =============================================================================
 
-/// Get slot for a range variable (key or value).
-/// - If `define` is true: declare new variable
+/// Define or lookup a range variable (key or value) using StmtCompiler.
+/// - If `define` is true: declare new variable with proper escape handling
 /// - If `define` is false: lookup existing variable
+/// Gets type from identifier definition when available.
 fn range_var_slot(
+    sc: &mut StmtCompiler,
     var: Option<&Expr>,
+    fallback_type: TypeKey,
     define: bool,
-    slots: u16,
-    slot_types: &[vo_common_core::types::SlotType],
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     match var {
         Some(expr) => {
             if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
                 if define {
-                    Ok(func.define_local_stack(ident.symbol, slots, slot_types))
+                    let obj_key = sc.info.get_def(ident);
+                    let type_key = sc.info.obj_type(obj_key, "range var must have type");
+                    let escapes = sc.info.is_escaped(obj_key);
+                    let storage = sc.define_local(ident.symbol, type_key, escapes, None)?;
+                    Ok(storage.slot())
                 } else {
-                    Ok(func.lookup_local(ident.symbol)
+                    Ok(sc.func.lookup_local(ident.symbol)
                         .expect("range variable not found")
                         .storage.slot())
                 }
             } else if define {
-                Ok(func.alloc_temp(slots))
+                let slots = sc.info.type_slot_count(fallback_type);
+                Ok(sc.func.alloc_temp(slots))
             } else {
-                crate::expr::compile_expr(expr, ctx, func, info)
+                crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)
             }
         }
-        None => Ok(func.alloc_temp(slots)),
+        None => {
+            let slots = sc.info.type_slot_count(fallback_type);
+            Ok(sc.func.alloc_temp(slots))
+        }
     }
 }
 
@@ -598,158 +604,108 @@ fn compile_stmt_with_label(
                 ForClause::Range { key, value, define, expr } => {
                     // Compile the range expression
                     let range_type = info.expr_type(expr.id);
+                    let mut sc = StmtCompiler::new(ctx, func, info);
                     
-                    // Check if it's an array (stack or heap)
-                    let is_array = info.is_array(range_type);
-                    
-                    if is_array {
-                        // Get array info
+                    if info.is_array(range_type) {
                         let elem_slots = info.array_elem_slots(range_type) as u8;
                         let arr_len = info.array_len(range_type) as u32;
+                        let elem_type = info.array_elem_type(range_type);
                         
-                        // Check if array is on stack or heap using StorageKind
-                        let arr_source = crate::expr::get_expr_source(expr, ctx, func, info);
-                        let arr_slot = match arr_source {
+                        // Check if array is on stack or heap
+                        let arr_source = crate::expr::get_expr_source(expr, sc.ctx, sc.func, sc.info);
+                        let stack_arr_slot = match arr_source {
                             ExprSource::Location(StorageKind::StackValue { slot, .. }) => Some(slot),
                             _ => None,
                         };
                         
-                        if let Some(arr_slot) = arr_slot {
-                            // Stack array: define key and value slots
-                            let val_slot_types = info.type_slot_types(info.array_elem_type(range_type));
-                            let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
-                            let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
-                            
-                            // Prepare IterBegin args: a=meta, a+1=base_slot, a+2=len
-                            let iter_args = func.alloc_temp(3);
+                        // Define key and value using StmtCompiler
+                        let key_slot = range_var_slot(&mut sc, key.as_ref(), elem_type, *define)?;
+                        let val_slot = range_var_slot(&mut sc, value.as_ref(), elem_type, *define)?;
+                        
+                        if let Some(arr_slot) = stack_arr_slot {
+                            // Stack array iteration
+                            let iter_args = sc.func.alloc_temp(3);
                             let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
-                            func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
-                            func.emit_op(Opcode::LoadInt, iter_args + 1, arr_slot, 0);
-                            func.emit_op(Opcode::LoadInt, iter_args + 2, arr_len as u16, (arr_len >> 16) as u16);
-                            
-                            // IterBegin: a=iter_args, b=iter_type(6=StackArray)
-                            func.emit_op(Opcode::IterBegin, iter_args, 6, 0);
-                            
-                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
+                            sc.func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
+                            sc.func.emit_op(Opcode::LoadInt, iter_args + 1, arr_slot, 0);
+                            sc.func.emit_op(Opcode::LoadInt, iter_args + 2, arr_len as u16, (arr_len >> 16) as u16);
+                            sc.func.emit_op(Opcode::IterBegin, iter_args, 6, 0);
                         } else {
                             // Heap array iteration
                             let arr_slot = if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
-                                func.lookup_local(ident.symbol)
-                                    .expect("heap array local not found - codegen bug")
+                                sc.func.lookup_local(ident.symbol)
+                                    .expect("heap array local not found")
                                     .storage.slot()
                             } else {
-                                crate::expr::compile_expr(expr, ctx, func, info)?
+                                crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?
                             };
                             
-                            let val_slot_types = vec![vo_common_core::types::SlotType::Value; elem_slots as usize];
-                            let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
-                            let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
-                            
-                            // Prepare IterBegin args: a=meta, a+1=array_ref
-                            let iter_args = func.alloc_temp(2);
+                            let iter_args = sc.func.alloc_temp(2);
                             let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
-                            func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
-                            func.emit_op(Opcode::Copy, iter_args + 1, arr_slot, 0);
-                            
-                            // IterBegin: a=iter_args, b=iter_type(0=HeapArray)
-                            func.emit_op(Opcode::IterBegin, iter_args, 0, 0);
-                            
-                            emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
+                            sc.func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
+                            sc.func.emit_op(Opcode::Copy, iter_args + 1, arr_slot, 0);
+                            sc.func.emit_op(Opcode::IterBegin, iter_args, 0, 0);
                         }
+                        
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, sc.ctx, sc.func, sc.info, label)?;
                     } else if info.is_slice(range_type) {
-                        // Slice iteration
                         let elem_slots = info.slice_elem_slots(range_type) as u8;
-                        let slice_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        let slice_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
+                        let elem_type = info.slice_elem_type(range_type);
                         
-                        let val_slot_types = vec![vo_common_core::types::SlotType::Value; elem_slots as usize];
-                        let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
-                        let val_slot = range_var_slot(value.as_ref(), *define, elem_slots as u16, &val_slot_types, ctx, func, info)?;
+                        let key_slot = range_var_slot(&mut sc, key.as_ref(), elem_type, *define)?;
+                        let val_slot = range_var_slot(&mut sc, value.as_ref(), elem_type, *define)?;
                         
-                        // Prepare IterBegin args: a=meta, a+1=slice_ref
-                        let iter_args = func.alloc_temp(2);
+                        let iter_args = sc.func.alloc_temp(2);
                         let meta = crate::type_info::encode_iter_meta(1, elem_slots as u16);
-                        func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
-                        func.emit_op(Opcode::Copy, iter_args + 1, slice_reg, 0);
+                        sc.func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
+                        sc.func.emit_op(Opcode::Copy, iter_args + 1, slice_reg, 0);
+                        sc.func.emit_op(Opcode::IterBegin, iter_args, 1, 0);
                         
-                        // IterBegin: a=iter_args, b=iter_type(1=Slice)
-                        func.emit_op(Opcode::IterBegin, iter_args, 1, 0);
-                        
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, sc.ctx, sc.func, sc.info, label)?;
                     } else if info.is_string(range_type) {
-                        // String iteration
-                        let str_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        let str_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
                         
-                        let key_slot = range_var_slot(key.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
-                        let val_slot = range_var_slot(value.as_ref(), *define, 1, &[vo_common_core::types::SlotType::Value], ctx, func, info)?;
+                        let key_slot = range_var_slot(&mut sc, key.as_ref(), range_type, *define)?;
+                        let val_slot = range_var_slot(&mut sc, value.as_ref(), range_type, *define)?;
                         
-                        // Prepare IterBegin args: a=meta, a+1=string_ref
-                        let iter_args = func.alloc_temp(2);
+                        let iter_args = sc.func.alloc_temp(2);
                         let meta = crate::type_info::encode_iter_meta(1, 1);
-                        func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
-                        func.emit_op(Opcode::Copy, iter_args + 1, str_reg, 0);
+                        sc.func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
+                        sc.func.emit_op(Opcode::Copy, iter_args + 1, str_reg, 0);
+                        sc.func.emit_op(Opcode::IterBegin, iter_args, 3, 0);
                         
-                        // IterBegin: a=iter_args, b=iter_type(3=String)
-                        func.emit_op(Opcode::IterBegin, iter_args, 3, 0);
-                        
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, sc.ctx, sc.func, sc.info, label)?;
                     } else if info.is_map(range_type) {
-                        // Map iteration
-                        let map_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        let map_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
                         let (key_slots, val_slots) = info.map_key_val_slots(range_type);
+                        let (key_type, val_type) = info.map_key_val_types(range_type);
                         
-                        let key_slot_types = vec![vo_common_core::types::SlotType::Value; key_slots as usize];
-                        let val_slot_types = vec![vo_common_core::types::SlotType::Value; val_slots as usize];
-                        let key_slot = range_var_slot(key.as_ref(), *define, key_slots as u16, &key_slot_types, ctx, func, info)?;
-                        let val_slot = range_var_slot(value.as_ref(), *define, val_slots as u16, &val_slot_types, ctx, func, info)?;
+                        let key_slot = range_var_slot(&mut sc, key.as_ref(), key_type, *define)?;
+                        let val_slot = range_var_slot(&mut sc, value.as_ref(), val_type, *define)?;
                         
-                        // Prepare IterBegin args: a=meta, a+1=map_ref
-                        let iter_args = func.alloc_temp(2);
+                        let iter_args = sc.func.alloc_temp(2);
                         let meta = crate::type_info::encode_iter_meta(key_slots, val_slots);
-                        func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
-                        func.emit_op(Opcode::Copy, iter_args + 1, map_reg, 0);
+                        sc.func.emit_op(Opcode::LoadInt, iter_args, meta as u16, (meta >> 16) as u16);
+                        sc.func.emit_op(Opcode::Copy, iter_args + 1, map_reg, 0);
+                        sc.func.emit_op(Opcode::IterBegin, iter_args, 2, 0);
                         
-                        // IterBegin: a=iter_args, b=iter_type(2=Map)
-                        func.emit_op(Opcode::IterBegin, iter_args, 2, 0);
-                        
-                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, ctx, func, info, label)?;
+                        emit_iter_loop(key_slot, val_slot, &for_stmt.body, sc.ctx, sc.func, sc.info, label)?;
                     } else if info.is_chan(range_type) {
-                        // Channel iteration: for v := range ch
-                        let chan_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        let chan_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
+                        let elem_type = info.chan_elem_type(range_type);
                         
-                        // Get element slot count from channel type
+                        // Channel: use value or key (Go semantics: single var is value)
+                        let var_expr = value.as_ref().or(key.as_ref());
+                        let val_slot = range_var_slot(&mut sc, var_expr, elem_type, *define)?;
+                        
+                        let iter_args = sc.func.alloc_temp(2);
                         let elem_slots = info.chan_elem_slots(range_type);
+                        sc.func.emit_op(Opcode::LoadInt, iter_args, elem_slots, 0);
+                        sc.func.emit_op(Opcode::Copy, iter_args + 1, chan_reg, 0);
+                        sc.func.emit_op(Opcode::IterBegin, iter_args, 5, 0);
                         
-                        // Define value variable (channels don't have key in for-range)
-                        let val_slot = if let Some(v) = value {
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
-                                    func.define_local_stack(ident.symbol, elem_slots, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
-                                } else { func.alloc_temp(elem_slots) }
-                            } else {
-                                crate::expr::compile_expr(v, ctx, func, info)?
-                            }
-                        } else if let Some(k) = key {
-                            // If only key is specified, use it as value (Go semantics)
-                            if *define {
-                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
-                                    func.define_local_stack(ident.symbol, elem_slots, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
-                                } else { func.alloc_temp(elem_slots) }
-                            } else {
-                                crate::expr::compile_expr(k, ctx, func, info)?
-                            }
-                        } else {
-                            func.alloc_temp(elem_slots)
-                        };
-                        
-                        // Prepare IterBegin args: a=elem_slots, a+1=chan_ref
-                        let iter_args = func.alloc_temp(2);
-                        func.emit_op(Opcode::LoadInt, iter_args, elem_slots, 0);
-                        func.emit_op(Opcode::Copy, iter_args + 1, chan_reg, 0);
-                        
-                        // IterBegin: a=iter_args, b=iter_type(5=Channel)
-                        func.emit_op(Opcode::IterBegin, iter_args, 5, 0);
-                        
-                        emit_iter_loop(val_slot, 0, &for_stmt.body, ctx, func, info, label)?;
+                        emit_iter_loop(val_slot, 0, &for_stmt.body, sc.ctx, sc.func, sc.info, label)?;
                     } else {
                         return Err(CodegenError::UnsupportedStmt("for-range unsupported type".to_string()));
                     }
