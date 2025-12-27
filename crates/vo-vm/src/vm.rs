@@ -129,9 +129,6 @@ impl Vm {
                     return Err(VmError::PanicUnwound);
                 }
             }
-            
-            // Periodically compact dead fibers
-            self.scheduler.maybe_compact();
         }
 
         Ok(())

@@ -9,8 +9,10 @@ use crate::fiber::{Fiber, FiberStatus};
 
 #[derive(Debug)]
 pub struct Scheduler {
-    /// Fibers indexed by id (id == index). Never removed, only marked dead.
+    /// Fibers indexed by id (id == index).
     pub fibers: Vec<Fiber>,
+    /// Free slots from dead fibers, available for reuse.
+    free_slots: Vec<u32>,
     pub ready_queue: VecDeque<u32>,
     pub current: Option<u32>,
 }
@@ -19,16 +21,27 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             fibers: Vec::new(),
+            free_slots: Vec::new(),
             ready_queue: VecDeque::new(),
             current: None,
         }
     }
 
-    /// Spawn a new fiber, returns its id (which equals its index in fibers vec).
+    /// Spawn a new fiber, returns its id.
+    /// Reuses dead fiber slots when available.
     pub fn spawn(&mut self, mut fiber: Fiber) -> u32 {
-        let id = self.fibers.len() as u32;
-        fiber.id = id;
-        self.fibers.push(fiber);
+        let id = if let Some(slot) = self.free_slots.pop() {
+            // Reuse dead fiber slot
+            fiber.id = slot;
+            self.fibers[slot as usize] = fiber;
+            slot
+        } else {
+            // Allocate new slot
+            let id = self.fibers.len() as u32;
+            fiber.id = id;
+            self.fibers.push(fiber);
+            id
+        };
         self.ready_queue.push_back(id);
         id
     }
@@ -97,6 +110,7 @@ impl Scheduler {
     pub fn kill_current(&mut self) {
         if let Some(id) = self.current {
             self.fibers[id as usize].status = FiberStatus::Dead;
+            self.free_slots.push(id);
         }
     }
 
@@ -104,52 +118,6 @@ impl Scheduler {
         !self.ready_queue.is_empty() || self.current.is_some()
     }
 
-    /// Compact dead fibers when too many accumulate.
-    /// Returns true if compaction happened.
-    /// NOTE: Disabled because channel stores fiber_id which becomes invalid after compact.
-    /// TODO: Fix by updating channel waiting_receivers/senders during compact.
-    pub fn maybe_compact(&mut self) -> bool {
-        // Disabled - fiber_id in channels becomes invalid after compact
-        false
-        // let dead_count = self.fibers.iter().filter(|f| f.status == FiberStatus::Dead).count();
-        // if dead_count > 64 && dead_count > self.fibers.len() / 2 {
-        //     self.compact();
-        //     true
-        // } else {
-        //     false
-        // }
-    }
-
-    /// Remove dead fibers and rebuild indices.
-    fn compact(&mut self) {
-        // Build old_id -> new_id mapping
-        let mut new_fibers = Vec::new();
-        let mut id_map = vec![u32::MAX; self.fibers.len()];
-        
-        for (old_id, fiber) in self.fibers.drain(..).enumerate() {
-            if fiber.status != FiberStatus::Dead {
-                let new_id = new_fibers.len() as u32;
-                id_map[old_id] = new_id;
-                let mut f = fiber;
-                f.id = new_id;
-                new_fibers.push(f);
-            }
-        }
-        
-        self.fibers = new_fibers;
-        
-        // Update ready_queue
-        self.ready_queue.retain(|id| id_map[*id as usize] != u32::MAX);
-        for id in self.ready_queue.iter_mut() {
-            *id = id_map[*id as usize];
-        }
-        
-        // Update current
-        if let Some(id) = self.current {
-            let new_id = id_map[id as usize];
-            self.current = if new_id != u32::MAX { Some(new_id) } else { None };
-        }
-    }
 }
 
 impl Default for Scheduler {
