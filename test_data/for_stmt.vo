@@ -1,0 +1,136 @@
+// Test: for statement - all forms
+package main
+
+func main() {
+	// 1. Infinite loop with break
+	i := 0
+	for {
+		i += 1
+		if i >= 5 {
+			break
+		}
+	}
+	assert(i == 5, "infinite loop with break")
+	
+	// 2. Condition only (while-style)
+	j := 0
+	for j < 10 {
+		j += 1
+	}
+	assert(j == 10, "condition only")
+	
+	// 3. Three-clause form
+	sum := 0
+	for k := 1; k <= 10; k += 1 {
+		sum += k
+	}
+	assert(sum == 55, "three-clause form")
+	
+	// 4. Three-clause with empty init
+	n := 0
+	for ; n < 5; n += 1 {
+	}
+	assert(n == 5, "three-clause empty init")
+	
+	// 5. Three-clause with empty post
+	p := 0
+	for q := 0; q < 5; {
+		p += 1
+		q += 1
+	}
+	assert(p == 5, "three-clause empty post")
+	
+	// 6. Three-clause all empty (infinite with break)
+	r := 0
+	for ; ; {
+		r += 1
+		if r >= 3 {
+			break
+		}
+	}
+	assert(r == 3, "three-clause all empty")
+	
+	// 7. Range over slice with index and value
+	slice := []int{10, 20, 30}
+	sumSlice := 0
+	for idx, val := range slice {
+		sumSlice += idx + val
+	}
+	assert(sumSlice == 63, "range slice i,v")
+	
+	// 8. Range with single variable (index only)
+	indexSum := 0
+	for idx := range slice {
+		indexSum += idx
+	}
+	assert(indexSum == 3, "range single var")
+	
+	// 9. Range ignoring index
+	valSum := 0
+	for _, val := range slice {
+		valSum += val
+	}
+	assert(valSum == 60, "range ignore index")
+	
+	// 10. Range with no variables
+	rangeCount := 0
+	for range slice {
+		rangeCount += 1
+	}
+	assert(rangeCount == 3, "range no vars")
+	
+	// 11. Range over array
+	arr := [3]int{1, 2, 3}
+	arrSum := 0
+	for _, v := range arr {
+		arrSum += v
+	}
+	assert(arrSum == 6, "range array")
+	
+	// 12. Range over map
+	m := map[string]int{"a": 1, "b": 2}
+	mapSum := 0
+	for _, v := range m {
+		mapSum += v
+	}
+	assert(mapSum == 3, "range map")
+	
+	// 13. Range with assignment (not short decl)
+	var x, y int
+	for x, y = range []int{100, 200} {
+	}
+	assert(x == 1 && y == 200, "range assignment")
+	
+	// 14. Nested loops
+	count := 0
+	for a := 0; a < 3; a += 1 {
+		for b := 0; b < 3; b += 1 {
+			count += 1
+		}
+	}
+	assert(count == 9, "nested loops")
+	
+	// 15. Continue
+	skipSum := 0
+	for z := 0; z < 10; z += 1 {
+		if z%2 == 0 {
+			continue
+		}
+		skipSum += z
+	}
+	assert(skipSum == 25, "continue")
+	
+	// 16. Break in nested
+	outerCount := 0
+	for c := 0; c < 10; c += 1 {
+		for d := 0; d < 10; d += 1 {
+			if d == 2 {
+				break
+			}
+			outerCount += 1
+		}
+	}
+	assert(outerCount == 20, "break in nested")
+	
+	println("for statement tests passed")
+}

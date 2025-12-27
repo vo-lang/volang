@@ -59,6 +59,8 @@ skips:
     reason: "VariableNotFound"
   - file: field_offset_debug.vo
     skip: [jit]
+  - file: for_stmt.vo
+    skip: [jit]
   - file: go_stmt.vo
     skip: [vm, jit]
     reason: "VariableNotFound"

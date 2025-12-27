@@ -432,7 +432,9 @@ pub fn compile_stmt(
                                         func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
                                     } else { func.alloc_temp(1) }
                                 } else {
-                                    crate::expr::compile_expr(k, ctx, func, info)?
+                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
+                                        func.lookup_local(ident.symbol).expect("range key variable not found").slot
+                                    } else { crate::expr::compile_expr(k, ctx, func, info)? }
                                 }
                             } else {
                                 func.alloc_temp(1) // dummy key slot
@@ -445,7 +447,9 @@ pub fn compile_stmt(
                                         func.define_local_stack(ident.symbol, elem_slots as u16, &slot_types)
                                     } else { func.alloc_temp(elem_slots as u16) }
                                 } else {
-                                    crate::expr::compile_expr(v, ctx, func, info)?
+                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
+                                        func.lookup_local(ident.symbol).expect("range value variable not found").slot
+                                    } else { crate::expr::compile_expr(v, ctx, func, info)? }
                                 }
                             } else {
                                 func.alloc_temp(elem_slots as u16) // dummy value slot
@@ -479,7 +483,9 @@ pub fn compile_stmt(
                                         func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
                                     } else { func.alloc_temp(1) }
                                 } else {
-                                    crate::expr::compile_expr(k, ctx, func, info)?
+                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
+                                        func.lookup_local(ident.symbol).expect("range key variable not found").slot
+                                    } else { crate::expr::compile_expr(k, ctx, func, info)? }
                                 }
                             } else {
                                 func.alloc_temp(1)
@@ -491,7 +497,9 @@ pub fn compile_stmt(
                                         func.define_local_stack(ident.symbol, elem_slots as u16, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
                                     } else { func.alloc_temp(elem_slots as u16) }
                                 } else {
-                                    crate::expr::compile_expr(v, ctx, func, info)?
+                                    if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
+                                        func.lookup_local(ident.symbol).expect("range value variable not found").slot
+                                    } else { crate::expr::compile_expr(v, ctx, func, info)? }
                                 }
                             } else {
                                 func.alloc_temp(elem_slots as u16)
@@ -522,7 +530,14 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
                                 } else { func.alloc_temp(1) }
                             } else {
-                                crate::expr::compile_expr(k, ctx, func, info)?
+                                // Assignment: lookup existing variable
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
+                                    func.lookup_local(ident.symbol)
+                                        .expect("range key variable not found")
+                                        .slot
+                                } else {
+                                    crate::expr::compile_expr(k, ctx, func, info)?
+                                }
                             }
                         } else {
                             func.alloc_temp(1)
@@ -534,7 +549,14 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, elem_slots as u16, &vec![vo_common_core::types::SlotType::Value; elem_slots as usize])
                                 } else { func.alloc_temp(elem_slots as u16) }
                             } else {
-                                crate::expr::compile_expr(v, ctx, func, info)?
+                                // Assignment: lookup existing variable
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
+                                    func.lookup_local(ident.symbol)
+                                        .expect("range value variable not found")
+                                        .slot
+                                } else {
+                                    crate::expr::compile_expr(v, ctx, func, info)?
+                                }
                             }
                         } else {
                             func.alloc_temp(elem_slots as u16)
@@ -561,7 +583,9 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
                                 } else { func.alloc_temp(1) }
                             } else {
-                                crate::expr::compile_expr(k, ctx, func, info)?
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
+                                    func.lookup_local(ident.symbol).expect("range key variable not found").slot
+                                } else { crate::expr::compile_expr(k, ctx, func, info)? }
                             }
                         } else {
                             func.alloc_temp(1)
@@ -573,7 +597,9 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, 1, &[vo_common_core::types::SlotType::Value])
                                 } else { func.alloc_temp(1) }
                             } else {
-                                crate::expr::compile_expr(v, ctx, func, info)?
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
+                                    func.lookup_local(ident.symbol).expect("range value variable not found").slot
+                                } else { crate::expr::compile_expr(v, ctx, func, info)? }
                             }
                         } else {
                             func.alloc_temp(1)
@@ -603,7 +629,9 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, key_slots as u16, &vec![vo_common_core::types::SlotType::Value; key_slots as usize])
                                 } else { func.alloc_temp(key_slots as u16) }
                             } else {
-                                crate::expr::compile_expr(k, ctx, func, info)?
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &k.kind {
+                                    func.lookup_local(ident.symbol).expect("range key variable not found").slot
+                                } else { crate::expr::compile_expr(k, ctx, func, info)? }
                             }
                         } else {
                             func.alloc_temp(key_slots as u16)
@@ -615,7 +643,9 @@ pub fn compile_stmt(
                                     func.define_local_stack(ident.symbol, val_slots as u16, &vec![vo_common_core::types::SlotType::Value; val_slots as usize])
                                 } else { func.alloc_temp(val_slots as u16) }
                             } else {
-                                crate::expr::compile_expr(v, ctx, func, info)?
+                                if let vo_syntax::ast::ExprKind::Ident(ident) = &v.kind {
+                                    func.lookup_local(ident.symbol).expect("range value variable not found").slot
+                                } else { crate::expr::compile_expr(v, ctx, func, info)? }
                             }
                         } else {
                             func.alloc_temp(val_slots as u16)

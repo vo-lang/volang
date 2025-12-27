@@ -251,24 +251,38 @@ impl<'a> Parser<'a> {
     fn parse_for_stmt(&mut self) -> ParseResult<StmtKind> {
         self.expect(TokenKind::For)?;
         
-        // Disable composite literals in for header
         let saved = self.allow_composite_lit;
         self.allow_composite_lit = false;
         
         let clause = if self.at(TokenKind::LBrace) {
-            // Infinite loop: for { }
+            // for { } - infinite loop
             ForClause::Cond(None)
         } else if self.at(TokenKind::Range) {
             // for range expr { }
             self.advance();
             let expr = self.parse_expr()?;
             ForClause::Range { key: None, value: None, define: false, expr }
+        } else if self.at(TokenKind::Semicolon) {
+            // for ; cond; post { } - three-clause with empty init
+            self.advance();
+            let cond = if self.at(TokenKind::Semicolon) {
+                None
+            } else {
+                Some(self.parse_expr()?)
+            };
+            self.expect(TokenKind::Semicolon)?;
+            let post = if self.at(TokenKind::LBrace) {
+                None
+            } else {
+                Some(Box::new(self.parse_simple_stmt_or_expr()?))
+            };
+            ForClause::Three { init: None, cond, post }
         } else {
-            // Try to determine the form
+            // Parse first statement/expression
             let first = self.parse_simple_stmt_or_expr()?;
             
             if self.at(TokenKind::LBrace) {
-                // Condition only: for cond { }
+                // for cond { }
                 match first.kind {
                     StmtKind::Expr(expr) => ForClause::Cond(Some(expr)),
                     _ => {
@@ -277,7 +291,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else if self.at(TokenKind::Semicolon) {
-                // Three-clause form: for init; cond; post { }
+                // for init; cond; post { }
                 self.advance();
                 let cond = if self.at(TokenKind::Semicolon) {
                     None
@@ -291,29 +305,30 @@ impl<'a> Parser<'a> {
                     Some(Box::new(self.parse_simple_stmt_or_expr()?))
                 };
                 ForClause::Three { init: Some(Box::new(first)), cond, post }
-            } else {
-                // Check for range clause after short var decl or assignment
+            } else if self.at(TokenKind::Range) {
+                // for vars := range expr { } or for vars = range expr { }
+                self.advance();
+                let expr = self.parse_expr()?;
                 match &first.kind {
-                    StmtKind::ShortVar(svd) if self.at(TokenKind::Range) => {
-                        self.advance();
-                        let expr = self.parse_expr()?;
+                    StmtKind::ShortVar(svd) => {
                         let exprs: Vec<Expr> = svd.names.iter().map(|ident| {
                             self.make_expr(ExprKind::Ident(ident.clone()), ident.span)
                         }).collect();
                         let (key, value) = self.exprs_to_key_value(&exprs);
                         ForClause::Range { key, value, define: true, expr }
                     }
-                    StmtKind::Assign(assign) if self.at(TokenKind::Range) => {
-                        self.advance();
-                        let expr = self.parse_expr()?;
+                    StmtKind::Assign(assign) => {
                         let (key, value) = self.exprs_to_key_value(&assign.lhs);
                         ForClause::Range { key, value, define: false, expr }
                     }
                     _ => {
-                        self.error("invalid for clause");
+                        self.error("invalid for-range clause");
                         return Err(());
                     }
                 }
+            } else {
+                self.error("invalid for clause");
+                return Err(());
             }
         };
         
@@ -611,6 +626,13 @@ impl<'a> Parser<'a> {
             TokenKind::AmpCaretEq | TokenKind::ShlEq | TokenKind::ShrEq => {
                 let op = self.token_to_assign_op(&self.current.kind);
                 self.advance();
+                // Check for range keyword - will be handled by for loop parser
+                if self.at(TokenKind::Range) {
+                    return Ok(Stmt {
+                        kind: StmtKind::Assign(AssignStmt { lhs: left, op, rhs: vec![] }),
+                        span: Span::new(start, self.current.span.start),
+                    });
+                }
                 let rhs = self.parse_expr_list()?;
                 StmtKind::Assign(AssignStmt { lhs: left, op, rhs })
             }
