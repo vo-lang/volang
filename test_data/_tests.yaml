@@ -142,6 +142,12 @@ tests:
     mode: [vm]
   - file: type_assertion.vo
     mode: [vm]
+  - file: iface_to_iface_assertion.vo
+    mode: [vm]
+  - file: iface_escape_closure.vo
+    mode: [vm]
+  - file: debug_iface_bugs.vo
+    mode: [vm]
 
   # JIT-only tests (all skipped - JIT not ready)
   - file: jit/bitwise_ops.vo

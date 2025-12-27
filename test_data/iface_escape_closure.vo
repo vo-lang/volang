@@ -1,0 +1,85 @@
+package main
+
+// Test: interface variable captured by closure must escape
+
+type Speaker interface {
+    Speak() string
+}
+
+type Dog struct {}
+
+func (d Dog) Speak() string {
+    return "woof"
+}
+
+// Simplest case: int captured by closure
+func test_int_closure() {
+    var x int = 42
+    f := func() int {
+        return x
+    }
+    result := f()
+    if result != 42 {
+        panic("test_int_closure failed")
+    }
+    println("Test 0 PASSED: int captured by closure")
+}
+
+// Interface captured by closure - must escape
+func test_iface_closure() {
+    var s Speaker = Dog{}
+    
+    // Closure captures interface variable s
+    f := func() string {
+        return s.Speak()
+    }
+    
+    result := f()
+    if result != "woof" {
+        panic("test_iface_closure failed")
+    }
+    println("Test 1 PASSED: interface captured by closure")
+}
+
+// Interface reassigned inside closure
+func test_iface_closure_reassign() {
+    var s Speaker = Dog{}
+    
+    f := func() {
+        s = Dog{}
+    }
+    
+    f()
+    result := s.Speak()
+    if result != "woof" {
+        panic("test_iface_closure_reassign failed")
+    }
+    println("Test 2 PASSED: interface reassigned in closure")
+}
+
+// Return closure that captures interface
+func make_speaker_func() func() string {
+    var s Speaker = Dog{}
+    return func() string {
+        return s.Speak()
+    }
+}
+
+func test_iface_return_closure() {
+    f := make_speaker_func()
+    result := f()
+    if result != "woof" {
+        panic("test_iface_return_closure failed")
+    }
+    println("Test 3 PASSED: closure returned with captured interface")
+}
+
+func main() {
+    test_int_closure()
+    test_iface_closure()
+    test_iface_closure_reassign()
+    test_iface_return_closure()
+    
+    println("")
+    println("=== iface_escape_closure: ALL TESTS PASSED ===")
+}

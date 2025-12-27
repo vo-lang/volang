@@ -80,7 +80,11 @@ pub fn compile_stmt(
                             if i < spec.values.len() {
                                 // Compile value to temp, then PtrSet
                                 let tmp = func.alloc_temp(slots);
-                                compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
+                                if info.is_interface(type_key) {
+                                    compile_iface_assign(tmp, &spec.values[i], type_key, ctx, func, info)?;
+                                } else {
+                                    compile_expr_to(&spec.values[i], tmp, ctx, func, info)?;
+                                }
                                 func.emit_ptr_set(slot, 0, tmp, slots);
                             }
                             // else: PtrNew already zero-initializes
@@ -1331,7 +1335,26 @@ fn compile_assign(
                     }
                 }
                 ExprSource::NeedsCompile => {
-                    return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                    // Check if this is a closure capture
+                    let capture_index = func.lookup_capture(ident.symbol).map(|c| c.index);
+                    if let Some(idx) = capture_index {
+                        // Captured variable: ClosureGet to get GcRef, then PtrSet
+                        let gcref_slot = func.alloc_temp(1);
+                        func.emit_op(Opcode::ClosureGet, gcref_slot, idx, 0);
+                        
+                        let value_slots = info.type_slot_count(lhs_type);
+                        let tmp = func.alloc_temp(value_slots);
+                        
+                        if info.is_interface(lhs_type) {
+                            compile_iface_assign(tmp, rhs, lhs_type, ctx, func, info)?;
+                        } else {
+                            compile_expr_to(rhs, tmp, ctx, func, info)?;
+                        }
+                        
+                        func.emit_ptr_set(gcref_slot, 0, tmp, value_slots);
+                    } else {
+                        return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
+                    }
                 }
             }
         }
