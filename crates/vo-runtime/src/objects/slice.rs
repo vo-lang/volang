@@ -15,8 +15,13 @@ pub struct SliceData {
     pub cap: usize,
 }
 
-const DATA_SLOTS: u16 = 4;
+pub const DATA_SLOTS: u16 = 4;
 const _: () = assert!(core::mem::size_of::<SliceData>() == DATA_SLOTS as usize * 8);
+
+pub const FIELD_ARRAY: usize = 0;
+pub const FIELD_START: usize = 1;
+pub const FIELD_LEN: usize = 2;
+pub const FIELD_CAP: usize = 3;
 
 impl SliceData {
     #[inline]

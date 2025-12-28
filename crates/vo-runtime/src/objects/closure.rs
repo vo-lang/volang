@@ -13,7 +13,7 @@ pub struct ClosureHeader {
     pub capture_count: u32,
 }
 
-const HEADER_SLOTS: usize = 1;
+pub const HEADER_SLOTS: usize = 1;
 const _: () = assert!(core::mem::size_of::<ClosureHeader>() == HEADER_SLOTS * 8);
 
 impl ClosureHeader {

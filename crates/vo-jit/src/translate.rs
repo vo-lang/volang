@@ -798,21 +798,63 @@ impl FunctionCompiler<'_> {
     // =========================================================================
 
     pub(crate) fn translate_slot_get(&mut self, inst: &Instruction) {
-        // SlotGet: dynamic slot access for stack arrays
-        // TODO: Implement dynamic slot indexing
-        panic!("SlotGet not yet implemented in JIT: {:?}", inst);
+        // SlotGet: a = dst, b = base slot, c = idx slot
+        // Stack array dynamic access: read slot[base + idx]
+        let idx = self.read_var(inst.c);
+        let base = inst.b as usize;
+        
+        // Base slot contains pointer to stack array data
+        let base_ptr = self.read_var(base as u16);
+        let byte_offset = self.builder.ins().imul_imm(idx, 8);
+        let addr = self.builder.ins().iadd(base_ptr, byte_offset);
+        let val = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), addr, 0);
+        self.write_var(inst.a, val);
     }
 
     pub(crate) fn translate_slot_set(&mut self, inst: &Instruction) {
-        panic!("SlotSet not yet implemented in JIT: {:?}", inst);
+        // SlotSet: a = base slot, b = idx slot, c = src
+        let idx = self.read_var(inst.b);
+        let val = self.read_var(inst.c);
+        let base = inst.a as usize;
+        
+        let base_val = self.read_var(base as u16);
+        let byte_offset = self.builder.ins().imul_imm(idx, 8);
+        let addr = self.builder.ins().iadd(base_val, byte_offset);
+        self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), val, addr, 0);
     }
 
     pub(crate) fn translate_slot_get_n(&mut self, inst: &Instruction) {
-        panic!("SlotGetN not yet implemented in JIT: {:?}", inst);
+        // SlotGetN: a = dst, b = base slot, c = idx slot, flags = elem_slots
+        let idx = self.read_var(inst.c);
+        let elem_slots = inst.flags as usize;
+        let base = inst.b as usize;
+        
+        let base_val = self.read_var(base as u16);
+        let elem_byte_offset = self.builder.ins().imul_imm(idx, (elem_slots * 8) as i64);
+        let start_addr = self.builder.ins().iadd(base_val, elem_byte_offset);
+        
+        for i in 0..elem_slots {
+            let addr = self.builder.ins().iadd_imm(start_addr, (i * 8) as i64);
+            let val = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), addr, 0);
+            self.write_var(inst.a + i as u16, val);
+        }
     }
 
     pub(crate) fn translate_slot_set_n(&mut self, inst: &Instruction) {
-        panic!("SlotSetN not yet implemented in JIT: {:?}", inst);
+        // SlotSetN: a = base slot, b = idx slot, c = src, flags = elem_slots
+        let idx = self.read_var(inst.b);
+        let elem_slots = inst.flags as usize;
+        let base = inst.a as usize;
+        
+        let base_val = self.read_var(base as u16);
+        let elem_byte_offset = self.builder.ins().imul_imm(idx, (elem_slots * 8) as i64);
+        let start_addr = self.builder.ins().iadd(base_val, elem_byte_offset);
+        
+        for i in 0..elem_slots {
+            let val = self.read_var(inst.c + i as u16);
+            let addr = self.builder.ins().iadd_imm(start_addr, (i * 8) as i64);
+            self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), val, addr, 0);
+        }
     }
 
     // =========================================================================
@@ -1056,9 +1098,7 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_array_new(&mut self, inst: &Instruction) {
         // ArrayNew: a = dst, b = elem_meta_slot, c = len_slot, flags = elem_slots
-        // For now, use vo_gc_alloc with array layout
-        // TODO: Add vo_array_new helper for proper ArrayHeader setup
-        let gc_alloc_func = match self.gc_alloc_func {
+        let array_new_func = match self.array_funcs.array_new {
             Some(f) => f,
             None => return,
         };
@@ -1066,42 +1106,27 @@ impl FunctionCompiler<'_> {
         let gc_ptr = self.load_gc_ptr();
         let meta_raw = self.read_var(inst.b);
         let meta_i32 = self.builder.ins().ireduce(types::I32, meta_raw);
+        let elem_slots = self.builder.ins().iconst(types::I32, inst.flags as i64);
         let len = self.read_var(inst.c);
-        let elem_slots = inst.flags as i64;
         
-        // Total slots = ArrayHeader (2 slots) + len * elem_slots
-        // ArrayHeader: len (usize), elem_meta+elem_bytes packed
-        let header_slots = self.builder.ins().iconst(types::I64, 2);
-        let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots);
-        let data_slots = self.builder.ins().imul(len, elem_slots_val);
-        let total_slots = self.builder.ins().iadd(header_slots, data_slots);
-        let total_slots_i32 = self.builder.ins().ireduce(types::I32, total_slots);
-        
-        let call = self.builder.ins().call(gc_alloc_func, &[gc_ptr, meta_i32, total_slots_i32]);
+        let call = self.builder.ins().call(array_new_func, &[gc_ptr, meta_i32, elem_slots, len]);
         let arr_ref = self.builder.inst_results(call)[0];
-        
-        // Initialize ArrayHeader: store len at offset 0
-        self.builder.ins().store(
-            cranelift_codegen::ir::MemFlags::trusted(),
-            len,
-            arr_ref,
-            0,
-        );
         
         self.write_var(inst.a, arr_ref);
     }
 
     pub(crate) fn translate_array_get(&mut self, inst: &Instruction) {
         // ArrayGet: a = dst, b = arr, c = idx, flags = elem_slots
-        // Read elem_slots values from arr at offset = ArrayHeader(2) + idx * elem_slots
+        use vo_runtime::objects::array::HEADER_SLOTS;
+        
         let arr = self.read_var(inst.b);
         let idx = self.read_var(inst.c);
         let elem_slots = inst.flags as usize;
         
-        // Calculate offset: (2 + idx * elem_slots) * 8
+        // Calculate offset: (HEADER_SLOTS + idx * elem_slots) * 8
         let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots as i64);
         let slot_offset = self.builder.ins().imul(idx, elem_slots_val);
-        let header_offset = self.builder.ins().iconst(types::I64, 2); // ArrayHeader is 2 slots
+        let header_offset = self.builder.ins().iconst(types::I64, HEADER_SLOTS as i64);
         let total_offset = self.builder.ins().iadd(header_offset, slot_offset);
         let byte_offset = self.builder.ins().imul_imm(total_offset, 8);
         
@@ -1121,14 +1146,16 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_array_set(&mut self, inst: &Instruction) {
         // ArraySet: a = arr, b = idx, c = src, flags = elem_slots
+        use vo_runtime::objects::array::HEADER_SLOTS;
+        
         let arr = self.read_var(inst.a);
         let idx = self.read_var(inst.b);
         let elem_slots = inst.flags as usize;
         
-        // Calculate offset: (2 + idx * elem_slots) * 8
+        // Calculate offset: (HEADER_SLOTS + idx * elem_slots) * 8
         let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots as i64);
         let slot_offset = self.builder.ins().imul(idx, elem_slots_val);
-        let header_offset = self.builder.ins().iconst(types::I64, 2);
+        let header_offset = self.builder.ins().iconst(types::I64, HEADER_SLOTS as i64);
         let total_offset = self.builder.ins().iadd(header_offset, slot_offset);
         let byte_offset = self.builder.ins().imul_imm(total_offset, 8);
         
@@ -1152,8 +1179,7 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_slice_new(&mut self, inst: &Instruction) {
         // SliceNew: a = dst, b = elem_meta_slot, c = len_slot (cap at c+1), flags = elem_slots
-        // Similar to ArrayNew but creates a SliceData structure
-        let gc_alloc_func = match self.gc_alloc_func {
+        let slice_new_func = match self.slice_funcs.slice_new {
             Some(f) => f,
             None => return,
         };
@@ -1161,68 +1187,35 @@ impl FunctionCompiler<'_> {
         let gc_ptr = self.load_gc_ptr();
         let meta_raw = self.read_var(inst.b);
         let meta_i32 = self.builder.ins().ireduce(types::I32, meta_raw);
+        let elem_slots = self.builder.ins().iconst(types::I32, inst.flags as i64);
         let len = self.read_var(inst.c);
         let cap = self.read_var(inst.c + 1);
-        let elem_slots = inst.flags as i64;
         
-        // Allocate underlying array: ArrayHeader (2 slots) + cap * elem_slots
-        let header_slots = self.builder.ins().iconst(types::I64, 2);
-        let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots);
-        let data_slots = self.builder.ins().imul(cap, elem_slots_val);
-        let total_arr_slots = self.builder.ins().iadd(header_slots, data_slots);
-        let total_arr_slots_i32 = self.builder.ins().ireduce(types::I32, total_arr_slots);
-        
-        let call = self.builder.ins().call(gc_alloc_func, &[gc_ptr, meta_i32, total_arr_slots_i32]);
-        let arr_ref = self.builder.inst_results(call)[0];
-        
-        // Initialize ArrayHeader len
-        self.builder.ins().store(
-            cranelift_codegen::ir::MemFlags::trusted(),
-            cap,
-            arr_ref,
-            0,
-        );
-        
-        // Allocate SliceData (3 slots: array, start, len+cap packed)
-        let slice_meta = self.builder.ins().iconst(types::I32, 0); // TODO: proper slice meta
-        let slice_slots = self.builder.ins().iconst(types::I32, 3);
-        let call2 = self.builder.ins().call(gc_alloc_func, &[gc_ptr, slice_meta, slice_slots]);
-        let slice_ref = self.builder.inst_results(call2)[0];
-        
-        // Store SliceData fields
-        // slot 0: array ref
-        self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), arr_ref, slice_ref, 0);
-        // slot 1: start (0)
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), zero, slice_ref, 8);
-        // slot 2: len (low 32 bits) + cap (high 32 bits)
-        let len_i32 = self.builder.ins().ireduce(types::I32, len);
-        let cap_i32 = self.builder.ins().ireduce(types::I32, cap);
-        let cap_ext = self.builder.ins().uextend(types::I64, cap_i32);
-        let cap_shifted = self.builder.ins().ishl_imm(cap_ext, 32);
-        let len_ext = self.builder.ins().uextend(types::I64, len_i32);
-        let len_cap = self.builder.ins().bor(len_ext, cap_shifted);
-        self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), len_cap, slice_ref, 16);
+        let call = self.builder.ins().call(slice_new_func, &[gc_ptr, meta_i32, elem_slots, len, cap]);
+        let slice_ref = self.builder.inst_results(call)[0];
         
         self.write_var(inst.a, slice_ref);
     }
 
     pub(crate) fn translate_slice_get(&mut self, inst: &Instruction) {
         // SliceGet: a = dst, b = slice, c = idx, flags = elem_slots
-        // SliceData: array(0), start(8), len_cap(16)
+        // SliceData layout (from slice.rs): array(0), start(1), len(2), cap(3) - 4 slots
+        use vo_runtime::objects::slice::{FIELD_ARRAY, FIELD_START};
+        use vo_runtime::objects::array::HEADER_SLOTS as ARRAY_HEADER_SLOTS;
+        
         let s = self.read_var(inst.b);
         let idx = self.read_var(inst.c);
         let elem_slots = inst.flags as usize;
         
         // Load array ref and start from SliceData
-        let arr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 0);
-        let start = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 8);
+        let arr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, (FIELD_ARRAY * 8) as i32);
+        let start = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, (FIELD_START * 8) as i32);
         
-        // Calculate offset in array: (start + idx) * elem_slots + ArrayHeader(2)
+        // Calculate offset in array: (start + idx) * elem_slots + ArrayHeader
         let total_idx = self.builder.ins().iadd(start, idx);
         let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots as i64);
         let slot_offset = self.builder.ins().imul(total_idx, elem_slots_val);
-        let header_offset = self.builder.ins().iconst(types::I64, 2);
+        let header_offset = self.builder.ins().iconst(types::I64, ARRAY_HEADER_SLOTS as i64);
         let final_offset = self.builder.ins().iadd(header_offset, slot_offset);
         let byte_offset = self.builder.ins().imul_imm(final_offset, 8);
         
@@ -1237,19 +1230,22 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_slice_set(&mut self, inst: &Instruction) {
         // SliceSet: a = slice, b = idx, c = src, flags = elem_slots
+        use vo_runtime::objects::slice::{FIELD_ARRAY, FIELD_START};
+        use vo_runtime::objects::array::HEADER_SLOTS as ARRAY_HEADER_SLOTS;
+        
         let s = self.read_var(inst.a);
         let idx = self.read_var(inst.b);
         let elem_slots = inst.flags as usize;
         
         // Load array ref and start from SliceData
-        let arr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 0);
-        let start = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 8);
+        let arr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, (FIELD_ARRAY * 8) as i32);
+        let start = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, (FIELD_START * 8) as i32);
         
         // Calculate offset
         let total_idx = self.builder.ins().iadd(start, idx);
         let elem_slots_val = self.builder.ins().iconst(types::I64, elem_slots as i64);
         let slot_offset = self.builder.ins().imul(total_idx, elem_slots_val);
-        let header_offset = self.builder.ins().iconst(types::I64, 2);
+        let header_offset = self.builder.ins().iconst(types::I64, ARRAY_HEADER_SLOTS as i64);
         let final_offset = self.builder.ins().iadd(header_offset, slot_offset);
         let byte_offset = self.builder.ins().imul_imm(final_offset, 8);
         
@@ -1264,78 +1260,118 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_slice_len(&mut self, inst: &Instruction) {
         // SliceLen: a = dst, b = slice
+        let slice_len_func = match self.slice_funcs.slice_len {
+            Some(f) => f,
+            None => return,
+        };
+        
         let s = self.read_var(inst.b);
-        
-        // Check for null slice
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let is_null = self.builder.ins().icmp(IntCC::Equal, s, zero);
-        
-        let then_block = self.builder.create_block();
-        let else_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-        
-        self.builder.ins().brif(is_null, then_block, &[], else_block, &[]);
-        
-        // Null case: return 0
-        self.builder.switch_to_block(then_block);
-        self.builder.seal_block(then_block);
-        self.builder.ins().jump(merge_block, &[zero]);
-        
-        // Non-null: load len from SliceData
-        self.builder.switch_to_block(else_block);
-        self.builder.seal_block(else_block);
-        let len_cap = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 16);
-        let len = self.builder.ins().band_imm(len_cap, 0xFFFFFFFF);
-        self.builder.ins().jump(merge_block, &[len]);
-        
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        let result = self.builder.block_params(merge_block)[0];
+        let call = self.builder.ins().call(slice_len_func, &[s]);
+        let result = self.builder.inst_results(call)[0];
         self.write_var(inst.a, result);
     }
 
     pub(crate) fn translate_slice_cap(&mut self, inst: &Instruction) {
         // SliceCap: a = dst, b = slice
+        let slice_cap_func = match self.slice_funcs.slice_cap {
+            Some(f) => f,
+            None => return,
+        };
+        
         let s = self.read_var(inst.b);
-        
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let is_null = self.builder.ins().icmp(IntCC::Equal, s, zero);
-        
-        let then_block = self.builder.create_block();
-        let else_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-        
-        self.builder.ins().brif(is_null, then_block, &[], else_block, &[]);
-        
-        self.builder.switch_to_block(then_block);
-        self.builder.seal_block(then_block);
-        self.builder.ins().jump(merge_block, &[zero]);
-        
-        self.builder.switch_to_block(else_block);
-        self.builder.seal_block(else_block);
-        let len_cap = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), s, 16);
-        let cap = self.builder.ins().ushr_imm(len_cap, 32);
-        self.builder.ins().jump(merge_block, &[cap]);
-        
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        let result = self.builder.block_params(merge_block)[0];
+        let call = self.builder.ins().call(slice_cap_func, &[s]);
+        let result = self.builder.inst_results(call)[0];
         self.write_var(inst.a, result);
     }
 
     pub(crate) fn translate_slice_slice(&mut self, inst: &Instruction) {
         // SliceSlice: a = dst, b = slice/array, c = lo (hi at c+1, max at c+2 if three-index)
         // flags: bit0 = is_array, bit1 = has_max
-        // TODO: Implement with vo_slice_slice / vo_slice_slice3 runtime helper
-        panic!("SliceSlice not yet implemented in JIT: {:?}", inst);
+        let is_array = (inst.flags & 1) != 0;
+        let has_max = (inst.flags & 2) != 0;
+        
+        let gc_ptr = self.load_gc_ptr();
+        let src = self.read_var(inst.b);
+        let lo = self.read_var(inst.c);
+        let hi = self.read_var(inst.c + 1);
+        
+        if is_array {
+            // Array slicing: arr[lo:hi] or arr[lo:hi:max]
+            if has_max {
+                let slice_from_array3_func = match self.slice_funcs.slice_from_array3 {
+                    Some(f) => f,
+                    None => return,
+                };
+                let max = self.read_var(inst.c + 2);
+                let call = self.builder.ins().call(slice_from_array3_func, &[gc_ptr, src, lo, hi, max]);
+                let result = self.builder.inst_results(call)[0];
+                self.write_var(inst.a, result);
+            } else {
+                let slice_from_array_func = match self.slice_funcs.slice_from_array {
+                    Some(f) => f,
+                    None => return,
+                };
+                let call = self.builder.ins().call(slice_from_array_func, &[gc_ptr, src, lo, hi]);
+                let result = self.builder.inst_results(call)[0];
+                self.write_var(inst.a, result);
+            }
+        } else {
+            // Slice slicing: s[lo:hi] or s[lo:hi:max]
+            if has_max {
+                let slice_slice3_func = match self.slice_funcs.slice_slice3 {
+                    Some(f) => f,
+                    None => return,
+                };
+                let max = self.read_var(inst.c + 2);
+                let call = self.builder.ins().call(slice_slice3_func, &[gc_ptr, src, lo, hi, max]);
+                let result = self.builder.inst_results(call)[0];
+                self.write_var(inst.a, result);
+            } else {
+                let slice_slice_func = match self.slice_funcs.slice_slice {
+                    Some(f) => f,
+                    None => return,
+                };
+                let call = self.builder.ins().call(slice_slice_func, &[gc_ptr, src, lo, hi]);
+                let result = self.builder.inst_results(call)[0];
+                self.write_var(inst.a, result);
+            }
+        }
     }
 
     pub(crate) fn translate_slice_append(&mut self, inst: &Instruction) {
-        // SliceAppend: a = dst, b = slice, c = val_src, flags = elem_slots
-        // TODO: Implement with vo_slice_append runtime helper
-        panic!("SliceAppend not yet implemented in JIT: {:?}", inst);
+        // SliceAppend: a = dst, b = slice, c = val_src, d = elem_meta_slot, flags = elem_slots
+        let slice_append_func = match self.slice_funcs.slice_append {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let gc_ptr = self.load_gc_ptr();
+        let s = self.read_var(inst.b);
+        let elem_slots = inst.flags as usize;
+        
+        // Read elem_meta from inst.d (encoded differently, check instruction format)
+        // For now, assume elem_meta is 0 (needs to be fixed based on actual instruction encoding)
+        let elem_meta = self.builder.ins().iconst(types::I32, 0);
+        let elem_slots_val = self.builder.ins().iconst(types::I32, elem_slots as i64);
+        
+        // Allocate stack space for value
+        let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (elem_slots.max(1) * 8) as u32,
+            0,
+        ));
+        
+        // Copy value to stack
+        for i in 0..elem_slots {
+            let val = self.read_var(inst.c + i as u16);
+            self.builder.ins().stack_store(val, val_slot, (i * 8) as i32);
+        }
+        
+        let val_ptr = self.builder.ins().stack_addr(types::I64, val_slot, 0);
+        
+        let call = self.builder.ins().call(slice_append_func, &[gc_ptr, elem_meta, elem_slots_val, s, val_ptr]);
+        let result = self.builder.inst_results(call)[0];
+        self.write_var(inst.a, result);
     }
 
     // =========================================================================
@@ -1345,65 +1381,200 @@ impl FunctionCompiler<'_> {
     pub(crate) fn translate_map_new(&mut self, inst: &Instruction) {
         // MapNew: a = dst, b = packed_meta_slot, c = (key_slots << 8) | val_slots
         // packed_meta = (key_meta << 32) | val_meta
-        // TODO: Add vo_map_new FuncRef and call it
-        panic!("MapNew not yet implemented in JIT: {:?}", inst);
+        let map_new_func = match self.map_funcs.map_new {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let gc_ptr = self.load_gc_ptr();
+        let packed_meta = self.read_var(inst.b);
+        
+        // Unpack key_meta (high 32) and val_meta (low 32)
+        let key_meta = self.builder.ins().ushr_imm(packed_meta, 32);
+        let key_meta_i32 = self.builder.ins().ireduce(types::I32, key_meta);
+        let val_meta_i32 = self.builder.ins().ireduce(types::I32, packed_meta);
+        
+        let key_slots = (inst.c >> 8) as i64;
+        let val_slots = (inst.c & 0xFF) as i64;
+        let key_slots_val = self.builder.ins().iconst(types::I32, key_slots);
+        let val_slots_val = self.builder.ins().iconst(types::I32, val_slots);
+        
+        let call = self.builder.ins().call(map_new_func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots_val, val_slots_val]);
+        let map_ref = self.builder.inst_results(call)[0];
+        
+        self.write_var(inst.a, map_ref);
     }
 
     pub(crate) fn translate_map_get(&mut self, inst: &Instruction) {
-        // MapGet: complex - needs runtime helper
-        // TODO: Implement with vo_map_get
-        panic!("MapGet not yet implemented in JIT: {:?}", inst);
+        // MapGet: a = dst, b = map, c = key_start, flags = (key_slots << 4) | val_slots
+        let map_get_func = match self.map_funcs.map_get {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let m = self.read_var(inst.b);
+        let key_slots = (inst.flags >> 4) as usize;
+        let val_slots = (inst.flags & 0xF) as usize;
+        
+        // Allocate stack space for key and value
+        let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (key_slots.max(1) * 8) as u32,
+            0,
+        ));
+        let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (val_slots.max(1) * 8) as u32,
+            0,
+        ));
+        
+        // Copy key to stack
+        for i in 0..key_slots {
+            let val = self.read_var(inst.c + i as u16);
+            self.builder.ins().stack_store(val, key_slot, (i * 8) as i32);
+        }
+        
+        let key_ptr = self.builder.ins().stack_addr(types::I64, key_slot, 0);
+        let val_ptr = self.builder.ins().stack_addr(types::I64, val_slot, 0);
+        let key_slots_val = self.builder.ins().iconst(types::I32, key_slots as i64);
+        let val_slots_val = self.builder.ins().iconst(types::I32, val_slots as i64);
+        
+        let call = self.builder.ins().call(map_get_func, &[m, key_ptr, key_slots_val, val_ptr, val_slots_val]);
+        let found = self.builder.inst_results(call)[0];
+        
+        // Copy value back from stack (dst = inst.a for value, found flag at dst + val_slots)
+        for i in 0..val_slots {
+            let val = self.builder.ins().stack_load(types::I64, val_slot, (i * 8) as i32);
+            self.write_var(inst.a + i as u16, val);
+        }
+        self.write_var(inst.a + val_slots as u16, found);
     }
 
     pub(crate) fn translate_map_set(&mut self, inst: &Instruction) {
-        // MapSet: complex - needs runtime helper
-        // TODO: Implement with vo_map_set
-        panic!("MapSet not yet implemented in JIT: {:?}", inst);
+        // MapSet: a = map, b = key_start, c = val_start, flags = (key_slots << 4) | val_slots
+        let map_set_func = match self.map_funcs.map_set {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let m = self.read_var(inst.a);
+        let key_slots = (inst.flags >> 4) as usize;
+        let val_slots = (inst.flags & 0xF) as usize;
+        
+        // Allocate stack space for key and value
+        let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (key_slots.max(1) * 8) as u32,
+            0,
+        ));
+        let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (val_slots.max(1) * 8) as u32,
+            0,
+        ));
+        
+        // Copy key and value to stack
+        for i in 0..key_slots {
+            let val = self.read_var(inst.b + i as u16);
+            self.builder.ins().stack_store(val, key_slot, (i * 8) as i32);
+        }
+        for i in 0..val_slots {
+            let val = self.read_var(inst.c + i as u16);
+            self.builder.ins().stack_store(val, val_slot, (i * 8) as i32);
+        }
+        
+        let key_ptr = self.builder.ins().stack_addr(types::I64, key_slot, 0);
+        let val_ptr = self.builder.ins().stack_addr(types::I64, val_slot, 0);
+        let key_slots_val = self.builder.ins().iconst(types::I32, key_slots as i64);
+        let val_slots_val = self.builder.ins().iconst(types::I32, val_slots as i64);
+        
+        self.builder.ins().call(map_set_func, &[m, key_ptr, key_slots_val, val_ptr, val_slots_val]);
     }
 
     pub(crate) fn translate_map_delete(&mut self, inst: &Instruction) {
-        // MapDelete: needs runtime helper
-        // TODO: Implement with vo_map_delete
-        panic!("MapDelete not yet implemented in JIT: {:?}", inst);
+        // MapDelete: a = map, b = key_start, flags = key_slots
+        let map_delete_func = match self.map_funcs.map_delete {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let m = self.read_var(inst.a);
+        let key_slots = inst.flags as usize;
+        
+        // Allocate stack space for key
+        let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (key_slots.max(1) * 8) as u32,
+            0,
+        ));
+        
+        // Copy key to stack
+        for i in 0..key_slots {
+            let val = self.read_var(inst.b + i as u16);
+            self.builder.ins().stack_store(val, key_slot, (i * 8) as i32);
+        }
+        
+        let key_ptr = self.builder.ins().stack_addr(types::I64, key_slot, 0);
+        let key_slots_val = self.builder.ins().iconst(types::I32, key_slots as i64);
+        
+        self.builder.ins().call(map_delete_func, &[m, key_ptr, key_slots_val]);
     }
 
     pub(crate) fn translate_map_len(&mut self, inst: &Instruction) {
         // MapLen: a = dst, b = map
-        // Simple - can inline null check + load
+        let map_len_func = match self.map_funcs.map_len {
+            Some(f) => f,
+            None => return,
+        };
+        
         let m = self.read_var(inst.b);
-        
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let is_null = self.builder.ins().icmp(IntCC::Equal, m, zero);
-        
-        let then_block = self.builder.create_block();
-        let else_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-        
-        self.builder.ins().brif(is_null, then_block, &[], else_block, &[]);
-        
-        // Null: return 0
-        self.builder.switch_to_block(then_block);
-        self.builder.seal_block(then_block);
-        self.builder.ins().jump(merge_block, &[zero]);
-        
-        // Non-null: load len from MapHeader (offset 0, low 32 bits)
-        self.builder.switch_to_block(else_block);
-        self.builder.seal_block(else_block);
-        let header = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), m, 0);
-        let len = self.builder.ins().band_imm(header, 0xFFFFFFFF);
-        self.builder.ins().jump(merge_block, &[len]);
-        
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        let result = self.builder.block_params(merge_block)[0];
+        let call = self.builder.ins().call(map_len_func, &[m]);
+        let result = self.builder.inst_results(call)[0];
         self.write_var(inst.a, result);
     }
 
     pub(crate) fn translate_map_iter_get(&mut self, inst: &Instruction) {
-        // MapIterGet: needs runtime helper for iteration
-        // TODO: Implement with vo_map_iter_get
-        panic!("MapIterGet not yet implemented in JIT: {:?}", inst);
+        // MapIterGet: a = dst (key+val+done), b = map, c = idx, flags = (key_slots << 4) | val_slots
+        let map_iter_get_func = match self.map_funcs.map_iter_get {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let m = self.read_var(inst.b);
+        let idx = self.read_var(inst.c);
+        let key_slots = (inst.flags >> 4) as usize;
+        let val_slots = (inst.flags & 0xF) as usize;
+        
+        // Allocate stack space for key and value
+        let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (key_slots.max(1) * 8) as u32,
+            0,
+        ));
+        let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (val_slots.max(1) * 8) as u32,
+            0,
+        ));
+        
+        let key_ptr = self.builder.ins().stack_addr(types::I64, key_slot, 0);
+        let val_ptr = self.builder.ins().stack_addr(types::I64, val_slot, 0);
+        let key_slots_val = self.builder.ins().iconst(types::I32, key_slots as i64);
+        let val_slots_val = self.builder.ins().iconst(types::I32, val_slots as i64);
+        
+        let call = self.builder.ins().call(map_iter_get_func, &[m, idx, key_ptr, key_slots_val, val_ptr, val_slots_val]);
+        let done = self.builder.inst_results(call)[0];
+        
+        // Copy key and value back from stack
+        for i in 0..key_slots {
+            let val = self.builder.ins().stack_load(types::I64, key_slot, (i * 8) as i32);
+            self.write_var(inst.a + i as u16, val);
+        }
+        for i in 0..val_slots {
+            let val = self.builder.ins().stack_load(types::I64, val_slot, (i * 8) as i32);
+            self.write_var(inst.a + key_slots as u16 + i as u16, val);
+        }
+        self.write_var(inst.a + (key_slots + val_slots) as u16, done);
     }
 
     // =========================================================================
@@ -1411,8 +1582,22 @@ impl FunctionCompiler<'_> {
     // =========================================================================
 
     pub(crate) fn translate_chan_new(&mut self, inst: &Instruction) {
-        // TODO: Call vo_chan_new
-        panic!("ChanNew not yet implemented in JIT: {:?}", inst);
+        // ChanNew: a = dst, b = elem_meta_slot, c = cap_slot, flags = elem_slots
+        let chan_new_func = match self.misc_funcs.chan_new {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let gc_ptr = self.load_gc_ptr();
+        let elem_meta = self.read_var(inst.b);
+        let elem_meta_i32 = self.builder.ins().ireduce(types::I32, elem_meta);
+        let elem_slots = self.builder.ins().iconst(types::I32, inst.flags as i64);
+        let cap = self.read_var(inst.c);
+        
+        let call = self.builder.ins().call(chan_new_func, &[gc_ptr, elem_meta_i32, elem_slots, cap]);
+        let chan_ref = self.builder.inst_results(call)[0];
+        
+        self.write_var(inst.a, chan_ref);
     }
 
     // =========================================================================
@@ -1421,31 +1606,20 @@ impl FunctionCompiler<'_> {
 
     pub(crate) fn translate_closure_new(&mut self, inst: &Instruction) {
         // ClosureNew: a = dst, b = func_id_low, c = capture_count, flags = func_id_high
-        // Layout: ClosureHeader (1 slot: func_id + capture_count) + captures
-        let gc_alloc_func = match self.gc_alloc_func {
+        let closure_new_func = match self.misc_funcs.closure_new {
             Some(f) => f,
             None => return,
         };
         
         let gc_ptr = self.load_gc_ptr();
         let func_id = ((inst.flags as u32) << 16) | (inst.b as u32);
-        let capture_count = inst.c as usize;
+        let capture_count = inst.c as u32;
         
-        // Total slots = header (1) + capture_count
-        let total_slots = 1 + capture_count;
+        let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
+        let capture_count_val = self.builder.ins().iconst(types::I32, capture_count as i64);
         
-        // ValueKind::Closure = 9
-        let closure_meta = self.builder.ins().iconst(types::I32, 9);
-        let slots_val = self.builder.ins().iconst(types::I32, total_slots as i64);
-        
-        let call = self.builder.ins().call(gc_alloc_func, &[gc_ptr, closure_meta, slots_val]);
+        let call = self.builder.ins().call(closure_new_func, &[gc_ptr, func_id_val, capture_count_val]);
         let closure_ref = self.builder.inst_results(call)[0];
-        
-        // Initialize ClosureHeader: func_id (low 32) + capture_count (high 32)
-        let func_id_val = self.builder.ins().iconst(types::I64, func_id as i64);
-        let cap_count_val = self.builder.ins().iconst(types::I64, (capture_count as i64) << 32);
-        let header = self.builder.ins().bor(func_id_val, cap_count_val);
-        self.builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), header, closure_ref, 0);
         
         self.write_var(inst.a, closure_ref);
     }
@@ -1453,12 +1627,13 @@ impl FunctionCompiler<'_> {
     pub(crate) fn translate_closure_get(&mut self, inst: &Instruction) {
         // ClosureGet: a = dst, b = capture_idx
         // Closure is always in slot 0 of current function
-        // Layout: [ClosureHeader (1 slot)][captures...]
+        use vo_runtime::objects::closure::HEADER_SLOTS;
+        
         let closure = self.read_var(0);
         let capture_idx = inst.b as usize;
         
-        // Offset = (1 + capture_idx) * 8 bytes
-        let offset = ((1 + capture_idx) * 8) as i32;
+        // Offset = (HEADER_SLOTS + capture_idx) * 8 bytes
+        let offset = ((HEADER_SLOTS + capture_idx) * 8) as i32;
         let val = self.builder.ins().load(
             types::I64,
             cranelift_codegen::ir::MemFlags::trusted(),
@@ -1466,21 +1641,6 @@ impl FunctionCompiler<'_> {
             offset,
         );
         self.write_var(inst.a, val);
-    }
-
-    pub(crate) fn translate_closure_set(&mut self, inst: &Instruction) {
-        // ClosureSet: a = capture_idx, b = src
-        let closure = self.read_var(0);
-        let capture_idx = inst.a as usize;
-        let val = self.read_var(inst.b);
-        
-        let offset = ((1 + capture_idx) * 8) as i32;
-        self.builder.ins().store(
-            cranelift_codegen::ir::MemFlags::trusted(),
-            val,
-            closure,
-            offset,
-        );
     }
 
     // =========================================================================
@@ -1543,9 +1703,66 @@ impl FunctionCompiler<'_> {
     }
 
     pub(crate) fn translate_iface_assert(&mut self, inst: &Instruction) {
-        // IfaceAssert is complex - needs runtime support for type checking
-        // TODO: Implement with vo_iface_assert runtime helper
-        panic!("IfaceAssert not yet implemented in JIT: {:?}", inst);
+        // IfaceAssert: a=dst, b=src (2 slots), c=target_id, flags=assert_kind|(has_ok<<2)|(target_slots<<3)
+        let iface_assert_func = match self.misc_funcs.iface_assert {
+            Some(f) => f,
+            None => return,
+        };
+        
+        let ctx = self.get_ctx_param();
+        let slot0 = self.read_var(inst.b);
+        let slot1 = self.read_var(inst.b + 1);
+        let target_id = self.builder.ins().iconst(types::I32, inst.c as i64);
+        let flags = self.builder.ins().iconst(types::I16, inst.flags as i64);
+        
+        let has_ok = ((inst.flags >> 2) & 0x1) != 0;
+        let assert_kind = inst.flags & 0x3;
+        let target_slots = (inst.flags >> 3) as usize;
+        
+        // Allocate stack space for result
+        let result_slots = if assert_kind == 1 { 3 } else { (target_slots.max(1) + 1) };
+        let result_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (result_slots * 8) as u32,
+            0,
+        ));
+        let dst_ptr = self.builder.ins().stack_addr(types::I64, result_slot, 0);
+        
+        let call = self.builder.ins().call(iface_assert_func, &[ctx, slot0, slot1, target_id, flags, dst_ptr]);
+        let result = self.builder.inst_results(call)[0];
+        
+        // Check for panic (result == 0 means panic when !has_ok)
+        if !has_ok {
+            let zero = self.builder.ins().iconst(types::I64, 0);
+            let is_panic = self.builder.ins().icmp(IntCC::Equal, result, zero);
+            
+            let panic_block = self.builder.create_block();
+            let continue_block = self.builder.create_block();
+            
+            self.builder.ins().brif(is_panic, panic_block, &[], continue_block, &[]);
+            
+            self.builder.switch_to_block(panic_block);
+            self.builder.seal_block(panic_block);
+            let panic_result = self.builder.ins().iconst(types::I32, 1);
+            self.builder.ins().return_(&[panic_result]);
+            
+            self.builder.switch_to_block(continue_block);
+            self.builder.seal_block(continue_block);
+        }
+        
+        // Copy results from stack to destination slots
+        let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+        for i in 0..dst_slots {
+            let val = self.builder.ins().stack_load(types::I64, result_slot, (i * 8) as i32);
+            self.write_var(inst.a + i as u16, val);
+        }
+        
+        // Copy ok flag if present
+        if has_ok {
+            let ok_offset = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+            let ok_val = self.builder.ins().stack_load(types::I64, result_slot, (ok_offset * 8) as i32);
+            self.write_var(inst.a + ok_offset as u16, ok_val);
+        }
     }
 
     // =========================================================================

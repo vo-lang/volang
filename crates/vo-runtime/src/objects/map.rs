@@ -39,7 +39,7 @@ pub struct MapData {
     pub val_slots: u16,
 }
 
-const DATA_SLOTS: u16 = 3;
+pub const DATA_SLOTS: u16 = 3;
 const _: () = assert!(core::mem::size_of::<MapData>() == DATA_SLOTS as usize * 8);
 
 impl MapData {

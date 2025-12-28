@@ -89,6 +89,16 @@ pub struct JitContext {
     
     /// Callback to call extern function: (registry, gc, extern_id, args, arg_count, ret) -> JitResult
     pub call_extern_fn: Option<extern "C" fn(*const c_void, *mut Gc, u32, *const u64, u32, *mut u64) -> JitResult>,
+    
+    /// Pointer to ItabCache for interface assertions.
+    pub itab_cache: *mut c_void,
+    
+    /// Pointer to Module for type information.
+    pub module: *const c_void,
+    
+    /// Callback for interface assertion: (ctx, slot0, slot1, target_id, flags, dst) -> JitResult
+    /// Returns matches in dst[0], and result values in subsequent slots
+    pub iface_assert_fn: Option<extern "C" fn(*mut JitContext, u64, u64, u32, u16, *mut u64) -> u64>,
 }
 
 // =============================================================================
@@ -589,6 +599,35 @@ pub extern "C" fn vo_ptr_clone(gc: *mut Gc, ptr: u64) -> u64 {
 }
 
 // =============================================================================
+// Closure Helpers
+// =============================================================================
+
+/// Create a new closure.
+#[no_mangle]
+pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) -> u64 {
+    use crate::objects::closure;
+    unsafe {
+        let gc = &mut *gc;
+        closure::create(gc, func_id, capture_count as usize) as u64
+    }
+}
+
+// =============================================================================
+// Channel Helpers
+// =============================================================================
+
+/// Create a new channel.
+#[no_mangle]
+pub extern "C" fn vo_chan_new(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: u64) -> u64 {
+    use crate::objects::channel;
+    use crate::ValueMeta;
+    unsafe {
+        let gc = &mut *gc;
+        channel::create(gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap as usize) as u64
+    }
+}
+
+// =============================================================================
 // Array Helpers
 // =============================================================================
 
@@ -617,6 +656,14 @@ pub extern "C" fn vo_array_get(arr: u64, slot_offset: u64) -> u64 {
 pub extern "C" fn vo_array_set(arr: u64, slot_offset: u64, val: u64) {
     use crate::objects::array;
     array::set(arr as crate::gc::GcRef, slot_offset as usize, val);
+}
+
+/// Get array length.
+#[no_mangle]
+pub extern "C" fn vo_array_len(arr: u64) -> u64 {
+    use crate::objects::array;
+    if arr == 0 { return 0; }
+    array::len(arr as crate::gc::GcRef) as u64
 }
 
 // =============================================================================
@@ -695,6 +742,143 @@ pub extern "C" fn vo_slice_append(gc: *mut Gc, elem_meta: u32, elem_slots: u32, 
     }
 }
 
+/// Create slice from array range (arr[lo:hi]).
+#[no_mangle]
+pub extern "C" fn vo_slice_from_array(gc: *mut Gc, arr: u64, lo: u64, hi: u64) -> u64 {
+    use crate::objects::slice;
+    unsafe {
+        let gc = &mut *gc;
+        let len = (hi - lo) as usize;
+        slice::from_array_range(gc, arr as crate::gc::GcRef, lo as usize, len, len) as u64
+    }
+}
+
+/// Create slice from array range with cap (arr[lo:hi:max]).
+#[no_mangle]
+pub extern "C" fn vo_slice_from_array3(gc: *mut Gc, arr: u64, lo: u64, hi: u64, max: u64) -> u64 {
+    use crate::objects::slice;
+    unsafe {
+        let gc = &mut *gc;
+        let len = (hi - lo) as usize;
+        let cap = (max - lo) as usize;
+        slice::from_array_range(gc, arr as crate::gc::GcRef, lo as usize, len, cap) as u64
+    }
+}
+
+// =============================================================================
+// Interface Helpers
+// =============================================================================
+
+/// Interface assertion.
+/// Returns: 1 if matches, 0 if not (when has_ok), or panics (when !has_ok && !matches)
+/// dst layout: [result_slots...][ok_flag if has_ok]
+#[no_mangle]
+pub extern "C" fn vo_iface_assert(
+    ctx: *mut JitContext,
+    slot0: u64,
+    slot1: u64,
+    target_id: u32,
+    flags: u16,
+    dst: *mut u64,
+) -> u64 {
+    use crate::objects::interface;
+    use crate::ValueKind;
+    
+    let assert_kind = flags & 0x3;
+    let has_ok = ((flags >> 2) & 0x1) != 0;
+    let target_slots = (flags >> 3) as usize;
+    
+    let src_rttid = interface::unpack_rttid(slot0);
+    let src_vk = interface::unpack_value_kind(slot0);
+    
+    // nil interface always fails
+    let matches = if src_vk == ValueKind::Void {
+        false
+    } else if assert_kind == 0 {
+        // Type comparison: check rttid
+        src_rttid == target_id
+    } else {
+        // Interface method check - call through callback
+        unsafe {
+            let ctx_ref = &*ctx;
+            if let Some(iface_assert_fn) = ctx_ref.iface_assert_fn {
+                iface_assert_fn(ctx, slot0, slot1, target_id, flags, dst) != 0
+            } else {
+                false
+            }
+        }
+    };
+    
+    unsafe {
+        if has_ok {
+            // Write ok flag
+            let ok_slot = if assert_kind == 1 { 2 } else if target_slots > 1 { target_slots } else { 1 };
+            *dst.add(ok_slot) = matches as u64;
+            
+            if matches {
+                write_iface_assert_success(ctx, slot0, slot1, assert_kind, target_slots, target_id, dst);
+            } else {
+                // Zero out on failure
+                let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+                for i in 0..dst_slots {
+                    *dst.add(i) = 0;
+                }
+            }
+            1 // Continue
+        } else if matches {
+            write_iface_assert_success(ctx, slot0, slot1, assert_kind, target_slots, target_id, dst);
+            1 // Continue
+        } else {
+            0 // Panic
+        }
+    }
+}
+
+unsafe fn write_iface_assert_success(
+    ctx: *mut JitContext,
+    slot0: u64,
+    slot1: u64,
+    assert_kind: u16,
+    target_slots: usize,
+    target_id: u32,
+    dst: *mut u64,
+) {
+    use crate::objects::interface;
+    use crate::ValueKind;
+    use crate::gc::GcRef;
+    
+    let src_rttid = interface::unpack_rttid(slot0);
+    let src_vk = interface::unpack_value_kind(slot0);
+    
+    if assert_kind == 1 {
+        // Interface assertion: call through callback to get new itab
+        let ctx_ref = &*ctx;
+        if let Some(iface_assert_fn) = ctx_ref.iface_assert_fn {
+            // Callback handles writing dst
+            iface_assert_fn(ctx, slot0, slot1, target_id, 0x8000 | (assert_kind as u16), dst);
+        } else {
+            *dst = slot0;
+            *dst.add(1) = slot1;
+        }
+    } else if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
+        // Copy value from GcRef
+        let gc_ref = slot1 as GcRef;
+        let slots = target_slots.max(1);
+        if slot1 != 0 {
+            for i in 0..slots {
+                *dst.add(i) = *gc_ref.add(i);
+            }
+        } else {
+            for i in 0..slots {
+                *dst.add(i) = 0;
+            }
+        }
+    } else {
+        // Other types: slot1 is the value
+        *dst = slot1;
+    }
+}
+
 // =============================================================================
 // Symbol Registration
 // =============================================================================
@@ -722,9 +906,12 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_str_eq", vo_str_eq as *const u8),
         ("vo_str_cmp", vo_str_cmp as *const u8),
         ("vo_str_decode_rune", vo_str_decode_rune as *const u8),
+        ("vo_closure_new", vo_closure_new as *const u8),
+        ("vo_chan_new", vo_chan_new as *const u8),
         ("vo_array_new", vo_array_new as *const u8),
         ("vo_array_get", vo_array_get as *const u8),
         ("vo_array_set", vo_array_set as *const u8),
+        ("vo_array_len", vo_array_len as *const u8),
         ("vo_slice_new", vo_slice_new as *const u8),
         ("vo_slice_len", vo_slice_len as *const u8),
         ("vo_slice_cap", vo_slice_cap as *const u8),
@@ -733,7 +920,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_slice_slice", vo_slice_slice as *const u8),
         ("vo_slice_slice3", vo_slice_slice3 as *const u8),
         ("vo_slice_append", vo_slice_append as *const u8),
+        ("vo_slice_from_array", vo_slice_from_array as *const u8),
+        ("vo_slice_from_array3", vo_slice_from_array3 as *const u8),
         ("vo_iface_pack_slot0", vo_iface_pack_slot0 as *const u8),
+        ("vo_iface_assert", vo_iface_assert as *const u8),
         ("vo_ptr_clone", vo_ptr_clone as *const u8),
         ("vo_map_new", vo_map_new as *const u8),
         ("vo_map_len", vo_map_len as *const u8),

@@ -65,6 +65,10 @@ pub struct FunctionCompiler<'a> {
     pub(crate) str_funcs: StringFuncs,
     /// Map helper FuncRefs.
     pub(crate) map_funcs: MapFuncs,
+    /// Array helper FuncRefs.
+    pub(crate) array_funcs: ArrayFuncs,
+    /// Slice helper FuncRefs.
+    pub(crate) slice_funcs: SliceFuncs,
     /// Misc helper FuncRefs.
     pub(crate) misc_funcs: MiscFuncs,
 }
@@ -90,12 +94,36 @@ pub struct MapFuncs {
     pub map_get: Option<FuncRef>,
     pub map_set: Option<FuncRef>,
     pub map_delete: Option<FuncRef>,
+    pub map_iter_get: Option<FuncRef>,
 }
 
-/// FuncRef for ptr_clone (deep copy).
+/// FuncRefs for array operations.
+#[derive(Default, Clone, Copy)]
+pub struct ArrayFuncs {
+    pub array_new: Option<FuncRef>,
+    pub array_len: Option<FuncRef>,
+}
+
+/// FuncRefs for slice operations.
+#[derive(Default, Clone, Copy)]
+pub struct SliceFuncs {
+    pub slice_new: Option<FuncRef>,
+    pub slice_len: Option<FuncRef>,
+    pub slice_cap: Option<FuncRef>,
+    pub slice_append: Option<FuncRef>,
+    pub slice_slice: Option<FuncRef>,
+    pub slice_slice3: Option<FuncRef>,
+    pub slice_from_array: Option<FuncRef>,
+    pub slice_from_array3: Option<FuncRef>,
+}
+
+/// FuncRefs for closure, channel, and interface.
 #[derive(Default, Clone, Copy)]
 pub struct MiscFuncs {
     pub ptr_clone: Option<FuncRef>,
+    pub closure_new: Option<FuncRef>,
+    pub chan_new: Option<FuncRef>,
+    pub iface_assert: Option<FuncRef>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -120,6 +148,8 @@ impl<'a> FunctionCompiler<'a> {
         call_extern_func: Option<FuncRef>,
         str_funcs: StringFuncs,
         map_funcs: MapFuncs,
+        array_funcs: ArrayFuncs,
+        slice_funcs: SliceFuncs,
         misc_funcs: MiscFuncs,
     ) -> Self {
         let mut builder = FunctionBuilder::new(func, func_ctx);
@@ -149,6 +179,8 @@ impl<'a> FunctionCompiler<'a> {
             call_extern_func,
             str_funcs,
             map_funcs,
+            array_funcs,
+            slice_funcs,
             misc_funcs,
         }
     }

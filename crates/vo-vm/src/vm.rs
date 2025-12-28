@@ -338,6 +338,9 @@ impl Vm {
             itab_lookup_fn: Some(itab_lookup_trampoline),
             extern_registry: &self.state.extern_registry as *const _ as *const std::ffi::c_void,
             call_extern_fn: Some(call_extern_trampoline),
+            itab_cache: &mut self.state.itab_cache as *mut _ as *mut std::ffi::c_void,
+            module: self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null()),
+            iface_assert_fn: None, // TODO: implement interface assertion callback
         };
         
         // Call JIT function

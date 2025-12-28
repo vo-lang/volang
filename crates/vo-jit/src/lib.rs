@@ -198,6 +198,25 @@ struct HelperFuncIds {
     str_cmp: cranelift_module::FuncId,
     str_decode_rune: cranelift_module::FuncId,
     ptr_clone: cranelift_module::FuncId,
+    closure_new: cranelift_module::FuncId,
+    chan_new: cranelift_module::FuncId,
+    array_new: cranelift_module::FuncId,
+    array_len: cranelift_module::FuncId,
+    slice_new: cranelift_module::FuncId,
+    slice_len: cranelift_module::FuncId,
+    slice_cap: cranelift_module::FuncId,
+    slice_append: cranelift_module::FuncId,
+    slice_slice: cranelift_module::FuncId,
+    slice_slice3: cranelift_module::FuncId,
+    slice_from_array: cranelift_module::FuncId,
+    slice_from_array3: cranelift_module::FuncId,
+    map_new: cranelift_module::FuncId,
+    map_len: cranelift_module::FuncId,
+    map_get: cranelift_module::FuncId,
+    map_set: cranelift_module::FuncId,
+    map_delete: cranelift_module::FuncId,
+    map_iter_get: cranelift_module::FuncId,
+    iface_assert: cranelift_module::FuncId,
 }
 
 impl JitCompiler {
@@ -238,6 +257,20 @@ impl JitCompiler {
         builder.symbol("vo_ptr_clone", vo_runtime::jit_api::vo_ptr_clone as *const u8);
         builder.symbol("vo_panic", vo_runtime::jit_api::vo_panic as *const u8);
         builder.symbol("vo_call_extern", vo_runtime::jit_api::vo_call_extern as *const u8);
+        builder.symbol("vo_closure_new", vo_runtime::jit_api::vo_closure_new as *const u8);
+        builder.symbol("vo_chan_new", vo_runtime::jit_api::vo_chan_new as *const u8);
+        builder.symbol("vo_array_new", vo_runtime::jit_api::vo_array_new as *const u8);
+        builder.symbol("vo_array_len", vo_runtime::jit_api::vo_array_len as *const u8);
+        builder.symbol("vo_slice_new", vo_runtime::jit_api::vo_slice_new as *const u8);
+        builder.symbol("vo_slice_len", vo_runtime::jit_api::vo_slice_len as *const u8);
+        builder.symbol("vo_slice_cap", vo_runtime::jit_api::vo_slice_cap as *const u8);
+        builder.symbol("vo_slice_append", vo_runtime::jit_api::vo_slice_append as *const u8);
+        builder.symbol("vo_slice_slice", vo_runtime::jit_api::vo_slice_slice as *const u8);
+        builder.symbol("vo_slice_slice3", vo_runtime::jit_api::vo_slice_slice3 as *const u8);
+        builder.symbol("vo_slice_from_array", vo_runtime::jit_api::vo_slice_from_array as *const u8);
+        builder.symbol("vo_slice_from_array3", vo_runtime::jit_api::vo_slice_from_array3 as *const u8);
+        builder.symbol("vo_map_iter_get", vo_runtime::jit_api::vo_map_iter_get as *const u8);
+        builder.symbol("vo_iface_assert", vo_runtime::jit_api::vo_iface_assert as *const u8);
 
         let mut module = JITModule::new(builder);
         let ctx = module.make_context();
@@ -417,6 +450,210 @@ impl JitCompiler {
         };
         let ptr_clone = module.declare_function("vo_ptr_clone", cranelift_module::Linkage::Import, &ptr_clone_sig)?;
         
+        // vo_closure_new(gc, func_id, capture_count) -> GcRef
+        let closure_new = module.declare_function("vo_closure_new", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_chan_new(gc, elem_meta, elem_slots, cap) -> GcRef
+        let chan_new = module.declare_function("vo_chan_new", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_array_new(gc, elem_meta, elem_slots, len) -> GcRef
+        let array_new = module.declare_function("vo_array_new", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_array_len(arr) -> u64
+        let array_len = module.declare_function("vo_array_len", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_new(gc, elem_meta, elem_slots, len, cap) -> GcRef
+        let slice_new = module.declare_function("vo_slice_new", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_len(s) -> u64
+        let slice_len = module.declare_function("vo_slice_len", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_cap(s) -> u64
+        let slice_cap = module.declare_function("vo_slice_cap", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_append(gc, elem_meta, elem_slots, s, val_ptr) -> GcRef
+        let slice_append = module.declare_function("vo_slice_append", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_slice(gc, s, lo, hi) -> GcRef
+        let slice_slice = module.declare_function("vo_slice_slice", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_slice3(gc, s, lo, hi, max) -> GcRef
+        let slice_slice3 = module.declare_function("vo_slice_slice3", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_from_array(gc, arr, lo, hi) -> GcRef
+        let slice_from_array = module.declare_function("vo_slice_from_array", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_slice_from_array3(gc, arr, lo, hi, max) -> GcRef
+        let slice_from_array3 = module.declare_function("vo_slice_from_array3", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_map_new(gc, key_meta, val_meta, key_slots, val_slots) -> GcRef
+        let map_new = module.declare_function("vo_map_new", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_map_len(m) -> u64
+        let map_len = module.declare_function("vo_map_len", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_map_get(m, key_ptr, key_slots, val_ptr, val_slots) -> u64
+        let map_get = module.declare_function("vo_map_get", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_map_set(m, key_ptr, key_slots, val_ptr, val_slots)
+        let map_set = module.declare_function("vo_map_set", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig
+        })?;
+        
+        // vo_map_delete(m, key_ptr, key_slots)
+        let map_delete = module.declare_function("vo_map_delete", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig
+        })?;
+        
+        // vo_map_iter_get(m, idx, key_ptr, key_slots, val_ptr, val_slots) -> u64
+        let map_iter_get = module.declare_function("vo_map_iter_get", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
+        // vo_iface_assert(ctx, slot0, slot1, target_id, flags, dst) -> u64
+        let iface_assert = module.declare_function("vo_iface_assert", cranelift_module::Linkage::Import, &{
+            let mut sig = cranelift_codegen::ir::Signature::new(module.target_config().default_call_conv);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I16));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(cranelift_codegen::ir::types::I64));
+            sig
+        })?;
+        
         let helper_funcs = HelperFuncIds {
             safepoint,
             call_vm,
@@ -434,6 +671,25 @@ impl JitCompiler {
             str_cmp,
             str_decode_rune,
             ptr_clone,
+            closure_new,
+            chan_new,
+            array_new,
+            array_len,
+            slice_new,
+            slice_len,
+            slice_cap,
+            slice_append,
+            slice_slice,
+            slice_slice3,
+            slice_from_array,
+            slice_from_array3,
+            map_new,
+            map_len,
+            map_get,
+            map_set,
+            map_delete,
+            map_iter_get,
+            iface_assert,
         };
 
         Ok(Self {
@@ -532,9 +788,36 @@ impl JitCompiler {
                 str_decode_rune: Some(self.module.declare_func_in_func(self.helper_funcs.str_decode_rune, &mut self.ctx.func)),
             };
             
-            let map_funcs = crate::compiler::MapFuncs::default();
+            let map_funcs = crate::compiler::MapFuncs {
+                map_new: Some(self.module.declare_func_in_func(self.helper_funcs.map_new, &mut self.ctx.func)),
+                map_len: Some(self.module.declare_func_in_func(self.helper_funcs.map_len, &mut self.ctx.func)),
+                map_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_get, &mut self.ctx.func)),
+                map_set: Some(self.module.declare_func_in_func(self.helper_funcs.map_set, &mut self.ctx.func)),
+                map_delete: Some(self.module.declare_func_in_func(self.helper_funcs.map_delete, &mut self.ctx.func)),
+                map_iter_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_get, &mut self.ctx.func)),
+            };
+            
+            let array_funcs = crate::compiler::ArrayFuncs {
+                array_new: Some(self.module.declare_func_in_func(self.helper_funcs.array_new, &mut self.ctx.func)),
+                array_len: Some(self.module.declare_func_in_func(self.helper_funcs.array_len, &mut self.ctx.func)),
+            };
+            
+            let slice_funcs = crate::compiler::SliceFuncs {
+                slice_new: Some(self.module.declare_func_in_func(self.helper_funcs.slice_new, &mut self.ctx.func)),
+                slice_len: Some(self.module.declare_func_in_func(self.helper_funcs.slice_len, &mut self.ctx.func)),
+                slice_cap: Some(self.module.declare_func_in_func(self.helper_funcs.slice_cap, &mut self.ctx.func)),
+                slice_append: Some(self.module.declare_func_in_func(self.helper_funcs.slice_append, &mut self.ctx.func)),
+                slice_slice: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice, &mut self.ctx.func)),
+                slice_slice3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice3, &mut self.ctx.func)),
+                slice_from_array: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array, &mut self.ctx.func)),
+                slice_from_array3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array3, &mut self.ctx.func)),
+            };
+            
             let misc_funcs = crate::compiler::MiscFuncs {
                 ptr_clone: Some(self.module.declare_func_in_func(self.helper_funcs.ptr_clone, &mut self.ctx.func)),
+                closure_new: Some(self.module.declare_func_in_func(self.helper_funcs.closure_new, &mut self.ctx.func)),
+                chan_new: Some(self.module.declare_func_in_func(self.helper_funcs.chan_new, &mut self.ctx.func)),
+                iface_assert: Some(self.module.declare_func_in_func(self.helper_funcs.iface_assert, &mut self.ctx.func)),
             };
             
             let compiler = FunctionCompiler::new(
@@ -551,6 +834,8 @@ impl JitCompiler {
                 Some(call_extern_func),
                 str_funcs,
                 map_funcs,
+                array_funcs,
+                slice_funcs,
                 misc_funcs,
             );
             let stack_map = compiler.compile()?;
