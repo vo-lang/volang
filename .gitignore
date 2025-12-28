@@ -34,3 +34,4 @@ tarpaulin-report.html
 *.goxc
 /.windsurf
 /.ref
+/benchmark/results

@@ -99,6 +99,13 @@ pub struct JitContext {
     /// Callback for interface assertion: (ctx, slot0, slot1, target_id, flags, dst) -> JitResult
     /// Returns matches in dst[0], and result values in subsequent slots
     pub iface_assert_fn: Option<extern "C" fn(*mut JitContext, u64, u64, u32, u16, *mut u64) -> u64>,
+    
+    /// JIT function pointer table: jit_func_table[func_id] = pointer to JIT function (or null if not compiled).
+    /// Used for direct JIT-to-JIT calls without going through VM trampoline.
+    pub jit_func_table: *const *const u8,
+    
+    /// Number of functions (length of jit_func_table).
+    pub jit_func_count: u32,
 }
 
 // =============================================================================

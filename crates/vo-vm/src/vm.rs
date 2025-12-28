@@ -248,6 +248,11 @@ pub struct Vm {
     /// JIT compiler (only available with "jit" feature).
     #[cfg(feature = "jit")]
     pub jit: Option<JitCompiler>,
+    /// JIT function pointer table: jit_func_table[func_id] = pointer to JIT function.
+    /// Initialized to null, filled in as functions are JIT compiled.
+    /// Used for direct JIT-to-JIT calls.
+    #[cfg(feature = "jit")]
+    pub jit_func_table: Vec<*const u8>,
 }
 
 impl Vm {
@@ -259,6 +264,8 @@ impl Vm {
             hot_counter: HotCounter::new(),
             #[cfg(feature = "jit")]
             jit: None,
+            #[cfg(feature = "jit")]
+            jit_func_table: Vec::new(),
         }
     }
     
@@ -271,6 +278,8 @@ impl Vm {
             hot_counter: HotCounter::with_thresholds(call_threshold, loop_threshold),
             #[cfg(feature = "jit")]
             jit: None,
+            #[cfg(feature = "jit")]
+            jit_func_table: Vec::new(),
         }
     }
 
@@ -352,6 +361,8 @@ impl Vm {
             itab_cache: &mut self.state.itab_cache as *mut _ as *mut std::ffi::c_void,
             module: self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null()),
             iface_assert_fn: None, // TODO: implement interface assertion callback
+            jit_func_table: self.jit_func_table.as_ptr() as *const *const u8,
+            jit_func_count: self.jit_func_table.len() as u32,
         };
         
         // Call JIT function
@@ -388,6 +399,14 @@ impl Vm {
         self.state.globals = vec![0u64; total_global_slots];
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
+        
+        // Initialize JIT function pointer table (all null initially)
+        #[cfg(feature = "jit")]
+        {
+            let func_count = module.functions.len();
+            self.jit_func_table = vec![std::ptr::null(); func_count];
+        }
+        
         self.module = Some(module);
     }
 
@@ -532,8 +551,15 @@ impl Vm {
                             if let Some(jit) = &mut self.jit {
                                 let func = &module.functions[target_func_id as usize];
                                 if jit.can_jit(func, module) {
-                                    // Ignore compilation errors - fall back to interpreter
-                                    let _ = jit.compile(target_func_id, func, module);
+                                    // Compile and update function pointer table
+                                    if jit.compile(target_func_id, func, module).is_ok() {
+                                        // Update jit_func_table with the compiled function pointer
+                                        if let Some(ptr) = unsafe { jit.get_func_ptr(target_func_id) } {
+                                            if (target_func_id as usize) < self.jit_func_table.len() {
+                                                self.jit_func_table[target_func_id as usize] = ptr as *const u8;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
