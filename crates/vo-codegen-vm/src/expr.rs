@@ -303,14 +303,9 @@ pub fn compile_expr_to(
             let error_slots = 2u16;
             let error_start = inner_start + inner_slots - error_slots;
             
-            // Check if error is nil: compare slot0 with 0
-            let is_nil_reg = func.alloc_temp(1);
-            let zero_reg = func.alloc_temp(1);
-            func.emit_op(Opcode::LoadInt, zero_reg, 0, 0);
-            func.emit_op(Opcode::EqI, is_nil_reg, error_start, zero_reg);
-            
-            // If error is nil, skip the fail path
-            let skip_fail_jump = func.emit_jump(Opcode::JumpIf, is_nil_reg);
+            // Check if error is nil: interface slot0 == 0 means nil (value_kind == Void)
+            // JumpIfNot jumps when slot0 == 0, which is exactly "error == nil"
+            let skip_fail_jump = func.emit_jump(Opcode::JumpIfNot, error_start);
             
             // === Fail path: error != nil ===
             // Get function's return types and emit fail-style return
@@ -1828,3 +1823,22 @@ fn compile_const_value(
     Ok(())
 }
 
+/// Match `x == nil` or `x != nil` patterns for optimization.
+/// Returns (value_expr, is_eq) where is_eq is true for `==`, false for `!=`.
+pub fn match_nil_comparison<'a>(
+    bin: &'a vo_syntax::ast::BinaryExpr,
+    info: &TypeInfoWrapper,
+) -> Option<(&'a Expr, bool)> {
+    let is_eq = matches!(bin.op, BinaryOp::Eq);
+    if !matches!(bin.op, BinaryOp::Eq | BinaryOp::NotEq) {
+        return None;
+    }
+    
+    let left_nil = info.is_nil(info.expr_type(bin.left.id));
+    let right_nil = info.is_nil(info.expr_type(bin.right.id));
+    match (left_nil, right_nil) {
+        (false, true) => Some((&bin.left, is_eq)),
+        (true, false) => Some((&bin.right, is_eq)),
+        _ => None,
+    }
+}

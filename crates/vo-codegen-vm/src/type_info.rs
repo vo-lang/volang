@@ -469,6 +469,14 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::is_unsigned(type_key, self.tc_objs())
     }
 
+    /// Check if type is UntypedNil (the nil literal)
+    pub fn is_nil(&self, type_key: TypeKey) -> bool {
+        matches!(
+            &self.tc_objs().types[type_key],
+            Type::Basic(b) if b.typ() == typ::BasicType::UntypedNil
+        )
+    }
+
     /// Get integer bit size. Panics if type is not an integer type.
     pub fn int_bits(&self, type_key: TypeKey) -> u8 {
         type_layout::int_bits(type_key, self.tc_objs())

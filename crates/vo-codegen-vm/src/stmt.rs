@@ -562,9 +562,25 @@ fn compile_stmt_with_label(
                 compile_stmt(init, ctx, func, info)?;
             }
 
-            // Condition
-            let cond_reg = crate::expr::compile_expr(&if_stmt.cond, ctx, func, info)?;
-            let else_jump = func.emit_jump(Opcode::JumpIfNot, cond_reg);
+            // Optimize: if x == nil / if x != nil → direct JumpIf/JumpIfNot
+            let else_jump = if let vo_syntax::ast::ExprKind::Binary(bin) = &if_stmt.cond.kind {
+                if let Some((value_expr, is_eq)) = crate::expr::match_nil_comparison(bin, info) {
+                    let val_reg = crate::expr::compile_expr(value_expr, ctx, func, info)?;
+                    if is_eq {
+                        // x == nil: skip then when x != 0, i.e., JumpIf
+                        func.emit_jump(Opcode::JumpIf, val_reg)
+                    } else {
+                        // x != nil: skip then when x == 0, i.e., JumpIfNot
+                        func.emit_jump(Opcode::JumpIfNot, val_reg)
+                    }
+                } else {
+                    let cond_reg = crate::expr::compile_expr(&if_stmt.cond, ctx, func, info)?;
+                    func.emit_jump(Opcode::JumpIfNot, cond_reg)
+                }
+            } else {
+                let cond_reg = crate::expr::compile_expr(&if_stmt.cond, ctx, func, info)?;
+                func.emit_jump(Opcode::JumpIfNot, cond_reg)
+            };
 
             // Then branch
             compile_block(&if_stmt.then, ctx, func, info)?;
