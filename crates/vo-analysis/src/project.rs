@@ -340,7 +340,11 @@ fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec
         state_ref.interner = new_interner;
         
         if diags.has_errors() {
-            return Err(AnalysisError::Parse(format!("{}: parse errors", path.display())));
+            let mut msg = format!("{}: parse errors\n", path.display());
+            for d in diags.iter() {
+                msg.push_str(&format!("  - {}\n", d.message));
+            }
+            return Err(AnalysisError::Parse(msg));
         }
         parsed_files.push(file);
     }
@@ -372,7 +376,11 @@ fn parse_vfs_package(
         state_ref.interner = new_interner;
         
         if diags.has_errors() {
-            return Err(AnalysisError::Parse(format!("{:?}: parse errors", vfs_file.path)));
+            let mut msg = format!("{:?}: parse errors\n", vfs_file.path);
+            for d in diags.iter() {
+                msg.push_str(&format!("  - {}\n", d.message));
+            }
+            return Err(AnalysisError::Parse(msg));
         }
         parsed_files.push(file);
     }

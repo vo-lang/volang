@@ -426,6 +426,15 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Ident) {
             let token = self.advance();
             Ok(self.make_ident(&token))
+        } else if self.current.kind.is_keyword() {
+            // Give a more helpful error when a keyword is used as an identifier
+            let keyword = self.current.kind.as_str();
+            let span = self.current.span;
+            self.diagnostics.emit(
+                crate::errors::SyntaxError::KeywordAsIdent
+                    .at_with_message(span, format!("cannot use keyword '{}' as identifier", keyword))
+            );
+            Err(())
         } else {
             self.error_expected("identifier");
             Err(())

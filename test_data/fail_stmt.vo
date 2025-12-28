@@ -1,0 +1,191 @@
+// Test: fail statement - error handling extension syntax
+package main
+
+// Error type implementation
+type MyError struct {
+    msg string
+}
+
+func (e MyError) Error() string {
+    return e.msg
+}
+
+func newError(msg string) error {
+    return MyError{msg: msg}
+}
+
+// Global error sentinels
+var ErrNotFound = newError("not found")
+var ErrInvalid = newError("invalid")
+var ErrEmpty = newError("empty")
+
+// ============ Test 1: Basic fail statement ============
+func testBasicFail(doFail bool) error {
+    if doFail {
+        fail newError("basic failure")
+    }
+    return nil
+}
+
+// ============ Test 2: fail with sentinel error ============
+func testFailWithSentinel(code int) error {
+    if code == 1 {
+        fail ErrNotFound
+    }
+    if code == 2 {
+        fail ErrInvalid
+    }
+    if code == 3 {
+        fail ErrEmpty
+    }
+    return nil
+}
+
+// ============ Test 3: fail with single return value ============
+func getValue(valid bool) (int, error) {
+    if !valid {
+        fail newError("invalid value")
+    }
+    return 42, nil
+}
+
+// ============ Test 4: fail with multiple return values ============
+func getMultiple(valid bool) (int, string, error) {
+    if !valid {
+        fail newError("invalid multiple")
+    }
+    return 100, "success", nil
+}
+
+// ============ Test 5: fail in nested control flow ============
+func testNestedFail(depth int) error {
+    if depth > 0 {
+        for i := 0; i < depth; i += 1 {
+            if i == depth-1 {
+                fail newError("nested failure")
+            }
+        }
+    }
+    return nil
+}
+
+// ============ Test 6: fail in switch statement ============
+func testSwitchFail(code int) error {
+    switch code {
+    case 1:
+        fail ErrNotFound
+    case 2:
+        fail ErrInvalid
+    case 3:
+        return nil
+    default:
+        fail newError("unknown code")
+    }
+    return nil
+}
+
+// ============ Test 7: fail after successful operations ============
+func testPartialSuccess(steps int) (int, error) {
+    result := 0
+    for i := 0; i < steps; i += 1 {
+        result += i
+        if i == 5 {
+            fail newError("failed at step 5")
+        }
+    }
+    return result, nil
+}
+
+// ============ Test 8: fail with computed error message ============
+func testComputedError(value int) error {
+    if value < 0 {
+        fail newError("negative value")
+    }
+    if value > 100 {
+        fail newError("value too large")
+    }
+    return nil
+}
+
+func main() int {
+    println("=== Test 1: Basic fail (success path) ===")
+    err := testBasicFail(false)
+    assert(err == nil, "should succeed")
+    println("PASSED")
+
+    println("")
+    println("=== Test 1b: Basic fail (failure path) ===")
+    err = testBasicFail(true)
+    assert(err != nil, "should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 2: Sentinel errors ===")
+    err = testFailWithSentinel(0)
+    assert(err == nil, "code 0 should succeed")
+    err = testFailWithSentinel(1)
+    assert(err != nil, "code 1 should fail")
+    err = testFailWithSentinel(2)
+    assert(err != nil, "code 2 should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 3: Single return value ===")
+    val, err := getValue(true)
+    assert(err == nil, "valid should succeed")
+    assert(val == 42, "value should be 42")
+    _, err = getValue(false)
+    assert(err != nil, "invalid should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 4: Multiple return values ===")
+    v1, v2, err := getMultiple(true)
+    assert(err == nil, "valid should succeed")
+    assert(v1 == 100, "v1 should be 100")
+    assert(v2 == "success", "v2 should be success")
+    _, _, err = getMultiple(false)
+    assert(err != nil, "invalid should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 5: Nested control flow ===")
+    err = testNestedFail(0)
+    assert(err == nil, "depth 0 should succeed")
+    err = testNestedFail(3)
+    assert(err != nil, "depth 3 should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 6: Switch statement ===")
+    err = testSwitchFail(3)
+    assert(err == nil, "code 3 should succeed")
+    err = testSwitchFail(1)
+    assert(err != nil, "code 1 should fail")
+    err = testSwitchFail(99)
+    assert(err != nil, "code 99 should fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 7: Partial success ===")
+    result, err := testPartialSuccess(3)
+    assert(err == nil, "3 steps should succeed")
+    assert(result == 3, "result should be 0+1+2=3")
+    _, err = testPartialSuccess(10)
+    assert(err != nil, "10 steps should fail at step 5")
+    println("PASSED")
+
+    println("")
+    println("=== Test 8: Computed error ===")
+    err = testComputedError(50)
+    assert(err == nil, "50 should succeed")
+    err = testComputedError(-1)
+    assert(err != nil, "negative should fail")
+    err = testComputedError(200)
+    assert(err != nil, "too large should fail")
+    println("PASSED")
+
+    println("")
+    println("=== All fail statement tests PASSED ===")
+    return 0
+}

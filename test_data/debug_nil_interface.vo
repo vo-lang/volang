@@ -1,0 +1,158 @@
+// Test: Debug interface nil comparison
+package main
+
+// ============ Test 1: Basic nil interface ============
+func testNilInterface() {
+    var a interface{}
+    println("Test 1: a is interface{}, should be nil")
+    if a == nil {
+        println("  PASS: a == nil")
+    } else {
+        println("  FAIL: a != nil (unexpected)")
+    }
+}
+
+// ============ Test 2: Assign nil to interface ============
+func testAssignNil() {
+    var a interface{}
+    a = nil
+    println("Test 2: a = nil explicitly")
+    if a == nil {
+        println("  PASS: a == nil")
+    } else {
+        println("  FAIL: a != nil (unexpected)")
+    }
+}
+
+// ============ Test 3: Return nil from function ============
+func returnNil() interface{} {
+    return nil
+}
+
+func testReturnNil() {
+    a := returnNil()
+    println("Test 3: a := returnNil()")
+    if a == nil {
+        println("  PASS: a == nil")
+    } else {
+        println("  FAIL: a != nil (unexpected)")
+    }
+}
+
+// ============ Test 4: Error interface ============
+type MyError struct {
+    msg string
+}
+
+func (e MyError) Error() string {
+    return e.msg
+}
+
+func returnError(shouldFail bool) error {
+    if shouldFail {
+        return MyError{msg: "error"}
+    }
+    return nil
+}
+
+func testErrorNil() {
+    println("Test 4a: returnError(false) should return nil")
+    err := returnError(false)
+    if err == nil {
+        println("  PASS: err == nil")
+    } else {
+        println("  FAIL: err != nil (unexpected)")
+    }
+    
+    println("Test 4b: returnError(true) should return error")
+    err = returnError(true)
+    if err != nil {
+        println("  PASS: err != nil")
+    } else {
+        println("  FAIL: err == nil (unexpected)")
+    }
+}
+
+// ============ Test 5: Compare interface to nil literal ============
+func testCompareNilLiteral() {
+    var a interface{}
+    println("Test 5: Compare to nil literal")
+    
+    isNil := a == nil
+    println("  isNil =", isNil)
+    
+    isNotNil := a != nil
+    println("  isNotNil =", isNotNil)
+}
+
+// ============ Test 6: Pointer nil check ============
+type Point struct {
+    x int
+    y int
+}
+
+func returnPointer(valid bool) *Point {
+    if valid {
+        return &Point{x: 1, y: 2}
+    }
+    return nil
+}
+
+func testPointerNil() {
+    println("Test 6: Pointer nil check")
+    p := returnPointer(false)
+    if p == nil {
+        println("  PASS: p == nil")
+    } else {
+        println("  FAIL: p != nil (unexpected)")
+    }
+}
+
+// ============ Test 7: Check interface value kind ============
+func testValueKind() {
+    var a interface{}
+    println("Test 7: Check interface before and after assignment")
+    
+    println("  Before assignment:")
+    if a == nil {
+        println("    a == nil: true")
+    } else {
+        println("    a == nil: false")
+    }
+    
+    a = 42
+    println("  After a = 42:")
+    if a == nil {
+        println("    a == nil: true (BUG!)")
+    } else {
+        println("    a == nil: false (correct)")
+    }
+    
+    a = nil
+    println("  After a = nil:")
+    if a == nil {
+        println("    a == nil: true")
+    } else {
+        println("    a == nil: false (BUG!)")
+    }
+}
+
+func main() int {
+    testNilInterface()
+    println("")
+    testAssignNil()
+    println("")
+    testReturnNil()
+    println("")
+    testErrorNil()
+    println("")
+    testCompareNilLiteral()
+    println("")
+    testPointerNil()
+    println("")
+    testValueKind()
+    
+    println("")
+    println("=== Debug complete ===")
+    return 0
+}

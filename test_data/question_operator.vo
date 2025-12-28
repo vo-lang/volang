@@ -1,0 +1,295 @@
+// Test: ? operator - error propagation extension syntax
+package main
+
+// Error type implementation
+type MyError struct {
+    msg string
+}
+
+func (e MyError) Error() string {
+    return e.msg
+}
+
+func newError(msg string) error {
+    return MyError{msg: msg}
+}
+
+// ============ Helper functions that return errors ============
+
+func maybeInt(succeed bool) (int, error) {
+    if !succeed {
+        return 0, newError("maybeInt failed")
+    }
+    return 42, nil
+}
+
+func maybeString(succeed bool) (string, error) {
+    if !succeed {
+        return "", newError("maybeString failed")
+    }
+    return "hello", nil
+}
+
+func maybeMultiple(succeed bool) (int, string, bool, error) {
+    if !succeed {
+        return 0, "", false, newError("maybeMultiple failed")
+    }
+    return 100, "world", true, nil
+}
+
+func maybeError(succeed bool) error {
+    if !succeed {
+        return newError("maybeError failed")
+    }
+    return nil
+}
+
+func maybeNested(depth int) (int, error) {
+    if depth <= 0 {
+        return 0, newError("depth exhausted")
+    }
+    return depth, nil
+}
+
+// ============ Test 1: Basic ? with single return value ============
+func testBasicQuestion(succeed bool) (int, error) {
+    result := maybeInt(succeed)?
+    return result + 10, nil
+}
+
+// ============ Test 2: ? with string return ============
+func testStringQuestion(succeed bool) (string, error) {
+    s := maybeString(succeed)?
+    return s + " world", nil
+}
+
+// ============ Test 3: ? with multiple return values ============
+func testMultipleQuestion(succeed bool) (int, string, error) {
+    a, b, c := maybeMultiple(succeed)?
+    if c {
+        return a * 2, b + "!", nil
+    }
+    return a, b, nil
+}
+
+// ============ Test 4: ? with error-only return ============
+func testErrorOnlyQuestion(succeed bool) error {
+    maybeError(succeed)?
+    return nil
+}
+
+// ============ Test 5: Chained ? operators ============
+func testChainedQuestion(succeed1 bool, succeed2 bool) (int, error) {
+    a := maybeInt(succeed1)?
+    b := maybeInt(succeed2)?
+    return a + b, nil
+}
+
+// ============ Test 6: ? in expression context ============
+func testExpressionQuestion(succeed bool) (int, error) {
+    result := maybeInt(succeed)? + 100
+    return result, nil
+}
+
+// ============ Test 7: ? with nested function calls ============
+func innerCall(succeed bool) (int, error) {
+    return maybeInt(succeed)
+}
+
+func testNestedCallQuestion(succeed bool) (int, error) {
+    result := innerCall(succeed)?
+    return result * 2, nil
+}
+
+// ============ Test 8: Multiple ? in sequence ============
+func testSequenceQuestion(steps int) (int, error) {
+    sum := 0
+    
+    a := maybeNested(steps)?
+    sum += a
+    
+    b := maybeNested(steps - 1)?
+    sum += b
+    
+    c := maybeNested(steps - 2)?
+    sum += c
+    
+    return sum, nil
+}
+
+// ============ Test 9: ? with control flow ============
+func testControlFlowQuestion(condition bool, succeed bool) (int, error) {
+    if condition {
+        val := maybeInt(succeed)?
+        return val, nil
+    }
+    return 0, nil
+}
+
+// ============ Test 10: ? propagates original error ============
+func level3(succeed bool) (int, error) {
+    if !succeed {
+        return 0, newError("level3 error")
+    }
+    return 3, nil
+}
+
+func level2(succeed bool) (int, error) {
+    val := level3(succeed)?
+    return val + 2, nil
+}
+
+func level1(succeed bool) (int, error) {
+    val := level2(succeed)?
+    return val + 1, nil
+}
+
+// ============ Test 11: ? with method call ============
+type Calculator struct {
+    base int
+}
+
+func (c Calculator) compute(add int, succeed bool) (int, error) {
+    if !succeed {
+        return 0, newError("compute failed")
+    }
+    return c.base + add, nil
+}
+
+func testMethodQuestion(succeed bool) (int, error) {
+    calc := Calculator{base: 100}
+    result := calc.compute(50, succeed)?
+    return result, nil
+}
+
+// ============ Test 12: ? discards value when not needed ============
+func produceSideEffect(succeed bool) (int, error) {
+    if !succeed {
+        return 0, newError("side effect failed")
+    }
+    return 999, nil
+}
+
+func testDiscardValueQuestion(succeed bool) error {
+    produceSideEffect(succeed)?
+    return nil
+}
+
+func main() int {
+    println("=== Test 1: Basic ? (success) ===")
+    val, err := testBasicQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(val == 52, "42 + 10 = 52")
+    println("PASSED")
+
+    println("")
+    println("=== Test 1b: Basic ? (failure) ===")
+    _, err = testBasicQuestion(false)
+    assert(err != nil, "should propagate error")
+    println("PASSED")
+
+    println("")
+    println("=== Test 2: String ? ===")
+    s, err := testStringQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(s == "hello world", "should concatenate")
+    _, err = testStringQuestion(false)
+    assert(err != nil, "should propagate error")
+    println("PASSED")
+
+    println("")
+    println("=== Test 3: Multiple return values ? ===")
+    a, b, err := testMultipleQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(a == 200, "100 * 2 = 200")
+    assert(b == "world!", "should append !")
+    _, _, err = testMultipleQuestion(false)
+    assert(err != nil, "should propagate error")
+    println("PASSED")
+
+    println("")
+    println("=== Test 4: Error-only ? ===")
+    err = testErrorOnlyQuestion(true)
+    assert(err == nil, "should succeed")
+    err = testErrorOnlyQuestion(false)
+    assert(err != nil, "should propagate error")
+    println("PASSED")
+
+    println("")
+    println("=== Test 5: Chained ? ===")
+    val, err = testChainedQuestion(true, true)
+    assert(err == nil, "both succeed")
+    assert(val == 84, "42 + 42 = 84")
+    _, err = testChainedQuestion(true, false)
+    assert(err != nil, "second fails")
+    _, err = testChainedQuestion(false, true)
+    assert(err != nil, "first fails")
+    println("PASSED")
+
+    println("")
+    println("=== Test 6: Expression context ? ===")
+    val, err = testExpressionQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(val == 142, "42 + 100 = 142")
+    _, err = testExpressionQuestion(false)
+    assert(err != nil, "should propagate")
+    println("PASSED")
+
+    println("")
+    println("=== Test 7: Nested call ? ===")
+    val, err = testNestedCallQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(val == 84, "42 * 2 = 84")
+    _, err = testNestedCallQuestion(false)
+    assert(err != nil, "should propagate")
+    println("PASSED")
+
+    println("")
+    println("=== Test 8: Sequence ? ===")
+    val, err = testSequenceQuestion(5)
+    assert(err == nil, "should succeed with depth 5,4,3")
+    assert(val == 12, "5 + 4 + 3 = 12")
+    _, err = testSequenceQuestion(2)
+    assert(err != nil, "should fail at depth 0")
+    println("PASSED")
+
+    println("")
+    println("=== Test 9: Control flow ? ===")
+    val, err = testControlFlowQuestion(true, true)
+    assert(err == nil && val == 42, "condition true, succeed")
+    val, err = testControlFlowQuestion(false, false)
+    assert(err == nil && val == 0, "condition false, skip")
+    _, err = testControlFlowQuestion(true, false)
+    assert(err != nil, "condition true, fail")
+    println("PASSED")
+
+    println("")
+    println("=== Test 10: Error propagation through levels ===")
+    val, err = level1(true)
+    assert(err == nil, "should succeed")
+    assert(val == 6, "3 + 2 + 1 = 6")
+    _, err = level1(false)
+    assert(err != nil, "error propagates from level3")
+    println("PASSED")
+
+    println("")
+    println("=== Test 11: Method call ? ===")
+    val, err = testMethodQuestion(true)
+    assert(err == nil, "should succeed")
+    assert(val == 150, "100 + 50 = 150")
+    _, err = testMethodQuestion(false)
+    assert(err != nil, "should propagate")
+    println("PASSED")
+
+    println("")
+    println("=== Test 12: Discard value ? ===")
+    err = testDiscardValueQuestion(true)
+    assert(err == nil, "should succeed")
+    err = testDiscardValueQuestion(false)
+    assert(err != nil, "should propagate")
+    println("PASSED")
+
+    println("")
+    println("=== All ? operator tests PASSED ===")
+    return 0
+}

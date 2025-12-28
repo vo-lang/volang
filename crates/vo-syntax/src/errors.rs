@@ -86,6 +86,8 @@ pub enum SyntaxError {
     ExpectedStructField = 1122,
     /// Expected interface method.
     ExpectedInterfaceMethod = 1123,
+    /// Keyword used as identifier.
+    KeywordAsIdent = 1124,
 }
 
 impl SyntaxError {
@@ -139,6 +141,7 @@ impl SyntaxError {
             SyntaxError::ExpectedFuncBody => "expected function body",
             SyntaxError::ExpectedStructField => "expected struct field",
             SyntaxError::ExpectedInterfaceMethod => "expected interface method",
+            SyntaxError::KeywordAsIdent => "cannot use keyword as identifier",
         }
     }
 

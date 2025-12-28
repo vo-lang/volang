@@ -378,13 +378,14 @@ fn compile_stmt_with_label(
 
         // === Short variable declaration ===
         StmtKind::ShortVar(short_var) => {
-            // Check for comma-ok case: v, ok := x.(T) or v, ok := <-ch or v, ok := m[k]
-            let is_comma_ok = short_var.values.len() == 1 
-                && short_var.names.len() == 2
+            // Check for multi-value case: v1, v2, ... := f() where f() returns a tuple
+            // This includes comma-ok (2 values) and multi-return functions (3+ values)
+            let is_multi_value = short_var.values.len() == 1 
+                && short_var.names.len() >= 2
                 && info.is_tuple(info.expr_type(short_var.values[0].id));
 
-            if is_comma_ok {
-                // Comma-ok: compile expr once, then distribute to variables
+            if is_multi_value {
+                // Multi-value: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(short_var.values[0].id);
                 let total_slots = info.type_slot_count(tuple_type);
                 let tmp_base = func.alloc_temp(total_slots);
@@ -444,14 +445,15 @@ fn compile_stmt_with_label(
         StmtKind::Assign(assign) => {
             use vo_syntax::ast::AssignOp;
             
-            // Check for comma-ok case: _, ok = x.(T) or v, ok = <-ch or v, ok = m[k]
-            let is_comma_ok = assign.op == AssignOp::Assign
+            // Check for multi-value case: v1, v2, ... = f() where f() returns a tuple
+            // This includes comma-ok (2 values) and multi-return functions (3+ values)
+            let is_multi_value = assign.op == AssignOp::Assign
                 && assign.rhs.len() == 1
-                && assign.lhs.len() == 2
+                && assign.lhs.len() >= 2
                 && info.is_tuple(info.expr_type(assign.rhs[0].id));
             
-            if is_comma_ok {
-                // Comma-ok assignment: compile expr once, then distribute to variables
+            if is_multi_value {
+                // Multi-value assignment: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(assign.rhs[0].id);
                 let total_slots = info.type_slot_count(tuple_type);
                 let tmp_base = func.alloc_temp(total_slots);
@@ -876,10 +878,37 @@ fn compile_stmt_with_label(
 
         // === Fail ===
         StmtKind::Fail(fail_stmt) => {
-            // Fail returns an error from a fallible function
-            let err_reg = crate::expr::compile_expr(&fail_stmt.error, ctx, func, info)?;
-            // This is similar to return with error
-            func.emit_op(Opcode::Panic, err_reg, 0, 0);
+            // Fail returns zero values for all non-error returns, plus the error value
+            // This is equivalent to: return <zero-values>, err
+            
+            // Get function's return types
+            let ret_types: Vec<_> = func.return_types().to_vec();
+            
+            // Calculate total return slots needed
+            let mut total_ret_slots = 0u16;
+            for ret_type in &ret_types {
+                total_ret_slots += info.type_slot_count(*ret_type);
+            }
+            
+            // Allocate space for return values
+            let ret_start = func.alloc_temp(total_ret_slots);
+            
+            // Initialize all slots to zero/nil first
+            // Use LoadNil for proper GC-safe initialization
+            for i in 0..total_ret_slots {
+                func.emit_op(Opcode::LoadNil, ret_start + i, 0, 0);
+            }
+            
+            // Compile the error expression into the last return slot(s)
+            // The error is the last return value
+            if !ret_types.is_empty() {
+                let error_type = *ret_types.last().unwrap();
+                let error_slots = info.type_slot_count(error_type);
+                let error_start = ret_start + total_ret_slots - error_slots;
+                compile_value_to(&fail_stmt.error, error_start, error_type, ctx, func, info)?;
+            }
+            
+            func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);
         }
 
         // === Goto ===
@@ -1662,6 +1691,9 @@ pub fn compile_iface_assign(
     
     let const_idx = if src_vk == vo_common_core::ValueKind::Interface {
         ctx.register_iface_assign_const_interface(iface_meta_id)
+    } else if src_vk == vo_common_core::ValueKind::Void {
+        // nil interface: rttid=0, itab_id=0, so packed=0
+        ctx.const_int(0)
     } else {
         // Use RuntimeType for structural equality in rttid lookup
         let rt = crate::type_key_to_runtime_type_simple(src_type, info, &info.project.interner, ctx);

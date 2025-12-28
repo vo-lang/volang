@@ -1289,7 +1289,7 @@ impl Checker {
                 // The inner expression must return a value where the last element is of type error.
                 // If error != nil, the function returns early with that error.
                 // If error == nil, the result is the value(s) without the error part.
-                self.expr(x, inner);
+                self.multi_expr(x, inner);
                 if x.invalid() {
                     return;
                 }
