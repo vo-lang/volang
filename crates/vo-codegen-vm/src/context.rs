@@ -24,8 +24,11 @@ pub struct CodegenContext {
     /// Extern function by string name (for builtins)
     extern_names: HashMap<String, u32>,
 
-    /// Global variable index: name -> global_idx
+    /// Global variable slot offset: name -> slot_offset
     global_indices: HashMap<Symbol, u32>,
+
+    /// Next global slot offset (accumulated from all globals)
+    global_slot_offset: u32,
 
     /// Constant pool: int value -> const_idx
     const_int: HashMap<i64, u16>,
@@ -84,6 +87,7 @@ impl CodegenContext {
             extern_indices: HashMap::new(),
             extern_names: HashMap::new(),
             global_indices: HashMap::new(),
+            global_slot_offset: 0,
             const_int: HashMap::new(),
             const_float: HashMap::new(),
             const_string: HashMap::new(),
@@ -386,10 +390,11 @@ impl CodegenContext {
     // === Global registration ===
 
     pub fn register_global(&mut self, name: Symbol, def: GlobalDef) -> u32 {
-        let id = self.module.globals.len() as u32;
+        let slot_offset = self.global_slot_offset;
+        self.global_slot_offset += def.slots as u32;
         self.module.globals.push(def);
-        self.global_indices.insert(name, id);
-        id
+        self.global_indices.insert(name, slot_offset);
+        slot_offset
     }
 
     pub fn get_global_index(&self, name: Symbol) -> Option<u32> {

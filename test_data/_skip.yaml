@@ -273,16 +273,15 @@ skips:
     skip: [jit]
   - file: var_init_order.vo
     skip: [jit]
-  # Extension syntax tests - pending fix for fail statement GC issue
+  # Extension syntax tests
   - file: fail_stmt.vo
-    skip: [vm, jit]
-    reason: "fail statement has GC-related bug with assert"
+    skip: [jit]
   - file: question_operator.vo
     skip: [vm, jit]
-    reason: "depends on fail statement fix"
+    reason: "? operator PanicUnwound issue - separate from global var fix"
   - file: errdefer_stmt.vo
     skip: [vm, jit]
-    reason: "depends on fail statement fix"
+    reason: "errdefer PanicUnwound issue - separate from global var fix"
   # Debug nil interface test
   - file: debug_nil_interface.vo
     skip: [jit]
