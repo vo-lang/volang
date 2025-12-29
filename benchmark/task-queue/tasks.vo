@@ -49,9 +49,10 @@ func (q *TaskQueue) findHighestPriority() int {
 	bestPriority := -1
 	n := len(q.tasks)
 	for i := 0; i < n; i++ {
-		if q.tasks[i].status == StatusPending {
-			if q.tasks[i].priority > bestPriority {
-				bestPriority = q.tasks[i].priority
+		t := &q.tasks[i];
+		if t.status == StatusPending {
+			if t.priority > bestPriority {
+				bestPriority = t.priority
 				bestIdx = i
 			}
 		}

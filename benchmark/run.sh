@@ -56,6 +56,11 @@ has_luajit() {
     command -v luajit >/dev/null 2>&1
 }
 
+# Check if ruby is available
+has_ruby() {
+    command -v ruby >/dev/null 2>&1
+}
+
 # Build vo release binary
 build_vo() {
     echo -e "${BLUE}Building Vo (release)...${NC}"
@@ -114,6 +119,13 @@ run_benchmark() {
     if [ -f "$py_file" ]; then
         cmds+=("python3 '$py_file'")
         names+=("Python")
+    fi
+    
+    # Ruby
+    local rb_file=$(find "$dir" -name "*.rb" | head -1)
+    if [ -f "$rb_file" ] && has_ruby; then
+        cmds+=("ruby '$rb_file'")
+        names+=("Ruby")
     fi
     
     # Java (compile and run)

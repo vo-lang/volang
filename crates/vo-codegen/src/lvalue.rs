@@ -467,6 +467,57 @@ fn flatten_field(lv: &LValue) -> FlattenedField {
 }
 
 /// Get element address for slice/array element field access.
+/// Compile &slice[i] or &array[i] to get element address, returning the register.
+pub fn compile_index_addr_to_reg(
+    container_expr: &Expr,
+    index_expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let container_type = info.expr_type(container_expr.id);
+    let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
+    let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
+    let addr_reg = func.alloc_temp(1);
+    
+    if info.is_slice(container_type) {
+        let elem_bytes = info.slice_elem_bytes(container_type) as u8;
+        func.emit_with_flags(Opcode::SliceAddr, elem_bytes, addr_reg, container_reg, index_reg);
+    } else {
+        let elem_bytes = info.array_elem_bytes(container_type) as u8;
+        func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, addr_reg, container_reg, index_reg);
+    }
+    
+    Ok(addr_reg)
+}
+
+/// Compile &slice[i] or &array[i] to get element address.
+pub fn compile_index_addr(
+    container_expr: &Expr,
+    index_expr: &Expr,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let container_type = info.expr_type(container_expr.id);
+    let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
+    let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
+    
+    if info.is_slice(container_type) {
+        let elem_bytes = info.slice_elem_bytes(container_type) as u8;
+        // SliceAddr: a=dst, b=slice, c=index, flags=elem_bytes
+        func.emit_with_flags(Opcode::SliceAddr, elem_bytes, dst, container_reg, index_reg);
+    } else {
+        // Heap Array
+        let elem_bytes = info.array_elem_bytes(container_type) as u8;
+        // ArrayAddr: a=dst, b=array, c=index, flags=elem_bytes
+        func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, dst, container_reg, index_reg);
+    }
+    
+    Ok(())
+}
+
 /// Returns a register holding the raw pointer to the element.
 fn emit_elem_addr(
     container_expr: &Expr,

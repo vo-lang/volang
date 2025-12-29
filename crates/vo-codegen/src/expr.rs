@@ -460,83 +460,17 @@ fn compile_short_circuit(
 
 fn compile_selector(
     expr: &Expr,
-    sel: &vo_syntax::ast::SelectorExpr,
+    _sel: &vo_syntax::ast::SelectorExpr,
     dst: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Get receiver type
-    let recv_type = info.expr_type(sel.expr.id);
-    
-    let field_name = info.project.interner.resolve(sel.sel.symbol)
-        .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
-    
-    // Check if receiver is pointer - need to dereference
-    let is_ptr = info.is_pointer(recv_type);
-    
-    // Get base type for field lookup (deref pointer if needed)
-    let base_type = if is_ptr {
-        info.pointer_base(recv_type)
-    } else {
-        recv_type
-    };
-    
-    // Get field offset: prefer Selection.indices() for promoted/embedded fields,
-    // fallback to field name lookup for simple cases.
-    // Selection handles embedded field promotion (e.g., Outer.X where X is from Inner).
-    let (offset, slots) = info.get_selection(expr.id)
-        .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-        .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
-    
-    if is_ptr {
-        // Pointer receiver: load ptr, then PtrGetN
-        let ptr_reg = compile_expr(&sel.expr, ctx, func, info)?;
-        func.emit_ptr_get(dst, ptr_reg, offset, slots);
-    } else {
-        // Value receiver: check storage location
-        let root_storage = find_root_storage(&sel.expr, func);
-        
-        match root_storage {
-            Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                // Heap variable: use PtrGet with offset
-                func.emit_ptr_get(dst, gcref_slot, offset, slots);
-            }
-            Some(StorageKind::HeapArray { gcref_slot, .. }) => {
-                // Heap array: use PtrGet with offset (for struct fields within array elements)
-                func.emit_ptr_get(dst, gcref_slot, offset, slots);
-            }
-            Some(StorageKind::Reference { slot }) => {
-                // Reference type: use PtrGet with offset
-                func.emit_ptr_get(dst, slot, offset, slots);
-            }
-            Some(StorageKind::StackValue { slot, .. }) => {
-                // Stack variable: direct slot access
-                func.emit_copy(dst, slot + offset, slots);
-            }
-            Some(StorageKind::Global { .. }) => {
-                // Global variables don't have field selectors through this path
-                return Err(CodegenError::Internal("global field selector not supported".to_string()));
-            }
-            None => {
-                // Temporary value - compile receiver first
-                let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                func.emit_copy(dst, recv_reg + offset, slots);
-            }
-        }
-    }
-    
+    // Use unified LValue system for all field access patterns
+    // This handles: x.field, p.field, slice[i].field, a.b[i].c, etc.
+    let lv = crate::lvalue::resolve_lvalue(expr, ctx, func, info)?;
+    crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func);
     Ok(())
-}
-
-/// Find root variable's StorageKind for selector chain
-fn find_root_storage(expr: &Expr, func: &FuncBuilder) -> Option<StorageKind> {
-    match &expr.kind {
-        ExprKind::Ident(ident) => {
-            func.lookup_local(ident.symbol).map(|local| local.storage)
-        }
-        _ => None,
-    }
 }
 
 // === Index (array/slice access) ===
@@ -908,6 +842,14 @@ fn compile_addr_of(
                 func.emit_op(Opcode::Copy, dst, local.storage.slot(), 0);
                 return Ok(());
             }
+        }
+    }
+    
+    // &slice[i] or &array[i] -> SliceAddr/ArrayAddr
+    if let ExprKind::Index(index_expr) = &operand.kind {
+        let container_type = info.expr_type(index_expr.expr.id);
+        if info.is_slice(container_type) || info.is_array(container_type) {
+            return crate::lvalue::compile_index_addr(&index_expr.expr, &index_expr.index, dst, ctx, func, info);
         }
     }
     

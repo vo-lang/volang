@@ -45,3 +45,10 @@ benchmark/nbody/go_bench
 benchmark/nbody/c_bench
 benchmark/task-queue/go_bench
 benchmark/task-queue/c_bench
+benchmark/sieve/c_bench
+benchmark/matrix2/c_bench
+benchmark/matrix/c_bench
+benchmark/fibonacci/c_bench
+luac.out
+benchmark/quicksort/go_bench
+benchmark/quicksort/c_bench
