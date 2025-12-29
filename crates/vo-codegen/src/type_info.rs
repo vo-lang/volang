@@ -554,4 +554,7 @@ pub fn encode_func_id(func_idx: u32) -> (u16, u8) {
 }
 
 // Re-export elem_flags from vo-common-core
-pub use vo_common_core::{elem_flags, ELEM_FLAG_INT8, ELEM_FLAG_INT16, ELEM_FLAG_INT32, ELEM_FLAG_FLOAT32};
+pub use vo_common_core::{
+    elem_flags, ELEM_FLAG_SIGN_BIT, ELEM_FLAG_FLOAT_BIT, ELEM_FLAG_BYTES_MASK,
+    ELEM_FLAG_INT8, ELEM_FLAG_INT16, ELEM_FLAG_INT32, ELEM_FLAG_FLOAT32,
+};

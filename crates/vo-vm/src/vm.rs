@@ -1012,7 +1012,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::ArrayGet => {
-                    // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+                    // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
                     let arr = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
                     let dst = bp + inst.a as usize;
@@ -1026,7 +1026,7 @@ impl Vm {
                         129 => unsafe { *base.offset(off) as i8 as i64 as u64 },
                         130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                         132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
-                        133 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
+                        0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
                         0 => array::get_auto(arr, idx, array::elem_bytes(arr)),
                         _ => {
                             let elem_bytes = inst.flags as usize;
@@ -1041,7 +1041,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::ArraySet => {
-                    // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+                    // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
                     let arr = stack_get!(fiber.stack, bp + inst.a as usize) as GcRef;
                     let idx = stack_get!(fiber.stack, bp + inst.b as usize) as usize;
                     let src = bp + inst.c as usize;
@@ -1052,7 +1052,7 @@ impl Vm {
                         1 | 129 => unsafe { *base.offset(off) = val as u8 },
                         2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                        133 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
+                        0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
                         0 => array::set_auto(arr, idx, val, array::elem_bytes(arr)),
                         _ => {
@@ -1072,7 +1072,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::SliceGet => {
-                    // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+                    // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
                     let s = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
                     let arr = slice_array!(s);
@@ -1088,7 +1088,7 @@ impl Vm {
                         129 => unsafe { *base.offset(off) as i8 as i64 as u64 },
                         130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                         132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
-                        133 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
+                        0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
                         0 => slice::get_auto(arr, start, idx, array::elem_bytes(arr)),
                         _ => {
                             let elem_bytes = inst.flags as usize;
@@ -1103,7 +1103,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::SliceSet => {
-                    // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+                    // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
                     let s = stack_get!(fiber.stack, bp + inst.a as usize) as GcRef;
                     let idx = stack_get!(fiber.stack, bp + inst.b as usize) as usize;
                     let arr = slice_array!(s);
@@ -1116,7 +1116,7 @@ impl Vm {
                         1 | 129 => unsafe { *base.offset(off) = val as u8 },
                         2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                        133 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
+                        0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
                         0 => slice::set_auto(arr, start, idx, val, array::elem_bytes(arr)),
                         _ => {
@@ -1676,7 +1676,7 @@ fn exec_inst_inline(
         // Array
         Opcode::ArrayNew => { exec::exec_array_new(fiber, inst, &mut state.gc); ExecResult::Continue }
         Opcode::ArrayGet => {
-            // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+            // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let arr = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
             let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
             let dst = bp + inst.a as usize;
@@ -1690,7 +1690,7 @@ fn exec_inst_inline(
                 129 => unsafe { *base.offset(off) as i8 as i64 as u64 },
                 130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                 132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
-                133 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
+                0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
                 0 => array::get_auto(arr, idx, array::elem_bytes(arr)),
                 _ => {
                     let elem_bytes = inst.flags as usize;
@@ -1705,7 +1705,7 @@ fn exec_inst_inline(
             ExecResult::Continue
         }
         Opcode::ArraySet => {
-            // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+            // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let arr = stack_get!(fiber.stack, bp + inst.a as usize) as GcRef;
             let idx = stack_get!(fiber.stack, bp + inst.b as usize) as usize;
             let src = bp + inst.c as usize;
@@ -1716,7 +1716,7 @@ fn exec_inst_inline(
                 1 | 129 => unsafe { *base.offset(off) = val as u8 },
                 2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
                 4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                133 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
+                0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
                 0 => array::set_auto(arr, idx, val, array::elem_bytes(arr)),
                 _ => {
@@ -1732,7 +1732,7 @@ fn exec_inst_inline(
         // Slice
         Opcode::SliceNew => { exec::exec_slice_new(fiber, inst, &mut state.gc); ExecResult::Continue }
         Opcode::SliceGet => {
-            // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+            // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let s = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
             let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
             let arr = slice_array!(s);
@@ -1748,7 +1748,7 @@ fn exec_inst_inline(
                 129 => unsafe { *base.offset(off) as i8 as i64 as u64 },
                 130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                 132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
-                133 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
+                0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
                 0 => slice::get_auto(arr, start, idx, array::elem_bytes(arr)),
                 _ => {
                     let elem_bytes = inst.flags as usize;
@@ -1763,7 +1763,7 @@ fn exec_inst_inline(
             ExecResult::Continue
         }
         Opcode::SliceSet => {
-            // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+            // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let s = stack_get!(fiber.stack, bp + inst.a as usize) as GcRef;
             let idx = stack_get!(fiber.stack, bp + inst.b as usize) as usize;
             let arr = slice_array!(s);
@@ -1776,7 +1776,7 @@ fn exec_inst_inline(
                 1 | 129 => unsafe { *base.offset(off) = val as u8 },
                 2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
                 4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                133 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
+                0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
                 0 => slice::set_auto(arr, start, idx, val, array::elem_bytes(arr)),
                 _ => {

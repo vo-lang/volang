@@ -1186,14 +1186,14 @@ impl FunctionCompiler<'_> {
         let idx = self.read_var(inst.c);
         let header_bytes = (HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed (just u32)
         let (elem_bytes, needs_sext) = match inst.flags {
             0 => panic!("JIT: ArrayGet with flags=0 not supported"),
-            129 => (1, true),   // int8
-            130 => (2, true),   // int16
-            132 => (4, true),   // int32
-            133 => (4, false),  // float32 (f32 bits as u32)
+            0x81 => (1, true),   // int8
+            0x82 => (2, true),   // int16
+            0x84 => (4, true),   // int32
+            0x44 => (4, false),  // float32 (f32 bits as u32)
             f => (f as usize, false),
         };
         
@@ -1245,13 +1245,13 @@ impl FunctionCompiler<'_> {
         let val = self.read_var(inst.c);
         let header_bytes = (HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let elem_bytes = match inst.flags {
             0 => panic!("JIT: ArraySet with flags=0 not supported"),
-            129 => 1,  // int8
-            130 => 2,  // int16
-            132 | 133 => 4,  // int32 or float32
+            0x81 => 1,  // int8
+            0x82 => 2,  // int16
+            0x84 | 0x44 => 4,  // int32 or float32
             f => f as usize,
         };
         
@@ -1325,14 +1325,14 @@ impl FunctionCompiler<'_> {
         let idx = self.read_var(inst.c);
         let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let (elem_bytes, needs_sext) = match inst.flags {
             0 => panic!("JIT: SliceGet with flags=0 not supported"),
-            129 => (1, true),   // int8
-            130 => (2, true),   // int16
-            132 => (4, true),   // int32
-            133 => (4, false),  // float32 (f32 bits as u32)
+            0x81 => (1, true),   // int8
+            0x82 => (2, true),   // int16
+            0x84 => (4, true),   // int32
+            0x44 => (4, false),  // float32 (f32 bits as u32)
             f => (f as usize, false),
         };
         
@@ -1389,13 +1389,13 @@ impl FunctionCompiler<'_> {
         let val = self.read_var(inst.c);
         let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 129=int8, 130=int16, 132=int32, 133=float32
+        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let elem_bytes = match inst.flags {
             0 => panic!("JIT: SliceSet with flags=0 not supported"),
-            129 => 1,  // int8
-            130 => 2,  // int16
-            132 | 133 => 4,  // int32 or float32
+            0x81 => 1,  // int8
+            0x82 => 2,  // int16
+            0x84 | 0x44 => 4,  // int32 or float32
             f => f as usize,
         };
         

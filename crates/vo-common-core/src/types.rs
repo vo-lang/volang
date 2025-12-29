@@ -189,24 +189,44 @@ impl SlotType {
 }
 
 // =============================================================================
-// Element Access Flags (for ArrayGet/Set, SliceGet/Set)
+// Element Access Flags (for ArrayGet/Set, SliceGet/Set, ArrayNew, SliceNew, etc.)
 // =============================================================================
 //
-// flags format:
-//   0       = dynamic (elem_bytes > 127, read from header at runtime)
-//   1-8     = direct read, zero extension (bool, uint8, uint16, uint32, int64, uint64, float64)
-//   129     = int8, sign extension (128 + 1)
-//   130     = int16, sign extension (128 + 2)
-//   132     = int32, sign extension (128 + 4)
-//   133     = float32, f32→f64 conversion (128 + 5)
-//   9-127   = multi-slot struct/array (elem_bytes, direct copy)
+// Bit layout (8 bits):
+//   bit 7 (0x80): SIGN_BIT  - needs sign extension (for signed integers)
+//   bit 6 (0x40): FLOAT_BIT - is floating point (only float32 needs special handling)
+//   bit 5-0 (0x3F): elem_bytes (0-63)
 //
-// This encoding allows VM/JIT to use a single match without function calls.
+// Values:
+//   0x00 = 0   = dynamic (elem_bytes > 63, read from header at runtime)
+//   0x01 = 1   = uint8/bool (1 byte, zero extend)
+//   0x02 = 2   = uint16 (2 bytes, zero extend)
+//   0x04 = 4   = uint32 (4 bytes, zero extend)
+//   0x08 = 8   = int64/uint64/float64/pointer (8 bytes, no extension)
+//   9-63       = multi-slot struct/array (elem_bytes, direct copy)
+//
+//   0x81 = 129 = int8 (1 byte, sign extend)
+//   0x82 = 130 = int16 (2 bytes, sign extend)
+//   0x84 = 132 = int32 (4 bytes, sign extend)
+//
+//   0x44 = 68  = float32 (4 bytes, stored as u32 bits)
+//
+// Decoding:
+//   is_signed = (flags & 0x80) != 0
+//   is_float  = (flags & 0x40) != 0
+//   elem_bytes = (flags & 0x3F) as usize
+//
+// Note: For Get operations, signed integers need sign extension to i64.
+//       For Set operations, all same-size types are handled identically.
 
-pub const ELEM_FLAG_INT8: u8 = 129;    // 128 + 1
-pub const ELEM_FLAG_INT16: u8 = 130;   // 128 + 2
-pub const ELEM_FLAG_INT32: u8 = 132;   // 128 + 4
-pub const ELEM_FLAG_FLOAT32: u8 = 133; // 128 + 5
+pub const ELEM_FLAG_SIGN_BIT: u8 = 0x80;
+pub const ELEM_FLAG_FLOAT_BIT: u8 = 0x40;
+pub const ELEM_FLAG_BYTES_MASK: u8 = 0x3F;
+
+pub const ELEM_FLAG_INT8: u8 = ELEM_FLAG_SIGN_BIT | 1;     // 0x81 = 129
+pub const ELEM_FLAG_INT16: u8 = ELEM_FLAG_SIGN_BIT | 2;    // 0x82 = 130
+pub const ELEM_FLAG_INT32: u8 = ELEM_FLAG_SIGN_BIT | 4;    // 0x84 = 132
+pub const ELEM_FLAG_FLOAT32: u8 = ELEM_FLAG_FLOAT_BIT | 4; // 0x44 = 68
 
 /// Convert elem_bytes and ValueKind to flags for instructions.
 #[inline]
@@ -216,6 +236,6 @@ pub fn elem_flags(elem_bytes: usize, vk: ValueKind) -> u8 {
         ValueKind::Int16 => ELEM_FLAG_INT16,
         ValueKind::Int32 => ELEM_FLAG_INT32,
         ValueKind::Float32 => ELEM_FLAG_FLOAT32,
-        _ => if elem_bytes > 127 { 0 } else { elem_bytes as u8 }
+        _ => if elem_bytes > (ELEM_FLAG_BYTES_MASK as usize) { 0 } else { elem_bytes as u8 }
     }
 }
