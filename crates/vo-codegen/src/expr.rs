@@ -1044,9 +1044,18 @@ fn compile_call(
     if let ExprKind::Ident(ident) = &call.func.kind {
         // First check if it's a known function
         if let Some(func_idx) = ctx.get_function_index(ident.symbol) {
-            // Regular function call - compile args to contiguous slots
-            // Allocate max(arg_slots, ret_slots) to ensure space for return values
-            let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
+            // Optimization: use dst directly as args_start if it has enough space
+            // This avoids a Copy after the call
+            let need_slots = total_arg_slots.max(ret_slots);
+            let args_start = if ret_slots > 0 && ret_slots >= total_arg_slots {
+                // dst has enough space, use it directly
+                dst
+            } else {
+                // Need more space for args than ret, allocate separately
+                func.alloc_temp(need_slots)
+            };
+            
+            // Compile args to args_start
             let mut offset = 0u16;
             for (i, arg) in call.args.iter().enumerate() {
                 let param_type = param_types.get(i).copied();
@@ -1068,7 +1077,7 @@ fn compile_call(
             func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
             
             // Copy result to dst if not already there
-            if ret_slots > 0 {
+            if ret_slots > 0 && dst != args_start {
                 func.emit_copy(dst, args_start, ret_slots);
             }
             return Ok(());
@@ -1093,7 +1102,7 @@ fn compile_call(
             func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
             
             // Copy result to dst if needed
-            if ret_slots > 0 {
+            if ret_slots > 0 && dst != args_start {
                 func.emit_copy(dst, args_start, ret_slots);
             }
             
@@ -1120,7 +1129,7 @@ fn compile_call(
     func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
     
     // Copy result to dst if needed
-    if ret_slots > 0 {
+    if ret_slots > 0 && dst != args_start {
         func.emit_copy(dst, args_start, ret_slots);
     }
     

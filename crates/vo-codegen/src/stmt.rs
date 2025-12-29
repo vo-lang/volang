@@ -7,7 +7,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::expr::compile_expr_to;
+use crate::expr::{compile_expr_to, get_expr_source};
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
@@ -543,24 +543,50 @@ fn compile_stmt_with_label(
                     total_ret_slots += info.type_slot_count(*ret_type);
                 }
                 
-                // Allocate space for return values
-                let ret_start = func.alloc_temp(total_ret_slots);
-                
-                // Compile return values with interface conversion if needed
-                let mut offset = 0u16;
-                for (i, result) in ret.values.iter().enumerate() {
-                    let ret_type = ret_types.get(i).copied();
-                    if let Some(rt) = ret_type {
-                        let slots = info.type_slot_count(rt);
-                        compile_value_to(result, ret_start + offset, rt, ctx, func, info)?;
-                        offset += slots;
+                // Optimization: single return value that's already in a usable slot
+                let optimized = if ret.values.len() == 1 && ret_types.len() == 1 {
+                    let result = &ret.values[0];
+                    let ret_type = ret_types[0];
+                    let expr_type = info.project.type_info.types.get(&result.id).map(|tv| tv.typ);
+                    
+                    // Only optimize if types match (no interface conversion needed)
+                    if expr_type == Some(ret_type) {
+                        if let ExprSource::Location(StorageKind::StackValue { slot, slots }) = 
+                            get_expr_source(result, ctx, func, info) 
+                        {
+                            // Direct return from existing slot
+                            func.emit_op(Opcode::Return, slot, slots, 0);
+                            true
+                        } else {
+                            false
+                        }
                     } else {
-                        let slots = info.expr_slots(result.id);
-                        compile_expr_to(result, ret_start + offset, ctx, func, info)?;
-                        offset += slots;
+                        false
                     }
+                } else {
+                    false
+                };
+                
+                if !optimized {
+                    // Standard path: allocate space and compile return values
+                    let ret_start = func.alloc_temp(total_ret_slots);
+                    
+                    // Compile return values with interface conversion if needed
+                    let mut offset = 0u16;
+                    for (i, result) in ret.values.iter().enumerate() {
+                        let ret_type = ret_types.get(i).copied();
+                        if let Some(rt) = ret_type {
+                            let slots = info.type_slot_count(rt);
+                            compile_value_to(result, ret_start + offset, rt, ctx, func, info)?;
+                            offset += slots;
+                        } else {
+                            let slots = info.expr_slots(result.id);
+                            compile_expr_to(result, ret_start + offset, ctx, func, info)?;
+                            offset += slots;
+                        }
+                    }
+                    func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);
                 }
-                func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);
             }
         }
 
