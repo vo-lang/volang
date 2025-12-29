@@ -708,22 +708,22 @@ pub extern "C" fn vo_slice_cap(s: u64) -> u64 {
 /// idx is element index, elem_bytes is byte size per element.
 #[no_mangle]
 pub extern "C" fn vo_slice_get(s: u64, idx: u64, elem_bytes: u64) -> u64 {
-    use crate::objects::{slice, array};
+    use crate::objects::slice;
     let s_ref = s as crate::gc::GcRef;
-    let arr = slice::array_ref(s_ref);
-    let start = slice::start(s_ref);
-    array::get_auto(arr, start + idx as usize, elem_bytes as usize)
+    let base_ptr = slice::data_ptr(s_ref);
+    let elem_kind = slice::elem_kind(s_ref);
+    slice::get_auto(base_ptr, idx as usize, elem_bytes as usize, elem_kind)
 }
 
 /// Set element in slice with automatic type conversion.
 /// idx is element index, elem_bytes is byte size per element.
 #[no_mangle]
 pub extern "C" fn vo_slice_set(s: u64, idx: u64, val: u64, elem_bytes: u64) {
-    use crate::objects::{slice, array};
+    use crate::objects::slice;
     let s_ref = s as crate::gc::GcRef;
-    let arr = slice::array_ref(s_ref);
-    let start = slice::start(s_ref);
-    array::set_auto(arr, start + idx as usize, val, elem_bytes as usize);
+    let base_ptr = slice::data_ptr(s_ref);
+    let elem_kind = slice::elem_kind(s_ref);
+    slice::set_auto(base_ptr, idx as usize, val, elem_bytes as usize, elem_kind);
 }
 
 /// Create a sub-slice (two-index: s[lo:hi]).
@@ -926,11 +926,10 @@ pub extern "C" fn vo_copy(dst: u64, src: u64) -> u64 {
     
     let dst_arr = slice::array_ref(dst_ref);
     let elem_bytes = array::elem_bytes(dst_arr);
-    let dst_start = slice::start(dst_ref);
-    let src_start = slice::start(src_ref);
-    let src_arr = slice::array_ref(src_ref);
+    let dst_ptr = slice::data_ptr(dst_ref);
+    let src_ptr = slice::data_ptr(src_ref);
     
-    array::copy_range(src_arr, src_start, dst_arr, dst_start, copy_len, elem_bytes);
+    unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_len * elem_bytes) };
     
     copy_len as u64
 }

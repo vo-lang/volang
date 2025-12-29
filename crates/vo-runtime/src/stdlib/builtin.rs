@@ -141,11 +141,10 @@ fn builtin_copy(call: &mut ExternCallWithGc) -> ExternResult {
     
     let dst_arr = slice::array_ref(dst);
     let elem_bytes = array::elem_bytes(dst_arr);
-    let dst_start = slice::start(dst);
-    let src_start = slice::start(src);
-    let src_arr = slice::array_ref(src);
+    let dst_ptr = slice::data_ptr(dst);
+    let src_ptr = slice::data_ptr(src);
     
-    array::copy_range(src_arr, src_start, dst_arr, dst_start, copy_len, elem_bytes);
+    unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_len * elem_bytes) };
     
     call.ret_i64(0, copy_len as i64);
     ExternResult::Ok

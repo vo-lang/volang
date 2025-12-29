@@ -1729,7 +1729,8 @@ fn compile_compound_assign(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::AssignOp;
-    use crate::lvalue::{resolve_lvalue, emit_lvalue_load, emit_lvalue_store, lvalue_slots};
+    use crate::lvalue::{resolve_lvalue, emit_lvalue_load, emit_lvalue_store, lvalue_slots, LValue};
+    use crate::func::StorageKind;
     
     // Get the operation opcode based on AssignOp and type
     let lhs_type = info.expr_type(lhs.id);
@@ -1758,12 +1759,18 @@ fn compile_compound_assign(
     
     // Resolve LHS to an LValue
     let lv = resolve_lvalue(lhs, ctx, func, info)?;
-    let slots = lvalue_slots(&lv);
     
-    // Compile RHS
+    // Compile RHS (may return existing slot for variables)
     let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
     
-    // Read current value, apply operation, write back
+    // Fast path: single-slot stack variable - operate directly, no load/store needed
+    if let LValue::Variable(StorageKind::StackValue { slot, slots: 1 }) = &lv {
+        func.emit_op(opcode, *slot, *slot, rhs_reg);
+        return Ok(());
+    }
+    
+    // General path: read current value, apply operation, write back
+    let slots = lvalue_slots(&lv);
     let tmp = func.alloc_temp(slots);
     emit_lvalue_load(&lv, tmp, ctx, func);
     func.emit_op(opcode, tmp, tmp, rhs_reg);

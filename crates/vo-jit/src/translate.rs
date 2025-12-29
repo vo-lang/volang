@@ -1347,22 +1347,16 @@ impl FunctionCompiler<'_> {
     }
 
     pub(crate) fn translate_slice_get(&mut self, inst: &Instruction) {
-        use vo_runtime::objects::slice::{FIELD_ARRAY, FIELD_START};
-        use vo_runtime::objects::array::HEADER_SLOTS as ARRAY_HEADER_SLOTS;
+        use vo_runtime::objects::slice::FIELD_DATA_PTR;
         use cranelift_codegen::ir::MemFlags;
         
         let s = self.read_var(inst.b);
         let idx = self.read_var(inst.c);
-        let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
         // flags: 0=dynamic (elem_bytes in c+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let (elem_bytes, needs_sext) = match inst.flags {
             0 => {
-                // dynamic: elem_bytes loaded via LoadConst to c+1
-                // Find the constant by looking at the instruction that loaded c+1
-                // The LoadConst instruction should have stored const_idx in inst.b
-                // We need to look up the constant value from the module
                 let eb = self.get_const_from_reg(inst.c + 1);
                 (eb as usize, false)
             }
@@ -1373,15 +1367,13 @@ impl FunctionCompiler<'_> {
             f => (f as usize, false),
         };
         
-        let arr = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_ARRAY * 8) as i32);
-        let start = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_START * 8) as i32);
-        let total_idx = self.builder.ins().iadd(start, idx);
+        // Load data_ptr directly - no need to load array and compute offset
+        let data_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_DATA_PTR * 8) as i32);
         
         if elem_bytes <= 8 {
             let eb = self.builder.ins().iconst(types::I64, elem_bytes as i64);
-            let off = self.builder.ins().imul(total_idx, eb);
-            let off = self.builder.ins().iadd_imm(off, header_bytes);
-            let addr = self.builder.ins().iadd(arr, off);
+            let off = self.builder.ins().imul(idx, eb);
+            let addr = self.builder.ins().iadd(data_ptr, off);
             
             let val = match elem_bytes {
                 1 => {
@@ -1405,11 +1397,10 @@ impl FunctionCompiler<'_> {
         } else {
             let elem_slots = (elem_bytes + 7) / 8;
             let eb = self.builder.ins().iconst(types::I64, elem_bytes as i64);
-            let off = self.builder.ins().imul(total_idx, eb);
-            let off = self.builder.ins().iadd_imm(off, header_bytes);
+            let off = self.builder.ins().imul(idx, eb);
             for i in 0..elem_slots {
                 let slot_off = self.builder.ins().iadd_imm(off, (i * 8) as i64);
-                let addr = self.builder.ins().iadd(arr, slot_off);
+                let addr = self.builder.ins().iadd(data_ptr, slot_off);
                 let val = self.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0);
                 self.write_var(inst.a + i as u16, val);
             }
@@ -1417,14 +1408,12 @@ impl FunctionCompiler<'_> {
     }
 
     pub(crate) fn translate_slice_set(&mut self, inst: &Instruction) {
-        use vo_runtime::objects::slice::{FIELD_ARRAY, FIELD_START};
-        use vo_runtime::objects::array::HEADER_SLOTS as ARRAY_HEADER_SLOTS;
+        use vo_runtime::objects::slice::FIELD_DATA_PTR;
         use cranelift_codegen::ir::MemFlags;
         
         let s = self.read_var(inst.a);
         let idx = self.read_var(inst.b);
         let val = self.read_var(inst.c);
-        let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
         // flags: 0=dynamic (elem_bytes in b+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
@@ -1436,15 +1425,13 @@ impl FunctionCompiler<'_> {
             f => f as usize,
         };
         
-        let arr = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_ARRAY * 8) as i32);
-        let start = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_START * 8) as i32);
-        let total_idx = self.builder.ins().iadd(start, idx);
+        // Load data_ptr directly - no need to load array and compute offset
+        let data_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_DATA_PTR * 8) as i32);
         
         if elem_bytes <= 8 {
             let eb = self.builder.ins().iconst(types::I64, elem_bytes as i64);
-            let off = self.builder.ins().imul(total_idx, eb);
-            let off = self.builder.ins().iadd_imm(off, header_bytes);
-            let addr = self.builder.ins().iadd(arr, off);
+            let off = self.builder.ins().imul(idx, eb);
+            let addr = self.builder.ins().iadd(data_ptr, off);
             
             match elem_bytes {
                 1 => {
@@ -1466,12 +1453,11 @@ impl FunctionCompiler<'_> {
         } else {
             let elem_slots = (elem_bytes + 7) / 8;
             let eb = self.builder.ins().iconst(types::I64, elem_bytes as i64);
-            let off = self.builder.ins().imul(total_idx, eb);
-            let off = self.builder.ins().iadd_imm(off, header_bytes);
+            let off = self.builder.ins().imul(idx, eb);
             for i in 0..elem_slots {
                 let v = self.read_var(inst.c + i as u16);
                 let slot_off = self.builder.ins().iadd_imm(off, (i * 8) as i64);
-                let addr = self.builder.ins().iadd(arr, slot_off);
+                let addr = self.builder.ins().iadd(data_ptr, slot_off);
                 self.builder.ins().store(MemFlags::trusted(), v, addr, 0);
             }
         }

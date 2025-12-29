@@ -58,12 +58,27 @@ pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
 }
 
 /// Compile expression, return result slot.
+/// For variables and references already in a slot, returns that slot directly (no Copy).
 pub fn compile_expr(
     expr: &Expr,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
+    // Fast path: check if expression already has a usable location
+    match get_expr_source(expr, ctx, func, info) {
+        ExprSource::Location(StorageKind::StackValue { slot, slots: 1 }) => {
+            // Single-slot stack variable: return directly, no allocation needed
+            return Ok(slot);
+        }
+        ExprSource::Location(StorageKind::Reference { slot }) => {
+            // Reference types (slice/map/chan): GcRef is the value, return directly
+            return Ok(slot);
+        }
+        _ => {}
+    }
+    
+    // Standard path: allocate temp and compile
     let slots = info.expr_slots(expr.id);
     let dst = func.alloc_temp(slots);
     compile_expr_to(expr, dst, ctx, func, info)?;
