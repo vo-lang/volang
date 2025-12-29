@@ -435,44 +435,71 @@ fn parse_func_signature(sig: &str, name: &str) -> Option<VoFuncSig> {
 }
 
 /// Parse parameter list.
+/// Handles Go-style shared types: "x, y float64" → two params both with float64
 fn parse_params(s: &str) -> Vec<VoParam> {
     let s = s.trim();
     if s.is_empty() {
         return Vec::new();
     }
     
-    let mut params = Vec::new();
+    // First pass: split by comma and collect (names, type_str) pairs
+    let parts: Vec<&str> = s.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
     
-    // Split by comma (simple, doesn't handle nested types with commas)
-    for part in s.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        
-        // Format: "name type" or "name1, name2 type" (shared type)
+    // For Go-style "x, y float64", we need to find the type from the last part that has one
+    // and apply it backwards to parts without types
+    let mut parsed: Vec<(Vec<String>, Option<VoType>)> = Vec::new();
+    
+    for part in &parts {
         let tokens: Vec<&str> = part.split_whitespace().collect();
         if tokens.len() >= 2 {
+            // Has type: "name type" or "name1 name2 type" (shouldn't happen but handle it)
             let ty_str = tokens.last().unwrap();
-            let ty = VoType::parse(ty_str).unwrap_or(VoType::Any);
-            
-            for &name in &tokens[..tokens.len() - 1] {
-                params.push(VoParam {
-                    name: name.trim_end_matches(',').to_string(),
-                    ty: ty.clone(),
-                });
-            }
+            let ty = VoType::parse(ty_str);
+            let names: Vec<String> = tokens[..tokens.len() - 1]
+                .iter()
+                .map(|n| n.trim_end_matches(',').to_string())
+                .collect();
+            parsed.push((names, ty));
         } else if tokens.len() == 1 {
-            // Just a type (unnamed parameter)
-            let ty = VoType::parse(tokens[0]).unwrap_or(VoType::Any);
-            params.push(VoParam {
-                name: String::new(),
-                ty,
-            });
+            // Just a name (type comes from next group) or just a type
+            let token = tokens[0];
+            // Check if it's a known type
+            if VoType::parse(token).is_some() && !token.chars().next().unwrap().is_lowercase() {
+                // Likely a type (capitalized or known keyword)
+                parsed.push((vec![], VoType::parse(token)));
+            } else {
+                // Just a name, type will be filled from next part
+                parsed.push((vec![token.to_string()], None));
+            }
         }
     }
     
-    params
+    // Second pass: fill in missing types from the next part that has a type
+    let mut result = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
+    
+    for (names, ty_opt) in parsed {
+        if let Some(ty) = ty_opt {
+            // First, flush pending names with this type
+            for name in pending_names.drain(..) {
+                result.push(VoParam { name, ty: ty.clone() });
+            }
+            // Then add current names with this type
+            for name in names {
+                result.push(VoParam { name, ty: ty.clone() });
+            }
+        } else {
+            // No type yet, accumulate names
+            pending_names.extend(names);
+        }
+    }
+    
+    // If there are still pending names without type, they become Any
+    for name in pending_names {
+        result.push(VoParam { name, ty: VoType::Any });
+    }
+    
+    result
 }
 
 /// Parse return type list.
