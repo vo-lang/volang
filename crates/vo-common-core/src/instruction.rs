@@ -155,6 +155,8 @@ pub enum Opcode {
     ArrayNew,
     ArrayGet,
     ArraySet,
+    /// Get element address: a=dst, b=array_gcref, c=index, flags=elem_bytes
+    ArrayAddr,
 
     // === SLICE: Slice operations ===
     SliceNew,
@@ -164,6 +166,8 @@ pub enum Opcode {
     SliceCap,
     SliceSlice,
     SliceAppend,
+    /// Get element address: a=dst, b=slice_reg, c=index, flags=elem_bytes
+    SliceAddr,
 
     // === MAP: Map operations ===
     MapNew,

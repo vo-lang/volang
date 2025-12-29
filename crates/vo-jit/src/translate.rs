@@ -1596,6 +1596,47 @@ impl FunctionCompiler<'_> {
         self.write_var(inst.a, result);
     }
 
+    pub(crate) fn translate_slice_addr(&mut self, inst: &Instruction) {
+        // SliceAddr: a=dst, b=slice, c=index, flags=elem_bytes
+        // Returns data_ptr + idx * elem_bytes
+        use vo_runtime::objects::slice::FIELD_DATA_PTR;
+        use cranelift_codegen::ir::MemFlags;
+        
+        let s = self.read_var(inst.b);
+        let idx = self.read_var(inst.c);
+        let elem_bytes = inst.flags as i64;
+        
+        // Load data_ptr from slice
+        let data_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), s, (FIELD_DATA_PTR * 8) as i32);
+        
+        // addr = data_ptr + idx * elem_bytes
+        let eb = self.builder.ins().iconst(types::I64, elem_bytes);
+        let off = self.builder.ins().imul(idx, eb);
+        let addr = self.builder.ins().iadd(data_ptr, off);
+        
+        self.write_var(inst.a, addr);
+    }
+
+    pub(crate) fn translate_array_addr(&mut self, inst: &Instruction) {
+        // ArrayAddr: a=dst, b=array_gcref, c=index, flags=elem_bytes
+        // Returns data_ptr + idx * elem_bytes (data starts after ArrayHeader)
+        use vo_runtime::objects::array::HEADER_SLOTS;
+        
+        let arr = self.read_var(inst.b);
+        let idx = self.read_var(inst.c);
+        let elem_bytes = inst.flags as i64;
+        
+        // data_ptr = arr + HEADER_SLOTS * 8 (ArrayHeader is 2 slots = 16 bytes)
+        let data_ptr = self.builder.ins().iadd_imm(arr, (HEADER_SLOTS * 8) as i64);
+        
+        // addr = data_ptr + idx * elem_bytes
+        let eb = self.builder.ins().iconst(types::I64, elem_bytes);
+        let off = self.builder.ins().imul(idx, eb);
+        let addr = self.builder.ins().iadd(data_ptr, off);
+        
+        self.write_var(inst.a, addr);
+    }
+
     // =========================================================================
     // Map operations
     // =========================================================================

@@ -1083,6 +1083,16 @@ impl Vm {
                     }
                     ExecResult::Continue
                 }
+                Opcode::ArrayAddr => {
+                    // Get element address: a=dst, b=array_gcref, c=index, flags=elem_bytes
+                    let arr = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
+                    let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
+                    let elem_bytes = inst.flags as usize;
+                    let base = array::data_ptr_bytes(arr);
+                    let addr = unsafe { base.add(idx * elem_bytes) } as u64;
+                    stack_set!(fiber.stack, bp + inst.a as usize, addr);
+                    ExecResult::Continue
+                }
 
                 // Slice operations
                 Opcode::SliceNew => {
@@ -1174,6 +1184,16 @@ impl Vm {
                 }
                 Opcode::SliceAppend => {
                     exec::exec_slice_append(fiber, &inst, &mut self.state.gc);
+                    ExecResult::Continue
+                }
+                Opcode::SliceAddr => {
+                    // Get element address: a=dst, b=slice_reg, c=index, flags=elem_bytes
+                    let s = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
+                    let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
+                    let elem_bytes = inst.flags as usize;
+                    let base = slice_data_ptr!(s);
+                    let addr = unsafe { base.add(idx * elem_bytes) } as u64;
+                    stack_set!(fiber.stack, bp + inst.a as usize, addr);
                     ExecResult::Continue
                 }
 
@@ -1771,6 +1791,15 @@ fn exec_inst_inline(
             }
             ExecResult::Continue
         }
+        Opcode::ArrayAddr => {
+            let arr = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
+            let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
+            let elem_bytes = inst.flags as usize;
+            let base = array::data_ptr_bytes(arr);
+            let addr = unsafe { base.add(idx * elem_bytes) } as u64;
+            stack_set!(fiber.stack, bp + inst.a as usize, addr);
+            ExecResult::Continue
+        }
         // Slice
         Opcode::SliceNew => { exec::exec_slice_new(fiber, inst, &mut state.gc); ExecResult::Continue }
         Opcode::SliceGet => {
@@ -1854,6 +1883,15 @@ fn exec_inst_inline(
         }
         Opcode::SliceSlice => { exec::exec_slice_slice(fiber, inst, &mut state.gc); ExecResult::Continue }
         Opcode::SliceAppend => { exec::exec_slice_append(fiber, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::SliceAddr => {
+            let s = stack_get!(fiber.stack, bp + inst.b as usize) as GcRef;
+            let idx = stack_get!(fiber.stack, bp + inst.c as usize) as usize;
+            let elem_bytes = inst.flags as usize;
+            let base = slice_data_ptr!(s);
+            let addr = unsafe { base.add(idx * elem_bytes) } as u64;
+            stack_set!(fiber.stack, bp + inst.a as usize, addr);
+            ExecResult::Continue
+        }
         // Map
         Opcode::MapNew => { exec::exec_map_new(fiber, inst, &mut state.gc); ExecResult::Continue }
         Opcode::MapGet => { exec::exec_map_get(fiber, inst); ExecResult::Continue }

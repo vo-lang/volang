@@ -256,6 +256,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::ArrayNew => format!("ArrayNew      r{}, len=r{}, elem_slots={}", a, b, flags),
         Opcode::ArrayGet => format!("ArrayGet      r{}, r{}[r{}], elem_slots={}", a, b, c, flags),
         Opcode::ArraySet => format!("ArraySet      r{}[r{}], r{}, elem_slots={}", a, b, c, flags),
+        Opcode::ArrayAddr => format!("ArrayAddr     r{}, r{}[r{}], elem_bytes={}", a, b, c, flags),
 
         // SLICE
         Opcode::SliceNew => format!("SliceNew      r{}, r{}, lo=r{}, hi=r{}", a, b, c, flags),
@@ -265,6 +266,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::SliceCap => format!("SliceCap      r{}, r{}", a, b),
         Opcode::SliceSlice => format!("SliceSlice    r{}, r{}, lo=r{}, hi=r{}", a, b, c, flags),
         Opcode::SliceAppend => format!("SliceAppend   r{}, r{}, r{}, elem_slots={}", a, b, c, flags),
+        Opcode::SliceAddr => format!("SliceAddr     r{}, r{}[r{}], elem_bytes={}", a, b, c, flags),
 
         // MAP
         Opcode::MapNew => format!("MapNew        r{}", a),

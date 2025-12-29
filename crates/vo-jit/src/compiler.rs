@@ -431,6 +431,7 @@ impl<'a> FunctionCompiler<'a> {
             Opcode::ArrayNew => self.translate_array_new(inst),
             Opcode::ArrayGet => self.translate_array_get(inst),
             Opcode::ArraySet => self.translate_array_set(inst),
+            Opcode::ArrayAddr => self.translate_array_addr(inst),
             
             Opcode::SliceNew => self.translate_slice_new(inst),
             Opcode::SliceGet => self.translate_slice_get(inst),
@@ -439,6 +440,7 @@ impl<'a> FunctionCompiler<'a> {
             Opcode::SliceCap => self.translate_slice_cap(inst),
             Opcode::SliceSlice => self.translate_slice_slice(inst),
             Opcode::SliceAppend => self.translate_slice_append(inst),
+            Opcode::SliceAddr => self.translate_slice_addr(inst),
             
             Opcode::MapNew => self.translate_map_new(inst),
             Opcode::MapGet => self.translate_map_get(inst),
