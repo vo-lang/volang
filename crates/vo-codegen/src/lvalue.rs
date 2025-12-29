@@ -218,6 +218,7 @@ pub fn resolve_lvalue(
 pub fn emit_lvalue_load(
     lv: &LValue,
     dst: u16,
+    ctx: &mut crate::context::CodegenContext,
     func: &mut FuncBuilder,
 ) {
     match lv {
@@ -258,18 +259,37 @@ pub fn emit_lvalue_load(
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
                     let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    func.emit_with_flags(Opcode::ArrayGet, flags, dst, *container_reg, *index_reg);
+                    if flags == 0 {
+                        // Dynamic case: put index and elem_bytes in consecutive registers
+                        let index_and_eb = func.alloc_temp(2);
+                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
+                        let eb_idx = ctx.const_int(*elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                        func.emit_with_flags(Opcode::ArrayGet, flags, dst, *container_reg, index_and_eb);
+                    } else {
+                        func.emit_with_flags(Opcode::ArrayGet, flags, dst, *container_reg, *index_reg);
+                    }
                 }
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
                     let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, *index_reg);
+                    if flags == 0 {
+                        // Dynamic case: put index and elem_bytes in consecutive registers
+                        // c=index, c+1=elem_bytes (via LoadConst)
+                        let index_and_eb = func.alloc_temp(2);
+                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
+                        let eb_idx = ctx.const_int(*elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                        func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, index_and_eb);
+                    } else {
+                        func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, *index_reg);
+                    }
                 }
                 ContainerKind::Map { key_slots, val_slots } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
                     let meta_reg = func.alloc_temp(1 + *key_slots);
-                    let (b, c) = crate::type_info::encode_i32(meta as i32);
-                    func.emit_op(Opcode::LoadInt, meta_reg, b, c);
+                    let meta_idx = ctx.const_int(meta as i64);
+                    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
                     func.emit_op(Opcode::MapGet, dst, *container_reg, meta_reg);
                 }
@@ -292,6 +312,7 @@ pub fn emit_lvalue_load(
 pub fn emit_lvalue_store(
     lv: &LValue,
     src: u16,
+    ctx: &mut crate::context::CodegenContext,
     func: &mut FuncBuilder,
 ) {
     match lv {
@@ -332,18 +353,37 @@ pub fn emit_lvalue_store(
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
                     let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    func.emit_with_flags(Opcode::ArraySet, flags, *container_reg, *index_reg, src);
+                    if flags == 0 {
+                        // Dynamic case: put index and elem_bytes in consecutive registers
+                        let index_and_eb = func.alloc_temp(2);
+                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
+                        let eb_idx = ctx.const_int(*elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                        func.emit_with_flags(Opcode::ArraySet, flags, *container_reg, index_and_eb, src);
+                    } else {
+                        func.emit_with_flags(Opcode::ArraySet, flags, *container_reg, *index_reg, src);
+                    }
                 }
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
                     let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, *index_reg, src);
+                    if flags == 0 {
+                        // Dynamic case: put index and elem_bytes in consecutive registers
+                        // b=index, b+1=elem_bytes (via LoadConst)
+                        let index_and_eb = func.alloc_temp(2);
+                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
+                        let eb_idx = ctx.const_int(*elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                        func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, index_and_eb, src);
+                    } else {
+                        func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, *index_reg, src);
+                    }
                 }
                 ContainerKind::Map { key_slots, val_slots } => {
                     // MapSet: a=map, b=meta_and_key, c=val
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
                     let meta_and_key_reg = func.alloc_temp(1 + *key_slots);
-                    let (b, c) = crate::type_info::encode_i32(meta as i32);
-                    func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
+                    let meta_idx = ctx.const_int(meta as i64);
+                    func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
                     func.emit_op(Opcode::MapSet, *container_reg, meta_and_key_reg, src);
                 }

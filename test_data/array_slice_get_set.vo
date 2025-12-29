@@ -1,0 +1,223 @@
+// Test: comprehensive array/slice get/set operations
+// Covers: int8, int16, int32, int64, float32, float64, small struct, large struct
+
+package main
+
+// Small struct (16 bytes = 2 slots, flags != 0)
+type SmallStruct struct {
+    a int64
+    b int64
+}
+
+// Medium struct (56 bytes = 7 slots, flags != 0)
+type MediumStruct struct {
+    a int64
+    b int64
+    c int64
+    d int64
+    e int64
+    f int64
+    g int64
+}
+
+// Large struct (72 bytes = 9 slots, flags = 0, dynamic path)
+type LargeStruct struct {
+    a int64
+    b int64
+    c int64
+    d int64
+    e int64
+    f int64
+    g int64
+    h int64
+    i int64
+}
+
+func testInt8() {
+    // Slice of int8
+    s := make([]int8, 4)
+    s[0] = 1
+    s[1] = -128
+    s[2] = 127
+    s[3] = 0
+    
+    if s[0] != 1 { println("FAIL: int8 s[0]") }
+    if s[1] != -128 { println("FAIL: int8 s[1]") }
+    if s[2] != 127 { println("FAIL: int8 s[2]") }
+    if s[3] != 0 { println("FAIL: int8 s[3]") }
+    println("int8 OK")
+}
+
+func testInt16() {
+    s := make([]int16, 4)
+    s[0] = 1
+    s[1] = -32768
+    s[2] = 32767
+    s[3] = 0
+    
+    if s[0] != 1 { println("FAIL: int16 s[0]") }
+    if s[1] != -32768 { println("FAIL: int16 s[1]") }
+    if s[2] != 32767 { println("FAIL: int16 s[2]") }
+    if s[3] != 0 { println("FAIL: int16 s[3]") }
+    println("int16 OK")
+}
+
+func testInt32() {
+    s := make([]int32, 4)
+    s[0] = 1
+    s[1] = -2147483648
+    s[2] = 2147483647
+    s[3] = 0
+    
+    if s[0] != 1 { println("FAIL: int32 s[0]") }
+    if s[1] != -2147483648 { println("FAIL: int32 s[1]") }
+    if s[2] != 2147483647 { println("FAIL: int32 s[2]") }
+    if s[3] != 0 { println("FAIL: int32 s[3]") }
+    println("int32 OK")
+}
+
+func testInt64() {
+    s := make([]int64, 4)
+    s[0] = 1
+    s[1] = -9223372036854775808
+    s[2] = 9223372036854775807
+    s[3] = 0
+    
+    if s[0] != 1 { println("FAIL: int64 s[0]") }
+    if s[1] != -9223372036854775808 { println("FAIL: int64 s[1]") }
+    if s[2] != 9223372036854775807 { println("FAIL: int64 s[2]") }
+    if s[3] != 0 { println("FAIL: int64 s[3]") }
+    println("int64 OK")
+}
+
+func testFloat32() {
+    s := make([]float32, 3)
+    s[0] = 1.5
+    s[1] = -3.14
+    s[2] = 0.0
+    
+    if s[0] != 1.5 { println("FAIL: float32 s[0]") }
+    if s[1] != -3.14 { println("FAIL: float32 s[1]") }
+    if s[2] != 0.0 { println("FAIL: float32 s[2]") }
+    println("float32 OK")
+}
+
+func testFloat64() {
+    s := make([]float64, 3)
+    s[0] = 1.5
+    s[1] = -3.14159265358979
+    s[2] = 0.0
+    
+    if s[0] != 1.5 { println("FAIL: float64 s[0]") }
+    if s[1] != -3.14159265358979 { println("FAIL: float64 s[1]") }
+    if s[2] != 0.0 { println("FAIL: float64 s[2]") }
+    println("float64 OK")
+}
+
+func testSmallStruct() {
+    // SmallStruct: 16 bytes (2 slots), flags != 0
+    s := make([]SmallStruct, 3)
+    s[0] = SmallStruct{1, 2}
+    s[1] = SmallStruct{10, 20}
+    s[2] = SmallStruct{100, 200}
+    
+    if s[0].a != 1 || s[0].b != 2 { println("FAIL: SmallStruct s[0]") }
+    if s[1].a != 10 || s[1].b != 20 { println("FAIL: SmallStruct s[1]") }
+    if s[2].a != 100 || s[2].b != 200 { println("FAIL: SmallStruct s[2]") }
+    println("SmallStruct OK")
+}
+
+func testMediumStruct() {
+    // MediumStruct: 56 bytes (7 slots), flags != 0
+    s := make([]MediumStruct, 2)
+    s[0] = MediumStruct{1, 2, 3, 4, 5, 6, 7}
+    s[1] = MediumStruct{10, 20, 30, 40, 50, 60, 70}
+    
+    if s[0].a != 1 || s[0].g != 7 { println("FAIL: MediumStruct s[0]") }
+    if s[1].a != 10 || s[1].g != 70 { println("FAIL: MediumStruct s[1]") }
+    println("MediumStruct OK")
+}
+
+func testLargeStruct() {
+    // LargeStruct: 72 bytes (9 slots), flags = 0 (dynamic path)
+    s := make([]LargeStruct, 2)
+    s[0] = LargeStruct{1, 2, 3, 4, 5, 6, 7, 8, 9}
+    s[1] = LargeStruct{10, 20, 30, 40, 50, 60, 70, 80, 90}
+    
+    v0 := s[0]
+    v1 := s[1]
+    
+    if v0.a != 1 { println("FAIL: LargeStruct v0.a") }
+    if v0.e != 5 { println("FAIL: LargeStruct v0.e") }
+    if v0.i != 9 { println("FAIL: LargeStruct v0.i") }
+    if v1.a != 10 { println("FAIL: LargeStruct v1.a") }
+    if v1.e != 50 { println("FAIL: LargeStruct v1.e") }
+    if v1.i != 90 { println("FAIL: LargeStruct v1.i") }
+    println("LargeStruct OK")
+}
+
+func testArrayInt() {
+    // Fixed-size array
+    var arr [4]int64
+    arr[0] = 100
+    arr[1] = 200
+    arr[2] = 300
+    arr[3] = 400
+    
+    if arr[0] != 100 { println("FAIL: array arr[0]") }
+    if arr[1] != 200 { println("FAIL: array arr[1]") }
+    if arr[2] != 300 { println("FAIL: array arr[2]") }
+    if arr[3] != 400 { println("FAIL: array arr[3]") }
+    println("Array int64 OK")
+}
+
+func testSliceLiteral() {
+    // Slice literal
+    s := []int64{1, 2, 3, 4, 5}
+    
+    if s[0] != 1 { println("FAIL: literal s[0]") }
+    if s[4] != 5 { println("FAIL: literal s[4]") }
+    if len(s) != 5 { println("FAIL: literal len") }
+    println("Slice literal OK")
+}
+
+func testAppend() {
+    s := make([]int64, 0, 4)
+    s = append(s, 1)
+    s = append(s, 2)
+    s = append(s, 3)
+    
+    if s[0] != 1 { println("FAIL: append s[0]") }
+    if s[1] != 2 { println("FAIL: append s[1]") }
+    if s[2] != 3 { println("FAIL: append s[2]") }
+    if len(s) != 3 { println("FAIL: append len") }
+    println("Append OK")
+}
+
+func testAppendLargeStruct() {
+    // Append with large struct (dynamic path)
+    s := make([]LargeStruct, 0, 2)
+    s = append(s, LargeStruct{1, 2, 3, 4, 5, 6, 7, 8, 9})
+    s = append(s, LargeStruct{10, 20, 30, 40, 50, 60, 70, 80, 90})
+    
+    if s[0].a != 1 || s[0].i != 9 { println("FAIL: append large s[0]") }
+    if s[1].a != 10 || s[1].i != 90 { println("FAIL: append large s[1]") }
+    println("Append LargeStruct OK")
+}
+
+func main() {
+    testInt8()
+    testInt16()
+    testInt32()
+    testInt64()
+    testFloat32()
+    testFloat64()
+    testSmallStruct()
+    testMediumStruct()
+    testLargeStruct()
+    testArrayInt()
+    testSliceLiteral()
+    testAppend()
+    testAppendLargeStruct()
+    println("All tests passed!")
+}

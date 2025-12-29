@@ -71,6 +71,9 @@ pub struct FunctionCompiler<'a> {
     pub(crate) slice_funcs: SliceFuncs,
     /// Misc helper FuncRefs.
     pub(crate) misc_funcs: MiscFuncs,
+    /// Map of register -> constant value for LoadConst instructions.
+    /// Used by dynamic elem_bytes lookups.
+    pub(crate) reg_consts: HashMap<u16, i64>,
 }
 
 /// FuncRefs for string operations.
@@ -182,7 +185,14 @@ impl<'a> FunctionCompiler<'a> {
             array_funcs,
             slice_funcs,
             misc_funcs,
+            reg_consts: HashMap::new(),
         }
+    }
+    
+    /// Get constant value for a register (set by LoadConst).
+    /// Used for dynamic elem_bytes lookups.
+    pub fn get_const_from_reg(&self, reg: u16) -> i64 {
+        *self.reg_consts.get(&reg).expect("JIT: register not set by LoadConst")
     }
 
     /// Compile the function and return the stack map.

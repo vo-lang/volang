@@ -497,7 +497,7 @@ fn compile_index(
     
     // Use LValue abstraction - resolves container kind and compiles index
     let lv = resolve_lvalue(expr, ctx, func, info)?;
-    emit_lvalue_load(&lv, dst, func);
+    emit_lvalue_load(&lv, dst, ctx, func);
     Ok(())
 }
 
@@ -1524,8 +1524,11 @@ fn compile_builtin_call(
                     let meta_reg = func.alloc_temp(1);
                     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
                     
-                    // len and cap in consecutive registers
-                    let len_cap_reg = func.alloc_temp(2);
+                    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+                    // When flags=0 (elem_bytes > 63), put elem_bytes in c+2
+                    let num_regs = if flags == 0 { 3 } else { 2 };
+                    let len_cap_reg = func.alloc_temp(num_regs);
+                    
                     if call.args.len() > 1 {
                         compile_expr_to(&call.args[1], len_cap_reg, _ctx, func, info)?;
                     } else {
@@ -1537,9 +1540,13 @@ fn compile_builtin_call(
                         // cap = len
                         func.emit_op(Opcode::Copy, len_cap_reg + 1, len_cap_reg, 0);
                     }
+                    if flags == 0 {
+                        // Store elem_bytes in c+2 for dynamic case (use LoadConst so JIT can read from const table)
+                        let elem_bytes_idx = _ctx.const_int(elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, len_cap_reg + 2, elem_bytes_idx, 0);
+                    }
                     
                     // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
-                    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                     func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
                 } else if info.is_map(type_key) {
                     // make(map[K]V)
@@ -1584,13 +1591,23 @@ fn compile_builtin_call(
             // Get elem_meta as raw u32 value
             let elem_meta_idx = _ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
             
-            // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_bytes
-            // c: [elem_meta (1 slot)], c+1..: [elem (elem_slots)]
-            let meta_and_elem_reg = func.alloc_temp(1 + elem_slots);
-            func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
-            compile_expr_to(&call.args[1], meta_and_elem_reg + 1, _ctx, func, info)?;
-            
             let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+            // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
+            // When flags!=0: c=[elem_meta], c+1..=[elem]
+            // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
+            let extra_slot = if flags == 0 { 1 } else { 0 };
+            let meta_and_elem_reg = func.alloc_temp(1 + extra_slot + elem_slots);
+            func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
+            if flags == 0 {
+                // Store elem_bytes at c+1, elem starts at c+2 (use LoadConst so JIT can read from const table)
+                let elem_bytes_idx = _ctx.const_int(elem_bytes as i64);
+                func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
+                compile_expr_to(&call.args[1], meta_and_elem_reg + 2, _ctx, func, info)?;
+            } else {
+                // elem starts at c+1
+                compile_expr_to(&call.args[1], meta_and_elem_reg + 1, _ctx, func, info)?;
+            }
+            
             func.emit_with_flags(Opcode::SliceAppend, flags, dst, slice_reg, meta_and_elem_reg);
         }
         "copy" => {
@@ -1615,7 +1632,8 @@ fn compile_builtin_call(
             let (key_slots, _) = info.map_key_val_slots(map_type);
             
             let meta_and_key_reg = func.alloc_temp(1 + key_slots);
-            func.emit_op(Opcode::LoadInt, meta_and_key_reg, key_slots, 0);
+            let meta_idx = _ctx.const_int(key_slots as i64);
+            func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
             func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
             
             func.emit_op(Opcode::MapDelete, map_reg, meta_and_key_reg, 0);
@@ -1732,21 +1750,35 @@ fn compile_composite_lit(
         let meta_reg = func.alloc_temp(1);
         func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
         
-        // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_bytes
-        // c and c+1 hold len and cap
-        let len_cap_reg = func.alloc_temp(2);
+        // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        // When flags=0 (dynamic), put len, cap, elem_bytes in consecutive registers
+        let num_regs = if flags == 0 { 3 } else { 2 };
+        let len_cap_reg = func.alloc_temp(num_regs);
         let (b, c) = crate::type_info::encode_i32(len as i32);
         func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
         func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
-        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
+        }
         func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
         
         // Set each element
         for (i, elem) in lit.elems.iter().enumerate() {
             let val_reg = compile_expr(&elem.value, ctx, func, info)?;
-            let idx_reg = func.alloc_temp(1);
-            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_reg, val_reg);
+            if flags == 0 {
+                // Dynamic case: put index and elem_bytes in consecutive registers
+                let idx_and_eb = func.alloc_temp(2);
+                func.emit_op(Opcode::LoadInt, idx_and_eb, i as u16, 0);
+                let eb_idx = ctx.const_int(elem_bytes as i64);
+                func.emit_op(Opcode::LoadConst, idx_and_eb + 1, eb_idx, 0);
+                func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_and_eb, val_reg);
+            } else {
+                let idx_reg = func.alloc_temp(1);
+                func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+                func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_reg, val_reg);
+            }
         }
     } else if info.is_map(type_key) {
         // Map literal: map[K]V{k1: v1, k2: v2, ...}
@@ -1782,8 +1814,8 @@ fn compile_composite_lit(
                 // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
                 let meta_and_key_reg = func.alloc_temp(1 + key_slots as u16);
                 let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
-                let (b, c) = crate::type_info::encode_i32(meta as i32);
-                func.emit_op(Opcode::LoadInt, meta_and_key_reg, b, c);
+                let meta_idx = ctx.const_int(meta as i64);
+                func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                 
                 // Compile key into meta_and_key_reg+1
                 // Handle both Expr and Ident (for bool literals like true/false)

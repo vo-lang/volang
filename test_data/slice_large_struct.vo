@@ -1,0 +1,32 @@
+// Test: slice of large struct (>63 bytes) triggers dynamic path
+// This should work correctly after the fix
+
+package main
+
+// 9 int64 fields = 72 bytes > 63, triggers flags=0 (dynamic)
+type BigStruct struct {
+    a int64
+    b int64
+    c int64
+    d int64
+    e int64
+    f int64
+    g int64
+    h int64
+    i int64
+}
+
+func main() {
+    s := make([]BigStruct, 2, 4)
+    
+    s[0] = BigStruct{1, 2, 3, 4, 5, 6, 7, 8, 9}
+    s[1] = BigStruct{10, 20, 30, 40, 50, 60, 70, 80, 90}
+    
+    p0 := s[0]
+    p1 := s[1]
+    
+    println(p0.a)  // expect: 1
+    println(p0.i)  // expect: 9
+    println(p1.a)  // expect: 10
+    println(p1.i)  // expect: 90
+}

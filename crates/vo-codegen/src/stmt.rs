@@ -100,11 +100,16 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let meta_reg = self.func.alloc_temp(1);
         self.func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
-        let len_reg = self.func.alloc_temp(1);
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        // When flags=0 (dynamic), put len and elem_bytes in consecutive registers
+        let num_regs = if flags == 0 { 2 } else { 1 };
+        let len_reg = self.func.alloc_temp(num_regs);
         let (b, c) = encode_i32(arr_len as i32);
         self.func.emit_op(Opcode::LoadInt, len_reg, b, c);
-
-        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let eb_idx = self.ctx.const_int(elem_bytes as i64);
+            self.func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
+        }
         self.func.emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
 
         Ok(StorageKind::HeapArray { gcref_slot, elem_slots })
@@ -696,12 +701,21 @@ fn compile_stmt_with_label(
                         lp.emit_key(sc.func, key.as_ref().map(|_| ks));
                         if value.is_some() {
                             // Stack array uses elem_slots, heap array uses elem_bytes
-                            let (op, flags) = if stk {
-                                (Opcode::SlotGetN, es as u8)
+                            if stk {
+                                sc.func.emit_with_flags(Opcode::SlotGetN, es as u8, vs, base, lp.idx_slot);
                             } else {
-                                (Opcode::ArrayGet, vo_common_core::elem_flags(eb, evk))
-                            };
-                            sc.func.emit_with_flags(op, flags, vs, if stk { base } else { reg }, lp.idx_slot);
+                                let flags = vo_common_core::elem_flags(eb, evk);
+                                if flags == 0 {
+                                    // Dynamic case: put index and elem_bytes in consecutive registers
+                                    let index_and_eb = sc.func.alloc_temp(2);
+                                    sc.func.emit_op(Opcode::Copy, index_and_eb, lp.idx_slot, 0);
+                                    let eb_idx = sc.ctx.const_int(eb as i64);
+                                    sc.func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                                    sc.func.emit_with_flags(Opcode::ArrayGet, flags, vs, reg, index_and_eb);
+                                } else {
+                                    sc.func.emit_with_flags(Opcode::ArrayGet, flags, vs, reg, lp.idx_slot);
+                                }
+                            }
                         }
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
                         lp.end(sc.func);
@@ -719,7 +733,16 @@ fn compile_stmt_with_label(
                         lp.emit_key(sc.func, key.as_ref().map(|_| ks));
                         if value.is_some() {
                             let flags = vo_common_core::elem_flags(eb, evk);
-                            sc.func.emit_with_flags(Opcode::SliceGet, flags, vs, reg, lp.idx_slot);
+                            if flags == 0 {
+                                // Dynamic case: put index and elem_bytes in consecutive registers
+                                let index_and_eb = sc.func.alloc_temp(2);
+                                sc.func.emit_op(Opcode::Copy, index_and_eb, lp.idx_slot, 0);
+                                let eb_idx = sc.ctx.const_int(eb as i64);
+                                sc.func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+                                sc.func.emit_with_flags(Opcode::SliceGet, flags, vs, reg, index_and_eb);
+                            } else {
+                                sc.func.emit_with_flags(Opcode::SliceGet, flags, vs, reg, lp.idx_slot);
+                            }
                         }
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
                         lp.end(sc.func);
@@ -883,7 +906,7 @@ fn compile_stmt_with_label(
             
             let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
             let tmp = func.alloc_temp(1);
-            emit_lvalue_load(&lv, tmp, func);
+            emit_lvalue_load(&lv, tmp, ctx, func);
             
             let one = func.alloc_temp(1);
             func.emit_op(Opcode::LoadInt, one, 1, 0);
@@ -894,7 +917,7 @@ fn compile_stmt_with_label(
                 func.emit_op(Opcode::SubI, tmp, tmp, one);
             }
             
-            emit_lvalue_store(&lv, tmp, func);
+            emit_lvalue_store(&lv, tmp, ctx, func);
         }
 
         // === TypeSwitch ===
@@ -1673,7 +1696,7 @@ fn compile_assign(
     // Compile RHS to temp, then store to LValue
     let tmp = func.alloc_temp(slots);
     compile_expr_to(rhs, tmp, ctx, func, info)?;
-    emit_lvalue_store(&lv, tmp, func);
+    emit_lvalue_store(&lv, tmp, ctx, func);
     
     Ok(())
 }
@@ -1692,7 +1715,7 @@ fn compile_assign_to_interface(
     // Interface is always 2 slots
     let tmp = func.alloc_temp(2);
     compile_iface_assign(tmp, rhs, iface_type, ctx, func, info)?;
-    emit_lvalue_store(lv, tmp, func);
+    emit_lvalue_store(lv, tmp, ctx, func);
     Ok(())
 }
 
@@ -1742,9 +1765,9 @@ fn compile_compound_assign(
     
     // Read current value, apply operation, write back
     let tmp = func.alloc_temp(slots);
-    emit_lvalue_load(&lv, tmp, func);
+    emit_lvalue_load(&lv, tmp, ctx, func);
     func.emit_op(opcode, tmp, tmp, rhs_reg);
-    emit_lvalue_store(&lv, tmp, func);
+    emit_lvalue_store(&lv, tmp, ctx, func);
     
     Ok(())
 }

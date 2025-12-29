@@ -25,11 +25,21 @@ impl FunctionCompiler<'_> {
         
         let const_idx = inst.b as usize;
         let val = match &self.vo_module.constants[const_idx] {
-            Constant::Nil => self.builder.ins().iconst(types::I64, 0),
-            Constant::Bool(b) => self.builder.ins().iconst(types::I64, *b as i64),
-            Constant::Int(i) => self.builder.ins().iconst(types::I64, *i),
+            Constant::Nil => {
+                self.reg_consts.insert(inst.a, 0);
+                self.builder.ins().iconst(types::I64, 0)
+            }
+            Constant::Bool(b) => {
+                self.reg_consts.insert(inst.a, *b as i64);
+                self.builder.ins().iconst(types::I64, *b as i64)
+            }
+            Constant::Int(i) => {
+                self.reg_consts.insert(inst.a, *i);
+                self.builder.ins().iconst(types::I64, *i)
+            }
             Constant::Float(f) => {
                 let bits = f.to_bits() as i64;
+                self.reg_consts.insert(inst.a, bits);
                 self.builder.ins().iconst(types::I64, bits)
             }
             Constant::String(_) => {
@@ -1186,10 +1196,10 @@ impl FunctionCompiler<'_> {
         let idx = self.read_var(inst.c);
         let header_bytes = (HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        // flags: 0=dynamic (elem_bytes in c+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed (just u32)
         let (elem_bytes, needs_sext) = match inst.flags {
-            0 => panic!("JIT: ArrayGet with flags=0 not supported"),
+            0 => (self.get_const_from_reg(inst.c + 1) as usize, false),  // dynamic: elem_bytes in c+1
             0x81 => (1, true),   // int8
             0x82 => (2, true),   // int16
             0x84 => (4, true),   // int32
@@ -1245,10 +1255,10 @@ impl FunctionCompiler<'_> {
         let val = self.read_var(inst.c);
         let header_bytes = (HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        // flags: 0=dynamic (elem_bytes in b+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let elem_bytes = match inst.flags {
-            0 => panic!("JIT: ArraySet with flags=0 not supported"),
+            0 => self.get_const_from_reg(inst.b + 1) as usize,  // dynamic: elem_bytes in b+1
             0x81 => 1,  // int8
             0x82 => 2,  // int16
             0x84 | 0x44 => 4,  // int32 or float32
@@ -1297,20 +1307,40 @@ impl FunctionCompiler<'_> {
     // =========================================================================
 
     pub(crate) fn translate_slice_new(&mut self, inst: &Instruction) {
-        // SliceNew: a = dst, b = elem_meta_slot, c = len_slot (cap at c+1), flags = elem_bytes
+        // SliceNew: a = dst, b = elem_meta_slot, c = len_slot (cap at c+1), flags = elem_flags
         let slice_new_func = match self.slice_funcs.slice_new {
             Some(f) => f,
             None => return,
         };
         
+        // flags: 0=dynamic (read from c+2 via LoadConst), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        let elem_bytes: usize = match inst.flags {
+            0 => {
+                // dynamic: elem_bytes loaded via LoadConst, we need to find the const index
+                // Look at the instruction that loads c+2 - it should be a LoadConst
+                // For now, read from register (the value is already loaded)
+                // TODO: Could optimize by reading from const table directly
+                0 // Will use register value
+            }
+            0x81 => 1,   // int8
+            0x82 => 2,   // int16
+            0x84 | 0x44 => 4,   // int32 or float32
+            f => f as usize,
+        };
+        let elem_bytes_val = if inst.flags == 0 {
+            let eb = self.read_var(inst.c + 2);
+            self.builder.ins().ireduce(types::I32, eb)
+        } else {
+            self.builder.ins().iconst(types::I32, elem_bytes as i64)
+        };
+        
         let gc_ptr = self.load_gc_ptr();
         let meta_raw = self.read_var(inst.b);
         let meta_i32 = self.builder.ins().ireduce(types::I32, meta_raw);
-        let elem_bytes = self.builder.ins().iconst(types::I32, inst.flags as i64);
         let len = self.read_var(inst.c);
         let cap = self.read_var(inst.c + 1);
         
-        let call = self.builder.ins().call(slice_new_func, &[gc_ptr, meta_i32, elem_bytes, len, cap]);
+        let call = self.builder.ins().call(slice_new_func, &[gc_ptr, meta_i32, elem_bytes_val, len, cap]);
         let slice_ref = self.builder.inst_results(call)[0];
         
         self.write_var(inst.a, slice_ref);
@@ -1325,10 +1355,17 @@ impl FunctionCompiler<'_> {
         let idx = self.read_var(inst.c);
         let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        // flags: 0=dynamic (elem_bytes in c+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let (elem_bytes, needs_sext) = match inst.flags {
-            0 => panic!("JIT: SliceGet with flags=0 not supported"),
+            0 => {
+                // dynamic: elem_bytes loaded via LoadConst to c+1
+                // Find the constant by looking at the instruction that loaded c+1
+                // The LoadConst instruction should have stored const_idx in inst.b
+                // We need to look up the constant value from the module
+                let eb = self.get_const_from_reg(inst.c + 1);
+                (eb as usize, false)
+            }
             0x81 => (1, true),   // int8
             0x82 => (2, true),   // int16
             0x84 => (4, true),   // int32
@@ -1389,10 +1426,10 @@ impl FunctionCompiler<'_> {
         let val = self.read_var(inst.c);
         let header_bytes = (ARRAY_HEADER_SLOTS * 8) as i64;
         
-        // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        // flags: 0=dynamic (elem_bytes in b+1 via LoadConst), 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
         // float32 stored as f32 bits, no special handling needed
         let elem_bytes = match inst.flags {
-            0 => panic!("JIT: SliceSet with flags=0 not supported"),
+            0 => self.get_const_from_reg(inst.b + 1) as usize,  // dynamic: elem_bytes in b+1
             0x81 => 1,  // int8
             0x82 => 2,  // int16
             0x84 | 0x44 => 4,  // int32 or float32
@@ -1521,33 +1558,48 @@ impl FunctionCompiler<'_> {
     }
 
     pub(crate) fn translate_slice_append(&mut self, inst: &Instruction) {
-        // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_bytes
-        // c: [elem_meta (1 slot)], c+1..: [elem (elem_slots)]
+        // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
+        // When flags!=0: c=[elem_meta], c+1..=[elem]
+        // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
         let slice_append_func = match self.slice_funcs.slice_append {
             Some(f) => f,
             None => return,
         };
         
+        // flags: 0=dynamic (read from c+1 via LoadConst), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
+        let (elem_bytes, elem_offset): (usize, u16) = match inst.flags {
+            0 => (0, 2),  // dynamic: elem_bytes in c+1, elem at c+2 (0 means read from register)
+            0x81 => (1, 1),   // int8
+            0x82 => (2, 1),   // int16
+            0x84 | 0x44 => (4, 1),   // int32 or float32
+            f => (f as usize, 1),
+        };
+        let is_dynamic = inst.flags == 0;
+        
         let gc_ptr = self.load_gc_ptr();
         let s = self.read_var(inst.b);
-        let elem_bytes = inst.flags as usize;
-        let elem_slots = (elem_bytes + 7) / 8;
         
         // Read elem_meta from c (first slot of meta_and_elem)
         let elem_meta_i64 = self.read_var(inst.c);
         let elem_meta = self.builder.ins().ireduce(types::I32, elem_meta_i64);
-        let elem_bytes_val = self.builder.ins().iconst(types::I32, elem_bytes as i64);
+        let elem_bytes_val = if is_dynamic {
+            let eb = self.read_var(inst.c + 1);
+            self.builder.ins().ireduce(types::I32, eb)
+        } else {
+            self.builder.ins().iconst(types::I32, elem_bytes as i64)
+        };
         
-        // Allocate stack space for value
+        // Allocate fixed size (256 bytes = 32 slots) for simplicity
         let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (elem_slots.max(1) * 8) as u32,
+            256,
             0,
         ));
         
-        // Copy value to stack (elem starts at c+1)
-        for i in 0..elem_slots {
-            let val = self.read_var(inst.c + 1 + i as u16);
+        // Copy slots (max 32 for 256 bytes)
+        let max_slots = if is_dynamic { 32 } else { (elem_bytes + 7) / 8 };
+        for i in 0..max_slots {
+            let val = self.read_var(inst.c + elem_offset + i as u16);
             self.builder.ins().stack_store(val, val_slot, (i * 8) as i32);
         }
         

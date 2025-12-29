@@ -1027,7 +1027,15 @@ impl Vm {
                         130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                         132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                         0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                        0 => array::get_auto(arr, idx, array::elem_bytes(arr)),
+                        0 => {
+                            // dynamic: elem_bytes in c+1 register
+                            let elem_bytes = stack_get!(fiber.stack, bp + inst.c as usize + 1) as usize;
+                            for i in 0..(elem_bytes + 7) / 8 {
+                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                                stack_set!(fiber.stack, dst + i, unsafe { *ptr });
+                            }
+                            return ExecResult::Continue;
+                        }
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
@@ -1054,7 +1062,14 @@ impl Vm {
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
-                        0 => array::set_auto(arr, idx, val, array::elem_bytes(arr)),
+                        0 => {
+                            // dynamic: elem_bytes in b+1 register
+                            let elem_bytes = stack_get!(fiber.stack, bp + inst.b as usize + 1) as usize;
+                            for i in 0..(elem_bytes + 7) / 8 {
+                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                unsafe { *ptr = stack_get!(fiber.stack, src + i) };
+                            }
+                        }
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
@@ -1089,7 +1104,15 @@ impl Vm {
                         130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                         132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                         0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                        0 => slice::get_auto(arr, start, idx, array::elem_bytes(arr)),
+                        0 => {
+                            // dynamic: elem_bytes in c+1 register
+                            let elem_bytes = stack_get!(fiber.stack, bp + inst.c as usize + 1) as usize;
+                            for i in 0..(elem_bytes + 7) / 8 {
+                                let ptr = unsafe { base.add((start + idx) * elem_bytes + i * 8) as *const u64 };
+                                stack_set!(fiber.stack, dst + i, unsafe { *ptr });
+                            }
+                            return ExecResult::Continue;
+                        }
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
@@ -1118,7 +1141,14 @@ impl Vm {
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
-                        0 => slice::set_auto(arr, start, idx, val, array::elem_bytes(arr)),
+                        0 => {
+                            // dynamic: elem_bytes in b+1 register
+                            let elem_bytes = stack_get!(fiber.stack, bp + inst.b as usize + 1) as usize;
+                            for i in 0..(elem_bytes + 7) / 8 {
+                                let ptr = unsafe { base.add((start + idx) * elem_bytes + i * 8) as *mut u64 };
+                                unsafe { *ptr = stack_get!(fiber.stack, src + i) };
+                            }
+                        }
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             for i in 0..(elem_bytes + 7) / 8 {
@@ -1691,7 +1721,15 @@ fn exec_inst_inline(
                 130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                 132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                 0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                0 => array::get_auto(arr, idx, array::elem_bytes(arr)),
+                0 => {
+                    // dynamic: elem_bytes in c+1 register
+                    let elem_bytes = stack_get!(fiber.stack, bp + inst.c as usize + 1) as usize;
+                    for i in 0..(elem_bytes + 7) / 8 {
+                        let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
+                        stack_set!(fiber.stack, dst + i, unsafe { *ptr });
+                    }
+                    return ExecResult::Continue;
+                }
                 _ => {
                     let elem_bytes = inst.flags as usize;
                     for i in 0..(elem_bytes + 7) / 8 {
@@ -1718,7 +1756,14 @@ fn exec_inst_inline(
                 4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
-                0 => array::set_auto(arr, idx, val, array::elem_bytes(arr)),
+                0 => {
+                    // dynamic: elem_bytes in b+1 register
+                    let elem_bytes = stack_get!(fiber.stack, bp + inst.b as usize + 1) as usize;
+                    for i in 0..(elem_bytes + 7) / 8 {
+                        let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                        unsafe { *ptr = stack_get!(fiber.stack, src + i) };
+                    }
+                }
                 _ => {
                     let elem_bytes = inst.flags as usize;
                     for i in 0..(elem_bytes + 7) / 8 {
@@ -1749,7 +1794,15 @@ fn exec_inst_inline(
                 130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                 132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                 0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                0 => slice::get_auto(arr, start, idx, array::elem_bytes(arr)),
+                0 => {
+                    // dynamic: elem_bytes in c+1 register
+                    let elem_bytes = stack_get!(fiber.stack, bp + inst.c as usize + 1) as usize;
+                    for i in 0..(elem_bytes + 7) / 8 {
+                        let ptr = unsafe { base.add((start + idx) * elem_bytes + i * 8) as *const u64 };
+                        stack_set!(fiber.stack, dst + i, unsafe { *ptr });
+                    }
+                    return ExecResult::Continue;
+                }
                 _ => {
                     let elem_bytes = inst.flags as usize;
                     for i in 0..(elem_bytes + 7) / 8 {
@@ -1778,7 +1831,14 @@ fn exec_inst_inline(
                 4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                 8 => unsafe { *(base.offset(off * 8) as *mut u64) = val },
-                0 => slice::set_auto(arr, start, idx, val, array::elem_bytes(arr)),
+                0 => {
+                    // dynamic: elem_bytes in b+1 register
+                    let elem_bytes = stack_get!(fiber.stack, bp + inst.b as usize + 1) as usize;
+                    for i in 0..(elem_bytes + 7) / 8 {
+                        let ptr = unsafe { base.add((start + idx) * elem_bytes + i * 8) as *mut u64 };
+                        unsafe { *ptr = stack_get!(fiber.stack, src + i) };
+                    }
+                }
                 _ => {
                     let elem_bytes = inst.flags as usize;
                     for i in 0..(elem_bytes + 7) / 8 {
