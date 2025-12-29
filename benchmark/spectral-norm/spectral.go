@@ -1,0 +1,62 @@
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+func a(i, j int) float64 {
+	return 1.0 / float64((i+j)*(i+j+1)/2+i+1)
+}
+
+func multiplyAv(n int, v, av []float64) {
+	for i := 0; i < n; i++ {
+		av[i] = 0
+		for j := 0; j < n; j++ {
+			av[i] += a(i, j) * v[j]
+		}
+	}
+}
+
+func multiplyAtv(n int, v, atv []float64) {
+	for i := 0; i < n; i++ {
+		atv[i] = 0
+		for j := 0; j < n; j++ {
+			atv[i] += a(j, i) * v[j]
+		}
+	}
+}
+
+func multiplyAtAv(n int, v, atav, av []float64) {
+	multiplyAv(n, v, av)
+	multiplyAtv(n, av, atav)
+}
+
+func spectralNorm(n int) float64 {
+	u := make([]float64, n)
+	v := make([]float64, n)
+	av := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		u[i] = 1
+	}
+
+	for i := 0; i < 10; i++ {
+		multiplyAtAv(n, u, v, av)
+		multiplyAtAv(n, v, u, av)
+	}
+
+	var vBv, vv float64
+	for i := 0; i < n; i++ {
+		vBv += u[i] * v[i]
+		vv += v[i] * v[i]
+	}
+
+	return math.Sqrt(vBv / vv)
+}
+
+func main() {
+	n := 200
+	result := spectralNorm(n)
+	fmt.Printf("%.9f\n", result)
+}

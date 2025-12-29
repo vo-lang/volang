@@ -675,6 +675,26 @@ fn compile_receive(
 
 // === Type conversion (T(x)) ===
 
+/// Compile type conversion from Call syntax: T(x)
+fn compile_type_conversion(
+    src_expr: &Expr,
+    dst: u16,
+    conv_expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    // Compile source expression
+    let src_reg = compile_expr(src_expr, ctx, func, info)?;
+    
+    // Get source and target types
+    let src_type = info.expr_type(src_expr.id);
+    let dst_type = info.expr_type(conv_expr.id);
+    
+    emit_type_conversion(src_reg, dst, src_type, dst_type, func, info);
+    Ok(())
+}
+
 fn compile_conversion(
     expr: &Expr,
     conv: &vo_syntax::ast::ConversionExpr,
@@ -690,6 +710,19 @@ fn compile_conversion(
     let src_type = info.expr_type(conv.expr.id);
     let dst_type = info.expr_type(expr.id);
     
+    emit_type_conversion(src_reg, dst, src_type, dst_type, func, info);
+    Ok(())
+}
+
+/// Emit type conversion instructions
+fn emit_type_conversion(
+    src_reg: u16,
+    dst: u16,
+    src_type: vo_analysis::objects::TypeKey,
+    dst_type: vo_analysis::objects::TypeKey,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
     let src_is_int = info.is_int(src_type);
     let src_is_float = info.is_float(src_type);
     let dst_is_int = info.is_int(dst_type);
@@ -738,8 +771,6 @@ fn compile_conversion(
         // Other conversions - just copy for now
         func.emit_op(Opcode::Copy, dst, src_reg, 0);
     }
-    
-    Ok(())
 }
 
 use crate::type_info::encode_i32;
@@ -951,9 +982,9 @@ fn compile_call(
             let obj_key = info.get_use(ident);
             let obj = &info.project.tc_objs.lobjs[obj_key];
             if obj.entity_type().is_type_name() {
-                // This is a type conversion, compile the argument
+                // This is a type conversion
                 if call.args.len() == 1 {
-                    return compile_expr_to(&call.args[0], dst, ctx, func, info);
+                    return compile_type_conversion(&call.args[0], dst, expr, ctx, func, info);
                 } else if call.args.is_empty() {
                     // Zero value - already handled by default initialization
                     return Ok(());

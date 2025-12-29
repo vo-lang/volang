@@ -52,3 +52,9 @@ benchmark/fibonacci/c_bench
 luac.out
 benchmark/quicksort/go_bench
 benchmark/quicksort/c_bench
+benchmark/spectral-norm/go_bench
+benchmark/spectral-norm/c_bench
+benchmark/fannkuch/c_bench
+benchmark/fannkuch/go_bench
+benchmark/sum-array/go_bench
+benchmark/sum-array/c_bench
