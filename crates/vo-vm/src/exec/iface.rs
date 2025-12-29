@@ -8,7 +8,6 @@ use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::interface;
 
 use crate::bytecode::{Constant, Module};
-use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 use crate::itab::ItabCache;
 use crate::vm::ExecResult;
@@ -19,14 +18,15 @@ use crate::vm::ExecResult;
 /// - Concrete type: (rttid << 32) | itab_id, itab built at compile time
 /// - Interface source: iface_meta_id (high 32 bits = 0), itab built at runtime
 pub fn exec_iface_assign(
-    fiber: &mut Fiber,
+    stack: &mut [u64],
+    bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
     itab_cache: &mut ItabCache,
     module: &Module,
 ) {
     let vk = ValueKind::from_u8(inst.flags);
-    let src = fiber.read_reg(inst.b);
+    let src = stack[bp + inst.b as usize];
 
     // Unpack metadata from constant pool
     let packed = match &module.constants[inst.c as usize] {
@@ -77,7 +77,7 @@ pub fn exec_iface_assign(
         }
         ValueKind::Interface => {
             let src_slot0 = src;
-            let src_slot1 = fiber.read_reg(inst.b + 1);
+            let src_slot1 = stack[bp + inst.b as usize + 1];
             let src_vk = interface::unpack_value_kind(src_slot0);
             if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
                 if src_slot1 != 0 {
@@ -92,8 +92,8 @@ pub fn exec_iface_assign(
         _ => src,
     };
 
-    fiber.write_reg(inst.a, slot0);
-    fiber.write_reg(inst.a + 1, slot1);
+    stack[bp + inst.a as usize] = slot0;
+    stack[bp + inst.a as usize + 1] = slot1;
 }
 
 /// IfaceAssert: a=dst, b=src_iface (2 slots), c=target_id
@@ -102,13 +102,14 @@ pub fn exec_iface_assign(
 /// For struct/array (determined by src_vk), copies value from GcRef to dst registers
 /// For interface (assert_kind=1), returns new interface with itab for target interface
 pub fn exec_iface_assert(
-    fiber: &mut Fiber,
+    stack: &mut [u64],
+    bp: usize,
     inst: &Instruction,
     itab_cache: &mut ItabCache,
     module: &Module,
 ) -> ExecResult {
-    let slot0 = fiber.read_reg(inst.b);
-    let slot1 = fiber.read_reg(inst.b + 1);
+    let slot0 = stack[bp + inst.b as usize];
+    let slot1 = stack[bp + inst.b as usize + 1];
 
     let assert_kind = inst.flags & 0x3;
     let has_ok = ((inst.flags >> 2) & 0x1) != 0;
@@ -163,7 +164,7 @@ pub fn exec_iface_assert(
     };
 
     // Helper to write successful result
-    let write_success = |fiber: &mut Fiber, itab_cache: &mut ItabCache| {
+    let write_success = |stack: &mut [u64], itab_cache: &mut ItabCache| {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Need to get named_type_id from runtime_types (rttid != named_type_id)
@@ -179,8 +180,8 @@ pub fn exec_iface_assert(
                 &module.interface_metas,
             );
             let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
-            fiber.write_reg(inst.a, new_slot0);
-            fiber.write_reg(inst.a + 1, slot1);
+            stack[bp + inst.a as usize] = new_slot0;
+            stack[bp + inst.a as usize + 1] = slot1;
         } else if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
             // Concrete type assertion for struct/array: copy value from GcRef
             let gc_ref = slot1 as GcRef;
@@ -188,34 +189,34 @@ pub fn exec_iface_assert(
             if slot1 != 0 {
                 for i in 0..slots {
                     let val = unsafe { *gc_ref.add(i as usize) };
-                    fiber.write_reg(inst.a + i, val);
+                    stack[bp + inst.a as usize + i as usize] = val;
                 }
             } else {
                 for i in 0..slots {
-                    fiber.write_reg(inst.a + i, 0);
+                    stack[bp + inst.a as usize + i as usize] = 0;
                 }
             }
         } else {
             // Concrete type assertion for other types: slot1 is the value
-            fiber.write_reg(inst.a, slot1);
+            stack[bp + inst.a as usize] = slot1;
         }
     };
 
     if has_ok {
         let ok_slot = if assert_kind == 1 { inst.a + 2 } else if target_slots > 1 { inst.a + target_slots } else { inst.a + 1 };
-        fiber.write_reg(ok_slot, matches as u64);
+        stack[bp + ok_slot as usize] = matches as u64;
         if matches {
-            write_success(fiber, itab_cache);
+            write_success(stack, itab_cache);
         } else {
             // Zero out destination on failure
             let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
             for i in 0..dst_slots {
-                fiber.write_reg(inst.a + i, 0);
+                stack[bp + inst.a as usize + i as usize] = 0;
             }
         }
         ExecResult::Continue
     } else if matches {
-        write_success(fiber, itab_cache);
+        write_success(stack, itab_cache);
         ExecResult::Continue
     } else {
         ExecResult::Panic

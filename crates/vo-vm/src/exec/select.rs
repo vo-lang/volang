@@ -1,14 +1,17 @@
 //! Select instructions: SelectBegin, SelectSend, SelectRecv, SelectExec
 
-use crate::fiber::{Fiber, SelectCase, SelectCaseKind, SelectState};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use crate::fiber::{SelectCase, SelectCaseKind, SelectState};
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
 
 #[inline]
-pub fn exec_select_begin(fiber: &mut Fiber, inst: &Instruction) {
+pub fn exec_select_begin(select_state: &mut Option<SelectState>, inst: &Instruction) {
     let case_count = inst.a as usize;
     let has_default = (inst.flags & 1) != 0;
-    fiber.select_state = Some(SelectState {
+    *select_state = Some(SelectState {
         cases: Vec::with_capacity(case_count),
         has_default,
         woken_index: None,
@@ -16,8 +19,8 @@ pub fn exec_select_begin(fiber: &mut Fiber, inst: &Instruction) {
 }
 
 #[inline]
-pub fn exec_select_send(fiber: &mut Fiber, inst: &Instruction) {
-    let state = fiber.select_state.as_mut().expect("no active select");
+pub fn exec_select_send(select_state: &mut Option<SelectState>, inst: &Instruction) {
+    let state = select_state.as_mut().expect("no active select");
     state.cases.push(SelectCase {
         kind: SelectCaseKind::Send,
         chan_reg: inst.a,
@@ -28,8 +31,8 @@ pub fn exec_select_send(fiber: &mut Fiber, inst: &Instruction) {
 }
 
 #[inline]
-pub fn exec_select_recv(fiber: &mut Fiber, inst: &Instruction) {
-    let state = fiber.select_state.as_mut().expect("no active select");
+pub fn exec_select_recv(select_state: &mut Option<SelectState>, inst: &Instruction) {
+    let state = select_state.as_mut().expect("no active select");
     let elem_slots = (inst.flags >> 1) & 0x7F;
     let has_ok = (inst.flags & 1) != 0;
     state.cases.push(SelectCase {
@@ -41,18 +44,18 @@ pub fn exec_select_recv(fiber: &mut Fiber, inst: &Instruction) {
     });
 }
 
-pub fn exec_select_exec(fiber: &mut Fiber, inst: &Instruction) -> ExecResult {
-    let state = fiber.select_state.as_mut().expect("no active select");
+pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<SelectState>, inst: &Instruction) -> ExecResult {
+    let state = select_state.as_mut().expect("no active select");
 
     if let Some(idx) = state.woken_index.take() {
-        fiber.write_reg(inst.a, idx as u64);
-        fiber.select_state = None;
+        stack[bp + inst.a as usize] = idx as u64;
+        *select_state = None;
         return ExecResult::Continue;
     }
 
     if state.has_default {
-        fiber.write_reg(inst.a, u64::MAX);
-        fiber.select_state = None;
+        stack[bp + inst.a as usize] = u64::MAX;
+        *select_state = None;
         return ExecResult::Continue;
     }
 

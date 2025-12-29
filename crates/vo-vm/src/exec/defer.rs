@@ -1,9 +1,12 @@
 //! Defer instructions: DeferPush, ErrDeferPush, Panic, Recover
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::{ValueKind, ValueMeta};
 
-use crate::fiber::{DeferEntry, Fiber};
+use crate::fiber::{CallFrame, DeferEntry};
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
 
@@ -13,23 +16,45 @@ use crate::vm::ExecResult;
 /// - c: arg_slots
 /// - flags bit 0: is_closure
 #[inline]
-pub fn exec_defer_push(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc) {
-    push_defer_entry(fiber, inst, gc, false);
+pub fn exec_defer_push(
+    stack: &[u64],
+    bp: usize,
+    frames: &[CallFrame],
+    defer_stack: &mut Vec<DeferEntry>,
+    inst: &Instruction,
+    gc: &mut Gc,
+) {
+    push_defer_entry(stack, bp, frames, defer_stack, inst, gc, false);
 }
 
 #[inline]
-pub fn exec_err_defer_push(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc) {
-    push_defer_entry(fiber, inst, gc, true);
+pub fn exec_err_defer_push(
+    stack: &[u64],
+    bp: usize,
+    frames: &[CallFrame],
+    defer_stack: &mut Vec<DeferEntry>,
+    inst: &Instruction,
+    gc: &mut Gc,
+) {
+    push_defer_entry(stack, bp, frames, defer_stack, inst, gc, true);
 }
 
-fn push_defer_entry(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc, is_errdefer: bool) {
+fn push_defer_entry(
+    stack: &[u64],
+    bp: usize,
+    frames: &[CallFrame],
+    defer_stack: &mut Vec<DeferEntry>,
+    inst: &Instruction,
+    gc: &mut Gc,
+    is_errdefer: bool,
+) {
     let is_closure = (inst.flags & 1) != 0;
     let arg_start = inst.b;
     let arg_slots = inst.c;
-    let frame_depth = fiber.frames.len();
+    let frame_depth = frames.len();
 
     let (func_id, closure) = if is_closure {
-        let closure_ref = fiber.read_reg(inst.a) as GcRef;
+        let closure_ref = stack[bp + inst.a as usize] as GcRef;
         (0, closure_ref)
     } else {
         let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
@@ -39,7 +64,7 @@ fn push_defer_entry(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc, is_errde
     let args = if arg_slots > 0 {
         let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Array), arg_slots);
         for i in 0..arg_slots {
-            let val = fiber.read_reg(arg_start + i);
+            let val = stack[bp + arg_start as usize + i as usize];
             unsafe { Gc::write_slot(args_ref, i as usize, val) };
         }
         args_ref
@@ -47,7 +72,7 @@ fn push_defer_entry(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc, is_errde
         core::ptr::null_mut()
     };
 
-    fiber.defer_stack.push(DeferEntry {
+    defer_stack.push(DeferEntry {
         frame_depth,
         func_id,
         closure,
@@ -59,14 +84,14 @@ fn push_defer_entry(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc, is_errde
 }
 
 #[inline]
-pub fn exec_panic(fiber: &mut Fiber, inst: &Instruction) -> ExecResult {
-    let val = fiber.read_reg(inst.a) as GcRef;
-    fiber.panic_value = Some(val);
+pub fn exec_panic(stack: &[u64], bp: usize, panic_value: &mut Option<GcRef>, inst: &Instruction) -> ExecResult {
+    let val = stack[bp + inst.a as usize] as GcRef;
+    *panic_value = Some(val);
     ExecResult::Panic
 }
 
 #[inline]
-pub fn exec_recover(fiber: &mut Fiber, inst: &Instruction) {
-    let val = fiber.panic_value.take().map(|v| v as u64).unwrap_or(0);
-    fiber.write_reg(inst.a, val);
+pub fn exec_recover(stack: &mut [u64], bp: usize, panic_value: &mut Option<GcRef>, inst: &Instruction) {
+    let val = panic_value.take().map(|v| v as u64).unwrap_or(0);
+    stack[bp + inst.a as usize] = val;
 }

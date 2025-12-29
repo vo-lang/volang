@@ -2,8 +2,10 @@
 //!
 //! Uses ExternRegistry from vo-runtime-core for extern function dispatch.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::bytecode::ExternDef;
-use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
 
@@ -12,7 +14,8 @@ use vo_runtime::ffi::ExternResult;
 use vo_runtime::gc::Gc;
 
 pub fn exec_call_extern(
-    fiber: &mut Fiber,
+    stack: &mut Vec<u64>,
+    bp: usize,
     inst: &Instruction,
     externs: &[ExternDef],
     registry: &ExternRegistry,
@@ -27,16 +30,13 @@ pub fn exec_call_extern(
         return ExecResult::Panic;
     }
     let _extern_def = &externs[extern_id as usize];
-
-    let frame = fiber.frames.last().expect("no active frame");
-    let bp = frame.bp;
     let dst = inst.a;
 
     // Call through ExternRegistry using ExternCall API
     // ret_start = dst so return value goes to the right register
     let result = registry.call(
         extern_id,
-        &mut fiber.stack,
+        stack,
         bp,
         arg_start,
         arg_count,

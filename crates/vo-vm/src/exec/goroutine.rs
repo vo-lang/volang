@@ -17,7 +17,8 @@ pub struct GoResult {
 /// - c: arg_slots
 /// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
 pub fn exec_go_start(
-    fiber: &mut Fiber,
+    stack: &[u64],
+    bp: usize,
     inst: &Instruction,
     functions: &[FunctionDef],
     next_fiber_id: u32,
@@ -27,7 +28,7 @@ pub fn exec_go_start(
     let arg_slots = inst.c;
 
     let (func_id, closure_ref) = if is_closure {
-        let closure_ref = fiber.read_reg(inst.a) as GcRef;
+        let closure_ref = stack[bp + inst.a as usize] as GcRef;
         let func_id = closure::func_id(closure_ref);
         (func_id, Some(closure_ref))
     } else {
@@ -41,16 +42,14 @@ pub fn exec_go_start(
 
     if let Some(closure_ref) = closure_ref {
         // Closure goes in reg[0], args start at reg[1]
-        new_fiber.write_reg(0, closure_ref as u64);
-        for i in 0..arg_slots {
-            let val = fiber.read_reg(args_start + i);
-            new_fiber.write_reg(1 + i, val);
+        new_fiber.stack[0] = closure_ref as u64;
+        for i in 0..arg_slots as usize {
+            new_fiber.stack[1 + i] = stack[bp + args_start as usize + i];
         }
     } else {
         // Regular function: args start at reg[0]
-        for i in 0..arg_slots {
-            let val = fiber.read_reg(args_start + i);
-            new_fiber.write_reg(i, val);
+        for i in 0..arg_slots as usize {
+            new_fiber.stack[i] = stack[bp + args_start as usize + i];
         }
     }
 

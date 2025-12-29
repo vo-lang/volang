@@ -3,20 +3,19 @@
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;
 
-use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 
 #[inline]
-pub fn exec_closure_new(fiber: &mut Fiber, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_closure_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
     let func_id = (inst.b as u32) | ((inst.flags as u32) << 16);
     let capture_count = inst.c as usize;
     let c = closure::create(gc, func_id, capture_count);
-    fiber.write_reg(inst.a, c as u64);
+    stack[bp + inst.a as usize] = c as u64;
 }
 
 #[inline]
-pub fn exec_closure_get(fiber: &mut Fiber, inst: &Instruction) {
-    let c = fiber.read_reg(0) as GcRef;
+pub fn exec_closure_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
+    let c = stack[bp] as GcRef;
     let val = closure::get_capture(c, inst.b as usize);
-    fiber.write_reg(inst.a, val);
+    stack[bp + inst.a as usize] = val;
 }

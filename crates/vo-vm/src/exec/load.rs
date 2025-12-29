@@ -1,11 +1,10 @@
 //! Load instructions: Nop, LoadConst
 
 use crate::bytecode::Constant;
-use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 
 #[inline]
-pub fn exec_load_const(fiber: &mut Fiber, inst: &Instruction, constants: &[Constant]) {
+pub fn exec_load_const(stack: &mut [u64], bp: usize, inst: &Instruction, constants: &[Constant]) {
     let val = match &constants[inst.b as usize] {
         Constant::Nil => 0,
         Constant::Bool(b) => *b as u64,
@@ -13,5 +12,5 @@ pub fn exec_load_const(fiber: &mut Fiber, inst: &Instruction, constants: &[Const
         Constant::Float(f) => f.to_bits(),
         Constant::String(_) => 0, // String handled separately via StrNew
     };
-    fiber.write_reg(inst.a, val);
+    stack[bp + inst.a as usize] = val;
 }
