@@ -40,3 +40,8 @@ benchmark/matrix2/go_bench
 *.class
 benchmark/binary-trees/go_bench
 benchmark/fibonacci/go_bench
+benchmark/binary-trees/c_bench
+benchmark/nbody/go_bench
+benchmark/nbody/c_bench
+benchmark/task-queue/go_bench
+benchmark/task-queue/c_bench

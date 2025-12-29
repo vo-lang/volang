@@ -36,6 +36,11 @@ check_deps() {
     fi
 }
 
+# Check if C compiler is available
+has_cc() {
+    command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1
+}
+
 # Check if java is available
 has_java() {
     command -v java >/dev/null 2>&1 && command -v javac >/dev/null 2>&1
@@ -117,6 +122,16 @@ run_benchmark() {
         if javac -d "$dir" "$java_file" 2>/dev/null; then
             cmds+=("java -cp '$dir' '$java_class'")
             names+=("Java")
+        fi
+    fi
+    
+    # C (compile and run)
+    local c_file=$(find "$dir" -name "*.c" | head -1)
+    if [ -f "$c_file" ] && has_cc; then
+        local c_bin="$dir/c_bench"
+        if cc -O3 -o "$c_bin" "$c_file" 2>/dev/null; then
+            cmds+=("'$c_bin'")
+            names+=("C")
         fi
     fi
     

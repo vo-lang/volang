@@ -1,0 +1,142 @@
+package main
+
+const StatusPending = 0
+const StatusRunning = 1
+const StatusCompleted = 2
+const StatusFailed = 3
+
+const PriorityLow = 0
+const PriorityMedium = 1
+const PriorityHigh = 2
+
+type Task struct {
+	id       int
+	priority int
+	status   int
+	duration int
+	retries  int
+}
+
+type TaskQueue struct {
+	tasks     []Task
+	completed int
+	failed    int
+	totalTime int
+}
+
+func newTaskQueue() *TaskQueue {
+	return &TaskQueue{
+		tasks:     []Task{},
+		completed: 0,
+		failed:    0,
+		totalTime: 0,
+	}
+}
+
+func (q *TaskQueue) addTask(id, priority, duration int) {
+	task := Task{
+		id:       id,
+		priority: priority,
+		status:   StatusPending,
+		duration: duration,
+		retries:  0,
+	}
+	q.tasks = append(q.tasks, task)
+}
+
+func (q *TaskQueue) findHighestPriority() int {
+	bestIdx := -1
+	bestPriority := -1
+	n := len(q.tasks)
+	for i := 0; i < n; i++ {
+		if q.tasks[i].status == StatusPending {
+			if q.tasks[i].priority > bestPriority {
+				bestPriority = q.tasks[i].priority
+				bestIdx = i
+			}
+		}
+	}
+	return bestIdx
+}
+
+func (q *TaskQueue) processTask(idx, currentTime int) bool {
+	if idx < 0 || idx >= len(q.tasks) {
+		return false
+	}
+	
+	q.tasks[idx].status = StatusRunning
+	
+	// Simulate processing: tasks with odd duration "fail" on first try
+	shouldFail := q.tasks[idx].duration%2 == 1 && q.tasks[idx].retries == 0
+	
+	if shouldFail {
+		q.tasks[idx].retries++
+		q.tasks[idx].status = StatusPending // Retry
+		return false
+	}
+	
+	// Check timeout (tasks > 100 duration fail after 3 retries)
+	if q.tasks[idx].duration > 100 && q.tasks[idx].retries >= 3 {
+		q.tasks[idx].status = StatusFailed
+		q.failed++
+		return false
+	}
+	
+	// Success
+	q.tasks[idx].status = StatusCompleted
+	q.completed++
+	q.totalTime += q.tasks[idx].duration
+	return true
+}
+
+func (q *TaskQueue) runUntilEmpty() int {
+	iterations := 0
+	for {
+		idx := q.findHighestPriority()
+		if idx < 0 {
+			break
+		}
+		q.processTask(idx, iterations)
+		iterations++
+		if iterations > 1000000 {
+			break // Safety limit
+		}
+	}
+	return iterations
+}
+
+func (q *TaskQueue) getStats() (int, int, int) {
+	return q.completed, q.failed, q.totalTime
+}
+
+func main() {
+	totalCompleted := 0
+	totalFailed := 0
+	totalTime := 0
+	
+	// Run multiple rounds
+	rounds := 1000
+	tasksPerRound := 100
+	
+	for round := 0; round < rounds; round++ {
+		q := newTaskQueue()
+		
+		// Add tasks with varying priorities and durations
+		for i := 0; i < tasksPerRound; i++ {
+			priority := i % 3
+			duration := (i * 7 + round) % 150
+			q.addTask(round*tasksPerRound+i, priority, duration)
+		}
+		
+		q.runUntilEmpty()
+		
+		completed, failed, time := q.getStats()
+		totalCompleted += completed
+		totalFailed += failed
+		totalTime += time
+	}
+	
+	println(totalCompleted)
+	println(totalFailed)
+	println(totalTime)
+}
