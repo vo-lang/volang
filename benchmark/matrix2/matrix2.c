@@ -33,7 +33,7 @@ int main() {
 
     Mat3 tmp = {0};
 
-    for (int i = 0; i < 1000000; i++) {
+    for (int i = 0; i < 3000000; i++) {
         matMulInto(&tmp, &result, &a);
         matMulInto(&result, &tmp, &a);
     }

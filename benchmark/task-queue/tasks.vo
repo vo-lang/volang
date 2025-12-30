@@ -116,8 +116,8 @@ func main() {
 	totalTime := 0
 	
 	// Run multiple rounds
-	rounds := 1000
-	tasksPerRound := 100
+	rounds := 2000
+	tasksPerRound := 150
 	
 	for round := 0; round < rounds; round++ {
 		q := newTaskQueue()

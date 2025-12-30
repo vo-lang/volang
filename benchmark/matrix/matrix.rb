@@ -24,7 +24,7 @@ result = {
   m20: 0.0, m21: 0.0, m22: 1.0,
 }
 
-1000000.times do
+3000000.times do
   result = mat_mul(result, a)
 end
 

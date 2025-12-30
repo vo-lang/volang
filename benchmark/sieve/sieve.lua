@@ -25,6 +25,6 @@ local function sieve(n)
     return count
 end
 
-local n = 100000
+local n = 300000
 local count = sieve(n)
 print(string.format("primes up to %d: %d", n, count))

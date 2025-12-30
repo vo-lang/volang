@@ -104,8 +104,8 @@ public class Tasks {
         int totalFailed = 0;
         int totalTime = 0;
 
-        int rounds = 1000;
-        int tasksPerRound = 100;
+        int rounds = 2000;
+        int tasksPerRound = 150;
 
         for (int round = 0; round < rounds; round++) {
             TaskQueue q = new TaskQueue();

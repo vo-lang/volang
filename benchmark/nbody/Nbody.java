@@ -97,7 +97,7 @@ public class Nbody {
         offsetMomentum(bodies);
         System.out.printf("%.9f%n", energy(bodies));
 
-        int n = 50000;
+        int n = 150000;
         for (int i = 0; i < n; i++) {
             advance(bodies, 0.01);
         }

@@ -50,7 +50,7 @@ public class Spectral {
     }
 
     public static void main(String[] args) {
-        int n = 200;
+        int n = 500;
         double result = spectralNorm(n);
         System.out.printf("%.9f%n", result);
     }

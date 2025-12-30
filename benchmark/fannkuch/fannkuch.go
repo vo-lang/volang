@@ -68,7 +68,7 @@ func fannkuch(n int) int {
 }
 
 func main() {
-	n := 9
+	n := 10
 	result := fannkuch(n)
 	fmt.Printf("Pfannkuchen(%d) = %d\n", n, result)
 }

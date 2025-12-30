@@ -45,6 +45,6 @@ def spectral_norm(n)
   Math.sqrt(vBv / vv)
 end
 
-n = 200
+n = 500
 result = spectral_norm(n)
 puts format("%.9f", result)

@@ -19,7 +19,7 @@ end
 
 def main
   min_depth = 4
-  max_depth = 14
+  max_depth = 16
   stretch_depth = max_depth + 1
 
   stretch_tree = make(stretch_depth)

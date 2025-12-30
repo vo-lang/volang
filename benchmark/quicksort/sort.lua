@@ -33,8 +33,8 @@ local function isSorted(arr, n)
 end
 
 local function main()
-    local size = 1000
-    local iterations = 10
+    local size = 3000
+    local iterations = 20
     local checksum = 0
 
     for iter = 0, iterations - 1 do

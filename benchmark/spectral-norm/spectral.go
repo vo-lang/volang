@@ -56,7 +56,7 @@ func spectralNorm(n int) float64 {
 }
 
 func main() {
-	n := 200
+	n := 500
 	result := spectralNorm(n)
 	fmt.Printf("%.9f\n", result)
 }

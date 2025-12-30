@@ -97,7 +97,7 @@ func main() {
 	offsetMomentum(bodies)
 	fmt.Printf("%.9f\n", energy(bodies))
 
-	n := 50000
+	n := 150000
 	for i := 0; i < n; i++ {
 		advance(bodies, 0.01)
 	}

@@ -28,7 +28,7 @@ func sieve(n int) int {
 }
 
 func main() {
-	n := 100000
+	n := 300000
 	count := sieve(n)
 	fmt.Printf("primes up to %d: %d\n", n, count)
 }

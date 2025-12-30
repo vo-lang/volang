@@ -51,6 +51,6 @@ local function spectral_norm(n)
     return math.sqrt(vBv / vv)
 end
 
-local n = 200
+local n = 500
 local result = spectral_norm(n)
 print(string.format("%.9f", result))

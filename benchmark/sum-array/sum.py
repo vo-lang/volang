@@ -1,4 +1,4 @@
-n = 10000000
+n = 30000000
 arr = list(range(n))
 
 sum_val = 0

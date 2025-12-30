@@ -31,8 +31,8 @@ def is_sorted(arr)
 end
 
 def main
-  size = 1000
-  iterations = 10
+  size = 3000
+  iterations = 20
   checksum = 0
 
   iterations.times do |iter|

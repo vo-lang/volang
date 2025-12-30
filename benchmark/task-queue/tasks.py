@@ -82,8 +82,8 @@ def main():
     total_failed = 0
     total_time = 0
     
-    rounds = 1000
-    tasks_per_round = 100
+    rounds = 2000
+    tasks_per_round = 150
     
     for round in range(rounds):
         q = TaskQueue()

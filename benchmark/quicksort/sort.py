@@ -28,8 +28,8 @@ def is_sorted(arr):
 
 
 def main():
-    size = 1000
-    iterations = 10
+    size = 3000
+    iterations = 20
     checksum = 0
 
     for iter in range(iterations):

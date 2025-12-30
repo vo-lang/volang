@@ -111,14 +111,76 @@ use crate::itab::ItabCache;
 use crate::scheduler::Scheduler;
 
 #[cfg(feature = "jit")]
-use vo_jit::{JitManager, JitConfig};
+use vo_jit::{JitManager, JitConfig, JitFunc, OsrResult};
 
 #[cfg(feature = "jit")]
-use vo_runtime::jit_api::JitResult;
+use vo_runtime::jit_api::{JitResult, JitContext};
 
-/// Helper to build JitContext from VM state using jit_bridge.
+// =============================================================================
+// JIT Trampolines (inlined from jit_bridge)
+// =============================================================================
+
 #[cfg(feature = "jit")]
-fn build_jit_ctx_from_state(
+extern "C" fn itab_lookup_trampoline(
+    itabs: *const std::ffi::c_void,
+    itab_id: u32,
+    method_idx: u32,
+) -> u32 {
+    unsafe {
+        let itabs = itabs as *const crate::bytecode::Itab;
+        let itab = &*itabs.add(itab_id as usize);
+        itab.methods[method_idx as usize]
+    }
+}
+
+#[cfg(feature = "jit")]
+extern "C" fn call_extern_trampoline(
+    registry: *const std::ffi::c_void,
+    gc: *mut vo_runtime::gc::Gc,
+    extern_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+) -> JitResult {
+    use vo_runtime::ffi::{ExternResult, ExternRegistry};
+    
+    let registry = unsafe { &*(registry as *const ExternRegistry) };
+    let gc = unsafe { &mut *gc };
+    
+    let mut temp_stack: Vec<u64> = (0..arg_count as usize)
+        .map(|i| unsafe { *args.add(i) })
+        .collect();
+    
+    let result = registry.call(extern_id, &mut temp_stack, 0, 0, arg_count as u16, 0, gc);
+    
+    match result {
+        ExternResult::Ok => {
+            for i in 0..arg_count as usize {
+                unsafe { *ret.add(i) = temp_stack[i] };
+            }
+            JitResult::Ok
+        }
+        ExternResult::Yield => JitResult::Panic,
+        ExternResult::Panic(_) => JitResult::Panic,
+    }
+}
+
+#[cfg(feature = "jit")]
+extern "C" fn vm_call_trampoline(
+    vm: *mut std::ffi::c_void,
+    _fiber: *mut std::ffi::c_void,
+    func_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_count: u32,
+) -> JitResult {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.execute_jit_call(func_id, args, arg_count, ret, ret_count)
+}
+
+#[cfg(feature = "jit")]
+fn build_jit_ctx(
     state: &mut VmState,
     jit_func_table: *const *const u8,
     jit_func_count: u32,
@@ -127,22 +189,25 @@ fn build_jit_ctx_from_state(
     module_ptr: *const std::ffi::c_void,
     safepoint_flag: *const bool,
     panic_flag: *mut bool,
-) -> vo_runtime::jit_api::JitContext {
-    crate::jit_bridge::build_jit_ctx(
-        &mut state.gc as *mut _,
-        state.globals.as_mut_ptr(),
-        jit_func_table,
-        jit_func_count,
-        vm_ptr,
-        fiber_ptr,
-        module_ptr,
-        state.itab_cache.itabs_ptr(),
-        &state.extern_registry as *const _ as *const std::ffi::c_void,
-        &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
-        Some(crate::jit_bridge::vm_call_trampoline),
+) -> JitContext {
+    JitContext {
+        gc: &mut state.gc as *mut _,
+        globals: state.globals.as_mut_ptr(),
         safepoint_flag,
         panic_flag,
-    )
+        vm: vm_ptr,
+        fiber: fiber_ptr,
+        call_vm_fn: Some(vm_call_trampoline),
+        itabs: state.itab_cache.itabs_ptr(),
+        itab_lookup_fn: Some(itab_lookup_trampoline),
+        extern_registry: &state.extern_registry as *const _ as *const std::ffi::c_void,
+        call_extern_fn: Some(call_extern_trampoline),
+        itab_cache: &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
+        module: module_ptr,
+        iface_assert_fn: None,
+        jit_func_table,
+        jit_func_count,
+    }
 }
 
 /// Time slice: number of instructions before forced yield check.
@@ -326,7 +391,7 @@ impl vo_runtime::jit_api::JitCallContext for Vm {
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null());
         
-        build_jit_ctx_from_state(
+        build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             safepoint_flag, panic_flag,
@@ -353,7 +418,7 @@ impl Vm {
             .map(|m| m as *const _ as *const std::ffi::c_void)
             .unwrap_or(std::ptr::null());
         
-        let mut ctx = build_jit_ctx_from_state(
+        let mut ctx = build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, std::ptr::null_mut(), module_ptr,
             &safepoint_flag, &mut panic_flag,
@@ -436,8 +501,7 @@ impl Vm {
                 ExecResult::Osr(osr_func_id, backedge_pc, loop_header_pc) => {
                     // Handle OSR
                     if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-                        use crate::jit_bridge::OsrResult;
-                        let osr_action = crate::jit_bridge::try_osr_compile(jit_mgr, osr_func_id, backedge_pc, loop_header_pc);
+                        let osr_action = jit_mgr.try_osr(osr_func_id, backedge_pc, loop_header_pc);
                         
                         let osr_func = match osr_action {
                             OsrResult::Ready(ptr) => Some(ptr),
@@ -512,31 +576,34 @@ impl Vm {
         result
     }
 
-    /// Try to call a function via JIT. Returns Some(ExecResult) if JIT was used,
-    /// None if should fall back to interpreter.
+    /// Call a JIT function inline (used by resolve_call path).
     #[cfg(feature = "jit")]
-    pub fn try_jit_call(
+    fn call_jit_inline(
         &mut self,
         fiber_id: u32,
-        func_id: u32,
+        jit_func: JitFunc,
         arg_start: u16,
         arg_slots: usize,
-        ret_slots: u16,
-    ) -> Option<ExecResult> {
-        use vo_runtime::jit_api::JitResult;
+        ret_slots: usize,
+    ) -> ExecResult {
+        use vo_runtime::jit_api::JitCallContext;
         
-        // Get JIT function first (immutable borrow ends here)
-        let jit_func = self.jit_mgr.as_ref()?.get_entry(func_id)?;
+        let mut args = JitCallContext::read_args(self, fiber_id, arg_start, arg_slots);
+        let mut ret_buf = vec![0u64; ret_slots];
         
-        // Now call with mutable borrow
-        let result = crate::jit_bridge::execute_jit_call(
-            self, jit_func, fiber_id, arg_start, arg_slots, ret_slots as usize,
-        );
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut jit_ctx = JitCallContext::build_context(self, fiber_id, &safepoint_flag, &mut panic_flag);
+        let result = jit_func(&mut jit_ctx, args.as_mut_ptr(), ret_buf.as_mut_ptr());
         
-        Some(match result {
+        if result == JitResult::Ok {
+            JitCallContext::write_returns(self, fiber_id, arg_start, &ret_buf);
+        }
+        
+        match result {
             JitResult::Ok => ExecResult::Continue,
             JitResult::Panic => ExecResult::Panic,
-        })
+        }
     }
 
     /// Try to perform OSR (On-Stack Replacement) at a loop back-edge.
@@ -552,18 +619,15 @@ impl Vm {
         loop_header_pc: usize,
         bp: usize,
     ) -> Option<ExecResult> {
-        use vo_runtime::jit_api::JitResult;
-        use crate::jit_bridge::OsrResult;
-        
         // Get function info
         let module = self.module.as_ref()?;
         let func_def = &module.functions[func_id as usize];
         let local_slots = func_def.local_slots as usize;
         let ret_slots = func_def.ret_slots as usize;
         
-        // Try to get OSR function via bridge
+        // Try to get OSR function
         let jit_mgr = self.jit_mgr.as_mut()?;
-        let osr_func = match crate::jit_bridge::try_osr_compile(jit_mgr, func_id, backedge_pc, loop_header_pc) {
+        let osr_func = match jit_mgr.try_osr(func_id, backedge_pc, loop_header_pc) {
             OsrResult::Ready(ptr) => ptr,
             OsrResult::ShouldCompile => {
                 let module = self.module.as_ref()?;
@@ -577,10 +641,14 @@ impl Vm {
             OsrResult::NotHot => return None,
         };
         
-        // Execute OSR call via bridge
-        let (result, ret_buf) = crate::jit_bridge::execute_osr_call(
-            self, osr_func, fiber_id, bp, local_slots, ret_slots,
-        );
+        // Execute OSR call inline
+        use vo_runtime::jit_api::JitCallContext;
+        let mut locals = JitCallContext::read_locals(self, fiber_id, bp, local_slots);
+        let mut ret_buf = vec![0u64; ret_slots];
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut jit_ctx = JitCallContext::build_context(self, fiber_id, &safepoint_flag, &mut panic_flag);
+        let result = osr_func(&mut jit_ctx, locals.as_mut_ptr(), ret_buf.as_mut_ptr());
         
         // Handle result (VM-specific: pop frame, write to caller)
         match result {
@@ -1109,22 +1177,14 @@ impl Vm {
                     let arg_slots = (inst.c >> 8) as usize;
                     let ret_slots = (inst.c & 0xFF) as u16;
                     
-                    // Check if JIT version exists
-                    let has_jit = self.jit_mgr.as_ref()
-                        .and_then(|mgr| mgr.get_entry(target_func_id))
-                        .is_some();
+                    // Try JIT via resolve_call
+                    let target_func = &module.functions[target_func_id as usize];
+                    let jit_func = self.jit_mgr.as_mut()
+                        .and_then(|mgr| mgr.resolve_call(target_func_id, target_func, module));
                     
-                    if has_jit {
-                        self.try_jit_call(fiber_id, target_func_id, arg_start, arg_slots, ret_slots)
-                            .unwrap_or(ExecResult::Continue)
+                    if let Some(jit_func) = jit_func {
+                        self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, ret_slots as usize)
                     } else {
-                        // Record call and check if should compile
-                        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-                            if jit_mgr.record_call(target_func_id) {
-                                let target_func = &module.functions[target_func_id as usize];
-                                let _ = jit_mgr.compile_full(target_func_id, target_func, module);
-                            }
-                        }
                         exec::exec_call(stack, &mut fiber.frames, &inst, module)
                     }
                 }

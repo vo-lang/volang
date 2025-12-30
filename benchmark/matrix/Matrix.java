@@ -30,7 +30,7 @@ public class Matrix {
         result.m10 = 0.0; result.m11 = 1.0; result.m12 = 0.0;
         result.m20 = 0.0; result.m21 = 0.0; result.m22 = 1.0;
 
-        for (int i = 0; i < 1000000; i++) {
+        for (int i = 0; i < 3000000; i++) {
             result = matMul(result, a);
         }
 

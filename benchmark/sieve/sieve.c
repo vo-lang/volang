@@ -30,7 +30,7 @@ int sieve(int n) {
 }
 
 int main() {
-    int n = 100000;
+    int n = 300000;
     int count = sieve(n);
     printf("primes up to %d: %d\n", n, count);
     return 0;

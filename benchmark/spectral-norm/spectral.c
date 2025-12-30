@@ -57,7 +57,7 @@ double spectral_norm(int n) {
 }
 
 int main() {
-    int n = 200;
+    int n = 500;
     double result = spectral_norm(n);
     printf("%.9f\n", result);
     return 0;

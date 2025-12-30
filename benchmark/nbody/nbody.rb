@@ -98,7 +98,7 @@ def main
   offset_momentum(bodies)
   puts format("%.9f", energy(bodies))
 
-  n = 50000
+  n = 150000
   n.times { advance(bodies, 0.01) }
 
   puts format("%.9f", energy(bodies))

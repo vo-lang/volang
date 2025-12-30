@@ -96,8 +96,8 @@ local totalCompleted = 0
 local totalFailed = 0
 local totalTime = 0
 
-local rounds = 1000
-local tasksPerRound = 100
+local rounds = 2000
+local tasksPerRound = 150
 
 for round = 0, rounds - 1 do
     local q = newTaskQueue()

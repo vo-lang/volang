@@ -36,8 +36,8 @@ public class Sort {
     }
 
     public static void main(String[] args) {
-        int size = 1000;
-        int iterations = 10;
+        int size = 3000;
+        int iterations = 20;
         long checksum = 0;
 
         for (int iter = 0; iter < iterations; iter++) {

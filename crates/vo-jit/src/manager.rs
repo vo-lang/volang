@@ -16,6 +16,17 @@ use crate::{JitCompiler, JitError, JitFunc};
 // Configuration
 // =============================================================================
 
+/// OSR compilation result.
+#[derive(Debug)]
+pub enum OsrResult {
+    /// Already have OSR version, use it
+    Ready(JitFunc),
+    /// Should compile now (hot enough)
+    ShouldCompile,
+    /// Not hot enough yet, continue VM
+    NotHot,
+}
+
 /// JIT configuration.
 #[derive(Debug, Clone)]
 pub struct JitConfig {
@@ -150,16 +161,6 @@ impl JitManager {
         self.func_table.len()
     }
     
-    /// Get mutable reference to compiler (for setting trampolines).
-    pub fn compiler_mut(&mut self) -> &mut JitCompiler {
-        &mut self.compiler
-    }
-    
-    /// Get reference to compiler.
-    pub fn compiler(&self) -> &JitCompiler {
-        &self.compiler
-    }
-    
     // =========================================================================
     // Query API
     // =========================================================================
@@ -182,8 +183,43 @@ impl JitManager {
             .osr_entries.get(&loop_header_pc).copied()
     }
     
-    /// Check if function can be JIT compiled.
-    pub fn can_jit(&self, func_def: &FunctionDef, module: &VoModule) -> bool {
+    /// Resolve which version to use for a function call.
+    /// Returns Some(jit_func) if JIT version available, None for VM fallback.
+    /// Also handles hot tracking and triggers compilation when threshold reached.
+    pub fn resolve_call(&mut self, func_id: u32, func_def: &FunctionDef, module: &VoModule) -> Option<JitFunc> {
+        // 1. Already have JIT version?
+        if let Some(jit_func) = self.get_entry(func_id) {
+            return Some(jit_func);
+        }
+        
+        // 2. Record call, compile if hot
+        if self.record_call(func_id) {
+            if self.compile_full(func_id, func_def, module).is_ok() {
+                return self.get_entry(func_id);
+            }
+        }
+        
+        // 3. Fall back to VM
+        None
+    }
+    
+    /// Try to perform OSR at a loop back-edge.
+    /// Returns the appropriate action for OSR.
+    pub fn try_osr(&mut self, func_id: u32, backedge_pc: usize, loop_header_pc: usize) -> OsrResult {
+        // Check if already have OSR version
+        if let Some(ptr) = self.get_osr_entry(func_id, loop_header_pc) {
+            return OsrResult::Ready(ptr);
+        }
+        
+        // Record backedge and check if should compile
+        match self.record_backedge(func_id, backedge_pc, loop_header_pc) {
+            Some(_) => OsrResult::ShouldCompile,
+            None => OsrResult::NotHot,
+        }
+    }
+    
+    /// Check if function can be JIT compiled (internal use).
+    fn can_jit(&self, func_def: &FunctionDef, module: &VoModule) -> bool {
         self.compiler.can_jit(func_def, module)
     }
     
@@ -344,53 +380,5 @@ impl JitManager {
         
         // OSR success proves function is hot, compile full version
         let _ = self.compile_full(func_id, func_def, module);
-    }
-    
-    // =========================================================================
-    // Unified Call Entry Point
-    // =========================================================================
-    
-    /// **THE** unified function call entry point.
-    /// 
-    /// All function calls must go through this method. It:
-    /// 1. Checks for existing JIT version and uses it if available
-    /// 2. Records call count and compiles if hot
-    /// 3. Falls back to VM interpretation via callback
-    /// 
-    /// This ensures consistent version selection and hot tracking regardless
-    /// of whether the caller is JIT code, VM code, or trampoline code.
-    pub fn call_function(
-        &mut self,
-        func_id: u32,
-        args: *mut u64,
-        arg_count: u32,
-        ret: *mut u64,
-        ret_count: u32,
-        ctx: &mut JitContext,
-        module: &VoModule,
-        vm_interpret_fn: fn(u32, *mut u64, u32, *mut u64, u32, &mut JitContext, &VoModule) -> JitResult,
-    ) -> JitResult {
-        // 1. Check if JIT version exists
-        if let Some(jit_func) = self.get_entry(func_id) {
-            // Update func_table pointer in ctx (it might have changed)
-            ctx.jit_func_table = self.func_table_ptr();
-            ctx.jit_func_count = self.func_table_len() as u32;
-            return jit_func(ctx, args, ret);
-        }
-        
-        // 2. Record call and try to compile if hot
-        if self.record_call(func_id) {
-            let func_def = &module.functions[func_id as usize];
-            if self.compile_full(func_id, func_def, module).is_ok() {
-                if let Some(jit_func) = self.get_entry(func_id) {
-                    ctx.jit_func_table = self.func_table_ptr();
-                    ctx.jit_func_count = self.func_table_len() as u32;
-                    return jit_func(ctx, args, ret);
-                }
-            }
-        }
-        
-        // 3. Fall back to VM interpretation
-        vm_interpret_fn(func_id, args, arg_count, ret, ret_count, ctx, module)
     }
 }

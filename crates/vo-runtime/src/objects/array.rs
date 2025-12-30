@@ -37,7 +37,7 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usiz
     let data_slots = (data_bytes + 7) / 8; // round up to slot boundary
     let total_slots = HEADER_SLOTS + data_slots;
     let array_meta = ValueMeta::new(0, ValueKind::Array);
-    let arr = gc.alloc(array_meta, total_slots as u16);
+    let arr = gc.alloc_array(array_meta, total_slots);
     let header = ArrayHeader::as_mut(arr);
     header.len = length;
     header.elem_meta = elem_meta;
@@ -70,6 +70,14 @@ pub fn elem_bytes(arr: GcRef) -> usize {
     ArrayHeader::as_ref(arr).elem_bytes as usize
 }
 
+/// Total slots including header (for large array clone)
+#[inline]
+pub fn total_slots(arr: GcRef) -> usize {
+    let header = ArrayHeader::as_ref(arr);
+    let data_bytes = header.len * header.elem_bytes as usize;
+    let data_slots = (data_bytes + 7) / 8;
+    HEADER_SLOTS + data_slots
+}
 
 /// Return byte pointer to data area (after header)
 #[inline(always)]

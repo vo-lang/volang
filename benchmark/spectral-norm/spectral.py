@@ -37,6 +37,6 @@ def spectral_norm(n):
     return math.sqrt(vBv / vv)
 
 if __name__ == "__main__":
-    n = 200
+    n = 500
     result = spectral_norm(n)
     print(f"{result:.9f}")

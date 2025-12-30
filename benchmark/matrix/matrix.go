@@ -35,7 +35,7 @@ func main() {
 		m20: 0.0, m21: 0.0, m22: 1.0,
 	}
 
-	for i := 0; i < 1000000; i++ {
+	for i := 0; i < 3000000; i++ {
 		result = matMul(result, a)
 	}
 

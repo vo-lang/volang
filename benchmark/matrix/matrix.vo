@@ -35,8 +35,8 @@ func main() {
         m20: 0.0, m21: 0.0, m22: 1.0,
     }
     
-    // 1 million matrix multiplications
-    for i := 0; i < 1000000; i++ {
+    // 3 million matrix multiplications
+    for i := 0; i < 3000000; i++ {
         result = matMul(result, a)
     }
     

@@ -23,7 +23,7 @@ result = {
     'm20': 0.0, 'm21': 0.0, 'm22': 1.0,
 }
 
-for i in range(1000000):
+for i in range(3000000):
     result = mat_mul(result, a)
 
 print(f"result[0][0]: {result['m00']}")

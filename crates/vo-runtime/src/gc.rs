@@ -117,8 +117,19 @@ impl Gc {
 
     /// Allocate a new GC object.
     pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
+        self.alloc_inner(value_meta, slots, slots as usize)
+    }
+    
+    /// Allocate a large array. For arrays with total_slots > u16::MAX,
+    /// GcHeader.slots is set to 0, and the actual size is read from ArrayHeader.
+    pub fn alloc_array(&mut self, value_meta: ValueMeta, total_slots: usize) -> GcRef {
+        let header_slots = if total_slots > u16::MAX as usize { 0 } else { total_slots as u16 };
+        self.alloc_inner(value_meta, header_slots, total_slots)
+    }
+    
+    fn alloc_inner(&mut self, value_meta: ValueMeta, header_slots: u16, slots: usize) -> GcRef {
         let header_size = GcHeader::SIZE;
-        let data_size = (slots as usize) * 8;
+        let data_size = slots * 8;
         let total_size = header_size + data_size;
 
         let layout = core::alloc::Layout::from_size_align(total_size, 8).unwrap();
@@ -128,7 +139,7 @@ impl Gc {
             panic!("GC allocation failed");
         }
 
-        let header = GcHeader::new(value_meta, slots);
+        let header = GcHeader::new(value_meta, header_slots);
         unsafe {
             core::ptr::write(ptr as *mut GcHeader, header);
         }
@@ -250,16 +261,27 @@ impl Gc {
     /// # Safety
     /// src must be a valid GcRef or null.
     pub unsafe fn ptr_clone(&mut self, src: GcRef) -> GcRef {
+        use crate::objects::array;
+        
         if src.is_null() {
             return src;
         }
         let header = Self::header(src);
-        let slots = header.slots;
         let value_meta = header.value_meta;
+        
+        // For large arrays, slots == 0, read actual size from ArrayHeader
+        let actual_slots = if header.slots == 0 {
+            if value_meta.value_kind() != ValueKind::Array {
+                panic!("slots == 0 but value_kind is not Array");
+            }
+            array::total_slots(src)
+        } else {
+            header.slots as usize
+        };
 
-        let dst = self.alloc(value_meta, slots);
+        let dst = self.alloc_inner(value_meta, header.slots, actual_slots);
 
-        for i in 0..slots as usize {
+        for i in 0..actual_slots {
             let val = unsafe { Self::read_slot(src, i) };
             unsafe { Self::write_slot(dst, i, val) };
         }

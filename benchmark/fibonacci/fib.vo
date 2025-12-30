@@ -8,7 +8,7 @@ func fib(n int) int {
 }
 
 func main() {
-    n := 30
+    n := 35
     result := fib(n)
     println("fib(", n, ") =", result)
 }

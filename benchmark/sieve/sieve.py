@@ -16,6 +16,6 @@ def sieve(n):
             count += 1
     return count
 
-n = 100000
+n = 300000
 count = sieve(n)
 print(f"primes up to {n}: {count}")
