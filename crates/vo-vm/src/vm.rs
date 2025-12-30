@@ -106,13 +106,12 @@ macro_rules! string_index {
 use crate::bytecode::Module;
 use crate::exec::{self, ExternRegistry};
 use crate::fiber::Fiber;
-use crate::hot_counter::HotCounter;
 use crate::instruction::{Instruction, Opcode};
 use crate::itab::ItabCache;
 use crate::scheduler::Scheduler;
 
 #[cfg(feature = "jit")]
-use vo_jit::JitCompiler;
+use vo_jit::{JitManager, JitConfig};
 
 #[cfg(feature = "jit")]
 use vo_runtime::jit_api::JitResult;
@@ -175,26 +174,51 @@ extern "C" fn call_extern_trampoline(
     }
 }
 
-/// VM call trampoline for JIT -> VM calls.
-/// This function is called by vo_call_vm when JIT code needs to call another function.
+/// Helper to build JitContext from VM state.
+/// Centralizes the JitContext construction to avoid code duplication.
 #[cfg(feature = "jit")]
-extern "C" fn vm_call_trampoline(
-    vm: *mut std::ffi::c_void,
-    _fiber: *mut std::ffi::c_void,
+fn build_jit_ctx(
+    state: &mut VmState,
+    jit_func_table: *const *const u8,
+    jit_func_count: u32,
+    vm_ptr: *mut std::ffi::c_void,
+    fiber_ptr: *mut std::ffi::c_void,
+    module_ptr: *const std::ffi::c_void,
+    safepoint_flag: *const bool,
+    panic_flag: *mut bool,
+) -> vo_runtime::jit_api::JitContext {
+    vo_runtime::jit_api::JitContext {
+        gc: &mut state.gc as *mut _,
+        globals: state.globals.as_mut_ptr(),
+        safepoint_flag,
+        panic_flag,
+        vm: vm_ptr,
+        fiber: fiber_ptr,
+        call_vm_fn: Some(vm_call_trampoline),
+        itabs: state.itab_cache.itabs_ptr(),
+        itab_lookup_fn: Some(itab_lookup_trampoline),
+        extern_registry: &state.extern_registry as *const _ as *const std::ffi::c_void,
+        call_extern_fn: Some(call_extern_trampoline),
+        itab_cache: &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
+        module: module_ptr,
+        iface_assert_fn: None,
+        jit_func_table,
+        jit_func_count,
+    }
+}
+
+/// Pure VM interpretation of a function call.
+/// This is the fallback when JIT version is not available.
+#[cfg(feature = "jit")]
+fn vm_interpret_call(
+    vm: &mut Vm,
     func_id: u32,
     args: *const u64,
     arg_count: u32,
     ret: *mut u64,
     ret_count: u32,
+    module: &Module,
 ) -> JitResult {
-    // Safety: vm must be a valid pointer to Vm
-    let vm = unsafe { &mut *(vm as *mut Vm) };
-    let module = match &vm.module {
-        Some(m) => m as *const Module,
-        None => return JitResult::Panic,
-    };
-    let module = unsafe { &*module };
-    
     let func = &module.functions[func_id as usize];
     
     // Create a temporary fiber for the call
@@ -235,6 +259,7 @@ extern "C" fn vm_call_trampoline(
         let frame_func_id = frame.func_id;
         frame.pc += 1;
         
+        
         // For Return instruction: save return values before exec_return modifies stack
         // Save when returning from the INITIAL frame (bp == 0) and not in defer execution
         if inst.opcode() == crate::instruction::Opcode::Return && fiber.defer_state.is_none() {
@@ -258,7 +283,7 @@ extern "C" fn vm_call_trampoline(
         }
         
         let bp = fiber.frames.last().map(|f| f.bp).unwrap_or(0);
-        let result = exec_inst_inline(&mut fiber, &inst, frame_func_id, bp, module, &mut vm.state);
+        let result = exec_inst_inline(vm, &mut fiber, &inst, frame_func_id, bp, module);
         
         match result {
             ExecResult::Continue => {}
@@ -269,6 +294,74 @@ extern "C" fn vm_call_trampoline(
             }
             ExecResult::Done => break,
             ExecResult::Panic => return JitResult::Panic,
+            ExecResult::Osr(osr_func_id, backedge_pc, loop_header_pc) => {
+                // Handle OSR outside the recursive call stack
+                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                    use crate::jit_bridge::OsrResult;
+                    let osr_action = crate::jit_bridge::try_osr_compile(jit_mgr, osr_func_id, backedge_pc, loop_header_pc);
+                    
+                    let osr_func = match osr_action {
+                        OsrResult::Ready(ptr) => Some(ptr),
+                        OsrResult::ShouldCompile => {
+                            let func_def = &module.functions[osr_func_id as usize];
+                            jit_mgr.compile_osr(osr_func_id, loop_header_pc, func_def, module).ok()
+                        }
+                        OsrResult::NotHot => None,
+                    };
+                    
+                    if let Some(osr_ptr) = osr_func {
+                        // Execute OSR
+                        let func_def = &module.functions[osr_func_id as usize];
+                        let local_slots = func_def.local_slots as usize;
+                        let ret_slots = func_def.ret_slots as usize;
+                        let frame = fiber.frames.last().unwrap();
+                        let osr_bp = frame.bp;
+                        let ret_reg = frame.ret_reg as usize;
+                        
+                        let mut locals: Vec<u64> = fiber.stack[osr_bp..osr_bp + local_slots].to_vec();
+                        let mut ret_buf: Vec<u64> = vec![0; ret_slots];
+                        
+                        let func_table_ptr = jit_mgr.func_table_ptr();
+                        let func_table_len = jit_mgr.func_table_len() as u32;
+                        let safepoint_flag = false;
+                        let mut panic_flag = false;
+                        let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
+                        let module_ptr = module as *const _ as *const std::ffi::c_void;
+                        
+                        let mut ctx = build_jit_ctx(
+                            &mut vm.state, func_table_ptr, func_table_len,
+                            vm_ptr, std::ptr::null_mut(), module_ptr,
+                            &safepoint_flag, &mut panic_flag,
+                        );
+                        
+                        let jit_result = crate::jit_bridge::call_jit_function(osr_ptr, &mut ctx, &mut locals, &mut ret_buf);
+                        
+                        match jit_result {
+                            JitResult::Ok => {
+                                fiber.frames.pop();
+                                if fiber.frames.is_empty() {
+                                    // Save return values for vm_interpret_call to return
+                                    for (i, val) in ret_buf.iter().enumerate() {
+                                        if i < ret_slots && i < fiber.stack.len() {
+                                            fiber.stack[i] = *val;
+                                        }
+                                    }
+                                    saved_ret_vals = Some(ret_buf[..ret_slots.min(ret_buf.len())].to_vec());
+                                    break;
+                                }
+                                // Write to caller frame
+                                let caller_bp = fiber.frames.last().unwrap().bp;
+                                for (i, val) in ret_buf.iter().enumerate() {
+                                    if i < ret_slots {
+                                        fiber.stack[caller_bp + ret_reg + i] = *val;
+                                    }
+                                }
+                            }
+                            JitResult::Panic => return JitResult::Panic,
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -285,6 +378,75 @@ extern "C" fn vm_call_trampoline(
     JitResult::Ok
 }
 
+/// VM call trampoline for JIT -> VM calls.
+/// This is the **unified entry point** for all function calls from JIT code.
+/// It delegates to JitManager which selects the best version (JIT or VM).
+#[cfg(feature = "jit")]
+extern "C" fn vm_call_trampoline(
+    vm: *mut std::ffi::c_void,
+    _fiber: *mut std::ffi::c_void,
+    func_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_count: u32,
+) -> JitResult {
+    use vo_runtime::jit_api::JitContext;
+    
+    // Safety: vm must be a valid pointer to Vm
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let module = match &vm.module {
+        Some(m) => m as *const Module,
+        None => return JitResult::Panic,
+    };
+    let module = unsafe { &*module };
+    
+    // Use JitManager unified entry point
+    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+        // 1. Check if JIT version exists
+        if let Some(jit_func) = jit_mgr.get_entry(func_id) {
+            let func_table_ptr = jit_mgr.func_table_ptr();
+            let func_table_len = jit_mgr.func_table_len() as u32;
+            let safepoint_flag = false;
+            let mut panic_flag = false;
+            let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
+            let module_ptr = module as *const _ as *const std::ffi::c_void;
+            
+            let mut ctx = build_jit_ctx(
+                &mut vm.state, func_table_ptr, func_table_len,
+                vm_ptr, std::ptr::null_mut(), module_ptr,
+                &safepoint_flag, &mut panic_flag,
+            );
+            return jit_func(&mut ctx, args as *mut u64, ret);
+        }
+        
+        // 2. Record call and try to compile if hot
+        if jit_mgr.record_call(func_id) {
+            let func_def = &module.functions[func_id as usize];
+            if jit_mgr.compile_full(func_id, func_def, module).is_ok() {
+                if let Some(jit_func) = jit_mgr.get_entry(func_id) {
+                    let func_table_ptr = jit_mgr.func_table_ptr();
+                    let func_table_len = jit_mgr.func_table_len() as u32;
+                    let safepoint_flag = false;
+                    let mut panic_flag = false;
+                    let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
+                    let module_ptr = module as *const _ as *const std::ffi::c_void;
+                    
+                    let mut ctx = build_jit_ctx(
+                        &mut vm.state, func_table_ptr, func_table_len,
+                        vm_ptr, std::ptr::null_mut(), module_ptr,
+                        &safepoint_flag, &mut panic_flag,
+                    );
+                    return jit_func(&mut ctx, args as *mut u64, ret);
+                }
+            }
+        }
+    }
+    
+    // 3. Fall back to VM interpretation
+    vm_interpret_call(vm, func_id, args, arg_count, ret, ret_count, module)
+}
+
 /// Time slice: number of instructions before forced yield check.
 const TIME_SLICE: u32 = 1000;
 
@@ -296,6 +458,8 @@ pub enum ExecResult {
     Block,  // Channel blocking - don't re-queue, wait for wake
     Panic,
     Done,
+    /// OSR request: (func_id, backedge_pc, loop_header_pc)
+    Osr(u32, usize, usize),
 }
 
 #[derive(Debug)]
@@ -342,16 +506,9 @@ pub struct Vm {
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
-    /// Hot function counter for JIT compilation decisions.
-    pub hot_counter: HotCounter,
-    /// JIT compiler (only available with "jit" feature).
+    /// JIT manager (only available with "jit" feature).
     #[cfg(feature = "jit")]
-    pub jit: Option<JitCompiler>,
-    /// JIT function pointer table: jit_func_table[func_id] = pointer to JIT function.
-    /// Initialized to null, filled in as functions are JIT compiled.
-    /// Used for direct JIT-to-JIT calls.
-    #[cfg(feature = "jit")]
-    pub jit_func_table: Vec<*const u8>,
+    pub jit_mgr: Option<JitManager>,
 }
 
 impl Vm {
@@ -360,26 +517,28 @@ impl Vm {
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
-            hot_counter: HotCounter::new(),
             #[cfg(feature = "jit")]
-            jit: None,
-            #[cfg(feature = "jit")]
-            jit_func_table: Vec::new(),
+            jit_mgr: None,
         }
     }
     
-    /// Create a VM with custom hot counter thresholds.
+    /// Create a VM with custom JIT thresholds.
+    #[cfg(feature = "jit")]
     pub fn with_jit_thresholds(call_threshold: u32, loop_threshold: u32) -> Self {
-        Self {
-            module: None,
-            scheduler: Scheduler::new(),
-            state: VmState::new(),
-            hot_counter: HotCounter::with_thresholds(call_threshold, loop_threshold),
-            #[cfg(feature = "jit")]
-            jit: None,
-            #[cfg(feature = "jit")]
-            jit_func_table: Vec::new(),
+        let mut vm = Self::new();
+        let config = JitConfig {
+            call_threshold,
+            loop_threshold,
+        };
+        if let Ok(mgr) = JitManager::with_config(config) {
+            vm.jit_mgr = Some(mgr);
         }
+        vm
+    }
+    
+    #[cfg(not(feature = "jit"))]
+    pub fn with_jit_thresholds(_call_threshold: u32, _loop_threshold: u32) -> Self {
+        Self::new()
     }
 
     /// Initialize JIT compiler (if jit feature is enabled).
@@ -388,12 +547,11 @@ impl Vm {
     /// If JIT initialization fails, the VM will continue with interpretation only.
     #[cfg(feature = "jit")]
     pub fn init_jit(&mut self) {
-        match JitCompiler::new() {
-            Ok(jit) => {
-                self.jit = Some(jit);
+        match JitManager::new() {
+            Ok(mgr) => {
+                self.jit_mgr = Some(mgr);
             }
             Err(e) => {
-                // Log error but continue - VM can run without JIT
                 #[cfg(feature = "std")]
                 eprintln!("Warning: JIT initialization failed: {}", e);
             }
@@ -403,14 +561,62 @@ impl Vm {
     /// Check if JIT is available and enabled.
     #[cfg(feature = "jit")]
     pub fn has_jit(&self) -> bool {
-        self.jit.is_some()
+        self.jit_mgr.is_some()
     }
 
     #[cfg(not(feature = "jit"))]
     pub fn has_jit(&self) -> bool {
         false
     }
+}
 
+// =============================================================================
+// JitCallContext Implementation
+// =============================================================================
+
+#[cfg(feature = "jit")]
+impl vo_runtime::jit_api::JitCallContext for Vm {
+    fn read_args(&self, fiber_id: u32, arg_start: u16, arg_count: usize) -> Vec<u64> {
+        let fiber = &self.scheduler.fibers[fiber_id as usize];
+        (0..arg_count)
+            .map(|i| fiber.read_reg(arg_start + i as u16))
+            .collect()
+    }
+    
+    fn write_returns(&mut self, fiber_id: u32, ret_start: u16, values: &[u64]) {
+        let fiber = &mut self.scheduler.fibers[fiber_id as usize];
+        for (i, val) in values.iter().enumerate() {
+            fiber.write_reg(ret_start + i as u16, *val);
+        }
+    }
+    
+    fn read_locals(&self, fiber_id: u32, bp: usize, local_count: usize) -> Vec<u64> {
+        let fiber = &self.scheduler.fibers[fiber_id as usize];
+        fiber.stack[bp..bp + local_count].to_vec()
+    }
+    
+    fn build_context(
+        &mut self,
+        fiber_id: u32,
+        safepoint_flag: *const bool,
+        panic_flag: *mut bool,
+    ) -> vo_runtime::jit_api::JitContext {
+        let jit_mgr = self.jit_mgr.as_ref().unwrap();
+        let func_table_ptr = jit_mgr.func_table_ptr();
+        let func_table_len = jit_mgr.func_table_len() as u32;
+        let fiber_ptr = &mut self.scheduler.fibers[fiber_id as usize] as *mut Fiber as *mut std::ffi::c_void;
+        let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
+        let module_ptr = self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null());
+        
+        build_jit_ctx(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, fiber_ptr, module_ptr,
+            safepoint_flag, panic_flag,
+        )
+    }
+}
+
+impl Vm {
     /// Try to call a function via JIT. Returns Some(ExecResult) if JIT was used,
     /// None if should fall back to interpreter.
     #[cfg(feature = "jit")]
@@ -422,62 +628,89 @@ impl Vm {
         arg_slots: usize,
         ret_slots: u16,
     ) -> Option<ExecResult> {
-        use vo_runtime::jit_api::{JitContext, JitResult};
+        use vo_runtime::jit_api::JitResult;
         
-        let jit = self.jit.as_ref()?;
-        let func_ptr = unsafe { jit.get_func_ptr(func_id)? };
+        // Get JIT function first (immutable borrow ends here)
+        let jit_func = self.jit_mgr.as_ref()?.get_entry(func_id)?;
         
-        // Prepare args array
-        let args: Vec<u64> = {
-            let fiber = &self.scheduler.fibers[fiber_id as usize];
-            (0..arg_slots)
-                .map(|i| fiber.read_reg(arg_start + i as u16))
-                .collect()
-        };
-        let mut args = args;
-        
-        // Prepare return buffer
-        let mut ret_buf: Vec<u64> = vec![0; ret_slots as usize];
-        
-        // Flags for safepoint and panic
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        
-        // Create JIT context
-        let fiber_ptr = &mut self.scheduler.fibers[fiber_id as usize] as *mut Fiber;
-        let mut ctx = JitContext {
-            gc: &mut self.state.gc as *mut _,
-            globals: self.state.globals.as_mut_ptr(),
-            safepoint_flag: &safepoint_flag as *const bool,
-            panic_flag: &mut panic_flag as *mut bool,
-            vm: self as *mut _ as *mut std::ffi::c_void,
-            fiber: fiber_ptr as *mut std::ffi::c_void,
-            call_vm_fn: Some(vm_call_trampoline),
-            itabs: self.state.itab_cache.itabs_ptr(),
-            itab_lookup_fn: Some(itab_lookup_trampoline),
-            extern_registry: &self.state.extern_registry as *const _ as *const std::ffi::c_void,
-            call_extern_fn: Some(call_extern_trampoline),
-            itab_cache: &mut self.state.itab_cache as *mut _ as *mut std::ffi::c_void,
-            module: self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null()),
-            iface_assert_fn: None, // TODO: implement interface assertion callback
-            jit_func_table: self.jit_func_table.as_ptr() as *const *const u8,
-            jit_func_count: self.jit_func_table.len() as u32,
-        };
-        
-        // Call JIT function
-        let result = func_ptr(
-            &mut ctx,
-            args.as_mut_ptr(),
-            ret_buf.as_mut_ptr(),
+        // Now call with mutable borrow
+        let result = crate::jit_bridge::execute_jit_call(
+            self, jit_func, fiber_id, arg_start, arg_slots, ret_slots as usize,
         );
         
+        Some(match result {
+            JitResult::Ok => ExecResult::Continue,
+            JitResult::Panic => ExecResult::Panic,
+        })
+    }
+
+    /// Try to perform OSR (On-Stack Replacement) at a loop back-edge.
+    ///
+    /// If the loop is hot enough, compile an OSR version and switch to JIT execution.
+    /// Returns Some(ExecResult) if OSR was performed, None to continue VM execution.
+    #[cfg(feature = "jit")]
+    fn try_osr(
+        &mut self,
+        fiber_id: u32,
+        func_id: u32,
+        backedge_pc: usize,
+        loop_header_pc: usize,
+        bp: usize,
+    ) -> Option<ExecResult> {
+        use vo_runtime::jit_api::JitResult;
+        use crate::jit_bridge::OsrResult;
+        
+        // Get function info
+        let module = self.module.as_ref()?;
+        let func_def = &module.functions[func_id as usize];
+        let local_slots = func_def.local_slots as usize;
+        let ret_slots = func_def.ret_slots as usize;
+        
+        // Try to get OSR function via bridge
+        let jit_mgr = self.jit_mgr.as_mut()?;
+        let osr_func = match crate::jit_bridge::try_osr_compile(jit_mgr, func_id, backedge_pc, loop_header_pc) {
+            OsrResult::Ready(ptr) => ptr,
+            OsrResult::ShouldCompile => {
+                let module = self.module.as_ref()?;
+                let func_def = &module.functions[func_id as usize];
+                let jit_mgr = self.jit_mgr.as_mut()?;
+                match jit_mgr.compile_osr(func_id, loop_header_pc, func_def, module) {
+                    Ok(ptr) => ptr,
+                    Err(_) => return None,
+                }
+            }
+            OsrResult::NotHot => return None,
+        };
+        
+        // Execute OSR call via bridge
+        let (result, ret_buf) = crate::jit_bridge::execute_osr_call(
+            self, osr_func, fiber_id, bp, local_slots, ret_slots,
+        );
+        
+        // Handle result (VM-specific: pop frame, write to caller)
         match result {
             JitResult::Ok => {
-                // Write return values to caller's registers
                 let fiber = &mut self.scheduler.fibers[fiber_id as usize];
-                for (i, val) in ret_buf.iter().enumerate() {
-                    fiber.write_reg(arg_start + i as u16, *val);
+                let frame = fiber.frames.pop()?;
+                
+                if fiber.frames.is_empty() {
+                    return Some(ExecResult::Done);
                 }
+                
+                let caller_bp = fiber.frames.last()?.bp;
+                for (i, val) in ret_buf.iter().enumerate() {
+                    if i < ret_slots {
+                        fiber.stack[caller_bp + frame.ret_reg as usize + i] = *val;
+                    }
+                }
+                
+                // Trigger full compilation after successful OSR
+                if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+                    let module = self.module.as_ref().unwrap();
+                    let func_def = &module.functions[func_id as usize];
+                    jit_mgr.on_osr_complete(func_id, func_def, module);
+                }
+                
                 Some(ExecResult::Continue)
             }
             JitResult::Panic => Some(ExecResult::Panic),
@@ -499,11 +732,10 @@ impl Vm {
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
         
-        // Initialize JIT function pointer table (all null initially)
+        // Initialize JIT manager for this module
         #[cfg(feature = "jit")]
-        {
-            let func_count = module.functions.len();
-            self.jit_func_table = vec![std::ptr::null(); func_count];
+        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+            jit_mgr.init(module.functions.len());
         }
         
         self.module = Some(module);
@@ -548,6 +780,11 @@ impl Vm {
                 ExecResult::Panic => {
                     self.scheduler.kill_current();
                     return Err(VmError::PanicUnwound);
+                }
+                ExecResult::Osr(_, _, _) => {
+                    // OSR result should not propagate here from run_fiber
+                    // If it does, just continue
+                    self.scheduler.suspend_current();
                 }
             }
         }
@@ -876,13 +1113,48 @@ impl Vm {
                     ExecResult::Continue
                 }
 
-                // Jump - inline
+                // Jump - inline with OSR support
+                #[cfg(feature = "jit")]
+                Opcode::Jump => {
+                    let offset = inst.imm32();
+                    let backedge_pc = fiber.current_frame().unwrap().pc;
+                    let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+                    
+                    // Check for back-edge (loop) and try OSR
+                    if loop_header_pc < backedge_pc {
+                        if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
+                            return result;
+                        }
+                    }
+                    
+                    fiber.current_frame_mut().unwrap().pc = loop_header_pc;
+                    ExecResult::Continue
+                }
+                #[cfg(not(feature = "jit"))]
                 Opcode::Jump => {
                     let offset = inst.imm32();
                     let frame = fiber.current_frame_mut().unwrap();
                     frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     ExecResult::Continue
                 }
+                #[cfg(feature = "jit")]
+                Opcode::JumpIf => {
+                    let cond = stack_get!(stack, bp + inst.a as usize);
+                    if cond != 0 {
+                        let offset = inst.imm32();
+                        let backedge_pc = frame.pc;
+                        let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+                        
+                        if loop_header_pc < backedge_pc {
+                            if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
+                                return result;
+                            }
+                        }
+                        frame.pc = loop_header_pc;
+                    }
+                    ExecResult::Continue
+                }
+                #[cfg(not(feature = "jit"))]
                 Opcode::JumpIf => {
                     let cond = stack_get!(stack, bp + inst.a as usize);
                     if cond != 0 {
@@ -892,6 +1164,24 @@ impl Vm {
                     }
                     ExecResult::Continue
                 }
+                #[cfg(feature = "jit")]
+                Opcode::JumpIfNot => {
+                    let cond = stack_get!(stack, bp + inst.a as usize);
+                    if cond == 0 {
+                        let offset = inst.imm32();
+                        let backedge_pc = frame.pc;
+                        let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+                        
+                        if loop_header_pc < backedge_pc {
+                            if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
+                                return result;
+                            }
+                        }
+                        frame.pc = loop_header_pc;
+                    }
+                    ExecResult::Continue
+                }
+                #[cfg(not(feature = "jit"))]
                 Opcode::JumpIfNot => {
                     let cond = stack_get!(stack, bp + inst.a as usize);
                     if cond == 0 {
@@ -910,26 +1200,20 @@ impl Vm {
                     let arg_slots = (inst.c >> 8) as usize;
                     let ret_slots = (inst.c & 0xFF) as u16;
                     
-                    let has_jit_func = self.jit.as_ref()
-                        .and_then(|jit| unsafe { jit.get_func_ptr(target_func_id) })
+                    // Check if JIT version exists
+                    let has_jit = self.jit_mgr.as_ref()
+                        .and_then(|mgr| mgr.get_entry(target_func_id))
                         .is_some();
                     
-                    if has_jit_func {
+                    if has_jit {
                         self.try_jit_call(fiber_id, target_func_id, arg_start, arg_slots, ret_slots)
                             .unwrap_or(ExecResult::Continue)
                     } else {
-                        if self.hot_counter.record_call(target_func_id) {
-                            if let Some(jit) = &mut self.jit {
+                        // Record call and check if should compile
+                        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+                            if jit_mgr.record_call(target_func_id) {
                                 let target_func = &module.functions[target_func_id as usize];
-                                if jit.can_jit(target_func, module) {
-                                    if jit.compile(target_func_id, target_func, module).is_ok() {
-                                        if let Some(ptr) = unsafe { jit.get_func_ptr(target_func_id) } {
-                                            if (target_func_id as usize) < self.jit_func_table.len() {
-                                                self.jit_func_table[target_func_id as usize] = ptr as *const u8;
-                                            }
-                                        }
-                                    }
-                                }
+                                let _ = jit_mgr.compile_full(target_func_id, target_func, module);
                             }
                         }
                         exec::exec_call(stack, &mut fiber.frames, &inst, module)
@@ -1412,14 +1696,16 @@ impl Vm {
 
 /// Inline instruction execution for vm_call_trampoline (JIT->VM calls).
 /// This is a standalone function to avoid code duplication with run_fiber.
+/// All function calls within this execution go through vm_call_trampoline
+/// to ensure unified version selection.
 #[cfg(feature = "jit")]
 fn exec_inst_inline(
+    vm: &mut Vm,
     fiber: &mut Fiber,
     inst: &Instruction,
     func_id: u32,
     bp: usize,
     module: &Module,
-    state: &mut VmState,
 ) -> ExecResult {
     // Create local stack reference for this function
     let stack = &mut fiber.stack;
@@ -1444,11 +1730,11 @@ fn exec_inst_inline(
         Opcode::SlotSet => { exec::exec_slot_set(stack, bp, inst); ExecResult::Continue }
         Opcode::SlotGetN => { exec::exec_slot_get_n(stack, bp, inst); ExecResult::Continue }
         Opcode::SlotSetN => { exec::exec_slot_set_n(stack, bp, inst); ExecResult::Continue }
-        Opcode::GlobalGet => { exec::exec_global_get(stack, bp, inst, &state.globals); ExecResult::Continue }
-        Opcode::GlobalGetN => { exec::exec_global_get_n(stack, bp, inst, &state.globals); ExecResult::Continue }
-        Opcode::GlobalSet => { exec::exec_global_set(&stack, bp, inst, &mut state.globals); ExecResult::Continue }
-        Opcode::GlobalSetN => { exec::exec_global_set_n(&stack, bp, inst, &mut state.globals); ExecResult::Continue }
-        Opcode::PtrNew => { exec::exec_ptr_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::GlobalGet => { exec::exec_global_get(stack, bp, inst, &vm.state.globals); ExecResult::Continue }
+        Opcode::GlobalGetN => { exec::exec_global_get_n(stack, bp, inst, &vm.state.globals); ExecResult::Continue }
+        Opcode::GlobalSet => { exec::exec_global_set(&stack, bp, inst, &mut vm.state.globals); ExecResult::Continue }
+        Opcode::GlobalSetN => { exec::exec_global_set_n(&stack, bp, inst, &mut vm.state.globals); ExecResult::Continue }
+        Opcode::PtrNew => { exec::exec_ptr_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::PtrGet => { exec::exec_ptr_get(stack, bp, inst); ExecResult::Continue }
         Opcode::PtrSet => { exec::exec_ptr_set(&stack, bp, inst); ExecResult::Continue }
         Opcode::PtrGetN => { exec::exec_ptr_get_n(stack, bp, inst); ExecResult::Continue }
@@ -1646,19 +1932,30 @@ fn exec_inst_inline(
             stack_set!(stack, bp + inst.a as usize, (a == 0) as u64);
             ExecResult::Continue
         }
-        // Jump
+        // Jump with OSR check (returns Osr result instead of executing inline)
         Opcode::Jump => {
             let offset = inst.imm32();
-            let frame = fiber.current_frame_mut().unwrap();
-            frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+            let backedge_pc = fiber.frames.last().map(|f| f.pc).unwrap_or(0);
+            let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+            fiber.frames.last_mut().unwrap().pc = loop_header_pc;
+            
+            // Check for back-edge and request OSR
+            if loop_header_pc < backedge_pc {
+                return ExecResult::Osr(func_id, backedge_pc, loop_header_pc);
+            }
             ExecResult::Continue
         }
         Opcode::JumpIf => {
             let cond = stack_get!(stack, bp + inst.a as usize);
             if cond != 0 {
                 let offset = inst.imm32();
-                let frame = fiber.current_frame_mut().unwrap();
-                frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                let backedge_pc = fiber.frames.last().map(|f| f.pc).unwrap_or(0);
+                let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+                fiber.frames.last_mut().unwrap().pc = loop_header_pc;
+                
+                if loop_header_pc < backedge_pc {
+                    return ExecResult::Osr(func_id, backedge_pc, loop_header_pc);
+                }
             }
             ExecResult::Continue
         }
@@ -1666,23 +1963,79 @@ fn exec_inst_inline(
             let cond = stack_get!(stack, bp + inst.a as usize);
             if cond == 0 {
                 let offset = inst.imm32();
-                let frame = fiber.current_frame_mut().unwrap();
-                frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                let backedge_pc = fiber.frames.last().map(|f| f.pc).unwrap_or(0);
+                let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
+                fiber.frames.last_mut().unwrap().pc = loop_header_pc;
+                
+                if loop_header_pc < backedge_pc {
+                    return ExecResult::Osr(func_id, backedge_pc, loop_header_pc);
+                }
             }
             ExecResult::Continue
         }
-        // Call
-        Opcode::Call => exec::exec_call(stack, &mut fiber.frames, inst, module),
-        Opcode::CallExtern => exec::exec_call_extern(stack, bp, inst, &module.externs, &state.extern_registry, &mut state.gc),
+        // Call - check JitManager for version selection, use push-frame for VM
+        Opcode::Call => {
+            let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+            let arg_start = inst.b as usize;
+            let arg_slots = (inst.c >> 8) as usize;
+            let ret_slots = (inst.c & 0xFF) as usize;
+            
+            // Ask JitManager for decision
+            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                // Record call and try to compile if hot
+                if jit_mgr.record_call(target_func_id) {
+                    let target_func = &module.functions[target_func_id as usize];
+                    let _ = jit_mgr.compile_full(target_func_id, target_func, module);
+                }
+                
+                // If JIT version exists, call it directly
+                if let Some(jit_func) = jit_mgr.get_entry(target_func_id) {
+                    // Prepare args
+                    let mut args: Vec<u64> = (0..arg_slots)
+                        .map(|i| stack[bp + arg_start + i])
+                        .collect();
+                    let mut ret_buf: Vec<u64> = vec![0; ret_slots];
+                    
+                    let func_table_ptr = jit_mgr.func_table_ptr();
+                    let func_table_len = jit_mgr.func_table_len() as u32;
+                    let safepoint_flag = false;
+                    let mut panic_flag = false;
+                    let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
+                    let module_ptr = module as *const _ as *const std::ffi::c_void;
+                    
+                    let mut ctx = build_jit_ctx(
+                        &mut vm.state, func_table_ptr, func_table_len,
+                        vm_ptr, std::ptr::null_mut(), module_ptr,
+                        &safepoint_flag, &mut panic_flag,
+                    );
+                    
+                    let result = crate::jit_bridge::call_jit_function(jit_func, &mut ctx, &mut args, &mut ret_buf);
+                    
+                    // Write return values back to stack
+                    for (i, val) in ret_buf.iter().enumerate() {
+                        stack[bp + arg_start + i] = *val;
+                    }
+                    
+                    return match result {
+                        JitResult::Ok => ExecResult::Continue,
+                        JitResult::Panic => ExecResult::Panic,
+                    };
+                }
+            }
+            
+            // No JIT version, use push-frame (let vm_interpret_call loop handle it)
+            exec::exec_call(stack, &mut fiber.frames, inst, module)
+        }
+        Opcode::CallExtern => exec::exec_call_extern(stack, bp, inst, &module.externs, &vm.state.extern_registry, &mut vm.state.gc),
         Opcode::CallClosure => exec::exec_call_closure(stack, &mut fiber.frames, inst, module),
-        Opcode::CallIface => exec::exec_call_iface(stack, &mut fiber.frames, inst, module, &state.itab_cache),
+        Opcode::CallIface => exec::exec_call_iface(stack, &mut fiber.frames, inst, module, &vm.state.itab_cache),
         Opcode::Return => {
             let func = &module.functions[func_id as usize];
             let is_error_return = (inst.flags & 1) != 0;
             exec::exec_return(stack, &mut fiber.frames, &mut fiber.defer_stack, &mut fiber.defer_state, inst, func, module, is_error_return)
         }
         // String
-        Opcode::StrNew => { exec::exec_str_new(stack, bp, inst, &module.constants, &mut state.gc); ExecResult::Continue }
+        Opcode::StrNew => { exec::exec_str_new(stack, bp, inst, &module.constants, &mut vm.state.gc); ExecResult::Continue }
         Opcode::StrLen => {
             let s = stack_get!(stack, bp + inst.b as usize) as GcRef;
             let len = if s.is_null() { 0 } else { string_len!(s) };
@@ -1696,8 +2049,8 @@ fn exec_inst_inline(
             stack_set!(stack, bp + inst.a as usize, byte as u64);
             ExecResult::Continue
         }
-        Opcode::StrConcat => { exec::exec_str_concat(stack, bp, inst, &mut state.gc); ExecResult::Continue }
-        Opcode::StrSlice => { exec::exec_str_slice(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::StrConcat => { exec::exec_str_concat(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
+        Opcode::StrSlice => { exec::exec_str_slice(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::StrEq => {
             let a = stack_get!(stack, bp + inst.b as usize) as GcRef;
             let b = stack_get!(stack, bp + inst.c as usize) as GcRef;
@@ -1743,7 +2096,7 @@ fn exec_inst_inline(
             ExecResult::Continue
         }
         // Array
-        Opcode::ArrayNew => { exec::exec_array_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::ArrayNew => { exec::exec_array_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::ArrayGet => {
             // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let arr = stack_get!(stack, bp + inst.b as usize) as GcRef;
@@ -1823,7 +2176,7 @@ fn exec_inst_inline(
             ExecResult::Continue
         }
         // Slice
-        Opcode::SliceNew => { exec::exec_slice_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::SliceNew => { exec::exec_slice_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::SliceGet => {
             // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
             let s = stack_get!(stack, bp + inst.b as usize) as GcRef;
@@ -1903,8 +2256,8 @@ fn exec_inst_inline(
             stack_set!(stack, bp + inst.a as usize, cap as u64);
             ExecResult::Continue
         }
-        Opcode::SliceSlice => { exec::exec_slice_slice(stack, bp, inst, &mut state.gc); ExecResult::Continue }
-        Opcode::SliceAppend => { exec::exec_slice_append(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::SliceSlice => { exec::exec_slice_slice(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
+        Opcode::SliceAppend => { exec::exec_slice_append(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::SliceAddr => {
             let s = stack_get!(stack, bp + inst.b as usize) as GcRef;
             let idx = stack_get!(stack, bp + inst.c as usize) as usize;
@@ -1915,30 +2268,30 @@ fn exec_inst_inline(
             ExecResult::Continue
         }
         // Map
-        Opcode::MapNew => { exec::exec_map_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::MapNew => { exec::exec_map_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::MapGet => { exec::exec_map_get(stack, bp, inst); ExecResult::Continue }
         Opcode::MapSet => { exec::exec_map_set(&stack, bp, inst); ExecResult::Continue }
         Opcode::MapDelete => { exec::exec_map_delete(&stack, bp, inst); ExecResult::Continue }
         Opcode::MapLen => { exec::exec_map_len(stack, bp, inst); ExecResult::Continue }
         Opcode::MapIterGet => { exec::exec_map_iter_get(stack, bp, inst); ExecResult::Continue }
         // Channel - not supported in JIT trampoline
-        Opcode::ChanNew => { exec::exec_chan_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::ChanNew => { exec::exec_chan_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose => ExecResult::Panic,
         // Select - not supported in JIT trampoline
         Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => ExecResult::Panic,
         // Closure
-        Opcode::ClosureNew => { exec::exec_closure_new(stack, bp, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::ClosureNew => { exec::exec_closure_new(stack, bp, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::ClosureGet => { exec::exec_closure_get(stack, bp, inst); ExecResult::Continue }
         // GoStart - not supported in JIT trampoline
         Opcode::GoStart => ExecResult::Panic,
         // Defer
-        Opcode::DeferPush => { exec::exec_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, inst, &mut state.gc); ExecResult::Continue }
-        Opcode::ErrDeferPush => { exec::exec_err_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, inst, &mut state.gc); ExecResult::Continue }
+        Opcode::DeferPush => { exec::exec_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, inst, &mut vm.state.gc); ExecResult::Continue }
+        Opcode::ErrDeferPush => { exec::exec_err_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, inst, &mut vm.state.gc); ExecResult::Continue }
         Opcode::Panic => exec::exec_panic(&stack, bp, &mut fiber.panic_value, inst),
         Opcode::Recover => { exec::exec_recover(stack, bp, &mut fiber.panic_value, inst); ExecResult::Continue }
         // Interface
-        Opcode::IfaceAssign => { exec::exec_iface_assign(stack, bp, inst, &mut state.gc, &mut state.itab_cache, module); ExecResult::Continue }
-        Opcode::IfaceAssert => exec::exec_iface_assert(stack, bp, inst, &mut state.itab_cache, module),
+        Opcode::IfaceAssign => { exec::exec_iface_assign(stack, bp, inst, &mut vm.state.gc, &mut vm.state.itab_cache, module); ExecResult::Continue }
+        Opcode::IfaceAssert => exec::exec_iface_assert(stack, bp, inst, &mut vm.state.itab_cache, module),
         // Conversion
         Opcode::ConvI2F => {
             let a = stack_get!(stack, bp + inst.b as usize) as i64;

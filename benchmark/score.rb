@@ -47,8 +47,12 @@ def calculate_scores
     end
     
     # Calculate relative scores (1.0 = fastest)
-    fastest = mean_times.values.min
-    mean_times.each do |lang, mean|
+    # Skip benchmarks with invalid times (0, NaN, Infinity)
+    valid_times = mean_times.reject { |_, mean| mean.nil? || mean.nan? || mean.infinite? || mean == 0 }
+    next if valid_times.empty?
+    
+    fastest = valid_times.values.min
+    valid_times.each do |lang, mean|
       relative = mean / fastest
       scores[lang] << relative
       puts "  #{lang}: #{relative.round(2)} (mean: #{mean.round(4)}s)"
@@ -123,11 +127,19 @@ def calculate_scores
       mean_times[lang] = mean if lang
     end
     
-    fastest = mean_times.values.min
+    # Skip benchmarks with invalid times
+    valid_times = mean_times.reject { |_, mean| mean.nil? || mean.nan? || mean.infinite? || mean == 0 }
+    if valid_times.empty?
+      sorted.each { |_, _| print sprintf(" %8s", "N/A") }
+      puts
+      next
+    end
+    
+    fastest = valid_times.values.min
     
     sorted.each do |lang, _|
-      if mean_times[lang]
-        relative = mean_times[lang] / fastest
+      if valid_times[lang]
+        relative = valid_times[lang] / fastest
         print sprintf(" %8.2f", relative.round(2))
       else
         print sprintf(" %8s", "-")

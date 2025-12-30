@@ -11,6 +11,9 @@ pub mod exec;
 pub mod hot_counter;
 mod gc_roots;
 
+#[cfg(feature = "jit")]
+pub mod jit_bridge;
+
 // Re-export from vo-common-core for backward compatibility
 pub use vo_runtime::bytecode;
 pub use vo_runtime::instruction;

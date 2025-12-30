@@ -104,19 +104,13 @@ impl HotCounter {
 
     /// Record a loop back-edge execution.
     ///
-    /// Returns `true` if this function should be JIT compiled.
-    /// Only triggers if the function hasn't already hit the call threshold.
+    /// Returns `true` if this function should be OSR compiled.
+    /// OSR triggers when a hot loop is detected, regardless of call count.
     ///
-    /// Called from VM's exec_jump when target < current_pc.
+    /// Called from VM's Jump/JumpIf/JumpIfNot when target < current_pc.
     pub fn record_back_edge(&mut self, func_id: u32) -> bool {
-        // Skip if already marked
+        // Skip if already marked (prevents duplicate OSR compilation)
         if self.marked_for_jit.get(&func_id).copied().unwrap_or(false) {
-            return false;
-        }
-
-        // Skip if call count already reached threshold
-        let call_count = self.call_counts.get(&func_id).copied().unwrap_or(0);
-        if call_count >= self.call_threshold {
             return false;
         }
 

@@ -989,3 +989,34 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_copy", vo_copy as *const u8),
     ]
 }
+
+// =============================================================================
+// JIT Bridge Trait
+// =============================================================================
+
+/// Trait for VM to implement, allowing bridge layer to call JIT functions
+/// without circular dependency.
+///
+/// This trait abstracts the VM-specific operations needed for JIT calls:
+/// - Reading/writing fiber registers
+/// - Building JitContext
+/// - Accessing JitManager
+pub trait JitCallContext {
+    /// Read arguments from fiber into a Vec.
+    fn read_args(&self, fiber_id: u32, arg_start: u16, arg_count: usize) -> Vec<u64>;
+    
+    /// Write return values back to fiber.
+    fn write_returns(&mut self, fiber_id: u32, ret_start: u16, values: &[u64]);
+    
+    /// Read locals from fiber stack for OSR.
+    fn read_locals(&self, fiber_id: u32, bp: usize, local_count: usize) -> Vec<u64>;
+    
+    /// Build JitContext with current VM state.
+    /// Returns (ctx, func_table_ptr, func_table_len).
+    fn build_context(
+        &mut self,
+        fiber_id: u32,
+        safepoint_flag: *const bool,
+        panic_flag: *mut bool,
+    ) -> JitContext;
+}

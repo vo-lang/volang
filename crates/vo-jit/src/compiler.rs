@@ -258,6 +258,70 @@ impl<'a> FunctionCompiler<'a> {
         Ok(self.gc_tracker.build_stack_map())
     }
 
+    /// Compile the function for OSR (On-Stack Replacement) entry at the given PC.
+    ///
+    /// OSR compilation differs from normal compilation:
+    /// - Prologue loads ALL local slots from the locals buffer (not just params)
+    /// - Entry jumps directly to the OSR target block (loop head)
+    ///
+    /// The function signature is the same: (ctx, locals, ret) -> JitResult
+    /// But 'locals' contains all local_slots values, not just param_slots.
+    pub fn compile_osr(mut self, osr_pc: usize) -> Result<StackMap, JitError> {
+        // 1. Declare variables for all local slots
+        self.declare_variables();
+        
+        // 2. Scan bytecode to find jump targets and create blocks
+        self.scan_jump_targets();
+        
+        // 3. Verify OSR target is a valid jump target
+        if !self.blocks.contains_key(&osr_pc) {
+            return Err(JitError::InvalidOsrTarget(osr_pc));
+        }
+        
+        // 4. Switch to entry block and emit OSR prologue
+        self.builder.switch_to_block(self.entry_block);
+        self.emit_osr_prologue(osr_pc);
+        
+        // Track whether current block is terminated
+        let mut block_terminated = true; // Entry block ends with jump to osr_pc
+        
+        // 5. Translate each instruction (same as normal compile)
+        for pc in 0..self.func_def.code.len() {
+            self.current_pc = pc;
+            
+            if let Some(&block) = self.blocks.get(&pc) {
+                if !block_terminated {
+                    self.builder.ins().jump(block, &[]);
+                }
+                self.builder.switch_to_block(block);
+                block_terminated = false;
+            } else if block_terminated {
+                let dummy = self.builder.create_block();
+                self.builder.switch_to_block(dummy);
+                block_terminated = false;
+            }
+            
+            let inst = &self.func_def.code[pc];
+            self.translate_inst(inst)?;
+            
+            match inst.opcode() {
+                Opcode::Return | Opcode::Jump | Opcode::Panic => {
+                    block_terminated = true;
+                }
+                Opcode::JumpIf | Opcode::JumpIfNot => {
+                    block_terminated = false;
+                }
+                _ => {}
+            }
+        }
+        
+        // 6. Seal all blocks and finalize
+        self.builder.seal_all_blocks();
+        self.builder.finalize();
+        
+        Ok(self.gc_tracker.build_stack_map())
+    }
+
     /// Declare Cranelift variables for all local slots.
     fn declare_variables(&mut self) {
         let num_slots = self.func_def.local_slots as usize;
@@ -338,6 +402,35 @@ impl<'a> FunctionCompiler<'a> {
         for i in param_slots..self.vars.len() {
             self.builder.def_var(self.vars[i], zero);
         }
+    }
+
+    /// Emit OSR prologue: load ALL local slots and jump to OSR target.
+    ///
+    /// Unlike normal prologue which only loads param_slots, OSR loads all local_slots
+    /// because the VM has already initialized all variables before the OSR point.
+    fn emit_osr_prologue(&mut self, osr_pc: usize) {
+        // Get function parameters: ctx, locals, ret (same signature as normal)
+        let params = self.builder.block_params(self.entry_block);
+        let _ctx = params[0];    // JitContext*
+        let locals = params[1];  // locals: *mut u64 (ALL local slots)
+        let _ret = params[2];    // ret: *mut u64
+        
+        // Load ALL local slots from the locals buffer
+        let num_slots = self.func_def.local_slots as usize;
+        for i in 0..num_slots {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                locals,
+                offset,
+            );
+            self.builder.def_var(self.vars[i], val);
+        }
+        
+        // Jump directly to the OSR target block (loop head)
+        let target_block = self.blocks[&osr_pc];
+        self.builder.ins().jump(target_block, &[]);
     }
 
     /// Translate a single bytecode instruction.

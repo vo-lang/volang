@@ -8,6 +8,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# Flag to enable Python and Ruby benchmarks (disabled by default)
+RUN_ALL_LANGS=false
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -90,8 +93,8 @@ run_benchmark() {
         cmds+=("$vo_bin run '$vo_file'")
         names+=("Vo-VM")
         
-        # Vo JIT
-        cmds+=("VO_JIT_CALL_THRESHOLD=1 $vo_bin run --mode=jit '$vo_file'")
+        # Vo JIT (OSR handles hot loops automatically)
+        cmds+=("$vo_bin run --mode=jit '$vo_file'")
         names+=("Vo-JIT")
     fi
     
@@ -115,15 +118,15 @@ run_benchmark() {
         names+=("LuaJIT")
     fi
     
-    # Python
-    if [ -f "$py_file" ]; then
+    # Python (only if --all-langs is set)
+    if [ -f "$py_file" ] && [ "$RUN_ALL_LANGS" = true ]; then
         cmds+=("python3 '$py_file'")
         names+=("Python")
     fi
     
-    # Ruby
+    # Ruby (only if --all-langs is set)
     local rb_file=$(find "$dir" -name "*.rb" | head -1)
-    if [ -f "$rb_file" ] && has_ruby; then
+    if [ -f "$rb_file" ] && has_ruby && [ "$RUN_ALL_LANGS" = true ]; then
         cmds+=("ruby '$rb_file'")
         names+=("Ruby")
     fi
@@ -148,7 +151,7 @@ run_benchmark() {
     fi
     
     # Build hyperfine command
-    local hf_args=("--warmup" "1")
+    local hf_args=("--warmup" "1" "--runs" "3")
     for i in "${!cmds[@]}"; do
         hf_args+=("-n" "${names[$i]}" "${cmds[$i]}")
     done
@@ -201,6 +204,19 @@ generate_report() {
 
 # Main
 main() {
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all-langs)
+                RUN_ALL_LANGS=true
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
     check_deps
     build_vo
     
