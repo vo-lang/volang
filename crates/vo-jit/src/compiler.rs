@@ -263,6 +263,7 @@ impl<'a> FunctionCompiler<'a> {
     /// OSR compilation differs from normal compilation:
     /// - Prologue loads ALL local slots from the locals buffer (not just params)
     /// - Entry jumps directly to the OSR target block (loop head)
+    /// - Only compiles reachable code from osr_pc, avoiding dummy blocks before osr_pc
     ///
     /// The function signature is the same: (ctx, locals, ret) -> JitResult
     /// But 'locals' contains all local_slots values, not just param_slots.
@@ -285,17 +286,41 @@ impl<'a> FunctionCompiler<'a> {
         // Track whether current block is terminated
         let mut block_terminated = true; // Entry block ends with jump to osr_pc
         
-        // 5. Translate each instruction (same as normal compile)
+        // 5. Translate instructions
+        //
+        // OSR compilation challenge: entry_block jumps directly to osr_pc.
+        // Code before osr_pc that is NOT a jump target is unreachable.
+        // If we create dummy blocks for such code, they have incomplete variable
+        // definitions, and when they jump to the next block, Cranelift's SSA
+        // construction uses default value 0 for undefined variables.
+        //
+        // Solution: For unreachable code before osr_pc, create a dummy block
+        // that ends with trap (unreachable). This prevents it from becoming
+        // a predecessor of any real block, avoiding the SSA issue.
         for pc in 0..self.func_def.code.len() {
             self.current_pc = pc;
             
-            if let Some(&block) = self.blocks.get(&pc) {
+            let is_jump_target = self.blocks.contains_key(&pc);
+            
+            if is_jump_target {
+                // Jump target - always translate
                 if !block_terminated {
-                    self.builder.ins().jump(block, &[]);
+                    self.builder.ins().jump(self.blocks[&pc], &[]);
                 }
-                self.builder.switch_to_block(block);
+                self.builder.switch_to_block(self.blocks[&pc]);
                 block_terminated = false;
             } else if block_terminated {
+                // Not a jump target and previous block terminated
+                if pc < osr_pc {
+                    // Before OSR entry and not a jump target = unreachable
+                    // Create dummy block that traps, so it won't be a predecessor
+                    let dummy = self.builder.create_block();
+                    self.builder.switch_to_block(dummy);
+                    self.builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+                    block_terminated = true;
+                    continue;
+                }
+                // After OSR entry - create dummy block as normal
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
                 block_terminated = false;

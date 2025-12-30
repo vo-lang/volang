@@ -1,0 +1,168 @@
+package main
+
+import "fmt"
+
+type Node struct {
+	value int
+	left  *Node
+	right *Node
+}
+
+func (n *Node) insert(val int) {
+	if val < n.value {
+		if n.left == nil {
+			n.left = &Node{value: val}
+		} else {
+			n.left.insert(val)
+		}
+	} else {
+		if n.right == nil {
+			n.right = &Node{value: val}
+		} else {
+			n.right.insert(val)
+		}
+	}
+}
+
+func (n *Node) sum() int {
+	if n == nil {
+		return 0
+	}
+	total := n.value
+	if n.left != nil {
+		total += n.left.sum()
+	}
+	if n.right != nil {
+		total += n.right.sum()
+	}
+	return total
+}
+
+func (n *Node) count() int {
+	if n == nil {
+		return 0
+	}
+	c := 1
+	if n.left != nil {
+		c += n.left.count()
+	}
+	if n.right != nil {
+		c += n.right.count()
+	}
+	return c
+}
+
+func (n *Node) height() int {
+	if n == nil {
+		return 0
+	}
+	lh := 0
+	rh := 0
+	if n.left != nil {
+		lh = n.left.height()
+	}
+	if n.right != nil {
+		rh = n.right.height()
+	}
+	if lh > rh {
+		return lh + 1
+	}
+	return rh + 1
+}
+
+func makeTree(values []int) *Node {
+	if len(values) == 0 {
+		return nil
+	}
+	root := &Node{value: values[0]}
+	for i := 1; i < len(values); i++ {
+		root.insert(values[i])
+	}
+	return root
+}
+
+func fibonacci(n int) int {
+	if n <= 1 {
+		return n
+	}
+	return fibonacci(n-1) + fibonacci(n-2)
+}
+
+func processWithClosure(arr []int, multiplier int) []int {
+	result := make([]int, len(arr))
+	
+	transform := func(x int) int {
+		return x*multiplier + fibonacci(10)
+	}
+	
+	for i := 0; i < len(arr); i++ {
+		result[i] = transform(arr[i])
+	}
+	
+	return result
+}
+
+func matrixMultiply(a [][]int, b [][]int) [][]int {
+	n := len(a)
+	result := make([][]int, n)
+	for i := 0; i < n; i++ {
+		result[i] = make([]int, n)
+		for j := 0; j < n; j++ {
+			sum := 0
+			for k := 0; k < n; k++ {
+				sum += a[i][k] * b[k][j]
+			}
+			result[i][j] = sum
+		}
+	}
+	return result
+}
+
+func main() {
+	iterations := 500
+	treeSize := 100
+	matrixSize := 20
+	
+	totalSum := 0
+	totalCount := 0
+	totalHeight := 0
+	
+	for iter := 0; iter < iterations; iter++ {
+		values := make([]int, treeSize)
+		for i := 0; i < treeSize; i++ {
+			values[i] = (i*7 + iter*13) % 1000
+		}
+		
+		tree := makeTree(values)
+		totalSum += tree.sum()
+		totalCount += tree.count()
+		totalHeight += tree.height()
+		
+		processed := processWithClosure(values, iter%10+1)
+		for i := 0; i < len(processed); i++ {
+			totalSum += processed[i] % 100
+		}
+		
+		if iter%50 == 0 {
+			matA := make([][]int, matrixSize)
+			matB := make([][]int, matrixSize)
+			for i := 0; i < matrixSize; i++ {
+				matA[i] = make([]int, matrixSize)
+				matB[i] = make([]int, matrixSize)
+				for j := 0; j < matrixSize; j++ {
+					matA[i][j] = (i + j + iter) % 10
+					matB[i][j] = (i*j + iter) % 10
+				}
+			}
+			
+			matC := matrixMultiply(matA, matB)
+			for i := 0; i < matrixSize; i++ {
+				for j := 0; j < matrixSize; j++ {
+					totalSum += matC[i][j]
+				}
+			}
+		}
+	}
+	
+	fmt.Println(totalSum, totalCount, totalHeight)
+}

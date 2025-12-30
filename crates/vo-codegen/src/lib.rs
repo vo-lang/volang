@@ -550,11 +550,28 @@ fn compile_func_decl(
         builder.define_param(recv.name.symbol, slots, &slot_types);
     }
     
-    // Define parameters
+    // Define parameters and collect escaped ones for boxing
+    let mut escaped_params = Vec::new();
     for param in &func_decl.sig.params {
         let (slots, slot_types) = info.type_expr_layout(param.ty.id);
+        let type_key = info.type_expr_type(param.ty.id);
         for name in &param.names {
             builder.define_param(name.symbol, slots, &slot_types);
+            let obj_key = info.get_def(name);
+            if info.is_escaped(obj_key) {
+                escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
+            }
+        }
+    }
+    
+    // Box escaped parameters: allocate heap storage and copy param values
+    for (sym, type_key, slots, slot_types) in escaped_params {
+        if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots) {
+            let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+            let meta_reg = builder.alloc_temp(1);
+            builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
+            builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
+            builder.emit_ptr_set(gcref_slot, 0, param_slot, slots);
         }
     }
     

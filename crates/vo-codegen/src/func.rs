@@ -172,6 +172,30 @@ impl FuncBuilder {
         slot
     }
 
+    /// Box an escaped parameter: allocate heap storage and copy the stack param value into it.
+    /// Returns (gcref_slot, param_slot) for the caller to emit PtrNew + PtrSet.
+    /// The local storage is updated to HeapBoxed.
+    pub fn box_escaped_param(&mut self, sym: Symbol, value_slots: u16) -> Option<(u16, u16)> {
+        let local = self.locals.get(&sym)?;
+        let param_slot = match local.storage {
+            StorageKind::StackValue { slot, .. } => slot,
+            _ => return None,
+        };
+        
+        let gcref_slot = self.next_slot;
+        self.locals.insert(
+            sym,
+            LocalVar {
+                symbol: sym,
+                storage: StorageKind::HeapBoxed { gcref_slot, value_slots },
+            },
+        );
+        self.slot_types.push(SlotType::GcRef);
+        self.next_slot += 1;
+        
+        Some((gcref_slot, param_slot))
+    }
+
     // === Local variable definition ===
 
     /// Define a local variable with the given StorageKind.

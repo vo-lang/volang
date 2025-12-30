@@ -1,0 +1,41 @@
+package main
+
+func fibonacci(n int) int {
+	if n <= 1 {
+		return n
+	}
+	return fibonacci(n-1) + fibonacci(n-2)
+}
+
+func processWithClosure(arr []int, multiplier int) []int {
+	result := make([]int, len(arr))
+	
+	transform := func(x int) int {
+		return x * multiplier + fibonacci(10)
+	}
+	
+	for i := 0; i < len(arr); i++ {
+		result[i] = transform(arr[i])
+	}
+	
+	return result
+}
+
+func main() {
+	values := make([]int, 5)
+	for i := 0; i < 5; i++ {
+		values[i] = i * 2
+	}
+	
+	processed := processWithClosure(values, 3)
+	
+	expected := 55
+	for i := 0; i < len(processed); i++ {
+		if i == 0 {
+			if processed[i] != expected {
+				panic("wrong result")
+			}
+		}
+		println(processed[i])
+	}
+}

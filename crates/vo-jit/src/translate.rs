@@ -358,12 +358,12 @@ impl FunctionCompiler<'_> {
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (arg_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (ret_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy args to stack buffer
@@ -380,6 +380,7 @@ impl FunctionCompiler<'_> {
         // JitContext layout (offset in bytes):
         // jit_func_table: offset 112 (after iface_assert_fn)
         const JIT_FUNC_TABLE_OFFSET: i32 = 112;
+        const JIT_FUNC_COUNT_OFFSET: i32 = 120;
         
         // Load jit_func_table pointer from ctx
         let func_table = self.builder.ins().load(
@@ -388,6 +389,27 @@ impl FunctionCompiler<'_> {
             ctx,
             JIT_FUNC_TABLE_OFFSET,
         );
+
+        // Fail-fast: bounds check func_id against jit_func_count before indexing
+        let func_count = self.builder.ins().load(
+            types::I32,
+            cranelift_codegen::ir::MemFlags::trusted(),
+            ctx,
+            JIT_FUNC_COUNT_OFFSET,
+        );
+        let func_id_i32 = self.builder.ins().iconst(types::I32, func_id as i64);
+        let in_bounds = self.builder.ins().icmp(IntCC::UnsignedLessThan, func_id_i32, func_count);
+        let in_bounds_block = self.builder.create_block();
+        let oob_block = self.builder.create_block();
+        self.builder.ins().brif(in_bounds, in_bounds_block, &[], oob_block, &[]);
+
+        self.builder.switch_to_block(oob_block);
+        self.builder.seal_block(oob_block);
+        let panic_result = self.builder.ins().iconst(types::I32, 1);
+        self.builder.ins().return_(&[panic_result]);
+
+        self.builder.switch_to_block(in_bounds_block);
+        self.builder.seal_block(in_bounds_block);
         
         // Calculate &jit_func_table[func_id] = func_table + func_id * 8
         let func_id_i64 = self.builder.ins().iconst(types::I64, func_id as i64);
@@ -419,7 +441,8 @@ impl FunctionCompiler<'_> {
         
         // Build signature for JIT function: (ctx, args, ret) -> i32
         let ptr_type = types::I64;
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        let call_conv = self.builder.func.signature.call_conv;
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type)); // ctx
         sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type)); // args
         sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type)); // ret
@@ -492,7 +515,7 @@ impl FunctionCompiler<'_> {
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (arg_count.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy args to stack buffer
@@ -557,12 +580,12 @@ impl FunctionCompiler<'_> {
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (arg_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (ret_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy args to stack buffer (excluding closure)
@@ -627,12 +650,12 @@ impl FunctionCompiler<'_> {
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (arg_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (ret_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy args to stack buffer
@@ -1579,7 +1602,7 @@ impl FunctionCompiler<'_> {
         let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             256,
-            0,
+            3,
         ));
         
         // Copy slots (max 32 for 256 bytes)
@@ -1683,12 +1706,12 @@ impl FunctionCompiler<'_> {
         let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (key_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (val_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy key to stack
@@ -1728,12 +1751,12 @@ impl FunctionCompiler<'_> {
         let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (key_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (val_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy key and value to stack
@@ -1768,7 +1791,7 @@ impl FunctionCompiler<'_> {
         let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (key_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         // Copy key to stack
@@ -1812,12 +1835,12 @@ impl FunctionCompiler<'_> {
         let key_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (key_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         let val_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (val_slots.max(1) * 8) as u32,
-            0,
+            3,
         ));
         
         let key_ptr = self.builder.ins().stack_addr(types::I64, key_slot, 0);
@@ -1987,7 +2010,7 @@ impl FunctionCompiler<'_> {
         let result_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (result_slots * 8) as u32,
-            0,
+            3,
         ));
         let dst_ptr = self.builder.ins().stack_addr(types::I64, result_slot, 0);
         

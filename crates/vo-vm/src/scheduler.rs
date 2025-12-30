@@ -32,19 +32,25 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Initial capacity for trampoline fibers.
+    const INITIAL_TRAMPOLINE_CAPACITY: usize = 8;
+    
     pub fn new() -> Self {
-        Self {
+        Scheduler {
             fibers: Vec::new(),
             free_slots: Vec::new(),
             ready_queue: VecDeque::new(),
             current: None,
-            trampoline_fibers: Vec::new(),
+            trampoline_fibers: Vec::with_capacity(Self::INITIAL_TRAMPOLINE_CAPACITY),
             trampoline_free_slots: Vec::new(),
         }
     }
     
     /// Acquire a trampoline fiber for JIT->VM calls.
     /// Returns fiber ID with high bit set.
+    /// 
+    /// IMPORTANT: This function must NOT cause Vec reallocation because run_fiber
+    /// caches raw pointers to fibers. We ensure this by reserving capacity before push.
     pub fn acquire_trampoline_fiber(&mut self) -> u32 {
         let index = if let Some(slot) = self.trampoline_free_slots.pop() {
             // Reuse existing fiber
@@ -52,8 +58,13 @@ impl Scheduler {
             fiber.reset();
             slot
         } else {
-            // Create new fiber
+            // Create new fiber - MUST reserve before push to prevent reallocation
             let index = self.trampoline_fibers.len() as u32;
+            if self.trampoline_fibers.len() >= self.trampoline_fibers.capacity() {
+                // Double capacity or add 16, whichever is larger
+                let additional = self.trampoline_fibers.capacity().max(16);
+                self.trampoline_fibers.reserve(additional);
+            }
             let mut fiber = Fiber::new(TRAMPOLINE_FIBER_FLAG | index);
             fiber.status = FiberStatus::Running;
             self.trampoline_fibers.push(fiber);

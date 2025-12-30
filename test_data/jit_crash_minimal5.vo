@@ -1,0 +1,50 @@
+package main
+
+type Node struct {
+	value int
+	left  *Node
+	right *Node
+}
+
+func (n *Node) sum() int {
+	if n == nil {
+		return 0
+	}
+
+	total := 0
+	
+    // 这个block 注释了就不crash
+	if n.right != nil {
+        println(11111, n.right)
+		total += n.right.sum()
+	}
+	return total
+}
+
+func makeTree(values []int) *Node {
+	
+    // 现在这个是 >=5会触发！
+	for i := 1; i < 5; i++ {}    
+	
+    return &Node{value: values[0]}
+}
+
+func main() {
+	
+	for iter := 0; iter < 13; iter++ {
+
+
+		values := make([]int, 100)
+		for i := 0; i < 5; i++ {
+		}
+        
+		tree := makeTree(values)
+
+        //会打印2222 ptr@0x64，而x64就是上面的100
+        // 把100改成其他大于等于6的数就也会crash，5以下则不会
+        println(2222, tree.right)
+
+
+		//tree.sum()
+	}
+}

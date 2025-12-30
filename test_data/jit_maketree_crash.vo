@@ -1,0 +1,59 @@
+package main
+
+type Node struct {
+	value int
+	left  *Node
+	right *Node
+}
+
+func (n *Node) insert(val int) {
+	if val < n.value {
+		if n.left == nil {
+			n.left = &Node{value: val}
+		} else {
+			n.left.insert(val)
+		}
+	} else {
+		if n.right == nil {
+			n.right = &Node{value: val}
+		} else {
+			n.right.insert(val)
+		}
+	}
+}
+
+func (n *Node) sum() int {
+	if n == nil {
+		return 0
+	}
+	total := n.value
+	if n.left != nil {
+		total += n.left.sum()
+	}
+	if n.right != nil {
+		total += n.right.sum()
+	}
+	return total
+}
+
+func makeTree(values []int) *Node {
+	if len(values) == 0 {
+		return nil
+	}
+	root := &Node{value: values[0]}
+	for i := 1; i < len(values); i++ {
+		root.insert(values[i])
+	}
+	return root
+}
+
+func main() {
+	for iter := 0; iter < 10; iter++ {
+		values := make([]int, 10)
+		for i := 0; i < 10; i++ {
+			values[i] = (i * 7 + iter * 13) % 100
+		}
+		tree := makeTree(values)
+		println(tree.sum())
+	}
+}

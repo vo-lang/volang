@@ -228,14 +228,11 @@ impl JitManager {
     
     /// Record a function call. Returns true if the function should be compiled.
     pub fn record_call(&mut self, func_id: u32) -> bool {
-        // Ensure capacity
         let id = func_id as usize;
-        while self.funcs.len() <= id {
-            self.funcs.push(FunctionJitInfo::new());
-            self.func_table.push(std::ptr::null());
-        }
-        
-        let info = &mut self.funcs[id];
+        let info = self
+            .funcs
+            .get_mut(id)
+            .expect("JIT: func_id out of range (JitManager not initialized for module?)");
         info.call_count += 1;
         info.call_count >= self.config.call_threshold && info.state == CompileState::Interpreted
     }
@@ -247,14 +244,11 @@ impl JitManager {
         backedge_pc: usize, 
         loop_header_pc: usize
     ) -> Option<usize> {
-        // Ensure capacity
         let id = func_id as usize;
-        while self.funcs.len() <= id {
-            self.funcs.push(FunctionJitInfo::new());
-            self.func_table.push(std::ptr::null());
-        }
-        
-        let info = &mut self.funcs[id];
+        let info = self
+            .funcs
+            .get_mut(id)
+            .expect("JIT: func_id out of range (JitManager not initialized for module?)");
         
         // Already has full version or unsupported
         if info.state == CompileState::FullyCompiled 

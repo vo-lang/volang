@@ -1,0 +1,48 @@
+package main
+
+type Node struct {
+	value int
+	left  *Node
+	right *Node
+}
+
+func (n *Node) insert(val int) {
+	if val < n.value {
+		if n.left == nil {
+			n.left = &Node{value: val}
+		} else {
+			n.left.insert(val)
+		}
+	} else {
+		if n.right == nil {
+			n.right = &Node{value: val}
+		} else {
+			n.right.insert(val)
+		}
+	}
+}
+
+func (n *Node) sum() int {
+	if n == nil {
+		return 0
+	}
+	total := n.value
+	if n.left != nil {
+		total += n.left.sum()
+	}
+	if n.right != nil {
+		total += n.right.sum()
+	}
+	return total
+}
+
+func main() {
+	root := &Node{value: 10}
+	root.insert(5)
+	root.insert(15)
+	root.insert(3)
+	root.insert(7)
+	
+	s := root.sum()
+	println(s)
+}
