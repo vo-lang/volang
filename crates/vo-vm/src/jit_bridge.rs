@@ -2,12 +2,114 @@
 //!
 //! This module contains all the "glue code" between JIT and VM:
 //! - vo_call_function: Entry point for JIT code to call back into VM
+//! - Trampolines for JIT -> VM callbacks (itab lookup, extern calls)
+//! - JitContext builder
 //! - High-level JIT call functions using JitCallContext trait
 //! - OSR compilation helpers
 //! - JIT function calling utilities
 
 use vo_runtime::jit_api::{JitContext, JitResult, JitCallContext};
+use vo_runtime::ffi::{ExternCall, ExternResult, ExternRegistry};
 use vo_jit::{JitManager, JitFunc};
+
+// =============================================================================
+// Trampolines for JIT -> VM callbacks
+// =============================================================================
+
+/// Itab lookup trampoline for JIT -> VM itab lookup.
+pub extern "C" fn itab_lookup_trampoline(
+    itabs: *const std::ffi::c_void,
+    itab_id: u32,
+    method_idx: u32,
+) -> u32 {
+    unsafe {
+        let itabs = itabs as *const crate::bytecode::Itab;
+        let itab = &*itabs.add(itab_id as usize);
+        itab.methods[method_idx as usize]
+    }
+}
+
+/// Extern call trampoline for JIT -> extern function calls.
+pub extern "C" fn call_extern_trampoline(
+    registry: *const std::ffi::c_void,
+    gc: *mut vo_runtime::gc::Gc,
+    extern_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+) -> JitResult {
+    let registry = unsafe { &*(registry as *const ExternRegistry) };
+    let gc = unsafe { &mut *gc };
+    
+    // Create a temporary stack for the extern call
+    let mut temp_stack: Vec<u64> = (0..arg_count as usize)
+        .map(|i| unsafe { *args.add(i) })
+        .collect();
+    
+    // Call through ExternRegistry
+    let result = registry.call(
+        extern_id,
+        &mut temp_stack,
+        0,     // bp
+        0,     // arg_start
+        arg_count as u16,
+        0,     // ret_start (same as arg_start)
+        gc,
+    );
+    
+    match result {
+        ExternResult::Ok => {
+            // Copy return values (extern functions may return values in the same slots)
+            for i in 0..arg_count as usize {
+                unsafe { *ret.add(i) = temp_stack[i] };
+            }
+            JitResult::Ok
+        }
+        ExternResult::Yield => JitResult::Panic, // Yield not supported in JIT
+        ExternResult::Panic(_) => JitResult::Panic,
+    }
+}
+
+// =============================================================================
+// JitContext Builder
+// =============================================================================
+
+/// Helper to build JitContext from components.
+/// Centralizes the JitContext construction to avoid code duplication.
+pub fn build_jit_ctx(
+    gc: *mut vo_runtime::gc::Gc,
+    globals: *mut u64,
+    jit_func_table: *const *const u8,
+    jit_func_count: u32,
+    vm_ptr: *mut std::ffi::c_void,
+    fiber_ptr: *mut std::ffi::c_void,
+    module_ptr: *const std::ffi::c_void,
+    itabs: *const std::ffi::c_void,
+    extern_registry: *const std::ffi::c_void,
+    itab_cache: *mut std::ffi::c_void,
+    call_vm_fn: Option<extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, u32, *const u64, u32, *mut u64, u32) -> JitResult>,
+    safepoint_flag: *const bool,
+    panic_flag: *mut bool,
+) -> JitContext {
+    JitContext {
+        gc,
+        globals,
+        safepoint_flag,
+        panic_flag,
+        vm: vm_ptr,
+        fiber: fiber_ptr,
+        call_vm_fn,
+        itabs,
+        itab_lookup_fn: Some(itab_lookup_trampoline),
+        extern_registry,
+        call_extern_fn: Some(call_extern_trampoline),
+        itab_cache,
+        module: module_ptr,
+        iface_assert_fn: None,
+        jit_func_table,
+        jit_func_count,
+    }
+}
 
 // =============================================================================
 // JIT -> VM Call Entry Point

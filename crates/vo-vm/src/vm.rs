@@ -116,68 +116,9 @@ use vo_jit::{JitManager, JitConfig};
 #[cfg(feature = "jit")]
 use vo_runtime::jit_api::JitResult;
 
-/// Itab lookup trampoline for JIT -> VM itab lookup.
+/// Helper to build JitContext from VM state using jit_bridge.
 #[cfg(feature = "jit")]
-extern "C" fn itab_lookup_trampoline(
-    itabs: *const std::ffi::c_void,
-    itab_id: u32,
-    method_idx: u32,
-) -> u32 {
-    unsafe {
-        let itabs = itabs as *const crate::bytecode::Itab;
-        let itab = &*itabs.add(itab_id as usize);
-        itab.methods[method_idx as usize]
-    }
-}
-
-/// Extern call trampoline for JIT -> extern function calls.
-#[cfg(feature = "jit")]
-extern "C" fn call_extern_trampoline(
-    registry: *const std::ffi::c_void,
-    gc: *mut vo_runtime::gc::Gc,
-    extern_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-) -> JitResult {
-    use vo_runtime::ffi::{ExternCall, ExternResult};
-    
-    let registry = unsafe { &*(registry as *const ExternRegistry) };
-    let gc = unsafe { &mut *gc };
-    
-    // Create a temporary stack for the extern call
-    let mut temp_stack: Vec<u64> = (0..arg_count as usize)
-        .map(|i| unsafe { *args.add(i) })
-        .collect();
-    
-    // Call through ExternRegistry
-    let result = registry.call(
-        extern_id,
-        &mut temp_stack,
-        0,     // bp
-        0,     // arg_start
-        arg_count as u16,
-        0,     // ret_start (same as arg_start)
-        gc,
-    );
-    
-    match result {
-        ExternResult::Ok => {
-            // Copy return values (extern functions may return values in the same slots)
-            for i in 0..arg_count as usize {
-                unsafe { *ret.add(i) = temp_stack[i] };
-            }
-            JitResult::Ok
-        }
-        ExternResult::Yield => JitResult::Panic, // Yield not supported in JIT
-        ExternResult::Panic(_) => JitResult::Panic,
-    }
-}
-
-/// Helper to build JitContext from VM state.
-/// Centralizes the JitContext construction to avoid code duplication.
-#[cfg(feature = "jit")]
-fn build_jit_ctx(
+fn build_jit_ctx_from_state(
     state: &mut VmState,
     jit_func_table: *const *const u8,
     jit_func_count: u32,
@@ -187,24 +128,21 @@ fn build_jit_ctx(
     safepoint_flag: *const bool,
     panic_flag: *mut bool,
 ) -> vo_runtime::jit_api::JitContext {
-    vo_runtime::jit_api::JitContext {
-        gc: &mut state.gc as *mut _,
-        globals: state.globals.as_mut_ptr(),
-        safepoint_flag,
-        panic_flag,
-        vm: vm_ptr,
-        fiber: fiber_ptr,
-        call_vm_fn: Some(vm_call_trampoline),
-        itabs: state.itab_cache.itabs_ptr(),
-        itab_lookup_fn: Some(itab_lookup_trampoline),
-        extern_registry: &state.extern_registry as *const _ as *const std::ffi::c_void,
-        call_extern_fn: Some(call_extern_trampoline),
-        itab_cache: &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
-        module: module_ptr,
-        iface_assert_fn: None,
+    crate::jit_bridge::build_jit_ctx(
+        &mut state.gc as *mut _,
+        state.globals.as_mut_ptr(),
         jit_func_table,
         jit_func_count,
-    }
+        vm_ptr,
+        fiber_ptr,
+        module_ptr,
+        state.itab_cache.itabs_ptr(),
+        &state.extern_registry as *const _ as *const std::ffi::c_void,
+        &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
+        Some(vm_call_trampoline),
+        safepoint_flag,
+        panic_flag,
+    )
 }
 
 /// VM call trampoline for JIT -> VM calls.
@@ -241,7 +179,7 @@ extern "C" fn vm_call_trampoline(
             let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
             let module_ptr = module as *const _ as *const std::ffi::c_void;
             
-            let mut ctx = build_jit_ctx(
+            let mut ctx = build_jit_ctx_from_state(
                 &mut vm.state, func_table_ptr, func_table_len,
                 vm_ptr, std::ptr::null_mut(), module_ptr,
                 &safepoint_flag, &mut panic_flag,
@@ -261,7 +199,7 @@ extern "C" fn vm_call_trampoline(
                     let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
                     let module_ptr = module as *const _ as *const std::ffi::c_void;
                     
-                    let mut ctx = build_jit_ctx(
+                    let mut ctx = build_jit_ctx_from_state(
                         &mut vm.state, func_table_ptr, func_table_len,
                         vm_ptr, std::ptr::null_mut(), module_ptr,
                         &safepoint_flag, &mut panic_flag,
@@ -333,7 +271,7 @@ extern "C" fn vm_call_trampoline(
                         let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
                         let module_ptr = module as *const _ as *const std::ffi::c_void;
                         
-                        let mut ctx = build_jit_ctx(
+                        let mut ctx = build_jit_ctx_from_state(
                             &mut vm.state, func_table_ptr, func_table_len,
                             vm_ptr, std::ptr::null_mut(), module_ptr,
                             &safepoint_flag, &mut panic_flag,
@@ -571,7 +509,7 @@ impl vo_runtime::jit_api::JitCallContext for Vm {
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref().map(|m| m as *const _ as *const std::ffi::c_void).unwrap_or(std::ptr::null());
         
-        build_jit_ctx(
+        build_jit_ctx_from_state(
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             safepoint_flag, panic_flag,
