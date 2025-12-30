@@ -139,193 +139,10 @@ fn build_jit_ctx_from_state(
         state.itab_cache.itabs_ptr(),
         &state.extern_registry as *const _ as *const std::ffi::c_void,
         &mut state.itab_cache as *mut _ as *mut std::ffi::c_void,
-        Some(vm_call_trampoline),
+        Some(crate::jit_bridge::vm_call_trampoline),
         safepoint_flag,
         panic_flag,
     )
-}
-
-/// VM call trampoline for JIT -> VM calls.
-/// This is the **unified entry point** for all function calls from JIT code.
-/// It delegates to JitManager which selects the best version (JIT or VM).
-#[cfg(feature = "jit")]
-extern "C" fn vm_call_trampoline(
-    vm: *mut std::ffi::c_void,
-    _fiber: *mut std::ffi::c_void,
-    func_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> JitResult {
-    use vo_runtime::jit_api::JitContext;
-    
-    // Safety: vm must be a valid pointer to Vm
-    let vm = unsafe { &mut *(vm as *mut Vm) };
-    let module = match &vm.module {
-        Some(m) => m as *const Module,
-        None => return JitResult::Panic,
-    };
-    let module = unsafe { &*module };
-    
-    // Use JitManager unified entry point
-    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-        // 1. Check if JIT version exists
-        if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-            let func_table_ptr = jit_mgr.func_table_ptr();
-            let func_table_len = jit_mgr.func_table_len() as u32;
-            let safepoint_flag = false;
-            let mut panic_flag = false;
-            let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
-            let module_ptr = module as *const _ as *const std::ffi::c_void;
-            
-            let mut ctx = build_jit_ctx_from_state(
-                &mut vm.state, func_table_ptr, func_table_len,
-                vm_ptr, std::ptr::null_mut(), module_ptr,
-                &safepoint_flag, &mut panic_flag,
-            );
-            return jit_func(&mut ctx, args as *mut u64, ret);
-        }
-        
-        // 2. Record call and try to compile if hot
-        if jit_mgr.record_call(func_id) {
-            let func_def = &module.functions[func_id as usize];
-            if jit_mgr.compile_full(func_id, func_def, module).is_ok() {
-                if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-                    let func_table_ptr = jit_mgr.func_table_ptr();
-                    let func_table_len = jit_mgr.func_table_len() as u32;
-                    let safepoint_flag = false;
-                    let mut panic_flag = false;
-                    let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
-                    let module_ptr = module as *const _ as *const std::ffi::c_void;
-                    
-                    let mut ctx = build_jit_ctx_from_state(
-                        &mut vm.state, func_table_ptr, func_table_len,
-                        vm_ptr, std::ptr::null_mut(), module_ptr,
-                        &safepoint_flag, &mut panic_flag,
-                    );
-                    return jit_func(&mut ctx, args as *mut u64, ret);
-                }
-            }
-        }
-    }
-    
-    // 3. Fall back to VM interpretation using trampoline fiber
-    let func_def = &module.functions[func_id as usize];
-    let local_slots = func_def.local_slots;
-    let param_slots = func_def.param_slots as usize;
-    
-    // Acquire a trampoline fiber from the pool
-    let trampoline_id = vm.scheduler.acquire_trampoline_fiber();
-    
-    {
-        let fiber = vm.scheduler.trampoline_fiber_mut(trampoline_id);
-        
-        // Setup initial frame
-        fiber.push_frame(func_id, local_slots, 0, ret_count as u16);
-        
-        // Copy arguments
-        for i in 0..param_slots.min(arg_count as usize) {
-            fiber.stack[i] = unsafe { *args.add(i) };
-        }
-    }
-    
-    // Run the fiber until completion
-    let result = loop {
-        let exec_result = vm.run_fiber(trampoline_id);
-        match exec_result {
-            ExecResult::Done => break JitResult::Ok,
-            ExecResult::Panic => break JitResult::Panic,
-            ExecResult::Osr(osr_func_id, backedge_pc, loop_header_pc) => {
-                // Handle OSR
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    use crate::jit_bridge::OsrResult;
-                    let osr_action = crate::jit_bridge::try_osr_compile(jit_mgr, osr_func_id, backedge_pc, loop_header_pc);
-                    
-                    let osr_func = match osr_action {
-                        OsrResult::Ready(ptr) => Some(ptr),
-                        OsrResult::ShouldCompile => {
-                            let osr_func_def = &module.functions[osr_func_id as usize];
-                            jit_mgr.compile_osr(osr_func_id, loop_header_pc, osr_func_def, module).ok()
-                        }
-                        OsrResult::NotHot => None,
-                    };
-                    
-                    if let Some(osr_ptr) = osr_func {
-                        let osr_func_def = &module.functions[osr_func_id as usize];
-                        let osr_local_slots = osr_func_def.local_slots as usize;
-                        let osr_ret_slots = osr_func_def.ret_slots as usize;
-                        
-                        let fiber = vm.scheduler.trampoline_fiber_mut(trampoline_id);
-                        let frame = fiber.frames.last().unwrap();
-                        let osr_bp = frame.bp;
-                        let osr_ret_reg = frame.ret_reg as usize;
-                        
-                        let mut locals: Vec<u64> = fiber.stack[osr_bp..osr_bp + osr_local_slots].to_vec();
-                        let mut ret_buf: Vec<u64> = vec![0; osr_ret_slots];
-                        
-                        let func_table_ptr = jit_mgr.func_table_ptr();
-                        let func_table_len = jit_mgr.func_table_len() as u32;
-                        let safepoint_flag = false;
-                        let mut panic_flag = false;
-                        let vm_ptr = vm as *mut _ as *mut std::ffi::c_void;
-                        let module_ptr = module as *const _ as *const std::ffi::c_void;
-                        
-                        let mut ctx = build_jit_ctx_from_state(
-                            &mut vm.state, func_table_ptr, func_table_len,
-                            vm_ptr, std::ptr::null_mut(), module_ptr,
-                            &safepoint_flag, &mut panic_flag,
-                        );
-                        
-                        let jit_result = crate::jit_bridge::call_jit_function(osr_ptr, &mut ctx, &mut locals, &mut ret_buf);
-                        
-                        let fiber = vm.scheduler.trampoline_fiber_mut(trampoline_id);
-                        match jit_result {
-                            JitResult::Ok => {
-                                fiber.frames.pop();
-                                if fiber.frames.is_empty() {
-                                    // Copy return values
-                                    for (i, val) in ret_buf.iter().enumerate() {
-                                        if i < osr_ret_slots {
-                                            fiber.stack[i] = *val;
-                                        }
-                                    }
-                                    break JitResult::Ok;
-                                }
-                                // Write to caller frame
-                                let caller_bp = fiber.frames.last().unwrap().bp;
-                                for (i, val) in ret_buf.iter().enumerate() {
-                                    if i < osr_ret_slots {
-                                        fiber.stack[caller_bp + osr_ret_reg + i] = *val;
-                                    }
-                                }
-                            }
-                            JitResult::Panic => break JitResult::Panic,
-                        }
-                    }
-                }
-                // Continue execution
-            }
-            _ => {
-                // Continue for other results
-            }
-        }
-    };
-    
-    // Copy return values
-    if result == JitResult::Ok {
-        let fiber = vm.scheduler.trampoline_fiber(trampoline_id);
-        for i in 0..(ret_count as usize) {
-            if i < fiber.stack.len() {
-                unsafe { *ret.add(i) = fiber.stack[i] };
-            }
-        }
-    }
-    
-    // Release the trampoline fiber back to the pool
-    vm.scheduler.release_trampoline_fiber(trampoline_id);
-    
-    result
 }
 
 /// Time slice: number of instructions before forced yield check.
@@ -518,6 +335,183 @@ impl vo_runtime::jit_api::JitCallContext for Vm {
 }
 
 impl Vm {
+    /// Call a JIT function with a fresh context (raw pointer version).
+    #[cfg(feature = "jit")]
+    fn call_jit_direct(
+        &mut self,
+        jit_func: vo_jit::JitFunc,
+        args: *mut u64,
+        ret: *mut u64,
+    ) -> JitResult {
+        let jit_mgr = self.jit_mgr.as_ref().unwrap();
+        let func_table_ptr = jit_mgr.func_table_ptr();
+        let func_table_len = jit_mgr.func_table_len() as u32;
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
+        let module_ptr = self.module.as_ref()
+            .map(|m| m as *const _ as *const std::ffi::c_void)
+            .unwrap_or(std::ptr::null());
+        
+        let mut ctx = build_jit_ctx_from_state(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, std::ptr::null_mut(), module_ptr,
+            &safepoint_flag, &mut panic_flag,
+        );
+        jit_func(&mut ctx, args, ret)
+    }
+
+    /// Call a JIT function with slices (for OSR).
+    #[cfg(feature = "jit")]
+    fn call_jit_with_slices(
+        &mut self,
+        jit_func: vo_jit::JitFunc,
+        args: &mut [u64],
+        ret: &mut [u64],
+    ) -> JitResult {
+        self.call_jit_direct(jit_func, args.as_mut_ptr(), ret.as_mut_ptr())
+    }
+
+    /// Execute a JIT->VM call. This is the core logic for vm_call_trampoline.
+    /// Handles JIT compilation, hot function detection, and VM fallback.
+    #[cfg(feature = "jit")]
+    pub fn execute_jit_call(
+        &mut self,
+        func_id: u32,
+        args: *const u64,
+        arg_count: u32,
+        ret: *mut u64,
+        ret_count: u32,
+    ) -> JitResult {
+        let module = match &self.module {
+            Some(m) => m as *const Module,
+            None => return JitResult::Panic,
+        };
+        let module = unsafe { &*module };
+        
+        // Use JitManager unified entry point
+        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+            // 1. Check if JIT version exists
+            if let Some(jit_func) = jit_mgr.get_entry(func_id) {
+                return self.call_jit_direct(jit_func, args as *mut u64, ret);
+            }
+            
+            // 2. Record call and try to compile if hot
+            if jit_mgr.record_call(func_id) {
+                let func_def = &module.functions[func_id as usize];
+                if jit_mgr.compile_full(func_id, func_def, module).is_ok() {
+                    if let Some(jit_func) = jit_mgr.get_entry(func_id) {
+                        return self.call_jit_direct(jit_func, args as *mut u64, ret);
+                    }
+                }
+            }
+        }
+        
+        // 3. Fall back to VM interpretation using trampoline fiber
+        let func_def = &module.functions[func_id as usize];
+        let local_slots = func_def.local_slots;
+        let param_slots = func_def.param_slots as usize;
+        
+        // Acquire a trampoline fiber from the pool
+        let trampoline_id = self.scheduler.acquire_trampoline_fiber();
+        
+        {
+            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+            
+            // Setup initial frame
+            fiber.push_frame(func_id, local_slots, 0, ret_count as u16);
+            
+            // Copy arguments
+            for i in 0..param_slots.min(arg_count as usize) {
+                fiber.stack[i] = unsafe { *args.add(i) };
+            }
+        }
+        
+        // Run the fiber until completion
+        let result = loop {
+            let exec_result = self.run_fiber(trampoline_id);
+            match exec_result {
+                ExecResult::Done => break JitResult::Ok,
+                ExecResult::Panic => break JitResult::Panic,
+                ExecResult::Osr(osr_func_id, backedge_pc, loop_header_pc) => {
+                    // Handle OSR
+                    if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+                        use crate::jit_bridge::OsrResult;
+                        let osr_action = crate::jit_bridge::try_osr_compile(jit_mgr, osr_func_id, backedge_pc, loop_header_pc);
+                        
+                        let osr_func = match osr_action {
+                            OsrResult::Ready(ptr) => Some(ptr),
+                            OsrResult::ShouldCompile => {
+                                let osr_func_def = &module.functions[osr_func_id as usize];
+                                jit_mgr.compile_osr(osr_func_id, loop_header_pc, osr_func_def, module).ok()
+                            }
+                            OsrResult::NotHot => None,
+                        };
+                        
+                        if let Some(osr_ptr) = osr_func {
+                            let osr_func_def = &module.functions[osr_func_id as usize];
+                            let osr_local_slots = osr_func_def.local_slots as usize;
+                            let osr_ret_slots = osr_func_def.ret_slots as usize;
+                            
+                            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                            let frame = fiber.frames.last().unwrap();
+                            let osr_bp = frame.bp;
+                            let osr_ret_reg = frame.ret_reg as usize;
+                            
+                            let mut locals: Vec<u64> = fiber.stack[osr_bp..osr_bp + osr_local_slots].to_vec();
+                            let mut ret_buf: Vec<u64> = vec![0; osr_ret_slots];
+                            
+                            let jit_result = self.call_jit_with_slices(osr_ptr, &mut locals, &mut ret_buf);
+                            
+                            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                            match jit_result {
+                                JitResult::Ok => {
+                                    fiber.frames.pop();
+                                    if fiber.frames.is_empty() {
+                                        // Copy return values
+                                        for (i, val) in ret_buf.iter().enumerate() {
+                                            if i < osr_ret_slots {
+                                                fiber.stack[i] = *val;
+                                            }
+                                        }
+                                        break JitResult::Ok;
+                                    }
+                                    // Write to caller frame
+                                    let caller_bp = fiber.frames.last().unwrap().bp;
+                                    for (i, val) in ret_buf.iter().enumerate() {
+                                        if i < osr_ret_slots {
+                                            fiber.stack[caller_bp + osr_ret_reg + i] = *val;
+                                        }
+                                    }
+                                }
+                                JitResult::Panic => break JitResult::Panic,
+                            }
+                        }
+                    }
+                    // Continue execution
+                }
+                _ => {
+                    // Continue for other results
+                }
+            }
+        };
+        
+        // Copy return values
+        if result == JitResult::Ok {
+            let fiber = self.scheduler.trampoline_fiber(trampoline_id);
+            for i in 0..(ret_count as usize) {
+                if i < fiber.stack.len() {
+                    unsafe { *ret.add(i) = fiber.stack[i] };
+                }
+            }
+        }
+        
+        // Release the trampoline fiber back to the pool
+        self.scheduler.release_trampoline_fiber(trampoline_id);
+        
+        result
+    }
+
     /// Try to call a function via JIT. Returns Some(ExecResult) if JIT was used,
     /// None if should fall back to interpreter.
     #[cfg(feature = "jit")]

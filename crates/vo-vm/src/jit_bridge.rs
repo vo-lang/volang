@@ -9,7 +9,7 @@
 //! - JIT function calling utilities
 
 use vo_runtime::jit_api::{JitContext, JitResult, JitCallContext};
-use vo_runtime::ffi::{ExternCall, ExternResult, ExternRegistry};
+use vo_runtime::ffi::{ExternResult, ExternRegistry};
 use vo_jit::{JitManager, JitFunc};
 
 // =============================================================================
@@ -109,6 +109,29 @@ pub fn build_jit_ctx(
         jit_func_table,
         jit_func_count,
     }
+}
+
+// =============================================================================
+// JIT -> VM Call Trampoline
+// =============================================================================
+
+/// VM call trampoline for JIT -> VM calls.
+/// This is the **unified entry point** for all function calls from JIT code.
+/// It delegates to Vm::execute_jit_call which handles JIT/VM selection.
+pub extern "C" fn vm_call_trampoline(
+    vm: *mut std::ffi::c_void,
+    _fiber: *mut std::ffi::c_void,
+    func_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_count: u32,
+) -> JitResult {
+    use crate::vm::Vm;
+    
+    // Safety: vm must be a valid pointer to Vm
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.execute_jit_call(func_id, args, arg_count, ret, ret_count)
 }
 
 // =============================================================================
