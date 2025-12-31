@@ -268,23 +268,24 @@ pub fn compile_value_to(
 struct IndexLoop {
     idx_slot: u16,
     loop_start: usize,
+    begin_pc: usize,
     end_jump: usize,
 }
 
 impl IndexLoop {
-    /// Begin: __idx := 0, loop: if __idx >= __len { goto end }
+    /// Begin: __idx := 0, HINT_LOOP_BEGIN, loop: if __idx >= __len { goto end }
     fn begin(func: &mut FuncBuilder, len_slot: u16, label: Option<vo_common::Symbol>) -> Self {
         let idx_slot = func.alloc_temp(1);
         func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
         
         let loop_start = func.current_pc();
-        func.enter_loop(loop_start, label);
+        let begin_pc = func.enter_loop(loop_start, label);
         
         let cmp_slot = func.alloc_temp(1);
         func.emit_op(Opcode::GeI, cmp_slot, idx_slot, len_slot);
         let end_jump = func.emit_jump(Opcode::JumpIf, cmp_slot);
         
-        Self { idx_slot, loop_start, end_jump }
+        Self { idx_slot, loop_start, begin_pc, end_jump }
     }
     
     /// Emit: i := __idx
@@ -294,18 +295,26 @@ impl IndexLoop {
         }
     }
     
-    /// End: __idx++, goto loop, patch breaks/continues
+    /// End: __idx++, HINT_LOOP_END, goto loop, patch breaks/continues, finalize HINT_LOOP_BEGIN
     fn end(self, func: &mut FuncBuilder) {
         let post_pc = func.current_pc();
         let one = func.alloc_temp(1);
         func.emit_op(Opcode::LoadInt, one, 1, 0);
         func.emit_op(Opcode::AddI, self.idx_slot, self.idx_slot, one);
+        
+        // exit_loop emits HINT_LOOP_END and patches flags
+        let exit_info = func.exit_loop();
+        
         func.emit_jump_to(Opcode::Jump, 0, self.loop_start);
         
-        func.patch_jump(self.end_jump, func.current_pc());
-        let (breaks, continues) = func.exit_loop();
-        for pc in breaks { func.patch_jump(pc, func.current_pc()); }
-        for pc in continues { func.patch_jump(pc, post_pc); }
+        let exit_pc = func.current_pc();
+        func.patch_jump(self.end_jump, exit_pc);
+        
+        // Finalize HINT_LOOP_BEGIN with correct exit_pc
+        func.finalize_loop_hint(exit_info.begin_pc, exit_pc);
+        
+        for pc in exit_info.break_patches { func.patch_jump(pc, exit_pc); }
+        for pc in exit_info.continue_patches { func.patch_jump(pc, post_pc); }
     }
 }
 
@@ -638,7 +647,7 @@ fn compile_stmt_with_label(
                 ForClause::Cond(cond_opt) => {
                     // while-style: for cond { } or infinite: for { }
                     let loop_start = func.current_pc();
-                    func.enter_loop(loop_start, label);
+                    let begin_pc = func.enter_loop(loop_start, label);
 
                     let end_jump = if let Some(cond) = cond_opt {
                         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -648,14 +657,23 @@ fn compile_stmt_with_label(
                     };
 
                     compile_block(&for_stmt.body, ctx, func, info)?;
+                    
+                    // exit_loop emits HINT_LOOP_END and patches flags
+                    let exit_info = func.exit_loop();
+                    
                     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
+                    let exit_pc = func.current_pc();
                     if let Some(j) = end_jump {
-                        func.patch_jump(j, func.current_pc());
+                        func.patch_jump(j, exit_pc);
                     }
-                    let (break_patches, _) = func.exit_loop();
-                    for pc in break_patches {
-                        func.patch_jump(pc, func.current_pc());
+                    
+                    // Finalize HINT_LOOP_BEGIN: exit_pc=0 for infinite loop, actual exit_pc otherwise
+                    let hint_exit_pc = if cond_opt.is_some() { exit_pc } else { 0 };
+                    func.finalize_loop_hint(begin_pc, hint_exit_pc);
+                    
+                    for pc in exit_info.break_patches {
+                        func.patch_jump(pc, exit_pc);
                     }
                 }
 
@@ -667,6 +685,9 @@ fn compile_stmt_with_label(
 
                     let loop_start = func.current_pc();
 
+                    // continue_pc=0 means "patch later" - continue should go to post
+                    let begin_pc = func.enter_loop(0, label);
+
                     let end_jump = if let Some(cond) = cond {
                         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
                         Some(func.emit_jump(Opcode::JumpIfNot, cond_reg))
@@ -674,8 +695,6 @@ fn compile_stmt_with_label(
                         None
                     };
 
-                    // continue_pc=0 means "patch later" - continue should go to post
-                    func.enter_loop(0, label);
                     compile_block(&for_stmt.body, ctx, func, info)?;
 
                     // Post statement - this is where continue should jump to
@@ -684,21 +703,26 @@ fn compile_stmt_with_label(
                         compile_stmt(post, ctx, func, info)?;
                     }
 
+                    // exit_loop emits HINT_LOOP_END and patches flags
+                    let exit_info = func.exit_loop();
+                    
                     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
+                    let exit_pc = func.current_pc();
                     if let Some(j) = end_jump {
-                        func.patch_jump(j, func.current_pc());
+                        func.patch_jump(j, exit_pc);
                     }
 
-                    let (break_patches, continue_patches) = func.exit_loop();
+                    // Finalize HINT_LOOP_BEGIN with exit_pc
+                    func.finalize_loop_hint(begin_pc, exit_pc);
                     
                     // Patch break jumps to after loop
-                    for pc in break_patches {
-                        func.patch_jump(pc, func.current_pc());
+                    for pc in exit_info.break_patches {
+                        func.patch_jump(pc, exit_pc);
                     }
                     
                     // Patch continue jumps to post statement
-                    for pc in continue_patches {
+                    for pc in exit_info.continue_patches {
                         func.patch_jump(pc, post_pc);
                     }
                 }
@@ -786,7 +810,7 @@ fn compile_stmt_with_label(
                         sc.func.emit_op(Opcode::StrLen, len, reg, 0);
                         
                         let loop_start = sc.func.current_pc();
-                        sc.func.enter_loop(loop_start, label);
+                        let begin_pc = sc.func.enter_loop(loop_start, label);
                         sc.func.emit_op(Opcode::GeI, cmp, pos, len);
                         let end_jump = sc.func.emit_jump(Opcode::JumpIf, cmp);
                         
@@ -798,12 +822,20 @@ fn compile_stmt_with_label(
                         
                         let post_pc = sc.func.current_pc();
                         sc.func.emit_op(Opcode::AddI, pos, pos, rune_width + 1);
+                        
+                        // exit_loop emits HINT_LOOP_END and patches flags
+                        let exit_info = sc.func.exit_loop();
+                        
                         sc.func.emit_jump_to(Opcode::Jump, 0, loop_start);
                         
-                        sc.func.patch_jump(end_jump, sc.func.current_pc());
-                        let (breaks, continues) = sc.func.exit_loop();
-                        for pc in breaks { sc.func.patch_jump(pc, sc.func.current_pc()); }
-                        for pc in continues { sc.func.patch_jump(pc, post_pc); }
+                        let exit_pc = sc.func.current_pc();
+                        sc.func.patch_jump(end_jump, exit_pc);
+                        
+                        // Finalize HINT_LOOP_BEGIN with exit_pc
+                        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+                        
+                        for pc in exit_info.break_patches { sc.func.patch_jump(pc, exit_pc); }
+                        for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
                         
                     } else if info.is_map(range_type) {
                         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
@@ -836,7 +868,7 @@ fn compile_stmt_with_label(
                         
                         // loop:
                         let loop_start = sc.func.current_pc();
-                        sc.func.enter_loop(loop_start, label);
+                        let begin_pc = sc.func.enter_loop(loop_start, label);
                         
                         // v, ok := <-ch
                         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot, flags=elem_slots|0x80 (with_ok)
@@ -849,16 +881,23 @@ fn compile_stmt_with_label(
                         // body
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
                         
+                        // exit_loop emits HINT_LOOP_END and patches flags
+                        let exit_info = sc.func.exit_loop();
+                        
                         // goto loop (continue target is loop_start for channel)
                         sc.func.emit_jump_to(Opcode::Jump, 0, loop_start);
                         
                         // end:
-                        sc.func.patch_jump(end_jump, sc.func.current_pc());
-                        let (break_patches, continue_patches) = sc.func.exit_loop();
-                        for pc in break_patches {
-                            sc.func.patch_jump(pc, sc.func.current_pc());
+                        let exit_pc = sc.func.current_pc();
+                        sc.func.patch_jump(end_jump, exit_pc);
+                        
+                        // Finalize HINT_LOOP_BEGIN with exit_pc
+                        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+                        
+                        for pc in exit_info.break_patches {
+                            sc.func.patch_jump(pc, exit_pc);
                         }
-                        for pc in continue_patches {
+                        for pc in exit_info.continue_patches {
                             sc.func.patch_jump(pc, loop_start);
                         }
                         
@@ -889,6 +928,8 @@ fn compile_stmt_with_label(
 
         // === Defer ===
         StmtKind::Defer(defer_stmt) => {
+            // Mark current loop (if any) as containing defer
+            func.mark_loop_has_defer();
             // Defer is implemented as pushing a closure to defer stack
             // The call expression becomes a closure that will be called on function exit
             compile_defer(&defer_stmt.call, ctx, func, info)?;

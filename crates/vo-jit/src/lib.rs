@@ -175,10 +175,8 @@ pub struct JitCompiler {
     module: JITModule,
     /// Cranelift codegen context (reused across compilations).
     ctx: cranelift_codegen::Context,
-    /// Cache of compiled functions (normal entry).
+    /// Cache of compiled functions.
     cache: JitCache,
-    /// Cache of OSR-compiled functions: (func_id, osr_pc) -> CompiledFunction.
-    osr_cache: HashMap<(u32, usize), CompiledFunction>,
     /// Cached FuncIds for runtime helper functions (declared once).
     helper_funcs: HelperFuncIds,
 }
@@ -700,7 +698,6 @@ impl JitCompiler {
             module,
             ctx,
             cache: JitCache::new(),
-            osr_cache: HashMap::new(),
             helper_funcs,
         })
     }
@@ -875,150 +872,8 @@ impl JitCompiler {
         Ok(())
     }
 
-    /// Compile a function for OSR entry at the given PC.
-    ///
-    /// OSR (On-Stack Replacement) compilation creates a version of the function
-    /// that can be entered mid-execution, at a loop head. The compiled function
-    /// receives all local variables as input (not just parameters).
-    pub fn compile_osr(
-        &mut self,
-        func_id: u32,
-        osr_pc: usize,
-        func: &FunctionDef,
-        vo_module: &VoModule,
-    ) -> Result<(), JitError> {
-        use cranelift_codegen::ir::{types, AbiParam, Signature};
-        use cranelift_frontend::FunctionBuilderContext;
-        
-        if !self.can_jit(func, vo_module) {
-            return Err(JitError::NotJittable(func_id));
-        }
-
-        if self.osr_cache.contains_key(&(func_id, osr_pc)) {
-            return Ok(()); // Already compiled
-        }
-
-        // 1. Create function signature: (ctx: *mut, locals: *mut, ret: *mut) -> i32
-        // Same signature as normal, but 'locals' contains ALL local slots
-        let ptr_type = self.module.target_config().pointer_type();
-        let mut sig = Signature::new(self.module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type)); // ctx
-        sig.params.push(AbiParam::new(ptr_type)); // locals (all local_slots)
-        sig.params.push(AbiParam::new(ptr_type)); // ret
-        sig.returns.push(AbiParam::new(types::I32)); // JitResult
-
-        // 2. Declare function in module with unique name
-        let func_name = format!("vo_jit_{}_osr_{}", func_id, osr_pc);
-        let func_id_cl = self.module.declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
-
-        // 3. Clear context and set signature
-        self.ctx.func.signature = sig;
-        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(1, func_id); // namespace 1 for OSR
-
-        // 4. Build function IR using FunctionCompiler with OSR mode
-        let mut func_ctx = FunctionBuilderContext::new();
-        {
-            let safepoint_func = self.module.declare_func_in_func(self.helper_funcs.safepoint, &mut self.ctx.func);
-            let call_vm_func = self.module.declare_func_in_func(self.helper_funcs.call_vm, &mut self.ctx.func);
-            let gc_alloc_func = self.module.declare_func_in_func(self.helper_funcs.gc_alloc, &mut self.ctx.func);
-            let call_closure_func = self.module.declare_func_in_func(self.helper_funcs.call_closure, &mut self.ctx.func);
-            let call_iface_func = self.module.declare_func_in_func(self.helper_funcs.call_iface, &mut self.ctx.func);
-            let panic_func = self.module.declare_func_in_func(self.helper_funcs.panic, &mut self.ctx.func);
-            let call_extern_func = self.module.declare_func_in_func(self.helper_funcs.call_extern, &mut self.ctx.func);
-            
-            let str_funcs = crate::compiler::StringFuncs {
-                str_new: Some(self.module.declare_func_in_func(self.helper_funcs.str_new, &mut self.ctx.func)),
-                str_len: Some(self.module.declare_func_in_func(self.helper_funcs.str_len, &mut self.ctx.func)),
-                str_index: Some(self.module.declare_func_in_func(self.helper_funcs.str_index, &mut self.ctx.func)),
-                str_concat: Some(self.module.declare_func_in_func(self.helper_funcs.str_concat, &mut self.ctx.func)),
-                str_slice: Some(self.module.declare_func_in_func(self.helper_funcs.str_slice, &mut self.ctx.func)),
-                str_eq: Some(self.module.declare_func_in_func(self.helper_funcs.str_eq, &mut self.ctx.func)),
-                str_cmp: Some(self.module.declare_func_in_func(self.helper_funcs.str_cmp, &mut self.ctx.func)),
-                str_decode_rune: Some(self.module.declare_func_in_func(self.helper_funcs.str_decode_rune, &mut self.ctx.func)),
-            };
-            
-            let map_funcs = crate::compiler::MapFuncs {
-                map_new: Some(self.module.declare_func_in_func(self.helper_funcs.map_new, &mut self.ctx.func)),
-                map_len: Some(self.module.declare_func_in_func(self.helper_funcs.map_len, &mut self.ctx.func)),
-                map_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_get, &mut self.ctx.func)),
-                map_set: Some(self.module.declare_func_in_func(self.helper_funcs.map_set, &mut self.ctx.func)),
-                map_delete: Some(self.module.declare_func_in_func(self.helper_funcs.map_delete, &mut self.ctx.func)),
-                map_iter_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_get, &mut self.ctx.func)),
-            };
-            
-            let array_funcs = crate::compiler::ArrayFuncs {
-                array_new: Some(self.module.declare_func_in_func(self.helper_funcs.array_new, &mut self.ctx.func)),
-                array_len: Some(self.module.declare_func_in_func(self.helper_funcs.array_len, &mut self.ctx.func)),
-            };
-            
-            let slice_funcs = crate::compiler::SliceFuncs {
-                slice_new: Some(self.module.declare_func_in_func(self.helper_funcs.slice_new, &mut self.ctx.func)),
-                slice_len: Some(self.module.declare_func_in_func(self.helper_funcs.slice_len, &mut self.ctx.func)),
-                slice_cap: Some(self.module.declare_func_in_func(self.helper_funcs.slice_cap, &mut self.ctx.func)),
-                slice_append: Some(self.module.declare_func_in_func(self.helper_funcs.slice_append, &mut self.ctx.func)),
-                slice_slice: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice, &mut self.ctx.func)),
-                slice_slice3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice3, &mut self.ctx.func)),
-                slice_from_array: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array, &mut self.ctx.func)),
-                slice_from_array3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array3, &mut self.ctx.func)),
-            };
-            
-            let misc_funcs = crate::compiler::MiscFuncs {
-                ptr_clone: Some(self.module.declare_func_in_func(self.helper_funcs.ptr_clone, &mut self.ctx.func)),
-                closure_new: Some(self.module.declare_func_in_func(self.helper_funcs.closure_new, &mut self.ctx.func)),
-                chan_new: Some(self.module.declare_func_in_func(self.helper_funcs.chan_new, &mut self.ctx.func)),
-                iface_assert: Some(self.module.declare_func_in_func(self.helper_funcs.iface_assert, &mut self.ctx.func)),
-            };
-            
-            let compiler = FunctionCompiler::new(
-                &mut self.ctx.func,
-                &mut func_ctx,
-                func,
-                vo_module,
-                Some(safepoint_func),
-                Some(call_vm_func),
-                Some(gc_alloc_func),
-                Some(call_closure_func),
-                Some(call_iface_func),
-                Some(panic_func),
-                Some(call_extern_func),
-                str_funcs,
-                map_funcs,
-                array_funcs,
-                slice_funcs,
-                misc_funcs,
-            );
-            // Use OSR compile mode
-            let stack_map = compiler.compile_osr(osr_pc)?;
-            
-            // Debug: print Cranelift IR if VO_DUMP_JIT_IR is set
-            if std::env::var("VO_DUMP_JIT_IR").is_ok() {
-                eprintln!("=== JIT OSR IR for func_{} @ pc={} ({}) ===", func_id, osr_pc, &func_name);
-                eprintln!("{}", self.ctx.func);
-                eprintln!("=== End OSR IR ===\n");
-            }
-            
-            // 5. Compile to machine code
-            self.module.define_function(func_id_cl, &mut self.ctx)?;
-            self.module.clear_context(&mut self.ctx);
-            
-            // 6. Finalize and get code pointer
-            self.module.finalize_definitions()?;
-            let code_ptr = self.module.get_finalized_function(func_id_cl);
-            let code_size = 0;
-            
-            // 7. Store in OSR cache
-            let compiled = CompiledFunction {
-                code_ptr,
-                code_size,
-                stack_map,
-                param_slots: func.local_slots, // OSR uses all locals
-                ret_slots: func.ret_slots,
-            };
-            self.osr_cache.insert((func_id, osr_pc), compiled);
-        }
-
-        Ok(())
-    }
+    // TODO: Loop OSR compilation will be implemented here
+    // pub fn compile_loop_osr(...) -> Result<LoopFunc, JitError> { ... }
 
     /// Get a compiled function by ID.
     pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
@@ -1031,17 +886,6 @@ impl JitCompiler {
     /// The returned function pointer must only be called with valid JitContext.
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.cache.get_func_ptr(func_id)
-    }
-
-    /// Get the OSR JIT function pointer for a compiled function.
-    ///
-    /// # Safety
-    /// The returned function pointer must only be called with valid JitContext
-    /// and a locals buffer containing all local_slots values.
-    pub unsafe fn get_osr_func_ptr(&self, func_id: u32, osr_pc: usize) -> Option<JitFunc> {
-        self.osr_cache.get(&(func_id, osr_pc)).map(|f| {
-            std::mem::transmute(f.code_ptr)
-        })
     }
 
     /// Get the internal cache (for VM integration).

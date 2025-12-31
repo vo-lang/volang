@@ -242,6 +242,8 @@ pub enum TypeError {
     LabelNotDeclared = 2800,
     /// Inner declaration shadows outer.
     LabelShadowed = 2801,
+    /// Goto is not supported.
+    GotoNotSupported = 2802,
 
     // === Init Expression (2850-2899) ===
     /// Extra init expr.
@@ -396,6 +398,7 @@ impl TypeError {
             // Label
             TypeError::LabelNotDeclared => "label not declared",
             TypeError::LabelShadowed => "inner declaration shadows outer",
+            TypeError::GotoNotSupported => "goto is not supported, use labeled break instead",
 
             // Init Expression
             TypeError::ExtraInitExpr => "extra init expr",

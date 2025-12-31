@@ -39,6 +39,8 @@ skips:
   - file: label_stmt.vo
   - file: go_stmt.vo
   - file: goto_stmt.vo
+    skip: [vm, jit]
+    reason: "goto is not supported"
   - file: hex_literal_debug.vo
   - file: iface_escape_closure.vo
   - file: iface_to_iface_assertion.vo

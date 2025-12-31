@@ -143,7 +143,7 @@ fn format_instruction(instr: &Instruction) -> String {
 
     match op {
         // LOAD
-        Opcode::Nop => "Nop".to_string(),
+        Opcode::Hint => format!("Hint          flags={}, a={}, bc={}", flags, a, instr.imm32_unsigned()),
         Opcode::LoadInt => format!("LoadInt       r{}, {}", a, instr.imm32()),
         Opcode::LoadConst => format!("LoadConst     r{}, const_{}", a, b),
 

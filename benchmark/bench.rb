@@ -294,9 +294,15 @@ class BenchmarkRunner
       valid_times = mean_times.reject { |_, mean| mean.nil? || mean.nan? || mean.infinite? || mean == 0 }
       next if valid_times.empty?
       
-      fastest = valid_times.values.min
+      # In vo mode, use Vo-VM as baseline; otherwise use fastest
+      baseline = if @vo_mode && valid_times['Vo-VM']
+                   valid_times['Vo-VM']
+                 else
+                   valid_times.values.min
+                 end
+      
       valid_times.each do |lang, mean|
-        relative = mean / fastest
+        relative = mean / baseline
         scores[lang] << relative
         puts "  #{lang}: #{relative.round(2)} (mean: #{mean.round(4)}s)"
       end
@@ -376,11 +382,16 @@ class BenchmarkRunner
         next
       end
       
-      fastest = valid_times.values.min
+      # In vo mode, use Vo-VM as baseline; otherwise use fastest
+      baseline = if @vo_mode && valid_times['Vo-VM']
+                   valid_times['Vo-VM']
+                 else
+                   valid_times.values.min
+                 end
       
       sorted.each do |lang, _|
         if valid_times[lang]
-          relative = valid_times[lang] / fastest
+          relative = valid_times[lang] / baseline
           print sprintf(" %8.2f", relative.round(2))
         else
           print sprintf(" %8s", "-")
@@ -390,8 +401,13 @@ class BenchmarkRunner
     end
     
     puts "\nHow to read this table:"
-    puts "- Ranking: Lower average relative time is better (1.0x = fastest overall)"
-    puts "- Detailed table: 1.0 = fastest in that specific benchmark"
+    if @vo_mode
+      puts "- Ranking: Relative to Vo-VM baseline (1.0x = same as Vo-VM)"
+      puts "- Detailed table: 1.0 = same speed as Vo-VM, <1.0 = faster, >1.0 = slower"
+    else
+      puts "- Ranking: Lower average relative time is better (1.0x = fastest overall)"
+      puts "- Detailed table: 1.0 = fastest in that specific benchmark"
+    end
     puts "- '-' means the language was not tested for that benchmark"
     puts "- 'N/A' means all results were invalid (too fast to measure accurately)"
   end

@@ -1,5 +1,29 @@
 //! Instruction format and opcodes.
 
+// =============================================================================
+// Hint instruction constants (for JIT loop analysis)
+// =============================================================================
+
+/// Hint type: pure NOP (backward compatible)
+pub const HINT_NOP: u8 = 0;
+/// Hint type: loop begin marker
+pub const HINT_LOOP_BEGIN: u8 = 1;
+/// Hint type: loop end marker
+pub const HINT_LOOP_END: u8 = 2;
+/// Hint type: loop metadata (e.g., continue_pc for labeled continue)
+pub const HINT_LOOP_META: u8 = 3;
+
+/// Loop flag: contains defer statement
+pub const LOOP_FLAG_HAS_DEFER: u8 = 0x01;
+/// Loop flag: has labeled break to outer loop
+pub const LOOP_FLAG_HAS_LABELED_BREAK: u8 = 0x02;
+/// Loop flag: has labeled continue to outer loop
+pub const LOOP_FLAG_HAS_LABELED_CONTINUE: u8 = 0x04;
+
+// =============================================================================
+// Instruction format
+// =============================================================================
+
 /// 8-byte fixed instruction format.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +77,9 @@ impl Instruction {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
+    // === HINT: NOP / Loop metadata for JIT ===
+    Hint = 0,
     // === LOAD: Load immediate/constant ===
-    Nop = 0,
     LoadInt,
     LoadConst,
 

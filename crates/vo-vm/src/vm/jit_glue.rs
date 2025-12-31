@@ -3,7 +3,6 @@
 use vo_runtime::jit_api::{JitResult, JitContext, JitCallContext};
 use vo_jit::JitFunc;
 
-use super::jit_mgr::OsrResult;
 
 use crate::bytecode::Module;
 use crate::fiber::Fiber;
@@ -259,57 +258,16 @@ impl Vm {
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
-                ExecResult::Osr(osr_func_id, backedge_pc, loop_header_pc) => {
+                ExecResult::Osr(func_id, backedge_pc, loop_header_pc) => {
+                    // OSR requested - record backedge for hot tracking
+                    // TODO: Implement actual loop OSR execution
                     if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-                        let osr_action = jit_mgr.try_osr(osr_func_id, backedge_pc, loop_header_pc);
-                        
-                        let osr_func = match osr_action {
-                            OsrResult::Ready(ptr) => Some(ptr),
-                            OsrResult::ShouldCompile => {
-                                let osr_func_def = &module.functions[osr_func_id as usize];
-                                jit_mgr.compile_osr(osr_func_id, loop_header_pc, osr_func_def, module).ok()
-                            }
-                            OsrResult::NotHot => None,
-                        };
-                        
-                        if let Some(osr_ptr) = osr_func {
-                            let osr_func_def = &module.functions[osr_func_id as usize];
-                            let osr_local_slots = osr_func_def.local_slots as usize;
-                            let osr_ret_slots = osr_func_def.ret_slots as usize;
-                            
-                            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                            let frame = fiber.frames.last().unwrap();
-                            let osr_bp = frame.bp;
-                            let osr_ret_reg = frame.ret_reg as usize;
-                            
-                            let mut locals: Vec<u64> = fiber.stack[osr_bp..osr_bp + osr_local_slots].to_vec();
-                            let mut ret_buf: Vec<u64> = vec![0; osr_ret_slots];
-                            
-                            let jit_result = self.call_jit_with_slices(osr_ptr, &mut locals, &mut ret_buf);
-                            
-                            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                            match jit_result {
-                                JitResult::Ok => {
-                                    fiber.frames.pop();
-                                    if fiber.frames.is_empty() {
-                                        for (i, val) in ret_buf.iter().enumerate() {
-                                            if i < osr_ret_slots {
-                                                fiber.stack[i] = *val;
-                                            }
-                                        }
-                                        break JitResult::Ok;
-                                    }
-                                    let caller_bp = fiber.frames.last().unwrap().bp;
-                                    for (i, val) in ret_buf.iter().enumerate() {
-                                        if i < osr_ret_slots {
-                                            fiber.stack[caller_bp + osr_ret_reg + i] = *val;
-                                        }
-                                    }
-                                }
-                                JitResult::Panic => break JitResult::Panic,
-                            }
+                        if jit_mgr.record_backedge(func_id, backedge_pc, loop_header_pc) {
+                            let func_def = &module.functions[func_id as usize];
+                            let _ = jit_mgr.compile_full(func_id, func_def, module);
                         }
                     }
+                    // Continue VM execution (no mid-execution OSR yet)
                 }
                 _ => {}
             }
@@ -355,31 +313,31 @@ impl Vm {
         }
     }
 
-    /// Try to perform OSR at a loop back-edge.
+    /// Try to perform loop OSR at a back-edge.
     /// 
-    /// Current strategy: Conservative - compile full JIT on hot loop detection,
-    /// but don't switch mid-execution. This avoids complex SSA issues in OSR compilation.
-    /// See docs/dev-notes/osr-bug-analysis.md for details.
+    /// TODO: Implement loop OSR. Currently just records backedge for hot tracking
+    /// and triggers full function compilation when hot.
+    #[allow(unused_variables)]
     pub(super) fn try_osr(
         &mut self,
-        _fiber_id: u32,
+        fiber_id: u32,
         func_id: u32,
         backedge_pc: usize,
         loop_header_pc: usize,
-        _bp: usize,
+        bp: usize,
     ) -> Option<ExecResult> {
         let module = self.module.as_ref()?;
         let func_def = &module.functions[func_id as usize];
-        
         let jit_mgr = self.jit_mgr.as_mut()?;
         
-        match jit_mgr.try_osr(func_id, backedge_pc, loop_header_pc) {
-            OsrResult::Ready(_) | OsrResult::ShouldCompile => {
-                // Compile full JIT for future calls, but continue VM execution
-                let _ = jit_mgr.compile_full(func_id, func_def, module);
-                None
-            }
-            OsrResult::NotHot => None,
+        // Record backedge hit for hot tracking
+        if jit_mgr.record_backedge(func_id, backedge_pc, loop_header_pc) {
+            // Loop is hot - compile full function for future calls
+            let _ = jit_mgr.compile_full(func_id, func_def, module);
         }
+        
+        // TODO: Implement actual loop OSR (mid-execution switch to JIT)
+        // For now, always continue VM execution
+        None
     }
 }

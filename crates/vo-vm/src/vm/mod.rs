@@ -28,7 +28,7 @@ mod jit_glue;
 pub mod jit_mgr;
 
 #[cfg(feature = "jit")]
-pub use jit_mgr::{JitManager, JitConfig, OsrResult};
+pub use jit_mgr::{JitManager, JitConfig};
 
 pub struct Vm {
     pub module: Option<Module>,
@@ -230,7 +230,7 @@ impl Vm {
 
             // Single dispatch - all instructions handled here
             let result = match inst.opcode() {
-                Opcode::Nop => ExecResult::Continue,
+                Opcode::Hint => ExecResult::Continue,
 
                 Opcode::LoadInt => {
                     let val = inst.imm32() as i64 as u64;

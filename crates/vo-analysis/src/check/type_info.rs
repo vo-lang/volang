@@ -242,7 +242,6 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
             }
             total
         }
-        other => panic!("type_slot_count: unhandled type {:?}", other),
     }
 }
 
@@ -289,7 +288,6 @@ pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> 
             }
             types
         }
-        other => panic!("type_slot_types: unhandled type {:?}", other),
     }
 }
 

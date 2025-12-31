@@ -644,9 +644,12 @@ impl Checker {
                 }
             }
 
-            StmtKind::Goto(_) => {
-                self.octx.has_label = true;
-                // checked in label pass
+            StmtKind::Goto(goto) => {
+                self.error_code_msg(
+                    TypeError::GotoNotSupported,
+                    goto.label.span,
+                    "goto is not supported, use labeled break instead",
+                );
             }
 
             StmtKind::Fallthrough => {
