@@ -331,15 +331,27 @@ impl Vm {
             return self.execute_loop_osr(fiber_id, loop_func, bp);
         }
         
-        // 2. Record backedge hit for hot tracking
+        // 2. Check if loop already failed compilation
+        if jit_mgr.is_loop_failed(func_id, loop_begin_pc) {
+            return None;
+        }
+        
+        // 3. Record backedge hit for hot tracking
         if jit_mgr.record_backedge(func_id, loop_begin_pc) {
             // Loop is hot - try to compile
             if let Some(loop_info) = jit_mgr.find_loop(func_id, func_def, loop_begin_pc) {
                 if loop_info.is_jittable() {
-                    if jit_mgr.compile_loop(func_id, func_def, module, &loop_info).is_ok() {
-                        // Compilation succeeded - execute the loop
-                        if let Some(loop_func) = unsafe { jit_mgr.get_loop_func(func_id, loop_begin_pc) } {
-                            return self.execute_loop_osr(fiber_id, loop_func, bp);
+                    match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
+                        Ok(_) => {
+                            // Compilation succeeded - execute the loop
+                            if let Some(loop_func) = unsafe { jit_mgr.get_loop_func(func_id, loop_begin_pc) } {
+                                return self.execute_loop_osr(fiber_id, loop_func, bp);
+                            }
+                        }
+                        Err(e) => {
+                            // Mark as failed and report error
+                            jit_mgr.mark_loop_failed(func_id, loop_begin_pc);
+                            eprintln!("[JIT] Loop compilation failed (func={}, pc={}): {:?}", func_id, loop_begin_pc, e);
                         }
                     }
                 }

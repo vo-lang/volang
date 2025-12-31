@@ -74,6 +74,9 @@ pub struct FunctionJitInfo {
     
     /// Analyzed loops (lazily populated).
     pub loops: Option<Vec<LoopInfo>>,
+    
+    /// Loops that failed compilation (never retry).
+    pub failed_loops: std::collections::HashSet<usize>,
 }
 
 impl FunctionJitInfo {
@@ -84,6 +87,7 @@ impl FunctionJitInfo {
             call_count: 0,
             loop_counts: HashMap::new(),
             loops: None,
+            failed_loops: std::collections::HashSet::new(),
         }
     }
 }
@@ -283,6 +287,20 @@ impl JitManager {
         self.func_table[func_id as usize] = ptr as *const u8;
         
         Ok(())
+    }
+    
+    /// Check if a loop has failed compilation.
+    pub fn is_loop_failed(&self, func_id: u32, begin_pc: usize) -> bool {
+        self.funcs.get(func_id as usize)
+            .map(|info| info.failed_loops.contains(&begin_pc))
+            .unwrap_or(false)
+    }
+    
+    /// Mark a loop as failed (never retry).
+    pub fn mark_loop_failed(&mut self, func_id: u32, begin_pc: usize) {
+        if let Some(info) = self.funcs.get_mut(func_id as usize) {
+            info.failed_loops.insert(begin_pc);
+        }
     }
     
     /// Compile a loop for OSR.

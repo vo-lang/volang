@@ -82,15 +82,21 @@ impl<'a> LoopCompiler<'a> {
         self.declare_variables();
         self.scan_jump_targets();
         
+        // loop_header: where loop starts (begin_pc + 1, after HINT_LOOP_BEGIN)
         let loop_header = self.ensure_block(self.loop_info.begin_pc + 1);
         
+        // Entry block: get params, load vars, jump to loop header
         self.builder.switch_to_block(self.entry_block);
-        self.emit_prologue();
+        let entry_params = self.builder.block_params(self.entry_block);
+        self.ctx_ptr = entry_params[0];
+        self.locals_ptr = entry_params[1];
+        self.load_vars_from_memory();
         self.builder.ins().jump(loop_header, &[]);
         
         let mut block_terminated = true;
         
-        for pc in (self.loop_info.begin_pc + 1)..self.loop_info.end_pc {
+        // Compile from after LOOP_BEGIN hint to after LOOP_END hint (includes back-edge jump)
+        for pc in (self.loop_info.begin_pc + 1)..(self.loop_info.end_pc + 2) {
             self.current_pc = pc;
             
             if let Some(&block) = self.blocks.get(&pc) {
@@ -113,10 +119,14 @@ impl<'a> LoopCompiler<'a> {
             block_terminated = self.translate_instruction(inst)?;
         }
         
-        // Exit block: store locals back and return exit_pc
+        // If last instruction didn't terminate, jump to exit
+        if !block_terminated {
+            self.builder.ins().jump(self.exit_block, &[]);
+        }
+        
+        // Exit block: return exit_pc
         self.builder.switch_to_block(self.exit_block);
-        self.emit_epilogue();
-        let exit_pc = self.builder.ins().iconst(types::I32, self.loop_info.end_pc as i64);
+        let exit_pc = self.builder.ins().iconst(types::I32, self.loop_info.exit_pc as i64);
         self.builder.ins().return_(&[exit_pc]);
         
         self.builder.seal_all_blocks();
@@ -143,13 +153,21 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn scan_jump_targets(&mut self) {
-        for pc in (self.loop_info.begin_pc + 1)..self.loop_info.end_pc {
+        let loop_end = self.loop_info.end_pc + 2;
+        for pc in (self.loop_info.begin_pc + 1)..loop_end {
             let inst = &self.func_def.code[pc];
             match inst.opcode() {
                 Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
                     let offset = inst.imm32();
-                    let target = (pc as i32 + offset) as usize;
-                    if target >= self.loop_info.begin_pc && target < self.loop_info.end_pc {
+                    let raw_target = (pc as i32 + offset) as usize;
+                    // Map LOOP_BEGIN to loop_header (begin_pc + 1)
+                    let target = if raw_target == self.loop_info.begin_pc {
+                        self.loop_info.begin_pc + 1
+                    } else {
+                        raw_target
+                    };
+                    // Create block for targets within loop body (after begin_pc)
+                    if target > self.loop_info.begin_pc && target < loop_end {
                         self.ensure_block(target);
                     }
                 }
@@ -168,23 +186,11 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
-    fn emit_prologue(&mut self) {
-        let params = self.builder.block_params(self.entry_block);
-        self.ctx_ptr = params[0];
-        self.locals_ptr = params[1];
-        
+    fn load_vars_from_memory(&mut self) {
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
-        }
-    }
-
-    fn emit_epilogue(&mut self) {
-        for i in 0..self.vars.len() {
-            let val = self.builder.use_var(self.vars[i]);
-            let offset = (i * 8) as i32;
-            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
         }
     }
 
@@ -206,8 +212,7 @@ impl<'a> LoopCompiler<'a> {
             Opcode::CallClosure => { self.call_closure(inst); Ok(false) }
             Opcode::CallIface => { self.call_iface(inst); Ok(false) }
             _ => {
-                // Unsupported - exit to VM
-                self.emit_epilogue();
+                // Unsupported - exit to VM (variables already in memory)
                 let ret_pc = self.builder.ins().iconst(types::I32, self.current_pc as i64);
                 self.builder.ins().return_(&[ret_pc]);
                 Ok(true)
@@ -217,38 +222,41 @@ impl<'a> LoopCompiler<'a> {
 
     fn jump(&mut self, inst: &Instruction) {
         let offset = inst.imm32();
-        let target = (self.current_pc as i32 + offset) as usize;
+        let raw_target = (self.current_pc as i32 + offset) as usize;
+        let loop_end = self.loop_info.end_pc + 2;
         
-        if target < self.loop_info.begin_pc || target >= self.loop_info.end_pc {
-            // Jump outside loop - exit
-            self.emit_epilogue();
-            let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
+        // Back-edge: jump to loop header (condition check)
+        if raw_target == self.loop_info.begin_pc || raw_target == self.loop_info.begin_pc + 1 {
+            self.do_emit_safepoint();
+            let loop_header = self.blocks[&(self.loop_info.begin_pc + 1)];
+            self.builder.ins().jump(loop_header, &[]);
+        } else if raw_target <= self.loop_info.begin_pc || raw_target >= loop_end {
+            // Jump outside loop - exit to VM
+            let ret_pc = self.builder.ins().iconst(types::I32, raw_target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
-            if offset < 0 {
-                self.do_emit_safepoint();
-            }
-            let block = self.blocks[&target];
+            // Jump within loop body
+            let block = self.blocks[&raw_target];
             self.builder.ins().jump(block, &[]);
         }
     }
 
     fn jump_if(&mut self, inst: &Instruction) {
-        let cond = self.builder.use_var(self.vars[inst.a as usize]);
+        let cond = self.read_var(inst.a);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
+        let loop_end = self.loop_info.end_pc + 2;
         
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(IntCC::NotEqual, cond, zero);
         
-        if target < self.loop_info.begin_pc || target >= self.loop_info.end_pc {
+        if target < self.loop_info.begin_pc || target >= loop_end {
             let exit_block = self.builder.create_block();
             self.builder.ins().brif(cmp, exit_block, &[], fall_through, &[]);
             
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
-            self.emit_epilogue();
             let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
@@ -261,21 +269,21 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn jump_if_not(&mut self, inst: &Instruction) {
-        let cond = self.builder.use_var(self.vars[inst.a as usize]);
+        let cond = self.read_var(inst.a);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
+        let loop_end = self.loop_info.end_pc + 2;
         
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(IntCC::Equal, cond, zero);
         
-        if target < self.loop_info.begin_pc || target >= self.loop_info.end_pc {
+        if target < self.loop_info.begin_pc || target >= loop_end {
             let exit_block = self.builder.create_block();
             self.builder.ins().brif(cmp, exit_block, &[], fall_through, &[]);
             
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
-            self.emit_epilogue();
             let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
@@ -287,17 +295,17 @@ impl<'a> LoopCompiler<'a> {
         self.builder.seal_block(fall_through);
     }
 
-    fn ret(&mut self, inst: &Instruction) {
-        // Return inside loop - store locals and return to VM
-        self.emit_epilogue();
+    fn ret(&mut self, _inst: &Instruction) {
+        // Return inside loop - return to VM (variables already in memory)
         let ret_pc = self.builder.ins().iconst(types::I32, self.current_pc as i64);
         self.builder.ins().return_(&[ret_pc]);
     }
 
     fn panic(&mut self, inst: &Instruction) {
         if let Some(panic_func) = self.helpers.panic {
-            let msg = self.builder.use_var(self.vars[inst.b as usize]);
-            self.builder.ins().call(panic_func, &[self.ctx_ptr, msg]);
+            let msg = self.read_var(inst.b);
+            let ctx = self.ctx_ptr;
+            self.builder.ins().call(panic_func, &[ctx, msg]);
         }
         let panic_val = self.builder.ins().iconst(types::I32, LOOP_RESULT_PANIC as i64);
         self.builder.ins().return_(&[panic_val]);
@@ -328,7 +336,7 @@ impl<'a> LoopCompiler<'a> {
         ));
         
         for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
+            let val = self.read_var((arg_start + i) as u16);
             self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
         }
         
@@ -338,14 +346,15 @@ impl<'a> LoopCompiler<'a> {
         let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
         let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
         
-        let call = self.builder.ins().call(call_vm_func, &[self.ctx_ptr, func_id_val, args_ptr, arg_count, ret_ptr, ret_count]);
+        let ctx = self.ctx_ptr;
+        let call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr, arg_count, ret_ptr, ret_count]);
         let result = self.builder.inst_results(call)[0];
         
         self.check_call_result(result);
         
         for i in 0..ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+            self.write_var((arg_start + i) as u16, val);
         }
     }
 
@@ -369,7 +378,7 @@ impl<'a> LoopCompiler<'a> {
         ));
         
         for i in 0..arg_count {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
+            let val = self.read_var((arg_start + i) as u16);
             self.builder.ins().stack_store(val, slot, (i * 8) as i32);
         }
         
@@ -377,14 +386,15 @@ impl<'a> LoopCompiler<'a> {
         let extern_id_val = self.builder.ins().iconst(types::I32, extern_id as i64);
         let arg_count_val = self.builder.ins().iconst(types::I32, arg_count as i64);
         
-        let call = self.builder.ins().call(call_extern_func, &[self.ctx_ptr, extern_id_val, args_ptr, arg_count_val, args_ptr]);
+        let ctx = self.ctx_ptr;
+        let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr]);
         let result = self.builder.inst_results(call)[0];
         
         self.check_call_result(result);
         
         for i in 0..arg_count {
             let val = self.builder.ins().stack_load(types::I64, slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[dst + i], val);
+            self.write_var((dst + i) as u16, val);
         }
     }
 
@@ -396,7 +406,7 @@ impl<'a> LoopCompiler<'a> {
         
         self.do_emit_safepoint();
         
-        let closure_ref = self.builder.use_var(self.vars[inst.a as usize]);
+        let closure_ref = self.read_var(inst.a);
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
         let ret_slots = (inst.c & 0xFF) as usize;
@@ -413,7 +423,7 @@ impl<'a> LoopCompiler<'a> {
         ));
         
         for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
+            let val = self.read_var((arg_start + i) as u16);
             self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
         }
         
@@ -422,14 +432,15 @@ impl<'a> LoopCompiler<'a> {
         let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
         let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
         
-        let call = self.builder.ins().call(call_closure_func, &[self.ctx_ptr, closure_ref, args_ptr, arg_count, ret_ptr, ret_count]);
+        let ctx = self.ctx_ptr;
+        let call = self.builder.ins().call(call_closure_func, &[ctx, closure_ref, args_ptr, arg_count, ret_ptr, ret_count]);
         let result = self.builder.inst_results(call)[0];
         
         self.check_call_result(result);
         
         for i in 0..ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+            self.write_var((arg_start + i) as u16, val);
         }
     }
 
@@ -441,8 +452,8 @@ impl<'a> LoopCompiler<'a> {
         
         self.do_emit_safepoint();
         
-        let slot0 = self.builder.use_var(self.vars[inst.a as usize]);
-        let slot1 = self.builder.use_var(self.vars[inst.a as usize + 1]);
+        let slot0 = self.read_var(inst.a);
+        let slot1 = self.read_var(inst.a + 1);
         let method_idx = inst.flags as u32;
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
@@ -460,7 +471,7 @@ impl<'a> LoopCompiler<'a> {
         ));
         
         for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
+            let val = self.read_var((arg_start + i) as u16);
             self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
         }
         
@@ -471,8 +482,9 @@ impl<'a> LoopCompiler<'a> {
         let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
         let func_id = self.builder.ins().iconst(types::I32, 0);
         
+        let ctx = self.ctx_ptr;
         let call = self.builder.ins().call(call_iface_func, &[
-            self.ctx_ptr, slot0, slot1, method_idx_val, args_ptr, arg_count, ret_ptr, ret_count, func_id
+            ctx, slot0, slot1, method_idx_val, args_ptr, arg_count, ret_ptr, ret_count, func_id
         ]);
         let result = self.builder.inst_results(call)[0];
         
@@ -480,7 +492,7 @@ impl<'a> LoopCompiler<'a> {
         
         for i in 0..ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+            self.write_var((arg_start + i) as u16, val);
         }
     }
 
@@ -507,7 +519,8 @@ impl<'a> LoopCompiler<'a> {
             None => return,
         };
         
-        let flag_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), self.ctx_ptr, 16);
+        let ctx_ptr = self.ctx_ptr;
+        let flag_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx_ptr, 16);
         let flag = self.builder.ins().load(types::I8, MemFlags::trusted(), flag_ptr, 0);
         
         let call_block = self.builder.create_block();
@@ -517,7 +530,8 @@ impl<'a> LoopCompiler<'a> {
         
         self.builder.switch_to_block(call_block);
         self.builder.seal_block(call_block);
-        self.builder.ins().call(safepoint_func, &[self.ctx_ptr]);
+        let ctx_for_call = self.ctx_ptr;
+        self.builder.ins().call(safepoint_func, &[ctx_for_call]);
         self.builder.ins().jump(merge_block, &[]);
         
         self.builder.switch_to_block(merge_block);

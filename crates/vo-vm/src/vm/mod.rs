@@ -234,7 +234,7 @@ impl Vm {
                     #[cfg(feature = "jit")]
                     {
                         use vo_common_core::instruction::HINT_LOOP_BEGIN;
-                        let hint_kind = inst.a as u8;
+                        let hint_kind = inst.flags;
                         if hint_kind == HINT_LOOP_BEGIN {
                             let loop_pc = frame.pc - 1;
                             if let Some(new_pc) = self.try_osr(fiber_id, func_id, loop_pc, bp) {

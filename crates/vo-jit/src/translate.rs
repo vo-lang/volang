@@ -83,12 +83,39 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ArrayGet => { array_get(e, inst); Ok(Completed) }
         ArraySet => { array_set(e, inst); Ok(Completed) }
         ArrayAddr => { array_addr(e, inst); Ok(Completed) }
+        // String operations
+        StrLen => { str_len(e, inst); Ok(Completed) }
+        StrIndex => { str_index(e, inst); Ok(Completed) }
+        StrConcat => { str_concat(e, inst); Ok(Completed) }
+        StrSlice => { str_slice(e, inst); Ok(Completed) }
+        StrEq => { str_eq(e, inst); Ok(Completed) }
+        StrNe => { str_ne(e, inst); Ok(Completed) }
+        StrLt => { str_cmp(e, inst, IntCC::SignedLessThan); Ok(Completed) }
+        StrLe => { str_cmp(e, inst, IntCC::SignedLessThanOrEqual); Ok(Completed) }
+        StrGt => { str_cmp(e, inst, IntCC::SignedGreaterThan); Ok(Completed) }
+        StrGe => { str_cmp(e, inst, IntCC::SignedGreaterThanOrEqual); Ok(Completed) }
+        StrDecodeRune => { str_decode_rune(e, inst); Ok(Completed) }
+        // Map operations
+        MapNew => { map_new(e, inst); Ok(Completed) }
+        MapLen => { map_len(e, inst); Ok(Completed) }
+        MapGet => { map_get(e, inst); Ok(Completed) }
+        MapSet => { map_set(e, inst); Ok(Completed) }
+        MapDelete => { map_delete(e, inst); Ok(Completed) }
+        MapIterGet => { map_iter_get(e, inst); Ok(Completed) }
+        // Closure operations
+        ClosureNew => { closure_new(e, inst); Ok(Completed) }
+        ClosureGet => { closure_get(e, inst); Ok(Completed) }
+        // Allocation
+        PtrNew => { ptr_new(e, inst); Ok(Completed) }
+        ChanNew => { chan_new(e, inst); Ok(Completed) }
+        // Interface
+        IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
+        StrNew => { str_new(e, inst); Ok(Completed) }
+        IfaceAssign => { iface_assign(e, inst); Ok(Completed) }
         // Control flow - compiler specific
         Jump | JumpIf | JumpIfNot | Return | Panic => Ok(Unhandled),
         // Function calls - compiler specific
         Call | CallExtern | CallClosure | CallIface => Ok(Unhandled),
-        // Compiler specific (needs constant table access)
-        StrNew | IfaceAssign => Ok(Unhandled),
         // Unsupported
         _ => Ok(Unhandled),
     }
@@ -736,4 +763,329 @@ fn array_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
     let addr = e.builder().ins().iadd(arr, off);
     e.write_var(inst.a, addr);
+}
+
+// =============================================================================
+// String operations
+// =============================================================================
+
+fn str_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_len { Some(f) => f, None => return };
+    let s = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[s]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_index { Some(f) => f, None => return };
+    let s = e.read_var(inst.b);
+    let idx = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[s, idx]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn str_concat<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_concat { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let a = e.read_var(inst.b);
+    let b = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[gc_ptr, a, b]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_slice { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let s = e.read_var(inst.b);
+    let lo = e.read_var(inst.c);
+    let hi = e.read_var(inst.c + 1);
+    let call = e.builder().ins().call(func, &[gc_ptr, s, lo, hi]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_eq { Some(f) => f, None => return };
+    let a = e.read_var(inst.b);
+    let b = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[a, b]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_eq { Some(f) => f, None => return };
+    let a = e.read_var(inst.b);
+    let b = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[a, b]);
+    let eq_result = e.builder().inst_results(call)[0];
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let cmp = e.builder().ins().icmp(IntCC::Equal, eq_result, zero);
+    let result = e.builder().ins().uextend(types::I64, cmp);
+    e.write_var(inst.a, result);
+}
+
+fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
+    let func = match e.helpers().str_cmp { Some(f) => f, None => return };
+    let a = e.read_var(inst.b);
+    let b = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[a, b]);
+    let cmp_result = e.builder().inst_results(call)[0];
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
+    let result = e.builder().ins().uextend(types::I64, cmp);
+    e.write_var(inst.a, result);
+}
+
+fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().str_decode_rune { Some(f) => f, None => return };
+    let s = e.read_var(inst.b);
+    let idx = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[s, idx]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+// =============================================================================
+// Map operations
+// =============================================================================
+
+fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_new { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let packed_meta = e.read_var(inst.b);
+    let key_meta = e.builder().ins().ushr_imm(packed_meta, 32);
+    let key_meta_i32 = e.builder().ins().ireduce(types::I32, key_meta);
+    let val_meta_i32 = e.builder().ins().ireduce(types::I32, packed_meta);
+    let key_slots = e.builder().ins().iconst(types::I32, (inst.c >> 8) as i64);
+    let val_slots = e.builder().ins().iconst(types::I32, (inst.c & 0xFF) as i64);
+    let call = e.builder().ins().call(func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots, val_slots]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_len { Some(f) => f, None => return };
+    let m = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[m]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_get { Some(f) => f, None => return };
+    let m = e.read_var(inst.a);
+    let key = e.read_var(inst.b);
+    let key_bytes = e.builder().ins().iconst(types::I64, inst.c as i64);
+    let val_bytes = e.builder().ins().iconst(types::I64, inst.flags as i64);
+    let call = e.builder().ins().call(func, &[m, key, key_bytes, val_bytes]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_set { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let m = e.read_var(inst.a);
+    let key = e.read_var(inst.b);
+    let val = e.read_var(inst.c);
+    let key_bytes = e.builder().ins().iconst(types::I64, (inst.flags & 0x0F) as i64);
+    let val_bytes = e.builder().ins().iconst(types::I64, (inst.flags >> 4) as i64);
+    e.builder().ins().call(func, &[gc_ptr, m, key, val, key_bytes, val_bytes]);
+}
+
+fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_delete { Some(f) => f, None => return };
+    let m = e.read_var(inst.a);
+    let key = e.read_var(inst.b);
+    let key_bytes = e.builder().ins().iconst(types::I64, inst.c as i64);
+    e.builder().ins().call(func, &[m, key, key_bytes]);
+}
+
+fn map_iter_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_iter_get { Some(f) => f, None => return };
+    let m = e.read_var(inst.b);
+    let idx = e.read_var(inst.c);
+    let key_slots = (inst.flags >> 4) as usize;
+    let val_slots = (inst.flags & 0xF) as usize;
+    let key_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (key_slots.max(1) * 8) as u32, 8));
+    let val_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (val_slots.max(1) * 8) as u32, 8));
+    let key_ptr = e.builder().ins().stack_addr(types::I64, key_slot, 0);
+    let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
+    let key_slots_i32 = e.builder().ins().iconst(types::I32, key_slots as i64);
+    let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
+    let call = e.builder().ins().call(func, &[m, idx, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let done = e.builder().inst_results(call)[0];
+    for i in 0..key_slots {
+        let val = e.builder().ins().stack_load(types::I64, key_slot, (i * 8) as i32);
+        e.write_var(inst.a + i as u16, val);
+    }
+    for i in 0..val_slots {
+        let val = e.builder().ins().stack_load(types::I64, val_slot, (i * 8) as i32);
+        e.write_var(inst.a + key_slots as u16 + i as u16, val);
+    }
+    e.write_var(inst.a + (key_slots + val_slots) as u16, done);
+}
+
+// =============================================================================
+// Closure operations
+// =============================================================================
+
+fn closure_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().closure_new { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let func_id = ((inst.flags as u32) << 16) | (inst.b as u32);
+    let capture_count = inst.c as u32;
+    let func_id_i32 = e.builder().ins().iconst(types::I32, func_id as i64);
+    let capture_count_i32 = e.builder().ins().iconst(types::I32, capture_count as i64);
+    let call = e.builder().ins().call(func, &[gc_ptr, func_id_i32, capture_count_i32]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn closure_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    use vo_runtime::objects::closure::HEADER_SLOTS;
+    let closure = e.read_var(0);
+    let capture_idx = inst.b as usize;
+    let offset = ((HEADER_SLOTS + capture_idx) * 8) as i32;
+    let val = e.builder().ins().load(types::I64, MemFlags::trusted(), closure, offset);
+    e.write_var(inst.a, val);
+}
+
+// =============================================================================
+// Allocation operations
+// =============================================================================
+
+fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().gc_alloc { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let meta_raw = e.read_var(inst.b);
+    let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
+    let slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let call = e.builder().ins().call(func, &[gc_ptr, meta_i32, slots_i32]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().chan_new { Some(f) => f, None => return };
+    let gc_ptr = e.gc_ptr();
+    let elem_meta = e.read_var(inst.b);
+    let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
+    let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let cap = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+// =============================================================================
+// Interface operations
+// =============================================================================
+
+fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    use vo_runtime::bytecode::Constant;
+    let func = match e.helpers().str_new { Some(f) => f, None => return };
+    let const_idx = inst.b as usize;
+    let bytes: Vec<u8> = if let Constant::String(s) = &e.vo_module().constants[const_idx] {
+        s.as_bytes().to_vec()
+    } else {
+        let zero = e.builder().ins().iconst(types::I64, 0);
+        e.write_var(inst.a, zero);
+        return;
+    };
+    let len = bytes.len();
+    if len == 0 {
+        let zero = e.builder().ins().iconst(types::I64, 0);
+        e.write_var(inst.a, zero);
+    } else {
+        let gc_ptr = e.gc_ptr();
+        let stack_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, len as u32, 0));
+        for (i, &b) in bytes.iter().enumerate() {
+            let byte_val = e.builder().ins().iconst(types::I8, b as i64);
+            e.builder().ins().stack_store(byte_val, stack_slot, i as i32);
+        }
+        let data_ptr = e.builder().ins().stack_addr(types::I64, stack_slot, 0);
+        let len_val = e.builder().ins().iconst(types::I64, len as i64);
+        let call = e.builder().ins().call(func, &[gc_ptr, data_ptr, len_val]);
+        let result = e.builder().inst_results(call)[0];
+        e.write_var(inst.a, result);
+    }
+}
+
+fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    use vo_runtime::bytecode::Constant;
+    let vk = inst.flags;
+    let src = e.read_var(inst.b);
+    let const_idx = inst.c as usize;
+    let (rttid, itab_id) = if let Constant::Int(packed) = &e.vo_module().constants[const_idx] {
+        let rttid = (*packed >> 32) as u32;
+        let itab_id = (*packed & 0xFFFFFFFF) as u32;
+        (rttid, itab_id)
+    } else {
+        (0, 0)
+    };
+    let itab_shifted = (itab_id as u64) << 32;
+    let rttid_shifted = (rttid as u64) << 8;
+    let slot0_val = itab_shifted | rttid_shifted | (vk as u64);
+    let slot0 = e.builder().ins().iconst(types::I64, slot0_val as i64);
+    let slot1 = if vk == 7 || vk == 8 {
+        if let Some(ptr_clone_func) = e.helpers().ptr_clone {
+            let gc_ptr = e.gc_ptr();
+            let call = e.builder().ins().call(ptr_clone_func, &[gc_ptr, src]);
+            e.builder().inst_results(call)[0]
+        } else { src }
+    } else if vk == 11 {
+        e.read_var(inst.b + 1)
+    } else { src };
+    e.write_var(inst.a, slot0);
+    e.write_var(inst.a + 1, slot1);
+}
+
+fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().iface_assert { Some(f) => f, None => return };
+    let ctx = e.ctx_param();
+    let slot0 = e.read_var(inst.b);
+    let slot1 = e.read_var(inst.b + 1);
+    let target_id_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
+    let flags_i16 = e.builder().ins().iconst(types::I16, inst.flags as i64);
+    let has_ok = ((inst.flags >> 2) & 0x1) != 0;
+    let assert_kind = inst.flags & 0x3;
+    let target_slots = (inst.flags >> 3) as usize;
+    let result_slots = if assert_kind == 1 { 3 } else { target_slots.max(1) + 1 };
+    let result_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (result_slots * 8) as u32, 8));
+    let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
+    let call = e.builder().ins().call(func, &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr]);
+    let result = e.builder().inst_results(call)[0];
+    if !has_ok {
+        let panic_ret = e.panic_return_value();
+        let zero = e.builder().ins().iconst(types::I64, 0);
+        let is_panic = e.builder().ins().icmp(IntCC::Equal, result, zero);
+        let panic_block = e.builder().create_block();
+        let continue_block = e.builder().create_block();
+        e.builder().ins().brif(is_panic, panic_block, &[], continue_block, &[]);
+        e.builder().switch_to_block(panic_block);
+        e.builder().seal_block(panic_block);
+        let panic_val = e.builder().ins().iconst(types::I32, panic_ret as i64);
+        e.builder().ins().return_(&[panic_val]);
+        e.builder().switch_to_block(continue_block);
+        e.builder().seal_block(continue_block);
+    }
+    let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+    for i in 0..dst_slots {
+        let val = e.builder().ins().stack_load(types::I64, result_slot, (i * 8) as i32);
+        e.write_var(inst.a + i as u16, val);
+    }
+    if has_ok {
+        let ok_offset = if assert_kind == 1 { 2 } else { target_slots.max(1) };
+        let ok_val = e.builder().ins().stack_load(types::I64, result_slot, (ok_offset * 8) as i32);
+        e.write_var(inst.a + ok_offset as u16, ok_val);
+    }
 }

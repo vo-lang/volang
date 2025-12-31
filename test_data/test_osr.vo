@@ -1,0 +1,13 @@
+package main
+
+func main() {
+	n := 100
+	arr := make([]int, n)
+	for i := 0; i < n; i++ {
+		arr[i] = i
+	}
+	println(arr[0])
+	println(arr[49])
+	println(arr[50])
+	println(arr[99])
+}
