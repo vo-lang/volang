@@ -230,7 +230,21 @@ impl Vm {
 
             // Single dispatch - all instructions handled here
             let result = match inst.opcode() {
-                Opcode::Hint => ExecResult::Continue,
+                Opcode::Hint => {
+                    #[cfg(feature = "jit")]
+                    {
+                        use vo_common_core::instruction::HINT_LOOP_BEGIN;
+                        let hint_kind = inst.a as u8;
+                        if hint_kind == HINT_LOOP_BEGIN {
+                            let loop_pc = frame.pc - 1;
+                            if let Some(new_pc) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
+                                frame.pc = new_pc;
+                                continue;
+                            }
+                        }
+                    }
+                    ExecResult::Continue
+                }
 
                 Opcode::LoadInt => {
                     let val = inst.imm32() as i64 as u64;
@@ -505,79 +519,23 @@ impl Vm {
                 }
 
                 // Jump - inline with OSR support
-                #[cfg(feature = "jit")]
                 Opcode::Jump => {
                     let offset = inst.imm32();
-                    let backedge_pc = fiber.current_frame().unwrap().pc;
-                    let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
-                    
-                    // Check for back-edge (loop) and try OSR
-                    if loop_header_pc < backedge_pc {
-                        if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
-                            return result;
-                        }
-                    }
-                    
-                    fiber.current_frame_mut().unwrap().pc = loop_header_pc;
-                    ExecResult::Continue
-                }
-                #[cfg(not(feature = "jit"))]
-                Opcode::Jump => {
-                    let offset = inst.imm32();
-                    let frame = fiber.current_frame_mut().unwrap();
                     frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     ExecResult::Continue
                 }
-                #[cfg(feature = "jit")]
                 Opcode::JumpIf => {
                     let cond = stack_get(stack, bp + inst.a as usize);
                     if cond != 0 {
                         let offset = inst.imm32();
-                        let backedge_pc = frame.pc;
-                        let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
-                        
-                        if loop_header_pc < backedge_pc {
-                            if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
-                                return result;
-                            }
-                        }
-                        frame.pc = loop_header_pc;
-                    }
-                    ExecResult::Continue
-                }
-                #[cfg(not(feature = "jit"))]
-                Opcode::JumpIf => {
-                    let cond = stack_get(stack, bp + inst.a as usize);
-                    if cond != 0 {
-                        let offset = inst.imm32();
-                        let frame = fiber.current_frame_mut().unwrap();
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
                     ExecResult::Continue
                 }
-                #[cfg(feature = "jit")]
                 Opcode::JumpIfNot => {
                     let cond = stack_get(stack, bp + inst.a as usize);
                     if cond == 0 {
                         let offset = inst.imm32();
-                        let backedge_pc = frame.pc;
-                        let loop_header_pc = (backedge_pc as i64 + offset as i64 - 1) as usize;
-                        
-                        if loop_header_pc < backedge_pc {
-                            if let Some(result) = self.try_osr(fiber_id, func_id, backedge_pc, loop_header_pc, bp) {
-                                return result;
-                            }
-                        }
-                        frame.pc = loop_header_pc;
-                    }
-                    ExecResult::Continue
-                }
-                #[cfg(not(feature = "jit"))]
-                Opcode::JumpIfNot => {
-                    let cond = stack_get(stack, bp + inst.a as usize);
-                    if cond == 0 {
-                        let offset = inst.imm32();
-                        let frame = fiber.current_frame_mut().unwrap();
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
                     ExecResult::Continue

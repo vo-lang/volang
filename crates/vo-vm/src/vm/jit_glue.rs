@@ -258,16 +258,9 @@ impl Vm {
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
-                ExecResult::Osr(func_id, backedge_pc, loop_header_pc) => {
-                    // OSR requested - record backedge for hot tracking
-                    // TODO: Implement actual loop OSR execution
-                    if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-                        if jit_mgr.record_backedge(func_id, backedge_pc, loop_header_pc) {
-                            let func_def = &module.functions[func_id as usize];
-                            let _ = jit_mgr.compile_full(func_id, func_def, module);
-                        }
-                    }
-                    // Continue VM execution (no mid-execution OSR yet)
+                ExecResult::Osr(_, _, _) => {
+                    // OSR is now handled at HINT_LOOP_BEGIN, this shouldn't happen
+                    // Continue VM execution
                 }
                 _ => {}
             }
@@ -315,29 +308,92 @@ impl Vm {
 
     /// Try to perform loop OSR at a back-edge.
     /// 
-    /// TODO: Implement loop OSR. Currently just records backedge for hot tracking
-    /// and triggers full function compilation when hot.
-    #[allow(unused_variables)]
+    /// Called when VM detects a HINT_LOOP_BEGIN instruction.
+    /// If the loop is hot and compiled, executes it via JIT and returns the new PC.
     pub(super) fn try_osr(
         &mut self,
         fiber_id: u32,
         func_id: u32,
-        backedge_pc: usize,
-        loop_header_pc: usize,
+        loop_begin_pc: usize,
         bp: usize,
-    ) -> Option<ExecResult> {
+    ) -> Option<usize> {
+        use vo_jit::LOOP_RESULT_PANIC;
+        
         let module = self.module.as_ref()?;
         let func_def = &module.functions[func_id as usize];
         let jit_mgr = self.jit_mgr.as_mut()?;
         
-        // Record backedge hit for hot tracking
-        if jit_mgr.record_backedge(func_id, backedge_pc, loop_header_pc) {
-            // Loop is hot - compile full function for future calls
-            let _ = jit_mgr.compile_full(func_id, func_def, module);
+        // 1. Check if loop is already compiled
+        let loop_func = unsafe { jit_mgr.get_loop_func(func_id, loop_begin_pc) };
+        
+        if let Some(loop_func) = loop_func {
+            // Loop is compiled - execute it
+            return self.execute_loop_osr(fiber_id, loop_func, bp);
         }
         
-        // TODO: Implement actual loop OSR (mid-execution switch to JIT)
-        // For now, always continue VM execution
+        // 2. Record backedge hit for hot tracking
+        if jit_mgr.record_backedge(func_id, loop_begin_pc) {
+            // Loop is hot - try to compile
+            if let Some(loop_info) = jit_mgr.find_loop(func_id, func_def, loop_begin_pc) {
+                if loop_info.is_jittable() {
+                    if jit_mgr.compile_loop(func_id, func_def, module, &loop_info).is_ok() {
+                        // Compilation succeeded - execute the loop
+                        if let Some(loop_func) = unsafe { jit_mgr.get_loop_func(func_id, loop_begin_pc) } {
+                            return self.execute_loop_osr(fiber_id, loop_func, bp);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Continue VM execution
         None
+    }
+    
+    /// Execute a compiled loop function via OSR.
+    /// Returns the new PC to resume at, or None on panic.
+    fn execute_loop_osr(
+        &mut self,
+        fiber_id: u32,
+        loop_func: vo_jit::LoopFunc,
+        bp: usize,
+    ) -> Option<usize> {
+        use vo_jit::LOOP_RESULT_PANIC;
+        
+        let jit_mgr = self.jit_mgr.as_ref().unwrap();
+        let func_table_ptr = jit_mgr.func_table_ptr();
+        let func_table_len = jit_mgr.func_table_len() as u32;
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
+        let module_ptr = self.module.as_ref()
+            .map(|m| m as *const _ as *const std::ffi::c_void)
+            .unwrap_or(std::ptr::null());
+        
+        // Build JIT context
+        let mut ctx = build_jit_ctx(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, std::ptr::null_mut(), module_ptr,
+            &safepoint_flag, &mut panic_flag,
+        );
+        
+        // Get locals pointer from fiber stack
+        let fiber = if is_trampoline_fiber(fiber_id) {
+            self.scheduler.trampoline_fiber_mut(fiber_id)
+        } else {
+            &mut self.scheduler.fibers[fiber_id as usize]
+        };
+        let locals_ptr = fiber.stack[bp..].as_mut_ptr();
+        
+        // Call loop function
+        let exit_pc = loop_func(&mut ctx, locals_ptr);
+        
+        if exit_pc == LOOP_RESULT_PANIC {
+            // Panic occurred - let VM handle it
+            None
+        } else {
+            // Return new PC to resume at
+            Some(exit_pc as usize)
+        }
     }
 }

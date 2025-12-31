@@ -13,6 +13,7 @@ jit = ["vo-jit"]
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime" }
+vo-common-core = { path = "../vo-common-core" }
 hashbrown = "0.15"
 
 # Optional JIT compiler

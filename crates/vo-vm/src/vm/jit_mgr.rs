@@ -12,7 +12,10 @@
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
-use vo_jit::{JitCompiler, JitError, JitFunc};
+use std::collections::HashMap;
+
+use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo, LOOP_RESULT_PANIC};
+use vo_jit::loop_analysis::analyze_loops;
 
 // =============================================================================
 // Configuration
@@ -65,6 +68,12 @@ pub struct FunctionJitInfo {
     
     /// Call count (for triggering full compilation).
     pub call_count: u32,
+    
+    /// Loop backedge counts: (begin_pc) -> count.
+    pub loop_counts: HashMap<usize, u32>,
+    
+    /// Analyzed loops (lazily populated).
+    pub loops: Option<Vec<LoopInfo>>,
 }
 
 impl FunctionJitInfo {
@@ -73,6 +82,8 @@ impl FunctionJitInfo {
             state: CompileState::Interpreted,
             full_entry: None,
             call_count: 0,
+            loop_counts: HashMap::new(),
+            loops: None,
         }
     }
 }
@@ -199,12 +210,34 @@ impl JitManager {
     }
     
     /// Record a loop backedge hit. Returns true if loop OSR should be triggered.
-    /// 
-    /// TODO: Implement loop OSR. Currently always returns false.
-    #[allow(unused_variables)]
-    pub fn record_backedge(&mut self, func_id: u32, backedge_pc: usize, loop_header_pc: usize) -> bool {
-        // TODO: Implement loop hot tracking and OSR compilation
-        false
+    pub fn record_backedge(&mut self, func_id: u32, loop_begin_pc: usize) -> bool {
+        let id = func_id as usize;
+        let info = match self.funcs.get_mut(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        
+        let count = info.loop_counts.entry(loop_begin_pc).or_insert(0);
+        *count += 1;
+        *count >= self.config.loop_threshold
+    }
+    
+    /// Get or analyze loops for a function.
+    pub fn get_loops(&mut self, func_id: u32, func_def: &FunctionDef) -> &[LoopInfo] {
+        let id = func_id as usize;
+        let info = &mut self.funcs[id];
+        
+        if info.loops.is_none() {
+            info.loops = Some(analyze_loops(func_def));
+        }
+        
+        info.loops.as_ref().unwrap()
+    }
+    
+    /// Find loop info by begin_pc.
+    pub fn find_loop(&mut self, func_id: u32, func_def: &FunctionDef, begin_pc: usize) -> Option<LoopInfo> {
+        let loops = self.get_loops(func_id, func_def);
+        loops.iter().find(|l| l.begin_pc == begin_pc).cloned()
     }
     
     // =========================================================================
@@ -235,7 +268,10 @@ impl JitManager {
         }
         
         // Compile
-        self.compiler.compile(func_id, func_def, module)?;
+        if let Err(e) = self.compiler.compile(func_id, func_def, module) {
+            info.state = CompileState::Unsupported;
+            return Err(e);
+        }
         
         // Get function pointer
         let ptr = unsafe { self.compiler.get_func_ptr(func_id) }
@@ -249,6 +285,24 @@ impl JitManager {
         Ok(())
     }
     
-    // TODO: Implement loop OSR compilation
-    // pub fn compile_loop_osr(...) -> Result<LoopFunc, JitError> { ... }
+    /// Compile a loop for OSR.
+    pub fn compile_loop(
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        module: &VoModule,
+        loop_info: &LoopInfo,
+    ) -> Result<(), JitError> {
+        self.compiler.compile_loop(func_id, func_def, module, loop_info)
+    }
+    
+    /// Get loop function pointer.
+    pub unsafe fn get_loop_func(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
+        self.compiler.get_loop_func_ptr(func_id, begin_pc)
+    }
+    
+    /// Check if a loop is compiled.
+    pub fn has_loop(&self, func_id: u32, begin_pc: usize) -> bool {
+        self.compiler.get_loop(func_id, begin_pc).is_some()
+    }
 }
