@@ -82,18 +82,11 @@ impl<'a> LoopCompiler<'a> {
         self.declare_variables();
         self.scan_jump_targets();
         
-        // loop_header: where loop starts (begin_pc + 1, after HINT_LOOP_BEGIN)
-        let loop_header = self.ensure_block(self.loop_info.begin_pc + 1);
-        
-        // Entry block: get params, load vars, jump to loop header
+        // Exactly like func_compiler: entry_block -> prologue -> sequential compile
         self.builder.switch_to_block(self.entry_block);
-        let entry_params = self.builder.block_params(self.entry_block);
-        self.ctx_ptr = entry_params[0];
-        self.locals_ptr = entry_params[1];
-        self.load_vars_from_memory();
-        self.builder.ins().jump(loop_header, &[]);
+        self.emit_prologue();
         
-        let mut block_terminated = true;
+        let mut block_terminated = false;  // Same as func_compiler!
         
         // Compile from after LOOP_BEGIN hint to after LOOP_END hint (includes back-edge jump)
         for pc in (self.loop_info.begin_pc + 1)..(self.loop_info.end_pc + 2) {
@@ -124,8 +117,9 @@ impl<'a> LoopCompiler<'a> {
             self.builder.ins().jump(self.exit_block, &[]);
         }
         
-        // Exit block: return exit_pc
+        // Exit block: store vars back to memory, then return exit_pc
         self.builder.switch_to_block(self.exit_block);
+        self.store_vars_to_memory();
         let exit_pc = self.builder.ins().iconst(types::I32, self.loop_info.exit_pc as i64);
         self.builder.ins().return_(&[exit_pc]);
         
@@ -186,11 +180,25 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
-    fn load_vars_from_memory(&mut self) {
+    fn emit_prologue(&mut self) {
+        let params = self.builder.block_params(self.entry_block);
+        self.ctx_ptr = params[0];
+        self.locals_ptr = params[1];
+        
+        // Load all variables from memory - like func_compiler loads from args
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
+        }
+    }
+    
+    fn store_vars_to_memory(&mut self) {
+        // Write modified variables back to memory
+        for &slot in &self.loop_info.live_out {
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            let offset = (slot as i32) * 8;
+            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
         }
     }
 
@@ -232,6 +240,7 @@ impl<'a> LoopCompiler<'a> {
             self.builder.ins().jump(loop_header, &[]);
         } else if raw_target <= self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
+            self.store_vars_to_memory();
             let ret_pc = self.builder.ins().iconst(types::I32, raw_target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
@@ -257,6 +266,7 @@ impl<'a> LoopCompiler<'a> {
             
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
+            self.store_vars_to_memory();
             let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
@@ -284,6 +294,7 @@ impl<'a> LoopCompiler<'a> {
             
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
+            self.store_vars_to_memory();
             let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
             self.builder.ins().return_(&[ret_pc]);
         } else {
@@ -296,7 +307,8 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn ret(&mut self, _inst: &Instruction) {
-        // Return inside loop - return to VM (variables already in memory)
+        // Return inside loop - store vars and return to VM
+        self.store_vars_to_memory();
         let ret_pc = self.builder.ins().iconst(types::I32, self.current_pc as i64);
         self.builder.ins().return_(&[ret_pc]);
     }

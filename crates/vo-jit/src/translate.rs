@@ -456,7 +456,8 @@ fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // Slice operations
 // =============================================================================
 
-const SLICE_FIELD_DATA_PTR: i32 = 0;
+use vo_runtime::objects::slice::FIELD_DATA_PTR as SLICE_FIELD_DATA_PTR_SLOT;
+const SLICE_FIELD_DATA_PTR: i32 = (SLICE_FIELD_DATA_PTR_SLOT * 8) as i32;
 
 fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let slice_new_func = match e.helpers().slice_new {

@@ -14,7 +14,7 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use std::collections::HashMap;
 
-use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo, LOOP_RESULT_PANIC};
+use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 use vo_jit::loop_analysis::analyze_loops;
 
 // =============================================================================
@@ -191,11 +191,6 @@ impl JitManager {
         
         // 3. Fall back to VM
         None
-    }
-    
-    /// Check if function can be JIT compiled (internal use).
-    fn can_jit(&self, func_def: &FunctionDef, module: &VoModule) -> bool {
-        self.compiler.can_jit(func_def, module)
     }
     
     // =========================================================================

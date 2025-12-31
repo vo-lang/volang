@@ -1,0 +1,27 @@
+package main
+
+// Test JIT func compilation (not loop OSR)
+// This function should be JIT compiled as a whole
+
+func fillArray(arr []int,i int) {
+        println(12323132, i)
+		arr[i] = i
+        println(12323132, i, arr[i])
+	
+}
+
+func main() {
+	n := 100
+	arr := make([]int, n)
+
+    for i := 0; i < n; i++ {
+		fillArray(arr, i)
+        println(8888888, i, arr[i])
+	}
+	println(arr)
+	println(arr[0])
+	println(arr[49])
+	println(arr[50])
+    println(arr[98])
+	println(arr[99])
+}

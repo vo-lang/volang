@@ -7,7 +7,7 @@ use vo_analysis::{analyze_project, AnalysisError};
 use vo_module::VfsConfig;
 use vo_codegen::compile_project;
 use vo_vm::bytecode::Module;
-use vo_vm::vm::{Vm, VmError};
+use vo_vm::vm::Vm;
 use vo_syntax::parser;
 use crate::printer::AstPrinter;
 use crate::bytecode_text;

@@ -639,6 +639,9 @@ impl JitCompiler {
             return Ok(());
         }
 
+        // Clear any residual state from previous compilation
+        self.ctx.clear();
+
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type));
@@ -678,6 +681,9 @@ impl JitCompiler {
         if !loop_info.is_jittable() {
             return Err(JitError::NotJittable(func_id));
         }
+
+        // Clear any residual state from previous compilation
+        self.ctx.clear();
 
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);

@@ -239,7 +239,6 @@ impl Vm {
                             let loop_pc = frame.pc - 1;
                             if let Some(new_pc) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
                                 frame.pc = new_pc;
-                                continue;
                             }
                         }
                     }

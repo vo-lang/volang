@@ -195,16 +195,6 @@ impl Vm {
         jit_func(&mut ctx, args, ret)
     }
 
-    /// Call a JIT function with slices (for OSR).
-    pub(super) fn call_jit_with_slices(
-        &mut self,
-        jit_func: JitFunc,
-        args: &mut [u64],
-        ret: &mut [u64],
-    ) -> JitResult {
-        self.call_jit_direct(jit_func, args.as_mut_ptr(), ret.as_mut_ptr())
-    }
-
     /// Execute a JIT->VM call. This is the core logic for vm_call_trampoline.
     pub fn execute_jit_call(
         &mut self,
@@ -317,8 +307,6 @@ impl Vm {
         loop_begin_pc: usize,
         bp: usize,
     ) -> Option<usize> {
-        use vo_jit::LOOP_RESULT_PANIC;
-        
         let module = self.module.as_ref()?;
         let func_def = &module.functions[func_id as usize];
         let jit_mgr = self.jit_mgr.as_mut()?;

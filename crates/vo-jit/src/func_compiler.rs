@@ -71,11 +71,9 @@ impl<'a> FunctionCompiler<'a> {
                     self.builder.ins().jump(block, &[]);
                 }
                 self.builder.switch_to_block(block);
-                block_terminated = false;
             } else if block_terminated {
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
-                block_terminated = false;
             }
             
             let inst = &self.func_def.code[pc];
