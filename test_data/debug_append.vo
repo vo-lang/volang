@@ -1,0 +1,34 @@
+// Debug multi-arg append
+package main
+
+func main() {
+	// Test 1: single-arg append
+	s1 := []int{1}
+	s1 = append(s1, 2)
+	s1 = append(s1, 3)
+	println("s1 len:", len(s1))
+	assert(len(s1) == 3)
+	println("Test 1 passed")
+	
+	// Test 2: multi-arg append
+	s2 := []int{1}
+	s2 = append(s2, 2, 3)
+	println("s2 len:", len(s2))
+	assert(len(s2) == 3)
+	println("Test 2 passed")
+	
+	// Test 3: multi-arg append with pointers
+	type Node struct {
+		Value int
+	}
+	nodes := []*Node{}
+	a := &Node{Value: 1}
+	b := &Node{Value: 2}
+	c := &Node{Value: 3}
+	nodes = append(nodes, a, b, c)
+	println("nodes len:", len(nodes))
+	assert(len(nodes) == 3)
+	println("Test 3 passed")
+	
+	println("debug_append: PASSED")
+}

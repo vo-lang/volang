@@ -1732,7 +1732,7 @@ fn compile_builtin_call(
             func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, 0, 0);
         }
         "append" => {
-            // append(slice, elem...) - variadic
+            // append(slice, elem...) - variadic, supports multiple elements
             if call.args.len() < 2 {
                 return Err(CodegenError::Internal("append requires at least 2 args".to_string()));
             }
@@ -1754,18 +1754,27 @@ fn compile_builtin_call(
             // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
             let extra_slot = if flags == 0 { 1 } else { 0 };
             let meta_and_elem_reg = func.alloc_temp(1 + extra_slot + elem_slots);
-            func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
-            if flags == 0 {
-                // Store elem_bytes at c+1, elem starts at c+2 (use LoadConst so JIT can read from const table)
-                let elem_bytes_idx = _ctx.const_int(elem_bytes as i64);
-                func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                compile_expr_to(&call.args[1], meta_and_elem_reg + 2, _ctx, func, info)?;
-            } else {
-                // elem starts at c+1
-                compile_expr_to(&call.args[1], meta_and_elem_reg + 1, _ctx, func, info)?;
-            }
             
-            func.emit_with_flags(Opcode::SliceAppend, flags, dst, slice_reg, meta_and_elem_reg);
+            // Current slice (updated after each append)
+            let mut current_slice = slice_reg;
+            
+            // Append each element (args[1], args[2], ...)
+            for (i, arg) in call.args.iter().skip(1).enumerate() {
+                let is_last = i == call.args.len() - 2;
+                let append_dst = if is_last { dst } else { func.alloc_temp(1) };
+                
+                func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
+                if flags == 0 {
+                    let elem_bytes_idx = _ctx.const_int(elem_bytes as i64);
+                    func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
+                    compile_expr_to(arg, meta_and_elem_reg + 2, _ctx, func, info)?;
+                } else {
+                    compile_expr_to(arg, meta_and_elem_reg + 1, _ctx, func, info)?;
+                }
+                
+                func.emit_with_flags(Opcode::SliceAppend, flags, append_dst, current_slice, meta_and_elem_reg);
+                current_slice = append_dst;
+            }
         }
         "copy" => {
             // copy(dst, src) - use extern for now
