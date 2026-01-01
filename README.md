@@ -119,7 +119,7 @@ type User struct {
     age  int
 }
 
-func (u User) Greet() string {
+func (u *User) Greet() string {
     return "Hello, " + u.name
 }
 
