@@ -343,6 +343,15 @@ fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let v = e.read_var(inst.c);
     let offset = (inst.b as i32) * 8;
     e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
+    
+    // Write barrier if val may be GcRef (flags & 1)
+    if (inst.flags & 1) != 0 {
+        if let Some(wb_ref) = e.helpers().write_barrier {
+            let gc = e.gc_ptr();
+            let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
+            e.builder().ins().call(wb_ref, &[gc, ptr, offset_val, v]);
+        }
+    }
 }
 
 fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {

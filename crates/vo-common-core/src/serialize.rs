@@ -241,6 +241,7 @@ impl Module {
             w.write_u16(g.slots);
             w.write_u8(g.value_kind);
             w.write_u32(g.meta_id);
+            w.write_vec(&g.slot_types, |w, st| w.write_u8(*st as u8));
         });
 
         w.write_vec(&self.functions, |w, f| {
@@ -356,11 +357,13 @@ impl Module {
             let slots = r.read_u16()?;
             let value_kind = r.read_u8()?;
             let meta_id = r.read_u32()?;
+            let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             Ok(GlobalDef {
                 name,
                 slots,
                 value_kind,
                 meta_id,
+                slot_types,
             })
         })?;
 

@@ -45,8 +45,11 @@ pub fn exec_map_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
     }
 }
 
+/// MapSet: a=map, b=meta_slot, c=val_start
+/// meta format: key_slots<<8 | val_slots
+/// flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
 #[inline]
-pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction) {
+pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
     let m = stack[bp + inst.a as usize] as GcRef;
     let meta = stack[bp + inst.b as usize];
     let key_slots = ((meta >> 8) & 0xFF) as usize;
@@ -59,6 +62,25 @@ pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction) {
     let val: &[u64] = &stack[val_start..val_start + val_slots];
 
     map::set(m, key, val);
+    
+    // Write barrier: if key or val may contain GcRef, barrier the map
+    // For maps, we use backward barrier on the map itself
+    if (inst.flags & 0b01) != 0 {
+        // Key contains GcRef
+        for &k in key {
+            if k != 0 {
+                gc.write_barrier(m, k as GcRef);
+            }
+        }
+    }
+    if (inst.flags & 0b10) != 0 {
+        // Val contains GcRef
+        for &v in val {
+            if v != 0 {
+                gc.write_barrier(m, v as GcRef);
+            }
+        }
+    }
 }
 
 #[inline]

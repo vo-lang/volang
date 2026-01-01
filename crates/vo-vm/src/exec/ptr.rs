@@ -22,12 +22,18 @@ pub fn exec_ptr_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
     stack[bp + inst.a as usize] = val;
 }
 
+/// PtrSet: a=ptr, b=offset, c=val
+/// flags: bit0 = val is GcRef (needs write barrier)
 #[inline]
-pub fn exec_ptr_set(stack: &[u64], bp: usize, inst: &Instruction) {
+pub fn exec_ptr_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
     let ptr = stack[bp + inst.a as usize] as GcRef;
     let offset = inst.b as usize;
     let val = stack[bp + inst.c as usize];
     unsafe { Gc::write_slot(ptr, offset, val) };
+    // Write barrier if val may be GcRef
+    if (inst.flags & 1) != 0 {
+        gc.write_barrier(ptr, val as GcRef);
+    }
 }
 
 #[inline]
@@ -43,6 +49,10 @@ pub fn exec_ptr_get_n(stack: &mut [u64], bp: usize, inst: &Instruction) {
     }
 }
 
+/// PtrSetN: a=ptr, b=offset, c=src_start, flags=count
+/// Note: PtrSetN has no barrier support. For structs containing GcRefs,
+/// codegen emits individual PtrSet instructions (with barrier flags) for
+/// each slot using emit_ptr_set_with_slot_types().
 #[inline]
 pub fn exec_ptr_set_n(stack: &[u64], bp: usize, inst: &Instruction) {
     let ptr = stack[bp + inst.a as usize] as GcRef;

@@ -205,6 +205,20 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn struct_field_type_by_index(&self, type_key: TypeKey, field_index: usize) -> TypeKey {
         type_layout::struct_field_type_by_index(type_key, field_index, self.tc_objs())
     }
+    
+    /// Get struct field offset, slots, and type by field name
+    pub fn struct_field_offset_with_type(&self, type_key: TypeKey, field_name: &str) -> (u16, u16, TypeKey) {
+        let (offset, slots) = type_layout::struct_field_offset(type_key, field_name, self.tc_objs());
+        let field_type = type_layout::struct_field_type(type_key, field_name, self.tc_objs());
+        (offset, slots, field_type)
+    }
+    
+    /// Get struct field offset, slots, and type by field index
+    pub fn struct_field_offset_by_index_with_type(&self, type_key: TypeKey, field_index: usize) -> (u16, u16, TypeKey) {
+        let (offset, slots) = type_layout::struct_field_offset_by_index(type_key, field_index, self.tc_objs());
+        let field_type = type_layout::struct_field_type_by_index(type_key, field_index, self.tc_objs());
+        (offset, slots, field_type)
+    }
 
     pub fn compute_field_offset_from_indices(&self, base_type: TypeKey, indices: &[usize]) -> (u16, u16) {
         type_layout::compute_field_offset_from_indices(base_type, indices, self.tc_objs())

@@ -124,6 +124,7 @@ struct HelperFuncIds {
     safepoint: cranelift_module::FuncId,
     call_vm: cranelift_module::FuncId,
     gc_alloc: cranelift_module::FuncId,
+    write_barrier: cranelift_module::FuncId,
     call_closure: cranelift_module::FuncId,
     call_iface: cranelift_module::FuncId,
     panic: cranelift_module::FuncId,
@@ -196,6 +197,7 @@ impl JitCompiler {
     fn register_symbols(builder: &mut JITBuilder) {
         builder.symbol("vo_gc_safepoint", vo_runtime::jit_api::vo_gc_safepoint as *const u8);
         builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
+        builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
         builder.symbol("vo_call_vm", vo_runtime::jit_api::vo_call_vm as *const u8);
         builder.symbol("vo_call_closure", vo_runtime::jit_api::vo_call_closure as *const u8);
         builder.symbol("vo_call_iface", vo_runtime::jit_api::vo_call_iface as *const u8);
@@ -258,6 +260,15 @@ impl JitCompiler {
             sig.params.push(AbiParam::new(types::I32));
             sig.params.push(AbiParam::new(types::I32));
             sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
+        let write_barrier = module.declare_function("vo_gc_write_barrier", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));    // gc
+            sig.params.push(AbiParam::new(types::I64)); // obj (parent)
+            sig.params.push(AbiParam::new(types::I32)); // offset
+            sig.params.push(AbiParam::new(types::I64)); // val (child)
             sig
         })?;
         
@@ -567,7 +578,7 @@ impl JitCompiler {
         })?;
         
         Ok(HelperFuncIds {
-            safepoint, call_vm, gc_alloc, call_closure, call_iface, panic, call_extern,
+            safepoint, call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
             ptr_clone, closure_new, chan_new, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
@@ -593,6 +604,7 @@ impl JitCompiler {
             safepoint: Some(self.module.declare_func_in_func(self.helper_funcs.safepoint, &mut self.ctx.func)),
             call_vm: Some(self.module.declare_func_in_func(self.helper_funcs.call_vm, &mut self.ctx.func)),
             gc_alloc: Some(self.module.declare_func_in_func(self.helper_funcs.gc_alloc, &mut self.ctx.func)),
+            write_barrier: Some(self.module.declare_func_in_func(self.helper_funcs.write_barrier, &mut self.ctx.func)),
             call_closure: Some(self.module.declare_func_in_func(self.helper_funcs.call_closure, &mut self.ctx.func)),
             call_iface: Some(self.module.declare_func_in_func(self.helper_funcs.call_iface, &mut self.ctx.func)),
             panic: Some(self.module.declare_func_in_func(self.helper_funcs.panic, &mut self.ctx.func)),

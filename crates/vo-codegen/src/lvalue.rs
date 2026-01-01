@@ -25,7 +25,7 @@ pub enum ContainerKind {
     /// Slice: SliceGet/SliceSet with elem_bytes and elem_vk
     Slice { elem_bytes: u16, elem_vk: vo_common_core::ValueKind },
     /// Map: MapGet/MapSet with meta encoding
-    Map { key_slots: u16, val_slots: u16 },
+    Map { key_slots: u16, val_slots: u16, key_may_gc: bool, val_may_gc: bool },
     /// String: StrIndex (read-only)
     String,
 }
@@ -195,8 +195,10 @@ pub fn resolve_lvalue(
             } else if info.is_map(container_type) {
                 let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
                 let (key_slots, val_slots) = info.map_key_val_slots(container_type);
+                let key_may_gc = info.map_key_value_kind(container_type).may_contain_gc_refs();
+                let val_may_gc = info.map_val_value_kind(container_type).may_contain_gc_refs();
                 Ok(LValue::Index {
-                    kind: ContainerKind::Map { key_slots, val_slots },
+                    kind: ContainerKind::Map { key_slots, val_slots, key_may_gc, val_may_gc },
                     container_reg,
                     index_reg,
                 })
@@ -294,7 +296,7 @@ pub fn emit_lvalue_load(
                         func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, *index_reg);
                     }
                 }
-                ContainerKind::Map { key_slots, val_slots } => {
+                ContainerKind::Map { key_slots, val_slots, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
                     let meta_reg = func.alloc_temp(1 + *key_slots);
@@ -319,19 +321,21 @@ pub fn emit_lvalue_load(
 }
 
 /// Emit code to store value from source slot to an LValue.
+/// `slot_types`: SlotTypes of the value being stored (for write barrier on GcRef slots)
 pub fn emit_lvalue_store(
     lv: &LValue,
     src: u16,
     ctx: &mut crate::context::CodegenContext,
     func: &mut FuncBuilder,
+    slot_types: &[vo_runtime::SlotType],
 ) {
     match lv {
         LValue::Variable(storage) => {
-            func.emit_storage_store(*storage, src);
+            func.emit_storage_store_with_slot_types(*storage, src, slot_types);
         }
         
-        LValue::Deref { ptr_reg, offset, elem_slots } => {
-            func.emit_ptr_set(*ptr_reg, *offset, src, *elem_slots);
+        LValue::Deref { ptr_reg, offset, elem_slots: _ } => {
+            func.emit_ptr_set_with_slot_types(*ptr_reg, *offset, src, slot_types);
         }
         
         LValue::Field { base, offset, slots } => {
@@ -340,10 +344,10 @@ pub fn emit_lvalue_store(
                     func.emit_copy(slot + total_offset + offset, src, *slots);
                 }
                 FlattenedField::HeapBoxed { gcref_slot, total_offset } => {
-                    func.emit_ptr_set(gcref_slot, total_offset + offset, src, *slots);
+                    func.emit_ptr_set_with_slot_types(gcref_slot, total_offset + offset, src, slot_types);
                 }
                 FlattenedField::Deref { ptr_reg, total_offset } => {
-                    func.emit_ptr_set(ptr_reg, total_offset + offset, src, *slots);
+                    func.emit_ptr_set_with_slot_types(ptr_reg, total_offset + offset, src, slot_types);
                 }
                 FlattenedField::Global { index, total_offset } => {
                     // GlobalSetN with offset
@@ -388,14 +392,16 @@ pub fn emit_lvalue_store(
                         func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, *index_reg, src);
                     }
                 }
-                ContainerKind::Map { key_slots, val_slots } => {
+                ContainerKind::Map { key_slots, val_slots, key_may_gc, val_may_gc } => {
                     // MapSet: a=map, b=meta_and_key, c=val
+                    // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
                     let meta_and_key_reg = func.alloc_temp(1 + *key_slots);
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
-                    func.emit_op(Opcode::MapSet, *container_reg, meta_and_key_reg, src);
+                    let flags = (*key_may_gc as u8) | ((*val_may_gc as u8) << 1);
+                    func.emit_with_flags(Opcode::MapSet, flags, *container_reg, meta_and_key_reg, src);
                 }
                 ContainerKind::String => {
                     // String is immutable - should not reach here
@@ -404,11 +410,11 @@ pub fn emit_lvalue_store(
             }
         }
         
-        LValue::Capture { capture_index, value_slots } => {
+        LValue::Capture { capture_index, value_slots: _ } => {
             // ClosureGet gets the GcRef, then PtrSet to write value
             let gcref_slot = func.alloc_temp(1);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
-            func.emit_ptr_set(gcref_slot, 0, src, *value_slots);
+            func.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
         }
     }
 }

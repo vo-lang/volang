@@ -20,7 +20,7 @@
 
 use std::ffi::c_void;
 
-use crate::gc::Gc;
+use crate::gc::{Gc, GcRef};
 
 // =============================================================================
 // JitContext
@@ -170,18 +170,28 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
 ///
 /// # Safety
 /// - `gc` must be a valid pointer to a Gc instance
-/// - `obj` must be a valid GcRef
+/// - `obj` must be a valid GcRef (parent object being written to)
+/// - `val` must be a valid GcRef or 0 (child value being written)
 #[no_mangle]
-pub extern "C" fn vo_gc_write_barrier(_gc: *mut Gc, _obj: u64, _offset: u32, _val: u64) {
-    // TODO: Implement
-    // This is called when is_marking is true.
-    // Need to mark the old value gray to preserve tri-color invariant.
+pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: u64) {
+    if gc.is_null() || obj == 0 {
+        return;
+    }
+    let gc = unsafe { &mut *gc };
+    let parent = obj as GcRef;
+    let child = val as GcRef;
+    gc.write_barrier(parent, child);
 }
 
 /// GC safepoint.
 ///
 /// Called at loop back-edges and before function calls when safepoint_flag
-/// is set. May trigger garbage collection.
+/// is set. Currently a no-op placeholder - full GC integration requires
+/// stack map support which is not yet implemented.
+///
+/// The synchronous JIT design means GC can run when:
+/// 1. JIT calls vo_call_vm (VM will handle GC)
+/// 2. JIT calls vo_gc_alloc (checks debt)
 ///
 /// # Arguments
 /// - `ctx`: JIT context
@@ -190,11 +200,14 @@ pub extern "C" fn vo_gc_write_barrier(_gc: *mut Gc, _obj: u64, _offset: u32, _va
 /// - `ctx` must be a valid pointer to JitContext
 #[no_mangle]
 pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
-    // TODO: Implement
-    // 1. Check if GC wants to run
-    // 2. If so, scan JIT stack frames using stack maps
-    // 3. Run GC
-    // 4. Clear safepoint_flag
+    // Currently no-op. GC is triggered by:
+    // - vo_gc_alloc when debt > 0
+    // - vo_call_vm which enters VM context where GC can run
+    //
+    // Full safepoint support would require:
+    // 1. Stack maps to identify GcRef locations in JIT frames
+    // 2. Cooperation with VM to scan roots
+    // For now, the synchronous JIT design ensures GC safety at call boundaries.
 }
 
 /// Call a VM-interpreted function from JIT code.
@@ -481,33 +494,8 @@ pub extern "C" fn vo_map_iter_get(m: u64, idx: u64, key_ptr: *mut u64, key_slots
 }
 
 // =============================================================================
-// Map/String Iteration Helpers
+// String Helpers
 // =============================================================================
-
-/// Get next key-value pair from map iteration.
-///
-/// # Arguments
-/// - `map`: Map GcRef
-/// - `cursor`: Pointer to cursor (updated by this function)
-/// - `key`: Pointer to store key
-/// - `val`: Pointer to store value
-///
-/// # Returns
-/// - `true` if there was a next element
-/// - `false` if iteration is complete
-///
-/// # Safety
-/// - All pointers must be valid
-#[no_mangle]
-pub extern "C" fn vo_map_iter_next(
-    _map: u64,
-    _cursor: *mut u64,
-    _key: *mut u64,
-    _val: *mut u64,
-) -> bool {
-    // TODO: Implement
-    todo!("vo_map_iter_next not yet implemented")
-}
 
 /// Decode a UTF-8 rune from a string.
 ///
@@ -952,7 +940,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_call_iface", vo_call_iface as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
-        ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_str_new", vo_str_new as *const u8),
         ("vo_str_len", vo_str_len as *const u8),
         ("vo_str_index", vo_str_index as *const u8),

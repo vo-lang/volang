@@ -228,13 +228,13 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
 
     /// Store a value from an already-compiled slot to an existing storage.
     /// Used for re-assignment in short var declarations.
-    pub fn store_from_slot(&mut self, storage: StorageKind, src_slot: u16, slots: u16) {
+    pub fn store_from_slot(&mut self, storage: StorageKind, src_slot: u16, slot_types: &[vo_runtime::SlotType]) {
         match storage {
-            StorageKind::StackValue { slot, .. } => {
+            StorageKind::StackValue { slot, slots } => {
                 self.func.emit_copy(slot, src_slot, slots);
             }
-            StorageKind::HeapBoxed { gcref_slot, value_slots } => {
-                self.func.emit_ptr_set(gcref_slot, 0, src_slot, value_slots);
+            StorageKind::HeapBoxed { gcref_slot, .. } => {
+                self.func.emit_ptr_set_with_slot_types(gcref_slot, 0, src_slot, slot_types);
             }
             StorageKind::Reference { slot } => {
                 self.func.emit_copy(slot, src_slot, 1);
@@ -426,7 +426,8 @@ fn compile_stmt_with_label(
                         let escapes = info.is_escaped(obj_key);
                         sc.define_local_from_slot(name.symbol, elem_type, escapes, tmp_base + offset)?;
                     } else if let Some(local) = sc.func.lookup_local(name.symbol) {
-                        sc.store_from_slot(local.storage, tmp_base + offset, elem_slots);
+                        let elem_slot_types = info.type_slot_types(elem_type);
+                        sc.store_from_slot(local.storage, tmp_base + offset, &elem_slot_types);
                     }
                     offset += elem_slots;
                 }
@@ -984,7 +985,8 @@ fn compile_stmt_with_label(
                 func.emit_op(Opcode::SubI, tmp, tmp, one);
             }
             
-            emit_lvalue_store(&lv, tmp, ctx, func);
+            // Inc/dec on integers - no GC refs
+            emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value]);
         }
 
         // === TypeSwitch ===
@@ -1763,7 +1765,8 @@ fn compile_assign(
     // Compile RHS to temp, then store to LValue
     let tmp = func.alloc_temp(slots);
     compile_expr_to(rhs, tmp, ctx, func, info)?;
-    emit_lvalue_store(&lv, tmp, ctx, func);
+    let slot_types = info.type_slot_types(lhs_type);
+    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types);
     
     Ok(())
 }
@@ -1782,7 +1785,9 @@ fn compile_assign_to_interface(
     // Interface is always 2 slots
     let tmp = func.alloc_temp(2);
     compile_iface_assign(tmp, rhs, iface_type, ctx, func, info)?;
-    emit_lvalue_store(lv, tmp, ctx, func);
+    // Interface data slot may contain GcRef
+    // Interface: slot0=header, slot1=data (may be GcRef)
+    emit_lvalue_store(lv, tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
     Ok(())
 }
 
@@ -1841,7 +1846,8 @@ fn compile_compound_assign(
     let tmp = func.alloc_temp(slots);
     emit_lvalue_load(&lv, tmp, ctx, func);
     func.emit_op(opcode, tmp, tmp, rhs_reg);
-    emit_lvalue_store(&lv, tmp, ctx, func);
+    // Compound assign is for numeric types - no GC refs
+    emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value]);
     
     Ok(())
 }

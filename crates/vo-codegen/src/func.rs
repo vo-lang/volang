@@ -357,12 +357,57 @@ impl FuncBuilder {
         }
     }
 
-    /// Emit PtrSet or PtrSetN based on slot count
+    /// Emit PtrSet or PtrSetN based on slot count.
+    /// WARNING: This does NOT emit write barriers. Use emit_ptr_set_with_slot_types for assignment
+    /// to existing objects when the value may contain GcRefs.
     pub fn emit_ptr_set(&mut self, ptr: u16, offset: u16, src: u16, slots: u16) {
         if slots == 1 {
             self.emit_op(Opcode::PtrSet, ptr, offset, src);
         } else {
             self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+        }
+    }
+    
+    /// Emit PtrSet with explicit barrier flag (single slot only).
+    /// For multi-slot with GcRefs, use emit_ptr_set_with_slot_types instead.
+    pub fn emit_ptr_set_with_barrier(&mut self, ptr: u16, offset: u16, src: u16, slots: u16, is_gcref: bool) {
+        if slots == 1 {
+            let flags = if is_gcref { 1 } else { 0 };
+            self.emit_with_flags(Opcode::PtrSet, flags, ptr, offset, src);
+        } else {
+            // Multi-slot: emit PtrSetN (no barrier in instruction itself)
+            // If caller passed is_gcref=true, they should use emit_ptr_set_with_slot_types instead
+            self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+        }
+    }
+    
+    /// Emit PtrSet/PtrSetN with proper write barriers based on slot types.
+    /// This correctly handles multi-slot structs containing GcRefs.
+    pub fn emit_ptr_set_with_slot_types(&mut self, ptr: u16, offset: u16, src: u16, slot_types: &[vo_runtime::SlotType]) {
+        use vo_runtime::SlotType;
+        let slots = slot_types.len() as u16;
+        
+        if slots == 0 {
+            return;
+        }
+        
+        // Check if any slot needs barrier
+        let has_gc_refs = slot_types.iter().any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+        
+        if !has_gc_refs {
+            // No GcRefs - use simple PtrSetN
+            if slots == 1 {
+                self.emit_op(Opcode::PtrSet, ptr, offset, src);
+            } else {
+                self.emit_with_flags(Opcode::PtrSetN, slots as u8, ptr, offset, src);
+            }
+        } else {
+            // Has GcRefs - emit individual PtrSet for each slot with appropriate barrier flag
+            for (i, st) in slot_types.iter().enumerate() {
+                let is_gcref = matches!(st, SlotType::GcRef | SlotType::Interface1);
+                let flags = if is_gcref { 1 } else { 0 };
+                self.emit_with_flags(Opcode::PtrSet, flags, ptr, offset + i as u16, src + i as u16);
+            }
         }
     }
 
@@ -396,7 +441,7 @@ impl FuncBuilder {
         }
     }
 
-    /// Store value from src to storage.
+    /// Store value from src to storage (no barrier).
     /// For HeapArray, this copies the GcRef. Use ArraySet for element access.
     pub fn emit_storage_store(&mut self, storage: StorageKind, src: u16) {
         match storage {
@@ -407,13 +452,40 @@ impl FuncBuilder {
                 self.emit_ptr_set(gcref_slot, 0, src, value_slots);
             }
             StorageKind::HeapArray { gcref_slot, .. } => {
-                // Store GcRef (for re-assignment of array variable)
                 self.emit_op(Opcode::Copy, gcref_slot, src, 0);
             }
             StorageKind::Reference { slot } => {
                 self.emit_op(Opcode::Copy, slot, src, 0);
             }
             StorageKind::Global { index, slots } => {
+                if slots == 1 {
+                    self.emit_op(Opcode::GlobalSet, index, src, 0);
+                } else {
+                    self.emit_with_flags(Opcode::GlobalSetN, slots as u8, index, src, 0);
+                }
+            }
+        }
+    }
+    
+    /// Store value from src to storage with proper write barriers based on slot types.
+    pub fn emit_storage_store_with_slot_types(&mut self, storage: StorageKind, src: u16, slot_types: &[vo_runtime::SlotType]) {
+        match storage {
+            StorageKind::StackValue { slot, slots } => {
+                self.emit_copy(slot, src, slots);
+            }
+            StorageKind::HeapBoxed { gcref_slot, .. } => {
+                self.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
+            }
+            StorageKind::HeapArray { gcref_slot, .. } => {
+                // Store GcRef (for re-assignment of array variable)
+                // Array variable itself is always a GcRef
+                self.emit_with_flags(Opcode::PtrSet, 1, gcref_slot, 0, src);
+            }
+            StorageKind::Reference { slot } => {
+                self.emit_op(Opcode::Copy, slot, src, 0);
+            }
+            StorageKind::Global { index, slots } => {
+                // Globals are roots - always scanned at GC start, no barrier needed
                 if slots == 1 {
                     self.emit_op(Opcode::GlobalSet, index, src, 0);
                 } else {

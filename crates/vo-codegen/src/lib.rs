@@ -248,6 +248,7 @@ fn collect_file_declarations(
                         
                         let slots = info.type_slot_count(type_key);
                         let value_kind = info.type_value_kind(type_key) as u8;
+                        let slot_types = info.type_slot_types(type_key);
                         ctx.register_global(
                             name.symbol,
                             vo_vm::bytecode::GlobalDef {
@@ -255,6 +256,7 @@ fn collect_file_declarations(
                                 slots,
                                 value_kind,
                                 meta_id: 0,
+                                slot_types,
                             },
                         );
                     }

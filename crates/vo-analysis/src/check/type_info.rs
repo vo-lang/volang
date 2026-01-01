@@ -580,6 +580,22 @@ pub fn struct_field_type_by_index(type_key: TypeKey, field_index: usize, tc_objs
     panic!("struct field index {} not found", field_index)
 }
 
+/// Get struct field type by name.
+pub fn struct_field_type(type_key: TypeKey, field_name: &str, tc_objs: &TCObjects) -> TypeKey {
+    let underlying = typ::underlying_type(type_key, tc_objs);
+    if let Type::Struct(s) = &tc_objs.types[underlying] {
+        for &field_obj in s.fields() {
+            let obj = &tc_objs.lobjs[field_obj];
+            if obj.name() == field_name {
+                if let Some(field_type) = obj.typ() {
+                    return field_type;
+                }
+            }
+        }
+    }
+    panic!("struct field {} not found", field_name)
+}
+
 /// Compute field offset using selection indices.
 pub fn compute_field_offset_from_indices(base_type: TypeKey, indices: &[usize], tc_objs: &TCObjects) -> (u16, u16) {
     if indices.is_empty() {

@@ -897,10 +897,10 @@ fn compile_func_lit(
         if let Some(sym) = info.project.interner.get(var_name) {
             if let Some(local) = parent_func.lookup_local(sym) {
                 // Use PtrSet to write directly to closure's capture slot
-                // PtrSet: heap[slots[a]].offset[b] = slots[c]
                 // offset = 1 (ClosureHeader) + capture_index
+                // Captures are always GcRefs (HeapBoxed storage)
                 let offset = 1 + i as u16;
-                parent_func.emit_op(Opcode::PtrSet, dst, offset, local.storage.slot());
+                parent_func.emit_ptr_set_with_barrier(dst, offset, local.storage.slot(), 1, true);
             }
         }
     }
@@ -957,19 +957,21 @@ fn compile_addr_of(
                     let field_name = info.project.interner.resolve(field_ident.symbol)
                         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
                     
-                    let (offset, field_slots) = info.struct_field_offset(type_key, field_name);
+                    let (offset, field_slots, field_type) = info.struct_field_offset_with_type(type_key, field_name);
+                    let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
                     
                     let tmp = func.alloc_temp(field_slots);
                     compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                    func.emit_ptr_set(dst, offset, tmp, field_slots);
+                    func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
                 }
             } else {
                 // Positional field
-                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i);
+                let (offset, field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
+                let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
                 
                 let tmp = func.alloc_temp(field_slots);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                func.emit_ptr_set(dst, offset, tmp, field_slots);
+                func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
             }
         }
         

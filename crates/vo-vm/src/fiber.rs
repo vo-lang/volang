@@ -29,6 +29,8 @@ pub struct DeferEntry {
 pub struct DeferState {
     pub pending: Vec<DeferEntry>,
     pub ret_vals: Vec<u64>,
+    /// SlotTypes for ret_vals (for GC scanning)
+    pub ret_slot_types: Vec<vo_runtime::SlotType>,
     pub caller_ret_reg: u16,
     pub caller_ret_count: usize,
     pub is_error_return: bool,

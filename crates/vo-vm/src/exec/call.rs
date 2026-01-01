@@ -149,7 +149,7 @@ pub fn exec_return(
     defer_stack: &mut Vec<DeferEntry>,
     defer_state: &mut Option<DeferState>,
     inst: &Instruction,
-    _func: &FunctionDef,
+    func: &FunctionDef,
     module: &Module,
     is_error_return: bool,
 ) -> ExecResult {
@@ -241,6 +241,12 @@ pub fn exec_return(
     let ret_vals: Vec<u64> = (0..ret_count)
         .map(|i| stack[current_bp + ret_start + i])
         .collect();
+    
+    // Get slot types for return values (for GC scanning)
+    let ret_slot_types: Vec<vo_runtime::SlotType> = func.slot_types
+        .get(ret_start..ret_start + ret_count)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
 
     // Collect defers for current frame (in reverse order for LIFO)
     let mut pending_defers: Vec<_> = Vec::new();
@@ -268,6 +274,7 @@ pub fn exec_return(
         *defer_state = Some(DeferState {
             pending: pending_defers,
             ret_vals,
+            ret_slot_types,
             caller_ret_reg: frame.ret_reg,
             caller_ret_count: frame.ret_count as usize,
             is_error_return,

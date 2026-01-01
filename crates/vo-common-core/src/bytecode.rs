@@ -48,6 +48,7 @@ pub struct GlobalDef {
     pub slots: u16,
     pub value_kind: u8,
     pub meta_id: u32,
+    pub slot_types: Vec<SlotType>,
 }
 
 #[derive(Debug, Clone)]

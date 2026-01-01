@@ -307,7 +307,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::PtrSet => {
-                    exec::exec_ptr_set(&stack, bp, &inst);
+                    exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc);
                     ExecResult::Continue
                 }
                 Opcode::PtrGetN => {
@@ -847,7 +847,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::MapSet => {
-                    exec::exec_map_set(&stack, bp, &inst);
+                    exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc);
                     ExecResult::Continue
                 }
                 Opcode::MapDelete => {
