@@ -120,13 +120,33 @@ pub fn resolve_lvalue(
                     .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
                     .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
                 
-                // Special case: Index expression base (slice/array element field access)
-                // e.g., bodies[i].x - need to get element address then access field
+                // Special case: Index expression base (slice/array/map element field access)
                 if let ExprKind::Index(idx) = &sel.expr.kind {
                     let container_type = info.expr_type(idx.expr.id);
                     if info.is_slice(container_type) || info.is_array(container_type) {
+                        // Slice/array: get element address then access field
                         let elem_addr_reg = emit_elem_addr(&idx.expr, &idx.index, container_type, ctx, func, info)?;
                         return Ok(LValue::Deref { ptr_reg: elem_addr_reg, offset, elem_slots: slots });
+                    } else if info.is_map(container_type) {
+                        // Map: get value to temp, then access field from temp
+                        // maps[k].field - map returns by value, so we get a copy
+                        let (_, val_type) = info.map_key_val_types(container_type);
+                        let val_slots = info.type_slot_count(val_type);
+                        let tmp = func.alloc_temp(val_slots);
+                        
+                        // Compile map get to temp
+                        let (key_slots, _) = info.map_key_val_slots(container_type);
+                        let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
+                        let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
+                        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
+                        let meta_reg = func.alloc_temp(1 + key_slots);
+                        let meta_idx = ctx.const_int(meta as i64);
+                        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+                        func.emit_copy(meta_reg + 1, index_reg, key_slots);
+                        func.emit_op(Opcode::MapGet, tmp, container_reg, meta_reg);
+                        
+                        // Return stack location for the temp value with field offset
+                        return Ok(LValue::Variable(StorageKind::StackValue { slot: tmp + offset, slots }));
                     }
                 }
                 

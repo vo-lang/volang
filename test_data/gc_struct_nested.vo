@@ -46,30 +46,60 @@ type Person struct {
 }
 
 func main() {
+	println("Starting test...")
 	// Test 1: Binary tree with pointers
 	var root *Node
+	println("Test 1a: root declared")
 	values := []int{50, 25, 75, 12, 37, 62, 87}
+	println("Test 1b: values created")
 	for _, v := range values {
 		root = insert(root, v)
 	}
+	println("Test 1c: tree built")
 	assert(count(root) == 7)
-	assert(sum(root) == 348)
+	println("Test 1d: count passed")
+	s := sum(root)
+	println("Test 1e: sum =", s)
+	assert(s == 348)
+	println("Test 1 passed")
 
 	// Test 2: Struct with slice of pointers
+	println("Test 2a: creating alice")
 	alice := &Person{Name: "Alice", Friends: []*Person{}, Data: make(map[string]string)}
+	println("Test 2b: creating bob")
 	bob := &Person{Name: "Bob", Friends: []*Person{}, Data: make(map[string]string)}
+	println("Test 2c: creating charlie")
 	charlie := &Person{Name: "Charlie", Friends: []*Person{}, Data: make(map[string]string)}
+	println("Test 2d: all persons created")
 	
-	alice.Friends = append(alice.Friends, bob, charlie)
+	println("Test 2e: appending bob to alice.Friends")
+	alice.Friends = append(alice.Friends, bob)
+	println("Test 2e2: len after bob =", len(alice.Friends))
+	println("Test 2e3: appending charlie to alice.Friends")
+	alice.Friends = append(alice.Friends, charlie)
+	println("Test 2e4: len after charlie =", len(alice.Friends))
+	println("Test 2f: appending to bob.Friends")
 	bob.Friends = append(bob.Friends, alice)
-	charlie.Friends = append(charlie.Friends, alice, bob)
+	println("Test 2g: appending to charlie.Friends")
+	charlie.Friends = append(charlie.Friends, alice)
+	charlie.Friends = append(charlie.Friends, bob)
+	println("Test 2h: appends done")
 	
+	println("Test 2i: setting alice.Data")
 	alice.Data["role"] = "admin"
+	println("Test 2j: setting bob.Data")
 	bob.Data["role"] = "user"
+	println("Test 2k: data set")
 	
+	println("Test 2l: checking alice.Name")
 	assert(alice.Name == "Alice")
-	assert(len(alice.Friends) == 2)
+	println("Test 2m: checking len(alice.Friends)")
+	friendsLen := len(alice.Friends)
+	println("Test 2m2: friendsLen =", friendsLen)
+	assert(friendsLen == 2)
+	println("Test 2n: checking alice.Friends[0].Name")
 	assert(alice.Friends[0].Name == "Bob")
+	println("Test 2o: checking charlie.Friends[1].Data")
 	assert(charlie.Friends[1].Data["role"] == "user")
 
 	println("gc_struct_nested: PASSED")
