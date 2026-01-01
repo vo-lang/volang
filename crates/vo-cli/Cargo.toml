@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Command-line interface for the Vo compiler"
 
+[features]
+default = []
+gc-debug = ["vo-runtime/gc-debug"]
+
 [[bin]]
 name = "vo"
 path = "src/main.rs"

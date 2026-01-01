@@ -8,6 +8,7 @@ description = "Vo language runtime - shared data structures for VM and JIT (no_s
 [features]
 default = ["std"]
 std = ["vo-common-core/std", "linkme", "vo-ffi-macro"]
+gc-debug = ["std"]  # GC 验证模式，需要 std
 
 [dependencies]
 vo-common-core = { path = "../vo-common-core" }

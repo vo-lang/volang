@@ -81,6 +81,12 @@ pub fn run(
     print_ast: bool,
     print_codegen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize GC debug if enabled via environment variable
+    #[cfg(feature = "gc-debug")]
+    if std::env::var("VO_GC_DEBUG").is_ok() {
+        vo_runtime::gc_debug::enable();
+    }
+    
     let path = Path::new(file);
     
     // Handle --ast flag: parse and print AST only

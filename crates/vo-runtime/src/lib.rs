@@ -21,6 +21,8 @@ pub mod builtins;
 pub mod stdlib;
 #[cfg(feature = "std")]
 pub mod jit_api;
+#[cfg(feature = "gc-debug")]
+pub mod gc_debug;
 
 // Re-exports from vo-common-core (no_std compatible)
 pub use vo_common_core::types::{MetaId, SlotType, ValueKind, ValueMeta, META_ID_MASK, INVALID_META_ID};

@@ -265,6 +265,9 @@ impl Gc {
         self.total_bytes += total_size;
         self.debt += total_size as isize;
 
+        #[cfg(feature = "gc-debug")]
+        crate::gc_debug::on_alloc(data_ptr);
+
         data_ptr
     }
 
@@ -325,6 +328,9 @@ impl Gc {
     /// Write barrier for incremental GC (backward barrier).
     /// Called when a black object writes a white reference.
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
+        #[cfg(feature = "gc-debug")]
+        crate::gc_debug::on_barrier(parent, 0, child as u64);
+        
         if self.state != GcState::Propagate {
             return;
         }
@@ -337,6 +343,20 @@ impl Gc {
         if p_header.is_black() && c_header.is_white() {
             self.barrier_back(parent);
         }
+    }
+    
+    /// Check if object is black (for gc-debug)
+    #[inline]
+    pub fn is_black(&self, obj: GcRef) -> bool {
+        if obj.is_null() { return false; }
+        Self::header(obj).is_black()
+    }
+    
+    /// Check if object is white (for gc-debug)
+    #[inline]
+    pub fn is_white(&self, obj: GcRef) -> bool {
+        if obj.is_null() { return false; }
+        Self::header(obj).is_white()
     }
     
     /// Backward barrier: turn black object back to gray for re-scan.
@@ -535,6 +555,9 @@ impl Gc {
                 self.sweep_write_pos += 1;
             } else if obj_white == dead_white {
                 // Dead: free it
+                #[cfg(feature = "gc-debug")]
+                crate::gc_debug::on_free(obj);
+                
                 let size_bytes = Self::object_size_bytes(obj);
                 finalize_object(obj);
                 self.total_bytes -= size_bytes;
