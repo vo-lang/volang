@@ -10,6 +10,8 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::array;
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+use super::impl_gc_object;
+
 #[repr(C)]
 pub struct StringData {
     pub array: GcRef,
@@ -25,17 +27,7 @@ pub const FIELD_ARRAY: usize = 0;   // u64 offset for array GcRef
 pub const FIELD_START: usize = 2;   // u32 offset (byte 8)
 pub const FIELD_LEN: usize = 3;     // u32 offset (byte 12)
 
-impl StringData {
-    #[inline]
-    fn as_ref(s: GcRef) -> &'static Self {
-        unsafe { &*(s as *const Self) }
-    }
-
-    #[inline]
-    fn as_mut(s: GcRef) -> &'static mut Self {
-        unsafe { &mut *(s as *mut Self) }
-    }
-}
+impl_gc_object!(StringData);
 
 pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
     // Empty string is represented as null GcRef (zero value)

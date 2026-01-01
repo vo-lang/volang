@@ -8,6 +8,8 @@
 use crate::gc::{Gc, GcRef};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+use super::impl_gc_object;
+
 #[repr(C)]
 pub struct ArrayHeader {
     pub len: usize,
@@ -18,17 +20,7 @@ pub struct ArrayHeader {
 pub const HEADER_SLOTS: usize = 2;
 const _: () = assert!(core::mem::size_of::<ArrayHeader>() == HEADER_SLOTS * 8);
 
-impl ArrayHeader {
-    #[inline]
-    fn as_ref(arr: GcRef) -> &'static Self {
-        unsafe { &*(arr as *const Self) }
-    }
-
-    #[inline]
-    fn as_mut(arr: GcRef) -> &'static mut Self {
-        unsafe { &mut *(arr as *mut Self) }
-    }
-}
+impl_gc_object!(ArrayHeader);
 
 /// Create a new array with packed element storage.
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)

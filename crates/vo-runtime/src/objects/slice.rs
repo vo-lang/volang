@@ -7,6 +7,8 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::array;
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+use super::impl_gc_object;
+
 #[repr(C)]
 pub struct SliceData {
     pub array: GcRef,
@@ -23,17 +25,7 @@ pub const FIELD_DATA_PTR: usize = 1;
 pub const FIELD_LEN: usize = 2;
 pub const FIELD_CAP: usize = 3;
 
-impl SliceData {
-    #[inline]
-    fn as_ref(s: GcRef) -> &'static Self {
-        unsafe { &*(s as *const Self) }
-    }
-
-    #[inline]
-    fn as_mut(s: GcRef) -> &'static mut Self {
-        unsafe { &mut *(s as *mut Self) }
-    }
-}
+impl_gc_object!(SliceData);
 
 /// Create a new slice with packed element storage.
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)

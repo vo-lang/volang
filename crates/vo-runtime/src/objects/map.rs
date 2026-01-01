@@ -20,6 +20,8 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::string;
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+use super::impl_gc_object;
+
 type SingleKeyMap = HashMap<u64, Box<[u64]>>;
 type MultiKeyMap = HashMap<Box<[u64]>, Box<[u64]>>;
 type StringKeyMap = HashMap<Box<[u8]>, (GcRef, Box<[u64]>)>;  // key=string content, val=(original GcRef, value)
@@ -42,17 +44,7 @@ pub struct MapData {
 pub const DATA_SLOTS: u16 = 3;
 const _: () = assert!(core::mem::size_of::<MapData>() == DATA_SLOTS as usize * 8);
 
-impl MapData {
-    #[inline]
-    fn as_ref(m: GcRef) -> &'static Self {
-        unsafe { &*(m as *const Self) }
-    }
-
-    #[inline]
-    fn as_mut(m: GcRef) -> &'static mut Self {
-        unsafe { &mut *(m as *mut Self) }
-    }
-}
+impl_gc_object!(MapData);
 
 pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: u16, val_slots: u16) -> GcRef {
     let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);

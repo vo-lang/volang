@@ -7,6 +7,8 @@
 use crate::gc::{Gc, GcRef};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+use super::impl_gc_object;
+
 #[repr(C)]
 pub struct ClosureHeader {
     pub func_id: u32,
@@ -16,17 +18,7 @@ pub struct ClosureHeader {
 pub const HEADER_SLOTS: usize = 1;
 const _: () = assert!(core::mem::size_of::<ClosureHeader>() == HEADER_SLOTS * 8);
 
-impl ClosureHeader {
-    #[inline]
-    fn as_ref(c: GcRef) -> &'static Self {
-        unsafe { &*(c as *const Self) }
-    }
-
-    #[inline]
-    fn as_mut(c: GcRef) -> &'static mut Self {
-        unsafe { &mut *(c as *mut Self) }
-    }
-}
+impl_gc_object!(ClosureHeader);
 
 pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
     let total_slots = HEADER_SLOTS + capture_count;
