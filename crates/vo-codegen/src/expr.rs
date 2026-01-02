@@ -1018,26 +1018,29 @@ fn compile_addr_of(
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
         
-        // Initialize fields via PtrSet
+        // Initialize fields via PtrSet (or IfaceAssign for interface fields)
         for (i, elem) in lit.elems.iter().enumerate() {
-            if let Some(key) = &elem.key {
+            let (offset, field_slots, field_type) = if let Some(key) = &elem.key {
                 // Named field
                 if let vo_syntax::ast::CompositeLitKey::Ident(field_ident) = key {
                     let field_name = info.project.interner.resolve(field_ident.symbol)
                         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
-                    
-                    let (offset, field_slots, field_type) = info.struct_field_offset_with_type(type_key, field_name);
-                    let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
-                    
-                    let tmp = func.alloc_temp(field_slots);
-                    compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                    func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
+                    info.struct_field_offset_with_type(type_key, field_name)
+                } else {
+                    continue;
                 }
             } else {
                 // Positional field
-                let (offset, field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
+                info.struct_field_offset_by_index_with_type(type_key, i)
+            };
+            
+            // Interface field: use compile_value_to which handles IfaceAssign
+            if info.is_interface(field_type) {
+                let tmp = func.alloc_temp(field_slots);
+                crate::stmt::compile_value_to(&elem.value, tmp, field_type, ctx, func, info)?;
+                func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, true);
+            } else {
                 let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
-                
                 let tmp = func.alloc_temp(field_slots);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
                 func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
