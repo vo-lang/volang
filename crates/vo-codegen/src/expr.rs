@@ -1250,6 +1250,38 @@ fn compile_call(
     Ok(())
 }
 
+/// Compile closure call when closure is already in a register.
+/// Used for func field calls like h.logic(args).
+fn compile_closure_call_from_reg(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    closure_reg: u16,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id)) as u16;
+    let total_arg_slots: u16 = call.args.iter().map(|a| info.expr_slots(a.id)).sum();
+    
+    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots).max(1));
+    let mut offset = 0u16;
+    for arg in &call.args {
+        let arg_slots = info.expr_slots(arg.id);
+        compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+        offset += arg_slots;
+    }
+    
+    let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
+    func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
+    
+    if ret_slots > 0 && dst != args_start {
+        func.emit_copy(dst, args_start, ret_slots);
+    }
+    
+    Ok(())
+}
+
 // =============================================================================
 // Method Call - Helper Functions
 // =============================================================================
@@ -1379,8 +1411,22 @@ fn compile_method_call(
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
     let method_sym = sel.sel.symbol;
     
-    // Use unified method call resolution
+    // Check if this is a func field call (e.g., h.logic(args) where logic is a func field)
     let selection = info.get_selection(call.func.id);
+    if let Some(sel_info) = selection {
+        if *sel_info.kind() == vo_analysis::selection::SelectionKind::FieldVal {
+            // This is a field access, not a method call
+            // Check if the field type is a function
+            let field_type = info.expr_type(call.func.id);
+            if info.is_func_type(field_type) {
+                // Compile as: get field value (closure), then call it
+                let closure_reg = compile_expr(&call.func, ctx, func, info)?;
+                return compile_closure_call_from_reg(expr, call, closure_reg, dst, ctx, func, info);
+            }
+        }
+    }
+    
+    // Use unified method call resolution
     let is_interface_recv = info.is_interface(recv_type);
     
     let call_info = crate::embed::resolve_method_call(

@@ -1,0 +1,39 @@
+// Test: struct with func field returning interface{}
+package main
+
+type SimpleHandler struct {
+    name     string
+    priority int
+    logic    func(map[string]interface{}) interface{}
+}
+
+func (h *SimpleHandler) Handle(args map[string]interface{}) (interface{}, bool, string) {
+    if h.logic == nil {
+        return nil, false, "no_logic"
+    }
+    return h.logic(args), true, "ok"
+}
+
+func main() {
+    // Test with nil logic
+    h1 := &SimpleHandler{name: "test1", priority: 1}
+    result, ok, msg := h1.Handle(nil)
+    assert(result == nil, "nil result")
+    assert(ok == false, "ok false")
+    assert(msg == "no_logic", "msg no_logic")
+    
+    // Test with logic
+    h2 := &SimpleHandler{
+        name: "test2",
+        priority: 2,
+        logic: func(args map[string]interface{}) interface{} {
+            return 42
+        },
+    }
+    result2, ok2, msg2 := h2.Handle(nil)
+    assert(result2.(int) == 42, "result 42")
+    assert(ok2 == true, "ok true")
+    assert(msg2 == "ok", "msg ok")
+    
+    println("struct_func_iface: PASSED")
+}

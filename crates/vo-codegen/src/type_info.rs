@@ -254,6 +254,11 @@ impl<'a> TypeInfoWrapper<'a> {
         typ::is_string(type_key, self.tc_objs())
     }
 
+    pub fn is_func_type(&self, type_key: TypeKey) -> bool {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        self.tc_objs().types[underlying].try_as_signature().is_some()
+    }
+
     pub fn is_chan(&self, type_key: TypeKey) -> bool {
         type_layout::is_chan(type_key, self.tc_objs())
     }
