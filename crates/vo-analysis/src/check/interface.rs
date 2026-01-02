@@ -437,6 +437,10 @@ impl Checker {
 
     /// like declare_in_set but for method infos.
     /// Aligned with goscript/types/src/check/interface.rs::declare_in_method_set
+    /// 
+    /// Per Go spec: if the same method is inherited from multiple embedded interfaces
+    /// with identical signatures, it's allowed (diamond pattern). Only report error
+    /// if signatures differ.
     fn declare_in_method_set(
         &self,
         set: &mut HashMap<String, MethodInfo>,
@@ -444,15 +448,37 @@ impl Checker {
         mi: MethodInfo,
         pos: Span,
     ) -> bool {
-        // Use name as id for duplicate detection
-        // (func may not be set yet for explicit methods being collected)
-        if let Some(_alt) = set.insert(name.to_string(), mi) {
+        // Check if method already exists
+        if let Some(existing) = set.get(name) {
+            // Both methods have func set (from embedded interfaces) - compare signatures
+            if let (Some(existing_func), Some(new_func)) = (existing.func(), mi.func()) {
+                let existing_type = self.lobj(existing_func).typ();
+                let new_type = self.lobj(new_func).typ();
+                
+                // If signatures are identical (structurally), this is valid (diamond pattern)
+                // Use typ::identical_o to compare types structurally, not by TypeKey
+                if typ::identical_o(existing_type, new_type, self.objs()) {
+                    return true;
+                }
+                
+                // Signatures differ - this is an error
+                self.error_code_msg(
+                    TypeError::MethodRedeclared, 
+                    pos, 
+                    format!("{} redeclared with different signature", name)
+                );
+                return false;
+            }
+            
+            // One or both don't have func set yet (explicit methods being collected)
+            // This is a redeclaration error
             self.error_code_msg(TypeError::MethodRedeclared, pos, format!("{} redeclared", name));
-            // Would also report other declaration location like goscript
-            false
-        } else {
-            true
+            return false;
         }
+        
+        // Method doesn't exist yet, add it
+        set.insert(name.to_string(), mi);
+        true
     }
 
     /// Computes method set for an interface.

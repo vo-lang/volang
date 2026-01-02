@@ -1,0 +1,430 @@
+package main
+
+// Test: Methods with function types as parameters and return values
+// Focus: Higher-order functions, callbacks, closures implementing interfaces
+
+// ============================================
+// Part 1: Basic Function Parameters
+// ============================================
+
+type Transformer interface {
+    Transform(arr []int, f func(int) int) []int
+}
+
+type ArrayTransformer struct{}
+
+func (at ArrayTransformer) Transform(arr []int, f func(int) int) []int {
+    result := make([]int, len(arr))
+    for i, v := range arr {
+        result[i] = f(v)
+    }
+    return result
+}
+
+func testBasicFuncParam() {
+    var t Transformer = ArrayTransformer{}
+    
+    arr := []int{1, 2, 3, 4, 5}
+    doubled := t.Transform(arr, func(x int) int { return x * 2 })
+    
+    assert(doubled[0] == 2, "testBasicFuncParam: doubled[0] should be 2")
+    assert(doubled[4] == 10, "testBasicFuncParam: doubled[4] should be 10")
+    
+    squared := t.Transform(arr, func(x int) int { return x * x })
+    assert(squared[2] == 9, "testBasicFuncParam: squared[2] should be 9")
+}
+
+// ============================================
+// Part 2: Function Return Values
+// ============================================
+
+type OperatorFactory interface {
+    GetAdder(n int) func(int) int
+    GetMultiplier(n int) func(int) int
+    GetComparator(threshold int) func(int) bool
+}
+
+type MathFactory struct{}
+
+func (mf MathFactory) GetAdder(n int) func(int) int {
+    return func(x int) int { return x + n }
+}
+
+func (mf MathFactory) GetMultiplier(n int) func(int) int {
+    return func(x int) int { return x * n }
+}
+
+func (mf MathFactory) GetComparator(threshold int) func(int) bool {
+    return func(x int) bool { return x > threshold }
+}
+
+func testFuncReturnValue() {
+    var of OperatorFactory = MathFactory{}
+    
+    add5 := of.GetAdder(5)
+    assert(add5(10) == 15, "testFuncReturnValue: add5(10) should be 15")
+    assert(add5(0) == 5, "testFuncReturnValue: add5(0) should be 5")
+    
+    mul3 := of.GetMultiplier(3)
+    assert(mul3(7) == 21, "testFuncReturnValue: mul3(7) should be 21")
+    
+    gt10 := of.GetComparator(10)
+    assert(gt10(15) == true, "testFuncReturnValue: gt10(15) should be true")
+    assert(gt10(5) == false, "testFuncReturnValue: gt10(5) should be false")
+}
+
+// ============================================
+// Part 3: Complex Function Signatures
+// ============================================
+
+type Reducer interface {
+    Reduce(arr []int, init int, f func(acc int, val int) int) int
+    ReduceWithIndex(arr []int, init int, f func(acc int, val int, idx int) int) int
+}
+
+type ArrayReducer struct{}
+
+func (ar ArrayReducer) Reduce(arr []int, init int, f func(acc int, val int) int) int {
+    result := init
+    for _, v := range arr {
+        result = f(result, v)
+    }
+    return result
+}
+
+func (ar ArrayReducer) ReduceWithIndex(arr []int, init int, f func(acc int, val int, idx int) int) int {
+    result := init
+    for i, v := range arr {
+        result = f(result, v, i)
+    }
+    return result
+}
+
+func testComplexFuncSig() {
+    var r Reducer = ArrayReducer{}
+    
+    arr := []int{1, 2, 3, 4, 5}
+    
+    sum := r.Reduce(arr, 0, func(acc, val int) int { return acc + val })
+    assert(sum == 15, "testComplexFuncSig: sum should be 15")
+    
+    product := r.Reduce(arr, 1, func(acc, val int) int { return acc * val })
+    assert(product == 120, "testComplexFuncSig: product should be 120")
+    
+    // Sum of value * index
+    weighted := r.ReduceWithIndex(arr, 0, func(acc, val, idx int) int {
+        return acc + val*idx
+    })
+    // 1*0 + 2*1 + 3*2 + 4*3 + 5*4 = 0 + 2 + 6 + 12 + 20 = 40
+    assert(weighted == 40, "testComplexFuncSig: weighted should be 40")
+}
+
+// ============================================
+// Part 4: Multiple Function Parameters
+// ============================================
+
+type Pipeline interface {
+    Chain(input int, f1 func(int) int, f2 func(int) int, f3 func(int) int) int
+    MapFilter(arr []int, mapper func(int) int, filter func(int) bool) []int
+}
+
+type DataPipeline struct{}
+
+func (dp DataPipeline) Chain(input int, f1 func(int) int, f2 func(int) int, f3 func(int) int) int {
+    return f3(f2(f1(input)))
+}
+
+func (dp DataPipeline) MapFilter(arr []int, mapper func(int) int, filter func(int) bool) []int {
+    result := []int{}
+    for _, v := range arr {
+        mapped := mapper(v)
+        if filter(mapped) {
+            result = append(result, mapped)
+        }
+    }
+    return result
+}
+
+func testMultipleFuncParams() {
+    var p Pipeline = DataPipeline{}
+    
+    r1 := p.Chain(
+        5,
+        func(x int) int { return x + 1 },  // 6
+        func(x int) int { return x * 2 },  // 12
+        func(x int) int { return x - 3 },  // 9
+    )
+    assert(r1 == 9, "testMultipleFuncParams: Chain result should be 9")
+    
+    arr := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+    r2 := p.MapFilter(
+        arr,
+        func(x int) int { return x * x },       // square
+        func(x int) bool { return x > 20 },     // filter > 20
+    )
+    // 1,4,9,16,25,36,49,64,81,100 -> filter >20 -> 25,36,49,64,81,100
+    assert(len(r2) == 6, "testMultipleFuncParams: MapFilter should return 6 elements")
+    assert(r2[0] == 25, "testMultipleFuncParams: r2[0] should be 25")
+}
+
+// ============================================
+// Part 5: Function Type with Multiple Returns
+// ============================================
+
+type TryOperation interface {
+    Try(f func() (int, bool)) (int, bool)
+    TryWithDefault(f func() (int, bool), defaultVal int) int
+    TryMap(arr []int, f func(int) (int, bool)) []int
+}
+
+type TryRunner struct{}
+
+func (tr TryRunner) Try(f func() (int, bool)) (int, bool) {
+    return f()
+}
+
+func (tr TryRunner) TryWithDefault(f func() (int, bool), defaultVal int) int {
+    result, ok := f()
+    if ok {
+        return result
+    }
+    return defaultVal
+}
+
+func (tr TryRunner) TryMap(arr []int, f func(int) (int, bool)) []int {
+    result := []int{}
+    for _, v := range arr {
+        mapped, ok := f(v)
+        if ok {
+            result = append(result, mapped)
+        }
+    }
+    return result
+}
+
+func testFuncMultiReturn() {
+    var t TryOperation = TryRunner{}
+    
+    v1, ok1 := t.Try(func() (int, bool) { return 42, true })
+    assert(ok1 == true, "testFuncMultiReturn: Try should succeed")
+    assert(v1 == 42, "testFuncMultiReturn: Try should return 42")
+    
+    v2, ok2 := t.Try(func() (int, bool) { return 0, false })
+    assert(ok2 == false, "testFuncMultiReturn: Try should fail")
+    _ = v2
+    
+    v3 := t.TryWithDefault(func() (int, bool) { return 100, true }, 999)
+    assert(v3 == 100, "testFuncMultiReturn: TryWithDefault should return 100")
+    
+    v4 := t.TryWithDefault(func() (int, bool) { return 0, false }, 999)
+    assert(v4 == 999, "testFuncMultiReturn: TryWithDefault should return default")
+    
+    arr := []int{1, 2, 3, 4, 5}
+    // Only keep even numbers doubled
+    v5 := t.TryMap(arr, func(x int) (int, bool) {
+        if x%2 == 0 {
+            return x * 2, true
+        }
+        return 0, false
+    })
+    assert(len(v5) == 2, "testFuncMultiReturn: TryMap should return 2 elements")
+    assert(v5[0] == 4, "testFuncMultiReturn: v5[0] should be 4")
+    assert(v5[1] == 8, "testFuncMultiReturn: v5[1] should be 8")
+}
+
+// ============================================
+// Part 6: Predicate Combinations
+// ============================================
+
+type PredicateCombiner interface {
+    And(p1, p2 func(int) bool) func(int) bool
+    Or(p1, p2 func(int) bool) func(int) bool
+    Not(p func(int) bool) func(int) bool
+    All(ps ...func(int) bool) func(int) bool
+}
+
+type LogicCombiner struct{}
+
+func (lc LogicCombiner) And(p1, p2 func(int) bool) func(int) bool {
+    return func(x int) bool { return p1(x) && p2(x) }
+}
+
+func (lc LogicCombiner) Or(p1, p2 func(int) bool) func(int) bool {
+    return func(x int) bool { return p1(x) || p2(x) }
+}
+
+func (lc LogicCombiner) Not(p func(int) bool) func(int) bool {
+    return func(x int) bool { return !p(x) }
+}
+
+func (lc LogicCombiner) All(ps ...func(int) bool) func(int) bool {
+    return func(x int) bool {
+        for _, p := range ps {
+            if !p(x) {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+func testPredicateCombinations() {
+    var pc PredicateCombiner = LogicCombiner{}
+    
+    isPositive := func(x int) bool { return x > 0 }
+    isEven := func(x int) bool { return x%2 == 0 }
+    isLessThan10 := func(x int) bool { return x < 10 }
+    
+    positiveEven := pc.And(isPositive, isEven)
+    assert(positiveEven(4) == true, "testPredicateCombinations: 4 is positive even")
+    assert(positiveEven(-4) == false, "testPredicateCombinations: -4 is not positive")
+    assert(positiveEven(3) == false, "testPredicateCombinations: 3 is not even")
+    
+    positiveOrEven := pc.Or(isPositive, isEven)
+    assert(positiveOrEven(3) == true, "testPredicateCombinations: 3 is positive")
+    assert(positiveOrEven(-4) == true, "testPredicateCombinations: -4 is even")
+    assert(positiveOrEven(-3) == false, "testPredicateCombinations: -3 is neither")
+    
+    notPositive := pc.Not(isPositive)
+    assert(notPositive(-1) == true, "testPredicateCombinations: -1 is not positive")
+    assert(notPositive(1) == false, "testPredicateCombinations: 1 is positive")
+    
+    allThree := pc.All(isPositive, isEven, isLessThan10)
+    assert(allThree(4) == true, "testPredicateCombinations: 4 passes all")
+    assert(allThree(12) == false, "testPredicateCombinations: 12 fails lessThan10")
+    assert(allThree(-2) == false, "testPredicateCombinations: -2 fails positive")
+}
+
+// ============================================
+// Part 7: Callback Pattern
+// ============================================
+
+type AsyncLike interface {
+    OnSuccess(action func() int, callback func(int))
+    OnComplete(action func() (int, bool), onSuccess func(int), onError func())
+}
+
+type CallbackRunner struct {
+    lastResult int
+    wasError   bool
+}
+
+func (cr *CallbackRunner) OnSuccess(action func() int, callback func(int)) {
+    result := action()
+    callback(result)
+    cr.lastResult = result
+}
+
+func (cr *CallbackRunner) OnComplete(action func() (int, bool), onSuccess func(int), onError func()) {
+    result, ok := action()
+    if ok {
+        onSuccess(result)
+        cr.lastResult = result
+        cr.wasError = false
+    } else {
+        onError()
+        cr.wasError = true
+    }
+}
+
+func testCallbackPattern() {
+    cr := &CallbackRunner{}
+    var async AsyncLike = cr
+    
+    captured := 0
+    async.OnSuccess(
+        func() int { return 42 },
+        func(v int) { captured = v * 2 },
+    )
+    assert(captured == 84, "testCallbackPattern: captured should be 84")
+    assert(cr.lastResult == 42, "testCallbackPattern: lastResult should be 42")
+    
+    successCalled := false
+    errorCalled := false
+    async.OnComplete(
+        func() (int, bool) { return 100, true },
+        func(v int) { successCalled = true },
+        func() { errorCalled = true },
+    )
+    assert(successCalled == true, "testCallbackPattern: success should be called")
+    assert(errorCalled == false, "testCallbackPattern: error should not be called")
+    
+    successCalled = false
+    errorCalled = false
+    async.OnComplete(
+        func() (int, bool) { return 0, false },
+        func(v int) { successCalled = true },
+        func() { errorCalled = true },
+    )
+    assert(successCalled == false, "testCallbackPattern: success should not be called")
+    assert(errorCalled == true, "testCallbackPattern: error should be called")
+}
+
+// ============================================
+// Part 8: Currying and Partial Application
+// ============================================
+
+type Currier interface {
+    Curry2(f func(int, int) int) func(int) func(int) int
+    Curry3(f func(int, int, int) int) func(int) func(int) func(int) int
+    Partial(f func(int, int) int, first int) func(int) int
+}
+
+type FuncCurrier struct{}
+
+func (fc FuncCurrier) Curry2(f func(int, int) int) func(int) func(int) int {
+    return func(a int) func(int) int {
+        return func(b int) int {
+            return f(a, b)
+        }
+    }
+}
+
+func (fc FuncCurrier) Curry3(f func(int, int, int) int) func(int) func(int) func(int) int {
+    return func(a int) func(int) func(int) int {
+        return func(b int) func(int) int {
+            return func(c int) int {
+                return f(a, b, c)
+            }
+        }
+    }
+}
+
+func (fc FuncCurrier) Partial(f func(int, int) int, first int) func(int) int {
+    return func(second int) int {
+        return f(first, second)
+    }
+}
+
+func testCurrying() {
+    var c Currier = FuncCurrier{}
+    
+    add := func(a, b int) int { return a + b }
+    curriedAdd := c.Curry2(add)
+    add5 := curriedAdd(5)
+    assert(add5(3) == 8, "testCurrying: add5(3) should be 8")
+    assert(add5(10) == 15, "testCurrying: add5(10) should be 15")
+    
+    mul3 := func(a, b, c int) int { return a * b * c }
+    curriedMul := c.Curry3(mul3)
+    mulBy2 := curriedMul(2)
+    mulBy2and3 := mulBy2(3)
+    assert(mulBy2and3(4) == 24, "testCurrying: 2*3*4 should be 24")
+    
+    sub := func(a, b int) int { return a - b }
+    sub10 := c.Partial(sub, 10)
+    assert(sub10(3) == 7, "testCurrying: 10-3 should be 7")
+}
+
+func main() {
+    testBasicFuncParam()
+    testFuncReturnValue()
+    testComplexFuncSig()
+    testMultipleFuncParams()
+    testFuncMultiReturn()
+    testPredicateCombinations()
+    testCallbackPattern()
+    testCurrying()
+    
+    println("method_sig_func_types: ALL PASSED")
+}

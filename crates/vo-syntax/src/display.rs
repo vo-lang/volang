@@ -84,7 +84,9 @@ pub fn fmt_expr(expr: &Expr, f: &mut fmt::Formatter<'_>, interner: &SymbolIntern
             f.write_char(')')
         }
         ExprKind::CompositeLit(cl) => {
-            fmt_type_expr(&cl.ty, f, interner)?;
+            if let Some(ty) = &cl.ty {
+                fmt_type_expr(ty, f, interner)?;
+            }
             f.write_char('{')?;
             for (i, elem) in cl.elems.iter().enumerate() {
                 if i > 0 {

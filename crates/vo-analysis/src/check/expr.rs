@@ -1140,11 +1140,31 @@ impl Checker {
                 x.typ = Some(target);
             }
             ExprKind::CompositeLit(lit) => {
-                let ty = self.type_expr(&lit.ty);
-                if ty == self.invalid_type() {
-                    x.mode = OperandMode::Invalid;
-                    return;
-                }
+                // Determine composite literal type (aligns with goscript logic)
+                let ty = if let Some(ref type_expr) = lit.ty {
+                    // Composite literal type present - use it
+                    let t = self.type_expr(type_expr);
+                    if t == self.invalid_type() {
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                    t
+                } else {
+                    // No composite literal type present - use hint (element type of enclosing type)
+                    if let Some(h) = hint {
+                        // For nested literals, dereference pointer types like goscript's try_deref
+                        let base = typ::underlying_type(h, self.objs());
+                        if let Some(ptr) = self.otype(base).try_as_pointer() {
+                            ptr.base()
+                        } else {
+                            h
+                        }
+                    } else {
+                        self.error_code_msg(TypeError::InvalidOp, e.span, "missing type in composite literal");
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                };
                 
                 let utype = typ::underlying_type(ty, self.objs());
                 let utype_val = self.otype(utype);

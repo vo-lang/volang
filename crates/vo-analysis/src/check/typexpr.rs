@@ -334,20 +334,27 @@ impl Checker {
             true,
         );
 
-        // Collect parameters - FuncType has Vec<TypeExpr>, not Vec<Param>
+        // Collect parameters - FuncType uses Vec<Param> with names preserved
         let mut params = Vec::new();
-        for param_type in &func.params {
-            let ty = self.indirect_type(param_type);
-            let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
+        for param in &func.params {
+            let ty = self.indirect_type(&param.ty);
+            // Use first name if available, otherwise empty
+            let name = param.names.first()
+                .map(|n| self.resolve_ident(n).to_string())
+                .unwrap_or_default();
+            let var = self.new_param_var(0, Some(self.pkg), name, Some(ty));
             params.push(var);
         }
         let variadic = false; // FuncType in Vo doesn't have variadic marker
 
         // Collect results
         let mut results = Vec::new();
-        for result_type in &func.results {
-            let ty = self.indirect_type(result_type);
-            let var = self.new_param_var(0, Some(self.pkg), String::new(), Some(ty));
+        for result in &func.results {
+            let ty = self.indirect_type(&result.ty);
+            let name = result.names.first()
+                .map(|n| self.resolve_ident(n).to_string())
+                .unwrap_or_default();
+            let var = self.new_param_var(0, Some(self.pkg), name, Some(ty));
             results.push(var);
         }
 

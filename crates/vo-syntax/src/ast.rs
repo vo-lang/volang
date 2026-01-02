@@ -400,12 +400,13 @@ pub enum ChanDir {
 }
 
 /// A function type.
+/// Aligned with goscript: uses Param to preserve parameter names.
 #[derive(Debug, Clone)]
 pub struct FuncType {
-    /// The parameter types.
-    pub params: Vec<TypeExpr>,
-    /// The result types.
-    pub results: Vec<TypeExpr>,
+    /// The parameters (may have names or be anonymous).
+    pub params: Vec<Param>,
+    /// The results (may have names or be anonymous).
+    pub results: Vec<Param>,
 }
 
 /// A struct or object type.
@@ -979,10 +980,11 @@ pub struct TypeAssertExpr {
 }
 
 /// A composite literal.
+/// Aligned with goscript: ty is Option to support anonymous composite literals.
 #[derive(Debug, Clone)]
 pub struct CompositeLit {
-    /// The type of the literal.
-    pub ty: TypeExpr,
+    /// The type of the literal (None for anonymous literals like `{x: 1}` in slice).
+    pub ty: Option<TypeExpr>,
     /// The elements.
     pub elems: Vec<CompositeLitElem>,
 }
@@ -1271,7 +1273,9 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             }
         }
         ExprKind::CompositeLit(c) => {
-            visitor.visit_type_expr(&c.ty);
+            if let Some(ty) = &c.ty {
+                visitor.visit_type_expr(ty);
+            }
             for elem in &c.elems {
                 visitor.visit_expr(&elem.value);
             }
@@ -1312,10 +1316,10 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
         TypeExprKind::Chan(c) => visitor.visit_type_expr(&c.elem),
         TypeExprKind::Func(f) => {
             for p in &f.params {
-                visitor.visit_type_expr(p);
+                visitor.visit_type_expr(&p.ty);
             }
             for r in &f.results {
-                visitor.visit_type_expr(r);
+                visitor.visit_type_expr(&r.ty);
             }
         }
         TypeExprKind::Struct(s) => {

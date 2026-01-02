@@ -200,11 +200,22 @@ impl<'a> Parser<'a> {
         
         self.expect(TokenKind::RBrace)?;
         let span = Span::new(start, self.current.span.start);
-        Ok(self.make_expr(ExprKind::CompositeLit(Box::new(CompositeLit { ty, elems })), span))
+        Ok(self.make_expr(ExprKind::CompositeLit(Box::new(CompositeLit { ty: Some(ty), elems })), span))
     }
 
     fn parse_composite_lit_elem(&mut self) -> ParseResult<CompositeLitElem> {
         let start = self.current.span.start;
+        
+        // Check for nested anonymous composite literal: {key: val, ...}
+        // This is the type-elided form used in slice/array/map literals
+        if self.at(TokenKind::LBrace) {
+            let value = self.parse_anonymous_composite_lit()?;
+            return Ok(CompositeLitElem {
+                key: None,
+                value,
+                span: Span::new(start, self.current.span.start),
+            });
+        }
         
         // Try to parse key: value
         let first = self.parse_expr()?;
@@ -216,7 +227,12 @@ impl<'a> Parser<'a> {
             } else {
                 CompositeLitKey::Expr(first)
             };
-            let value = self.parse_expr()?;
+            // Check if value is anonymous composite literal
+            let value = if self.at(TokenKind::LBrace) {
+                self.parse_anonymous_composite_lit()?
+            } else {
+                self.parse_expr()?
+            };
             Ok(CompositeLitElem {
                 key: Some(key),
                 value,
@@ -230,6 +246,27 @@ impl<'a> Parser<'a> {
                 span: Span::new(start, self.current.span.start),
             })
         }
+    }
+    
+    /// Parse an anonymous composite literal (type elided): {key: val, ...}
+    /// The type will be inferred from context during type checking.
+    fn parse_anonymous_composite_lit(&mut self) -> ParseResult<Expr> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::LBrace)?;
+        
+        let mut elems = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at_eof() {
+            elems.push(self.parse_composite_lit_elem()?);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        
+        self.expect(TokenKind::RBrace)?;
+        let span = Span::new(start, self.current.span.start);
+        
+        // Anonymous composite literal - type will be inferred from context (aligned with goscript)
+        Ok(self.make_expr(ExprKind::CompositeLit(Box::new(CompositeLit { ty: None, elems })), span))
     }
 
     fn parse_infix_expr(&mut self, left: Expr, prec: Precedence) -> ParseResult<Expr> {

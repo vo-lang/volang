@@ -1,0 +1,464 @@
+package main
+
+// Test: Complex method signatures with various parameter combinations
+// Focus: Different parameter types, counts, and ordering
+
+// ============================================
+// Part 1: Mixed Primitive Parameters
+// ============================================
+
+type MixedPrimitives interface {
+    Process(a int, b float64, c bool, d string) string
+}
+
+type MixedProcessor struct{}
+
+func (m MixedProcessor) Process(a int, b float64, c bool, d string) string {
+    if c {
+        return d
+    }
+    return "false"
+}
+
+func testMixedPrimitives() {
+    var mp MixedPrimitives = MixedProcessor{}
+    
+    r1 := mp.Process(1, 2.5, true, "hello")
+    assert(r1 == "hello", "testMixedPrimitives: should return 'hello'")
+    
+    r2 := mp.Process(0, 0.0, false, "world")
+    assert(r2 == "false", "testMixedPrimitives: should return 'false'")
+}
+
+// ============================================
+// Part 2: Nested Struct Parameters
+// ============================================
+
+type Point struct {
+    x, y int
+}
+
+type Rect struct {
+    origin Point
+    size   Point
+}
+
+type Canvas struct {
+    rects []Rect
+    name  string
+}
+
+type GeometryProcessor interface {
+    CalculateArea(r Rect) int
+    ContainsPoint(r Rect, p Point) bool
+    ProcessCanvas(c Canvas) int
+}
+
+type GeoImpl struct{}
+
+func (g GeoImpl) CalculateArea(r Rect) int {
+    return r.size.x * r.size.y
+}
+
+func (g GeoImpl) ContainsPoint(r Rect, p Point) bool {
+    if p.x >= r.origin.x && p.x < r.origin.x+r.size.x {
+        if p.y >= r.origin.y && p.y < r.origin.y+r.size.y {
+            return true
+        }
+    }
+    return false
+}
+
+func (g GeoImpl) ProcessCanvas(c Canvas) int {
+    total := 0
+    for _, r := range c.rects {
+        total = total + g.CalculateArea(r)
+    }
+    return total
+}
+
+func testNestedStructParams() {
+    var gp GeometryProcessor = GeoImpl{}
+    
+    r := Rect{origin: Point{x: 0, y: 0}, size: Point{x: 10, y: 5}}
+    area := gp.CalculateArea(r)
+    assert(area == 50, "testNestedStructParams: area should be 50")
+    
+    p1 := Point{x: 5, y: 2}
+    c1 := gp.ContainsPoint(r, p1)
+    assert(c1 == true, "testNestedStructParams: (5,2) should be inside")
+    
+    p2 := Point{x: 15, y: 2}
+    c2 := gp.ContainsPoint(r, p2)
+    assert(c2 == false, "testNestedStructParams: (15,2) should be outside")
+    
+    canvas := Canvas{
+        rects: []Rect{
+            {origin: Point{x: 0, y: 0}, size: Point{x: 2, y: 3}},
+            {origin: Point{x: 0, y: 0}, size: Point{x: 4, y: 5}},
+        },
+        name: "test",
+    }
+    total := gp.ProcessCanvas(canvas)
+    assert(total == 26, "testNestedStructParams: total area should be 26")
+}
+
+// ============================================
+// Part 3: Pointer and Value Mixed Parameters
+// ============================================
+
+type MutableData struct {
+    count int
+    name  string
+}
+
+type DataHandler interface {
+    ModifyData(d *MutableData, increment int) int
+    ReadData(d MutableData) int
+    SwapData(a *MutableData, b *MutableData)
+}
+
+type DataProcessor struct{}
+
+func (dp DataProcessor) ModifyData(d *MutableData, increment int) int {
+    d.count = d.count + increment
+    return d.count
+}
+
+func (dp DataProcessor) ReadData(d MutableData) int {
+    return d.count
+}
+
+func (dp DataProcessor) SwapData(a *MutableData, b *MutableData) {
+    a.count, b.count = b.count, a.count
+    a.name, b.name = b.name, a.name
+}
+
+func testPointerValueMixed() {
+    var dh DataHandler = DataProcessor{}
+    
+    d := &MutableData{count: 10, name: "test"}
+    r1 := dh.ModifyData(d, 5)
+    assert(r1 == 15, "testPointerValueMixed: ModifyData should return 15")
+    assert(d.count == 15, "testPointerValueMixed: d.count should be 15")
+    
+    r2 := dh.ReadData(*d)
+    assert(r2 == 15, "testPointerValueMixed: ReadData should return 15")
+    
+    a := &MutableData{count: 100, name: "A"}
+    b := &MutableData{count: 200, name: "B"}
+    dh.SwapData(a, b)
+    assert(a.count == 200, "testPointerValueMixed: a.count should be 200")
+    assert(b.count == 100, "testPointerValueMixed: b.count should be 100")
+    assert(a.name == "B", "testPointerValueMixed: a.name should be 'B'")
+    assert(b.name == "A", "testPointerValueMixed: b.name should be 'A'")
+}
+
+// ============================================
+// Part 4: Slice of Different Types
+// ============================================
+
+type CollectionHandler interface {
+    SumInts(arr []int) int
+    JoinStrings(arr []string, sep string) string
+    FilterPositive(arr []int) []int
+    TransformPoints(pts []Point) []int
+}
+
+type CollImpl struct{}
+
+func (c CollImpl) SumInts(arr []int) int {
+    sum := 0
+    for _, v := range arr {
+        sum = sum + v
+    }
+    return sum
+}
+
+func (c CollImpl) JoinStrings(arr []string, sep string) string {
+    result := ""
+    for i, s := range arr {
+        if i > 0 {
+            result = result + sep
+        }
+        result = result + s
+    }
+    return result
+}
+
+func (c CollImpl) FilterPositive(arr []int) []int {
+    result := []int{}
+    for _, v := range arr {
+        if v > 0 {
+            result = append(result, v)
+        }
+    }
+    return result
+}
+
+func (c CollImpl) TransformPoints(pts []Point) []int {
+    result := make([]int, len(pts))
+    for i, p := range pts {
+        result[i] = p.x + p.y
+    }
+    return result
+}
+
+func testSliceTypes() {
+    var ch CollectionHandler = CollImpl{}
+    
+    s1 := ch.SumInts([]int{1, 2, 3, 4, 5})
+    assert(s1 == 15, "testSliceTypes: SumInts should return 15")
+    
+    s2 := ch.JoinStrings([]string{"a", "b", "c"}, "-")
+    assert(s2 == "a-b-c", "testSliceTypes: JoinStrings should return 'a-b-c'")
+    
+    s3 := ch.FilterPositive([]int{-1, 2, -3, 4, 0, 5})
+    assert(len(s3) == 3, "testSliceTypes: FilterPositive should return 3 elements")
+    assert(s3[0] == 2, "testSliceTypes: s3[0] should be 2")
+    assert(s3[1] == 4, "testSliceTypes: s3[1] should be 4")
+    assert(s3[2] == 5, "testSliceTypes: s3[2] should be 5")
+    
+    pts := []Point{{x: 1, y: 2}, {x: 3, y: 4}, {x: 5, y: 6}}
+    s4 := ch.TransformPoints(pts)
+    assert(s4[0] == 3, "testSliceTypes: s4[0] should be 3")
+    assert(s4[1] == 7, "testSliceTypes: s4[1] should be 7")
+    assert(s4[2] == 11, "testSliceTypes: s4[2] should be 11")
+}
+
+// ============================================
+// Part 5: Map with Different Key/Value Types
+// ============================================
+
+type MapHandler interface {
+    CountByKey(m map[string][]int) map[string]int
+    MergeIntMaps(a, b map[int]int) map[int]int
+    InvertMap(m map[string]int) map[int][]string
+}
+
+type MapImpl struct{}
+
+func (mi MapImpl) CountByKey(m map[string][]int) map[string]int {
+    result := make(map[string]int)
+    for k, v := range m {
+        result[k] = len(v)
+    }
+    return result
+}
+
+func (mi MapImpl) MergeIntMaps(a, b map[int]int) map[int]int {
+    result := make(map[int]int)
+    for k, v := range a {
+        result[k] = v
+    }
+    for k, v := range b {
+        existing, ok := result[k]
+        if ok {
+            result[k] = existing + v
+        } else {
+            result[k] = v
+        }
+    }
+    return result
+}
+
+func (mi MapImpl) InvertMap(m map[string]int) map[int][]string {
+    result := make(map[int][]string)
+    for k, v := range m {
+        existing, ok := result[v]
+        if ok {
+            result[v] = append(existing, k)
+        } else {
+            result[v] = []string{k}
+        }
+    }
+    return result
+}
+
+func testMapTypes() {
+    var mh MapHandler = MapImpl{}
+    
+    m1 := map[string][]int{
+        "a": {1, 2, 3},
+        "b": {4, 5},
+        "c": {},
+    }
+    counts := mh.CountByKey(m1)
+    assert(counts["a"] == 3, "testMapTypes: counts['a'] should be 3")
+    assert(counts["b"] == 2, "testMapTypes: counts['b'] should be 2")
+    assert(counts["c"] == 0, "testMapTypes: counts['c'] should be 0")
+    
+    ma := map[int]int{1: 10, 2: 20}
+    mb := map[int]int{2: 5, 3: 30}
+    merged := mh.MergeIntMaps(ma, mb)
+    assert(merged[1] == 10, "testMapTypes: merged[1] should be 10")
+    assert(merged[2] == 25, "testMapTypes: merged[2] should be 25")
+    assert(merged[3] == 30, "testMapTypes: merged[3] should be 30")
+}
+
+// ============================================
+// Part 6: Multiple Return Values with Different Types
+// ============================================
+
+type MultiReturnHandler interface {
+    Parse(s string) (int, bool)
+    DivMod(a, b int) (int, int, bool)
+    GetMinMax(arr []int) (int, int, bool)
+    ExtractInfo(p Point) (x int, y int, sum int)
+}
+
+type ParseImpl struct{}
+
+func (pi ParseImpl) Parse(s string) (int, bool) {
+    if s == "" {
+        return 0, false
+    }
+    // Simplified: just return length
+    return len(s), true
+}
+
+func (pi ParseImpl) DivMod(a, b int) (int, int, bool) {
+    if b == 0 {
+        return 0, 0, false
+    }
+    return a / b, a % b, true
+}
+
+func (pi ParseImpl) GetMinMax(arr []int) (int, int, bool) {
+    if len(arr) == 0 {
+        return 0, 0, false
+    }
+    min := arr[0]
+    max := arr[0]
+    for _, v := range arr {
+        if v < min {
+            min = v
+        }
+        if v > max {
+            max = v
+        }
+    }
+    return min, max, true
+}
+
+func (pi ParseImpl) ExtractInfo(p Point) (x int, y int, sum int) {
+    return p.x, p.y, p.x + p.y
+}
+
+func testMultiReturn() {
+    var mrh MultiReturnHandler = ParseImpl{}
+    
+    n, ok := mrh.Parse("hello")
+    assert(ok == true, "testMultiReturn: Parse should succeed")
+    assert(n == 5, "testMultiReturn: Parse should return 5")
+    
+    _, ok2 := mrh.Parse("")
+    assert(ok2 == false, "testMultiReturn: Parse empty should fail")
+    
+    q, r, ok3 := mrh.DivMod(17, 5)
+    assert(ok3 == true, "testMultiReturn: DivMod should succeed")
+    assert(q == 3, "testMultiReturn: quotient should be 3")
+    assert(r == 2, "testMultiReturn: remainder should be 2")
+    
+    _, _, ok4 := mrh.DivMod(10, 0)
+    assert(ok4 == false, "testMultiReturn: DivMod by zero should fail")
+    
+    min, max, ok5 := mrh.GetMinMax([]int{5, 2, 8, 1, 9})
+    assert(ok5 == true, "testMultiReturn: GetMinMax should succeed")
+    assert(min == 1, "testMultiReturn: min should be 1")
+    assert(max == 9, "testMultiReturn: max should be 9")
+    
+    x, y, sum := mrh.ExtractInfo(Point{x: 3, y: 7})
+    assert(x == 3, "testMultiReturn: x should be 3")
+    assert(y == 7, "testMultiReturn: y should be 7")
+    assert(sum == 10, "testMultiReturn: sum should be 10")
+}
+
+// ============================================
+// Part 7: Same Method Name Different Signatures in Different Interfaces
+// ============================================
+
+type IntAdder interface {
+    Add(a, b int) int
+}
+
+type FloatAdder interface {
+    Add(a, b float64) float64
+}
+
+type StringAdder interface {
+    Add(a, b string) string
+}
+
+type IntAdd struct{}
+type FloatAdd struct{}
+type StringAdd struct{}
+
+func (ia IntAdd) Add(a, b int) int           { return a + b }
+func (fa FloatAdd) Add(a, b float64) float64 { return a + b }
+func (sa StringAdd) Add(a, b string) string  { return a + b }
+
+func testDifferentSignaturesSameName() {
+    var ia IntAdder = IntAdd{}
+    var fa FloatAdder = FloatAdd{}
+    var sa StringAdder = StringAdd{}
+    
+    ri := ia.Add(10, 20)
+    assert(ri == 30, "testDifferentSignaturesSameName: IntAdder should return 30")
+    
+    rf := fa.Add(1.5, 2.5)
+    assert(rf == 4.0, "testDifferentSignaturesSameName: FloatAdder should return 4.0")
+    
+    rs := sa.Add("hello", "world")
+    assert(rs == "helloworld", "testDifferentSignaturesSameName: StringAdder should return 'helloworld'")
+}
+
+// ============================================
+// Part 8: Variadic with Mixed Types Before
+// ============================================
+
+type Logger interface {
+    Log(level int, format string, args ...interface{})
+    LogWithPrefix(prefix string, level int, msgs ...string)
+}
+
+type StdLogger struct {
+    output string
+}
+
+func (l *StdLogger) Log(level int, format string, args ...interface{}) {
+    // Just store the level and format for testing
+    l.output = format
+}
+
+func (l *StdLogger) LogWithPrefix(prefix string, level int, msgs ...string) {
+    result := prefix + ":"
+    for _, m := range msgs {
+        result = result + " " + m
+    }
+    l.output = result
+}
+
+func testVariadicMixed() {
+    l := &StdLogger{}
+    var logger Logger = l
+    
+    logger.Log(1, "test message", 42, "extra")
+    assert(l.output == "test message", "testVariadicMixed: Log should store format")
+    
+    logger.LogWithPrefix("[INFO]", 2, "msg1", "msg2", "msg3")
+    assert(l.output == "[INFO]: msg1 msg2 msg3", "testVariadicMixed: LogWithPrefix should work")
+}
+
+func main() {
+    testMixedPrimitives()
+    testNestedStructParams()
+    testPointerValueMixed()
+    testSliceTypes()
+    testMapTypes()
+    testMultiReturn()
+    testDifferentSignaturesSameName()
+    testVariadicMixed()
+    
+    println("method_sig_complex_params: ALL PASSED")
+}

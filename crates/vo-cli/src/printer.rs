@@ -306,7 +306,7 @@ impl<'a> AstPrinter<'a> {
                 write!(self.output, "func(").unwrap();
                 for (i, p) in f.params.iter().enumerate() {
                     if i > 0 { write!(self.output, ", ").unwrap(); }
-                    self.write_type_inline(p);
+                    self.write_type_inline(&p.ty);
                 }
                 write!(self.output, ")").unwrap();
                 if !f.results.is_empty() {
@@ -316,7 +316,7 @@ impl<'a> AstPrinter<'a> {
                     }
                     for (i, r) in f.results.iter().enumerate() {
                         if i > 0 { write!(self.output, ", ").unwrap(); }
-                        self.write_type_inline(r);
+                        self.write_type_inline(&r.ty);
                     }
                     if f.results.len() > 1 {
                         write!(self.output, ")").unwrap();
@@ -691,7 +691,9 @@ impl<'a> AstPrinter<'a> {
                 write!(self.output, ")").unwrap();
             }
             ExprKind::CompositeLit(cl) => {
-                self.write_type_inline(&cl.ty);
+                if let Some(ty) = &cl.ty {
+                    self.write_type_inline(ty);
+                }
                 write!(self.output, "{{").unwrap();
                 for (i, elem) in cl.elems.iter().enumerate() {
                     if i > 0 { write!(self.output, ", ").unwrap(); }

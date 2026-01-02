@@ -729,14 +729,27 @@ close(ch)          // close channel (no more sends allowed)
 
 ```ebnf
 FuncType      ::= "func" "(" ParamTypeList? ")" ResultType? ;
-ParamTypeList ::= Type ( "," Type )* ;
-ResultType    ::= Type | "(" Type ( "," Type )* ")" ;
+ParamTypeList ::= ParamDecl ( "," ParamDecl )* ;
+ParamDecl     ::= IdentList? Type ;  // names are optional
+ResultType    ::= Type | "(" ParamDecl ( "," ParamDecl )* ")" ;
 ```
 
 Function types are reference types. Zero value is `nil`.
 
+**Parameter naming**: Function types can include parameter names for documentation, but the names are not part of the type identity. The following are equivalent types:
+
 ```vo
-var f func(int) int  // f == nil
+func(int, int) int
+func(x int, y int) int
+func(a, b int) int
+```
+
+**Examples**:
+
+```vo
+var f func(int) int                    // f == nil
+var g func(x int, y int) int           // with named params (equivalent to above)
+var h func(callback func(int) bool)    // function taking function
 ```
 
 ### 6.8 Variadic Functions
