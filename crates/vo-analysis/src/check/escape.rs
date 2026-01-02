@@ -37,6 +37,12 @@ pub fn analyze(
     }
 }
 
+/// Entry in closure stack during escape analysis.
+struct ClosureEntry {
+    id: ExprId,
+    scope: Option<ScopeKey>,
+}
+
 /// The escape analyzer.
 struct EscapeAnalyzer<'a> {
     type_info: &'a TypeInfo,
@@ -46,8 +52,8 @@ struct EscapeAnalyzer<'a> {
     closure_captures: HashMap<ExprId, Vec<ObjKey>>,
     /// Current function scope (None for package-level code)
     func_scope: Option<ScopeKey>,
-    /// Stack of closure ExprIds being analyzed (for nested closure captures)
-    closure_stack: Vec<ExprId>,
+    /// Stack of closures being analyzed (for nested closure captures)
+    closure_stack: Vec<ClosureEntry>,
 }
 
 impl<'a> EscapeAnalyzer<'a> {
@@ -294,7 +300,7 @@ impl<'a> EscapeAnalyzer<'a> {
                 let saved_scope = self.func_scope;
                 
                 self.func_scope = closure_scope;
-                self.closure_stack.push(expr.id);
+                self.closure_stack.push(ClosureEntry { id: expr.id, scope: closure_scope });
                 self.closure_captures.insert(expr.id, Vec::new());
                 
                 self.visit_block(&func.body);
@@ -309,12 +315,17 @@ impl<'a> EscapeAnalyzer<'a> {
                     if let Some(&obj) = self.type_info.uses.get(&ident.id) {
                         if self.is_captured(obj, func_scope) {
                             self.escaped.insert(obj);
-                            // Record capture for ALL closures in the stack
-                            // Inner closure captures must propagate to outer closures
-                            for &closure_id in &self.closure_stack {
-                                if let Some(captures) = self.closure_captures.get_mut(&closure_id) {
-                                    if !captures.contains(&obj) {
-                                        captures.push(obj);
+                            // Record capture for closures that actually need to capture this var
+                            // A closure needs to capture a var if the var is declared outside that closure's scope
+                            for entry in &self.closure_stack {
+                                if let Some(scope) = entry.scope {
+                                    // Only add if var is captured by THIS closure (not its own param/local)
+                                    if self.is_captured(obj, scope) {
+                                        if let Some(captures) = self.closure_captures.get_mut(&entry.id) {
+                                            if !captures.contains(&obj) {
+                                                captures.push(obj);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -635,6 +646,28 @@ mod tests {
             }
         "#);
         assert!(escaped.contains(&"x".to_string()), "x should escape: {:?}", escaped);
+    }
+
+    #[test]
+    fn test_nested_closure_param_capture() {
+        // Test case: closure parameter captured by inner closure
+        // func(a) returns func(b) that uses a
+        let escaped = get_escaped_vars(r#"
+            package main
+            func outer() func(int) func(int) int {
+                return func(a int) func(int) int {
+                    return func(b int) int {
+                        return a + b
+                    }
+                }
+            }
+            func main() {
+                f := outer()
+                g := f(5)
+                _ = g(3)
+            }
+        "#);
+        assert!(escaped.contains(&"a".to_string()), "a (closure param) should escape: {:?}", escaped);
     }
 
     #[test]

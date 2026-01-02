@@ -916,11 +916,29 @@ fn compile_func_lit(
         }
     }
     
-    // Define parameters (starting after slot 0 which is closure ref)
+    // Define parameters and collect escaped ones for boxing
+    // Reference types (closure, slice, map, channel, pointer) don't need boxing - they're already GcRefs
+    let mut escaped_params = Vec::new();
     for param in &func_lit.sig.params {
         let (slots, slot_types) = info.type_expr_layout(param.ty.id);
+        let type_key = info.type_expr_type(param.ty.id);
         for name in &param.names {
             closure_builder.define_param(name.symbol, slots, &slot_types);
+            let obj_key = info.get_def(name);
+            if info.is_escaped(obj_key) && !info.is_reference_type(type_key) {
+                escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
+            }
+        }
+    }
+    
+    // Box escaped parameters: allocate heap storage and copy param values
+    for (sym, type_key, slots, slot_types) in escaped_params {
+        if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots) {
+            let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+            let meta_reg = closure_builder.alloc_temp(1);
+            closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+            closure_builder.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
+            closure_builder.emit_ptr_set(gcref_slot, 0, param_slot, slots);
         }
     }
     

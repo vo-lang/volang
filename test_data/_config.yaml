@@ -140,8 +140,6 @@ tests:
   # Typechecker tests - complex test cases with multiple issues (parser/compiler bugs fixed, test cases need review)
   - file: typechecker/method_sig_complex_params.vo
   - file: typechecker/method_sig_func_types.vo
-    skip: [vm, jit]
-    reason: "Part 8 Currying triggers nested closure escape analysis bug (func returning func returning func)"
   - file: typechecker/interface_complex_hierarchy.vo
     skip: [vm, jit]
     reason: "test case has codegen issues (method dispatch) - diamond pattern fixed"
