@@ -1228,26 +1228,7 @@ fn compile_call(
     
     // Non-ident function call (e.g., expression returning a closure)
     let closure_reg = compile_expr(&call.func, ctx, func, info)?;
-    
-    // Compile arguments - allocate max(arg_slots, ret_slots) for return values
-    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
-    let mut offset = 0u16;
-    for arg in &call.args {
-        let arg_slots = info.expr_slots(arg.id);
-        compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-        offset += arg_slots;
-    }
-    
-    // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
-    let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
-    func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
-    
-    // Copy result to dst if needed
-    if ret_slots > 0 && dst != args_start {
-        func.emit_copy(dst, args_start, ret_slots);
-    }
-    
-    Ok(())
+    compile_closure_call_from_reg(expr, call, closure_reg, dst, ctx, func, info)
 }
 
 /// Compile closure call when closure is already in a register.
