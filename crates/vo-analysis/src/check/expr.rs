@@ -922,7 +922,8 @@ impl Checker {
                 x.typ = Some(self.basic_type(BasicType::UntypedString));
             }
             ExprKind::Paren(inner) => {
-                self.raw_internal(x, inner, hint);
+                self.raw_expr_impl(x, inner, hint);
+                return;
             }
             ExprKind::Unary(u) => {
                 self.expr(x, &u.operand);

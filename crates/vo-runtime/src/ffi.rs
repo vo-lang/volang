@@ -331,6 +331,30 @@ impl<'a> ExternCallWithGc<'a> {
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, len) };
         s
     }
+
+    /// Allocate and return a new string slice ([]string).
+    #[inline]
+    pub fn ret_string_slice(&mut self, n: u16, strings: &[String]) {
+        let ptr = self.alloc_string_slice(strings);
+        self.call.ret_ref(n, ptr);
+    }
+
+    /// Allocate a new string slice ([]string).
+    #[inline]
+    pub fn alloc_string_slice(&mut self, strings: &[String]) -> GcRef {
+        let len = strings.len();
+        // String is a reference type, takes 1 slot (8 bytes)
+        let elem_meta = ValueMeta::new(0, ValueKind::String);
+        let s = slice::create(self.gc, elem_meta, 8, len, len);
+        
+        // Write each string to the slice
+        for (i, rust_str) in strings.iter().enumerate() {
+            let str_ref = string::from_rust_str(self.gc, rust_str);
+            // String is a GcRef (8 bytes), store as u64
+            slice::set(s, i, str_ref as u64, 8);
+        }
+        s
+    }
 }
 
 // ==================== Extern Registry ====================

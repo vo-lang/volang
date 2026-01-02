@@ -1,0 +1,25 @@
+// Test strings.Split function
+package main
+
+import "strings"
+
+func main() {
+    // Basic split
+    parts := strings.Split("a,b,c", ",")
+    assert(len(parts) == 3, "split should return 3 parts")
+    assert(parts[0] == "a", "first part should be 'a'")
+    assert(parts[1] == "b", "second part should be 'b'")
+    assert(parts[2] == "c", "third part should be 'c'")
+    
+    // Split with no separator found
+    parts2 := strings.Split("hello", ",")
+    assert(len(parts2) == 1, "split with no match should return 1 part")
+    assert(parts2[0] == "hello", "part should be original string")
+    
+    // Split empty string
+    parts3 := strings.Split("", ",")
+    assert(len(parts3) == 1, "split empty string should return 1 part")
+    assert(parts3[0] == "", "part should be empty")
+    
+    println("string_split test passed")
+}

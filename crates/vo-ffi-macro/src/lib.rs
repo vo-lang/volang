@@ -750,6 +750,17 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
     }
 }
 
+/// Extract the inner type name from a generic type like Vec<T>.
+fn get_generic_inner_type(type_path: &syn::TypePath) -> Option<String> {
+    let segment = type_path.path.segments.last()?;
+    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+        if let Some(syn::GenericArgument::Type(Type::Path(inner))) = args.args.first() {
+            return inner.path.segments.last().map(|s| s.ident.to_string());
+        }
+    }
+    None
+}
+
 fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u16)> {
     match ty {
         Type::Path(type_path) => {
@@ -836,8 +847,12 @@ fn generate_ret_write(ret: &ReturnType) -> syn::Result<TokenStream2> {
                             Ok(quote! { call.ret_str(0, &__result); })
                         }
                         "Vec" => {
-                            // Check if it's Vec<u8>
-                            Ok(quote! { call.ret_bytes(0, &__result); })
+                            match get_generic_inner_type(type_path).as_deref() {
+                                Some("u8") => Ok(quote! { call.ret_bytes(0, &__result); }),
+                                Some("String") => Ok(quote! { call.ret_string_slice(0, &__result); }),
+                                Some(inner) => Err(syn::Error::new_spanned(ty, format!("unsupported Vec element type: {}", inner))),
+                                None => Err(syn::Error::new_spanned(ty, "Vec requires generic type argument")),
+                            }
                         }
                         _ => Err(syn::Error::new_spanned(ty, format!("unsupported return type: {}", ident))),
                     }
