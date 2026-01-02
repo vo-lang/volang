@@ -1574,14 +1574,81 @@ fn compile_method_call(
     
     let method_name = info.project.interner.resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+    let method_sym = sel.sel.symbol;
     
-    // 2. Interface method call
-    if info.is_interface(recv_type) {
-        return compile_interface_method(expr, call, sel, recv_type, method_name, dst, ctx, func, info);
+    // Use unified method call resolution
+    let selection = info.get_selection(call.func.id);
+    let is_interface_recv = info.is_interface(recv_type);
+    
+    let call_info = crate::embed::resolve_method_call(
+        recv_type, method_name, method_sym, selection, is_interface_recv, ctx, &info.project.tc_objs
+    ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found on type", method_name)))?;
+    
+    // Dispatch based on call type
+    compile_method_call_dispatch(expr, call, sel, &call_info, dst, ctx, func, info)
+}
+
+/// Dispatch method call based on MethodCallInfo.
+fn compile_method_call_dispatch(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    sel: &vo_syntax::ast::SelectorExpr,
+    call_info: &crate::embed::MethodCallInfo,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    use crate::embed::MethodDispatch;
+    
+    let method_name = info.project.interner.resolve(sel.sel.symbol).unwrap_or("?");
+    let recv_type = info.expr_type(sel.expr.id);
+    
+    match &call_info.dispatch {
+        MethodDispatch::Interface { method_idx } => {
+            // Interface dispatch
+            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+            let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
+            let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+            let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+            let args_start = func.alloc_temp(arg_slots.max(ret_slots).max(1));
+            
+            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+            
+            let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
+            func.emit_with_flags(Opcode::CallIface, *method_idx as u8, recv_reg, args_start, c);
+            
+            if ret_slots > 0 && dst != args_start {
+                func.emit_copy(dst, args_start, ret_slots);
+            }
+            Ok(())
+        }
+        MethodDispatch::EmbeddedInterface { embed_offset, iface_type, method_idx } => {
+            // Embedded interface dispatch
+            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+            let iface_slot = func.alloc_temp(2);
+            func.emit_ptr_get(iface_slot, recv_reg, *embed_offset, 2);
+            
+            let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
+            let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+            let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+            let args_start = func.alloc_temp(arg_slots.max(ret_slots).max(1));
+            
+            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+            
+            let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
+            func.emit_with_flags(Opcode::CallIface, *method_idx as u8, iface_slot, args_start, c);
+            
+            if ret_slots > 0 && dst != args_start {
+                func.emit_copy(dst, args_start, ret_slots);
+            }
+            Ok(())
+        }
+        MethodDispatch::Static { func_id, expects_ptr_recv } => {
+            // Static call - use existing compile_concrete_method logic
+            compile_concrete_method(expr, call, sel, recv_type, method_name, dst, ctx, func, info)
+        }
     }
-    
-    // 3. Concrete method call
-    compile_concrete_method(expr, call, sel, recv_type, method_name, dst, ctx, func, info)
 }
 
 /// Compile extern package function call (e.g., fmt.Println).
@@ -1598,48 +1665,6 @@ fn compile_extern_call(
     let is_variadic = info.is_variadic(func_type);
     let (args_start, total_slots) = compile_call_args(call, is_variadic, ctx, func, info)?;
     func.emit_with_flags(Opcode::CallExtern, total_slots as u8, dst, extern_id as u16, args_start);
-    Ok(())
-}
-
-/// Compile interface method call.
-/// 
-/// CallIface instruction format (matching VM exec_call_iface):
-/// - a = iface_slot (interface value, 2 slots: slot0=metadata, slot1=data)
-/// - b = args_start (arguments)
-/// - c = (arg_slots << 8) | ret_slots
-/// - flags = method_idx
-/// 
-/// Result is written back to args_start, then copied to dst if needed.
-fn compile_interface_method(
-    expr: &Expr,
-    call: &vo_syntax::ast::CallExpr,
-    sel: &vo_syntax::ast::SelectorExpr,
-    recv_type: TypeKey,
-    method_name: &str,
-    dst: u16,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-    
-    // Get method signature
-    let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
-    let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
-    let args_start = func.alloc_temp(arg_slots.max(ret_slots).max(1));
-    
-    // Compile arguments
-    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-    
-    // CallIface
-    let method_idx = ctx.get_interface_method_index(recv_type, method_name, &info.project.tc_objs);
-    let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
-    func.emit_with_flags(Opcode::CallIface, method_idx as u8, recv_reg, args_start, c);
-    
-    if ret_slots > 0 && dst != args_start {
-        func.emit_copy(dst, args_start, ret_slots);
-    }
     Ok(())
 }
 
