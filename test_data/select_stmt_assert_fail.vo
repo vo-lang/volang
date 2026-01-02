@@ -18,13 +18,13 @@ func main() {
 	case v := <-ch1:
 		assert(v == 42, "should receive 42 from ch1")
 	default:
-		panic("should receive from ch1")
+		assert(false, "should receive from ch1")
 	}
 	
 	// Test 3: select with default (no ready channel)
 	select {
 	case v := <-ch1:
-		panic("ch1 should be empty")
+		assert(false, "ch1 should be empty")
 	default:
 		// Expected path
 	}
@@ -34,7 +34,7 @@ func main() {
 	case ch2 <- 100:
 		// Expected path - ch2 has buffer space
 	default:
-		panic("should be able to send to ch2")
+		assert(false, "should be able to send to ch2")
 	}
 	
 	// Verify the send worked

@@ -71,7 +71,7 @@ tests:
   - file: rect_only.vo
   - file: rect_only_sum.vo
   - file: rune_literal.vo
-  - file: select_stmt.vo
+  - file: select_stmt_assert_fail.vo
     should_fail: true
     reason: "assert(false) is compile-time error"
   - file: setfield_getfield_test.vo
