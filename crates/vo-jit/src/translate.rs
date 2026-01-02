@@ -65,8 +65,6 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         SlotSetN => { slot_set_n(e, inst); Ok(Completed) }
         ConvI2F => { conv_i2f(e, inst); Ok(Completed) }
         ConvF2I => { conv_f2i(e, inst); Ok(Completed) }
-        ConvI32I64 => { conv_i32_i64(e, inst); Ok(Completed) }
-        ConvI64I32 => { conv_i64_i32(e, inst); Ok(Completed) }
         ConvF64F32 => { conv_f64_f32(e, inst); Ok(Completed) }
         ConvF32F64 => { conv_f32_f64(e, inst); Ok(Completed) }
         // Slice operations
@@ -427,20 +425,6 @@ fn conv_f2i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let f = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
     let r = e.builder().ins().fcvt_to_sint(types::I64, f);
-    e.write_var(inst.a, r);
-}
-
-fn conv_i32_i64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b);
-    let t = e.builder().ins().ireduce(types::I32, a);
-    let r = e.builder().ins().sextend(types::I64, t);
-    e.write_var(inst.a, r);
-}
-
-fn conv_i64_i32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b);
-    let t = e.builder().ins().ireduce(types::I32, a);
-    let r = e.builder().ins().uextend(types::I64, t);
     e.write_var(inst.a, r);
 }
 

@@ -201,6 +201,4 @@ skips:
   # FIXED: typechecker/bug_named_type_interface.vo - needs_unbox check in wrapper
   # FIXED: typechecker/method_set_equivalence.vo - interface parameter works
   # FIXED: typechecker/bug_ptr_embed_interface.vo - promoted method wrapper for pointer embedding
-  - file: typechecker/type_assertion.vo
-    skip: [vm, jit]
-    reason: "interface-to-interface assignment doesn't preserve reference semantics"
+  # FIXED: typechecker/type_assertion.vo - interface-to-interface assignment now preserves reference semantics

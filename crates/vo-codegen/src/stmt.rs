@@ -254,8 +254,7 @@ pub fn compile_value_to(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let expr_type = info.expr_type(expr.id);
-    if info.is_interface(target_type) && !info.is_interface(expr_type) {
+    if info.is_interface(target_type) {
         compile_iface_assign(dst, expr, target_type, ctx, func, info)
     } else {
         compile_expr_to(expr, dst, ctx, func, info)

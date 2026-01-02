@@ -469,6 +469,12 @@ pub fn type_key_to_runtime_type_simple(
     use vo_runtime::RuntimeType;
     use vo_runtime::ValueKind;
     
+    // Check if it's a Named type first (applies to all types including basic types)
+    // e.g., `type MyInt int` should have different rttid from `int`
+    if let Some(id) = ctx.get_named_type_id(type_key) {
+        return RuntimeType::Named(id);
+    }
+    
     // Use ValueKind as a simple way to identify basic types
     let vk = info.type_value_kind(type_key);
     
@@ -479,16 +485,11 @@ pub fn type_key_to_runtime_type_simple(
             RuntimeType::Basic(vk)
         }
         ValueKind::Struct | ValueKind::Array => {
-            // Check if it's a Named type first
-            if let Some(id) = ctx.get_named_type_id(type_key) {
-                RuntimeType::Named(id)
+            // Anonymous struct/array - simplified representation
+            if vk == ValueKind::Struct {
+                RuntimeType::Struct { fields: Vec::new() }
             } else {
-                // Anonymous struct/array - simplified representation
-                if vk == ValueKind::Struct {
-                    RuntimeType::Struct { fields: Vec::new() }
-                } else {
-                    RuntimeType::Array { len: 0, elem: Box::new(RuntimeType::Basic(ValueKind::Void)) }
-                }
+                RuntimeType::Array { len: 0, elem: Box::new(RuntimeType::Basic(ValueKind::Void)) }
             }
         }
         ValueKind::Pointer => {
@@ -498,18 +499,26 @@ pub fn type_key_to_runtime_type_simple(
             RuntimeType::Pointer(Box::new(elem_rt))
         }
         ValueKind::Slice => {
-            RuntimeType::Slice(Box::new(RuntimeType::Basic(ValueKind::Void)))
+            let elem_type = info.slice_elem_type(type_key);
+            let elem_rt = type_key_to_runtime_type_simple(elem_type, info, _interner, ctx);
+            RuntimeType::Slice(Box::new(elem_rt))
         }
         ValueKind::Map => {
+            let (key_type, val_type) = info.map_key_val_types(type_key);
+            let key_rt = type_key_to_runtime_type_simple(key_type, info, _interner, ctx);
+            let val_rt = type_key_to_runtime_type_simple(val_type, info, _interner, ctx);
             RuntimeType::Map {
-                key: Box::new(RuntimeType::Basic(ValueKind::Void)),
-                val: Box::new(RuntimeType::Basic(ValueKind::Void)),
+                key: Box::new(key_rt),
+                val: Box::new(val_rt),
             }
         }
         ValueKind::Channel => {
+            let elem_type = info.chan_elem_type(type_key);
+            let elem_rt = type_key_to_runtime_type_simple(elem_type, info, _interner, ctx);
+            let dir = info.chan_dir(type_key);
             RuntimeType::Chan {
-                dir: vo_runtime::ChanDir::Both,
-                elem: Box::new(RuntimeType::Basic(ValueKind::Void)),
+                dir,
+                elem: Box::new(elem_rt),
             }
         }
         ValueKind::Interface => {

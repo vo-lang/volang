@@ -148,27 +148,26 @@ pub fn exec_iface_assert(
                     true // empty interface always satisfied
                 } else {
                     // Look up RuntimeType to find named_type_id for method lookup
-                    if let Some(rt) = module.runtime_types.get(src_rttid as usize) {
-                        if let vo_runtime::RuntimeType::Named(named_type_id) = rt {
-                            let named_type = &module.named_type_metas[*named_type_id as usize];
-                            // Check each interface method: name must exist AND signature must match
-                            iface_meta.methods.iter().all(|iface_method| {
-                                if let Some(concrete_method) = named_type.methods.get(&iface_method.name) {
-                                    // Compare signatures using InterfaceMethod::matches_signature
-                                    let iface_method_wrapper = vo_runtime::InterfaceMethod::new(
-                                        vo_runtime::symbol::Symbol::DUMMY,
-                                        iface_method.signature.clone(),
-                                    );
-                                    iface_method_wrapper.matches_signature(&concrete_method.signature)
-                                } else {
-                                    false // method not found
-                                }
-                            })
-                        } else {
-                            false // non-named types can't implement interfaces with methods
-                        }
+                    // Use extract_named_type_id to handle Pointer(Named(id)) case
+                    if let Some(named_type_id) = module.runtime_types.get(src_rttid as usize)
+                        .and_then(|rt| extract_named_type_id(rt))
+                    {
+                        let named_type = &module.named_type_metas[named_type_id as usize];
+                        // Check each interface method: name must exist AND signature must match
+                        iface_meta.methods.iter().all(|iface_method| {
+                            if let Some(concrete_method) = named_type.methods.get(&iface_method.name) {
+                                // Compare signatures using InterfaceMethod::matches_signature
+                                let iface_method_wrapper = vo_runtime::InterfaceMethod::new(
+                                    vo_runtime::symbol::Symbol::DUMMY,
+                                    iface_method.signature.clone(),
+                                );
+                                iface_method_wrapper.matches_signature(&concrete_method.signature)
+                            } else {
+                                false // method not found
+                            }
+                        })
                     } else {
-                        false
+                        false // non-named types can't implement interfaces with methods
                     }
                 }
             }
@@ -180,12 +179,10 @@ pub fn exec_iface_assert(
     let write_success = |stack: &mut [u64], itab_cache: &mut ItabCache| {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
-            // Need to get named_type_id from runtime_types (rttid != named_type_id)
-            let named_type_id = if let Some(vo_runtime::RuntimeType::Named(id)) = module.runtime_types.get(src_rttid as usize) {
-                *id
-            } else {
-                0 // Should not happen for valid interface assertion
-            };
+            // Use extract_named_type_id to handle Pointer(Named(id)) case
+            let named_type_id = module.runtime_types.get(src_rttid as usize)
+                .and_then(|rt| extract_named_type_id(rt))
+                .unwrap_or(0);
             let new_itab_id = itab_cache.get_or_create(
                 named_type_id,
                 target_id,

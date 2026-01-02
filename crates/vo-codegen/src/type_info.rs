@@ -464,6 +464,20 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
+    /// Get channel direction
+    pub fn chan_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Chan(c) = &self.tc_objs().types[underlying] {
+            match c.dir() {
+                vo_analysis::typ::ChanDir::SendRecv => vo_runtime::ChanDir::Both,
+                vo_analysis::typ::ChanDir::SendOnly => vo_runtime::ChanDir::Send,
+                vo_analysis::typ::ChanDir::RecvOnly => vo_runtime::ChanDir::Recv,
+            }
+        } else {
+            panic!("chan_dir: not a channel type")
+        }
+    }
+
     /// Get array length
     pub fn array_len(&self, type_key: TypeKey) -> u64 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
