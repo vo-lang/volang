@@ -1227,19 +1227,31 @@ fn compile_defer_method_call(
     let recv_type = info.expr_type(sel.expr.id);
     let method_name = info.project.interner.resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+    let method_sym = sel.sel.symbol;
     
-    let base_type = if info.is_pointer(recv_type) { info.pointer_base(recv_type) } else { recv_type };
     let selection = info.get_selection(call_expr.func.id);
-    let resolution = crate::expr::resolve_method(base_type, method_name, selection, ctx, info)?;
+    let is_interface_recv = info.is_interface(recv_type);
     
-    let actual_recv_type = resolution.defining_type.unwrap_or(base_type);
-    let is_promoted = resolution.defining_type.is_some();
+    let call_info = crate::embed::resolve_method_call(
+        recv_type, method_name, method_sym, selection, is_interface_recv, ctx, &info.project.tc_objs
+    ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
+    
+    // Extract func_id from Static dispatch (defer only works with static calls)
+    let (func_id, expects_ptr_recv) = match call_info.dispatch {
+        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
+        _ => return Err(CodegenError::UnsupportedExpr("defer on interface call not supported".to_string())),
+    };
+    
+    let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
+    let actual_recv_type = if call_info.embed_path.steps.is_empty() { base_type } else { call_info.embed_path.final_type };
+    let is_promoted = !call_info.embed_path.steps.is_empty();
+    
     let recv_storage = match &sel.expr.kind {
         ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|l| l.storage),
         _ => None,
     };
     
-    let recv_slots = if resolution.expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+    let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
     let other_arg_slots: u16 = call_expr.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
     let total_arg_slots = recv_slots + other_arg_slots;
     let args_start = alloc_args(func, total_arg_slots);
@@ -1247,7 +1259,7 @@ fn compile_defer_method_call(
     let embed = crate::expr::EmbedPath::from_selection(selection, is_promoted, base_type, info);
     crate::expr::emit_receiver(
         &sel.expr, args_start, recv_type, recv_storage,
-        resolution.expects_ptr_recv, actual_recv_type, embed,
+        expects_ptr_recv, actual_recv_type, embed,
         ctx, func, info
     )?;
     
@@ -1258,7 +1270,7 @@ fn compile_defer_method_call(
         offset += slots;
     }
     
-    emit_defer_func(opcode, resolution.func_idx, args_start, total_arg_slots, func);
+    emit_defer_func(opcode, func_id, args_start, total_arg_slots, func);
     Ok(())
 }
 

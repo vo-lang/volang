@@ -8,7 +8,7 @@
 //! The key insight is that all method calls through embedding share the same
 //! path analysis logic, whether at compile time or for runtime dispatch.
 
-use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
+use vo_analysis::objects::{TCObjects, TypeKey};
 use vo_analysis::check::type_info as layout;
 use vo_analysis::typ::{self, Type};
 
@@ -28,12 +28,8 @@ pub struct EmbedPathInfo {
 /// A single step in an embedding path.
 #[derive(Debug, Clone, Copy)]
 pub struct EmbedStep {
-    /// Field index at this level
-    pub field_index: usize,
     /// Byte offset of this field within its parent struct
     pub field_offset: u16,
-    /// Type of this field
-    pub field_type: TypeKey,
     /// True if this field is a pointer type (*T)
     pub is_pointer: bool,
     /// True if this field is an interface type
@@ -49,17 +45,6 @@ pub struct EmbeddedIfaceInfo {
     pub iface_type: TypeKey,
 }
 
-impl EmbedPathInfo {
-    /// Returns true if path contains any pointer embeddings.
-    pub fn has_pointer_embed(&self) -> bool {
-        self.steps.iter().any(|s| s.is_pointer)
-    }
-    
-    /// Returns true if path ends at an embedded interface.
-    pub fn ends_at_interface(&self) -> bool {
-        self.embedded_iface.is_some()
-    }
-}
 
 /// Analyze an embedding path from indices (as returned by Selection or lookup).
 ///
@@ -102,9 +87,7 @@ pub fn analyze_embed_path(
         let is_interface = layout::is_interface(field_type, tc_objs);
         
         steps.push(EmbedStep {
-            field_index: idx,
             field_offset,
-            field_type,
             is_pointer,
             is_interface,
         });
@@ -141,29 +124,6 @@ pub fn analyze_embed_path(
         final_type: current_type,
         embedded_iface,
     }
-}
-
-/// Check if an ObjKey refers to an interface method declaration (no body).
-/// Interface method declarations are not registered in objkey_to_iface_func.
-pub fn is_interface_method_decl(obj_key: ObjKey, tc_objs: &TCObjects) -> bool {
-    let obj = &tc_objs.lobjs[obj_key];
-    if !obj.entity_type().is_func() {
-        return false;
-    }
-    
-    // Interface method declarations have a signature with no body
-    // We can check if the method's receiver type is an interface
-    if let Some(method_type) = obj.typ() {
-        if let Some(sig) = tc_objs.types[method_type].try_as_signature() {
-            if let Some(recv_obj) = *sig.recv() {
-                if let Some(recv_type) = tc_objs.lobjs[recv_obj].typ() {
-                    return layout::is_interface(recv_type, tc_objs);
-                }
-            }
-        }
-    }
-    
-    false
 }
 
 // =============================================================================
