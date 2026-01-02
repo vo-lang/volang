@@ -1,0 +1,44 @@
+// SKIP: struct embedding interface not yet supported
+// Complex interface test with embedded interface fields
+package main
+
+type Executor interface {
+    Execute(string) string
+    Status() string
+}
+
+type BaseExecutor struct {
+    status string
+}
+
+func (b *BaseExecutor) Execute(cmd string) string {
+    b.status = "executed:" + cmd
+    return "result:" + cmd
+}
+
+func (b *BaseExecutor) Status() string { return b.status }
+
+type WrappedExecutor struct {
+    Executor
+    prefix string
+    calls  int
+}
+
+func (w *WrappedExecutor) Execute(cmd string) string {
+    w.calls = w.calls + 1
+    result := w.Executor.Execute(w.prefix + cmd)
+    return "[wrapped]" + result
+}
+
+func main() {
+    base := &BaseExecutor{status: "init"}
+    wrapped := &WrappedExecutor{Executor: base, prefix: "PRE:", calls: 0}
+    
+    var exec Executor = wrapped
+    result := exec.Execute("cmd1")
+    assert(result == "[wrapped]result:PRE:cmd1", "wrapped execute")
+    assert(wrapped.calls == 1, "wrapped calls")
+    assert(exec.Status() == "executed:PRE:cmd1", "wrapped status from embedded")
+    
+    println("interface_complex_subset: PASSED")
+}

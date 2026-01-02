@@ -3,6 +3,7 @@
 //! This crate compiles type-checked AST to VM bytecode.
 
 mod context;
+mod embed;
 mod error;
 mod expr;
 mod func;

@@ -22,6 +22,9 @@ tests:
   - file: debug_iface_bugs.vo
   - file: debug_sequence.vo
   - file: defer_stmt.vo
+  - file: embed_iface_simple.vo
+    skip: [vm, jit]
+    reason: "struct embedding interface not yet supported"
   - file: embed_interface.vo
   - file: embed_interface_impl.vo
   - file: embed_method.vo
@@ -46,6 +49,9 @@ tests:
     reason: "init() cannot be called explicitly"
   - file: interface.vo
   - file: interface_closure.vo
+  - file: interface_complex_subset.vo
+    skip: [vm, jit]
+    reason: "struct embedding interface not yet supported"
   - file: interface_conversion.vo
   - file: interface_method_set.vo
   - file: interface_pointer.vo

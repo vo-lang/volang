@@ -329,35 +329,43 @@ impl CodegenContext {
         let methods: Vec<u32> = method_names
             .iter()
             .map(|name| {
-                // Use lookup_field_or_method to find method (handles promoted methods)
                 match vo_analysis::lookup::lookup_field_or_method(type_key, true, pkg, name, tc_objs) {
                     vo_analysis::lookup::LookupResult::Entry(obj_key, indices, _) => {
-                        let base_iface_func = self.get_iface_func_by_objkey(obj_key)
-                            .unwrap_or_else(|| panic!(
-                                "method '{}' found but no iface_func_id registered for ObjKey {:?}",
-                                name, obj_key
-                            ));
+                        // Use unified embed path analysis
+                        let path_info = crate::embed::analyze_embed_path(type_key, &indices, tc_objs);
                         
-                        // Check if this is a promoted method (indices has embedding path)
-                        // indices = [field_idx, ..., method_idx], len > 1 means promoted
-                        if indices.len() > 1 {
-                            // Get original func_id (not iface wrapper) for direct call
-                            let original_func_id = self.get_func_by_objkey(obj_key)
-                                .unwrap_or(base_iface_func); // fallback to iface_func if not found
-                            
-                            // Generate a wrapper that navigates through embedded fields
-                            // and calls original method directly (avoiding double wrapper)
-                            crate::wrapper::generate_promoted_wrapper(
+                        if let Some(embed_iface) = path_info.embedded_iface {
+                            // Method comes from embedded interface - generate CallIface wrapper
+                            crate::wrapper::generate_embedded_iface_wrapper(
                                 self,
                                 type_key,
-                                &indices[..indices.len()-1], // embedding path (exclude method index)
-                                original_func_id,
-                                base_iface_func,
+                                embed_iface.offset,
+                                embed_iface.iface_type,
                                 name,
+                                obj_key,
                                 tc_objs,
                             )
+                        } else if let Some(base_iface_func) = self.get_iface_func_by_objkey(obj_key) {
+                            // Normal concrete method
+                            if !path_info.steps.is_empty() {
+                                // Promoted method through struct embedding
+                                let original_func_id = self.get_func_by_objkey(obj_key)
+                                    .unwrap_or(base_iface_func);
+                                crate::wrapper::generate_promoted_wrapper(
+                                    self,
+                                    type_key,
+                                    &indices[..indices.len()-1],
+                                    original_func_id,
+                                    base_iface_func,
+                                    name,
+                                    tc_objs,
+                                )
+                            } else {
+                                // Direct method, no embedding
+                                base_iface_func
+                            }
                         } else {
-                            base_iface_func
+                            panic!("method '{}' has no registered func_id and is not from embedded interface", name)
                         }
                     }
                     _ => panic!("method '{}' not found in type {:?} for itab building", name, type_key),

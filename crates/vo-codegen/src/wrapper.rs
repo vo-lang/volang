@@ -256,3 +256,100 @@ fn emit_call(builder: &mut FuncBuilder, func_id: u32, args_start: u16, arg_slots
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
     builder.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 }
+
+/// Generate wrapper for methods coming from embedded interface fields.
+/// 
+/// When a struct embeds an interface:
+/// ```
+/// type Outer struct { Inner }  // Inner is interface type
+/// ```
+/// calling `outer.Foo()` through interface dispatch needs a wrapper that:
+/// 1. Receives GcRef to Outer
+/// 2. Reads the embedded interface (2 slots: itab, data)
+/// 3. Calls the method on that interface via CallIface
+pub fn generate_embedded_iface_wrapper(
+    ctx: &mut CodegenContext,
+    _outer_type: TypeKey,
+    embed_offset: u16,
+    iface_type: TypeKey,
+    method_name: &str,
+    method_obj: vo_analysis::objects::ObjKey,
+    tc_objs: &vo_analysis::objects::TCObjects,
+) -> u32 {
+    let offset = embed_offset;
+    
+    // Get interface meta to find method index
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, tc_objs);
+    let iface_meta = &ctx.module().interface_metas[iface_meta_id as usize];
+    let method_idx = iface_meta.method_names.iter()
+        .position(|n| n == method_name)
+        .expect("method must exist in embedded interface");
+    
+    // Get method signature from the interface method obj
+    let method_type = tc_objs.lobjs[method_obj].typ()
+        .expect("interface method must have type");
+    let sig = tc_objs.types[method_type].try_as_signature()
+        .expect("method type must be signature");
+    
+    // Compute param and return slots
+    let params_tuple = sig.params();
+    let results_tuple = sig.results();
+    let param_slots: u16 = tc_objs.types[params_tuple].try_as_tuple()
+        .map(|t| t.vars().iter()
+            .map(|v| {
+                let typ = tc_objs.lobjs[*v].typ().unwrap();
+                vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
+            })
+            .sum())
+        .unwrap_or(0);
+    let ret_slots: u16 = tc_objs.types[results_tuple].try_as_tuple()
+        .map(|t| t.vars().iter()
+            .map(|v| {
+                let typ = tc_objs.lobjs[*v].typ().unwrap();
+                vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
+            })
+            .sum())
+        .unwrap_or(0);
+    
+    // Build wrapper
+    let wrapper_name = format!("{}$embed_iface", method_name);
+    let mut builder = FuncBuilder::new(&wrapper_name);
+    
+    // Receiver: GcRef to outer struct
+    builder.set_recv_slots(1);
+    let outer_gcref = builder.define_param(Symbol::DUMMY, 1, &[SlotType::GcRef]);
+    
+    // Forward parameters
+    let first_param_slot = if param_slots > 0 {
+        let slot = builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
+        for _ in 1..param_slots {
+            builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
+        }
+        Some(slot)
+    } else {
+        None
+    };
+    
+    // Load embedded interface (2 slots) from outer struct
+    let iface_slot = builder.alloc_temp(2);
+    builder.emit_ptr_get(iface_slot, outer_gcref, offset, 2);
+    
+    // Allocate args for CallIface (params only, receiver is separate)
+    let args_start = builder.alloc_temp(param_slots.max(ret_slots).max(1));
+    
+    // Copy forwarded params
+    if let Some(first_param) = first_param_slot {
+        builder.emit_copy(args_start, first_param, param_slots);
+    }
+    
+    // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
+    let c = crate::type_info::encode_call_args(param_slots, ret_slots);
+    builder.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
+    
+    // Return
+    builder.set_ret_slots(ret_slots);
+    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    
+    let func_def = builder.build();
+    ctx.add_function(func_def)
+}

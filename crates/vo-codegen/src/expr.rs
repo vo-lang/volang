@@ -1262,6 +1262,91 @@ fn compile_call(
 }
 
 // =============================================================================
+// Embedded Interface Method Call
+// =============================================================================
+
+/// Compile method call through embedded interface field.
+/// 
+/// When `outer.Method()` where Method comes from embedded interface:
+/// 1. Load the embedded interface value (2 slots)
+/// 2. Call via CallIface
+fn compile_embedded_iface_call(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    sel: &Selection,
+    recv_type: TypeKey,
+    method_name: &str,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    // Use unified embed path analysis
+    let path_info = crate::embed::analyze_embed_path(recv_type, sel.indices(), &info.project.tc_objs);
+    
+    let embed_iface = path_info.embedded_iface
+        .ok_or_else(|| CodegenError::Internal("expected embedded interface".to_string()))?;
+    
+    // Get method index in the embedded interface
+    let method_idx = ctx.get_interface_method_index(embed_iface.iface_type, method_name, &info.project.tc_objs);
+    
+    // Compile receiver expression
+    let sel_expr = if let ExprKind::Selector(s) = &call.func.kind {
+        &s.expr
+    } else {
+        return Err(CodegenError::Internal("expected selector expr".to_string()));
+    };
+    let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
+    
+    // Load embedded interface (2 slots) from struct
+    let iface_slot = func.alloc_temp(2);
+    func.emit_ptr_get(iface_slot, recv_reg, embed_iface.offset, 2);
+    
+    // Get method signature for arg/ret slots
+    let method_type = info.expr_type(call.func.id);
+    let param_types = info.func_param_types(method_type);
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+    
+    // Compile arguments
+    let mut arg_slots = 0u16;
+    for (i, arg) in call.args.iter().enumerate() {
+        let param_type = param_types.get(i).copied();
+        let slots = if let Some(pt) = param_type {
+            info.type_slot_count(pt)
+        } else {
+            info.expr_slots(arg.id)
+        };
+        arg_slots += slots;
+    }
+    
+    let args_start = func.alloc_temp(arg_slots.max(ret_slots).max(1));
+    let mut arg_offset = 0u16;
+    for (i, arg) in call.args.iter().enumerate() {
+        let param_type = param_types.get(i).copied();
+        if let Some(pt) = param_type {
+            let slots = info.type_slot_count(pt);
+            crate::stmt::compile_value_to(arg, args_start + arg_offset, pt, ctx, func, info)?;
+            arg_offset += slots;
+        } else {
+            let slots = info.expr_slots(arg.id);
+            compile_expr_to(arg, args_start + arg_offset, ctx, func, info)?;
+            arg_offset += slots;
+        }
+    }
+    
+    // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
+    let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
+    func.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
+    
+    // Copy result to dst
+    if ret_slots > 0 && dst != args_start {
+        func.emit_copy(dst, args_start, ret_slots);
+    }
+    
+    Ok(())
+}
+
+// =============================================================================
 // Method Call - Helper Functions
 // =============================================================================
 
@@ -1579,7 +1664,20 @@ fn compile_concrete_method(
     
     // Resolve method
     let selection = info.get_selection(call.func.id);
-    let resolution = resolve_method(base_type, method_name, selection, ctx, info)?;
+    let resolution = match resolve_method(base_type, method_name, selection, ctx, info) {
+        Ok(r) => r,
+        Err(_) => {
+            // Method not found as concrete method - check if it's from embedded interface
+            if let Some(sel) = selection {
+                if !sel.indices().is_empty() {
+                    return compile_embedded_iface_call(
+                        expr, call, sel, recv_type, method_name, dst, ctx, func, info
+                    );
+                }
+            }
+            return Err(CodegenError::UnsupportedExpr(format!("method {} not found on type", method_name)));
+        }
+    };
     let actual_recv_type = resolution.defining_type.unwrap_or(base_type);
     let is_promoted = resolution.defining_type.is_some();
     
