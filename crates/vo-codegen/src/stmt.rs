@@ -1256,10 +1256,11 @@ fn compile_defer_method_call(
     let total_arg_slots = recv_slots + other_arg_slots;
     let args_start = alloc_args(func, total_arg_slots);
     
-    let embed = crate::expr::EmbedPath::from_selection(selection, is_promoted, base_type, info);
+    let embed_offset = call_info.embed_path.total_offset;
+    let embed_is_pointer = call_info.embed_path.steps.iter().any(|s| s.is_pointer);
     crate::expr::emit_receiver(
         &sel.expr, args_start, recv_type, recv_storage,
-        expects_ptr_recv, actual_recv_type, embed,
+        expects_ptr_recv, actual_recv_type, embed_offset, embed_is_pointer,
         ctx, func, info
     )?;
     
