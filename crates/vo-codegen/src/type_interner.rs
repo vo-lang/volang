@@ -19,17 +19,31 @@ pub struct TypeInterner {
 }
 
 impl TypeInterner {
-    /// Creates a new empty type interner.
+    /// Creates a new type interner with all Basic types pre-registered.
+    /// rttid for Basic types = ValueKind value.
     pub fn new() -> Self {
-        Self {
+        let mut interner = Self {
             cache: HashMap::new(),
             types: Vec::new(),
+        };
+        // Pre-register all Basic types so rttid matches ValueKind value
+        for &vk in &ValueKind::ALL {
+            let rt = RuntimeType::Basic(vk);
+            let id = vk as u32;
+            interner.cache.insert(rt.clone(), id);
+            // Ensure types vec is large enough
+            while interner.types.len() <= id as usize {
+                interner.types.push(RuntimeType::Basic(ValueKind::Void));
+            }
+            interner.types[id as usize] = rt;
         }
+        interner
     }
-
+    
     /// Interns a runtime type, returning its rttid.
     ///
-    /// If the type was already interned, returns the existing rttid.
+    /// Basic types are pre-registered, so this just returns the cached id.
+    /// User-defined types get new ids starting from 24.
     pub fn intern(&mut self, rt: RuntimeType) -> u32 {
         if let Some(&id) = self.cache.get(&rt) {
             return id;

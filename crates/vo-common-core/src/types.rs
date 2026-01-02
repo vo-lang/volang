@@ -80,20 +80,30 @@ pub enum ValueKind {
     FuncPtr = 14,
 
     // === Compound Value Types (multi-slot, may contain GC refs) ===
-    Array = 16,
-    Struct = 21,
-    Interface = 23,
+    Array = 15,
+    Struct = 16,
+    Interface = 17,
 
     // === Reference Types (1 slot GcRef, heap allocated) ===
-    String = 15,
-    Slice = 17,
-    Map = 18,
-    Channel = 19,
-    Closure = 20,
-    Pointer = 22,
+    String = 18,
+    Slice = 19,
+    Map = 20,
+    Channel = 21,
+    Closure = 22,
+    Pointer = 23,
 }
 
 impl ValueKind {
+    /// All ValueKind variants for pre-registering RuntimeType::Basic in TypeInterner.
+    /// When adding a new ValueKind, add it here too!
+    pub const ALL: [ValueKind; 24] = [
+        Self::Void, Self::Bool, Self::Int, Self::Int8, Self::Int16, Self::Int32, Self::Int64,
+        Self::Uint, Self::Uint8, Self::Uint16, Self::Uint32, Self::Uint64,
+        Self::Float32, Self::Float64, Self::FuncPtr, Self::String,
+        Self::Array, Self::Slice, Self::Map, Self::Channel, Self::Closure,
+        Self::Struct, Self::Pointer, Self::Interface,
+    ];
+    
     #[inline]
     pub fn from_u8(v: u8) -> Self {
         Self::try_from(v).unwrap_or(ValueKind::Void)
