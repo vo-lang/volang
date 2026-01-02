@@ -1471,26 +1471,20 @@ fn compile_interface_method(
 ) -> Result<(), CodegenError> {
     let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
     
-    // Compile arguments
-    let arg_slots: u16 = call.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
-    let args_start = func.alloc_temp(arg_slots.max(1)); // At least 1 slot for result
-    let mut offset = 0u16;
-    for arg in &call.args {
-        let slots = info.expr_slots(arg.id);
-        compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-        offset += slots;
-    }
-    
+    // Get method signature
+    let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
+    let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
     let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+    let args_start = func.alloc_temp(arg_slots.max(ret_slots).max(1));
     
-    // Use ctx.get_interface_method_index for consistent ordering with itab
+    // Compile arguments
+    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+    
+    // CallIface
     let method_idx = ctx.get_interface_method_index(recv_type, method_name, &info.project.tc_objs);
-    
-    // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
     let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
     func.emit_with_flags(Opcode::CallIface, method_idx as u8, recv_reg, args_start, c);
     
-    // Copy result to dst if needed
     if ret_slots > 0 && dst != args_start {
         func.emit_copy(dst, args_start, ret_slots);
     }
@@ -1516,30 +1510,30 @@ fn compile_concrete_method(
         recv_type
     };
     
-    // Resolve method (handles direct and promoted methods)
+    // Resolve method
     let selection = info.get_selection(call.func.id);
     let resolution = resolve_method(base_type, method_name, selection, ctx, info)?;
-    
-    // Actual receiver type (for promoted methods, this is the embedded type)
     let actual_recv_type = resolution.defining_type.unwrap_or(base_type);
     let is_promoted = resolution.defining_type.is_some();
     
-    // Get receiver storage for optimization - storage already computed in LocalVar
+    // Get method signature
+    let method_type = info.expr_type(call.func.id);
+    let is_variadic = info.is_variadic(method_type);
+    let param_types = info.func_param_types(method_type);
+    
+    // Calculate slots
+    let recv_slots = if resolution.expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+    let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let total_slots = recv_slots + arg_slots;
+    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
+    let args_start = func.alloc_temp(total_slots.max(ret_slots));
+    
+    // Emit receiver
     let recv_storage = if let ExprKind::Ident(ident) = &sel.expr.kind {
         func.lookup_local(ident.symbol).map(|local| local.storage)
     } else {
         None
     };
-    
-    // Calculate slots
-    let recv_slots = if resolution.expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
-    let other_args_slots: u16 = call.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
-    let total_arg_slots = recv_slots + other_args_slots;
-    let ret_slots = info.type_slot_count(info.expr_type(expr.id));
-    // Allocate max(arg_slots, ret_slots) to ensure space for return values
-    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
-    
-    // Emit receiver
     let embed = EmbedPath::from_selection(selection, is_promoted, base_type, info);
     emit_receiver(
         &sel.expr, args_start, recv_type, recv_storage,
@@ -1547,23 +1541,17 @@ fn compile_concrete_method(
         ctx, func, info
     )?;
     
-    // Emit other arguments
-    let mut arg_offset = recv_slots;
-    for arg in &call.args {
-        compile_expr_to(arg, args_start + arg_offset, ctx, func, info)?;
-        arg_offset += info.expr_slots(arg.id);
-    }
+    // Compile arguments (with interface conversion + variadic packing)
+    compile_method_args(call, &param_types, is_variadic, args_start + recv_slots, ctx, func, info)?;
     
-    // Emit Call
-    let c = crate::type_info::encode_call_args(arg_offset, ret_slots);
+    // Call
+    let c = crate::type_info::encode_call_args(total_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(resolution.func_idx);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
     
-    // Copy result
     if ret_slots > 0 && dst != args_start {
         func.emit_copy(dst, args_start, ret_slots);
     }
-    
     Ok(())
 }
 
@@ -2155,6 +2143,153 @@ fn compile_const_value(
         }
     }
     Ok(())
+}
+
+/// Compile method arguments with variadic packing and interface conversion.
+/// Returns the total slots used for arguments.
+fn compile_method_args(
+    call: &vo_syntax::ast::CallExpr,
+    param_types: &[TypeKey],
+    is_variadic: bool,
+    args_start: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let num_fixed_params = if is_variadic && !param_types.is_empty() {
+        param_types.len() - 1
+    } else {
+        param_types.len()
+    };
+    
+    let mut offset = 0u16;
+    if is_variadic && !call.spread {
+        // Emit fixed arguments with interface conversion
+        for (i, arg) in call.args.iter().take(num_fixed_params).enumerate() {
+            let arg_type = info.expr_type(arg.id);
+            let param_type = param_types[i];
+            let param_slots = info.type_slot_count(param_type);
+            
+            if info.is_interface(param_type) && !info.is_interface(arg_type) {
+                crate::stmt::compile_iface_assign(args_start + offset, arg, param_type, ctx, func, info)?;
+            } else {
+                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+            }
+            offset += param_slots;
+        }
+        // Pack variadic arguments into slice
+        let variadic_args: Vec<&vo_syntax::ast::Expr> = call.args.iter().skip(num_fixed_params).collect();
+        let slice_type = param_types.last().copied().unwrap();
+        let elem_type = info.slice_elem_type(slice_type);
+        let slice_reg = pack_variadic_args(&variadic_args, elem_type, ctx, func, info)?;
+        func.emit_copy(args_start + offset, slice_reg, 1);
+        offset += 1;
+    } else {
+        // Non-variadic or spread: emit all arguments with interface conversion
+        for (i, arg) in call.args.iter().enumerate() {
+            let arg_type = info.expr_type(arg.id);
+            let param_type = param_types.get(i).copied();
+            
+            if let Some(pt) = param_type {
+                let param_slots = info.type_slot_count(pt);
+                if info.is_interface(pt) && !info.is_interface(arg_type) {
+                    crate::stmt::compile_iface_assign(args_start + offset, arg, pt, ctx, func, info)?;
+                } else {
+                    compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+                }
+                offset += param_slots;
+            } else {
+                let slots = info.expr_slots(arg.id);
+                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+                offset += slots;
+            }
+        }
+    }
+    Ok(offset)
+}
+
+/// Calculate arg slots for method call.
+fn calc_method_arg_slots(
+    call: &vo_syntax::ast::CallExpr,
+    param_types: &[TypeKey],
+    is_variadic: bool,
+    info: &TypeInfoWrapper,
+) -> u16 {
+    let num_fixed_params = if is_variadic && !param_types.is_empty() {
+        param_types.len() - 1
+    } else {
+        param_types.len()
+    };
+    
+    if is_variadic && !call.spread {
+        let fixed_slots: u16 = param_types.iter().take(num_fixed_params)
+            .map(|&t| info.type_slot_count(t)).sum();
+        fixed_slots + 1  // +1 for the packed slice
+    } else {
+        param_types.iter().map(|&t| info.type_slot_count(t)).sum()
+    }
+}
+
+/// Pack variadic arguments into a slice.
+/// For `f(a, b, c)` where f is variadic, this creates `[]T{a, b, c}` and returns its register.
+/// `variadic_args` are the arguments that should be packed (starting from first variadic arg).
+/// `elem_type` is the element type of the variadic slice.
+/// Returns the register containing the slice (1 slot).
+fn pack_variadic_args(
+    variadic_args: &[&vo_syntax::ast::Expr],
+    elem_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let len = variadic_args.len();
+    let elem_slots = info.type_slot_count(elem_type);
+    let elem_bytes = (elem_slots as usize) * 8;
+    let elem_slot_types = info.type_slot_types(elem_type);
+    let elem_vk = info.type_value_kind(elem_type);
+    
+    // Get element meta
+    let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
+    let meta_reg = func.alloc_temp(1);
+    func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
+    
+    // Create slice
+    let dst = func.alloc_temp(1);
+    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+    let num_regs = if flags == 0 { 3 } else { 2 };
+    let len_cap_reg = func.alloc_temp(num_regs);
+    let (b, c) = crate::type_info::encode_i32(len as i32);
+    func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
+    func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
+    if flags == 0 {
+        let eb_idx = ctx.const_int(elem_bytes as i64);
+        func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
+    }
+    func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
+    
+    // Set each element
+    for (i, elem) in variadic_args.iter().enumerate() {
+        let val_reg = if info.is_interface(elem_type) {
+            let iface_reg = func.alloc_temp(elem_slots);
+            crate::stmt::compile_iface_assign(iface_reg, elem, elem_type, ctx, func, info)?;
+            iface_reg
+        } else {
+            compile_expr(elem, ctx, func, info)?
+        };
+        if flags == 0 {
+            let idx_and_eb = func.alloc_temp(2);
+            func.emit_op(Opcode::LoadInt, idx_and_eb, i as u16, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            func.emit_op(Opcode::LoadConst, idx_and_eb + 1, eb_idx, 0);
+            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_and_eb, val_reg);
+        } else {
+            let idx_reg = func.alloc_temp(1);
+            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_reg, val_reg);
+        }
+    }
+    
+    Ok(dst)
 }
 
 /// Match `x == nil` or `x != nil` patterns for optimization.

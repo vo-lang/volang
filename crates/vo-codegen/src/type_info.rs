@@ -497,6 +497,25 @@ impl<'a> TypeInfoWrapper<'a> {
         panic!("get_interface_method_index: method {} not found", method_name)
     }
 
+    /// Get parameter types and variadic flag for an interface method
+    pub fn get_interface_method_signature(&self, iface_type: TypeKey, method_name: &str) -> (Vec<TypeKey>, bool) {
+        let underlying = typ::underlying_type(iface_type, self.tc_objs());
+        if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
+            let all_methods = iface.all_methods();
+            let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+            for &method in methods {
+                if self.obj_name(method) == method_name {
+                    let method_type = self.tc_objs().lobjs[method].typ()
+                        .expect("interface method must have type");
+                    let param_types = self.func_param_types(method_type);
+                    let is_variadic = self.is_variadic(method_type);
+                    return (param_types, is_variadic);
+                }
+            }
+        }
+        panic!("get_interface_method_signature: method {} not found", method_name)
+    }
+
     /// Get channel element slot count
     pub fn chan_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
@@ -539,6 +558,14 @@ impl<'a> TypeInfoWrapper<'a> {
         } else {
             Vec::new()
         }
+    }
+
+    /// Get variadic element type from the last parameter of a variadic function.
+    /// The last parameter is a slice type; returns the element type.
+    pub fn variadic_elem_type(&self, func_type: TypeKey) -> TypeKey {
+        let param_types = self.func_param_types(func_type);
+        let last_param = param_types.last().expect("variadic function must have at least one param");
+        self.slice_elem_type(*last_param)
     }
 
     /// Check if type is an integer type
