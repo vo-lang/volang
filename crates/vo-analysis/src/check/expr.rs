@@ -1236,9 +1236,9 @@ impl Checker {
                                     }
                                 }
                             }
-                            // Check value
+                            // Check value (with hint for nested composite literals)
                             let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value);
+                            self.expr_with_hint(&mut val, &elem.value, Some(elem_type));
                             if !val.invalid() {
                                 self.assignment(&mut val, Some(elem_type), "map literal value");
                             }

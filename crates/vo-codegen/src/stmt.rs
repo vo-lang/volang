@@ -497,8 +497,36 @@ fn compile_stmt_with_label(
                     }
                     offset += elem_slots;
                 }
+            } else if assign.op == AssignOp::Assign && assign.lhs.len() > 1 {
+                // Parallel assignment: a, b = b, a
+                // Must evaluate all RHS first, then assign to LHS to avoid interference
+                use crate::lvalue::{resolve_lvalue, emit_lvalue_store, lvalue_slots};
+                
+                // 1. Evaluate all RHS to temporaries
+                let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
+                for rhs in &assign.rhs {
+                    let rhs_slots = info.expr_slots(rhs.id);
+                    let tmp = func.alloc_temp(rhs_slots);
+                    compile_expr_to(rhs, tmp, ctx, func, info)?;
+                    rhs_temps.push((tmp, rhs_slots, info.expr_type(rhs.id)));
+                }
+                
+                // 2. Assign temporaries to LHS using LValue system
+                for (lhs, (tmp, _slots, _rhs_type)) in assign.lhs.iter().zip(rhs_temps.iter()) {
+                    // Skip blank identifier
+                    if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
+                        if info.project.interner.resolve(ident.symbol) == Some("_") {
+                            continue;
+                        }
+                    }
+                    
+                    let lhs_type = info.expr_type(lhs.id);
+                    let lv = resolve_lvalue(lhs, ctx, func, info)?;
+                    let slot_types = info.type_slot_types(lhs_type);
+                    emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types);
+                }
             } else {
-                // Normal case: N lhs = N rhs
+                // Single assignment or compound assignment
                 for (lhs, rhs) in assign.lhs.iter().zip(assign.rhs.iter()) {
                     if assign.op == AssignOp::Assign {
                         compile_assign(lhs, rhs, ctx, func, info)?;
@@ -1952,4 +1980,3 @@ fn compile_escaped_array_init(
     
     Ok(())
 }
-

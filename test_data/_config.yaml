@@ -139,8 +139,6 @@ tests:
 
   # Typechecker tests - complex test cases with multiple issues (parser/compiler bugs fixed, test cases need review)
   - file: typechecker/method_sig_complex_params.vo
-    skip: [vm, jit]
-    reason: "test case has multiple issues beyond the fixed bugs - needs review"
   - file: typechecker/method_sig_func_types.vo
     skip: [vm, jit]
     reason: "test case has multiple issues beyond the fixed bugs - needs review"

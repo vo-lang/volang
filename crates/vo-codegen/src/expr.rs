@@ -532,15 +532,33 @@ fn compile_pkg_qualified_name(
 
 fn compile_index(
     expr: &Expr,
-    _idx: &vo_syntax::ast::IndexExpr,
+    idx: &vo_syntax::ast::IndexExpr,
     dst: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{resolve_lvalue, emit_lvalue_load};
+    let container_type = info.expr_type(idx.expr.id);
+    let expr_type = info.expr_type(expr.id);
     
-    // Use LValue abstraction - resolves container kind and compiles index
+    // Check for map comma-ok: v, ok := m[k]
+    // If expr type is tuple and container is map, this is comma-ok
+    if info.is_map(container_type) && info.is_tuple(expr_type) {
+        let (key_slots, val_slots) = info.map_key_val_slots(container_type);
+        let map_reg = compile_expr(&idx.expr, ctx, func, info)?;
+        let key_reg = compile_expr(&idx.index, ctx, func, info)?;
+        
+        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, true);
+        let meta_reg = func.alloc_temp(1 + key_slots);
+        let meta_idx = ctx.const_int(meta as i64);
+        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        func.emit_copy(meta_reg + 1, key_reg, key_slots);
+        func.emit_op(Opcode::MapGet, dst, map_reg, meta_reg);
+        return Ok(());
+    }
+    
+    // Normal index: use LValue abstraction
+    use crate::lvalue::{resolve_lvalue, emit_lvalue_load};
     let lv = resolve_lvalue(expr, ctx, func, info)?;
     emit_lvalue_load(&lv, dst, ctx, func);
     Ok(())
