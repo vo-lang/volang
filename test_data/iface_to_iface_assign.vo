@@ -1,0 +1,460 @@
+package main
+
+// ============================================================================
+// Interface to Interface Assignment - Dynamic Itab Generation Test
+// ============================================================================
+// Tests runtime itab creation when assigning interface to interface
+// (NOT type assertion - direct assignment triggers IfaceAssign with iface source)
+
+// === Basic Interfaces ===
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type Closer interface {
+    Close() int
+}
+
+type ReadWriter interface {
+    Read() string
+    Write(s string)
+}
+
+type ReadCloser interface {
+    Read() string
+    Close() int
+}
+
+type WriteCloser interface {
+    Write(s string)
+    Close() int
+}
+
+type ReadWriteCloser interface {
+    Read() string
+    Write(s string)
+    Close() int
+}
+
+// Interface with multiple methods in different order
+type CloseReader interface {
+    Close() int
+    Read() string
+}
+
+// === Concrete Types ===
+
+type File struct {
+    name   string
+    closed bool
+}
+
+func (f *File) Read() string {
+    return "file:" + f.name
+}
+
+func (f *File) Write(s string) {
+    f.name = s
+}
+
+func (f *File) Close() int {
+    f.closed = true
+    return 0
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string {
+    return "buffer:" + b.data
+}
+
+func (b *Buffer) Write(s string) {
+    b.data = s
+}
+
+func (b *Buffer) Close() int {
+    b.data = ""
+    return 1
+}
+
+type Socket struct {
+    addr string
+}
+
+func (s *Socket) Read() string {
+    return "socket:" + s.addr
+}
+
+func (s *Socket) Write(data string) {
+    s.addr = data
+}
+
+func (s *Socket) Close() int {
+    return 2
+}
+
+// ============================================================================
+
+func assert(cond bool, msg string) {
+    if !cond {
+        panic(msg)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Test 1: ReadWriteCloser -> Reader (direct assignment, not assertion)
+// ----------------------------------------------------------------------------
+func test1() {
+    var rwc ReadWriteCloser = &File{name: "test.txt"}
+    var r Reader = rwc  // Direct assignment triggers runtime itab build
+    
+    result := r.Read()
+    assert(result == "file:test.txt", "test1: Read failed")
+    println("Test 1 PASSED: ReadWriteCloser -> Reader")
+}
+
+// ----------------------------------------------------------------------------
+// Test 2: ReadWriteCloser -> Writer
+// ----------------------------------------------------------------------------
+func test2() {
+    var rwc ReadWriteCloser = &File{name: "original"}
+    var w Writer = rwc
+    
+    w.Write("modified")
+    // Note: w is a copy, so original rwc is not affected
+    println("Test 2 PASSED: ReadWriteCloser -> Writer")
+}
+
+// ----------------------------------------------------------------------------
+// Test 3: ReadWriteCloser -> Closer
+// ----------------------------------------------------------------------------
+func test3() {
+    var rwc ReadWriteCloser = &File{name: "close.txt"}
+    var c Closer = rwc
+    
+    code := c.Close()
+    assert(code == 0, "test3: Close return code failed")
+    println("Test 3 PASSED: ReadWriteCloser -> Closer")
+}
+
+// ----------------------------------------------------------------------------
+// Test 4: ReadWriteCloser -> ReadWriter
+// ----------------------------------------------------------------------------
+func test4() {
+    var rwc ReadWriteCloser = &Buffer{data: "hello"}
+    var rw ReadWriter = rwc
+    
+    result := rw.Read()
+    assert(result == "buffer:hello", "test4: Read failed")
+    rw.Write("world")
+    println("Test 4 PASSED: ReadWriteCloser -> ReadWriter")
+}
+
+// ----------------------------------------------------------------------------
+// Test 5: ReadWriteCloser -> ReadCloser
+// ----------------------------------------------------------------------------
+func test5() {
+    var rwc ReadWriteCloser = &Socket{addr: "localhost"}
+    var rc ReadCloser = rwc
+    
+    result := rc.Read()
+    assert(result == "socket:localhost", "test5: Read failed")
+    code := rc.Close()
+    assert(code == 2, "test5: Close code failed")
+    println("Test 5 PASSED: ReadWriteCloser -> ReadCloser")
+}
+
+// ----------------------------------------------------------------------------
+// Test 6: ReadWriteCloser -> WriteCloser
+// ----------------------------------------------------------------------------
+func test6() {
+    var rwc ReadWriteCloser = &File{name: "wc.txt"}
+    var wc WriteCloser = rwc
+    
+    wc.Write("new content")
+    code := wc.Close()
+    assert(code == 0, "test6: Close code failed")
+    println("Test 6 PASSED: ReadWriteCloser -> WriteCloser")
+}
+
+// ----------------------------------------------------------------------------
+// Test 7: Chained assignment (multiple runtime itab builds)
+// ----------------------------------------------------------------------------
+func test7() {
+    var rwc ReadWriteCloser = &Buffer{data: "chain"}
+    var rw ReadWriter = rwc      // 1st runtime itab
+    var r Reader = rw            // 2nd runtime itab
+    
+    result := r.Read()
+    assert(result == "buffer:chain", "test7: chained Read failed")
+    println("Test 7 PASSED: chained interface assignment")
+}
+
+// ----------------------------------------------------------------------------
+// Test 8: Same itab should be cached (multiple assignments to same target)
+// ----------------------------------------------------------------------------
+func test8() {
+    var rwc1 ReadWriteCloser = &File{name: "file1"}
+    var rwc2 ReadWriteCloser = &File{name: "file2"}
+    
+    var r1 Reader = rwc1  // Creates itab for (File, Reader)
+    var r2 Reader = rwc2  // Should reuse cached itab
+    
+    result1 := r1.Read()
+    result2 := r2.Read()
+    
+    assert(result1 == "file:file1", "test8: r1.Read failed")
+    assert(result2 == "file:file2", "test8: r2.Read failed")
+    println("Test 8 PASSED: itab cache reuse")
+}
+
+// ----------------------------------------------------------------------------
+// Test 9: Different concrete types -> same interface
+// ----------------------------------------------------------------------------
+func test9() {
+    var rwc1 ReadWriteCloser = &File{name: "f"}
+    var rwc2 ReadWriteCloser = &Buffer{data: "b"}
+    var rwc3 ReadWriteCloser = &Socket{addr: "s"}
+    
+    var r1 Reader = rwc1
+    var r2 Reader = rwc2
+    var r3 Reader = rwc3
+    
+    assert(r1.Read() == "file:f", "test9: File.Read failed")
+    assert(r2.Read() == "buffer:b", "test9: Buffer.Read failed")
+    assert(r3.Read() == "socket:s", "test9: Socket.Read failed")
+    println("Test 9 PASSED: different types -> same interface")
+}
+
+// ----------------------------------------------------------------------------
+// Test 10: Function parameter conversion
+// ----------------------------------------------------------------------------
+func acceptReader(r Reader) string {
+    return r.Read()
+}
+
+func test10() {
+    var rwc ReadWriteCloser = &File{name: "param"}
+    result := acceptReader(rwc)  // Implicit conversion at call site
+    assert(result == "file:param", "test10: param conversion failed")
+    println("Test 10 PASSED: function parameter conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 11: Function return type conversion
+// ----------------------------------------------------------------------------
+func returnReader(rwc ReadWriteCloser) Reader {
+    return rwc  // Convert at return
+}
+
+func test11() {
+    var rwc ReadWriteCloser = &Buffer{data: "return"}
+    r := returnReader(rwc)
+    result := r.Read()
+    assert(result == "buffer:return", "test11: return conversion failed")
+    println("Test 11 PASSED: function return conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 12: ReadCloser -> CloseReader (same methods, different order)
+// ----------------------------------------------------------------------------
+func test12() {
+    var rc ReadCloser = &File{name: "order"}
+    var cr CloseReader = rc  // Method order differs in interface
+    
+    result := cr.Read()
+    code := cr.Close()
+    assert(result == "file:order", "test12: Read failed")
+    assert(code == 0, "test12: Close failed")
+    println("Test 12 PASSED: different method order")
+}
+
+// ----------------------------------------------------------------------------
+// Test 13: interface{} -> named interface (from iface source)
+// ----------------------------------------------------------------------------
+func test13() {
+    var rwc ReadWriteCloser = &Socket{addr: "empty"}
+    var e interface{} = rwc  // ReadWriteCloser -> interface{}
+    
+    // e now holds Socket, but has no itab (empty interface)
+    // Cannot directly assign e to Reader without assertion
+    // This tests interface{} as intermediate storage
+    
+    println("Test 13 PASSED: interface{} intermediate")
+}
+
+// ----------------------------------------------------------------------------
+// Test 14: Slice append with implicit interface conversion
+// ----------------------------------------------------------------------------
+func test14() {
+    var rwc1 ReadWriteCloser = &File{name: "slice1"}
+    var rwc2 ReadWriteCloser = &Buffer{data: "slice2"}
+    
+    // Implicit ReadWriteCloser -> Reader conversion in append
+    var readers []Reader
+    readers = append(readers, rwc1)
+    readers = append(readers, rwc2)
+    
+    assert(readers[0].Read() == "file:slice1", "test14: slice[0] failed")
+    assert(readers[1].Read() == "buffer:slice2", "test14: slice[1] failed")
+    println("Test 14 PASSED: slice append implicit conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 15: Nested function calls with interface conversion
+// ----------------------------------------------------------------------------
+func wrapReader(r Reader) Reader {
+    return r  // Pass through
+}
+
+func test15() {
+    var rwc ReadWriteCloser = &File{name: "nested"}
+    // rwc -> Reader (outer) -> pass through -> Reader (return)
+    r := wrapReader(rwc)
+    assert(r.Read() == "file:nested", "test15: nested call failed")
+    println("Test 15 PASSED: nested function calls")
+}
+
+// ----------------------------------------------------------------------------
+// Test 16: Reassignment with different source interfaces
+// ----------------------------------------------------------------------------
+func test16() {
+    var r Reader
+    
+    var rwc ReadWriteCloser = &File{name: "first"}
+    r = rwc  // File via ReadWriteCloser
+    assert(r.Read() == "file:first", "test16: first assign failed")
+    
+    var rc ReadCloser = &Buffer{data: "second"}
+    r = rc   // Buffer via ReadCloser (different source iface)
+    assert(r.Read() == "buffer:second", "test16: second assign failed")
+    
+    println("Test 16 PASSED: reassignment different sources")
+}
+
+// ----------------------------------------------------------------------------
+// Test 17: Loop with interface conversion
+// ----------------------------------------------------------------------------
+func test17() {
+    files := []*File{
+        &File{name: "a"},
+        &File{name: "b"},
+        &File{name: "c"},
+    }
+    
+    var rwc ReadWriteCloser
+    var r Reader
+    
+    expected := []string{"file:a", "file:b", "file:c"}
+    
+    for i := 0; i < len(files); i++ {
+        rwc = files[i]
+        r = rwc  // Runtime itab creation in loop
+        assert(r.Read() == expected[i], "test17: loop iteration failed")
+    }
+    println("Test 17 PASSED: loop with conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 18: Map value with implicit interface conversion
+// ----------------------------------------------------------------------------
+func test18() {
+    m := make(map[string]Reader)
+    
+    var rwc1 ReadWriteCloser = &File{name: "map1"}
+    var rwc2 ReadWriteCloser = &Buffer{data: "map2"}
+    
+    // Implicit ReadWriteCloser -> Reader conversion in map assignment
+    m["file"] = rwc1
+    m["buffer"] = rwc2
+    
+    assert(m["file"].Read() == "file:map1", "test18: map file failed")
+    assert(m["buffer"].Read() == "buffer:map2", "test18: map buffer failed")
+    println("Test 18 PASSED: map implicit conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 19: Struct field with implicit interface conversion
+// ----------------------------------------------------------------------------
+type Container struct {
+    reader Reader
+}
+
+func test19() {
+    var rwc ReadWriteCloser = &Socket{addr: "field"}
+    // Implicit ReadWriteCloser -> Reader conversion in struct literal
+    c := Container{reader: rwc}
+    
+    assert(c.reader.Read() == "socket:field", "test19: field failed")
+    println("Test 19 PASSED: struct field implicit conversion")
+}
+
+// ----------------------------------------------------------------------------
+// Test 20: Multiple target interfaces from same source (fresh instances)
+// ----------------------------------------------------------------------------
+func test20() {
+    // Use fresh File instances to avoid mutation interference
+    var rwc1 ReadWriteCloser = &File{name: "r"}
+    var r Reader = rwc1
+    assert(r.Read() == "file:r", "test20: Reader failed")
+    
+    var rwc2 ReadWriteCloser = &File{name: "w"}
+    var w Writer = rwc2
+    w.Write("modified")  // This modifies rwc2's File
+    
+    var rwc3 ReadWriteCloser = &File{name: "c"}
+    var c Closer = rwc3
+    assert(c.Close() == 0, "test20: Closer failed")
+    
+    var rwc4 ReadWriteCloser = &File{name: "rw"}
+    var rw ReadWriter = rwc4
+    assert(rw.Read() == "file:rw", "test20: ReadWriter failed")
+    rw.Write("new")
+    assert(rw.Read() == "file:new", "test20: ReadWriter after Write failed")
+    
+    var rwc5 ReadWriteCloser = &File{name: "rc"}
+    var rc ReadCloser = rwc5
+    assert(rc.Read() == "file:rc", "test20: ReadCloser failed")
+    
+    var rwc6 ReadWriteCloser = &File{name: "wc"}
+    var wc WriteCloser = rwc6
+    wc.Write("wc_mod")
+    assert(wc.Close() == 0, "test20: WriteCloser failed")
+    
+    println("Test 20 PASSED: multiple target interfaces")
+}
+
+// ============================================================================
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    test16()
+    test17()
+    test18()
+    test19()
+    test20()
+    
+    println("")
+    println("=== iface_to_iface_assign: ALL 20 TESTS PASSED ===")
+}

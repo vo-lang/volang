@@ -1805,9 +1805,9 @@ fn compile_builtin_call(
                 if flags == 0 {
                     let elem_bytes_idx = _ctx.const_int(elem_bytes as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                    compile_expr_to(arg, meta_and_elem_reg + 2, _ctx, func, info)?;
+                    crate::stmt::compile_value_to(arg, meta_and_elem_reg + 2, elem_type, _ctx, func, info)?;
                 } else {
-                    compile_expr_to(arg, meta_and_elem_reg + 1, _ctx, func, info)?;
+                    crate::stmt::compile_value_to(arg, meta_and_elem_reg + 1, elem_type, _ctx, func, info)?;
                 }
                 
                 func.emit_with_flags(Opcode::SliceAppend, flags, append_dst, current_slice, meta_and_elem_reg);
@@ -1921,14 +1921,16 @@ fn compile_composite_lit(
                     let field_name = info.project.interner.resolve(field_ident.symbol)
                         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
                     
-                    let (offset, _slots) = info.struct_field_offset(type_key, field_name);
+                    let (offset, _slots, field_type) = info.struct_field_offset_with_type(type_key, field_name);
                     
-                    compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
+                    // Use compile_value_to to handle interface conversion
+                    crate::stmt::compile_value_to(&elem.value, dst + offset, field_type, ctx, func, info)?;
                 }
             } else {
                 // Positional field: use field index
-                let (offset, field_slots) = info.struct_field_offset_by_index(type_key, i);
-                compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
+                let (offset, field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
+                // Use compile_value_to to handle interface conversion
+                crate::stmt::compile_value_to(&elem.value, dst + offset, field_type, ctx, func, info)?;
                 positional_offset = offset + field_slots;
             }
         }
