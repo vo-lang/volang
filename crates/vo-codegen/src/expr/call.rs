@@ -91,20 +91,7 @@ pub fn compile_call(
             };
             
             // Compile args to args_start
-            let mut offset = 0u16;
-            for (i, arg) in call.args.iter().enumerate() {
-                let param_type = param_types.get(i).copied();
-                // Compile arg with automatic interface conversion
-                if let Some(pt) = param_type {
-                    let slots = info.type_slot_count(pt);
-                    crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
-                    offset += slots;
-                } else {
-                    let arg_slots = info.expr_slots(arg.id);
-                    compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                    offset += arg_slots;
-                }
-            }
+            compile_args_with_types(&call.args, &param_types, args_start, ctx, func, info)?;
             
             // Call: a=func_id, b=args_start, c=(arg_slots<<8|ret_slots), flags=func_id_high
             let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
@@ -125,12 +112,7 @@ pub fn compile_call(
             
             // Compile arguments - allocate max(arg_slots, ret_slots) for return values
             let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
-            let mut offset = 0u16;
-            for arg in &call.args {
-                let arg_slots = info.expr_slots(arg.id);
-                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                offset += arg_slots;
-            }
+            compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
             
             // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
             let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
@@ -182,12 +164,7 @@ pub fn compile_closure_call_from_reg(
     let total_arg_slots: u16 = call.args.iter().map(|a| info.expr_slots(a.id)).sum();
     
     let args_start = func.alloc_temp(total_arg_slots.max(ret_slots).max(1));
-    let mut offset = 0u16;
-    for arg in &call.args {
-        let arg_slots = info.expr_slots(arg.id);
-        compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-        offset += arg_slots;
-    }
+    compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
     
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
     func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
@@ -511,21 +488,51 @@ pub fn compile_call_args(
         }
         Ok((args_start, total_slots))
     } else {
-        // Non-variadic: pass arguments normally
-        let mut total_slots = 0u16;
-        for arg in &call.args {
-            total_slots += info.expr_slots(arg.id);
-        }
-        
-        let args_start = func.alloc_temp(total_slots);
-        let mut offset = 0u16;
-        for arg in &call.args {
-            let arg_slots = info.expr_slots(arg.id);
-            compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-            offset += arg_slots;
-        }
-        Ok((args_start, total_slots))
+        compile_args_simple(&call.args, ctx, func, info)
     }
+}
+
+/// Compile arguments without type conversion, return (args_start, total_slots).
+/// Used by non-variadic calls and defer.
+pub fn compile_args_simple(
+    args: &[vo_syntax::ast::Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(u16, u16), CodegenError> {
+    let total_slots: u16 = args.iter().map(|arg| info.expr_slots(arg.id)).sum();
+    let args_start = if total_slots > 0 { func.alloc_temp(total_slots) } else { 0 };
+    let mut offset = 0u16;
+    for arg in args {
+        let slots = info.expr_slots(arg.id);
+        compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+        offset += slots;
+    }
+    Ok((args_start, total_slots))
+}
+
+/// Compile arguments with parameter types for automatic interface conversion.
+/// Used by method calls and defer with known param types.
+pub fn compile_args_with_types(
+    args: &[vo_syntax::ast::Expr],
+    param_types: &[TypeKey],
+    args_start: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let mut offset = 0u16;
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(&pt) = param_types.get(i) {
+            crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
+            offset += info.type_slot_count(pt);
+        } else {
+            let slots = info.expr_slots(arg.id);
+            compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+            offset += slots;
+        }
+    }
+    Ok(offset)
 }
 
 /// Get extern name for a package function call
@@ -561,21 +568,12 @@ pub fn compile_method_args(
         param_types.len()
     };
     
-    let mut offset = 0u16;
     if is_variadic && !call.spread {
-        // Emit fixed arguments with interface conversion
-        for (i, arg) in call.args.iter().take(num_fixed_params).enumerate() {
-            let arg_type = info.expr_type(arg.id);
-            let param_type = param_types[i];
-            let param_slots = info.type_slot_count(param_type);
-            
-            if info.is_interface(param_type) && !info.is_interface(arg_type) {
-                crate::stmt::compile_iface_assign(args_start + offset, arg, param_type, ctx, func, info)?;
-            } else {
-                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-            }
-            offset += param_slots;
-        }
+        // Emit fixed arguments with automatic interface conversion
+        let fixed_params = &param_types[..num_fixed_params];
+        let fixed_args: Vec<_> = call.args.iter().take(num_fixed_params).cloned().collect();
+        let mut offset = compile_args_with_types(&fixed_args, fixed_params, args_start, ctx, func, info)?;
+        
         // Pack variadic arguments into slice
         let variadic_args: Vec<&vo_syntax::ast::Expr> = call.args.iter().skip(num_fixed_params).collect();
         let slice_type = param_types.last().copied().unwrap();
@@ -583,28 +581,11 @@ pub fn compile_method_args(
         let slice_reg = pack_variadic_args(&variadic_args, elem_type, ctx, func, info)?;
         func.emit_copy(args_start + offset, slice_reg, 1);
         offset += 1;
+        Ok(offset)
     } else {
-        // Non-variadic or spread: emit all arguments with interface conversion
-        for (i, arg) in call.args.iter().enumerate() {
-            let arg_type = info.expr_type(arg.id);
-            let param_type = param_types.get(i).copied();
-            
-            if let Some(pt) = param_type {
-                let param_slots = info.type_slot_count(pt);
-                if info.is_interface(pt) && !info.is_interface(arg_type) {
-                    crate::stmt::compile_iface_assign(args_start + offset, arg, pt, ctx, func, info)?;
-                } else {
-                    compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                }
-                offset += param_slots;
-            } else {
-                let slots = info.expr_slots(arg.id);
-                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                offset += slots;
-            }
-        }
+        // Non-variadic or spread: emit all arguments with automatic interface conversion
+        compile_args_with_types(&call.args, param_types, args_start, ctx, func, info)
     }
-    Ok(offset)
 }
 
 /// Calculate arg slots for method call.

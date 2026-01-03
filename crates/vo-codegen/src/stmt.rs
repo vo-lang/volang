@@ -1163,18 +1163,7 @@ fn compile_defer_args_with_types(
         .sum();
     
     let args_start = alloc_args(func, total_arg_slots);
-    let mut offset = 0u16;
-    
-    for (i, arg) in call_expr.args.iter().enumerate() {
-        if let Some(&pt) = param_types.get(i) {
-            compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
-            offset += info.type_slot_count(pt);
-        } else {
-            let slots = info.expr_slots(arg.id);
-            crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-            offset += slots;
-        }
-    }
+    crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
     
     Ok((args_start, total_arg_slots))
 }
@@ -1185,17 +1174,7 @@ fn compile_defer_args_simple(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
-    let total_arg_slots: u16 = call_expr.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
-    let args_start = alloc_args(func, total_arg_slots);
-    
-    let mut offset = 0u16;
-    for arg in &call_expr.args {
-        let slots = info.expr_slots(arg.id);
-        crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-        offset += slots;
-    }
-    
-    Ok((args_start, total_arg_slots))
+    crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)
 }
 
 #[inline]
@@ -1309,19 +1288,7 @@ fn compile_go(
                     0
                 };
                 
-                let mut offset = 0u16;
-                for (i, arg) in call_expr.args.iter().enumerate() {
-                    let param_type = param_types.get(i).copied();
-                    if let Some(pt) = param_type {
-                        let slots = info.type_slot_count(pt);
-                        compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
-                        offset += slots;
-                    } else {
-                        let arg_slots = info.expr_slots(arg.id);
-                        crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                        offset += arg_slots;
-                    }
-                }
+                crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
                 
                 // GoStart: a=func_id_low, b=args_start, c=arg_slots, flags=func_id_high<<1
                 let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
@@ -1340,12 +1307,7 @@ fn compile_go(
                     0
                 };
                 
-                let mut offset = 0u16;
-                for arg in &call_expr.args {
-                    let arg_slots = info.expr_slots(arg.id);
-                    crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                    offset += arg_slots;
-                }
+                crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)?;
                 
                 // GoStart: a=closure_reg, b=args_start, c=arg_slots, flags=1 (is_closure)
                 func.emit_with_flags(Opcode::GoStart, 1, closure_reg, args_start, total_arg_slots);
@@ -1362,12 +1324,7 @@ fn compile_go(
             0
         };
         
-        let mut offset = 0u16;
-        for arg in &call_expr.args {
-            let arg_slots = info.expr_slots(arg.id);
-            crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-            offset += arg_slots;
-        }
+        crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)?;
         
         func.emit_with_flags(Opcode::GoStart, 1, closure_reg, args_start, total_arg_slots);
         return Ok(());
