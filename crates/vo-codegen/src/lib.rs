@@ -413,6 +413,26 @@ fn generate_method_signature(
     }
 }
 
+/// Extract RuntimeTypes from a tuple type (params or results).
+fn tuple_to_runtime_types(
+    tuple_key: vo_analysis::objects::TypeKey,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    info: &TypeInfoWrapper,
+    ctx: &CodegenContext,
+) -> Vec<vo_runtime::RuntimeType> {
+    use vo_analysis::typ::Type;
+    if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
+        tuple.vars().iter()
+            .filter_map(|&v| {
+                tc_objs.lobjs[v].typ()
+                    .map(|t| type_key_to_runtime_type_simple(t, info, &vo_common::SymbolInterner::new(), ctx))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Convert a Signature type to RuntimeType::Func with proper params/results
 fn signature_type_to_runtime_type(
     sig_type: vo_analysis::objects::TypeKey,
@@ -424,39 +444,12 @@ fn signature_type_to_runtime_type(
     use vo_runtime::RuntimeType;
     
     if let Type::Signature(sig) = &tc_objs.types[sig_type] {
-        // Extract parameter types from params tuple
-        let params_tuple = sig.params();
-        let params: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[params_tuple] {
-            tuple.vars().iter()
-                .filter_map(|&v| {
-                    let obj = &tc_objs.lobjs[v];
-                    obj.typ().map(|t| type_key_to_runtime_type_simple(t, info, &vo_common::SymbolInterner::new(), ctx))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        
-        // Extract result types from results tuple
-        let results_tuple = sig.results();
-        let results: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[results_tuple] {
-            tuple.vars().iter()
-                .filter_map(|&v| {
-                    let obj = &tc_objs.lobjs[v];
-                    obj.typ().map(|t| type_key_to_runtime_type_simple(t, info, &vo_common::SymbolInterner::new(), ctx))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        
         RuntimeType::Func {
-            params,
-            results,
+            params: tuple_to_runtime_types(sig.params(), tc_objs, info, ctx),
+            results: tuple_to_runtime_types(sig.results(), tc_objs, info, ctx),
             variadic: sig.variadic(),
         }
     } else {
-        // Fallback for non-signature types
         RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
     }
 }
@@ -652,6 +645,21 @@ fn compile_func_decl(
     Ok(func_id)
 }
 
+/// Emit GlobalSet or GlobalSetN depending on slot count.
+fn emit_global_set(builder: &mut FuncBuilder, global_idx: u32, src: u16, slots: u16) {
+    if slots == 1 {
+        builder.emit_op(vo_vm::instruction::Opcode::GlobalSet, global_idx as u16, src, 0);
+    } else {
+        builder.emit_with_flags(
+            vo_vm::instruction::Opcode::GlobalSetN,
+            slots as u8,
+            global_idx as u16,
+            src,
+            0,
+        );
+    }
+}
+
 fn compile_init_and_entry(
     project: &Project,
     ctx: &mut CodegenContext,
@@ -680,17 +688,7 @@ fn compile_init_and_entry(
                     
                     let tmp = init_builder.alloc_temp_typed(&slot_types);
                     crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, &mut init_builder, info)?;
-                    if slots == 1 {
-                        init_builder.emit_op(vo_vm::instruction::Opcode::GlobalSet, global_idx as u16, tmp, 0);
-                    } else {
-                        init_builder.emit_with_flags(
-                            vo_vm::instruction::Opcode::GlobalSetN,
-                            slots as u8,
-                            global_idx as u16,
-                            tmp,
-                            0,
-                        );
-                    }
+                    emit_global_set(&mut init_builder, global_idx, tmp, slots);
                 }
             }
         } else {
@@ -713,17 +711,7 @@ fn compile_init_and_entry(
                         // For now, just compile rhs for each (inefficient but correct)
                         let tmp = init_builder.alloc_temp_typed(&slot_types);
                         crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, &mut init_builder, info)?;
-                        if slots == 1 {
-                            init_builder.emit_op(vo_vm::instruction::Opcode::GlobalSet, global_idx as u16, tmp, 0);
-                        } else {
-                            init_builder.emit_with_flags(
-                                vo_vm::instruction::Opcode::GlobalSetN,
-                                slots as u8,
-                                global_idx as u16,
-                                tmp,
-                                0,
-                            );
-                        }
+                        emit_global_set(&mut init_builder, global_idx, tmp, slots);
                     }
                 }
                 let _ = i; // suppress unused warning
