@@ -9,6 +9,26 @@ use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 use super::{compile_expr, compile_expr_to};
 
+/// Compile arguments as (value, value_kind) pairs for print/println/assert.
+/// Returns args_start register.
+fn compile_args_with_value_kind(
+    args: &[vo_syntax::ast::Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let args_start = func.alloc_temp((args.len() * 2) as u16);
+    for (i, arg) in args.iter().enumerate() {
+        let slot = args_start + (i * 2) as u16;
+        compile_expr_to(arg, slot, ctx, func, info)?;
+        let arg_type = info.expr_type(arg.id);
+        let vk = info.type_value_kind(arg_type) as u8 as i32;
+        let (b, c) = encode_i32(vk);
+        func.emit_op(Opcode::LoadInt, slot + 1, b, c);
+    }
+    Ok(args_start)
+}
+
 pub fn is_builtin(name: &str) -> bool {
     matches!(name, "len" | "cap" | "make" | "new" | "append" | "copy" | "delete" | "panic" | "recover" | "print" | "println" | "close" | "assert")
 }
@@ -55,24 +75,9 @@ pub fn compile_builtin_call(
             func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
         }
         "print" | "println" => {
-            // CallExtern with vo_print/vo_println
-            // Each argument is passed as (value, value_kind) pair
             let extern_name = if name == "println" { "vo_println" } else { "vo_print" };
             let extern_id = ctx.get_or_register_extern(extern_name);
-            
-            // Compile arguments: each arg becomes (value, value_kind)
-            let args_start = func.alloc_temp((call.args.len() * 2) as u16);
-            for (i, arg) in call.args.iter().enumerate() {
-                let slot = args_start + (i * 2) as u16;
-                compile_expr_to(arg, slot, ctx, func, info)?;
-                // Store value_kind in next slot
-                let arg_type = info.expr_type(arg.id);
-                let vk = info.type_value_kind(arg_type) as u8 as i32;
-                let (b, c) = encode_i32(vk);
-                func.emit_op(Opcode::LoadInt, slot + 1, b, c);
-            }
-            
-            // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_slots (each arg is 2 slots)
+            let args_start = compile_args_with_value_kind(&call.args, ctx, func, info)?;
             func.emit_with_flags(Opcode::CallExtern, (call.args.len() * 2) as u8, dst, extern_id as u16, args_start);
         }
         "panic" => {
@@ -261,31 +266,16 @@ pub fn compile_builtin_call(
             func.emit_op(Opcode::Recover, dst, 0, 0);
         }
         "assert" => {
-            // assert(cond, msg...) - call vo_assert extern
-            // Args: [cond, cond_kind, msg_values...]
-            let extern_id = ctx.get_or_register_extern("vo_assert");
-            
             if call.args.is_empty() {
                 return Err(CodegenError::Internal("assert requires at least 1 argument".to_string()));
             }
-            
-            // Compile all arguments as (value, value_kind) pairs
-            let args_start = func.alloc_temp((call.args.len() * 2) as u16);
-            for (i, arg) in call.args.iter().enumerate() {
-                let slot = args_start + (i * 2) as u16;
-                compile_expr_to(arg, slot, ctx, func, info)?;
-                // Store value_kind in next slot
-                let arg_type = info.expr_type(arg.id);
-                let vk = info.type_value_kind(arg_type) as u8 as i32;
-                let (b, c) = encode_i32(vk);
-                func.emit_op(Opcode::LoadInt, slot + 1, b, c);
-            }
+            let extern_id = ctx.get_or_register_extern("vo_assert");
+            let args_start = compile_args_with_value_kind(&call.args, ctx, func, info)?;
             
             // Record debug info for assert (may cause panic)
             let pc = func.current_pc() as u32;
             ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
             
-            // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count*2
             func.emit_with_flags(Opcode::CallExtern, (call.args.len() * 2) as u8, dst, extern_id as u16, args_start);
         }
         _ => {

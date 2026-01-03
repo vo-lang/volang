@@ -58,77 +58,27 @@ pub fn analyze_embed_path(
     indices: &[usize],
     tc_objs: &TCObjects,
 ) -> EmbedPathInfo {
-    let mut steps = Vec::new();
-    let mut total_offset = 0u16;
-    let mut current_type = recv_type;
-    let mut embedded_iface = None;
-    
-    // Strip pointer from receiver if needed
-    if layout::is_pointer(current_type, tc_objs) {
-        let underlying = typ::underlying_type(current_type, tc_objs);
-        if let Type::Pointer(p) = &tc_objs.types[underlying] {
-            current_type = p.base();
-        }
-    }
-    
     // Walk through all indices except the last one (which is method index)
     let path_indices = if indices.len() > 1 {
         &indices[..indices.len() - 1]
     } else {
         &[]
     };
-    
-    for &idx in path_indices {
-        // Get field info at current level
-        let (field_offset, _slots) = layout::struct_field_offset_by_index(current_type, idx, tc_objs);
-        let field_type = layout::struct_field_type_by_index(current_type, idx, tc_objs);
-        
-        let is_pointer = layout::is_pointer(field_type, tc_objs);
-        let is_interface = layout::is_interface(field_type, tc_objs);
-        
-        steps.push(EmbedStep {
-            field_offset,
-            is_pointer,
-            is_interface,
-        });
-        
-        total_offset += field_offset;
-        
-        // Check if we hit an interface - that's a special case
-        if is_interface {
-            embedded_iface = Some(EmbeddedIfaceInfo {
-                offset: total_offset,
-                iface_type: field_type,
-            });
-            // Don't continue past interface - method comes from the interface
-            break;
-        }
-        
-        // Move to next level
-        if is_pointer {
-            // Pointer embedding: dereference to get the base type
-            let underlying = typ::underlying_type(field_type, tc_objs);
-            if let Type::Pointer(p) = &tc_objs.types[underlying] {
-                current_type = p.base();
-            }
-            // Note: offset resets after pointer dereference in some sense,
-            // but we track the pointer in the step for code gen
-        } else {
-            current_type = field_type;
-        }
-    }
-    
-    EmbedPathInfo {
-        steps,
-        total_offset,
-        final_type: current_type,
-        embedded_iface,
-    }
+    analyze_embed_path_impl(recv_type, path_indices, tc_objs)
 }
 
 /// Analyze embedding path using ALL indices (no method index skipping).
 /// Used by wrapper generation where indices are already stripped.
 pub fn analyze_embed_path_raw(
+    recv_type: TypeKey,
+    indices: &[usize],
+    tc_objs: &TCObjects,
+) -> EmbedPathInfo {
+    analyze_embed_path_impl(recv_type, indices, tc_objs)
+}
+
+/// Core implementation for embedding path analysis.
+fn analyze_embed_path_impl(
     recv_type: TypeKey,
     indices: &[usize],
     tc_objs: &TCObjects,
