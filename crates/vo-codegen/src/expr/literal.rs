@@ -213,18 +213,9 @@ fn compile_slice_lit(
         } else {
             compile_expr(&elem.value, ctx, func, info)?
         };
-        if flags == 0 {
-            // Dynamic case: put index and elem_bytes in consecutive registers
-            let idx_and_eb = func.alloc_temp(2);
-            func.emit_op(Opcode::LoadInt, idx_and_eb, i as u16, 0);
-            let eb_idx = ctx.const_int(elem_bytes as i64);
-            func.emit_op(Opcode::LoadConst, idx_and_eb + 1, eb_idx, 0);
-            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_and_eb, val_reg);
-        } else {
-            let idx_reg = func.alloc_temp(1);
-            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_reg, val_reg);
-        }
+        let idx_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+        func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }
     Ok(())
 }

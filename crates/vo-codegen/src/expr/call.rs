@@ -501,7 +501,7 @@ pub fn compile_args_simple(
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
     let total_slots: u16 = args.iter().map(|arg| info.expr_slots(arg.id)).sum();
-    let args_start = if total_slots > 0 { func.alloc_temp(total_slots) } else { 0 };
+    let args_start = func.alloc_args(total_slots);
     let mut offset = 0u16;
     for arg in args {
         let slots = info.expr_slots(arg.id);
@@ -656,17 +656,9 @@ fn pack_variadic_args(
         } else {
             compile_expr(elem, ctx, func, info)?
         };
-        if flags == 0 {
-            let idx_and_eb = func.alloc_temp(2);
-            func.emit_op(Opcode::LoadInt, idx_and_eb, i as u16, 0);
-            let eb_idx = ctx.const_int(elem_bytes as i64);
-            func.emit_op(Opcode::LoadConst, idx_and_eb + 1, eb_idx, 0);
-            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_and_eb, val_reg);
-        } else {
-            let idx_reg = func.alloc_temp(1);
-            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_with_flags(Opcode::SliceSet, flags, dst, idx_reg, val_reg);
-        }
+        let idx_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+        func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }
     
     Ok(dst)

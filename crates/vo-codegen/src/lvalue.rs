@@ -125,7 +125,7 @@ pub fn resolve_lvalue(
                     let container_type = info.expr_type(idx.expr.id);
                     if info.is_slice(container_type) || info.is_array(container_type) {
                         // Slice/array: get element address then access field
-                        let elem_addr_reg = emit_elem_addr(&idx.expr, &idx.index, container_type, ctx, func, info)?;
+                        let elem_addr_reg = compile_index_addr_to_reg(&idx.expr, &idx.index, ctx, func, info)?;
                         return Ok(LValue::Deref { ptr_reg: elem_addr_reg, offset, elem_slots: slots });
                     } else if info.is_map(container_type) {
                         // Map: get value to temp, then access field from temp
@@ -290,31 +290,10 @@ pub fn emit_lvalue_load(
                     }
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
-                    let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    if flags == 0 {
-                        // Dynamic case: put index and elem_bytes in consecutive registers
-                        let index_and_eb = func.alloc_temp(2);
-                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
-                        let eb_idx = ctx.const_int(*elem_bytes as i64);
-                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                        func.emit_with_flags(Opcode::ArrayGet, flags, dst, *container_reg, index_and_eb);
-                    } else {
-                        func.emit_with_flags(Opcode::ArrayGet, flags, dst, *container_reg, *index_reg);
-                    }
+                    func.emit_array_get(dst, *container_reg, *index_reg, *elem_bytes as usize, *elem_vk, ctx);
                 }
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
-                    let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    if flags == 0 {
-                        // Dynamic case: put index and elem_bytes in consecutive registers
-                        // c=index, c+1=elem_bytes (via LoadConst)
-                        let index_and_eb = func.alloc_temp(2);
-                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
-                        let eb_idx = ctx.const_int(*elem_bytes as i64);
-                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                        func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, index_and_eb);
-                    } else {
-                        func.emit_with_flags(Opcode::SliceGet, flags, dst, *container_reg, *index_reg);
-                    }
+                    func.emit_slice_get(dst, *container_reg, *index_reg, *elem_bytes as usize, *elem_vk, ctx);
                 }
                 ContainerKind::Map { key_slots, val_slots, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
@@ -386,31 +365,10 @@ pub fn emit_lvalue_store(
                     }
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
-                    let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    if flags == 0 {
-                        // Dynamic case: put index and elem_bytes in consecutive registers
-                        let index_and_eb = func.alloc_temp(2);
-                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
-                        let eb_idx = ctx.const_int(*elem_bytes as i64);
-                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                        func.emit_with_flags(Opcode::ArraySet, flags, *container_reg, index_and_eb, src);
-                    } else {
-                        func.emit_with_flags(Opcode::ArraySet, flags, *container_reg, *index_reg, src);
-                    }
+                    func.emit_array_set(*container_reg, *index_reg, src, *elem_bytes as usize, *elem_vk, ctx);
                 }
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
-                    let flags = vo_common_core::elem_flags(*elem_bytes as usize, *elem_vk);
-                    if flags == 0 {
-                        // Dynamic case: put index and elem_bytes in consecutive registers
-                        // b=index, b+1=elem_bytes (via LoadConst)
-                        let index_and_eb = func.alloc_temp(2);
-                        func.emit_op(Opcode::Copy, index_and_eb, *index_reg, 0);
-                        let eb_idx = ctx.const_int(*elem_bytes as i64);
-                        func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                        func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, index_and_eb, src);
-                    } else {
-                        func.emit_with_flags(Opcode::SliceSet, flags, *container_reg, *index_reg, src);
-                    }
+                    func.emit_slice_set(*container_reg, *index_reg, src, *elem_bytes as usize, *elem_vk, ctx);
                 }
                 ContainerKind::Map { key_slots, val_slots, key_may_gc, val_may_gc } => {
                     // MapSet: a=map, b=meta_and_key, c=val
@@ -492,32 +450,8 @@ fn flatten_field(lv: &LValue) -> FlattenedField {
     }
 }
 
-/// Get element address for slice/array element field access.
-/// Compile &slice[i] or &array[i] to get element address, returning the register.
-pub fn compile_index_addr_to_reg(
-    container_expr: &Expr,
-    index_expr: &Expr,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<u16, CodegenError> {
-    let container_type = info.expr_type(container_expr.id);
-    let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
-    let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
-    let addr_reg = func.alloc_temp(1);
-    
-    if info.is_slice(container_type) {
-        let elem_bytes = info.slice_elem_bytes(container_type) as u8;
-        func.emit_with_flags(Opcode::SliceAddr, elem_bytes, addr_reg, container_reg, index_reg);
-    } else {
-        let elem_bytes = info.array_elem_bytes(container_type) as u8;
-        func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, addr_reg, container_reg, index_reg);
-    }
-    
-    Ok(addr_reg)
-}
-
 /// Compile &slice[i] or &array[i] to get element address.
+/// When dst is provided, writes to dst. Otherwise allocates a temp register.
 pub fn compile_index_addr(
     container_expr: &Expr,
     index_expr: &Expr,
@@ -532,41 +466,24 @@ pub fn compile_index_addr(
     
     if info.is_slice(container_type) {
         let elem_bytes = info.slice_elem_bytes(container_type) as u8;
-        // SliceAddr: a=dst, b=slice, c=index, flags=elem_bytes
         func.emit_with_flags(Opcode::SliceAddr, elem_bytes, dst, container_reg, index_reg);
     } else {
-        // Heap Array
         let elem_bytes = info.array_elem_bytes(container_type) as u8;
-        // ArrayAddr: a=dst, b=array, c=index, flags=elem_bytes
         func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, dst, container_reg, index_reg);
     }
     
     Ok(())
 }
 
-/// Returns a register holding the raw pointer to the element.
-fn emit_elem_addr(
+/// Compile &slice[i] or &array[i] to get element address, returning the register.
+pub fn compile_index_addr_to_reg(
     container_expr: &Expr,
     index_expr: &Expr,
-    container_type: vo_analysis::objects::TypeKey,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
-    let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
     let addr_reg = func.alloc_temp(1);
-    
-    if info.is_slice(container_type) {
-        let elem_bytes = info.slice_elem_bytes(container_type) as u8;
-        // SliceAddr: a=dst, b=slice, c=index, flags=elem_bytes
-        func.emit_with_flags(Opcode::SliceAddr, elem_bytes, addr_reg, container_reg, index_reg);
-    } else {
-        // Heap Array
-        let elem_bytes = info.array_elem_bytes(container_type) as u8;
-        // ArrayAddr: a=dst, b=array, c=index, flags=elem_bytes
-        func.emit_with_flags(Opcode::ArrayAddr, elem_bytes, addr_reg, container_reg, index_reg);
-    }
-    
+    compile_index_addr(container_expr, index_expr, addr_reg, ctx, func, info)?;
     Ok(addr_reg)
 }

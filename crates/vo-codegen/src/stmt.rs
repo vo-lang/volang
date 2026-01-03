@@ -11,6 +11,25 @@ use crate::expr::{compile_expr_to, get_expr_source};
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
+/// Compute IfaceAssert parameters for a target type.
+/// Returns (assert_kind, target_id) where:
+/// - assert_kind: 0 for concrete types (rttid), 1 for interface types (iface_meta_id)
+/// - target_id: the corresponding id for runtime type checking
+fn compute_iface_assert_params(
+    type_key: TypeKey,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> (u8, u32) {
+    if info.is_interface(type_key) {
+        let iface_meta_id = ctx.get_or_create_interface_meta_id(type_key, &info.project.tc_objs);
+        (1, iface_meta_id)
+    } else {
+        let rt = crate::type_key_to_runtime_type_simple(type_key, info, &info.project.interner, ctx);
+        let rttid = ctx.intern_rttid(rt);
+        (0, rttid)
+    }
+}
+
 // =============================================================================
 // StmtCompiler - Unified statement compilation context
 // =============================================================================
@@ -782,17 +801,7 @@ fn compile_stmt_with_label(
                             if stk {
                                 sc.func.emit_with_flags(Opcode::SlotGetN, es as u8, vs, base, lp.idx_slot);
                             } else {
-                                let flags = vo_common_core::elem_flags(eb, evk);
-                                if flags == 0 {
-                                    // Dynamic case: put index and elem_bytes in consecutive registers
-                                    let index_and_eb = sc.func.alloc_temp(2);
-                                    sc.func.emit_op(Opcode::Copy, index_and_eb, lp.idx_slot, 0);
-                                    let eb_idx = sc.ctx.const_int(eb as i64);
-                                    sc.func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                                    sc.func.emit_with_flags(Opcode::ArrayGet, flags, vs, reg, index_and_eb);
-                                } else {
-                                    sc.func.emit_with_flags(Opcode::ArrayGet, flags, vs, reg, lp.idx_slot);
-                                }
+                                sc.func.emit_array_get(vs, reg, lp.idx_slot, eb, evk, sc.ctx);
                             }
                         }
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
@@ -810,17 +819,7 @@ fn compile_stmt_with_label(
                         let lp = IndexLoop::begin(sc.func, ls, label);
                         lp.emit_key(sc.func, key.as_ref().map(|_| ks));
                         if value.is_some() {
-                            let flags = vo_common_core::elem_flags(eb, evk);
-                            if flags == 0 {
-                                // Dynamic case: put index and elem_bytes in consecutive registers
-                                let index_and_eb = sc.func.alloc_temp(2);
-                                sc.func.emit_op(Opcode::Copy, index_and_eb, lp.idx_slot, 0);
-                                let eb_idx = sc.ctx.const_int(eb as i64);
-                                sc.func.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-                                sc.func.emit_with_flags(Opcode::SliceGet, flags, vs, reg, index_and_eb);
-                            } else {
-                                sc.func.emit_with_flags(Opcode::SliceGet, flags, vs, reg, lp.idx_slot);
-                            }
+                            sc.func.emit_slice_get(vs, reg, lp.idx_slot, eb, evk, sc.ctx);
                         }
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
                         lp.end(sc.func);
@@ -1162,7 +1161,7 @@ fn compile_defer_args_with_types(
         .map(|(i, arg)| param_types.get(i).map(|&pt| info.type_slot_count(pt)).unwrap_or_else(|| info.expr_slots(arg.id)))
         .sum();
     
-    let args_start = alloc_args(func, total_arg_slots);
+    let args_start = func.alloc_args(total_arg_slots);
     crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
     
     Ok((args_start, total_arg_slots))
@@ -1175,11 +1174,6 @@ fn compile_defer_args_simple(
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
     crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)
-}
-
-#[inline]
-fn alloc_args(func: &mut FuncBuilder, slots: u16) -> u16 {
-    if slots > 0 { func.alloc_temp(slots) } else { 0 }
 }
 
 #[inline]
@@ -1231,7 +1225,7 @@ fn compile_defer_method_call(
     let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
     let other_arg_slots: u16 = call_expr.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
     let total_arg_slots = recv_slots + other_arg_slots;
-    let args_start = alloc_args(func, total_arg_slots);
+    let args_start = func.alloc_args(total_arg_slots);
     
     let embed_offset = call_info.embed_path.total_offset;
     let embed_is_pointer = call_info.embed_path.steps.iter().any(|s| s.is_pointer);
@@ -1499,17 +1493,7 @@ fn compile_type_switch(
                 if let Some(type_expr) = type_opt {
                     let type_key = info.type_expr_type(type_expr.id);
                     
-                    // Determine assert_kind and target_id (same logic as compile_type_assert)
-                    let (assert_kind, target_id): (u8, u32) = if info.is_interface(type_key) {
-                        // Interface: assert_kind=1, target_id=iface_meta_id
-                        let iface_meta_id = ctx.get_or_create_interface_meta_id(type_key, &info.project.tc_objs);
-                        (1, iface_meta_id)
-                    } else {
-                        // All other types: assert_kind=0, target_id=rttid
-                        let rt = crate::type_key_to_runtime_type_simple(type_key, info, &info.project.interner, ctx);
-                        let rttid = ctx.intern_rttid(rt);
-                        (0, rttid)
-                    };
+                    let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
                     
                     // Allocate temp for IfaceAssert result (value + ok)
                     let target_slots = info.type_slot_count(type_key) as u8;
@@ -1553,15 +1537,7 @@ fn compile_type_switch(
                     let var_slot = func.define_local_stack(assign_name.symbol, slots, &slot_types);
                     
                     // Re-do IfaceAssert to extract value (we know it will succeed)
-                    // This is simpler than trying to reuse the check result
-                    let (assert_kind, target_id): (u8, u32) = if info.is_interface(type_key) {
-                        let iface_meta_id = ctx.get_or_create_interface_meta_id(type_key, &info.project.tc_objs);
-                        (1, iface_meta_id)
-                    } else {
-                        let rt = crate::type_key_to_runtime_type_simple(type_key, info, &info.project.interner, ctx);
-                        let rttid = ctx.intern_rttid(rt);
-                        (0, rttid)
-                    };
+                    let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
                     
                     let target_slots = slots as u8;
                     // IfaceAssert without ok (has_ok=0), result goes directly to var_slot

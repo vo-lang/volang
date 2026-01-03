@@ -312,6 +312,12 @@ impl FuncBuilder {
         slot
     }
 
+    /// Allocate temp slots for function arguments. Returns 0 if slots == 0.
+    #[inline]
+    pub fn alloc_args(&mut self, slots: u16) -> u16 {
+        if slots > 0 { self.alloc_temp(slots) } else { 0 }
+    }
+
     pub fn alloc_temp_typed(&mut self, types: &[SlotType]) -> u16 {
         let slot = self.next_slot;
         self.slot_types.extend_from_slice(types);
@@ -492,6 +498,98 @@ impl FuncBuilder {
                     self.emit_with_flags(Opcode::GlobalSetN, slots as u8, index, src, 0);
                 }
             }
+        }
+    }
+
+    // === Array/Slice element access helpers ===
+    // These handle the dynamic elem_flags == 0 case where elem_bytes must be passed in a register.
+
+    /// Emit ArrayGet with proper handling of dynamic elem_bytes.
+    /// When flags == 0, allocates extra register for elem_bytes.
+    pub fn emit_array_get(
+        &mut self,
+        dst: u16,
+        arr: u16,
+        idx: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_temp(2);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags(Opcode::ArrayGet, flags, dst, arr, index_and_eb);
+        } else {
+            self.emit_with_flags(Opcode::ArrayGet, flags, dst, arr, idx);
+        }
+    }
+
+    /// Emit ArraySet with proper handling of dynamic elem_bytes.
+    pub fn emit_array_set(
+        &mut self,
+        arr: u16,
+        idx: u16,
+        val: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_temp(2);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags(Opcode::ArraySet, flags, arr, index_and_eb, val);
+        } else {
+            self.emit_with_flags(Opcode::ArraySet, flags, arr, idx, val);
+        }
+    }
+
+    /// Emit SliceGet with proper handling of dynamic elem_bytes.
+    pub fn emit_slice_get(
+        &mut self,
+        dst: u16,
+        slice: u16,
+        idx: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_temp(2);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags(Opcode::SliceGet, flags, dst, slice, index_and_eb);
+        } else {
+            self.emit_with_flags(Opcode::SliceGet, flags, dst, slice, idx);
+        }
+    }
+
+    /// Emit SliceSet with proper handling of dynamic elem_bytes.
+    pub fn emit_slice_set(
+        &mut self,
+        slice: u16,
+        idx: u16,
+        val: u16,
+        elem_bytes: usize,
+        elem_vk: vo_common_core::ValueKind,
+        ctx: &mut crate::context::CodegenContext,
+    ) {
+        let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+        if flags == 0 {
+            let index_and_eb = self.alloc_temp(2);
+            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
+            let eb_idx = ctx.const_int(elem_bytes as i64);
+            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
+            self.emit_with_flags(Opcode::SliceSet, flags, slice, index_and_eb, val);
+        } else {
+            self.emit_with_flags(Opcode::SliceSet, flags, slice, idx, val);
         }
     }
 
