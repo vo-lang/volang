@@ -14,6 +14,32 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
+/// Define forwarded parameters in a wrapper function.
+/// Returns the first parameter slot if any parameters were defined.
+fn define_forwarded_params(builder: &mut FuncBuilder, param_slots: u16) -> Option<u16> {
+    if param_slots > 0 {
+        let first = builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
+        for _ in 1..param_slots {
+            builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
+        }
+        Some(first)
+    } else {
+        None
+    }
+}
+
+/// Compute total slot count for a tuple type (params or results).
+fn tuple_slot_count(tuple_key: vo_analysis::objects::TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
+    tc_objs.types[tuple_key].try_as_tuple()
+        .map(|t| t.vars().iter()
+            .map(|v| {
+                let typ = tc_objs.lobjs[*v].typ().unwrap();
+                vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
+            })
+            .sum())
+        .unwrap_or(0)
+}
+
 /// Generate a wrapper function for value receiver methods.
 /// The wrapper accepts interface data slot (GcRef for struct/array, value for basic types),
 /// and calls the original method with the receiver value.
@@ -144,15 +170,7 @@ pub fn generate_promoted_wrapper(
     let outer_gcref = builder.define_param(Symbol::DUMMY, 1, &[SlotType::GcRef]);
     
     // Define forwarded params
-    let first_param_slot = if forwarded_param_slots > 0 {
-        let slot = builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
-        for _ in 1..forwarded_param_slots {
-            builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
-        }
-        Some(slot)
-    } else {
-        None
-    };
+    let first_param_slot = define_forwarded_params(&mut builder, forwarded_param_slots);
     
     // Allocate args area for call
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
@@ -262,24 +280,8 @@ pub fn generate_embedded_iface_wrapper(
         .expect("method type must be signature");
     
     // Compute param and return slots
-    let params_tuple = sig.params();
-    let results_tuple = sig.results();
-    let param_slots: u16 = tc_objs.types[params_tuple].try_as_tuple()
-        .map(|t| t.vars().iter()
-            .map(|v| {
-                let typ = tc_objs.lobjs[*v].typ().unwrap();
-                vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
-            })
-            .sum())
-        .unwrap_or(0);
-    let ret_slots: u16 = tc_objs.types[results_tuple].try_as_tuple()
-        .map(|t| t.vars().iter()
-            .map(|v| {
-                let typ = tc_objs.lobjs[*v].typ().unwrap();
-                vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
-            })
-            .sum())
-        .unwrap_or(0);
+    let param_slots = tuple_slot_count(sig.params(), tc_objs);
+    let ret_slots = tuple_slot_count(sig.results(), tc_objs);
     
     // Build wrapper
     let wrapper_name = format!("{}$embed_iface", method_name);
@@ -290,15 +292,7 @@ pub fn generate_embedded_iface_wrapper(
     let outer_gcref = builder.define_param(Symbol::DUMMY, 1, &[SlotType::GcRef]);
     
     // Forward parameters
-    let first_param_slot = if param_slots > 0 {
-        let slot = builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
-        for _ in 1..param_slots {
-            builder.define_param(Symbol::DUMMY, 1, &[SlotType::Value]);
-        }
-        Some(slot)
-    } else {
-        None
-    };
+    let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
     // Load embedded interface (2 slots) from outer struct
     let iface_slot = builder.alloc_temp(2);
