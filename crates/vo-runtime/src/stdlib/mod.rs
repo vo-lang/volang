@@ -11,3 +11,4 @@ pub mod builtin;
 pub mod math;
 pub mod bytes;
 pub mod strings;
+pub mod dynamic;

@@ -1,0 +1,209 @@
+// Test dynamic access operator ~>
+
+type Person struct {
+    Name string
+    Age  int
+}
+
+func main() {
+    // Test 1: Basic dynamic field access on struct
+    var p interface{} = Person{Name: "Alice", Age: 30}
+    
+    result, err := p~>Name
+    if err != nil {
+        println("FAIL: Name error:", err)
+    } else if name, ok := result.(string); ok {
+        println("Name:", name)
+    } else {
+        println("FAIL: Name type assert failed")
+    }
+    
+    // Test 2: Dynamic field access - int field
+    ageVal, err2 := p~>Age
+    if err2 != nil {
+        println("FAIL: Age error:", err2)
+    } else if age, ok := ageVal.(int); ok {
+        println("Age:", age)
+    } else {
+        println("FAIL: Age type assert failed")
+    }
+    
+    // Test 3: Dynamic index access on slice
+    var slice interface{} = []int{10, 20, 30}
+    elem, sliceErr := slice~>[1]
+    if sliceErr != nil {
+        println("FAIL: slice index error:", sliceErr)
+    } else {
+        // Verify type assertion works with correct rttid
+        if v, ok := elem.(int); ok {
+            println("Slice[1]:", v)
+        } else {
+            println("Slice[1]: interface")
+        }
+    }
+    
+    // Test 4b: Map index
+    var m interface{} = map[string]int{"a": 1, "b": 2}
+    mapVal, mapErr := m~>["a"]
+    if mapErr != nil {
+        println("FAIL: map index error:", mapErr)
+    } else if v, ok := mapVal.(int); ok && v == 1 {
+        println("Map[a]: ok")
+    } else {
+        println("Map[a]: interface")
+    }
+    
+    // Test 4c: Dynamic index access on string
+    var str interface{} = "hello"
+    ch, err4 := str~>[0]
+    if err4 != nil {
+        println("FAIL: String index error:", err4)
+    } else if b, ok := ch.(uint8); ok && b == 'h' {
+        println("String[0]: ok")
+    } else {
+        println("String[0]: interface")
+    }
+    
+    // Test 5: Error on nil
+    var nilVal interface{} = nil
+    _, nilErr := nilVal~>field
+    if nilErr != nil {
+        println("nil error: ok")
+    } else {
+        println("FAIL: nil should error")
+    }
+    
+    // Test 6: Error on non-struct field access
+    var num interface{} = 42
+    _, numErr := num~>field
+    if numErr != nil {
+        println("non-struct error: ok")
+    } else {
+        println("FAIL: non-struct should error")
+    }
+    
+    // Test 7: Error on non-existent field
+    _, fieldErr := p~>NonExistent
+    if fieldErr != nil {
+        println("missing field error: ok")
+    } else {
+        println("FAIL: missing field should error")
+    }
+    
+    // Test 8: a~>b? short-circuit on error
+    _, err8 := testQuestionShortCircuit()
+    if err8 != nil {
+        println("question short-circuit: ok")
+    } else {
+        println("FAIL: question should propagate error")
+    }
+    
+    // Test 9: a~>b? success path
+    result9, err9 := testQuestionSuccess()
+    if err9 != nil {
+        println("FAIL: question success path error:", err9)
+    } else if r, ok := result9.(string); ok && r == "Alice" {
+        println("question success: ok")
+    } else {
+        println("FAIL: question success wrong value")
+    }
+    
+    // Test 10: nested struct field with ?
+    _, err10 := testNestedStruct()
+    if err10 != nil {
+        println("FAIL: nested struct error:", err10)
+    } else {
+        println("nested struct: ok")
+    }
+    
+    // Test 11: chained access without ? (o~>Inner~>Value)
+    val11 := testChainedAccessNoQuestion()
+    if val11 == 42 {
+        println("chained no-?: ok")
+    } else {
+        println("FAIL: chained no-? wrong value:", val11)
+    }
+    
+    // Test 12: chained access with ? (o~>Inner?~>Value?)
+    val12, err12 := testChainedAccessWithQuestion()
+    if err12 != nil {
+        println("FAIL: chained with-? error:", err12)
+    } else if val12 == 42 {
+        println("chained with-?: ok")
+    } else {
+        println("FAIL: chained with-? wrong value:", val12)
+    }
+    
+    println("done")
+}
+
+// Test ? short-circuit on error
+func testQuestionShortCircuit() (int, error) {
+    var nilVal interface{} = nil
+    _ = nilVal~>field?  // should short-circuit here
+    return 0, nil       // should not reach
+}
+
+// Test ? success path
+func testQuestionSuccess() (interface{}, error) {
+    var p interface{} = Person{Name: "Alice", Age: 30}
+    name := p~>Name?  // should succeed
+    return name, nil
+}
+
+// Test nested struct field access with ?
+type Inner struct {
+    Value int
+}
+type Outer struct {
+    Inner Inner
+}
+
+func testNestedStruct() (int, error) {
+    var o interface{} = Outer{Inner: Inner{Value: 42}}
+    inner := o~>Inner?
+    // inner is now interface{} containing Inner struct
+    _ = inner
+    return 42, nil
+}
+
+// Test chained access: a~>b~>c (direct chain without ?)
+func testChainedAccessNoQuestion() int {
+    var o interface{} = Outer{Inner: Inner{Value: 42}}
+    // Direct chain: o~>Inner~>Value returns (any, error)
+    val, err := o~>Inner~>Value
+    if err != nil {
+        return -1
+    }
+    if v, ok := val.(int); ok {
+        return v
+    }
+    return -2
+}
+
+// Test chained access: a~>b?~>c? (with ?)
+func testChainedAccessWithQuestion() (int, error) {
+    var o interface{} = Outer{Inner: Inner{Value: 42}}
+    // Chain with ?: short-circuits on error
+    val := o~>Inner?~>Value?
+    if v, ok := val.(int); ok {
+        return v, nil
+    }
+    return 0, nil
+}
+
+// expected output:
+// Name: Alice
+// Age: 30
+// Slice[1]: 20
+// Map[a]: ok
+// String[0]: ok
+// nil error: ok
+// non-struct error: ok
+// missing field error: ok
+// question short-circuit: ok
+// question success: ok
+// nested struct: ok
+// chained no-?: ok
+// chained with-?: ok
+// done

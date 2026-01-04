@@ -382,6 +382,17 @@ impl<'a> EscapeAnalyzer<'a> {
             ExprKind::Receive(e) => self.visit_expr(e),
             ExprKind::Paren(e) => self.visit_expr(e),
             ExprKind::TryUnwrap(e) => self.visit_expr(e),
+            ExprKind::DynAccess(d) => {
+                self.visit_expr(&d.base);
+                match &d.op {
+                    vo_syntax::ast::DynAccessOp::Field(_) => {}
+                    vo_syntax::ast::DynAccessOp::Index(idx) => self.visit_expr(idx),
+                    vo_syntax::ast::DynAccessOp::Call { args, .. }
+                    | vo_syntax::ast::DynAccessOp::MethodCall { args, .. } => {
+                        for arg in args { self.visit_expr(arg) }
+                    }
+                }
+            }
             ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::RuneLit(_) | ExprKind::StringLit(_) | ExprKind::TypeAsExpr(_) => {}
         }
     }

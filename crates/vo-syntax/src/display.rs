@@ -7,7 +7,7 @@ use std::fmt::{self, Write};
 use vo_common::symbol::SymbolInterner;
 
 use crate::ast::{
-    BinaryOp, CompositeLitKey, Expr, ExprKind, TypeExpr, TypeExprKind, UnaryOp,
+    BinaryOp, CompositeLitKey, DynAccessOp, Expr, ExprKind, TypeExpr, TypeExprKind, UnaryOp,
 };
 
 /// Formats an expression to a string representation.
@@ -132,6 +132,27 @@ pub fn fmt_expr(expr: &Expr, f: &mut fmt::Formatter<'_>, interner: &SymbolIntern
             fmt_expr(expr, f, interner)?;
             f.write_char('?')
         }
+        ExprKind::DynAccess(d) => {
+            fmt_expr(&d.base, f, interner)?;
+            f.write_str("~>")?;
+            match &d.op {
+                DynAccessOp::Field(ident) => {
+                    write!(f, "{}", interner.resolve(ident.symbol).unwrap_or("?"))
+                }
+                DynAccessOp::Index(index) => {
+                    f.write_char('[')?;
+                    fmt_expr(index, f, interner)?;
+                    f.write_char(']')
+                }
+                DynAccessOp::Call { args, spread } => {
+                    fmt_call_args(args, *spread, f, interner)
+                }
+                DynAccessOp::MethodCall { method, args, spread } => {
+                    write!(f, "{}", interner.resolve(method.symbol).unwrap_or("?"))?;
+                    fmt_call_args(args, *spread, f, interner)
+                }
+            }
+        }
     }
 }
 
@@ -226,4 +247,14 @@ impl fmt::Display for UnaryOp {
         };
         f.write_str(s)
     }
+}
+
+fn fmt_call_args(args: &[Expr], spread: bool, f: &mut fmt::Formatter<'_>, interner: &SymbolInterner) -> fmt::Result {
+    f.write_char('(')?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 { f.write_str(", ")? }
+        fmt_expr(arg, f, interner)?;
+    }
+    if spread { f.write_str("...")? }
+    f.write_char(')')
 }

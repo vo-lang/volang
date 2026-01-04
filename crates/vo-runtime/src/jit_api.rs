@@ -87,8 +87,8 @@ pub struct JitContext {
     /// Pointer to ExternRegistry for calling extern functions.
     pub extern_registry: *const c_void,
     
-    /// Callback to call extern function: (registry, gc, extern_id, args, arg_count, ret) -> JitResult
-    pub call_extern_fn: Option<extern "C" fn(*const c_void, *mut Gc, u32, *const u64, u32, *mut u64) -> JitResult>,
+    /// Callback to call extern function: (registry, gc, module, extern_id, args, arg_count, ret) -> JitResult
+    pub call_extern_fn: Option<extern "C" fn(*const c_void, *mut Gc, *const c_void, u32, *const u64, u32, *mut u64) -> JitResult>,
     
     /// Pointer to ItabCache for interface assertions.
     pub itab_cache: *mut c_void,
@@ -296,7 +296,7 @@ pub extern "C" fn vo_call_extern(
         None => return JitResult::Panic,
     };
     
-    call_fn(ctx_ref.extern_registry, ctx_ref.gc, extern_id, args, arg_count, ret)
+    call_fn(ctx_ref.extern_registry, ctx_ref.gc, ctx_ref.module, extern_id, args, arg_count, ret)
 }
 
 /// Call a closure from JIT code.

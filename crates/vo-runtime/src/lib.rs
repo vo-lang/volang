@@ -43,9 +43,9 @@ pub use vo_common_core::symbol;
 // Re-exports from ffi (std only)
 #[cfg(feature = "std")]
 pub use ffi::{
-    ExternCall, ExternCallWithGc, ExternFn, ExternFnWithGc, ExternRegistry, ExternResult,
-    ExternEntry, ExternEntryWithGc, EXTERN_TABLE, EXTERN_TABLE_WITH_GC,
-    lookup_extern, lookup_extern_with_gc,
+    ExternCall, ExternCallContext, ExternFn, ExternFnWithContext, ExternRegistry, ExternResult,
+    ExternEntry, ExternEntryWithContext, EXTERN_TABLE, EXTERN_TABLE_WITH_CONTEXT,
+    lookup_extern, lookup_extern_with_context,
 };
 #[cfg(feature = "std")]
 pub use linkme::distributed_slice;

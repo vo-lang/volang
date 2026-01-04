@@ -1,0 +1,67 @@
+package main
+
+type Counter struct {
+	value int
+}
+
+func (c *Counter) Inc() {
+	c.value++
+}
+
+func (c *Counter) Get() int {
+	return c.value
+}
+
+type Container struct {
+	counter Counter
+	name    string
+}
+
+func main() {
+	c := Container{
+		counter: Counter{value: 10},
+		name:    "test",
+	}
+	
+	// Dynamic access to get counter field
+	var box interface{} = c
+	
+	// Type assert to Counter
+	counter, ok :=  box~>counter?.(Counter)
+	if !ok {
+		println("FAIL: type assert to Counter failed")
+		return
+	}
+	
+	// Call method on extracted Counter
+	if counter.Get() != 10 {
+		println("FAIL: expected 10, got", counter.Get())
+		return
+	}
+	println("Get() before Inc:", counter.Get())
+	
+	// Inc modifies local copy (value semantics)
+	counter.Inc()
+	if counter.Get() != 11 {
+		println("FAIL: after Inc expected 11, got", counter.Get())
+		return
+	}
+	println("Get() after Inc:", counter.Get())
+	
+	// Original should be unchanged (value semantics)
+	counterAny2, _ := box~>counter
+	counter2, _ := counterAny2.(Counter)
+	if counter2.Get() != 10 {
+		println("FAIL: original should be 10, got", counter2.Get())
+		return
+	}
+	println("original unchanged:", counter2.Get())
+	
+	println("done")
+}
+
+// expected output:
+// Get() before Inc: 10
+// Get() after Inc: 11
+// original unchanged: 10
+// done

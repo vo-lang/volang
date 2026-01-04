@@ -827,6 +827,8 @@ pub enum ExprKind {
     TypeAsExpr(Box<TypeExpr>),
     /// A try-unwrap expression (error propagation with ?).
     TryUnwrap(Box<Expr>),
+    /// A dynamic access expression (using ~>).
+    DynAccess(Box<DynAccessExpr>),
 }
 
 /// An integer literal.
@@ -1025,6 +1027,28 @@ pub struct ConversionExpr {
     pub ty: TypeExpr,
     /// The expression being converted.
     pub expr: Expr,
+}
+
+/// A dynamic access expression using `~>`.
+#[derive(Debug, Clone)]
+pub struct DynAccessExpr {
+    /// The base expression (must be any/interface or (any, error)).
+    pub base: Expr,
+    /// The kind of dynamic operation.
+    pub op: DynAccessOp,
+}
+
+/// The kind of dynamic access operation.
+#[derive(Debug, Clone)]
+pub enum DynAccessOp {
+    /// Field access: `a~>field`
+    Field(Ident),
+    /// Index access: `a~>[key]`
+    Index(Expr),
+    /// Direct call: `a~>(args...)`
+    Call { args: Vec<Expr>, spread: bool },
+    /// Method call: `a~>method(args...)`
+    MethodCall { method: Ident, args: Vec<Expr>, spread: bool },
 }
 
 // =============================================================================
@@ -1293,6 +1317,24 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
         ExprKind::Paren(e) => visitor.visit_expr(e),
         ExprKind::TypeAsExpr(t) => visitor.visit_type_expr(t),
         ExprKind::TryUnwrap(e) => visitor.visit_expr(e),
+        ExprKind::DynAccess(d) => {
+            visitor.visit_expr(&d.base);
+            match &d.op {
+                DynAccessOp::Field(ident) => visitor.visit_ident(ident),
+                DynAccessOp::Index(index) => visitor.visit_expr(index),
+                DynAccessOp::Call { args, .. } => {
+                    for arg in args {
+                        visitor.visit_expr(arg);
+                    }
+                }
+                DynAccessOp::MethodCall { method, args, .. } => {
+                    visitor.visit_ident(method);
+                    for arg in args {
+                        visitor.visit_expr(arg);
+                    }
+                }
+            }
+        }
     }
 }
 

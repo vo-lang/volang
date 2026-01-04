@@ -157,6 +157,65 @@ impl CodegenContext {
         self.type_interner.intern(rt)
     }
 
+    /// Recursively intern a type_key, returning its rttid.
+    /// For composite types, this first interns inner types to get their rttids.
+    pub fn intern_type_key(&mut self, type_key: vo_analysis::objects::TypeKey, info: &crate::type_info::TypeInfoWrapper) -> u32 {
+        use vo_runtime::{RuntimeType, ValueKind};
+        
+        // Check if it's a Named type first
+        if let Some(id) = self.get_named_type_id(type_key) {
+            return self.type_interner.intern(RuntimeType::Named(id));
+        }
+        
+        let vk = info.type_value_kind(type_key);
+        
+        match vk {
+            ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
+            ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
+            ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String => {
+                self.type_interner.intern(RuntimeType::Basic(vk))
+            }
+            ValueKind::Struct => {
+                self.type_interner.intern(RuntimeType::Struct { fields: Vec::new() })
+            }
+            ValueKind::Array => {
+                let elem_type = info.array_elem_type(type_key);
+                let elem_rttid = self.intern_type_key(elem_type, info);
+                let len = info.array_len(type_key) as u64;
+                self.type_interner.intern(RuntimeType::Array { len, elem: elem_rttid })
+            }
+            ValueKind::Pointer => {
+                let elem_type = info.pointer_elem(type_key);
+                let elem_rttid = self.intern_type_key(elem_type, info);
+                self.type_interner.intern(RuntimeType::Pointer(elem_rttid))
+            }
+            ValueKind::Slice => {
+                let elem_type = info.slice_elem_type(type_key);
+                let elem_rttid = self.intern_type_key(elem_type, info);
+                self.type_interner.intern(RuntimeType::Slice(elem_rttid))
+            }
+            ValueKind::Map => {
+                let (key_type, val_type) = info.map_key_val_types(type_key);
+                let key_rttid = self.intern_type_key(key_type, info);
+                let val_rttid = self.intern_type_key(val_type, info);
+                self.type_interner.intern(RuntimeType::Map { key: key_rttid, val: val_rttid })
+            }
+            ValueKind::Channel => {
+                let elem_type = info.chan_elem_type(type_key);
+                let elem_rttid = self.intern_type_key(elem_type, info);
+                let dir = info.chan_dir(type_key);
+                self.type_interner.intern(RuntimeType::Chan { dir, elem: elem_rttid })
+            }
+            ValueKind::Interface => {
+                self.type_interner.intern(RuntimeType::Interface { methods: Vec::new() })
+            }
+            ValueKind::Closure => {
+                self.type_interner.intern(RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false })
+            }
+            _ => self.type_interner.intern(RuntimeType::Basic(ValueKind::Void)),
+        }
+    }
+
     /// Get the interned RuntimeTypes (in rttid order)
     pub fn runtime_types(&self) -> Vec<vo_runtime::RuntimeType> {
         self.type_interner.types().to_vec()
@@ -206,11 +265,6 @@ impl CodegenContext {
     pub fn get_method_from_named_type(&self, named_type_id: u32, method_name: &str) -> Option<MethodInfo> {
         self.module.named_type_metas.get(named_type_id as usize)
             .and_then(|meta| meta.methods.get(method_name).cloned())
-    }
-
-    /// Iterate over all named type keys and their IDs
-    pub fn named_type_ids_iter(&self) -> impl Iterator<Item = (TypeKey, u32)> + '_ {
-        self.named_type_ids.iter().map(|(&k, &v)| (k, v))
     }
 
     pub fn get_interface_meta_id(&self, type_key: TypeKey) -> Option<u32> {
@@ -531,6 +585,7 @@ impl CodegenContext {
     }
 
     /// Get or create ValueMeta with explicit ValueKind
+    /// Uses rttid for all types (not just struct meta_id)
     pub fn get_or_create_value_meta_with_kind(
         &mut self,
         type_key: Option<TypeKey>,
@@ -553,13 +608,17 @@ impl CodegenContext {
             }
         };
         
-        // Get meta_id from struct_meta_ids if available, otherwise 0
-        let meta_id = type_key
-            .and_then(|t| self.struct_meta_ids.get(&t).copied())
-            .unwrap_or(0) as u32;
+        // Use rttid for all types (unified type system)
+        // This allows type assertions to work for basic types in slices
+        let rttid = if let Some(tk) = type_key {
+            let rt = crate::type_key_to_runtime_type_basic(tk, value_kind.unwrap_or(ValueKind::Int));
+            self.intern_rttid(rt)
+        } else {
+            0
+        };
         
-        // ValueMeta format: [meta_id:24 | value_kind:8]
-        let value_meta = ((meta_id as u64) << 8) | (kind_byte as u64);
+        // ValueMeta format: [rttid:24 | value_kind:8]
+        let value_meta = ((rttid as u64) << 8) | (kind_byte as u64);
         
         // Add as Int constant (VM will interpret as ValueMeta)
         self.add_const(Constant::Int(value_meta as i64))

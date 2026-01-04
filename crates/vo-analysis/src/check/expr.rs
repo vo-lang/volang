@@ -1365,6 +1365,44 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                 }
             }
+            ExprKind::DynAccess(dyn_access) => {
+                // Use multi_expr to allow (any, error) tuple as base for chaining
+                self.multi_expr(x, &dyn_access.base);
+                if x.invalid() { return }
+
+                let base_type = x.typ.unwrap_or(self.invalid_type());
+                if !self.is_dyn_access_base_type(base_type) {
+                    self.error_code_msg(
+                        TypeError::InvalidOp,
+                        e.span,
+                        "~> operator requires any/interface or (any, error) type",
+                    );
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
+
+                // Type check operation arguments
+                match &dyn_access.op {
+                    vo_syntax::ast::DynAccessOp::Field(_) => {}
+                    vo_syntax::ast::DynAccessOp::Index(idx) => {
+                        self.expr(&mut Operand::default(), idx);
+                    }
+                    vo_syntax::ast::DynAccessOp::Call { args, .. }
+                    | vo_syntax::ast::DynAccessOp::MethodCall { args, .. } => {
+                        for arg in args {
+                            self.expr(&mut Operand::default(), arg);
+                        }
+                    }
+                }
+
+                // Result is (any, error)
+                let any_type = self.new_t_empty_interface();
+                let error_type = self.universe().error_type();
+                let any_var = self.new_var(0, None, String::new(), Some(any_type));
+                let err_var = self.new_var(0, None, String::new(), Some(error_type));
+                x.mode = OperandMode::Value;
+                x.typ = Some(self.new_t_tuple(vec![any_var, err_var]));
+            }
         }
         
         // Ensure x.expr points to the current expression (not a sub-expression)
@@ -1372,7 +1410,32 @@ impl Checker {
     }
 
     // =========================================================================
-    // Part 10: Entry functions
+    // Part 10: Helper functions
+    // =========================================================================
+
+    /// Check if type is valid for dynamic access (~> operator base).
+    /// Valid types: any/interface, or (any, error) tuple.
+    fn is_dyn_access_base_type(&self, type_key: TypeKey) -> bool {
+        // Check if it's an interface type
+        if self.otype(type_key).try_as_interface().is_some() {
+            return true;
+        }
+        // Check if it's (any, error) tuple
+        let Some(tuple) = self.otype(type_key).try_as_tuple() else { return false };
+        let vars = tuple.vars();
+        if vars.len() != 2 { return false }
+        
+        let Some(first_type) = self.lobj(vars[0]).typ() else { return false };
+        let is_interface = self.otype(first_type).try_as_interface().is_some();
+        
+        let Some(second_type) = self.lobj(vars[1]).typ() else { return false };
+        let is_error = typ::identical(second_type, self.universe().error_type(), self.objs());
+        
+        is_interface && is_error
+    }
+
+    // =========================================================================
+    // Part 11: Entry functions
     // =========================================================================
 
     /// Checks that x.(T) is legal; xtype must be the type of x.

@@ -3,6 +3,7 @@
 pub mod builtin;
 pub mod call;
 pub mod conversion;
+pub mod dyn_access;
 pub mod literal;
 
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
@@ -368,6 +369,11 @@ pub fn compile_expr_to(
         // === Try unwrap ===
         ExprKind::TryUnwrap(inner) => {
             compile_try_unwrap(inner, dst, ctx, func, info)?;
+        }
+
+        // === Dynamic access ===
+        ExprKind::DynAccess(dyn_access_expr) => {
+            dyn_access::compile_dyn_access(expr, dyn_access_expr, dst, ctx, func, info)?;
         }
 
         // === Call ===
@@ -748,3 +754,4 @@ fn compile_deref(
     func.emit_ptr_get(dst, ptr_reg, 0, elem_slots);
     Ok(())
 }
+

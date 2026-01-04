@@ -22,6 +22,9 @@ pub fn exec_call_extern(
     externs: &[ExternDef],
     registry: &ExternRegistry,
     gc: &mut Gc,
+    struct_metas: &[vo_common_core::bytecode::StructMeta],
+    named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
+    runtime_types: &[vo_runtime::RuntimeType],
     fiber_panic_msg: &mut Option<String>,
 ) -> ExecResult {
     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
@@ -45,6 +48,9 @@ pub fn exec_call_extern(
         arg_count,
         dst,
         gc,
+        struct_metas,
+        named_type_metas,
+        runtime_types,
     );
 
     match result {

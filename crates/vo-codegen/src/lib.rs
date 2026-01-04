@@ -17,7 +17,7 @@ pub use context::CodegenContext;
 pub use error::CodegenError;
 pub use func::FuncBuilder;
 pub use type_info::TypeInfoWrapper;
-pub use type_interner::{TypeInterner, type_key_to_runtime_type};
+pub use type_interner::{TypeInterner, intern_type_key};
 
 use vo_analysis::Project;
 use vo_syntax::ast::Decl;
@@ -63,10 +63,29 @@ fn register_types(
     use vo_runtime::ValueMeta;
     use std::collections::HashMap;
     
-    // Iterate all type declarations
+    // Collect all type declarations (including those inside functions)
+    let mut type_decls = Vec::new();
+    
     for file in &project.files {
         for decl in &file.decls {
-            if let Decl::Type(type_decl) = decl {
+            match decl {
+                Decl::Type(type_decl) => {
+                    type_decls.push(type_decl.clone());
+                }
+                Decl::Func(func_decl) => {
+                    // Also collect type declarations from function bodies
+                    if let Some(body) = &func_decl.body {
+                        collect_type_decls_from_stmts(&body.stmts, &mut type_decls);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // Process all collected type declarations
+    for type_decl in &type_decls {
+        {
                 let type_name = project.interner.resolve(type_decl.name.symbol)
                     .unwrap_or("?");
                 
@@ -81,6 +100,7 @@ fn register_types(
                         let mut field_names = Vec::new();
                         let mut field_offsets = Vec::new();
                         let mut slot_types = Vec::new();
+                        let mut field_value_metas = Vec::new();
                         let mut offset = 0u16;
                         
                         for field in &struct_type.fields {
@@ -95,6 +115,13 @@ fn register_types(
                                 let slot_type_list = info.type_slot_types(field_type);
                                 slot_types.extend(slot_type_list);
                                 offset += slots;
+                                
+                                // Compute field's value_meta for dynamic access
+                                let field_vk = info.type_value_kind(field_type);
+                                let field_rt = type_key_to_runtime_type_simple(field_type, info, &project.interner, ctx);
+                                let field_rttid = ctx.intern_rttid(field_rt);
+                                let value_meta = (field_rttid << 8) | (field_vk as u32);
+                                field_value_metas.push(value_meta);
                             }
                         }
                         
@@ -107,6 +134,7 @@ fn register_types(
                             field_names,
                             field_offsets,
                             slot_types,
+                            field_value_metas,
                         };
                         let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
                         ValueMeta::new(struct_meta_id as u32, vo_runtime::ValueKind::Struct)
@@ -167,11 +195,50 @@ fn register_types(
                     methods: HashMap::new(),
                 };
                 ctx.register_named_type_meta(named_key, named_type_meta);
-            }
         }
     }
     
     Ok(())
+}
+
+/// Recursively collect type declarations from statements
+fn collect_type_decls_from_stmts(stmts: &[vo_syntax::ast::Stmt], out: &mut Vec<vo_syntax::ast::TypeDecl>) {
+    use vo_syntax::ast::StmtKind;
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Type(type_decl) => {
+                out.push(type_decl.clone());
+            }
+            StmtKind::Block(block) => {
+                collect_type_decls_from_stmts(&block.stmts, out);
+            }
+            StmtKind::If(if_stmt) => {
+                collect_type_decls_from_stmts(&if_stmt.then.stmts, out);
+                if let Some(else_stmt) = &if_stmt.else_ {
+                    collect_type_decls_from_stmts(&[*else_stmt.clone()], out);
+                }
+            }
+            StmtKind::For(for_stmt) => {
+                collect_type_decls_from_stmts(&for_stmt.body.stmts, out);
+            }
+            StmtKind::Switch(switch_stmt) => {
+                for case in &switch_stmt.cases {
+                    collect_type_decls_from_stmts(&case.body, out);
+                }
+            }
+            StmtKind::TypeSwitch(ts) => {
+                for case in &ts.cases {
+                    collect_type_decls_from_stmts(&case.body, out);
+                }
+            }
+            StmtKind::Select(select_stmt) => {
+                for case in &select_stmt.cases {
+                    collect_type_decls_from_stmts(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn build_runtime_types(
@@ -383,7 +450,7 @@ fn generate_method_signature(
     func_decl: &vo_syntax::ast::FuncDecl,
     info: &TypeInfoWrapper,
     interner: &vo_common::SymbolInterner,
-    ctx: &CodegenContext,
+    ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::RuntimeType;
     
@@ -418,7 +485,7 @@ fn tuple_to_runtime_types(
     tuple_key: vo_analysis::objects::TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
-    ctx: &CodegenContext,
+    ctx: &mut CodegenContext,
 ) -> Vec<vo_runtime::RuntimeType> {
     use vo_analysis::typ::Type;
     if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
@@ -438,7 +505,7 @@ fn signature_type_to_runtime_type(
     sig_type: vo_analysis::objects::TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
-    ctx: &CodegenContext,
+    ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_analysis::typ::Type;
     use vo_runtime::RuntimeType;
@@ -454,14 +521,23 @@ fn signature_type_to_runtime_type(
     }
 }
 
-/// Simplified type_key to RuntimeType conversion.
+/// Convert type_key to RuntimeType using just ValueKind.
+/// Used for basic types when full type info is not available.
+pub fn type_key_to_runtime_type_basic(
+    _type_key: vo_analysis::objects::TypeKey,
+    vk: vo_runtime::ValueKind,
+) -> vo_runtime::RuntimeType {
+    vo_runtime::RuntimeType::Basic(vk)
+}
+
+/// Simplified type_key to RuntimeType conversion using mutable context for interning.
 /// Uses ValueKind-based conversion for basic types, named_type_id for Named types.
-/// Public for use in rttid generation.
+/// For composite types, recursively interns inner types to get their rttids.
 pub fn type_key_to_runtime_type_simple(
     type_key: vo_analysis::objects::TypeKey,
     info: &TypeInfoWrapper,
     _interner: &vo_common::SymbolInterner,
-    ctx: &CodegenContext,
+    ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::RuntimeType;
     use vo_runtime::ValueKind;
@@ -486,36 +562,36 @@ pub fn type_key_to_runtime_type_simple(
             if vk == ValueKind::Struct {
                 RuntimeType::Struct { fields: Vec::new() }
             } else {
-                RuntimeType::Array { len: 0, elem: Box::new(RuntimeType::Basic(ValueKind::Void)) }
+                RuntimeType::Array { len: 0, elem: ValueKind::Void as u32 }
             }
         }
         ValueKind::Pointer => {
-            // Preserve element type for correct rttid comparison
+            // Recursively intern elem type to get rttid
             let elem_type = info.pointer_elem(type_key);
-            let elem_rt = type_key_to_runtime_type_simple(elem_type, info, _interner, ctx);
-            RuntimeType::Pointer(Box::new(elem_rt))
+            let elem_rttid = ctx.intern_type_key(elem_type, info);
+            RuntimeType::Pointer(elem_rttid)
         }
         ValueKind::Slice => {
             let elem_type = info.slice_elem_type(type_key);
-            let elem_rt = type_key_to_runtime_type_simple(elem_type, info, _interner, ctx);
-            RuntimeType::Slice(Box::new(elem_rt))
+            let elem_rttid = ctx.intern_type_key(elem_type, info);
+            RuntimeType::Slice(elem_rttid)
         }
         ValueKind::Map => {
             let (key_type, val_type) = info.map_key_val_types(type_key);
-            let key_rt = type_key_to_runtime_type_simple(key_type, info, _interner, ctx);
-            let val_rt = type_key_to_runtime_type_simple(val_type, info, _interner, ctx);
+            let key_rttid = ctx.intern_type_key(key_type, info);
+            let val_rttid = ctx.intern_type_key(val_type, info);
             RuntimeType::Map {
-                key: Box::new(key_rt),
-                val: Box::new(val_rt),
+                key: key_rttid,
+                val: val_rttid,
             }
         }
         ValueKind::Channel => {
             let elem_type = info.chan_elem_type(type_key);
-            let elem_rt = type_key_to_runtime_type_simple(elem_type, info, _interner, ctx);
+            let elem_rttid = ctx.intern_type_key(elem_type, info);
             let dir = info.chan_dir(type_key);
             RuntimeType::Chan {
                 dir,
-                elem: Box::new(elem_rt),
+                elem: elem_rttid,
             }
         }
         ValueKind::Interface => {

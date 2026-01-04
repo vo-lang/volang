@@ -26,6 +26,9 @@ use crate::symbol::Symbol;
 use crate::types::ValueKind;
 
 /// Runtime type representation for type identity checking.
+/// 
+/// Composite types (Pointer/Array/Slice/Map/Chan) store elem rttid (u32)
+/// instead of Box<RuntimeType> to enable O(1) elem type lookup at runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeType {
     /// Basic types: int, string, bool, float64, etc.
@@ -35,28 +38,28 @@ pub enum RuntimeType {
     /// Named types are always different from any other type.
     Named(u32),
     
-    /// Pointer type: *T
-    Pointer(Box<RuntimeType>),
+    /// Pointer type: *T - stores elem rttid
+    Pointer(u32),
     
-    /// Array type: [N]T
+    /// Array type: [N]T - stores elem rttid
     Array {
         len: u64,
-        elem: Box<RuntimeType>,
+        elem: u32,
     },
     
-    /// Slice type: []T
-    Slice(Box<RuntimeType>),
+    /// Slice type: []T - stores elem rttid
+    Slice(u32),
     
-    /// Map type: map[K]V
+    /// Map type: map[K]V - stores key and val rttid
     Map {
-        key: Box<RuntimeType>,
-        val: Box<RuntimeType>,
+        key: u32,
+        val: u32,
     },
     
-    /// Channel type: chan T, chan<- T, <-chan T
+    /// Channel type: chan T, chan<- T, <-chan T - stores elem rttid
     Chan {
         dir: ChanDir,
-        elem: Box<RuntimeType>,
+        elem: u32,
     },
     
     /// Function type: func(params) results

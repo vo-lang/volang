@@ -135,6 +135,31 @@ fn write_expr(buf: &mut String, expr: &Expr, interner: &SymbolInterner) {
             write_expr(buf, expr, interner);
             buf.push('?');
         }
+        ExprKind::DynAccess(d) => {
+            write_expr(buf, &d.base, interner);
+            buf.push_str("~>");
+            match &d.op {
+                vo_syntax::ast::DynAccessOp::Field(ident) => {
+                    if let Some(name) = interner.resolve(ident.symbol) {
+                        buf.push_str(name);
+                    }
+                }
+                vo_syntax::ast::DynAccessOp::Index(idx) => {
+                    buf.push('[');
+                    write_expr(buf, idx, interner);
+                    buf.push(']');
+                }
+                vo_syntax::ast::DynAccessOp::Call { args, .. } => {
+                    write_args(buf, args, interner);
+                }
+                vo_syntax::ast::DynAccessOp::MethodCall { method, args, .. } => {
+                    if let Some(name) = interner.resolve(method.symbol) {
+                        buf.push_str(name);
+                    }
+                    write_args(buf, args, interner);
+                }
+            }
+        }
     }
 }
 
@@ -252,4 +277,13 @@ fn format_unop(op: &UnaryOp) -> &'static str {
         UnaryOp::Addr => "&",
         UnaryOp::Deref => "*",
     }
+}
+
+fn write_args(buf: &mut String, args: &[Expr], interner: &SymbolInterner) {
+    buf.push('(');
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 { buf.push_str(", ") }
+        write_expr(buf, arg, interner);
+    }
+    buf.push(')');
 }

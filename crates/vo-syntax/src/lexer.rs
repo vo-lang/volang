@@ -429,6 +429,18 @@ impl<'src> Lexer<'src> {
                 TokenKind::Question
             }
 
+            // Tilde arrow (dynamic access)
+            '~' => {
+                self.advance();
+                if self.advance_if('>') {
+                    TokenKind::TildeArrow
+                } else {
+                    let start = self.pos() - 1;
+                    self.diagnostics.emit(SyntaxError::UnexpectedChar.at_with_message(start..self.pos(), "expected '>' after '~'".to_string()));
+                    TokenKind::Invalid
+                }
+            }
+
             // String literals
             '"' => self.scan_string(),
             '`' => self.scan_raw_string(),

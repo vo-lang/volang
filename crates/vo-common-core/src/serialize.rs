@@ -111,8 +111,6 @@ const RT_INTERFACE: u8 = 9;
 const RT_TUPLE: u8 = 10;
 
 fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
-    use crate::runtime_type::{ChanDir, InterfaceMethod, StructField};
-    
     match rt {
         RuntimeType::Basic(vk) => {
             w.write_u8(RT_BASIC);
@@ -122,28 +120,28 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u8(RT_NAMED);
             w.write_u32(*id);
         }
-        RuntimeType::Pointer(inner) => {
+        RuntimeType::Pointer(elem_rttid) => {
             w.write_u8(RT_POINTER);
-            write_runtime_type(w, inner);
+            w.write_u32(*elem_rttid);
         }
         RuntimeType::Array { len, elem } => {
             w.write_u8(RT_ARRAY);
             w.write_u64(*len);
-            write_runtime_type(w, elem);
+            w.write_u32(*elem);
         }
-        RuntimeType::Slice(elem) => {
+        RuntimeType::Slice(elem_rttid) => {
             w.write_u8(RT_SLICE);
-            write_runtime_type(w, elem);
+            w.write_u32(*elem_rttid);
         }
         RuntimeType::Map { key, val } => {
             w.write_u8(RT_MAP);
-            write_runtime_type(w, key);
-            write_runtime_type(w, val);
+            w.write_u32(*key);
+            w.write_u32(*val);
         }
         RuntimeType::Chan { dir, elem } => {
             w.write_u8(RT_CHAN);
             w.write_u8(*dir as u8);
-            write_runtime_type(w, elem);
+            w.write_u32(*elem);
         }
         RuntimeType::Func { params, results, variadic } => {
             w.write_u8(RT_FUNC);
@@ -187,8 +185,7 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
 }
 
 fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> {
-    use crate::runtime_type::{ChanDir, InterfaceMethod, StructField};
-    use crate::symbol::Symbol;
+    use crate::runtime_type::ChanDir;
     use crate::types::ValueKind;
     use num_enum::TryFromPrimitive;
     
@@ -203,32 +200,32 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             Ok(RuntimeType::Named(id))
         }
         RT_POINTER => {
-            let inner = read_runtime_type(r)?;
-            Ok(RuntimeType::Pointer(Box::new(inner)))
+            let elem_rttid = r.read_u32()?;
+            Ok(RuntimeType::Pointer(elem_rttid))
         }
         RT_ARRAY => {
             let len = r.read_u64()?;
-            let elem = read_runtime_type(r)?;
-            Ok(RuntimeType::Array { len, elem: Box::new(elem) })
+            let elem = r.read_u32()?;
+            Ok(RuntimeType::Array { len, elem })
         }
         RT_SLICE => {
-            let elem = read_runtime_type(r)?;
-            Ok(RuntimeType::Slice(Box::new(elem)))
+            let elem_rttid = r.read_u32()?;
+            Ok(RuntimeType::Slice(elem_rttid))
         }
         RT_MAP => {
-            let key = read_runtime_type(r)?;
-            let val = read_runtime_type(r)?;
-            Ok(RuntimeType::Map { key: Box::new(key), val: Box::new(val) })
+            let key = r.read_u32()?;
+            let val = r.read_u32()?;
+            Ok(RuntimeType::Map { key, val })
         }
         RT_CHAN => {
             let dir = r.read_u8()?;
-            let elem = read_runtime_type(r)?;
+            let elem = r.read_u32()?;
             let dir = match dir {
                 1 => ChanDir::Send,
                 2 => ChanDir::Recv,
                 _ => ChanDir::Both,
             };
-            Ok(RuntimeType::Chan { dir, elem: Box::new(elem) })
+            Ok(RuntimeType::Chan { dir, elem })
         }
         RT_FUNC => {
             let variadic = r.read_u8()? != 0;
@@ -245,6 +242,8 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             Ok(RuntimeType::Func { params, results, variadic })
         }
         RT_STRUCT => {
+            use crate::runtime_type::StructField;
+            use crate::symbol::Symbol;
             let field_count = r.read_u32()? as usize;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
@@ -258,6 +257,8 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             Ok(RuntimeType::Struct { fields })
         }
         RT_INTERFACE => {
+            use crate::runtime_type::InterfaceMethod;
+            use crate::symbol::Symbol;
             let method_count = r.read_u32()? as usize;
             let mut methods = Vec::with_capacity(method_count);
             for _ in 0..method_count {
@@ -384,6 +385,7 @@ impl Module {
             w.write_vec(&m.slot_types, |w, st| w.write_u8(*st as u8));
             w.write_vec(&m.field_names, |w, n| w.write_string(n));
             w.write_vec(&m.field_offsets, |w, o| w.write_u16(*o));
+            w.write_vec(&m.field_value_metas, |w, v| w.write_u32(*v));
         });
 
         w.write_vec(&self.interface_metas, |w, m| {
@@ -501,10 +503,12 @@ impl Module {
             let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             let field_names = r.read_vec(|r| r.read_string())?;
             let field_offsets = r.read_vec(|r| r.read_u16())?;
+            let field_value_metas = r.read_vec(|r| r.read_u32())?;
             Ok(StructMeta {
                 slot_types,
                 field_names,
                 field_offsets,
+                field_value_metas,
             })
         })?;
 

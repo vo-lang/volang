@@ -57,6 +57,9 @@ pub struct StructMeta {
     pub slot_types: Vec<SlotType>,
     pub field_names: Vec<String>,
     pub field_offsets: Vec<u16>,
+    /// Per-field value_meta for dynamic access: (rttid << 8) | value_kind
+    /// Used by dyn_get_attr to correctly pack return values.
+    pub field_value_metas: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]

@@ -14,10 +14,13 @@ use crate::vm::ExecResult;
 
 /// Extract named_type_id from RuntimeType (recursively unwraps Pointer).
 /// Methods are always defined on the base Named type.
-fn extract_named_type_id(rt: &RuntimeType) -> Option<u32> {
+fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
     match rt {
         RuntimeType::Named(id) => Some(*id),
-        RuntimeType::Pointer(inner) => extract_named_type_id(inner),
+        RuntimeType::Pointer(elem_rttid) => {
+            runtime_types.get(*elem_rttid as usize)
+                .and_then(|inner| extract_named_type_id(inner, runtime_types))
+        }
         _ => None,
     }
 }
@@ -58,7 +61,7 @@ pub fn exec_iface_assign(
             // For Named types: Named(id) -> id
             // For Pointer types: Pointer(Named(id)) -> id (methods are on base type)
             let named_type_id = module.runtime_types.get(src_rttid as usize)
-                .and_then(|rt| extract_named_type_id(rt))
+                .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
                 .unwrap_or(0);
             
             if named_type_id == 0 {
@@ -150,7 +153,7 @@ pub fn exec_iface_assert(
                     // Look up RuntimeType to find named_type_id for method lookup
                     // Use extract_named_type_id to handle Pointer(Named(id)) case
                     if let Some(named_type_id) = module.runtime_types.get(src_rttid as usize)
-                        .and_then(|rt| extract_named_type_id(rt))
+                        .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
                     {
                         let named_type = &module.named_type_metas[named_type_id as usize];
                         // Check each interface method: name must exist AND signature must match
@@ -181,7 +184,7 @@ pub fn exec_iface_assert(
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
             let named_type_id = module.runtime_types.get(src_rttid as usize)
-                .and_then(|rt| extract_named_type_id(rt))
+                .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
                 .unwrap_or(0);
             let new_itab_id = itab_cache.get_or_create(
                 named_type_id,

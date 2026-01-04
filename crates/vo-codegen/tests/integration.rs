@@ -705,7 +705,7 @@ func main() int {
     
     // Should use CopyN for struct copy, not PtrNew
     let main_fn = module.functions.iter().find(|f| f.name == "main").unwrap();
-    let has_ptr_new = main_fn.code.iter().any(|i| i.op == 18); // PtrNew opcode
+    let has_ptr_new = main_fn.code.iter().any(|i| i.op == 13); // PtrNew opcode = 13
     assert!(!has_ptr_new, "non-escaped multi-slot struct should NOT use PtrNew");
 }
 

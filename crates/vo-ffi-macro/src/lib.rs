@@ -549,16 +549,16 @@ fn generate_wrapper(
         if is_runtime_core {
             Ok(quote! {
                 #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut crate::ffi::ExternCallWithGc) -> crate::ffi::ExternResult {
+                pub fn #wrapper_name(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
                     #(#arg_reads)*
                     let __result = #call_expr;
                     #ret_writes
                     crate::ffi::ExternResult::Ok
                 }
 
-                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_GC)]
+                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
                 #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntryWithGc = crate::ffi::ExternEntryWithGc {
+                static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
                     name: #lookup_name,
                     func: #wrapper_name,
                 };
@@ -566,16 +566,16 @@ fn generate_wrapper(
         } else {
             Ok(quote! {
                 #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallWithGc) -> vo_runtime::ffi::ExternResult {
+                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
                     #(#arg_reads)*
                     let __result = #call_expr;
                     #ret_writes
                     vo_runtime::ffi::ExternResult::Ok
                 }
 
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_GC)]
+                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
                 #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntryWithGc = vo_runtime::ffi::ExternEntryWithGc {
+                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
                     name: #lookup_name,
                     func: #wrapper_name,
                 };
@@ -673,16 +673,16 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
                 #func
 
                 #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut crate::ffi::ExternCallWithGc) -> crate::ffi::ExternResult {
+                pub fn #wrapper_name(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
                     #(#arg_reads)*
                     let __result = #call_expr;
                     #ret_writes
                     crate::ffi::ExternResult::Ok
                 }
 
-                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_GC)]
+                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
                 #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntryWithGc = crate::ffi::ExternEntryWithGc {
+                static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
                     name: #name,
                     func: #wrapper_name,
                 };
@@ -692,16 +692,16 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
                 #func
 
                 #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallWithGc) -> vo_runtime::ffi::ExternResult {
+                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
                     #(#arg_reads)*
                     let __result = #call_expr;
                     #ret_writes
                     vo_runtime::ffi::ExternResult::Ok
                 }
 
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_GC)]
+                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
                 #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntryWithGc = vo_runtime::ffi::ExternEntryWithGc {
+                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
                     name: #name,
                     func: #wrapper_name,
                 };

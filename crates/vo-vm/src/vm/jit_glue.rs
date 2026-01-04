@@ -29,21 +29,35 @@ pub extern "C" fn itab_lookup_trampoline(
 pub extern "C" fn call_extern_trampoline(
     registry: *const std::ffi::c_void,
     gc: *mut vo_runtime::gc::Gc,
+    module: *const std::ffi::c_void,
     extern_id: u32,
     args: *const u64,
     arg_count: u32,
     ret: *mut u64,
 ) -> JitResult {
     use vo_runtime::ffi::{ExternResult, ExternRegistry};
+    use crate::bytecode::Module;
     
     let registry = unsafe { &*(registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
+    let module = unsafe { &*(module as *const Module) };
     
     let mut temp_stack: Vec<u64> = (0..arg_count as usize)
         .map(|i| unsafe { *args.add(i) })
         .collect();
     
-    let result = registry.call(extern_id, &mut temp_stack, 0, 0, arg_count as u16, 0, gc);
+    let result = registry.call(
+        extern_id,
+        &mut temp_stack,
+        0,
+        0,
+        arg_count as u16,
+        0,
+        gc,
+        &module.struct_metas,
+        &module.named_type_metas,
+        &module.runtime_types,
+    );
     
     match result {
         ExternResult::Ok => {

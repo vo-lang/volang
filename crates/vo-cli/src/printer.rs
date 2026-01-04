@@ -737,10 +737,41 @@ impl<'a> AstPrinter<'a> {
                 self.write_expr_inline(e);
                 write!(self.output, "?").unwrap();
             }
+            ExprKind::DynAccess(d) => {
+                self.write_expr_inline(&d.base);
+                write!(self.output, "~>").unwrap();
+                match &d.op {
+                    vo_syntax::ast::DynAccessOp::Field(ident) => {
+                        write!(self.output, "{}", self.resolve_symbol(ident.symbol)).unwrap();
+                    }
+                    vo_syntax::ast::DynAccessOp::Index(idx) => {
+                        write!(self.output, "[").unwrap();
+                        self.write_expr_inline(idx);
+                        write!(self.output, "]").unwrap();
+                    }
+                    vo_syntax::ast::DynAccessOp::Call { args, spread } => {
+                        self.write_call_args(args, *spread);
+                    }
+                    vo_syntax::ast::DynAccessOp::MethodCall { method, args, spread } => {
+                        write!(self.output, "{}", self.resolve_symbol(method.symbol)).unwrap();
+                        self.write_call_args(args, *spread);
+                    }
+                }
+            }
         }
     }
 
     fn resolve_symbol(&self, symbol: vo_common::symbol::Symbol) -> String {
         self.interner.resolve(symbol).unwrap_or("<unknown>").to_string()
+    }
+
+    fn write_call_args(&mut self, args: &[vo_syntax::ast::Expr], spread: bool) {
+        write!(self.output, "(").unwrap();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 { write!(self.output, ", ").unwrap() }
+            self.write_expr_inline(arg);
+        }
+        if spread { write!(self.output, "...").unwrap() }
+        write!(self.output, ")").unwrap();
     }
 }

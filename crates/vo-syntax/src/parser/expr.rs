@@ -31,7 +31,7 @@ impl Precedence {
             TokenKind::Plus | TokenKind::Minus | TokenKind::Pipe | TokenKind::Caret => Precedence::Sum,
             TokenKind::Shl | TokenKind::Shr => Precedence::Shift,
             TokenKind::Star | TokenKind::Slash | TokenKind::Percent | TokenKind::Amp | TokenKind::AmpCaret => Precedence::Product,
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::Dot | TokenKind::Question => Precedence::Postfix,
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::Dot | TokenKind::Question | TokenKind::TildeArrow => Precedence::Postfix,
             TokenKind::LBrace => Precedence::Postfix,
             _ => Precedence::Lowest,
         }
@@ -381,6 +381,11 @@ impl<'a> Parser<'a> {
                 let span = Span::new(start, self.current.span.start);
                 Ok(self.make_expr(ExprKind::TryUnwrap(Box::new(left)), span))
             }
+            // Dynamic access operator
+            TokenKind::TildeArrow => {
+                self.advance();
+                self.parse_dyn_access(left, start)
+            }
             _ => Ok(left),
         }
     }
@@ -518,5 +523,42 @@ impl<'a> Parser<'a> {
             TokenKind::PipePipe => BinaryOp::LogOr,
             _ => unreachable!("not a binary operator: {:?}", kind),
         }
+    }
+
+    /// Parse dynamic access expression after `~>`.
+    /// Forms: a~>field, a~>[key], a~>(args...), a~>method(args...)
+    fn parse_dyn_access(&mut self, base: Expr, start: vo_common::span::BytePos) -> ParseResult<Expr> {
+        let op = if self.at(TokenKind::LBracket) {
+            // a~>[key]
+            self.advance();
+            let index = self.parse_expr()?;
+            self.expect(TokenKind::RBracket)?;
+            DynAccessOp::Index(index)
+        } else if self.at(TokenKind::LParen) {
+            // a~>(args...)
+            self.advance();
+            let (args, spread) = self.parse_call_args()?;
+            self.expect(TokenKind::RParen)?;
+            DynAccessOp::Call { args, spread }
+        } else if self.at(TokenKind::Ident) {
+            // a~>field or a~>method(args...)
+            let ident = self.parse_ident()?;
+            if self.at(TokenKind::LParen) {
+                // a~>method(args...)
+                self.advance();
+                let (args, spread) = self.parse_call_args()?;
+                self.expect(TokenKind::RParen)?;
+                DynAccessOp::MethodCall { method: ident, args, spread }
+            } else {
+                // a~>field
+                DynAccessOp::Field(ident)
+            }
+        } else {
+            self.error("expected identifier, '[', or '(' after '~>'");
+            return Err(());
+        };
+
+        let span = Span::new(start, self.current.span.start);
+        Ok(self.make_expr(ExprKind::DynAccess(Box::new(DynAccessExpr { base, op })), span))
     }
 }

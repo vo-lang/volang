@@ -204,7 +204,7 @@ impl TypeInfo {
 // They only depend on TCObjects and can be used by both codegen and other consumers.
 
 use crate::typ::{self, Type, BasicType};
-use vo_runtime::{SlotType, ValueKind, RuntimeType};
+use vo_runtime::{SlotType, ValueKind};
 
 /// Compute the number of slots a type occupies.
 pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
@@ -340,76 +340,6 @@ pub fn type_value_kind(type_key: TypeKey, tc_objs: &TCObjects) -> ValueKind {
         Type::Signature(_) => ValueKind::Closure,
         Type::Named(n) => type_value_kind(n.underlying(), tc_objs),
         other => panic!("type_value_kind: unhandled type {:?}", other),
-    }
-}
-
-/// Convert a type to RuntimeType (for type identity checking).
-pub fn type_to_runtime_type(type_key: TypeKey, tc_objs: &TCObjects, named_type_id_fn: impl Fn(TypeKey) -> Option<u32>) -> RuntimeType {
-    let vk = type_value_kind(type_key, tc_objs);
-    
-    match vk {
-        ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
-        ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
-        ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String => {
-            RuntimeType::Basic(vk)
-        }
-        ValueKind::Struct | ValueKind::Array => {
-            if let Some(id) = named_type_id_fn(type_key) {
-                RuntimeType::Named(id)
-            } else if vk == ValueKind::Struct {
-                RuntimeType::Struct { fields: Vec::new() }
-            } else {
-                RuntimeType::Array { len: 0, elem: Box::new(RuntimeType::Basic(ValueKind::Void)) }
-            }
-        }
-        ValueKind::Pointer => RuntimeType::Pointer(Box::new(RuntimeType::Basic(ValueKind::Void))),
-        ValueKind::Slice => RuntimeType::Slice(Box::new(RuntimeType::Basic(ValueKind::Void))),
-        ValueKind::Map => RuntimeType::Map {
-            key: Box::new(RuntimeType::Basic(ValueKind::Void)),
-            val: Box::new(RuntimeType::Basic(ValueKind::Void)),
-        },
-        ValueKind::Channel => RuntimeType::Chan {
-            dir: vo_runtime::ChanDir::Both,
-            elem: Box::new(RuntimeType::Basic(ValueKind::Void)),
-        },
-        ValueKind::Interface => RuntimeType::Interface { methods: Vec::new() },
-        ValueKind::Closure => RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false },
-        _ => RuntimeType::Basic(ValueKind::Void),
-    }
-}
-
-/// Convert a Signature type to RuntimeType::Func with proper params/results.
-pub fn signature_to_runtime_type(sig_type: TypeKey, tc_objs: &TCObjects, named_type_id_fn: impl Fn(TypeKey) -> Option<u32> + Copy) -> RuntimeType {
-    if let Type::Signature(sig) = &tc_objs.types[sig_type] {
-        let params_tuple = sig.params();
-        let params: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[params_tuple] {
-            tuple.vars().iter()
-                .filter_map(|&v| {
-                    tc_objs.lobjs[v].typ().map(|t| type_to_runtime_type(t, tc_objs, named_type_id_fn))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        
-        let results_tuple = sig.results();
-        let results: Vec<RuntimeType> = if let Type::Tuple(tuple) = &tc_objs.types[results_tuple] {
-            tuple.vars().iter()
-                .filter_map(|&v| {
-                    tc_objs.lobjs[v].typ().map(|t| type_to_runtime_type(t, tc_objs, named_type_id_fn))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        
-        RuntimeType::Func {
-            params,
-            results,
-            variadic: sig.variadic(),
-        }
-    } else {
-        RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
     }
 }
 

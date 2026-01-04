@@ -76,6 +76,40 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
+    /// Check if type is (any, error) tuple - used for dynamic access short-circuiting
+    pub fn is_tuple_any_error(&self, type_key: TypeKey) -> bool {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { return false };
+        let vars = tuple.vars();
+        if vars.len() != 2 { return false }
+        
+        let Some(first_type) = self.tc_objs().lobjs[vars[0]].typ() else { return false };
+        let first_underlying = typ::underlying_type(first_type, self.tc_objs());
+        let is_interface = matches!(&self.tc_objs().types[first_underlying], Type::Interface(_));
+        
+        let Some(second_type) = self.tc_objs().lobjs[vars[1]].typ() else { return false };
+        let Some(ref universe) = self.project.tc_objs.universe else { return false };
+        let is_error = typ::identical(second_type, universe.error_type(), self.tc_objs());
+        
+        is_interface && is_error
+    }
+
+    /// Get the empty interface type (any) - creates a new one each time
+    /// This is fine for codegen since we only use it for structural type comparison
+    pub fn any_type(&self) -> TypeKey {
+        // Empty interface is stored at index 0 in interface_metas
+        // We need to find it in the type system - use the first empty interface we can find
+        // For codegen purposes, any empty interface type will work
+        for (key, typ) in self.tc_objs().types.iter() {
+            if let Type::Interface(iface) = typ {
+                if iface.methods().is_empty() && iface.embeddeds().is_empty() {
+                    return key;
+                }
+            }
+        }
+        panic!("empty interface type not found in type system")
+    }
+
     pub fn expr_type_raw(&self, expr_id: ExprId) -> TypeKey {
         self.type_info().types.get(&expr_id)
             .map(|tv| tv.typ)
@@ -228,6 +262,16 @@ impl<'a> TypeInfoWrapper<'a> {
 
     pub fn is_interface(&self, type_key: TypeKey) -> bool {
         type_layout::is_interface(type_key, self.tc_objs())
+    }
+
+    /// Check if type is empty interface (any/interface{})
+    pub fn is_empty_interface(&self, type_key: TypeKey) -> bool {
+        let underlying = vo_analysis::typ::underlying_type(type_key, self.tc_objs());
+        if let vo_analysis::typ::Type::Interface(iface) = &self.tc_objs().types[underlying] {
+            iface.methods().is_empty() && iface.all_methods().as_ref().map_or(true, |m| m.is_empty())
+        } else {
+            false
+        }
     }
 
     pub fn is_pointer(&self, type_key: TypeKey) -> bool {

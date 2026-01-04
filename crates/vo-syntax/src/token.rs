@@ -236,6 +236,8 @@ pub enum TokenKind {
     At,
     /// `?` (error propagation operator)
     Question,
+    /// `~>` (dynamic access operator)
+    TildeArrow,
 }
 
 impl TokenKind {
@@ -310,6 +312,7 @@ impl TokenKind {
                 | TokenKind::PipePipe
                 | TokenKind::Not
                 | TokenKind::Arrow
+                | TokenKind::TildeArrow
                 | TokenKind::PlusPlus
                 | TokenKind::MinusMinus
         )
@@ -486,6 +489,7 @@ impl TokenKind {
             TokenKind::Ellipsis => "...",
             TokenKind::At => "@",
             TokenKind::Question => "?",
+            TokenKind::TildeArrow => "~>",
         }
     }
 }

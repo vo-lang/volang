@@ -108,8 +108,8 @@ impl Vm {
         for (id, def) in module.externs.iter().enumerate() {
             if let Some(func) = vo_runtime::lookup_extern(&def.name) {
                 self.state.extern_registry.register(id as u32, func);
-            } else if let Some(func) = vo_runtime::lookup_extern_with_gc(&def.name) {
-                self.state.extern_registry.register_with_gc(id as u32, func);
+            } else if let Some(func) = vo_runtime::lookup_extern_with_context(&def.name) {
+                self.state.extern_registry.register_with_context(id as u32, func);
             }
         }
         
@@ -569,7 +569,7 @@ impl Vm {
                     exec::exec_call(stack, &mut fiber.frames, &inst, module)
                 }
                 Opcode::CallExtern => {
-                    exec::exec_call_extern(stack, bp, &inst, &module.externs, &self.state.extern_registry, &mut self.state.gc, &mut fiber.panic_msg)
+                    exec::exec_call_extern(stack, bp, &inst, &module.externs, &self.state.extern_registry, &mut self.state.gc, &module.struct_metas, &module.named_type_metas, &module.runtime_types, &mut fiber.panic_msg)
                 }
                 Opcode::CallClosure => {
                     exec::exec_call_closure(stack, &mut fiber.frames, &inst, module)

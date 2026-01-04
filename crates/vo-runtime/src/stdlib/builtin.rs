@@ -8,11 +8,11 @@
 use linkme::distributed_slice;
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallWithGc, ExternEntryWithGc, ExternResult, EXTERN_TABLE_WITH_GC};
+use crate::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN_TABLE_WITH_CONTEXT};
 use crate::objects::string;
 
 /// Format a single (value, value_kind) pair to string.
-fn format_value(call: &ExternCallWithGc, slot: u16) -> String {
+fn format_value(call: &ExternCallContext, slot: u16) -> String {
     let value = call.arg_u64(slot);
     let kind = ValueKind::from_u8(call.arg_u64(slot + 1) as u8);
     
@@ -46,7 +46,7 @@ fn format_value(call: &ExternCallWithGc, slot: u16) -> String {
 }
 
 /// Format all (value, kind) pairs starting from `start_slot` into a space-separated string.
-fn format_args(call: &ExternCallWithGc, start_slot: u16) -> String {
+fn format_args(call: &ExternCallContext, start_slot: u16) -> String {
     let arg_count = call.arg_count();
     let mut result = String::new();
     let mut slot = start_slot;
@@ -73,20 +73,20 @@ fn format_args(call: &ExternCallWithGc, start_slot: u16) -> String {
 }
 
 /// vo_print - print values without newline (Go builtin print semantics)
-fn builtin_print(call: &mut ExternCallWithGc) -> ExternResult {
+fn builtin_print(call: &mut ExternCallContext) -> ExternResult {
     print!("{}", format_args(call, 0));
     ExternResult::Ok
 }
 
 /// vo_println - print values with newline (Go builtin println semantics)
-fn builtin_println(call: &mut ExternCallWithGc) -> ExternResult {
+fn builtin_println(call: &mut ExternCallContext) -> ExternResult {
     println!("{}", format_args(call, 0));
     ExternResult::Ok
 }
 
 /// vo_assert - assert condition with optional message
 /// Args: (cond bool, [(value, kind), ...])
-fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
+fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
     let cond = call.arg_bool(0);
     if !cond {
         let msg_part = format_args(call, 2);
@@ -101,25 +101,25 @@ fn builtin_assert(call: &mut ExternCallWithGc) -> ExternResult {
 }
 
 // Register builtins via linkme
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_BUILTIN_PRINT: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_PRINT: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_print",
     func: builtin_print,
 };
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_BUILTIN_PRINTLN: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_PRINTLN: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_println",
     func: builtin_println,
 };
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_BUILTIN_ASSERT: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_ASSERT: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_assert",
     func: builtin_assert,
 };
 
-fn builtin_copy(call: &mut ExternCallWithGc) -> ExternResult {
+fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::{slice, array};
     
     let dst = call.arg_ref(0);
@@ -150,8 +150,8 @@ fn builtin_copy(call: &mut ExternCallWithGc) -> ExternResult {
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_BUILTIN_COPY: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_COPY: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_copy",
     func: builtin_copy,
 };
@@ -159,7 +159,7 @@ static __VO_BUILTIN_COPY: ExternEntryWithGc = ExternEntryWithGc {
 // ==================== String Conversion Functions ====================
 
 /// int -> string (unicode code point)
-fn conv_int_str(call: &mut ExternCallWithGc) -> ExternResult {
+fn conv_int_str(call: &mut ExternCallContext) -> ExternResult {
     let code_point = call.arg_u64(0) as u32;
     let s = if let Some(c) = char::from_u32(code_point) {
         c.to_string()
@@ -171,64 +171,64 @@ fn conv_int_str(call: &mut ExternCallWithGc) -> ExternResult {
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_CONV_INT_STR: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_CONV_INT_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_int_str",
     func: conv_int_str,
 };
 
 /// []byte -> string (shares underlying array)
-fn conv_bytes_str(call: &mut ExternCallWithGc) -> ExternResult {
+fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
     let gc_ref = crate::objects::string::from_slice(call.gc(), slice_ref);
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_CONV_BYTES_STR: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_CONV_BYTES_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_bytes_str",
     func: conv_bytes_str,
 };
 
 /// string -> []byte (must copy)
-fn conv_str_bytes(call: &mut ExternCallWithGc) -> ExternResult {
+fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
     let str_ref = call.arg_ref(0);
     let gc_ref = crate::objects::string::to_byte_slice_obj(call.gc(), str_ref);
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_CONV_STR_BYTES: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_CONV_STR_BYTES: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_str_bytes",
     func: conv_str_bytes,
 };
 
 /// []rune -> string
-fn conv_runes_str(call: &mut ExternCallWithGc) -> ExternResult {
+fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
     let gc_ref = crate::objects::string::from_rune_slice_obj(call.gc(), slice_ref);
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_CONV_RUNES_STR: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_CONV_RUNES_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_runes_str",
     func: conv_runes_str,
 };
 
 /// string -> []rune
-fn conv_str_runes(call: &mut ExternCallWithGc) -> ExternResult {
+fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
     let str_ref = call.arg_ref(0);
     let gc_ref = crate::objects::string::to_rune_slice_obj(call.gc(), str_ref);
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_GC)]
-static __VO_CONV_STR_RUNES: ExternEntryWithGc = ExternEntryWithGc {
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_CONV_STR_RUNES: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_str_runes",
     func: conv_str_runes,
 };

@@ -1836,8 +1836,16 @@ pub fn compile_iface_assign(
 ) -> Result<(), CodegenError> {
     let src_type = info.expr_type(rhs.id);
     let src_vk = info.type_value_kind(src_type);
-    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, &info.project.tc_objs);
     
+    // Optimization: if src is any (empty interface), just copy - no itab rebuild needed
+    // because any has no methods, itab is always 0
+    if src_vk == vo_runtime::ValueKind::Interface && info.is_empty_interface(src_type) {
+        let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+        func.emit_copy(dst_slot, src_reg, 2);
+        return Ok(());
+    }
+    
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, &info.project.tc_objs);
     
     let const_idx = if src_vk == vo_runtime::ValueKind::Interface {
         ctx.register_iface_assign_const_interface(iface_meta_id)
