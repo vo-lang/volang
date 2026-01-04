@@ -164,9 +164,9 @@ impl CodegenContext {
     }
 
     /// Recursively intern a type_key, returning its rttid.
-    /// For composite types, this first interns inner types to get their rttids.
+    /// For composite types, this first interns inner types to get their ValueRttids.
     pub fn intern_type_key(&mut self, type_key: vo_analysis::objects::TypeKey, info: &crate::type_info::TypeInfoWrapper) -> u32 {
-        use vo_runtime::{RuntimeType, ValueKind};
+        use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
         
         // Check if it's a Named type first
         if let Some(named_id) = self.get_named_type_id(type_key) {
@@ -197,30 +197,39 @@ impl CodegenContext {
             ValueKind::Array => {
                 let elem_type = info.array_elem_type(type_key);
                 let elem_rttid = self.intern_type_key(elem_type, info);
+                let elem_vk = info.type_value_kind(elem_type);
                 let len = info.array_len(type_key) as u64;
-                self.type_interner.intern(RuntimeType::Array { len, elem: elem_rttid })
+                self.type_interner.intern(RuntimeType::Array { len, elem: ValueRttid::new(elem_rttid, elem_vk) })
             }
             ValueKind::Pointer => {
                 let elem_type = info.pointer_elem(type_key);
                 let elem_rttid = self.intern_type_key(elem_type, info);
-                self.type_interner.intern(RuntimeType::Pointer(elem_rttid))
+                let elem_vk = info.type_value_kind(elem_type);
+                self.type_interner.intern(RuntimeType::Pointer(ValueRttid::new(elem_rttid, elem_vk)))
             }
             ValueKind::Slice => {
                 let elem_type = info.slice_elem_type(type_key);
                 let elem_rttid = self.intern_type_key(elem_type, info);
-                self.type_interner.intern(RuntimeType::Slice(elem_rttid))
+                let elem_vk = info.type_value_kind(elem_type);
+                self.type_interner.intern(RuntimeType::Slice(ValueRttid::new(elem_rttid, elem_vk)))
             }
             ValueKind::Map => {
                 let (key_type, val_type) = info.map_key_val_types(type_key);
                 let key_rttid = self.intern_type_key(key_type, info);
+                let key_vk = info.type_value_kind(key_type);
                 let val_rttid = self.intern_type_key(val_type, info);
-                self.type_interner.intern(RuntimeType::Map { key: key_rttid, val: val_rttid })
+                let val_vk = info.type_value_kind(val_type);
+                self.type_interner.intern(RuntimeType::Map { 
+                    key: ValueRttid::new(key_rttid, key_vk), 
+                    val: ValueRttid::new(val_rttid, val_vk) 
+                })
             }
             ValueKind::Channel => {
                 let elem_type = info.chan_elem_type(type_key);
                 let elem_rttid = self.intern_type_key(elem_type, info);
+                let elem_vk = info.type_value_kind(elem_type);
                 let dir = info.chan_dir(type_key);
-                self.type_interner.intern(RuntimeType::Chan { dir, elem: elem_rttid })
+                self.type_interner.intern(RuntimeType::Chan { dir, elem: ValueRttid::new(elem_rttid, elem_vk) })
             }
             ValueKind::Interface => {
                 self.type_interner.intern(RuntimeType::Interface { methods: Vec::new() })

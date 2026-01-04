@@ -19,17 +19,25 @@ fn build_expected_sig_rttid(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> u32 {
-    // Build params: intern each argument type to get rttid
-    let params: Vec<u32> = args.iter()
+    use vo_runtime::ValueRttid;
+    
+    // Build params: intern each argument type to get ValueRttid
+    let params: Vec<ValueRttid> = args.iter()
         .map(|arg| {
             let arg_type = info.expr_type(arg.id);
-            ctx.intern_type_key(arg_type, info)
+            let rttid = ctx.intern_type_key(arg_type, info);
+            let vk = info.type_value_kind(arg_type);
+            ValueRttid::new(rttid, vk)
         })
         .collect();
     
     // Build results: use LHS types when known, `any` for empty interface
-    let results: Vec<u32> = ret_types.iter()
-        .map(|&type_key| ctx.intern_type_key(type_key, info))
+    let results: Vec<ValueRttid> = ret_types.iter()
+        .map(|&type_key| {
+            let rttid = ctx.intern_type_key(type_key, info);
+            let vk = info.type_value_kind(type_key);
+            ValueRttid::new(rttid, vk)
+        })
         .collect();
     
     // Build and intern the function signature

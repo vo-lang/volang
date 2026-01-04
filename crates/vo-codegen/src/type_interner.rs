@@ -4,7 +4,7 @@
 //! to structurally identical types. This enables O(1) type identity checks at runtime.
 
 use std::collections::HashMap;
-use vo_runtime::{RuntimeType, Symbol, ValueKind, ChanDir, StructField, InterfaceMethod};
+use vo_runtime::{RuntimeType, Symbol, ValueKind, ValueRttid, ChanDir, StructField, InterfaceMethod};
 use vo_analysis::objects::TypeKey;
 use vo_analysis::typ::{Type, BasicType};
 
@@ -81,9 +81,9 @@ impl Default for TypeInterner {
     }
 }
 
-/// Converts a type-checked TypeKey to a RuntimeType and interns it, returning rttid.
+/// Converts a type-checked TypeKey to a RuntimeType and interns it, returning ValueRttid.
 /// For composite types (Pointer/Array/Slice/Map/Chan), this first interns inner types
-/// to get their rttids, then constructs the outer type with those rttids.
+/// to get their ValueRttids, then constructs the outer type with those ValueRttids.
 ///
 /// named_type_ids maps TypeKey -> named_type_id for Named types.
 pub fn intern_type_key(
@@ -92,212 +92,34 @@ pub fn intern_type_key(
     tc_objs: &vo_analysis::objects::TCObjects,
     str_interner: &vo_common::SymbolInterner,
     named_type_ids: &std::collections::HashMap<TypeKey, u32>,
-) -> u32 {
-    let rt = match &tc_objs.types[type_key] {
-        Type::Basic(basic) => {
-            RuntimeType::Basic(basic_type_to_value_kind(basic.typ()))
-        }
-        
-        Type::Named(named) => {
-            // Try direct lookup first
-            if let Some(&id) = named_type_ids.get(&type_key) {
-                RuntimeType::Named(id)
-            } else {
-                // Fallback: find by ObjKey (same Named type may have different TypeKey)
-                let id = named_type_ids.iter()
-                    .find(|(&k, _)| {
-                        if let Type::Named(n) = &tc_objs.types[k] {
-                            n.obj() == named.obj()
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|(_, &id)| id)
-                    .expect("Named type must have a named_type_id");
-                RuntimeType::Named(id)
-            }
-        }
-        
-        Type::Pointer(ptr) => {
-            let elem_rttid = intern_type_key(interner, ptr.base(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Pointer(elem_rttid)
-        }
-        
-        Type::Array(arr) => {
-            let elem_rttid = intern_type_key(interner, arr.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Array {
-                len: arr.len().unwrap_or(0),
-                elem: elem_rttid,
-            }
-        }
-        
-        Type::Slice(slice) => {
-            let elem_rttid = intern_type_key(interner, slice.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Slice(elem_rttid)
-        }
-        
-        Type::Map(map) => {
-            let key_rttid = intern_type_key(interner, map.key(), tc_objs, str_interner, named_type_ids);
-            let val_rttid = intern_type_key(interner, map.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Map {
-                key: key_rttid,
-                val: val_rttid,
-            }
-        }
-        
-        Type::Chan(chan) => {
-            let elem_rttid = intern_type_key(interner, chan.elem(), tc_objs, str_interner, named_type_ids);
-            let dir = match chan.dir() {
-                vo_analysis::typ::ChanDir::SendRecv => ChanDir::Both,
-                vo_analysis::typ::ChanDir::SendOnly => ChanDir::Send,
-                vo_analysis::typ::ChanDir::RecvOnly => ChanDir::Recv,
-            };
-            RuntimeType::Chan {
-                dir,
-                elem: elem_rttid,
-            }
-        }
-        
-        Type::Signature(sig) => {
-            // params() and results() return TypeKey pointing to Tuple types
-            // Recursively intern each param/result type to get rttid
-            let params_tuple = &tc_objs.types[sig.params()];
-            let params: Vec<u32> = if let Type::Tuple(tuple) = params_tuple {
-                tuple.vars().iter()
-                    .filter_map(|&p| {
-                        let obj = &tc_objs.lobjs[p];
-                        obj.typ().map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            
-            let results_tuple = &tc_objs.types[sig.results()];
-            let results: Vec<u32> = if let Type::Tuple(tuple) = results_tuple {
-                tuple.vars().iter()
-                    .filter_map(|&r| {
-                        let obj = &tc_objs.lobjs[r];
-                        obj.typ().map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            
-            RuntimeType::Func {
-                params,
-                results,
-                variadic: sig.variadic(),
-            }
-        }
-        
-        Type::Struct(s) => {
-            let fields: Vec<StructField> = s.fields().iter()
-                .map(|&f| {
-                    let obj = &tc_objs.lobjs[f];
-                    let name = Symbol::from_raw(
-                        str_interner.get(obj.name()).map(|s| s.as_u32()).unwrap_or(u32::MAX)
-                    );
-                    let typ_rttid = obj.typ()
-                        .map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
-                        })
-                        .unwrap_or(ValueKind::Void as u32);
-                    
-                    let tag = Symbol::DUMMY;
-                    let embedded = obj.entity_type().var_property().embedded;
-                    
-                    let pkg = if obj.exported() {
-                        Symbol::DUMMY
-                    } else {
-                        obj.pkg()
-                            .and_then(|p| tc_objs.pkgs.get(p))
-                            .and_then(|pkg| pkg.name().as_ref())
-                            .and_then(|name| str_interner.get(name))
-                            .map(|s| Symbol::from_raw(s.as_u32()))
-                            .unwrap_or(Symbol::DUMMY)
-                    };
-                    
-                    StructField::new(name, typ_rttid, tag, embedded, pkg)
-                })
-                .collect();
-            
-            RuntimeType::Struct { fields }
-        }
-        
-        Type::Interface(iface) => {
-            let methods: Vec<InterfaceMethod> = {
-                let all_methods = iface.all_methods();
-                let method_keys: &[vo_analysis::objects::ObjKey] = all_methods.as_ref()
-                    .map(|v| v.as_slice())
-                    .unwrap_or_else(|| iface.methods());
-                
-                method_keys.iter()
-                    .map(|&m| {
-                        let obj = &tc_objs.lobjs[m];
-                        let name = Symbol::from_raw(
-                            str_interner.get(obj.name()).map(|s| s.as_u32()).unwrap_or(u32::MAX)
-                        );
-                        let sig_rttid = obj.typ()
-                            .map(|t| {
-                                let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                                interner.intern(rt)
-                            })
-                            .unwrap_or_else(|| {
-                                interner.intern(RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false })
-                            });
-                        
-                        InterfaceMethod::new(name, sig_rttid)
-                    })
-                    .collect()
-            };
-            
-            RuntimeType::Interface { methods }
-        }
-        
-        Type::Tuple(tuple) => {
-            let elems: Vec<u32> = tuple.vars().iter()
-                .filter_map(|&v| {
-                    let obj = &tc_objs.lobjs[v];
-                    obj.typ().map(|t| {
-                        let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                        interner.intern(rt)
-                    })
-                })
-                .collect();
-            RuntimeType::Tuple(elems)
-        }
-    };
-    
-    interner.intern(rt)
+) -> ValueRttid {
+    let (rt, vk) = type_key_to_runtime_type(interner, type_key, tc_objs, str_interner, named_type_ids);
+    let rttid = interner.intern(rt);
+    ValueRttid::new(rttid, vk)
 }
 
-/// Helper: converts a type_key to RuntimeType (for nested types in Func/Struct/Interface).
-/// This doesn't intern, just returns the RuntimeType.
+/// Helper: converts a type_key to (RuntimeType, ValueKind).
+/// This doesn't intern, just returns the RuntimeType and its ValueKind.
 fn type_key_to_runtime_type(
     interner: &mut TypeInterner,
     type_key: TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     str_interner: &vo_common::SymbolInterner,
     named_type_ids: &std::collections::HashMap<TypeKey, u32>,
-) -> RuntimeType {
+) -> (RuntimeType, ValueKind) {
     match &tc_objs.types[type_key] {
         Type::Basic(basic) => {
-            RuntimeType::Basic(basic_type_to_value_kind(basic.typ()))
+            let vk = basic_type_to_value_kind(basic.typ());
+            (RuntimeType::Basic(vk), vk)
         }
         Type::Named(named) => {
-            if let Some(&id) = named_type_ids.get(&type_key) {
-                RuntimeType::Named(id)
+            // Named types: get underlying value kind
+            let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
+            let (_, vk) = type_key_to_runtime_type(interner, underlying, tc_objs, str_interner, named_type_ids);
+            let id = if let Some(&id) = named_type_ids.get(&type_key) {
+                id
             } else {
-                let id = named_type_ids.iter()
+                named_type_ids.iter()
                     .find(|(&k, _)| {
                         if let Type::Named(n) = &tc_objs.types[k] {
                             n.obj() == named.obj()
@@ -306,45 +128,46 @@ fn type_key_to_runtime_type(
                         }
                     })
                     .map(|(_, &id)| id)
-                    .unwrap_or(0);
-                RuntimeType::Named(id)
-            }
+                    .unwrap_or(0)
+            };
+            (RuntimeType::Named(id), vk)
         }
         Type::Pointer(ptr) => {
-            let elem_rttid = intern_type_key(interner, ptr.base(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Pointer(elem_rttid)
+            let elem_value_rttid = intern_type_key(interner, ptr.base(), tc_objs, str_interner, named_type_ids);
+            (RuntimeType::Pointer(elem_value_rttid), ValueKind::Pointer)
         }
         Type::Array(arr) => {
-            let elem_rttid = intern_type_key(interner, arr.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Array { len: arr.len().unwrap_or(0), elem: elem_rttid }
+            let elem_value_rttid = intern_type_key(interner, arr.elem(), tc_objs, str_interner, named_type_ids);
+            (RuntimeType::Array { len: arr.len().unwrap_or(0), elem: elem_value_rttid }, ValueKind::Array)
         }
         Type::Slice(slice) => {
-            let elem_rttid = intern_type_key(interner, slice.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Slice(elem_rttid)
+            let elem_value_rttid = intern_type_key(interner, slice.elem(), tc_objs, str_interner, named_type_ids);
+            (RuntimeType::Slice(elem_value_rttid), ValueKind::Slice)
         }
         Type::Map(map) => {
-            let key_rttid = intern_type_key(interner, map.key(), tc_objs, str_interner, named_type_ids);
-            let val_rttid = intern_type_key(interner, map.elem(), tc_objs, str_interner, named_type_ids);
-            RuntimeType::Map { key: key_rttid, val: val_rttid }
+            let key_value_rttid = intern_type_key(interner, map.key(), tc_objs, str_interner, named_type_ids);
+            let val_value_rttid = intern_type_key(interner, map.elem(), tc_objs, str_interner, named_type_ids);
+            (RuntimeType::Map { key: key_value_rttid, val: val_value_rttid }, ValueKind::Map)
         }
         Type::Chan(chan) => {
-            let elem_rttid = intern_type_key(interner, chan.elem(), tc_objs, str_interner, named_type_ids);
+            let elem_value_rttid = intern_type_key(interner, chan.elem(), tc_objs, str_interner, named_type_ids);
             let dir = match chan.dir() {
                 vo_analysis::typ::ChanDir::SendRecv => ChanDir::Both,
                 vo_analysis::typ::ChanDir::SendOnly => ChanDir::Send,
                 vo_analysis::typ::ChanDir::RecvOnly => ChanDir::Recv,
             };
-            RuntimeType::Chan { dir, elem: elem_rttid }
+            (RuntimeType::Chan { dir, elem: elem_value_rttid }, ValueKind::Channel)
         }
         Type::Signature(sig) => {
             let params_tuple = &tc_objs.types[sig.params()];
-            let params: Vec<u32> = if let Type::Tuple(tuple) = params_tuple {
+            let params: Vec<ValueRttid> = if let Type::Tuple(tuple) = params_tuple {
                 tuple.vars().iter()
                     .filter_map(|&p| {
                         let obj = &tc_objs.lobjs[p];
                         obj.typ().map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
+                            let (rt, vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
+                            let rttid = interner.intern(rt);
+                            ValueRttid::new(rttid, vk)
                         })
                     })
                     .collect()
@@ -352,20 +175,21 @@ fn type_key_to_runtime_type(
                 Vec::new()
             };
             let results_tuple = &tc_objs.types[sig.results()];
-            let results: Vec<u32> = if let Type::Tuple(tuple) = results_tuple {
+            let results: Vec<ValueRttid> = if let Type::Tuple(tuple) = results_tuple {
                 tuple.vars().iter()
                     .filter_map(|&r| {
                         let obj = &tc_objs.lobjs[r];
                         obj.typ().map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
+                            let (rt, vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
+                            let rttid = interner.intern(rt);
+                            ValueRttid::new(rttid, vk)
                         })
                     })
                     .collect()
             } else {
                 Vec::new()
             };
-            RuntimeType::Func { params, results, variadic: sig.variadic() }
+            (RuntimeType::Func { params, results, variadic: sig.variadic() }, ValueKind::Closure)
         }
         Type::Struct(s) => {
             let fields: Vec<StructField> = s.fields().iter()
@@ -374,12 +198,13 @@ fn type_key_to_runtime_type(
                     let name = Symbol::from_raw(
                         str_interner.get(obj.name()).map(|s| s.as_u32()).unwrap_or(u32::MAX)
                     );
-                    let typ_rttid = obj.typ()
+                    let typ_value_rttid = obj.typ()
                         .map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
+                            let (rt, vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
+                            let rttid = interner.intern(rt);
+                            ValueRttid::new(rttid, vk)
                         })
-                        .unwrap_or(ValueKind::Void as u32);
+                        .unwrap_or(ValueRttid::new(ValueKind::Void as u32, ValueKind::Void));
                     let tag = Symbol::DUMMY;
                     let embedded = obj.entity_type().var_property().embedded;
                     let pkg = if obj.exported() { Symbol::DUMMY } else {
@@ -390,10 +215,10 @@ fn type_key_to_runtime_type(
                             .map(|s| Symbol::from_raw(s.as_u32()))
                             .unwrap_or(Symbol::DUMMY)
                     };
-                    StructField::new(name, typ_rttid, tag, embedded, pkg)
+                    StructField::new(name, typ_value_rttid, tag, embedded, pkg)
                 })
                 .collect();
-            RuntimeType::Struct { fields }
+            (RuntimeType::Struct { fields }, ValueKind::Struct)
         }
         Type::Interface(iface) => {
             let all_methods = iface.all_methods();
@@ -406,30 +231,33 @@ fn type_key_to_runtime_type(
                     let name = Symbol::from_raw(
                         str_interner.get(obj.name()).map(|s| s.as_u32()).unwrap_or(u32::MAX)
                     );
-                    let sig_rttid = obj.typ()
+                    let sig_value_rttid = obj.typ()
                         .map(|t| {
-                            let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                            interner.intern(rt)
+                            let (rt, _vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
+                            let rttid = interner.intern(rt);
+                            ValueRttid::new(rttid, ValueKind::Closure)
                         })
                         .unwrap_or_else(|| {
-                            interner.intern(RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false })
+                            let rttid = interner.intern(RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false });
+                            ValueRttid::new(rttid, ValueKind::Closure)
                         });
-                    InterfaceMethod::new(name, sig_rttid)
+                    InterfaceMethod::new(name, sig_value_rttid)
                 })
                 .collect();
-            RuntimeType::Interface { methods }
+            (RuntimeType::Interface { methods }, ValueKind::Interface)
         }
         Type::Tuple(tuple) => {
-            let elems: Vec<u32> = tuple.vars().iter()
+            let elems: Vec<ValueRttid> = tuple.vars().iter()
                 .filter_map(|&v| {
                     let obj = &tc_objs.lobjs[v];
                     obj.typ().map(|t| {
-                        let rt = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
-                        interner.intern(rt)
+                        let (rt, vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, named_type_ids);
+                        let rttid = interner.intern(rt);
+                        ValueRttid::new(rttid, vk)
                     })
                 })
                 .collect();
-            RuntimeType::Tuple(elems)
+            (RuntimeType::Tuple(elems), ValueKind::Void)
         }
     }
 }
@@ -484,13 +312,13 @@ mod tests {
     fn test_interner_composite() {
         let mut interner = TypeInterner::new();
         
-        // Slice stores elem rttid (u32), basic type rttid = ValueKind value
-        let int_rttid = ValueKind::Int as u32;
-        let string_rttid = ValueKind::String as u32;
+        // Slice stores elem ValueRttid, basic type rttid = ValueKind value
+        let int_value_rttid = ValueRttid::new(ValueKind::Int as u32, ValueKind::Int);
+        let string_value_rttid = ValueRttid::new(ValueKind::String as u32, ValueKind::String);
         
-        let slice_int = RuntimeType::Slice(int_rttid);
-        let slice_int2 = RuntimeType::Slice(int_rttid);
-        let slice_str = RuntimeType::Slice(string_rttid);
+        let slice_int = RuntimeType::Slice(int_value_rttid);
+        let slice_int2 = RuntimeType::Slice(int_value_rttid);
+        let slice_str = RuntimeType::Slice(string_value_rttid);
         
         let id1 = interner.intern(slice_int);
         let id2 = interner.intern(slice_int2);

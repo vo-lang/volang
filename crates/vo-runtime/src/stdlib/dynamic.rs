@@ -43,8 +43,8 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     // slot1 is the pointer value (GcRef to struct data)
     let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
         // Get pointed-to type's rttid
-        let elem_rttid = call.get_elem_rttid_from_base(rttid);
-        (elem_rttid, slot1 as GcRef)
+        let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+        (elem_value_rttid.rttid(), slot1 as GcRef)
     } else if vk == ValueKind::Struct {
         (rttid, slot1 as GcRef)
     } else {
@@ -212,13 +212,13 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             let elem_vk = elem_meta.value_kind();
             let elem_bytes = crate::objects::array::elem_bytes(crate::objects::slice::array_ref(base_ref));
             
-            // Get elem rttid from base's RuntimeType (now O(1))
-            let elem_rttid = call.get_elem_rttid_from_base(base_rttid);
+            // Get elem ValueRttid from base's RuntimeType (now O(1))
+            let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
             
             // Read element value
             let value = crate::objects::slice::get(base_ref, idx as usize, elem_bytes);
             
-            let result_slot0 = interface::pack_slot0(0, elem_rttid, elem_vk);
+            let result_slot0 = interface::pack_slot0(0, elem_value_rttid.rttid(), elem_vk);
             call.ret_u64(0, result_slot0);
             call.ret_u64(1, value);
             call.ret_nil(2);
@@ -266,22 +266,22 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             
             let val_meta = crate::objects::map::val_meta(base_ref);
             let val_vk = val_meta.value_kind();
-            // Get val rttid from base's RuntimeType (now O(1))
-            let val_rttid = call.get_elem_rttid_from_base(base_rttid);
+            // Get val ValueRttid from base's RuntimeType (now O(1))
+            let val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
             
             // Lookup in map - key is passed as slice
             let key_data = [key_slot1];
             let found = crate::objects::map::get(base_ref, &key_data);
             
             if let Some(val_slice) = found {
-                let result_slot0 = interface::pack_slot0(0, val_rttid, val_vk);
+                let result_slot0 = interface::pack_slot0(0, val_value_rttid.rttid(), val_vk);
                 call.ret_u64(0, result_slot0);
                 call.ret_u64(1, val_slice[0]);
                 call.ret_nil(2);
                 call.ret_nil(3);
             } else {
                 // Key not found - return zero value
-                let result_slot0 = interface::pack_slot0(0, val_rttid, val_vk);
+                let result_slot0 = interface::pack_slot0(0, val_value_rttid.rttid(), val_vk);
                 call.ret_u64(0, result_slot0);
                 call.ret_u64(1, 0);
                 call.ret_nil(2);

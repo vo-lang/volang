@@ -122,37 +122,37 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
         }
         RuntimeType::Pointer(elem_rttid) => {
             w.write_u8(RT_POINTER);
-            w.write_u32(*elem_rttid);
+            w.write_u32(elem_rttid.to_raw());
         }
         RuntimeType::Array { len, elem } => {
             w.write_u8(RT_ARRAY);
             w.write_u64(*len);
-            w.write_u32(*elem);
+            w.write_u32(elem.to_raw());
         }
         RuntimeType::Slice(elem_rttid) => {
             w.write_u8(RT_SLICE);
-            w.write_u32(*elem_rttid);
+            w.write_u32(elem_rttid.to_raw());
         }
         RuntimeType::Map { key, val } => {
             w.write_u8(RT_MAP);
-            w.write_u32(*key);
-            w.write_u32(*val);
+            w.write_u32(key.to_raw());
+            w.write_u32(val.to_raw());
         }
         RuntimeType::Chan { dir, elem } => {
             w.write_u8(RT_CHAN);
             w.write_u8(*dir as u8);
-            w.write_u32(*elem);
+            w.write_u32(elem.to_raw());
         }
         RuntimeType::Func { params, results, variadic } => {
             w.write_u8(RT_FUNC);
             w.write_u8(*variadic as u8);
             w.write_u32(params.len() as u32);
             for p in params {
-                w.write_u32(*p);
+                w.write_u32(p.to_raw());
             }
             w.write_u32(results.len() as u32);
             for r in results {
-                w.write_u32(*r);
+                w.write_u32(r.to_raw());
             }
         }
         RuntimeType::Struct { fields } => {
@@ -160,7 +160,7 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u32(fields.len() as u32);
             for f in fields {
                 w.write_u32(f.name.as_u32());
-                w.write_u32(f.typ);
+                w.write_u32(f.typ.to_raw());
                 w.write_u32(f.tag.as_u32());
                 w.write_u8(f.embedded as u8);
                 w.write_u32(f.pkg.as_u32());
@@ -171,14 +171,14 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u32(methods.len() as u32);
             for m in methods {
                 w.write_u32(m.name.as_u32());
-                w.write_u32(m.sig);
+                w.write_u32(m.sig.to_raw());
             }
         }
         RuntimeType::Tuple(types) => {
             w.write_u8(RT_TUPLE);
             w.write_u32(types.len() as u32);
             for t in types {
-                w.write_u32(*t);
+                w.write_u32(t.to_raw());
             }
         }
     }
@@ -200,26 +200,26 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             Ok(RuntimeType::Named(id))
         }
         RT_POINTER => {
-            let elem_rttid = r.read_u32()?;
+            let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
             Ok(RuntimeType::Pointer(elem_rttid))
         }
         RT_ARRAY => {
             let len = r.read_u64()?;
-            let elem = r.read_u32()?;
+            let elem = ValueRttid::from_raw(r.read_u32()?);
             Ok(RuntimeType::Array { len, elem })
         }
         RT_SLICE => {
-            let elem_rttid = r.read_u32()?;
+            let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
             Ok(RuntimeType::Slice(elem_rttid))
         }
         RT_MAP => {
-            let key = r.read_u32()?;
-            let val = r.read_u32()?;
+            let key = ValueRttid::from_raw(r.read_u32()?);
+            let val = ValueRttid::from_raw(r.read_u32()?);
             Ok(RuntimeType::Map { key, val })
         }
         RT_CHAN => {
             let dir = r.read_u8()?;
-            let elem = r.read_u32()?;
+            let elem = ValueRttid::from_raw(r.read_u32()?);
             let dir = match dir {
                 1 => ChanDir::Send,
                 2 => ChanDir::Recv,
@@ -232,12 +232,12 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let param_count = r.read_u32()? as usize;
             let mut params = Vec::with_capacity(param_count);
             for _ in 0..param_count {
-                params.push(r.read_u32()?);
+                params.push(ValueRttid::from_raw(r.read_u32()?));
             }
             let result_count = r.read_u32()? as usize;
             let mut results = Vec::with_capacity(result_count);
             for _ in 0..result_count {
-                results.push(r.read_u32()?);
+                results.push(ValueRttid::from_raw(r.read_u32()?));
             }
             Ok(RuntimeType::Func { params, results, variadic })
         }
@@ -248,7 +248,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let name = Symbol::from_raw(r.read_u32()?);
-                let typ = r.read_u32()?;
+                let typ = ValueRttid::from_raw(r.read_u32()?);
                 let tag = Symbol::from_raw(r.read_u32()?);
                 let embedded = r.read_u8()? != 0;
                 let pkg = Symbol::from_raw(r.read_u32()?);
@@ -263,7 +263,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut methods = Vec::with_capacity(method_count);
             for _ in 0..method_count {
                 let name = Symbol::from_raw(r.read_u32()?);
-                let sig = r.read_u32()?;
+                let sig = ValueRttid::from_raw(r.read_u32()?);
                 methods.push(InterfaceMethod::new(name, sig));
             }
             Ok(RuntimeType::Interface { methods })
@@ -272,7 +272,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let type_count = r.read_u32()? as usize;
             let mut types = Vec::with_capacity(type_count);
             for _ in 0..type_count {
-                types.push(r.read_u32()?);
+                types.push(ValueRttid::from_raw(r.read_u32()?));
             }
             Ok(RuntimeType::Tuple(types))
         }

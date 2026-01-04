@@ -23,12 +23,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::symbol::Symbol;
-use crate::types::ValueKind;
+use crate::types::{ValueKind, ValueRttid};
 
 /// Runtime type representation for type identity checking.
 /// 
-/// All nested types store rttid (u32) instead of Box<RuntimeType>
-/// to enable O(1) type lookup at runtime.
+/// All nested types store ValueRttid = (rttid << 8) | value_kind
+/// to enable O(1) type and value_kind lookup at runtime without table queries.
 #[derive(Debug, Clone)]
 pub enum RuntimeType {
     /// Basic types: int, string, bool, float64, etc.
@@ -38,34 +38,34 @@ pub enum RuntimeType {
     /// Named types are always different from any other type.
     Named(u32),
     
-    /// Pointer type: *T - stores elem rttid
-    Pointer(u32),
+    /// Pointer type: *T
+    Pointer(ValueRttid),
     
-    /// Array type: [N]T - stores elem rttid
+    /// Array type: [N]T
     Array {
         len: u64,
-        elem: u32,
+        elem: ValueRttid,
     },
     
-    /// Slice type: []T - stores elem rttid
-    Slice(u32),
+    /// Slice type: []T
+    Slice(ValueRttid),
     
-    /// Map type: map[K]V - stores key and val rttid
+    /// Map type: map[K]V
     Map {
-        key: u32,
-        val: u32,
+        key: ValueRttid,
+        val: ValueRttid,
     },
     
-    /// Channel type: chan T, chan<- T, <-chan T - stores elem rttid
+    /// Channel type: chan T, chan<- T, <-chan T
     Chan {
         dir: ChanDir,
-        elem: u32,
+        elem: ValueRttid,
     },
     
-    /// Function type: func(params) results - stores param/result rttids
+    /// Function type: func(params) results
     Func {
-        params: Vec<u32>,
-        results: Vec<u32>,
+        params: Vec<ValueRttid>,
+        results: Vec<ValueRttid>,
         variadic: bool,
     },
     
@@ -79,8 +79,8 @@ pub enum RuntimeType {
         methods: Vec<InterfaceMethod>,
     },
     
-    /// Tuple type (for function multi-value returns) - stores elem rttids
-    Tuple(Vec<u32>),
+    /// Tuple type (for function multi-value returns)
+    Tuple(Vec<ValueRttid>),
 }
 
 /// Channel direction.
@@ -100,8 +100,8 @@ pub enum ChanDir {
 pub struct StructField {
     /// Field name (interned symbol).
     pub name: Symbol,
-    /// Field type rttid.
-    pub typ: u32,
+    /// Field type.
+    pub typ: ValueRttid,
     /// Struct tag (Symbol::DUMMY if no tag).
     pub tag: Symbol,
     /// Whether this field is embedded.
@@ -116,8 +116,8 @@ pub struct StructField {
 pub struct InterfaceMethod {
     /// Method name (interned symbol).
     pub name: Symbol,
-    /// Method signature rttid (must point to RuntimeType::Func).
-    pub sig: u32,
+    /// Method signature (must point to RuntimeType::Func).
+    pub sig: ValueRttid,
 }
 
 impl RuntimeType {
@@ -145,14 +145,14 @@ impl RuntimeType {
 
 impl StructField {
     /// Creates a new struct field.
-    pub fn new(name: Symbol, typ: u32, tag: Symbol, embedded: bool, pkg: Symbol) -> Self {
+    pub fn new(name: Symbol, typ: ValueRttid, tag: Symbol, embedded: bool, pkg: Symbol) -> Self {
         Self { name, typ, tag, embedded, pkg }
     }
 }
 
 impl InterfaceMethod {
     /// Creates a new interface method.
-    pub fn new(name: Symbol, sig: u32) -> Self {
+    pub fn new(name: Symbol, sig: ValueRttid) -> Self {
         Self { name, sig }
     }
 }
@@ -209,7 +209,7 @@ impl core::hash::Hash for RuntimeType {
                 methods.len().hash(state);
                 let mut combined: u64 = 0;
                 for m in methods {
-                    combined = combined.wrapping_add(m.name.as_u32() as u64 ^ m.sig as u64);
+                    combined = combined.wrapping_add(m.name.as_u32() as u64 ^ m.sig.to_raw() as u64);
                 }
                 combined.hash(state);
             }

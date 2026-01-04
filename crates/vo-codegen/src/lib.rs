@@ -448,24 +448,27 @@ fn generate_method_signature(
     ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::RuntimeType;
+    use vo_runtime::ValueRttid;
     
-    // Collect parameter rttids (excluding receiver)
+    // Collect param ValueRttids
     let mut params = Vec::new();
     for param in &func_decl.sig.params {
         let param_type_key = info.type_expr_type(param.ty.id);
         let param_rttid = ctx.intern_type_key(param_type_key, info);
+        let param_vk = info.type_value_kind(param_type_key);
         // Each name in param.names represents one parameter of this type
         for _ in &param.names {
-            params.push(param_rttid);
+            params.push(ValueRttid::new(param_rttid, param_vk));
         }
     }
     
-    // Collect result rttids
+    // Collect result ValueRttids
     let mut results = Vec::new();
     for result in &func_decl.sig.results {
         let result_type_key = info.type_expr_type(result.ty.id);
         let result_rttid = ctx.intern_type_key(result_type_key, info);
-        results.push(result_rttid);
+        let result_vk = info.type_value_kind(result_type_key);
+        results.push(ValueRttid::new(result_rttid, result_vk));
     }
     
     RuntimeType::Func {
@@ -475,18 +478,23 @@ fn generate_method_signature(
     }
 }
 
-/// Extract rttids from a tuple type (params or results).
-fn tuple_to_rttids(
+/// Extract ValueRttids from a tuple type (params or results).
+fn tuple_to_value_rttids(
     tuple_key: vo_analysis::objects::TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> Vec<u32> {
+) -> Vec<vo_runtime::ValueRttid> {
     use vo_analysis::typ::Type;
+    use vo_runtime::ValueRttid;
     if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
         tuple.vars().iter()
             .filter_map(|&v| {
-                tc_objs.lobjs[v].typ().map(|t| ctx.intern_type_key(t, info))
+                tc_objs.lobjs[v].typ().map(|t| {
+                    let rttid = ctx.intern_type_key(t, info);
+                    let vk = info.type_value_kind(t);
+                    ValueRttid::new(rttid, vk)
+                })
             })
             .collect()
     } else {
@@ -506,8 +514,8 @@ fn signature_type_to_runtime_type(
     
     if let Type::Signature(sig) = &tc_objs.types[sig_type] {
         RuntimeType::Func {
-            params: tuple_to_rttids(sig.params(), tc_objs, info, ctx),
-            results: tuple_to_rttids(sig.results(), tc_objs, info, ctx),
+            params: tuple_to_value_rttids(sig.params(), tc_objs, info, ctx),
+            results: tuple_to_value_rttids(sig.results(), tc_objs, info, ctx),
             variadic: sig.variadic(),
         }
     } else {
@@ -556,36 +564,41 @@ pub fn type_key_to_runtime_type_simple(
             if vk == ValueKind::Struct {
                 RuntimeType::Struct { fields: Vec::new() }
             } else {
-                RuntimeType::Array { len: 0, elem: ValueKind::Void as u32 }
+                RuntimeType::Array { len: 0, elem: vo_runtime::ValueRttid::new(ValueKind::Void as u32, ValueKind::Void) }
             }
         }
         ValueKind::Pointer => {
-            // Recursively intern elem type to get rttid
+            // Recursively intern elem type to get ValueRttid
             let elem_type = info.pointer_elem(type_key);
             let elem_rttid = ctx.intern_type_key(elem_type, info);
-            RuntimeType::Pointer(elem_rttid)
+            let elem_vk = info.type_value_kind(elem_type);
+            RuntimeType::Pointer(vo_runtime::ValueRttid::new(elem_rttid, elem_vk))
         }
         ValueKind::Slice => {
             let elem_type = info.slice_elem_type(type_key);
             let elem_rttid = ctx.intern_type_key(elem_type, info);
-            RuntimeType::Slice(elem_rttid)
+            let elem_vk = info.type_value_kind(elem_type);
+            RuntimeType::Slice(vo_runtime::ValueRttid::new(elem_rttid, elem_vk))
         }
         ValueKind::Map => {
             let (key_type, val_type) = info.map_key_val_types(type_key);
             let key_rttid = ctx.intern_type_key(key_type, info);
+            let key_vk = info.type_value_kind(key_type);
             let val_rttid = ctx.intern_type_key(val_type, info);
+            let val_vk = info.type_value_kind(val_type);
             RuntimeType::Map {
-                key: key_rttid,
-                val: val_rttid,
+                key: vo_runtime::ValueRttid::new(key_rttid, key_vk),
+                val: vo_runtime::ValueRttid::new(val_rttid, val_vk),
             }
         }
         ValueKind::Channel => {
             let elem_type = info.chan_elem_type(type_key);
             let elem_rttid = ctx.intern_type_key(elem_type, info);
+            let elem_vk = info.type_value_kind(elem_type);
             let dir = info.chan_dir(type_key);
             RuntimeType::Chan {
                 dir,
-                elem: elem_rttid,
+                elem: vo_runtime::ValueRttid::new(elem_rttid, elem_vk),
             }
         }
         ValueKind::Interface => {
@@ -596,8 +609,8 @@ pub fn type_key_to_runtime_type_simple(
             let tc_objs = &info.project.tc_objs;
             let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
             if let vo_analysis::typ::Type::Signature(sig) = &tc_objs.types[underlying] {
-                let params = tuple_to_rttids(sig.params(), tc_objs, info, ctx);
-                let results = tuple_to_rttids(sig.results(), tc_objs, info, ctx);
+                let params = tuple_to_value_rttids(sig.params(), tc_objs, info, ctx);
+                let results = tuple_to_value_rttids(sig.results(), tc_objs, info, ctx);
                 RuntimeType::Func { params, results, variadic: sig.variadic() }
             } else {
                 RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }

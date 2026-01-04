@@ -56,7 +56,7 @@ impl ValueMeta {
 /// Runtime type ID with value kind - packed 32-bit representation.
 /// Layout: [rttid:24 | value_kind:8]
 /// Used in FieldMeta for dynamic access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ValueRttid(u32);
 
 impl ValueRttid {

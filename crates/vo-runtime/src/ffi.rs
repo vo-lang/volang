@@ -294,7 +294,7 @@ impl<'a> ExternCallContext<'a> {
         
         // Handle Pointer types - dereference to get base type
         let base_rttid = match self.runtime_types.get(rttid as usize)? {
-            RuntimeType::Pointer(elem_rttid) => *elem_rttid,
+            RuntimeType::Pointer(elem_value_rttid) => elem_value_rttid.rttid(),
             _ => rttid,
         };
         
@@ -401,46 +401,14 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Get return value metadata for all return values from a Func RuntimeType.
-    /// Returns Vec of (rttid << 8 | value_kind) for each return value.
+    /// Returns Vec of ValueRttid (already packed as rttid << 8 | value_kind).
     pub fn get_func_ret_metas(&self, func_rttid: u32) -> Vec<u32> {
         use crate::RuntimeType;
         
         if let Some(RuntimeType::Func { results, .. }) = self.runtime_types.get(func_rttid as usize) {
-            return results.iter().map(|&rttid| self.rttid_to_value_meta(rttid)).collect();
+            return results.iter().map(|vr| vr.to_raw()).collect();
         }
         Vec::new()
-    }
-    
-    /// Convert rttid to value_meta ((rttid << 8) | value_kind)
-    fn rttid_to_value_meta(&self, rttid: u32) -> u32 {
-        let vk = self.rttid_to_value_kind(rttid);
-        (rttid << 8) | (vk as u32)
-    }
-    
-    /// Get ValueKind for a given rttid.
-    /// For Named types, recursively looks up the underlying type.
-    pub fn rttid_to_value_kind(&self, rttid: u32) -> crate::ValueKind {
-        use crate::{RuntimeType, ValueKind};
-        
-        match self.runtime_types.get(rttid as usize) {
-            Some(RuntimeType::Basic(vk)) => *vk,
-            Some(RuntimeType::Named(named_id)) => {
-                // Named type: get underlying value_kind from named_type_metas
-                self.named_type_metas.get(*named_id as usize)
-                    .map(|meta| meta.underlying_meta.value_kind())
-                    .unwrap_or(ValueKind::Void)
-            }
-            Some(RuntimeType::Pointer(_)) => ValueKind::Pointer,
-            Some(RuntimeType::Slice(_)) => ValueKind::Slice,
-            Some(RuntimeType::Map { .. }) => ValueKind::Map,
-            Some(RuntimeType::Chan { .. }) => ValueKind::Channel,
-            Some(RuntimeType::Array { .. }) => ValueKind::Array,
-            Some(RuntimeType::Struct { .. }) => ValueKind::Struct,
-            Some(RuntimeType::Interface { .. }) => ValueKind::Interface,
-            Some(RuntimeType::Func { .. }) => ValueKind::Closure,
-            Some(RuntimeType::Tuple(_)) => ValueKind::Void,
-            None => ValueKind::Void,
-        }
     }
     
     /// Check if two function signatures are compatible for dynamic call.
@@ -458,7 +426,7 @@ impl<'a> ExternCallContext<'a> {
     ) -> Result<(), String> {
         use crate::RuntimeType;
         
-        let get_func_sig = |rttid: u32| -> Option<(&Vec<u32>, &Vec<u32>)> {
+        let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>)> {
             match self.runtime_types.get(rttid as usize)? {
                 RuntimeType::Func { params, results, .. } => Some((params, results)),
                 _ => None,
@@ -480,14 +448,14 @@ impl<'a> ExternCallContext<'a> {
                 expected_results.len(), closure_results.len()));
         }
         
-        for (i, (&expected, &closure)) in expected_params.iter().zip(closure_params).enumerate() {
-            if !self.rttids_compatible(expected, closure) {
+        for (i, (expected, closure)) in expected_params.iter().zip(closure_params).enumerate() {
+            if !self.value_rttids_compatible(*expected, *closure) {
                 return Err(format!("parameter {} type mismatch", i + 1));
             }
         }
         
-        for (i, (&closure, &expected)) in closure_results.iter().zip(expected_results).enumerate() {
-            if !self.rttids_compatible(closure, expected) {
+        for (i, (closure, expected)) in closure_results.iter().zip(expected_results).enumerate() {
+            if !self.value_rttids_compatible(*closure, *expected) {
                 return Err(format!("return {} type mismatch", i + 1));
             }
         }
@@ -495,8 +463,8 @@ impl<'a> ExternCallContext<'a> {
         Ok(())
     }
     
-    /// Check if source rttid is compatible with target rttid.
-    fn rttids_compatible(&self, source: u32, target: u32) -> bool {
+    /// Check if source ValueRttid is compatible with target ValueRttid.
+    fn value_rttids_compatible(&self, source: crate::ValueRttid, target: crate::ValueRttid) -> bool {
         use crate::RuntimeType;
         
         if source == target {
@@ -504,7 +472,8 @@ impl<'a> ExternCallContext<'a> {
         }
         
         // Check if target is any (empty interface)
-        if let Some(RuntimeType::Interface { methods }) = self.runtime_types.get(target as usize) {
+        let target_rttid = target.rttid();
+        if let Some(RuntimeType::Interface { methods }) = self.runtime_types.get(target_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
@@ -513,11 +482,11 @@ impl<'a> ExternCallContext<'a> {
         false
     }
 
-    /// Get element rttid from a Slice/Map/Chan RuntimeType.
-    /// Now that RuntimeType stores elem rttid directly, this is O(1).
-    /// Returns elem_rttid for slice/chan, val_rttid for map.
+    /// Get element ValueRttid from a Slice/Map/Chan RuntimeType.
+    /// Now that RuntimeType stores ValueRttid directly, this is O(1).
+    /// Returns elem ValueRttid for slice/chan, val ValueRttid for map.
     /// Panics if base_rttid is invalid - this indicates a codegen bug.
-    pub fn get_elem_rttid_from_base(&self, base_rttid: u32) -> u32 {
+    pub fn get_elem_value_rttid_from_base(&self, base_rttid: u32) -> crate::ValueRttid {
         use crate::RuntimeType;
         
         let rt = self.runtime_types.get(base_rttid as usize)
@@ -533,11 +502,11 @@ impl<'a> ExternCallContext<'a> {
             RuntimeType::Map { val, .. } => {
                 *val
             }
-            // String indexing returns uint8 - basic type rttid = ValueKind
+            // String indexing returns uint8 - basic type
             RuntimeType::Basic(crate::ValueKind::String) => {
-                crate::ValueKind::Uint8 as u32
+                crate::ValueRttid::new(crate::ValueKind::Uint8 as u32, crate::ValueKind::Uint8)
             }
-            _ => panic!("get_elem_rttid_from_base: unexpected type {:?}", rt),
+            _ => panic!("get_elem_value_rttid_from_base: unexpected type {:?}", rt),
         }
     }
 
