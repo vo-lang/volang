@@ -27,7 +27,7 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::{string, slice, array};
 use vo_common_core::bytecode::{StructMeta, NamedTypeMeta};
 use vo_common_core::runtime_type::RuntimeType;
-use vo_common_core::types::{ValueKind, ValueMeta};
+use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
 /// Extern function execution result.
 #[derive(Debug, Clone)]
@@ -400,13 +400,12 @@ impl<'a> ExternCallContext<'a> {
         self.gc.alloc(value_meta, slots)
     }
 
-    /// Get return value metadata for all return values from a Func RuntimeType.
-    /// Returns Vec of ValueRttid (already packed as rttid << 8 | value_kind).
-    pub fn get_func_ret_metas(&self, func_rttid: u32) -> Vec<u32> {
+    /// Get return ValueRttids for all return values from a Func RuntimeType.
+    pub fn get_func_results(&self, func_rttid: u32) -> Vec<ValueRttid> {
         use crate::RuntimeType;
         
         if let Some(RuntimeType::Func { results, .. }) = self.runtime_types.get(func_rttid as usize) {
-            return results.iter().map(|vr| vr.to_raw()).collect();
+            return results.clone();
         }
         Vec::new()
     }

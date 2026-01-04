@@ -379,21 +379,20 @@ fn dyn_get_ret_meta(call: &mut ExternCallContext) -> ExternResult {
     let closure_rttid = interface::unpack_rttid(callee_slot0);
     
     // Get return info from signature
-    let ret_metas = call.get_func_ret_metas(closure_rttid);
-    let ret_count = ret_metas.len();
-    let ret_slots: u16 = ret_metas.iter().map(|m| {
-        let vk = ValueKind::from_u8((*m & 0xFF) as u8);
-        match vk {
+    let ret_value_rttids = call.get_func_results(closure_rttid);
+    let ret_count = ret_value_rttids.len();
+    let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
+        match vr.value_kind() {
             ValueKind::Struct | ValueKind::Array => 2,  // GcRef
             _ => 1,
         }
     }).sum();
     
-    // Return: [ret_count, ret_slots, ret_meta_0, ret_meta_1, ...]
+    // Return: [ret_count, ret_slots, ret_value_rttid_0, ret_value_rttid_1, ...]
     call.ret_u64(0, ret_count as u64);
     call.ret_u64(1, ret_slots as u64);
-    for (i, meta) in ret_metas.iter().enumerate().take(8) {
-        call.ret_u64(2 + i as u16, *meta as u64);
+    for (i, vr) in ret_value_rttids.iter().enumerate().take(8) {
+        call.ret_u64(2 + i as u16, vr.to_raw() as u64);
     }
     
     ExternResult::Ok
