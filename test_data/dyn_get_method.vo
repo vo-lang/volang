@@ -1,0 +1,83 @@
+package main
+
+type Counter struct {
+	value int
+}
+
+func (c *Counter) Inc() {
+	c.value++
+}
+
+func (c *Counter) Get() int {
+	return c.value
+}
+
+func (c *Counter) Add(n int) int {
+	c.value += n
+	return c.value
+}
+
+func main() {
+	c := Counter{value: 10}
+	
+	// Get method as closure via dynamic access
+	var box interface{} = &c
+	
+	// Get the Get method
+	getMethod, err := box~>Get
+	if err != nil {
+		println("FAIL: get Get method error:", err)
+		return
+	}
+	
+	// Call it - should return 10
+	get := getMethod.(func() int)
+	result := get()
+	if result != 10 {
+		println("FAIL: expected 10, got", result)
+		return
+	}
+	println("Get() via closure:", result)
+	
+	// Get the Inc method
+	incMethod, err := box~>Inc
+	if err != nil {
+		println("FAIL: get Inc method error:", err)
+		return
+	}
+	
+	// Call Inc
+	inc := incMethod.(func())
+	inc()
+	
+	// Verify value changed
+	result = get()
+	if result != 11 {
+		println("FAIL: after Inc expected 11, got", result)
+		return
+	}
+	println("Get() after Inc:", result)
+	
+	// Get Add method with parameter
+	addMethod, err := box~>Add
+	if err != nil {
+		println("FAIL: get Add method error:", err)
+		return
+	}
+	
+	add := addMethod.(func(int) int)
+	result = add(5)
+	if result != 16 {
+		println("FAIL: Add(5) expected 16, got", result)
+		return
+	}
+	println("Add(5) result:", result)
+	
+	println("done")
+}
+
+// expected output:
+// Get() via closure: 10
+// Get() after Inc: 11
+// Add(5) result: 16
+// done

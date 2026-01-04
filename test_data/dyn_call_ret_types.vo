@@ -1,0 +1,149 @@
+// Test dyn_call with various return types
+package main
+
+type Data struct {
+	val int
+	name string
+}
+
+func (d *Data) GetInt() int {
+	return d.val
+}
+
+func (d *Data) GetString() string {
+	return d.name
+}
+
+func (d *Data) GetBool() bool {
+	return d.val > 0
+}
+
+func (d *Data) GetFloat() float64 {
+	return float64(d.val) * 1.5
+}
+
+func (d *Data) GetPointer() *Data {
+	return d
+}
+
+func (d *Data) GetSlice() []int {
+	return []int{d.val, d.val * 2}
+}
+
+func (d *Data) GetStruct() Data {
+	return Data{val: d.val + 1, name: d.name + "!"}
+}
+
+func (d *Data) GetNil() *Data {
+	return nil
+}
+
+func (d *Data) NoReturn() {
+	// No return value
+}
+
+func main() {
+	data := &Data{val: 42, name: "hello"}
+	var obj interface{} = data
+	
+	// Test int return
+	r1, err := obj~>GetInt()
+	if err != nil {
+		println("Error GetInt:", err)
+		return
+	}
+	v1 := r1.(int)
+	if v1 != 42 {
+		println("FAIL: GetInt expected 42, got", v1)
+		return
+	}
+	println("GetInt:", v1)
+	
+	// Test string return
+	r2, err := obj~>GetString()
+	if err != nil {
+		println("Error GetString:", err)
+		return
+	}
+	v2 := r2.(string)
+	if v2 != "hello" {
+		println("FAIL: GetString expected hello, got", v2)
+		return
+	}
+	println("GetString:", v2)
+	
+	// Test bool return
+	r3, err := obj~>GetBool()
+	if err != nil {
+		println("Error GetBool:", err)
+		return
+	}
+	v3 := r3.(bool)
+	if v3 != true {
+		println("FAIL: GetBool expected true")
+		return
+	}
+	println("GetBool:", v3)
+	
+	// Test float64 return
+	r4, err := obj~>GetFloat()
+	if err != nil {
+		println("Error GetFloat:", err)
+		return
+	}
+	v4 := r4.(float64)
+	if v4 != 63.0 {
+		println("FAIL: GetFloat expected 63.0, got", v4)
+		return
+	}
+	println("GetFloat:", v4)
+	
+	// Test pointer return
+	r5, err := obj~>GetPointer()
+	if err != nil {
+		println("Error GetPointer:", err)
+		return
+	}
+	v5 := r5.(*Data)
+	if v5.val != 42 {
+		println("FAIL: GetPointer expected val=42")
+		return
+	}
+	println("GetPointer: val =", v5.val)
+	
+	// Test slice return
+	r6, err := obj~>GetSlice()
+	if err != nil {
+		println("Error GetSlice:", err)
+		return
+	}
+	v6 := r6.([]int)
+	if len(v6) != 2 || v6[0] != 42 || v6[1] != 84 {
+		println("FAIL: GetSlice expected [42, 84]")
+		return
+	}
+	println("GetSlice:", v6[0], v6[1])
+	
+	// Test nil return
+	r7, err := obj~>GetNil()
+	if err != nil {
+		println("Error GetNil:", err)
+		return
+	}
+	v7 := r7.(*Data)
+	if v7 != nil {
+		println("FAIL: GetNil expected nil")
+		return
+	}
+	println("GetNil: nil")
+	
+	// Test no return value
+	_, err = obj~>NoReturn()
+	if err != nil {
+		println("Error NoReturn:", err)
+		return
+	}
+	println("NoReturn: ok")
+	
+	println("All return type tests passed!")
+}

@@ -24,9 +24,8 @@ pub fn format_text(module: &Module) -> String {
                 i,
                 s.slot_count()
             ));
-            for (j, name) in s.field_names.iter().enumerate() {
-                let offset = s.field_offsets.get(j).copied().unwrap_or(0);
-                out.push_str(&format!("#   {}: offset={}\n", name, offset));
+            for field in &s.fields {
+                out.push_str(&format!("#   {}: offset={}, slots={}\n", field.name, field.offset, field.slot_count));
             }
         }
         out.push('\n');

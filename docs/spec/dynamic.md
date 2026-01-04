@@ -76,8 +76,9 @@ All other dynamic operations are compile errors.
 | `a~>[key]` | value is not indexable | TypeError |
 | `a~>[key] = x` | value is not mutable indexable (not map/slice/array) | TypeError |
 | `a~>method(args...)` | method doesn't exist | AttributeError |
-| `a~>method(args...)` | call failed | CallError |
+| `a~>method(args...)` | signature mismatch (return count, param count, param type) | SignatureError |
 | `a~>(args...)` | value is not callable | CallError |
+| `a~>(args...)` | signature mismatch | SignatureError |
 
 ## Runtime Representation
 
@@ -86,6 +87,106 @@ All other dynamic operations are compile errors.
 Dynamic access operates on ordinary `any`/`interface` values.
 
 There is no error-carrying payload. Errors are reported via the explicit `error` return value of dynamic operations.
+
+## LHS Type-Driven Conversion
+
+When the LHS variable has a **known static type**, dynamic operations automatically convert the result to that type. This rule applies uniformly to all dynamic access scenarios.
+
+### Rule
+
+| LHS Declaration | Result Type | Conversion |
+|-----------------|-------------|------------|
+| `v, err := ...` | `any` | None (default) |
+| `var v int; v, err = ...` | `int` | Auto type assertion |
+| `var v MyStruct; v, err = ...` | `MyStruct` | Auto type assertion |
+
+### Applies To
+
+- **Field access**: `v, err := obj~>field`
+- **Index access**: `v, err := obj~>[key]`
+- **Method call**: `v, err := obj~>method(args...)`
+- **Direct call**: `v, err := obj~>(args...)`
+
+### Examples
+
+```go
+var obj interface{} = map[string]int{"count": 42}
+
+// LHS is any (short var decl)
+v, err := obj~>["count"]          // v is any
+
+// LHS has known type
+var count int
+count, err = obj~>["count"]       // count is int (auto conversion)
+
+// Multi-return with known types
+type Data struct { Name string; Age int }
+var obj2 interface{} = &Data{Name: "Alice", Age: 30}
+
+var name string
+var age int
+name, err = obj2~>Name            // auto conversion to string
+age, err = obj2~>Age              // auto conversion to int
+```
+
+### Error on Type Mismatch
+
+If the runtime value cannot be converted to the expected LHS type, a `TypeError` is returned.
+
+```go
+var count int
+count, err = obj~>["name"]        // err is TypeError (string -> int fails)
+```
+
+## Runtime Signature Checking
+
+Dynamic calls perform **runtime signature verification** before invoking the target closure. The expected signature is derived from the LHS types at compile time.
+
+### Checks Performed
+
+1. **Return value count**: The closure's return count must match the number of LHS variables (minus the error variable).
+2. **Parameter count**: The closure's parameter count must match the number of arguments provided.
+3. **Parameter types**: Each argument's runtime type (rttid) must be compatible with the closure's expected parameter type.
+4. **Return types**: If LHS has known types, the closure's return types must be compatible.
+
+### Examples
+
+```go
+type Calc struct { val int }
+func (c *Calc) Add(x int) int { return c.val + x }
+func (c *Calc) Pair() (int, string) { return c.val, "ok" }
+
+var obj interface{} = &Calc{val: 42}
+
+// OK: signature matches, LHS is any
+r1, err := obj~>Add(10)           // r1 is any(52)
+
+// OK: signature matches, LHS has known type
+var result int
+result, err = obj~>Add(10)        // result is 52 (int)
+
+// Error: return count mismatch (expects 1, got 2)
+r1, err := obj~>Pair()            // err is SignatureError
+
+// OK: return count matches
+r1, r2, err := obj~>Pair()        // r1 is any(42), r2 is any("ok")
+
+// OK: with known LHS types
+var n int
+var s string
+n, s, err = obj~>Pair()           // n is 42, s is "ok"
+
+// Error: parameter count mismatch
+r1, err := obj~>Add()             // err is SignatureError (expects 1 arg)
+r1, err := obj~>Add(1, 2)         // err is SignatureError (expects 1 arg)
+
+// Error: parameter type mismatch
+r1, err := obj~>Add("wrong")      // err is SignatureError (expects int)
+```
+
+### Implementation
+
+The expected signature is encoded as an `rttid` (runtime type ID) at compile time, including LHS types when known. At runtime, the `dyn_call_check` function compares the closure's signature rttid against the expected signature rttid. If they don't match, a `SignatureError` is returned without invoking the closure.
 
 ## Implementation Details
 
@@ -187,10 +288,19 @@ fn dyn_get_index(d: any, key: any) -> (any, error) {
     }
 }
 
-fn dyn_call(callee: any, args: any) -> (any, error) {
+fn dyn_call(callee: any, args: any, expected_sig: rttid) -> (any, error) {
+    // Runtime signature check before call:
+    // 1. Return value count must match LHS count
+    // 2. Parameter count must match args count
+    // 3. Parameter types must be compatible (rttid comparison)
+    //
+    // If signature mismatch, return SignatureError without calling.
     // If callee returns multiple values, the result is []any.
     // If callee returns a single value, the result is that value.
     // If callee returns nothing, the result is nil.
+    if !check_signature(callee, expected_sig) {
+        return (any(nil), SignatureError)
+    }
     match call(callee, args) {
         Ok(v) => (v, nil),
         Err(e) => (any(nil), e),
@@ -207,9 +317,9 @@ fn dyn_set_index(d: any, key: any, val: any) -> error {
     set_index(d, key, val)
 }
 
-fn dyn_call_method(d: any, method: &str, args: any) -> (any, error) {
+fn dyn_call_method(d: any, method: &str, args: any, expected_sig: rttid) -> (any, error) {
     match get_method(d, method) {
-        Ok(m) => call(m, args),
+        Ok(m) => dyn_call(m, args, expected_sig),
         Err(e) => (any(nil), e),
     }
 }
@@ -223,8 +333,8 @@ The runtime helpers used for lowering are also exposed as user-facing APIs (stdl
 - `dyn_set_attr(base any, name string, value any) -> error`
 - `dyn_get_index(base any, key any) -> (any, error)`
 - `dyn_set_index(base any, key any, value any) -> error`
-- `dyn_call(callee any, args []any) -> (any, error)`
-- `dyn_call_method(base any, method string, args []any) -> (any, error)`
+- `dyn_call(callee any, args []any, expected_sig rttid) -> (any, error)`
+- `dyn_call_method(base any, method string, args []any, expected_sig rttid) -> (any, error)`
 
 ## Examples
 

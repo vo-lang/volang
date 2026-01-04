@@ -1,0 +1,77 @@
+// Test map get various ways
+package main
+
+func main() {
+	// Static map get
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
+	
+	// Simple get
+	v1 := m["a"]
+	if v1 != 1 {
+		println("FAIL: m[a] expected 1, got", v1)
+		return
+	}
+	println("m[a] =", v1)
+	
+	// Comma-ok get existing key
+	v2, ok2 := m["b"]
+	if !ok2 || v2 != 2 {
+		println("FAIL: m[b] expected 2, true, got", v2, ok2)
+		return
+	}
+	println("m[b] =", v2, ", ok =", ok2)
+	
+	// Comma-ok get non-existing key
+	v3, ok3 := m["nonexistent"]
+	if ok3 || v3 != 0 {
+		println("FAIL: m[nonexistent] expected 0, false, got", v3, ok3)
+		return
+	}
+	println("m[nonexistent] =", v3, ", ok =", ok3)
+	
+	// Map with different value types
+	m2 := map[int]string{1: "one", 2: "two"}
+	v4 := m2[1]
+	if v4 != "one" {
+		println("FAIL: m2[1] expected one, got", v4)
+		return
+	}
+	println("m2[1] =", v4)
+	
+	v5, ok5 := m2[3]
+	if ok5 || v5 != "" {
+		println("FAIL: m2[3] expected empty, false")
+		return
+	}
+	println("m2[3] = empty, ok =", ok5)
+	
+	// Map with pointer values
+	type Data struct {
+		val int
+	}
+	m3 := map[string]*Data{"x": &Data{val: 100}}
+	v6 := m3["x"]
+	if v6 == nil || v6.val != 100 {
+		println("FAIL: m3[x] expected val=100")
+		return
+	}
+	println("m3[x].val =", v6.val)
+	
+	v7, ok7 := m3["y"]
+	if ok7 || v7 != nil {
+		println("FAIL: m3[y] expected nil, false")
+		return
+	}
+	println("m3[y] = nil, ok =", ok7)
+	
+	// Map with struct values
+	m4 := map[string]Data{"z": Data{val: 200}}
+	v8 := m4["z"]
+	if v8.val != 200 {
+		println("FAIL: m4[z] expected val=200, got", v8.val)
+		return
+	}
+	println("m4[z].val =", v8.val)
+	
+	println("All map get tests passed!")
+}

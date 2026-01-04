@@ -35,25 +35,32 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         string::as_str(name_ref)
     };
     
-    // Get value kind and check if it's a struct
+    // Get value kind
     let vk = interface::unpack_value_kind(slot0);
     let rttid = interface::unpack_rttid(slot0);
-    if vk != ValueKind::Struct {
-        return dyn_error(call, &format!("cannot access field on non-struct type {:?}", vk));
-    }
     
-    // Get meta_id from rttid (for struct, rttid encodes the struct_meta index)
-    // Note: rttid for Named types is the named_type_id, not struct_meta_id directly
-    // We need to look up the struct_meta_id from the named_type_meta
-    let rttid = interface::unpack_rttid(slot0);
+    // For Pointer types, dereference to access struct fields (Go auto-dereference)
+    // slot1 is the pointer value (GcRef to struct data)
+    let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
+        // Get pointed-to type's rttid
+        let elem_rttid = call.get_elem_rttid_from_base(rttid);
+        (elem_rttid, slot1 as GcRef)
+    } else if vk == ValueKind::Struct {
+        (rttid, slot1 as GcRef)
+    } else {
+        return dyn_error(call, &format!("cannot access field on type {:?}", vk));
+    };
     
     // For Named struct types, rttid points to runtime_types which contains Named(id)
     // We need to get the struct_meta_id from named_type_meta.underlying_meta
-    let struct_meta_id = call.get_struct_meta_id_from_rttid(rttid);
+    let struct_meta_id = call.get_struct_meta_id_from_rttid(effective_rttid);
     
     let struct_meta_id = match struct_meta_id {
         Some(id) => id as usize,
-        None => return dyn_error(call, &format!("cannot get struct_meta_id from rttid {}", rttid)),
+        None => {
+            // Not a struct type, try to get method instead
+            return try_get_method(call, rttid, slot1, field_name);
+        }
     };
     
     // Lookup struct metadata
@@ -63,41 +70,30 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     };
     
     // Find field by name
-    let field_idx = struct_meta.field_names.iter().position(|n| n == field_name);
-    let field_idx = match field_idx {
-        Some(idx) => idx,
-        None => return dyn_error(call, &format!("field '{}' not found", field_name)),
+    let field = match struct_meta.fields.iter().find(|f| f.name == field_name) {
+        Some(f) => f,
+        None => {
+            // Field not found - check if it's a method
+            return try_get_method(call, rttid, slot1, field_name);
+        }
     };
     
-    // Get field offset and value_meta
-    let field_offset = struct_meta.field_offsets[field_idx] as usize;
-    let field_value_meta = struct_meta.field_value_metas[field_idx];
-    
-    // Read field value from struct data
-    let data_ref = slot1 as GcRef;
+    // Read field value from struct data (data_ref already set above)
     if data_ref.is_null() {
         return dyn_error(call, "struct data is nil");
     }
     
-    // Extract field type info
-    // field_value_meta format: (rttid << 8) | value_kind
-    let field_rttid = (field_value_meta >> 8) as u32;
-    let field_vk = ValueKind::from_u8((field_value_meta & 0xFF) as u8);
-    
-    // Calculate field slots from struct_meta slot_types
-    let field_end_offset = if field_idx + 1 < struct_meta.field_offsets.len() {
-        struct_meta.field_offsets[field_idx + 1] as usize
-    } else {
-        struct_meta.slot_types.len()
-    };
-    let field_slots = field_end_offset - field_offset;
+    let field_offset = field.offset as usize;
+    let field_slots = field.slot_count as usize;
+    let field_rttid = field.type_info.rttid();
+    let field_vk = field.type_info.value_kind();
     
     // Read field data
     let data_ptr = data_ref as *const u64;
     
     let result_slot1 = if field_vk == ValueKind::Struct || field_vk == ValueKind::Array {
         // Struct/Array fields need boxing: allocate heap and copy data
-        let field_slot_types: Vec<_> = struct_meta.slot_types[field_offset..field_end_offset].to_vec();
+        let field_slot_types: Vec<_> = struct_meta.slot_types[field_offset..field_offset + field_slots].to_vec();
         let new_ref = call.gc_alloc(field_slots as u16, &field_slot_types);
         
         // Copy field data to new allocation
@@ -117,6 +113,33 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     // Return (any, nil)
     call.ret_u64(0, result_slot0);
     call.ret_u64(1, result_slot1);
+    call.ret_nil(2);
+    call.ret_nil(3);
+    
+    ExternResult::Ok
+}
+
+/// Try to get a method as a closure binding the receiver.
+/// Returns closure with receiver as first capture.
+fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64, method_name: &str) -> ExternResult {
+    use crate::objects::closure;
+    
+    // Lookup method by name - returns (func_id, is_pointer_receiver, signature_rttid)
+    let (func_id, _is_pointer_receiver, signature_rttid) = match call.lookup_method(rttid, method_name) {
+        Some(info) => info,
+        None => return dyn_error(call, &format!("field or method '{}' not found", method_name)),
+    };
+    
+    // Create closure with receiver as capture
+    // Closure layout: [func_id, capture_count=1] + [receiver]
+    let closure_ref = closure::create(call.gc(), func_id, 1);
+    closure::set_capture(closure_ref, 0, receiver_slot1);
+    
+    // Return closure as any with correct function type rttid
+    // This allows type assertions like methodAny.(func() int) to work
+    let result_slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
+    call.ret_u64(0, result_slot0);
+    call.ret_u64(1, closure_ref as u64);
     call.ret_nil(2);
     call.ret_nil(3);
     
@@ -282,56 +305,106 @@ static __VO_DYN_GET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     func: dyn_get_index,
 };
 
-/// dyn_call: Call an interface value as a function.
+/// dyn_call_check: Check closure signature before calling.
 ///
-/// Args: (callee: any[2], args: []any[1]) -> (any, error)[4]
-/// For now, this is a stub that returns an error.
-fn dyn_call(call: &mut ExternCallContext) -> ExternResult {
+/// Args: (callee: any[2], expected_sig_rttid: int[1]) -> error[2]
+/// - callee: closure wrapped as any
+/// - expected_sig_rttid: rttid of expected function signature (from codegen)
+///
+/// Returns: error (nil if signature compatible)
+fn dyn_call_check(call: &mut ExternCallContext) -> ExternResult {
+    let callee_slot0 = call.arg_u64(0);
+    let expected_sig_rttid = call.arg_u64(2) as u32;
+    
+    // 1. Check nil
+    if interface::is_nil(callee_slot0) {
+        let err = call.alloc_str("cannot call nil");
+        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
+        call.ret_ref(1, err);
+        return ExternResult::Ok;
+    }
+    
+    // 2. Check is Closure type
+    let vk = interface::unpack_value_kind(callee_slot0);
+    if vk != ValueKind::Closure {
+        let err = call.alloc_str(&format!("cannot call non-function type {:?}", vk));
+        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
+        call.ret_ref(1, err);
+        return ExternResult::Ok;
+    }
+    
+    // 3. Check signature compatibility
+    let closure_sig_rttid = interface::unpack_rttid(callee_slot0);
+    
+    if let Err(msg) = call.check_func_signature_compatible(closure_sig_rttid, expected_sig_rttid) {
+        let err = call.alloc_str(&msg);
+        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
+        call.ret_ref(1, err);
+        return ExternResult::Ok;
+    }
+    
+    // Signature compatible - return nil error
+    call.ret_nil(0);
+    call.ret_nil(1);
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_DYN_CALL_CHECK: ExternEntryWithContext = ExternEntryWithContext {
+    name: "dyn_call_check",
+    func: dyn_call_check,
+};
+
+/// dyn_get_ret_meta: Get return value metadata for all return values.
+///
+/// Args: (callee: any[2]) -> (ret_count: int[1], ret_slots: int[1], ret_meta_0: int[1], ret_meta_1: int[1], ...)
+/// - callee: closure wrapped as any
+///
+/// Returns: [ret_count, ret_slots, ret_meta_0, ret_meta_1, ...] where each ret_meta is (rttid << 8 | value_kind)
+/// Max 8 return values supported.
+fn dyn_get_ret_meta(call: &mut ExternCallContext) -> ExternResult {
     let callee_slot0 = call.arg_u64(0);
     
     if interface::is_nil(callee_slot0) {
-        return dyn_error(call, "cannot call nil");
+        call.ret_u64(0, 0);  // ret_count = 0
+        call.ret_u64(1, 0);  // ret_slots = 0
+        return ExternResult::Ok;
     }
     
     let vk = interface::unpack_value_kind(callee_slot0);
     if vk != ValueKind::Closure {
-        return dyn_error(call, &format!("cannot call non-function type {:?}", vk));
+        call.ret_u64(0, 0);  // ret_count = 0
+        call.ret_u64(1, 0);  // ret_slots = 0
+        return ExternResult::Ok;
     }
     
-    // TODO: implement actual function call
-    dyn_error(call, "dynamic function call not yet implemented")
+    // Get closure's function signature rttid
+    let closure_rttid = interface::unpack_rttid(callee_slot0);
+    
+    // Get return info from signature
+    let ret_metas = call.get_func_ret_metas(closure_rttid);
+    let ret_count = ret_metas.len();
+    let ret_slots: u16 = ret_metas.iter().map(|m| {
+        let vk = ValueKind::from_u8((*m & 0xFF) as u8);
+        match vk {
+            ValueKind::Struct | ValueKind::Array => 2,  // GcRef
+            _ => 1,
+        }
+    }).sum();
+    
+    // Return: [ret_count, ret_slots, ret_meta_0, ret_meta_1, ...]
+    call.ret_u64(0, ret_count as u64);
+    call.ret_u64(1, ret_slots as u64);
+    for (i, meta) in ret_metas.iter().enumerate().take(8) {
+        call.ret_u64(2 + i as u16, *meta as u64);
+    }
+    
+    ExternResult::Ok
 }
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_CALL: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_call",
-    func: dyn_call,
+static __VO_DYN_GET_RET_META: ExternEntryWithContext = ExternEntryWithContext {
+    name: "dyn_get_ret_meta",
+    func: dyn_get_ret_meta,
 };
 
-/// dyn_call_method: Call a method on an interface value.
-///
-/// Args: (base: any[2], method: string[1], args: []any[1]) -> (any, error)[4]
-/// For now, this is a stub that returns an error.
-fn dyn_call_method(call: &mut ExternCallContext) -> ExternResult {
-    let base_slot0 = call.arg_u64(0);
-    let method_ref = call.arg_ref(2);
-    
-    if interface::is_nil(base_slot0) {
-        return dyn_error(call, "cannot call method on nil");
-    }
-    
-    let method_name = if method_ref.is_null() {
-        return dyn_error(call, "method name is nil");
-    } else {
-        string::as_str(method_ref)
-    };
-    
-    // TODO: implement actual method call using itab lookup
-    dyn_error(call, &format!("dynamic method call '{}' not yet implemented", method_name))
-}
-
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_CALL_METHOD: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_call_method",
-    func: dyn_call_method,
-};

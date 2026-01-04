@@ -1,0 +1,31 @@
+// Simple test for dyn_call with arguments
+package main
+
+type Calc struct {
+	val int
+}
+
+func (c *Calc) Add(x int) int {
+	return c.val + x
+}
+
+func main() {
+	calc := &Calc{val: 10}
+	var obj interface{} = calc
+	
+	// First test: get method without calling
+	method, err := obj~>Add
+	if err != nil {
+		println("Error getting method:", err)
+		return
+	}
+	println("Got method:", method)
+	
+	// Test calling the method closure directly via type assertion
+	// This should work if dyn_get_attr returns a proper closure
+	// f := method.(func(int) int)
+	// result := f(5)
+	// println("Result:", result)
+	
+	println("Done")
+}

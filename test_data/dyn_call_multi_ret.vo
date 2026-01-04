@@ -1,0 +1,356 @@
+// Test dyn_call signature mismatch scenarios
+package main
+
+type Point struct {
+	X, Y int
+}
+
+type Container struct {
+	val    int
+	name   string
+	data   []int
+	items  map[string]int
+	point  Point
+}
+
+// === Return value variations ===
+func (c *Container) NoRet() {
+}
+
+func (c *Container) OneRet() int {
+	return c.val
+}
+
+func (c *Container) TwoRet() (int, string) {
+	return c.val, c.name
+}
+
+func (c *Container) ThreeRet() (int, string, bool) {
+	return c.val, c.name, c.val > 0
+}
+
+// Different return types
+func (c *Container) RetInt() int {
+	return c.val
+}
+
+func (c *Container) RetString() string {
+	return c.name
+}
+
+func (c *Container) RetBool() bool {
+	return c.val > 0
+}
+
+func (c *Container) RetFloat() float64 {
+	return float64(c.val) * 1.5
+}
+
+func (c *Container) RetSlice() []int {
+	return c.data
+}
+
+func (c *Container) RetMap() map[string]int {
+	return c.items
+}
+
+func (c *Container) RetStruct() Point {
+	return c.point
+}
+
+// === Parameter variations ===
+func (c *Container) NoArg() int {
+	return c.val
+}
+
+func (c *Container) OneArg(x int) int {
+	return c.val + x
+}
+
+func (c *Container) TwoArg(x, y int) int {
+	return x + y
+}
+
+func (c *Container) ThreeArg(x int, s string, b bool) string {
+	if b {
+		return s
+	}
+	return ""
+}
+
+// Different parameter types
+func (c *Container) ArgInt(x int) int {
+	return x * 2
+}
+
+func (c *Container) ArgString(s string) string {
+	return s + "!"
+}
+
+func (c *Container) ArgBool(b bool) bool {
+	return !b
+}
+
+func (c *Container) ArgFloat(f float64) float64 {
+	return f * 2.0
+}
+
+func (c *Container) ArgSlice(s []int) int {
+	sum := 0
+	for _, v := range s {
+		sum += v
+	}
+	return sum
+}
+
+func (c *Container) ArgMap(m map[string]int) int {
+	return len(m)
+}
+
+func (c *Container) ArgStruct(p Point) int {
+	return p.X + p.Y
+}
+
+// Complex combinations
+func (c *Container) Complex(x int, s string, data []int, m map[string]int) (int, string, bool) {
+	return x + len(data) + len(m), s, true
+}
+
+func main() {
+	c := &Container{
+		val:   42,
+		name:  "test",
+		data:  []int{1, 2, 3},
+		items: map[string]int{"a": 1, "b": 2},
+		point: Point{X: 10, Y: 20},
+	}
+	var obj interface{} = c
+
+	// ============================================================
+	// 1. RETURN VALUE COUNT MISMATCH (runtime check)
+	// ============================================================
+	println("=== Testing return count mismatch ===")
+
+	// Expect 1 return, method returns 0
+	_, err := obj~>NoRet()
+	if err == nil {
+		println("FAIL: NoRet() with 1 lhs should error")
+		return
+	}
+	println("NoRet() -> 1 lhs: error (expected)")
+
+	// Expect 1 return, method returns 2
+	_, err = obj~>TwoRet()
+	if err == nil {
+		println("FAIL: TwoRet() with 1 lhs should error")
+		return
+	}
+	println("TwoRet() -> 1 lhs: error (expected)")
+
+	// Expect 2 returns, method returns 1
+	_, _, err = obj~>OneRet()
+	if err == nil {
+		println("FAIL: OneRet() with 2 lhs should error")
+		return
+	}
+	println("OneRet() -> 2 lhs: error (expected)")
+
+	// Expect 2 returns, method returns 3
+	_, _, err = obj~>ThreeRet()
+	if err == nil {
+		println("FAIL: ThreeRet() with 2 lhs should error")
+		return
+	}
+	println("ThreeRet() -> 2 lhs: error (expected)")
+
+	// Expect 3 returns, method returns 2
+	_, _, _, err = obj~>TwoRet()
+	if err == nil {
+		println("FAIL: TwoRet() with 3 lhs should error")
+		return
+	}
+	println("TwoRet() -> 3 lhs: error (expected)")
+
+	// ============================================================
+	// 2. PARAMETER COUNT MISMATCH (runtime check)
+	// ============================================================
+	println("=== Testing parameter count mismatch ===")
+
+	// Method needs 0 args, pass 1
+	_, err = obj~>NoArg(1)
+	if err == nil {
+		println("FAIL: NoArg(1) should error")
+		return
+	}
+	println("NoArg(1): error (expected)")
+
+	// Method needs 1 arg, pass 0
+	_, err = obj~>OneArg()
+	if err == nil {
+		println("FAIL: OneArg() should error")
+		return
+	}
+	println("OneArg(): error (expected)")
+
+	// Method needs 1 arg, pass 2
+	_, err = obj~>OneArg(1, 2)
+	if err == nil {
+		println("FAIL: OneArg(1,2) should error")
+		return
+	}
+	println("OneArg(1,2): error (expected)")
+
+	// Method needs 2 args, pass 1
+	_, err = obj~>TwoArg(1)
+	if err == nil {
+		println("FAIL: TwoArg(1) should error")
+		return
+	}
+	println("TwoArg(1): error (expected)")
+
+	// Method needs 2 args, pass 3
+	_, err = obj~>TwoArg(1, 2, 3)
+	if err == nil {
+		println("FAIL: TwoArg(1,2,3) should error")
+		return
+	}
+	println("TwoArg(1,2,3): error (expected)")
+
+	// Method needs 3 args, pass 2
+	_, err = obj~>ThreeArg(1, "s")
+	if err == nil {
+		println("FAIL: ThreeArg(1,s) should error")
+		return
+	}
+	println("ThreeArg(1,s): error (expected)")
+
+	// ============================================================
+	// 3. PARAMETER TYPE MISMATCH (runtime check)
+	// ============================================================
+	println("=== Testing parameter type mismatch ===")
+
+	// Expect int, pass string
+	_, err = obj~>ArgInt("wrong")
+	if err == nil {
+		println("FAIL: ArgInt(string) should error")
+		return
+	}
+	println("ArgInt(string): error (expected)")
+
+	// Expect string, pass int
+	_, err = obj~>ArgString(123)
+	if err == nil {
+		println("FAIL: ArgString(int) should error")
+		return
+	}
+	println("ArgString(int): error (expected)")
+
+	// Expect bool, pass int
+	_, err = obj~>ArgBool(1)
+	if err == nil {
+		println("FAIL: ArgBool(int) should error")
+		return
+	}
+	println("ArgBool(int): error (expected)")
+
+	// Expect float64, pass string
+	_, err = obj~>ArgFloat("1.5")
+	if err == nil {
+		println("FAIL: ArgFloat(string) should error")
+		return
+	}
+	println("ArgFloat(string): error (expected)")
+
+	// Expect []int, pass []string
+	_, err = obj~>ArgSlice([]string{"a", "b"})
+	if err == nil {
+		println("FAIL: ArgSlice([]string) should error")
+		return
+	}
+	println("ArgSlice([]string): error (expected)")
+
+	// Expect map[string]int, pass map[int]string
+	_, err = obj~>ArgMap(map[int]string{1: "a"})
+	if err == nil {
+		println("FAIL: ArgMap(map[int]string) should error")
+		return
+	}
+	println("ArgMap(map[int]string): error (expected)")
+
+	// ============================================================
+	// 4. SUCCESSFUL CALLS (sanity check)
+	// ============================================================
+	println("=== Testing successful calls ===")
+
+	// Correct return counts
+	r1, err := obj~>OneRet()
+	if err != nil {
+		println("FAIL: OneRet() should succeed:", err)
+		return
+	}
+	if r1.(int) != 42 {
+		println("FAIL: OneRet expected 42")
+		return
+	}
+	println("OneRet():", r1.(int))
+
+	r1, r2, err := obj~>TwoRet()
+	if err != nil {
+		println("FAIL: TwoRet() should succeed:", err)
+		return
+	}
+	println("TwoRet():", r1.(int), r2.(string))
+
+	r1, r2, r3, err := obj~>ThreeRet()
+	if err != nil {
+		println("FAIL: ThreeRet() should succeed:", err)
+		return
+	}
+	println("ThreeRet():", r1.(int), r2.(string), r3.(bool))
+
+	// Correct parameter types
+	result, err := obj~>ArgInt(10)
+	if err != nil {
+		println("FAIL: ArgInt(10) should succeed:", err)
+		return
+	}
+	println("ArgInt(10):", result.(int))
+
+	sresult, err := obj~>ArgString("hello")
+	if err != nil {
+		println("FAIL: ArgString should succeed:", err)
+		return
+	}
+	println("ArgString(hello):", sresult.(string))
+
+	sliceResult, err := obj~>ArgSlice([]int{10, 20, 30})
+	if err != nil {
+		println("FAIL: ArgSlice should succeed:", err)
+		return
+	}
+	println("ArgSlice([10,20,30]):", sliceResult.(int))
+
+	mapResult, err := obj~>ArgMap(map[string]int{"x": 1, "y": 2, "z": 3})
+	if err != nil {
+		println("FAIL: ArgMap should succeed:", err)
+		return
+	}
+	println("ArgMap(3 items):", mapResult.(int))
+
+	structResult, err := obj~>ArgStruct(Point{X: 5, Y: 7})
+	if err != nil {
+		println("FAIL: ArgStruct should succeed:", err)
+		return
+	}
+	println("ArgStruct({5,7}):", structResult.(int))
+
+	// Complex successful call
+	cr1, cr2, cr3, err := obj~>Complex(100, "yes", []int{1, 2, 3}, map[string]int{"a": 1})
+	if err != nil {
+		println("FAIL: Complex should succeed:", err)
+		return
+	}
+	println("Complex(100,yes,[3],{1}):", cr1.(int), cr2.(string), cr3.(bool))
+
+	println("=== All signature mismatch tests passed! ===")
+}

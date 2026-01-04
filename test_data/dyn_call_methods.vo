@@ -1,0 +1,121 @@
+// Test various dynamic call patterns
+package main
+
+type Counter struct {
+	count int
+}
+
+func (c *Counter) Inc() {
+	c.count++
+}
+
+func (c *Counter) Add(n int) int {
+	c.count += n
+	return c.count
+}
+
+func (c *Counter) AddTwo(a, b int) int {
+	c.count += a + b
+	return c.count
+}
+
+func (c *Counter) Get() int {
+	return c.count
+}
+
+func (c Counter) ValueMethod() int {
+	return c.count * 2
+}
+
+type Wrapper struct {
+	counter *Counter
+}
+
+func (w *Wrapper) GetCounter() *Counter {
+	return w.counter
+}
+
+func main() {
+	c := &Counter{count: 0}
+	var obj interface{} = c
+	
+	// Test method with no args and no return
+	_, err := obj~>Inc()
+	if err != nil {
+		println("Error Inc:", err)
+		return
+	}
+	
+	r1, err := obj~>Get()
+	if err != nil {
+		println("Error Get:", err)
+		return
+	}
+	if r1.(int) != 1 {
+		println("FAIL: after Inc, expected 1, got", r1.(int))
+		return
+	}
+	println("After Inc: count =", r1.(int))
+	
+	// Test method with one arg
+	r2, err := obj~>Add(5)
+	if err != nil {
+		println("Error Add:", err)
+		return
+	}
+	if r2.(int) != 6 {
+		println("FAIL: after Add(5), expected 6, got", r2.(int))
+		return
+	}
+	println("After Add(5): count =", r2.(int))
+	
+	// Test method with two args
+	r3, err := obj~>AddTwo(10, 20)
+	if err != nil {
+		println("Error AddTwo:", err)
+		return
+	}
+	if r3.(int) != 36 {
+		println("FAIL: after AddTwo(10,20), expected 36, got", r3.(int))
+		return
+	}
+	println("After AddTwo(10,20): count =", r3.(int))
+	
+	// Test value receiver method
+	r4, err := obj~>ValueMethod()
+	if err != nil {
+		println("Error ValueMethod:", err)
+		return
+	}
+	if r4.(int) != 72 {
+		println("FAIL: ValueMethod expected 72, got", r4.(int))
+		return
+	}
+	println("ValueMethod: count*2 =", r4.(int))
+	
+	// Test method not found error
+	_, err = obj~>NonExistent()
+	if err == nil {
+		println("FAIL: NonExistent should return error")
+		return
+	}
+	println("NonExistent error:", err)
+	
+	// Test nested call: get method, then call it
+	w := &Wrapper{counter: &Counter{count: 100}}
+	var wobj interface{} = w
+	
+	r5, err := wobj~>GetCounter()
+	if err != nil {
+		println("Error GetCounter:", err)
+		return
+	}
+	inner := r5.(*Counter)
+	if inner.count != 100 {
+		println("FAIL: GetCounter expected count=100, got", inner.count)
+		return
+	}
+	println("GetCounter: inner.count =", inner.count)
+	
+	println("All method call tests passed!")
+}

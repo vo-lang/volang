@@ -1381,16 +1381,21 @@ impl Checker {
                     return;
                 }
 
-                // Type check operation arguments
+                // Type check operation arguments - convert to any (interface{})
+                let any_type_for_args = self.new_t_empty_interface();
                 match &dyn_access.op {
                     vo_syntax::ast::DynAccessOp::Field(_) => {}
                     vo_syntax::ast::DynAccessOp::Index(idx) => {
-                        self.expr(&mut Operand::default(), idx);
+                        let mut arg_x = Operand::default();
+                        self.expr(&mut arg_x, idx);
+                        self.convert_untyped(&mut arg_x, any_type_for_args);
                     }
                     vo_syntax::ast::DynAccessOp::Call { args, .. }
                     | vo_syntax::ast::DynAccessOp::MethodCall { args, .. } => {
                         for arg in args {
-                            self.expr(&mut Operand::default(), arg);
+                            let mut arg_x = Operand::default();
+                            self.expr(&mut arg_x, arg);
+                            self.convert_untyped(&mut arg_x, any_type_for_args);
                         }
                     }
                 }
@@ -1415,7 +1420,7 @@ impl Checker {
 
     /// Check if type is valid for dynamic access (~> operator base).
     /// Valid types: any/interface, or (any, error) tuple.
-    fn is_dyn_access_base_type(&self, type_key: TypeKey) -> bool {
+    pub(crate) fn is_dyn_access_base_type(&self, type_key: TypeKey) -> bool {
         // Check if it's an interface type
         if self.otype(type_key).try_as_interface().is_some() {
             return true;

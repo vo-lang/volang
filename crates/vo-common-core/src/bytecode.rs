@@ -8,7 +8,7 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use crate::types::{SlotType, ValueMeta};
+use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::instruction::Instruction;
 use crate::debug_info::DebugInfo;
@@ -52,21 +52,26 @@ pub struct GlobalDef {
     pub slot_types: Vec<SlotType>,
 }
 
+/// Metadata for a single struct field.
+#[derive(Debug, Clone)]
+pub struct FieldMeta {
+    pub name: String,
+    pub offset: u16,
+    pub slot_count: u16,
+    pub type_info: ValueRttid,
+}
+
 #[derive(Debug, Clone)]
 pub struct StructMeta {
     pub slot_types: Vec<SlotType>,
-    pub field_names: Vec<String>,
-    pub field_offsets: Vec<u16>,
-    /// Per-field value_meta for dynamic access: (rttid << 8) | value_kind
-    /// Used by dyn_get_attr to correctly pack return values.
-    pub field_value_metas: Vec<u32>,
+    pub fields: Vec<FieldMeta>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
     pub func_id: u32,
     pub is_pointer_receiver: bool,
-    pub signature: RuntimeType,
+    pub signature_rttid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +91,7 @@ impl StructMeta {
 #[derive(Debug, Clone)]
 pub struct InterfaceMethodMeta {
     pub name: String,
-    pub signature: RuntimeType,
+    pub signature_rttid: u32,
 }
 
 #[derive(Debug, Clone)]

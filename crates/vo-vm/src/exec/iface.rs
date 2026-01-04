@@ -156,15 +156,11 @@ pub fn exec_iface_assert(
                         .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
                     {
                         let named_type = &module.named_type_metas[named_type_id as usize];
-                        // Check each interface method: name must exist AND signature must match
+                        // Check each interface method: name must exist AND signature_rttid must match
                         iface_meta.methods.iter().all(|iface_method| {
                             if let Some(concrete_method) = named_type.methods.get(&iface_method.name) {
-                                // Compare signatures using InterfaceMethod::matches_signature
-                                let iface_method_wrapper = vo_runtime::InterfaceMethod::new(
-                                    vo_runtime::symbol::Symbol::DUMMY,
-                                    iface_method.signature.clone(),
-                                );
-                                iface_method_wrapper.matches_signature(&concrete_method.signature)
+                                // Compare signatures using rttid (structural equality)
+                                iface_method.signature_rttid == concrete_method.signature_rttid
                             } else {
                                 false // method not found
                             }

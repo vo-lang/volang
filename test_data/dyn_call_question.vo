@@ -1,0 +1,154 @@
+// Test ? syntax for error propagation in dynamic calls
+package main
+
+import "errors"
+
+type Data struct {
+	val int
+}
+
+func (d *Data) GetVal() int {
+	return d.val
+}
+
+func (d *Data) Double() int {
+	return d.val * 2
+}
+
+// Test ? with dyn_call - success case
+func testDynCallSuccess() error {
+	data := &Data{val: 10}
+	var obj interface{} = data
+	
+	// Use ? to propagate error - should succeed
+	result := obj~>GetVal()?
+	v := result.(int)
+	if v != 10 {
+		println("FAIL: GetVal expected 10, got", v)
+		return errors.New("unexpected value")
+	}
+	println("testDynCallSuccess: GetVal =", v)
+	return nil
+}
+
+// Test ? with dyn_call - error case (method not found)
+func testDynCallError() error {
+	data := &Data{val: 10}
+	var obj interface{} = data
+	
+	// Use ? to propagate error - should fail and propagate
+	_ = obj~>NonExistent()?
+	
+	// Should not reach here
+	println("FAIL: should have propagated error")
+	return nil
+}
+
+// Test ? with dyn_get_attr - success case
+func testDynAttrSuccess() error {
+	data := &Data{val: 42}
+	var obj interface{} = data
+	
+	// Use ? to propagate error - should succeed
+	result := obj~>val?
+	v := result.(int)
+	if v != 42 {
+		println("FAIL: val expected 42, got", v)
+		return errors.New("unexpected value")
+	}
+	println("testDynAttrSuccess: val =", v)
+	return nil
+}
+
+// Test ? with dyn_get_attr - error case (field not found)
+func testDynAttrError() error {
+	data := &Data{val: 10}
+	var obj interface{} = data
+	
+	// Use ? to propagate error - should fail and propagate
+	_ = obj~>nonexistent?
+	
+	// Should not reach here
+	println("FAIL: should have propagated error")
+	return nil
+}
+
+// Test ? with dyn_get_index - success case
+func testDynIndexSuccess() error {
+	s := []int{100, 200, 300}
+	var obj interface{} = s
+	
+	// Use ? to propagate error - should succeed
+	result := obj~>[1]?
+	v := result.(int)
+	if v != 200 {
+		println("FAIL: [1] expected 200, got", v)
+		return errors.New("unexpected value")
+	}
+	println("testDynIndexSuccess: [1] =", v)
+	return nil
+}
+
+// Test chained ? operations
+func testChained() error {
+	data := &Data{val: 5}
+	var obj interface{} = data
+	
+	// Chain multiple dynamic operations with ?
+	r1 := obj~>GetVal()?
+	v1 := r1.(int)
+	
+	r2 := obj~>Double()?
+	v2 := r2.(int)
+	
+	if v1 != 5 || v2 != 10 {
+		println("FAIL: expected 5 and 10, got", v1, v2)
+		return errors.New("unexpected values")
+	}
+	println("testChained: GetVal =", v1, ", Double =", v2)
+	return nil
+}
+
+func main() {
+	// Test success cases
+	err := testDynCallSuccess()
+	if err != nil {
+		println("testDynCallSuccess failed:", err)
+		return
+	}
+	
+	err = testDynAttrSuccess()
+	if err != nil {
+		println("testDynAttrSuccess failed:", err)
+		return
+	}
+	
+	err = testDynIndexSuccess()
+	if err != nil {
+		println("testDynIndexSuccess failed:", err)
+		return
+	}
+	
+	err = testChained()
+	if err != nil {
+		println("testChained failed:", err)
+		return
+	}
+	
+	// Test error propagation cases
+	err = testDynCallError()
+	if err == nil {
+		println("FAIL: testDynCallError should have returned error")
+		return
+	}
+	println("testDynCallError propagated error:", err)
+	
+	err = testDynAttrError()
+	if err == nil {
+		println("FAIL: testDynAttrError should have returned error")
+		return
+	}
+	println("testDynAttrError propagated error:", err)
+	
+	println("All ? syntax tests passed!")
+}

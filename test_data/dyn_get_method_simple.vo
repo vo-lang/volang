@@ -1,0 +1,29 @@
+package main
+
+type Counter struct {
+	value int
+}
+
+func (c *Counter) Get() int {
+	return c.value
+}
+
+func main() {
+	c := Counter{value: 42}
+	var box interface{} = &c
+	
+	// Get the method as closure
+	methodAny, err := box~>Get
+	if err != nil {
+		println("error:", err)
+		return
+	}
+	println("got method")
+	
+	// Call without type assertion - just as closure
+	get := methodAny.(func() int)
+	result := get()
+	println("result:", result)
+	
+	println("done")
+}

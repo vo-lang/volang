@@ -8,7 +8,7 @@ use crate::itab::ItabCache;
 /// Time slice: number of instructions before forced yield check.
 pub const TIME_SLICE: u32 = 1000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecResult {
     Continue,
     Return,

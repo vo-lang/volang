@@ -51,6 +51,5 @@ pub fn format_value(val: u64, kind: ValueKind) -> String {
         ValueKind::Interface => "<interface>".to_string(),
         ValueKind::Channel => "<chan>".to_string(),
         ValueKind::Closure => "<func>".to_string(),
-        ValueKind::FuncPtr => "<func>".to_string(),
     }
 }

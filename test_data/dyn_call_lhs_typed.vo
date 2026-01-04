@@ -1,0 +1,178 @@
+// Test LHS type-driven conversion for dynamic calls
+package main
+
+type Calc struct {
+	val int
+}
+
+func (c *Calc) GetInt() int {
+	return c.val
+}
+
+func (c *Calc) GetString() string {
+	return "hello"
+}
+
+func (c *Calc) GetPair() (int, string) {
+	return c.val, "world"
+}
+
+func main() {
+	c := &Calc{val: 42}
+	var obj interface{} = c
+
+	// Test 1: LHS is any (short var decl) - should box
+	r1, err := obj~>GetInt()
+	if err != nil {
+		println("FAIL: GetInt should succeed")
+		return
+	}
+	// r1 is any, need type assertion
+	if r1.(int) != 42 {
+		println("FAIL: expected 42, got", r1.(int))
+		return
+	}
+	println("Test 1 (any): GetInt() =", r1.(int))
+
+	// Test 2: LHS has concrete type - should NOT box
+	var result int
+	result, err = obj~>GetInt()
+	if err != nil {
+		println("FAIL: GetInt should succeed")
+		return
+	}
+	// result is int directly, no type assertion needed
+	if result != 42 {
+		println("FAIL: expected 42, got", result)
+		return
+	}
+	println("Test 2 (int): GetInt() =", result)
+
+	// Test 3: Multi-return with any
+	r1, r2, err := obj~>GetPair()
+	if err != nil {
+		println("FAIL: GetPair should succeed")
+		return
+	}
+	if r1.(int) != 42 || r2.(string) != "world" {
+		println("FAIL: GetPair mismatch")
+		return
+	}
+	println("Test 3 (any,any): GetPair() =", r1.(int), r2.(string))
+
+	// Test 4: Multi-return with concrete types
+	var n int
+	var s string
+	n, s, err = obj~>GetPair()
+	if err != nil {
+		println("FAIL: GetPair should succeed")
+		return
+	}
+	if n != 42 || s != "world" {
+		println("FAIL: GetPair mismatch")
+		return
+	}
+	println("Test 4 (int,string): GetPair() =", n, s)
+
+	// ============================================================
+	// Field access tests
+	// ============================================================
+	println("=== Testing field access LHS types ===")
+
+	type Data struct {
+		Count int
+		Name  string
+	}
+	var data interface{} = &Data{Count: 100, Name: "test"}
+
+	// Test 5: Field access with any LHS
+	f1, err := data~>Count
+	if err != nil {
+		println("FAIL: field Count should succeed")
+		return
+	}
+	if f1.(int) != 100 {
+		println("FAIL: expected 100")
+		return
+	}
+	println("Test 5 (any): data~>Count =", f1.(int))
+
+	// Test 6: Field access with concrete type LHS
+	var count int
+	count, err = data~>Count
+	if err != nil {
+		println("FAIL: field Count should succeed")
+		return
+	}
+	if count != 100 {
+		println("FAIL: expected 100")
+		return
+	}
+	println("Test 6 (int): data~>Count =", count)
+
+	// ============================================================
+	// Map index tests
+	// ============================================================
+	println("=== Testing map index LHS types ===")
+
+	var m interface{} = map[string]int{"a": 1, "b": 2}
+
+	// Test 7: Map index with any LHS
+	v1, err := m~>["a"]
+	if err != nil {
+		println("FAIL: map[a] should succeed")
+		return
+	}
+	if v1.(int) != 1 {
+		println("FAIL: expected 1")
+		return
+	}
+	println("Test 7 (any): m~>[a] =", v1.(int))
+
+	// Test 8: Map index with concrete type LHS
+	var val int
+	val, err = m~>["b"]
+	if err != nil {
+		println("FAIL: map[b] should succeed")
+		return
+	}
+	if val != 2 {
+		println("FAIL: expected 2")
+		return
+	}
+	println("Test 8 (int): m~>[b] =", val)
+
+	// ============================================================
+	// Slice index tests
+	// ============================================================
+	println("=== Testing slice index LHS types ===")
+
+	var sl interface{} = []int{10, 20, 30}
+
+	// Test 9: Slice index with any LHS
+	s1, err := sl~>[1]
+	if err != nil {
+		println("FAIL: slice[1] should succeed")
+		return
+	}
+	if s1.(int) != 20 {
+		println("FAIL: expected 20")
+		return
+	}
+	println("Test 9 (any): sl~>[1] =", s1.(int))
+
+	// Test 10: Slice index with concrete type LHS
+	var elem int
+	elem, err = sl~>[2]
+	if err != nil {
+		println("FAIL: slice[2] should succeed")
+		return
+	}
+	if elem != 30 {
+		println("FAIL: expected 30")
+		return
+	}
+	println("Test 10 (int): sl~>[2] =", elem)
+
+	println("=== All LHS type tests passed! ===")
+}

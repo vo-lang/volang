@@ -277,6 +277,35 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    /// Get named_type_id from rttid.
+    /// Returns Some(named_type_id) if rttid refers to a Named type.
+    pub fn get_named_type_id_from_rttid(&self, rttid: u32) -> Option<u32> {
+        use vo_common_core::runtime_type::RuntimeType;
+        let rt = self.runtime_types.get(rttid as usize)?;
+        match rt {
+            RuntimeType::Named(named_id) => Some(*named_id),
+            _ => None,
+        }
+    }
+
+    /// Lookup a method by name on a named type.
+    /// Returns (func_id, is_pointer_receiver, signature_rttid) if found.
+    /// For Pointer types, dereferences to find the base named type.
+    pub fn lookup_method(&self, rttid: u32, method_name: &str) -> Option<(u32, bool, u32)> {
+        use vo_common_core::runtime_type::RuntimeType;
+        
+        // Handle Pointer types - dereference to get base type
+        let base_rttid = match self.runtime_types.get(rttid as usize)? {
+            RuntimeType::Pointer(elem_rttid) => *elem_rttid,
+            _ => rttid,
+        };
+        
+        let named_id = self.get_named_type_id_from_rttid(base_rttid)?;
+        let named_meta = self.named_type_metas.get(named_id as usize)?;
+        let method_info = named_meta.methods.get(method_name)?;
+        Some((method_info.func_id, method_info.is_pointer_receiver, method_info.signature_rttid))
+    }
+
     /// Get the base call context.
     #[inline]
     pub fn call(&self) -> &ExternCall<'a> {
@@ -295,6 +324,10 @@ impl<'a> ExternCallContext<'a> {
     pub fn available_slots(&self) -> usize { self.call.available_slots() }
     #[inline]
     pub fn arg_count(&self) -> u16 { self.call.arg_count() }
+    #[inline]
+    pub fn arg_start(&self) -> u16 { self.call.arg_start }
+    #[inline]
+    pub fn ret_start(&self) -> u16 { self.call.ret_start }
 
     // ==================== Argument Reading (delegated) ====================
 
@@ -369,6 +402,119 @@ impl<'a> ExternCallContext<'a> {
         self.gc.alloc(value_meta, slots)
     }
 
+    /// Get return value metadata for all return values from a Func RuntimeType.
+    /// Returns Vec of (rttid << 8 | value_kind) for each return value.
+    pub fn get_func_ret_metas(&self, func_rttid: u32) -> Vec<u32> {
+        use crate::RuntimeType;
+        
+        if let Some(RuntimeType::Func { results, .. }) = self.runtime_types.get(func_rttid as usize) {
+            return results.iter().map(|&rttid| self.rttid_to_value_meta(rttid)).collect();
+        }
+        Vec::new()
+    }
+    
+    /// Convert rttid to value_meta ((rttid << 8) | value_kind)
+    fn rttid_to_value_meta(&self, rttid: u32) -> u32 {
+        let vk = self.rttid_to_value_kind(rttid);
+        (rttid << 8) | (vk as u32)
+    }
+    
+    /// Get ValueKind for a given rttid.
+    /// For Named types, recursively looks up the underlying type.
+    pub fn rttid_to_value_kind(&self, rttid: u32) -> crate::ValueKind {
+        use crate::{RuntimeType, ValueKind};
+        
+        match self.runtime_types.get(rttid as usize) {
+            Some(RuntimeType::Basic(vk)) => *vk,
+            Some(RuntimeType::Named(named_id)) => {
+                // Named type: get underlying value_kind from named_type_metas
+                self.named_type_metas.get(*named_id as usize)
+                    .map(|meta| meta.underlying_meta.value_kind())
+                    .unwrap_or(ValueKind::Void)
+            }
+            Some(RuntimeType::Pointer(_)) => ValueKind::Pointer,
+            Some(RuntimeType::Slice(_)) => ValueKind::Slice,
+            Some(RuntimeType::Map { .. }) => ValueKind::Map,
+            Some(RuntimeType::Chan { .. }) => ValueKind::Channel,
+            Some(RuntimeType::Array { .. }) => ValueKind::Array,
+            Some(RuntimeType::Struct { .. }) => ValueKind::Struct,
+            Some(RuntimeType::Interface { .. }) => ValueKind::Interface,
+            Some(RuntimeType::Func { .. }) => ValueKind::Closure,
+            Some(RuntimeType::Tuple(_)) => ValueKind::Void,
+            None => ValueKind::Void,
+        }
+    }
+    
+    /// Check if two function signatures are compatible for dynamic call.
+    /// Returns Ok(()) if compatible, Err(message) if not.
+    /// 
+    /// Compatibility rules:
+    /// - Parameter count must match
+    /// - Return count must match
+    /// - Each expected param type must be assignable from actual param type
+    /// - Each actual return type must be assignable to expected return type (any accepts all)
+    pub fn check_func_signature_compatible(
+        &self,
+        closure_sig_rttid: u32,
+        expected_sig_rttid: u32,
+    ) -> Result<(), String> {
+        use crate::RuntimeType;
+        
+        let get_func_sig = |rttid: u32| -> Option<(&Vec<u32>, &Vec<u32>)> {
+            match self.runtime_types.get(rttid as usize)? {
+                RuntimeType::Func { params, results, .. } => Some((params, results)),
+                _ => None,
+            }
+        };
+        
+        let (closure_params, closure_results) = get_func_sig(closure_sig_rttid)
+            .ok_or("closure is not a function type")?;
+        let (expected_params, expected_results) = get_func_sig(expected_sig_rttid)
+            .ok_or("expected signature is not a function type")?;
+        
+        if closure_params.len() != expected_params.len() {
+            return Err(format!("parameter count mismatch: expected {}, got {}", 
+                expected_params.len(), closure_params.len()));
+        }
+        
+        if closure_results.len() != expected_results.len() {
+            return Err(format!("return count mismatch: expected {}, got {}", 
+                expected_results.len(), closure_results.len()));
+        }
+        
+        for (i, (&expected, &closure)) in expected_params.iter().zip(closure_params).enumerate() {
+            if !self.rttids_compatible(expected, closure) {
+                return Err(format!("parameter {} type mismatch", i + 1));
+            }
+        }
+        
+        for (i, (&closure, &expected)) in closure_results.iter().zip(expected_results).enumerate() {
+            if !self.rttids_compatible(closure, expected) {
+                return Err(format!("return {} type mismatch", i + 1));
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if source rttid is compatible with target rttid.
+    fn rttids_compatible(&self, source: u32, target: u32) -> bool {
+        use crate::RuntimeType;
+        
+        if source == target {
+            return true;
+        }
+        
+        // Check if target is any (empty interface)
+        if let Some(RuntimeType::Interface { methods }) = self.runtime_types.get(target as usize) {
+            if methods.is_empty() {
+                return true;
+            }
+        }
+        
+        false
+    }
+
     /// Get element rttid from a Slice/Map/Chan RuntimeType.
     /// Now that RuntimeType stores elem rttid directly, this is O(1).
     /// Returns elem_rttid for slice/chan, val_rttid for map.
@@ -383,6 +529,9 @@ impl<'a> ExternCallContext<'a> {
             RuntimeType::Slice(elem_rttid) | RuntimeType::Chan { elem: elem_rttid, .. } => {
                 *elem_rttid
             }
+            RuntimeType::Pointer(elem_rttid) => {
+                *elem_rttid
+            }
             RuntimeType::Map { val, .. } => {
                 *val
             }
@@ -390,7 +539,7 @@ impl<'a> ExternCallContext<'a> {
             RuntimeType::Basic(crate::ValueKind::String) => {
                 crate::ValueKind::Uint8 as u32
             }
-            _ => panic!("dyn_get_index: unexpected base type {:?}", rt),
+            _ => panic!("get_elem_rttid_from_base: unexpected type {:?}", rt),
         }
     }
 

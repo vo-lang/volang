@@ -74,6 +74,7 @@ pub fn exec_call_closure(
     let ret_slots = (inst.c & 0xFF) as u16;
 
     let func = &module.functions[func_id as usize];
+    let recv_slots = func.recv_slots as usize;
 
     // New frame's bp is current stack top
     let new_bp = stack.len();
@@ -81,12 +82,22 @@ pub fn exec_call_closure(
     // Extend stack for new frame
     stack.resize(new_bp + func.local_slots as usize, 0);
     
-    // Slot 0 is closure ref
-    stack[new_bp] = closure_ref as u64;
-    
-    // Copy args directly (no Vec allocation)
-    for i in 0..arg_slots {
-        stack[new_bp + 1 + i] = stack[caller_bp + arg_start + i];
+    // For method closures (recv_slots > 0), receiver is in captures[0]
+    // For regular closures, slot 0 is closure ref
+    if recv_slots > 0 && closure::capture_count(closure_ref) > 0 {
+        // Method closure: copy receiver from captures to slot 0
+        stack[new_bp] = closure::get_capture(closure_ref, 0);
+        // Copy args after receiver
+        for i in 0..arg_slots {
+            stack[new_bp + recv_slots + i] = stack[caller_bp + arg_start + i];
+        }
+    } else {
+        // Regular closure: slot 0 is closure ref
+        stack[new_bp] = closure_ref as u64;
+        // Copy args directly
+        for i in 0..arg_slots {
+            stack[new_bp + 1 + i] = stack[caller_bp + arg_start + i];
+        }
     }
     
     // Push frame
@@ -219,8 +230,9 @@ pub fn exec_return(
         let frame = frames.last().unwrap();
         let current_bp = frame.bp;
         let ret_reg = frame.ret_reg;
-        let ret_slots = frame.ret_count as usize;
-        let write_count = ret_slots.min(ret_count);
+        let ret_slots = frame.ret_count;
+        
+        let write_count = (ret_slots as usize).min(ret_count);
         
         // Read return values before pop_frame truncates stack
         // Use fixed array for common case (most functions return 0-4 values)

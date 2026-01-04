@@ -33,7 +33,6 @@ fn format_value(call: &ExternCallContext, slot: u16) -> String {
             let s = string::as_str(value as crate::gc::GcRef);
             s.to_string()
         }
-        ValueKind::FuncPtr => format!("func@{:#x}", value),
         ValueKind::Pointer => format!("ptr@{:#x}", value),
         ValueKind::Slice => format!("slice@{:#x}", value),
         ValueKind::Map => format!("map@{:#x}", value),

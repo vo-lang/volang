@@ -93,6 +93,49 @@ impl<'a> TypeInfoWrapper<'a> {
         
         is_interface && is_error
     }
+    
+    /// Get expected return count for dynamic access expression.
+    /// Expression type is a tuple: (any, any, ..., error) where last element is error.
+    /// Returns the number of return values (tuple length - 1 for error).
+    pub fn get_dyn_access_ret_count(&self, type_key: TypeKey) -> u16 {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { return 1 };
+        let vars = tuple.vars();
+        if vars.is_empty() { return 1 }
+        // Last element is error, so ret_count = len - 1
+        (vars.len() - 1) as u16
+    }
+    
+    /// Get return types for dynamic access expression (excluding error).
+    /// Returns a list of TypeKeys for each return value.
+    pub fn get_dyn_access_ret_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else { 
+            return vec![]; 
+        };
+        let vars = tuple.vars();
+        if vars.is_empty() { return vec![]; }
+        // All elements except last (which is error)
+        vars[..vars.len() - 1]
+            .iter()
+            .filter_map(|&var| self.tc_objs().lobjs[var].typ())
+            .collect()
+    }
+    
+    /// Check if a type is the empty interface (any).
+    pub fn is_any_type(&self, type_key: TypeKey) -> bool {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
+        if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
+            iface.methods().is_empty() && iface.embeddeds().is_empty()
+        } else {
+            false
+        }
+    }
+    
+    /// Convert TypeKey to RuntimeType for signature building.
+    pub fn type_to_runtime_type(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> vo_runtime::RuntimeType {
+        crate::type_key_to_runtime_type_simple(type_key, self, &self.project.interner, ctx)
+    }
 
     /// Get the empty interface type (any) - creates a new one each time
     /// This is fine for codegen since we only use it for structural type comparison

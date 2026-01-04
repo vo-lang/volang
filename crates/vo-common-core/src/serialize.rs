@@ -20,10 +20,10 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use crate::types::{SlotType, ValueMeta};
+use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, InterfaceMethodMeta,
+    Constant, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta, InterfaceMethodMeta,
     Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 use crate::instruction::Instruction;
@@ -148,11 +148,11 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u8(*variadic as u8);
             w.write_u32(params.len() as u32);
             for p in params {
-                write_runtime_type(w, p);
+                w.write_u32(*p);
             }
             w.write_u32(results.len() as u32);
             for r in results {
-                write_runtime_type(w, r);
+                w.write_u32(*r);
             }
         }
         RuntimeType::Struct { fields } => {
@@ -160,7 +160,7 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u32(fields.len() as u32);
             for f in fields {
                 w.write_u32(f.name.as_u32());
-                write_runtime_type(w, &f.typ);
+                w.write_u32(f.typ);
                 w.write_u32(f.tag.as_u32());
                 w.write_u8(f.embedded as u8);
                 w.write_u32(f.pkg.as_u32());
@@ -171,14 +171,14 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u32(methods.len() as u32);
             for m in methods {
                 w.write_u32(m.name.as_u32());
-                write_runtime_type(w, &m.sig);
+                w.write_u32(m.sig);
             }
         }
         RuntimeType::Tuple(types) => {
             w.write_u8(RT_TUPLE);
             w.write_u32(types.len() as u32);
             for t in types {
-                write_runtime_type(w, t);
+                w.write_u32(*t);
             }
         }
     }
@@ -232,12 +232,12 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let param_count = r.read_u32()? as usize;
             let mut params = Vec::with_capacity(param_count);
             for _ in 0..param_count {
-                params.push(read_runtime_type(r)?);
+                params.push(r.read_u32()?);
             }
             let result_count = r.read_u32()? as usize;
             let mut results = Vec::with_capacity(result_count);
             for _ in 0..result_count {
-                results.push(read_runtime_type(r)?);
+                results.push(r.read_u32()?);
             }
             Ok(RuntimeType::Func { params, results, variadic })
         }
@@ -248,7 +248,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let name = Symbol::from_raw(r.read_u32()?);
-                let typ = read_runtime_type(r)?;
+                let typ = r.read_u32()?;
                 let tag = Symbol::from_raw(r.read_u32()?);
                 let embedded = r.read_u8()? != 0;
                 let pkg = Symbol::from_raw(r.read_u32()?);
@@ -263,7 +263,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut methods = Vec::with_capacity(method_count);
             for _ in 0..method_count {
                 let name = Symbol::from_raw(r.read_u32()?);
-                let sig = read_runtime_type(r)?;
+                let sig = r.read_u32()?;
                 methods.push(InterfaceMethod::new(name, sig));
             }
             Ok(RuntimeType::Interface { methods })
@@ -272,7 +272,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let type_count = r.read_u32()? as usize;
             let mut types = Vec::with_capacity(type_count);
             for _ in 0..type_count {
-                types.push(read_runtime_type(r)?);
+                types.push(r.read_u32()?);
             }
             Ok(RuntimeType::Tuple(types))
         }
@@ -383,14 +383,21 @@ impl Module {
 
         w.write_vec(&self.struct_metas, |w, m| {
             w.write_vec(&m.slot_types, |w, st| w.write_u8(*st as u8));
-            w.write_vec(&m.field_names, |w, n| w.write_string(n));
-            w.write_vec(&m.field_offsets, |w, o| w.write_u16(*o));
-            w.write_vec(&m.field_value_metas, |w, v| w.write_u32(*v));
+            w.write_vec(&m.fields, |w, f| {
+                w.write_string(&f.name);
+                w.write_u16(f.offset);
+                w.write_u16(f.slot_count);
+                w.write_u32(f.type_info.to_raw());
+            });
         });
 
         w.write_vec(&self.interface_metas, |w, m| {
             w.write_string(&m.name);
             w.write_vec(&m.method_names, |w, n| w.write_string(n));
+            w.write_vec(&m.methods, |w, method| {
+                w.write_string(&method.name);
+                w.write_u32(method.signature_rttid);
+            });
         });
 
         w.write_vec(&self.named_type_metas, |w, m| {
@@ -401,6 +408,7 @@ impl Module {
                 w.write_string(name);
                 w.write_u32(info.func_id);
                 w.write_u8(info.is_pointer_receiver as u8);
+                w.write_u32(info.signature_rttid);
             }
         });
 
@@ -501,27 +509,24 @@ impl Module {
 
         let struct_metas = r.read_vec(|r| {
             let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
-            let field_names = r.read_vec(|r| r.read_string())?;
-            let field_offsets = r.read_vec(|r| r.read_u16())?;
-            let field_value_metas = r.read_vec(|r| r.read_u32())?;
-            Ok(StructMeta {
-                slot_types,
-                field_names,
-                field_offsets,
-                field_value_metas,
-            })
+            let fields = r.read_vec(|r| {
+                let name = r.read_string()?;
+                let offset = r.read_u16()?;
+                let slot_count = r.read_u16()?;
+                let type_info = ValueRttid::from_raw(r.read_u32()?);
+                Ok(FieldMeta { name, offset, slot_count, type_info })
+            })?;
+            Ok(StructMeta { slot_types, fields })
         })?;
 
         let interface_metas = r.read_vec(|r| {
             let name = r.read_string()?;
             let method_names = r.read_vec(|r| r.read_string())?;
-            // TODO: serialize InterfaceMethodMeta with signatures
-            let methods = method_names.iter().map(|n| {
-                InterfaceMethodMeta {
-                    name: n.clone(),
-                    signature: RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false },
-                }
-            }).collect();
+            let methods = r.read_vec(|r| {
+                let name = r.read_string()?;
+                let signature_rttid = r.read_u32()?;
+                Ok(InterfaceMethodMeta { name, signature_rttid })
+            })?;
             Ok(InterfaceMeta { name, method_names, methods })
         })?;
 
@@ -534,9 +539,8 @@ impl Module {
                 let n = r.read_string()?;
                 let func_id = r.read_u32()?;
                 let is_pointer_receiver = r.read_u8()? != 0;
-                // TODO: serialize method signatures
-                let signature = RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false };
-                methods.insert(n, MethodInfo { func_id, is_pointer_receiver, signature });
+                let signature_rttid = r.read_u32()?;
+                methods.insert(n, MethodInfo { func_id, is_pointer_receiver, signature_rttid });
             }
             Ok(NamedTypeMeta {
                 name,

@@ -1,0 +1,29 @@
+// Debug test for dyn_call
+package main
+
+type Calc struct {
+	val int
+}
+
+func (c *Calc) Add(x int) int {
+	println("Add called with x =", x)
+	println("c.val =", c.val)
+	result := c.val + x
+	println("returning", result)
+	return result
+}
+
+func main() {
+	calc := &Calc{val: 10}
+	var obj interface{} = calc
+	
+	println("Calling obj~>Add(5)...")
+	result, err := obj~>Add(5)
+	if err != nil {
+		println("Error:", err)
+		return
+	}
+	println("Result type:", result)
+	val := result.(int)
+	println("Result value:", val)
+}

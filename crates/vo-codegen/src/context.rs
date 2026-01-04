@@ -222,27 +222,27 @@ impl CodegenContext {
     }
 
     /// Update a NamedTypeMeta's methods map after function compilation
-    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature: vo_runtime::RuntimeType) {
+    pub fn update_named_type_method(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver, signature });
+            meta.methods.insert(method_name, MethodInfo { func_id, is_pointer_receiver, signature_rttid });
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present
-    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature: vo_runtime::RuntimeType) {
+    pub fn update_named_type_method_if_absent(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
-            meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver, signature });
+            meta.methods.entry(method_name).or_insert(MethodInfo { func_id, is_pointer_receiver, signature_rttid });
         }
     }
 
     /// Update a NamedTypeMeta's methods map only if the method is not already present.
     /// Returns true if a new method was added, false if the method already existed.
-    pub fn update_named_type_method_if_absent_check(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature: vo_runtime::RuntimeType) -> bool {
+    pub fn update_named_type_method_if_absent_check(&mut self, named_type_id: u32, method_name: String, func_id: u32, is_pointer_receiver: bool, signature_rttid: u32) -> bool {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
             use std::collections::hash_map::Entry;
             match meta.methods.entry(method_name) {
                 Entry::Vacant(e) => {
-                    e.insert(MethodInfo { func_id, is_pointer_receiver, signature });
+                    e.insert(MethodInfo { func_id, is_pointer_receiver, signature_rttid });
                     true
                 }
                 Entry::Occupied(_) => false,
@@ -293,8 +293,7 @@ impl CodegenContext {
                 .map(|m| tc_objs.lobjs[*m].name().to_string())
                 .collect();
             
-            // Note: signatures are empty here - will be filled by VM at runtime if needed
-            // For anonymous interfaces created during codegen, we don't have full type info
+            // For anonymous interfaces, intern empty signature to get rttid
             let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs.iter()
                 .map(|&m| {
                     let obj = &tc_objs.lobjs[m];
@@ -305,7 +304,8 @@ impl CodegenContext {
                         results: Vec::new(), 
                         variadic: false 
                     };
-                    vo_vm::bytecode::InterfaceMethodMeta { name, signature: sig }
+                    let signature_rttid = self.type_interner.intern(sig);
+                    vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }
                 })
                 .collect();
             

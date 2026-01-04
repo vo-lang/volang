@@ -53,6 +53,39 @@ impl ValueMeta {
     }
 }
 
+/// Runtime type ID with value kind - packed 32-bit representation.
+/// Layout: [rttid:24 | value_kind:8]
+/// Used in FieldMeta for dynamic access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ValueRttid(u32);
+
+impl ValueRttid {
+    #[inline]
+    pub fn new(rttid: u32, value_kind: ValueKind) -> Self {
+        Self(((rttid & META_ID_MASK) << 8) | (value_kind as u32))
+    }
+
+    #[inline]
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[inline]
+    pub fn to_raw(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub fn value_kind(self) -> ValueKind {
+        ValueKind::from_u8(self.0 as u8)
+    }
+
+    #[inline]
+    pub fn rttid(self) -> u32 {
+        self.0 >> 8
+    }
+}
+
 /// Value kind - runtime classification of Vo values.
 ///
 /// Layout:
@@ -77,31 +110,28 @@ pub enum ValueKind {
     Uint64 = 11,
     Float32 = 12,
     Float64 = 13,
-    FuncPtr = 14,
 
     // === Compound Value Types (multi-slot, may contain GC refs) ===
-    Array = 15,
-    Struct = 16,
-    Interface = 17,
+    Array = 14,
+    Struct = 15,
+    Interface = 16,
 
     // === Reference Types (1 slot GcRef, heap allocated) ===
-    String = 18,
-    Slice = 19,
-    Map = 20,
-    Channel = 21,
-    Closure = 22,
-    Pointer = 23,
+    String = 17,
+    Slice = 18,
+    Map = 19,
+    Channel = 20,
+    Closure = 21,
+    Pointer = 22,
 }
 
 impl ValueKind {
-    /// All ValueKind variants for pre-registering RuntimeType::Basic in TypeInterner.
-    /// When adding a new ValueKind, add it here too!
-    pub const ALL: [ValueKind; 24] = [
+    /// Basic types that don't have internal type info.
+    /// Used for pre-registering RuntimeType::Basic in TypeInterner.
+    pub const BASIC: [ValueKind; 15] = [
         Self::Void, Self::Bool, Self::Int, Self::Int8, Self::Int16, Self::Int32, Self::Int64,
         Self::Uint, Self::Uint8, Self::Uint16, Self::Uint32, Self::Uint64,
-        Self::Float32, Self::Float64, Self::FuncPtr, Self::String,
-        Self::Array, Self::Slice, Self::Map, Self::Channel, Self::Closure,
-        Self::Struct, Self::Pointer, Self::Interface,
+        Self::Float32, Self::Float64, Self::String,
     ];
     
     #[inline]
@@ -111,7 +141,7 @@ impl ValueKind {
 
     #[inline]
     pub fn may_contain_gc_refs(&self) -> bool {
-        (*self as u8) > Self::FuncPtr as u8
+        (*self as u8) >= Self::Array as u8
     }
 
     pub fn fixed_slot_count(&self) -> u16 {
