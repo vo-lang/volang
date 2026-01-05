@@ -305,9 +305,12 @@ impl CodegenContext {
         let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
 
         if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
-            if iface.methods().is_empty() && iface.embeddeds().is_empty() {
-                self.interface_meta_ids.insert(underlying, 0);
-                return 0;
+            let all_methods = iface.all_methods();
+            if let Some(methods) = all_methods.as_ref() {
+                if methods.is_empty() {
+                    self.interface_meta_ids.insert(underlying, 0);
+                    return 0;
+                }
             }
         }
         
