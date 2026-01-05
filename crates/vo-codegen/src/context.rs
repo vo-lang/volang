@@ -303,6 +303,13 @@ impl CodegenContext {
     /// Get or create interface meta ID. Dynamically registers anonymous interfaces.
     pub fn get_or_create_interface_meta_id(&mut self, type_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
         let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
+
+        if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
+            if iface.methods().is_empty() && iface.embeddeds().is_empty() {
+                self.interface_meta_ids.insert(underlying, 0);
+                return 0;
+            }
+        }
         
         // Check if already registered
         if let Some(id) = self.interface_meta_ids.get(&underlying) {

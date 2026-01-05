@@ -1,0 +1,44 @@
+package main
+
+func acceptAny(x any) int {
+	if x == nil {
+		return 0
+	}
+	v := x.(int)
+	return v
+}
+
+func acceptIface(x interface{}) int {
+	if x == nil {
+		return 0
+	}
+	v := x.(int)
+	return v
+}
+
+func main() {
+	var a any = 42
+	var b interface{} = 42
+
+	var c any = b
+	var d interface{} = a
+
+	if acceptAny(a) != 42 {
+		println("FAIL: acceptAny(a)")
+		return
+	}
+	if acceptAny(c) != 42 {
+		println("FAIL: acceptAny(c)")
+		return
+	}
+	if acceptIface(b) != 42 {
+		println("FAIL: acceptIface(b)")
+		return
+	}
+	if acceptIface(d) != 42 {
+		println("FAIL: acceptIface(d)")
+		return
+	}
+
+	println("OK")
+}

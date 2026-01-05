@@ -37,6 +37,7 @@ pub struct Universe {
     scope: ScopeKey,
     unsafe_pkg: PackageKey,
     iota: ObjKey,
+    any_type: TypeKey,
     byte: TypeKey,
     rune: TypeKey,
     slice_of_bytes: TypeKey,
@@ -77,6 +78,9 @@ impl Universe {
         // Merge alias types into types map
         types.extend(alias_types);
 
+        // Create any type: alias for empty interface{}
+        let any_type = Self::create_any_type(universe_scope, objs);
+
         // Create error type
         let error_type = Self::create_error_type(&types, universe_scope, objs);
 
@@ -109,6 +113,7 @@ impl Universe {
             scope: universe_scope,
             unsafe_pkg,
             iota,
+            any_type,
             byte,
             rune,
             slice_of_bytes,
@@ -131,6 +136,10 @@ impl Universe {
 
     pub fn iota(&self) -> ObjKey {
         self.iota
+    }
+
+    pub fn any_type(&self) -> TypeKey {
+        self.any_type
     }
 
     pub fn byte(&self) -> TypeKey {
@@ -173,9 +182,24 @@ impl Universe {
         self.types.get(&basic).copied()
     }
 
+    fn create_any_type(universe_scope: ScopeKey, objs: &mut TCObjects) -> TypeKey {
+        let any_type = objs.types.insert(Type::Interface(InterfaceDetail::new_empty()));
+
+        let type_name = objs.lobjs.insert(LangObj::new_type_name(
+            0,
+            None,
+            "any".to_string(),
+            Some(any_type),
+        ));
+
+        Scope::insert(universe_scope, type_name, objs);
+        any_type
+    }
+
     /// Looks up a predeclared type by name string.
     pub fn lookup_type_by_name(&self, name: &str) -> Option<TypeKey> {
         let basic = match name {
+            "any" => return Some(self.any_type),
             "bool" => BasicType::Bool,
             "int" => BasicType::Int,
             "int8" => BasicType::Int8,
