@@ -6,12 +6,24 @@ package dyn
 // Code is a stable numeric category for programmatic matching.
 // Msg is the human-readable message.
 type Error struct {
-    Code int
-    Msg  string
+    ErrCode int
+    Msg     string
 }
 
 func (e *Error) Error() string {
     return e.Msg
+}
+
+func (e *Error) Code() int {
+    return e.ErrCode
+}
+
+func (e *Error) Unwrap() error {
+    return nil
+}
+
+func (e *Error) Data() any {
+    return nil
 }
 
 const (
@@ -27,13 +39,7 @@ const (
 
 // NewError constructs a new error value.
 func NewError(code int, msg string) error {
-    return &Error{Code: code, Msg: msg}
-}
-
-type Object interface {
-    AttrObject
-    IndexObject
-    CallObject
+    return &Error{ErrCode: code, Msg: msg}
 }
 
 type AttrObject interface {
@@ -48,6 +54,25 @@ type CallObject interface {
     __call(args ...any) (any, error)
 }
 
+type Object interface {
+    AttrObject
+    IndexObject
+    CallObject
+}
+
+type SetAttrObject interface {
+    __setattr(name string, value any) error
+}
+
+type SetIndexObject interface {
+    __setindex(key any, value any) error
+}
+
+type SetObject interface {
+    SetAttrObject
+    SetIndexObject
+}
+
 // Extern functions (implemented in Rust)
 func SetAttr(base any, name string, value any) error
 func SetIndex(base any, key any, value any) error
@@ -56,7 +81,8 @@ func SetIndex(base any, key any, value any) error
 type MapObject map[string]any
 
 func (m MapObject) __attr(name string) (any, error) {
-    return m.__index(name)
+    v, err := m.__index(name)
+    return v, err
 }
 
 func (m MapObject) __index(key any) (any, error) {
@@ -71,6 +97,19 @@ func (m MapObject) __index(key any) (any, error) {
     return v, nil
 }
 
+func (m MapObject) __setattr(name string, value any) error {
+    return m.__setindex(name, value)
+}
+
+func (m MapObject) __setindex(key any, value any) error {
+    k, ok := key.(string)
+    if !ok {
+        return NewError(ErrBadIndex, "map key must be string")
+    }
+    m[k] = value
+    return nil
+}
+
 // anyslice is the standard dynamic array container.
 type SliceObject []any
 
@@ -83,4 +122,16 @@ func (s SliceObject) __index(key any) (any, error) {
         return nil, NewError(ErrOutOfBounds, "slice index out of bounds")
     }
     return s[i], nil
+}
+
+func (s SliceObject) __setindex(key any, value any) error {
+    i, ok := key.(int)
+    if !ok {
+        return NewError(ErrBadIndex, "slice index must be int")
+    }
+    if i < 0 || i >= len(s) {
+        return NewError(ErrOutOfBounds, "slice index out of bounds")
+    }
+    s[i] = value
+    return nil
 }

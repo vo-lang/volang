@@ -320,8 +320,15 @@ fn compile_method_call(
     let is_interface_recv = info.is_interface(recv_type);
     
     let call_info = crate::embed::resolve_method_call(
-        recv_type, method_name, method_sym, selection, is_interface_recv, ctx, &info.project.tc_objs
-    ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found on type", method_name)))?;
+        recv_type,
+        method_name,
+        sel.sel.symbol,
+        selection,
+        is_interface_recv,
+        ctx,
+        &info.project.tc_objs,
+        &info.project.interner,
+    ).ok_or_else(|| CodegenError::Internal("method not found".to_string()))?;
     
     // Dispatch based on call type
     compile_method_call_dispatch(expr, call, sel, &call_info, dst, ctx, func, info)

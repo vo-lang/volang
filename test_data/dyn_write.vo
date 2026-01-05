@@ -6,7 +6,7 @@ type MyError struct {
 
 func (e MyError) Error() string { return e.msg }
 
-func (e MyError) Code() ErrorCode { return 0 }
+func (e MyError) Code() int { return 0 }
 
 func (e MyError) Unwrap() error { return nil }
 

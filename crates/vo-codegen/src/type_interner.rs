@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use vo_runtime::{RuntimeType, Symbol, ValueKind, ValueRttid, ChanDir, StructField, InterfaceMethod};
-use vo_analysis::objects::TypeKey;
+use vo_analysis::objects::{TypeKey, ObjKey};
 use vo_analysis::typ::{Type, BasicType};
 
 /// A type interner that assigns unique runtime type IDs to types.
@@ -85,13 +85,13 @@ impl Default for TypeInterner {
 /// For composite types (Pointer/Array/Slice/Map/Chan), this first interns inner types
 /// to get their ValueRttids, then constructs the outer type with those ValueRttids.
 ///
-/// named_type_ids maps TypeKey -> named_type_id for Named types.
+/// named_type_ids maps ObjKey -> named_type_id for Named types (ObjKey is the true identity).
 pub fn intern_type_key(
     interner: &mut TypeInterner,
     type_key: TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     str_interner: &vo_common::SymbolInterner,
-    named_type_ids: &std::collections::HashMap<TypeKey, u32>,
+    named_type_ids: &std::collections::HashMap<ObjKey, u32>,
 ) -> ValueRttid {
     let (rt, vk) = type_key_to_runtime_type(interner, type_key, tc_objs, str_interner, named_type_ids);
     let rttid = interner.intern(rt);
@@ -105,7 +105,7 @@ fn type_key_to_runtime_type(
     type_key: TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     str_interner: &vo_common::SymbolInterner,
-    named_type_ids: &std::collections::HashMap<TypeKey, u32>,
+    named_type_ids: &std::collections::HashMap<ObjKey, u32>,
 ) -> (RuntimeType, ValueKind) {
     match &tc_objs.types[type_key] {
         Type::Basic(basic) => {
@@ -135,20 +135,10 @@ fn type_key_to_runtime_type(
                     panic!("type_interner: unexpected Named underlying for a Named type")
                 }
             };
-            let id = if let Some(&id) = named_type_ids.get(&type_key) {
-                id
-            } else {
-                named_type_ids.iter()
-                    .find(|(&k, _)| {
-                        if let Type::Named(n) = &tc_objs.types[k] {
-                            n.obj() == named.obj()
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|(_, &id)| id)
-                    .unwrap_or(0)
-            };
+            // Use ObjKey for lookup - the true identity of Named types
+            let id = named.obj().as_ref()
+                .and_then(|obj_key| named_type_ids.get(obj_key).copied())
+                .unwrap_or(0);
             (RuntimeType::Named(id), vk)
         }
         Type::Pointer(ptr) => {

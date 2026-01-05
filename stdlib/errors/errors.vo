@@ -2,7 +2,7 @@ package errors
 
 // Error is the canonical structured error implementation.
 type Error struct {
-    code  ErrorCode
+    code  int
     msg   string
     cause error
     data  any
@@ -12,7 +12,7 @@ func (e *Error) Error() string {
     return e.msg
 }
 
-func (e *Error) Code() ErrorCode {
+func (e *Error) Code() int {
     return e.code
 }
 
@@ -25,7 +25,7 @@ func (e *Error) Data() any {
 }
 
 const (
-    CodeUnknown ErrorCode = 0
+    CodeUnknown int = 0
 )
 
 // New returns a new error with default code CodeUnknown.
@@ -34,7 +34,7 @@ func New(msg string) error {
 }
 
 // NewCode returns a new error with the given code.
-func NewCode(code ErrorCode, msg string) error {
+func NewCode(code int, msg string) error {
     return &Error{code: code, msg: msg}
 }
 
@@ -44,7 +44,7 @@ func Wrap(cause error, msg string) error {
 }
 
 // WrapCode returns a new error with a cause and the given code.
-func WrapCode(cause error, code ErrorCode, msg string) error {
+func WrapCode(cause error, code int, msg string) error {
     return &Error{code: code, msg: msg, cause: cause}
 }
 
@@ -53,21 +53,21 @@ func WithData(cause error, data any) error {
     return &Error{code: cause.Code(), msg: cause.Error(), cause: cause, data: data}
 }
 
-// MakeCode packs domain/local into a 64-bit ErrorCode.
-func MakeCode(domain uint32, local uint32) ErrorCode {
-    return ErrorCode((uint64(domain) << 32) | uint64(local))
+// MakeCode packs domain/local into a 64-bit int.
+func MakeCode(domain uint32, local uint32) int {
+    return int((uint64(domain) << 32) | uint64(local))
 }
 
-func Domain(code ErrorCode) uint32 {
+func Domain(code int) uint32 {
     return uint32(uint64(code) >> 32)
 }
 
-func Local(code ErrorCode) uint32 {
+func Local(code int) uint32 {
     return uint32(uint64(code) & 0xffffffff)
 }
 
 // IsCode checks whether any error in the unwrap chain matches code.
-func IsCode(err error, code ErrorCode) bool {
+func IsCode(err error, code int) bool {
     for err != nil {
         if err.Code() == code {
             return true

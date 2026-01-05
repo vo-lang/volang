@@ -1,0 +1,75 @@
+package main
+
+import "dyn"
+
+type MyError struct { msg string }
+func (e MyError) Error() string { return e.msg }
+func (e MyError) Code() int { return 0 }
+func (e MyError) Unwrap() error { return nil }
+func (e MyError) Data() any { return nil }
+func newError(msg string) error { return MyError{msg: msg} }
+
+func testMapSetAttr() error {
+    m := make(dyn.MapObject)
+    var a any = m
+
+    a~>foo = 1
+
+    v, err := a~>["foo"]
+    if err != nil {
+        return err
+    }
+    if v.(int) != 1 {
+        return newError("bad value")
+    }
+    return nil
+}
+
+func testMapSetIndex() error {
+    m := make(dyn.MapObject)
+    var a any = m
+
+    a~>["k"] = 2
+
+    v, err := a~>["k"]
+    if err != nil {
+        return err
+    }
+    if v.(int) != 2 {
+        return newError("bad value")
+    }
+    return nil
+}
+
+func testSliceSetIndex() error {
+    s := make(dyn.SliceObject, 3)
+    s[0] = 1
+    s[1] = 2
+    s[2] = 3
+    var a any = s
+
+    a~>[1] = 10
+
+    v, err := a~>[1]
+    if err != nil {
+        return err
+    }
+    if v.(int) != 10 {
+        return newError("bad value")
+    }
+    return nil
+}
+
+func main() int {
+    err := testMapSetAttr()
+    assert(err == nil, "map setattr should succeed")
+
+    err = testMapSetIndex()
+    assert(err == nil, "map setindex should succeed")
+
+    err = testSliceSetIndex()
+    assert(err == nil, "slice setindex should succeed")
+
+    println("done")
+    return 0
+}

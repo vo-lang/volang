@@ -634,7 +634,7 @@ fn compile_type_assert(
     let has_ok = info.is_tuple(result_type);
 
     let (assert_kind, target_id): (u8, u32) = if info.is_interface(target_type) {
-        let iface_meta_id = ctx.get_or_create_interface_meta_id(target_type, &info.project.tc_objs);
+        let iface_meta_id = ctx.get_or_create_interface_meta_id(target_type, &info.project.tc_objs, &info.project.interner);
         (1, iface_meta_id)
     } else {
         let rt = crate::type_key_to_runtime_type_simple(target_type, info, &info.project.interner, ctx);

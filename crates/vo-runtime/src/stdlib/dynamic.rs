@@ -297,9 +297,17 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             // Read element value
             let value = crate::objects::slice::get(base_ref, idx as usize, elem_bytes);
             
-            let result_slot0 = interface::pack_slot0(0, elem_value_rttid.rttid(), elem_vk);
-            call.ret_u64(0, result_slot0);
-            call.ret_u64(1, value);
+            if elem_vk == ValueKind::Interface {
+                // Element is already an interface (any), need to read 2 slots
+                let value2 = crate::objects::slice::get(base_ref, idx as usize * 2 + 1, 8);
+                let value1 = crate::objects::slice::get(base_ref, idx as usize * 2, 8);
+                call.ret_u64(0, value1);
+                call.ret_u64(1, value2);
+            } else {
+                let result_slot0 = interface::pack_slot0(0, elem_value_rttid.rttid(), elem_vk);
+                call.ret_u64(0, result_slot0);
+                call.ret_u64(1, value);
+            }
             call.ret_nil(2);
             call.ret_nil(3);
         }
@@ -353,9 +361,15 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             let found = crate::objects::map::get(base_ref, &key_data);
             
             if let Some(val_slice) = found {
-                let result_slot0 = interface::pack_slot0(0, val_value_rttid.rttid(), val_vk);
-                call.ret_u64(0, result_slot0);
-                call.ret_u64(1, val_slice[0]);
+                if val_vk == crate::ValueKind::Interface {
+                    // Value is already an interface (any), return as-is (2 slots)
+                    call.ret_u64(0, val_slice[0]);
+                    call.ret_u64(1, val_slice[1]);
+                } else {
+                    let result_slot0 = interface::pack_slot0(0, val_value_rttid.rttid(), val_vk);
+                    call.ret_u64(0, result_slot0);
+                    call.ret_u64(1, val_slice[0]);
+                }
                 call.ret_nil(2);
                 call.ret_nil(3);
             } else {

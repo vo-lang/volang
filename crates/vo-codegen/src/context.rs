@@ -47,8 +47,8 @@ pub struct CodegenContext {
     /// Type meta_id: TypeKey -> interface_meta_id
     interface_meta_ids: HashMap<TypeKey, u32>,
 
-    /// Type meta_id: TypeKey -> named_type_id
-    named_type_ids: HashMap<TypeKey, u32>,
+    /// Type meta_id: ObjKey -> named_type_id (Named type identity is ObjKey, not TypeKey)
+    named_type_ids: HashMap<ObjKey, u32>,
 
     /// RuntimeType -> rttid (structural equality)
     type_interner: TypeInterner,
@@ -147,15 +147,21 @@ impl CodegenContext {
         self.module.rttid_to_struct_meta.push((rttid, struct_meta_id));
     }
 
-    pub fn register_named_type_meta(&mut self, type_key: TypeKey, meta: NamedTypeMeta) -> u32 {
+    /// Register named type meta using ObjKey as the identity key.
+    pub fn register_named_type_meta(&mut self, obj_key: ObjKey, meta: NamedTypeMeta) -> u32 {
         let id = self.module.named_type_metas.len() as u32;
         self.module.named_type_metas.push(meta);
-        self.named_type_ids.insert(type_key, id);
+        self.named_type_ids.insert(obj_key, id);
         id
     }
 
-    pub fn get_named_type_id(&self, type_key: TypeKey) -> Option<u32> {
-        self.named_type_ids.get(&type_key).copied()
+    /// Get named_type_id by ObjKey (the true identity of Named types).
+    pub fn get_named_type_id(&self, obj_key: ObjKey) -> Option<u32> {
+        self.named_type_ids.get(&obj_key).copied()
+    }
+
+    pub fn named_type_ids_count(&self) -> usize {
+        self.named_type_ids.len()
     }
 
     // === RTTID registration ===
@@ -253,7 +259,12 @@ impl CodegenContext {
     }
 
     /// Get or create interface meta ID. Dynamically registers anonymous interfaces.
-    pub fn get_or_create_interface_meta_id(&mut self, type_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
+    pub fn get_or_create_interface_meta_id(
+        &mut self,
+        type_key: TypeKey,
+        tc_objs: &vo_analysis::objects::TCObjects,
+        interner: &vo_common::SymbolInterner,
+    ) -> u32 {
         let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
 
         if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
@@ -279,27 +290,30 @@ impl CodegenContext {
             } else {
                 iface.methods().iter().cloned().collect()
             };
-            
-            let names: Vec<String> = method_objs.iter()
+
+            let names: Vec<String> = method_objs
+                .iter()
                 .map(|m| tc_objs.lobjs[*m].name().to_string())
                 .collect();
-            
-            // For anonymous interfaces, intern empty signature to get rttid
-            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs.iter()
+
+            let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                .iter()
                 .map(|&m| {
                     let obj = &tc_objs.lobjs[m];
                     let name = obj.name().to_string();
-                    // Empty signature - anonymous interface methods use name-only matching
-                    let sig = vo_runtime::RuntimeType::Func { 
-                        params: Vec::new(), 
-                        results: Vec::new(), 
-                        variadic: false 
-                    };
-                    let signature_rttid = self.type_interner.intern(sig);
+                    let sig_type = obj.typ().expect("interface method must have signature type");
+                    let signature_rttid = crate::type_interner::intern_type_key(
+                        &mut self.type_interner,
+                        sig_type,
+                        tc_objs,
+                        interner,
+                        &self.named_type_ids,
+                    )
+                    .rttid();
                     vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }
                 })
                 .collect();
-            
+
             (names, metas)
         } else {
             (Vec::new(), Vec::new())
@@ -315,8 +329,14 @@ impl CodegenContext {
 
     /// Get method index in interface meta (for CallIface)
     /// This uses the registered InterfaceMeta's method_names order, which matches itab building.
-    pub fn get_interface_method_index(&mut self, type_key: TypeKey, method_name: &str, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
-        let iface_meta_id = self.get_or_create_interface_meta_id(type_key, tc_objs);
+    pub fn get_interface_method_index(
+        &mut self,
+        type_key: TypeKey,
+        method_name: &str,
+        tc_objs: &vo_analysis::objects::TCObjects,
+        interner: &vo_common::SymbolInterner,
+    ) -> u32 {
+        let iface_meta_id = self.get_or_create_interface_meta_id(type_key, tc_objs, interner);
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
         iface_meta.method_names.iter().position(|n| n == method_name)
             .map(|i| i as u32)
@@ -356,16 +376,16 @@ impl CodegenContext {
 
     /// Build pending itabs after all methods are registered.
     /// Uses lookup_field_or_method to find methods (including promoted methods from embedded fields).
-    pub fn finalize_itabs(&mut self, tc_objs: &vo_analysis::objects::TCObjects) {
+    pub fn finalize_itabs(&mut self, tc_objs: &vo_analysis::objects::TCObjects, interner: &vo_common::SymbolInterner) {
         let pending = std::mem::take(&mut self.pending_itabs);
         for (rttid, type_key, iface_meta_id, const_idx) in pending {
-            let itab_id = self.build_itab(type_key, iface_meta_id, tc_objs);
+            let itab_id = self.build_itab(type_key, iface_meta_id, tc_objs, interner);
             let packed = ((rttid as i64) << 32) | (itab_id as i64);
             self.module.constants[const_idx as usize] = Constant::Int(packed);
         }
     }
 
-    fn build_itab(&mut self, type_key: TypeKey, iface_meta_id: u32, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
+    fn build_itab(&mut self, type_key: TypeKey, iface_meta_id: u32, tc_objs: &vo_analysis::objects::TCObjects, interner: &vo_common::SymbolInterner) -> u32 {
         let iface_meta = &self.module.interface_metas[iface_meta_id as usize];
         
         // Get package from the type for unexported method lookup
@@ -396,6 +416,7 @@ impl CodegenContext {
                                 name,
                                 obj_key,
                                 tc_objs,
+                                interner,
                             )
                         } else if let Some(base_iface_func) = self.get_iface_func_by_objkey(obj_key) {
                             // Normal concrete method

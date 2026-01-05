@@ -21,13 +21,28 @@ fn compute_iface_assert_params(
     info: &TypeInfoWrapper,
 ) -> (u8, u32) {
     if info.is_interface(type_key) {
-        let iface_meta_id = ctx.get_or_create_interface_meta_id(type_key, &info.project.tc_objs);
+        let iface_meta_id = ctx.get_or_create_interface_meta_id(type_key, &info.project.tc_objs, &info.project.interner);
         (1, iface_meta_id)
     } else {
         let rt = crate::type_key_to_runtime_type_simple(type_key, info, &info.project.interner, ctx);
         let rttid = ctx.intern_rttid(rt);
         (0, rttid)
     }
+}
+
+fn lookup_pkg_type(info: &TypeInfoWrapper, pkg_path: &str, type_name: &str) -> vo_analysis::objects::TypeKey {
+    let tc_objs = &info.project.tc_objs;
+    let pkg = tc_objs
+        .find_package_by_path(pkg_path)
+        .unwrap_or_else(|| panic!("package '{}' not found (expected always-linked)", pkg_path));
+    let scope_key = *tc_objs.pkgs[pkg].scope();
+    let scope = &tc_objs.scopes[scope_key];
+    let obj = scope
+        .lookup(type_name)
+        .unwrap_or_else(|| panic!("type '{}' not found in package '{}'", type_name, pkg_path));
+    tc_objs.lobjs[obj]
+        .typ()
+        .unwrap_or_else(|| panic!("type object {}.{} has no type", pkg_path, type_name))
 }
 
 // =============================================================================
@@ -515,14 +530,58 @@ fn compile_stmt_with_label(
                             }
 
                             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
+                            let any_type = info.any_type();
+
+                            // Fast-path: if base implements dyn.SetAttrObject, call __setattr via CallIface
+                            let set_attr_iface_type = lookup_pkg_type(info, "dyn", "SetAttrObject");
+                            let set_attr_iface_meta_id = ctx.get_or_create_interface_meta_id(set_attr_iface_type, &info.project.tc_objs, &info.project.interner);
+                            let set_attr_method_idx = ctx.get_interface_method_index(set_attr_iface_type, "__setattr", &info.project.tc_objs, &info.project.interner);
+                            // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
+                            // Allocate 3 slots to keep ok in-bounds.
+                            let iface_reg = func.alloc_temp(3);
+                            let flags = 1 | (1 << 2) | (2 << 3);
+                            func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_attr_iface_meta_id as u16);
+                            let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
+
+                            // args: name[1] + value_any[2] => 3 slots, ret: error[2]
+                            let args_start = func.alloc_temp(3);
+                            let name_idx = ctx.const_string(field_name);
+                            func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
+                            crate::stmt::compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
+
+                            let c = crate::type_info::encode_call_args(3, 2);
+                            func.emit_with_flags(Opcode::CallIface, set_attr_method_idx as u8, iface_reg, args_start, c);
+
+                            // fail if err != nil
+                            let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
+
+                            let ret_types: Vec<_> = func.return_types().to_vec();
+                            let mut total_ret_slots = 0u16;
+                            for ret_type in &ret_types {
+                                total_ret_slots += info.type_slot_count(*ret_type);
+                            }
+                            let ret_start = func.alloc_temp(total_ret_slots);
+                            for i in 0..total_ret_slots {
+                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
+                            }
+                            if !ret_types.is_empty() {
+                                let error_type = *ret_types.last().unwrap();
+                                let error_slots = info.type_slot_count(error_type);
+                                let error_start = ret_start + total_ret_slots - error_slots;
+                                func.emit_copy(error_start, args_start, error_slots);
+                            }
+                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+
+                            func.patch_jump(ok_err_jump, func.current_pc());
+                            let end_jump = func.emit_jump(Opcode::Jump, 0);
+
+                            // Fallback to extern dyn_SetAttr
+                            func.patch_jump(fallback_jump, func.current_pc());
                             let args_start = func.alloc_temp(5);
                             func.emit_copy(args_start, base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
                             func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
-
-                            let any_type = info.any_type();
                             crate::stmt::compile_iface_assign(args_start + 3, &assign.rhs[0], any_type, ctx, func, info)?;
-
                             let extern_id = ctx.get_or_register_extern("dyn_SetAttr");
                             let err_reg = func.alloc_temp(2);
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
@@ -547,6 +606,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
 
                             func.patch_jump(done_jump, func.current_pc());
+                            func.patch_jump(end_jump, func.current_pc());
                             return Ok(());
                         }
                         vo_syntax::ast::DynAccessOp::Index(key_expr) => {
@@ -578,13 +638,56 @@ fn compile_stmt_with_label(
                                 func.patch_jump(ok_jump, func.current_pc());
                             }
 
+                            let any_type = info.any_type();
+
+                            // Fast-path: if base implements dyn.SetIndexObject, call __setindex via CallIface
+                            let set_index_iface_type = lookup_pkg_type(info, "dyn", "SetIndexObject");
+                            let set_index_iface_meta_id = ctx.get_or_create_interface_meta_id(set_index_iface_type, &info.project.tc_objs, &info.project.interner);
+                            let set_index_method_idx = ctx.get_interface_method_index(set_index_iface_type, "__setindex", &info.project.tc_objs, &info.project.interner);
+                            // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
+                            // Allocate 3 slots to keep ok in-bounds.
+                            let iface_reg = func.alloc_temp(3);
+                            let flags = 1 | (1 << 2) | (2 << 3);
+                            func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_index_iface_meta_id as u16);
+                            let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
+
+                            // args: key_any[2] + value_any[2] => 4 slots, ret: error[2]
+                            let args_start = func.alloc_temp(4);
+                            crate::stmt::compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
+                            crate::stmt::compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
+
+                            let c = crate::type_info::encode_call_args(4, 2);
+                            func.emit_with_flags(Opcode::CallIface, set_index_method_idx as u8, iface_reg, args_start, c);
+
+                            // fail if err != nil
+                            let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
+
+                            let ret_types: Vec<_> = func.return_types().to_vec();
+                            let mut total_ret_slots = 0u16;
+                            for ret_type in &ret_types {
+                                total_ret_slots += info.type_slot_count(*ret_type);
+                            }
+                            let ret_start = func.alloc_temp(total_ret_slots);
+                            for i in 0..total_ret_slots {
+                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
+                            }
+                            if !ret_types.is_empty() {
+                                let error_type = *ret_types.last().unwrap();
+                                let error_slots = info.type_slot_count(error_type);
+                                let error_start = ret_start + total_ret_slots - error_slots;
+                                func.emit_copy(error_start, args_start, error_slots);
+                            }
+                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+
+                            func.patch_jump(ok_err_jump, func.current_pc());
+                            let end_jump = func.emit_jump(Opcode::Jump, 0);
+
+                            // Fallback to extern dyn_SetIndex
+                            func.patch_jump(fallback_jump, func.current_pc());
                             let args_start = func.alloc_temp(6);
                             func.emit_copy(args_start, base_reg, 2);
-
-                            let any_type = info.any_type();
                             crate::stmt::compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
                             crate::stmt::compile_iface_assign(args_start + 4, &assign.rhs[0], any_type, ctx, func, info)?;
-
                             let extern_id = ctx.get_or_register_extern("dyn_SetIndex");
                             let err_reg = func.alloc_temp(2);
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
@@ -609,6 +712,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
 
                             func.patch_jump(done_jump, func.current_pc());
+                            func.patch_jump(end_jump, func.current_pc());
                             return Ok(());
                         }
                         _ => {}
@@ -1340,7 +1444,14 @@ fn compile_defer_method_call(
     let is_interface_recv = info.is_interface(recv_type);
     
     let call_info = crate::embed::resolve_method_call(
-        recv_type, method_name, method_sym, selection, is_interface_recv, ctx, &info.project.tc_objs
+        recv_type,
+        method_name,
+        method_sym,
+        selection,
+        is_interface_recv,
+        ctx,
+        &info.project.tc_objs,
+        &info.project.interner,
     ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
     
     // Extract func_id from Static dispatch (defer only works with static calls)
@@ -1631,7 +1742,7 @@ fn compile_type_switch(
                     
                     // Allocate temp for IfaceAssert result (value + ok)
                     let target_slots = info.type_slot_count(type_key) as u8;
-                    let result_slots = if assert_kind == 1 { 2 } else { target_slots as u16 };
+                    let result_slots: u16 = if assert_kind == 1 { 2 } else { target_slots as u16 };
                     let result_reg = func.alloc_temp(result_slots + 1); // +1 for ok bool
                     let ok_slot = result_reg + result_slots;
                     
@@ -1979,7 +2090,7 @@ pub fn compile_iface_assign(
         return Ok(());
     }
     
-    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, &info.project.tc_objs);
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, &info.project.tc_objs, &info.project.interner);
     
     let const_idx = if src_vk == vo_runtime::ValueKind::Interface {
         ctx.register_iface_assign_const_interface(iface_meta_id)

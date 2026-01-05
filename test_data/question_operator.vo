@@ -10,7 +10,7 @@ func (e MyError) Error() string {
     return e.msg
 }
 
-func (e MyError) Code() ErrorCode {
+func (e MyError) Code() int {
     return 0
 }
 

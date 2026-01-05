@@ -263,11 +263,12 @@ pub fn generate_embedded_iface_wrapper(
     method_name: &str,
     method_obj: vo_analysis::objects::ObjKey,
     tc_objs: &vo_analysis::objects::TCObjects,
+    interner: &vo_common::SymbolInterner,
 ) -> u32 {
     let offset = embed_offset;
     
     // Get interface meta to find method index
-    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, tc_objs);
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, tc_objs, interner);
     let iface_meta = &ctx.module().interface_metas[iface_meta_id as usize];
     let method_idx = iface_meta.method_names.iter()
         .position(|n| n == method_name)

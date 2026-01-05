@@ -542,6 +542,12 @@ impl<'a> ExternCallContext<'a> {
             RuntimeType::Basic(crate::ValueKind::String) => {
                 crate::ValueRttid::new(crate::ValueKind::Uint8 as u32, crate::ValueKind::Uint8)
             }
+            // Named type: recurse on underlying type
+            RuntimeType::Named(id) => {
+                let meta = &self.named_type_metas[*id as usize];
+                let underlying_rttid = meta.underlying_meta.meta_id();
+                self.get_elem_value_rttid_from_base(underlying_rttid)
+            }
             _ => panic!("get_elem_value_rttid_from_base: unexpected type {:?}", rt),
         }
     }

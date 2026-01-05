@@ -188,6 +188,7 @@ pub fn resolve_method_call(
     is_interface_recv: bool,
     ctx: &mut crate::context::CodegenContext,
     tc_objs: &TCObjects,
+    interner: &vo_common::SymbolInterner,
 ) -> Option<MethodCallInfo> {
     let recv_is_pointer = layout::is_pointer(recv_type, tc_objs);
     let base_type = if recv_is_pointer {
@@ -203,7 +204,7 @@ pub fn resolve_method_call(
     
     // Case 1: Interface receiver - use interface dispatch
     if is_interface_recv {
-        let method_idx = ctx.get_interface_method_index(recv_type, method_name, tc_objs);
+        let method_idx = ctx.get_interface_method_index(recv_type, method_name, tc_objs, interner);
         return Some(MethodCallInfo {
             dispatch: MethodDispatch::Interface { method_idx },
             embed_path: EmbedPathInfo {
@@ -224,7 +225,7 @@ pub fn resolve_method_call(
     
     // Case 2: Embedded interface - method comes from interface field
     if let Some(embed_iface) = embed_path.embedded_iface {
-        let method_idx = ctx.get_interface_method_index(embed_iface.iface_type, method_name, tc_objs);
+        let method_idx = ctx.get_interface_method_index(embed_iface.iface_type, method_name, tc_objs, interner);
         return Some(MethodCallInfo {
             dispatch: MethodDispatch::EmbeddedInterface {
                 embed_offset: embed_iface.offset,

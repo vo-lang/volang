@@ -103,9 +103,10 @@ fn register_types(
                 .unwrap_or("?");
             let qualified_type_name = format!("{}.{}", pkg_path, type_name);
 
-            // Get underlying type key from type expression, and named type key from declaration name
+            // Get underlying type key from type expression, and obj_key from declaration name
             let underlying_key = info.type_expr_type(type_decl.ty.id);
-            let named_key = info.obj_type(info.get_def(&type_decl.name), "type declaration must have type");
+            let obj_key = info.get_def(&type_decl.name);
+            let named_key = info.obj_type(obj_key, "type declaration must have type");
 
             // Register type-specific metadata first
             let underlying_meta = match &type_decl.ty.kind {
@@ -198,19 +199,21 @@ fn register_types(
                     ValueMeta::new(iface_meta_id as u32, vo_runtime::ValueKind::Interface)
                 }
                 _ => {
-                    // Other types: use underlying ValueKind, meta_id=0
+                    // Other types (Map, Slice, Chan, etc.): intern underlying type to get rttid
                     let underlying_vk = info.type_value_kind(underlying_key);
-                    ValueMeta::new(0, underlying_vk)
+                    let underlying_rt = type_key_to_runtime_type_simple(underlying_key, info, &project.interner, ctx);
+                    let underlying_rttid = ctx.intern_rttid(underlying_rt);
+                    ValueMeta::new(underlying_rttid, underlying_vk)
                 }
             };
 
-            // All named types get NamedTypeMeta
+            // All named types get NamedTypeMeta (keyed by ObjKey, the true identity)
             let named_type_meta = NamedTypeMeta {
                 name: qualified_type_name.to_string(),
                 underlying_meta,
                 methods: HashMap::new(),
             };
-            ctx.register_named_type_meta(named_key, named_type_meta);
+            ctx.register_named_type_meta(obj_key, named_type_meta);
         }
 
         Ok(())
@@ -442,7 +445,7 @@ fn compile_functions(
     update_named_type_methods(ctx, &method_mappings, info);
     
     // Build pending itabs - uses lookup_field_or_method to find methods (including promoted)
-    ctx.finalize_itabs(&info.project.tc_objs);
+    ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
     
     Ok(())
 }
@@ -510,12 +513,20 @@ fn compile_file_functions(
 fn update_named_type_methods(
     ctx: &mut CodegenContext,
     method_mappings: &[(vo_analysis::objects::TypeKey, String, u32, bool, u32)],
-    _info: &TypeInfoWrapper,
+    info: &TypeInfoWrapper,
 ) {
-    // Group methods by type_key
+    use vo_analysis::typ::Type;
+    let tc_objs = &info.project.tc_objs;
+    
+    // Group methods by type_key, lookup ObjKey from Named type
     for (type_key, method_name, func_id, is_pointer_receiver, signature_rttid) in method_mappings {
-        if let Some(named_type_id) = ctx.get_named_type_id(*type_key) {
-            ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver, *signature_rttid);
+        // Get ObjKey from the Named type (the true identity)
+        if let Type::Named(named) = &tc_objs.types[*type_key] {
+            if let Some(obj_key) = named.obj() {
+                if let Some(named_type_id) = ctx.get_named_type_id(*obj_key) {
+                    ctx.update_named_type_method(named_type_id, method_name.clone(), *func_id, *is_pointer_receiver, *signature_rttid);
+                }
+            }
         }
     }
 }
@@ -623,12 +634,22 @@ pub fn type_key_to_runtime_type_simple(
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::RuntimeType;
     use vo_runtime::ValueKind;
+    use vo_analysis::typ::Type;
     
-    // Check if it's a Named type first (applies to all types including basic types)
-    // e.g., `type MyInt int` should have different rttid from `int`
-    if let Some(id) = ctx.get_named_type_id(type_key) {
-        return RuntimeType::Named(id);
+    // Check if it's a Named type - use ObjKey (the true identity) for lookup
+    let tc_objs = &info.project.tc_objs;
+    if let Type::Named(named) = &tc_objs.types[type_key] {
+        if let Some(obj_key) = named.obj() {
+            if let Some(id) = ctx.get_named_type_id(*obj_key) {
+                return RuntimeType::Named(id);
+            }
+        }
+        // Named type not registered - recurse on underlying type
+        // This can happen for builtin named types like error
+        let underlying = named.underlying();
+        return type_key_to_runtime_type_simple(underlying, info, _interner, ctx);
     }
+    let _ = tc_objs;
     
     // Use ValueKind as a simple way to identify basic types
     let vk = info.type_value_kind(type_key);

@@ -38,7 +38,6 @@ pub struct Universe {
     unsafe_pkg: PackageKey,
     iota: ObjKey,
     any_type: TypeKey,
-    error_code_type: TypeKey,
     byte: TypeKey,
     rune: TypeKey,
     slice_of_bytes: TypeKey,
@@ -82,11 +81,8 @@ impl Universe {
         // Create any type: alias for empty interface{}
         let any_type = Self::create_any_type(universe_scope, objs);
 
-        // Create ErrorCode type (named u64)
-        let error_code_type = Self::create_error_code_type(&types, universe_scope, objs);
-
         // Create error type
-        let error_type = Self::create_error_type(&types, universe_scope, objs, any_type, error_code_type);
+        let error_type = Self::create_error_type(&types, universe_scope, objs, any_type);
 
         // Define constants (true, false, iota)
         let iota = Self::define_constants(&types, universe_scope, objs);
@@ -118,7 +114,6 @@ impl Universe {
             unsafe_pkg,
             iota,
             any_type,
-            error_code_type,
             byte,
             rune,
             slice_of_bytes,
@@ -145,10 +140,6 @@ impl Universe {
 
     pub fn any_type(&self) -> TypeKey {
         self.any_type
-    }
-
-    pub fn error_code_type(&self) -> TypeKey {
-        self.error_code_type
     }
 
     pub fn byte(&self) -> TypeKey {
@@ -205,36 +196,10 @@ impl Universe {
         any_type
     }
 
-    fn create_error_code_type(
-        types: &HashMap<BasicType, TypeKey>,
-        universe_scope: ScopeKey,
-        objs: &mut TCObjects,
-    ) -> TypeKey {
-        // Create: type ErrorCode uint64
-        let u64_type = types[&BasicType::Uint64];
-
-        let error_code_type = objs.types.insert(Type::Named(crate::typ::NamedDetail::new(
-            None,
-            Some(u64_type),
-            vec![],
-        )));
-
-        let type_name = objs.lobjs.insert(LangObj::new_type_name(
-            0,
-            None,
-            "ErrorCode".to_string(),
-            Some(error_code_type),
-        ));
-        Scope::insert(universe_scope, type_name, objs);
-
-        error_code_type
-    }
-
     /// Looks up a predeclared type by name string.
     pub fn lookup_type_by_name(&self, name: &str) -> Option<TypeKey> {
         let basic = match name {
             "any" => return Some(self.any_type),
-            "ErrorCode" => return Some(self.error_code_type),
             "bool" => BasicType::Bool,
             "int" => BasicType::Int,
             "int8" => BasicType::Int8,
@@ -350,15 +315,15 @@ impl Universe {
         universe_scope: ScopeKey,
         objs: &mut TCObjects,
         any_type: TypeKey,
-        error_code_type: TypeKey,
     ) -> TypeKey {
         // Create: type error interface {
         //   Error() string
-        //   Code() ErrorCode
+        //   Code() int
         //   Unwrap() error
         //   Data() any
         // }
         let string_type = types[&BasicType::Str];
+        let int_type = types[&BasicType::Int];
 
         // Create named type placeholder for "error" first so Unwrap() can return it.
         let error_type = objs.types.insert(Type::Named(crate::typ::NamedDetail::new(
@@ -382,10 +347,10 @@ impl Universe {
             .lobjs
             .insert(LangObj::new_func(0, None, "Error".to_string(), Some(err_sig)));
 
-        // === Code() ErrorCode ===
+        // === Code() int ===
         let code_res_var = objs
             .lobjs
-            .insert(LangObj::new_var(0, None, "".to_string(), Some(error_code_type)));
+            .insert(LangObj::new_var(0, None, "".to_string(), Some(int_type)));
         let code_params = objs.types.insert(Type::Tuple(TupleDetail::new(vec![])));
         let code_results = objs
             .types

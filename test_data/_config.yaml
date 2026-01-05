@@ -25,6 +25,7 @@ tests:
   - file: dyn_write_no_error_return.vo
     should_fail: true
     reason: "dynamic write requires function with error return value"
+  - file: dyn_write_fast_path.vo
   - file: embed_iface_simple.vo
   - file: embed_interface.vo
   - file: embed_interface_impl.vo

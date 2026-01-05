@@ -431,6 +431,9 @@ fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter
     let key = ImportKey::new("errors", ".");
     let _ = importer.import(&key);
 
+    let key = ImportKey::new("dyn", ".");
+    let _ = importer.import(&key);
+
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;
@@ -517,6 +520,7 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
             // Create a new importer for recursive imports
             let mut sub_importer = ProjectImporter::new(self.vfs, &self.working_dir, Rc::clone(&self.state));
             let result = checker.check_with_importer(&parsed_files, &mut sub_importer);
+            
             
             let mut state_ref = self.state.borrow_mut();
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
