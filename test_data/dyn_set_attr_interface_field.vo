@@ -1,0 +1,61 @@
+// Test dynamic set attr for interface-typed fields
+// Bug #2: Interface field type mismatch in dyn_set_attr
+package main
+
+type Reader interface {
+	Read() string
+}
+
+type MyReader struct {
+	data string
+}
+
+func (r *MyReader) Read() string {
+	return r.data
+}
+
+type Container struct {
+	Reader Reader  // Interface-typed field
+	Name   string
+}
+
+func testSetInterfaceField() error {
+	// Test 1: Set interface field via ~>field = value syntax
+	c := &Container{Name: "test"}
+	var box interface{} = c
+	
+	r := &MyReader{data: "hello"}
+	
+	// Set the Reader field dynamically
+	box~>Reader = r
+	
+	// Verify the field was set
+	assert(c.Reader != nil, "Reader should not be nil")
+	result := c.Reader.Read()
+	assert(result == "hello", "Reader.Read() should return hello")
+	println("Test 1 (set interface field):", result)
+	
+	// Test 2: Set with different implementation
+	r2 := &MyReader{data: "world"}
+	box~>Reader = r2
+	
+	result2 := c.Reader.Read()
+	assert(result2 == "world", "Reader.Read() should return world")
+	println("Test 2 (set different impl):", result2)
+	
+	return nil
+}
+
+func main() {
+	err := testSetInterfaceField()
+	if err != nil {
+		println("Error:", err.Error())
+	}
+	assert(err == nil, "testSetInterfaceField should succeed")
+	println("done")
+}
+
+// expected output:
+// Test 1 (set interface field): hello
+// Test 2 (set different impl): world
+// done

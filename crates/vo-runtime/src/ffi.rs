@@ -328,6 +328,26 @@ impl<'a> ExternCallContext<'a> {
             .and_then(|rt| rt.struct_meta_id())
     }
 
+    /// Get interface_meta_id from rttid.
+    /// Handles both direct Interface types and Named interface types.
+    pub fn get_interface_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
+        use vo_common_core::runtime_type::RuntimeType;
+        let rt = self.runtime_types.get(rttid as usize)?;
+        match rt {
+            RuntimeType::Interface { meta_id, .. } => Some(*meta_id),
+            RuntimeType::Named { id, .. } => {
+                // For named interface types, get meta_id from underlying_meta
+                let named_meta = self.named_type_metas.get(*id as usize)?;
+                if named_meta.underlying_meta.value_kind() == ValueKind::Interface {
+                    Some(named_meta.underlying_meta.meta_id())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Get named_type_id from rttid.
     /// If `follow_pointer` is true, dereferences Pointer types to find the base Named type.
     /// Returns Some(named_type_id) if rttid refers to a Named type.

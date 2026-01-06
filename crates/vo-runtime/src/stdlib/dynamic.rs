@@ -176,6 +176,18 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
 /// Try to get a method as a closure binding the receiver.
 /// Returns closure with receiver as first capture.
 /// Always returns in interface format.
+///
+/// # Design: Why `receiver_slot1` works for both Pointer and Struct
+///
+/// When a value is stored in an interface:
+/// - **Pointer** (`*T`): slot1 = GcRef pointing to T's data
+/// - **Struct** (`T`): slot1 = GcRef pointing to boxed T's data (structs are boxed in interface)
+///
+/// In both cases, slot1 is a GcRef to the struct data. This is exactly what methods need:
+/// - For **pointer receiver** methods `(t *T)`: the GcRef IS the pointer
+/// - For **value receiver** methods `(t T)`: the GcRef points to the data, VM copies it on call
+///
+/// So we pass `receiver_slot1` directly without needing to distinguish Pointer vs Struct.
 fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64, method_name: &str) -> ExternResult {
     use crate::objects::closure;
     
@@ -185,7 +197,7 @@ fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64,
         None => return dyn_error(call, dyn_err::BAD_FIELD, &format!("field or method '{}' not found", method_name)),
     };
     
-    // Create closure with receiver as capture
+    // Create closure with receiver as capture (see design note above for why this works)
     let closure_ref = closure::create(call.gc(), func_id, 1);
     closure::set_capture(closure_ref, 0, receiver_slot1);
     
@@ -451,7 +463,13 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     let val_rttid = interface::unpack_rttid(val_slot0);
 
     if expected_vk == ValueKind::Interface {
-        let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, expected_rttid) {
+        // Get iface_meta_id from expected_rttid (which points to RuntimeType::Interface)
+        let iface_meta_id = match call.get_interface_meta_id_from_rttid(expected_rttid) {
+            Some(id) => id,
+            None => return dyn_error_only(call, dyn_err::TYPE_MISMATCH, "field type is not a valid interface"),
+        };
+        
+        let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
             Ok(v) => v,
             Err(e) => return dyn_error_only(call, dyn_err::TYPE_MISMATCH, e),
         };
@@ -592,6 +610,15 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
             let map_key_vk = map::key_kind(base_ref);
             let key_vk = interface::unpack_value_kind(key_slot0);
 
+            // # Design: Why ValueKind check is sufficient for basic type keys
+            //
+            // For basic types (int, string, bool, etc.), ValueKind uniquely identifies the type.
+            // We don't need rttid checks because:
+            // - Same ValueKind means same underlying type (e.g., String is always string)
+            // - Integer types (Int, Int64, Int32, etc.) are intentionally compatible
+            //
+            // For Struct/Array keys, we DO check rttid below because different structs
+            // can have the same ValueKind but different layouts.
             let key_compatible = match (map_key_vk, key_vk) {
                 (a, b) if a == b => true,
                 (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
@@ -608,6 +635,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
 
             let mut key_buf: Vec<u64> = Vec::new();
             match map_key_vk {
+                // For Struct/Array keys, we need full rttid validation (see design note above)
                 ValueKind::Struct | ValueKind::Array => {
                     let expected_key_vr = match call.runtime_types().get(base_rttid as usize) {
                         Some(RuntimeType::Map { key, .. }) => *key,

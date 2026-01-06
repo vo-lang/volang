@@ -1,0 +1,57 @@
+// Test dynamic set index map key type validation
+// Bug #3: Map key type validation inconsistency
+package main
+
+type MyInt int
+
+func testMapKeyTypeMatch() error {
+	// Test 1: Basic string key map - should work
+	m1 := map[string]int{}
+	var box1 interface{} = m1
+	box1~>["key"] = 42
+	assert(m1["key"] == 42, "string key should work")
+	println("Test 1 (string key): ok")
+	
+	// Test 2: Basic int key map - should work
+	m2 := map[int]string{}
+	var box2 interface{} = m2
+	box2~>[1] = "one"
+	assert(m2[1] == "one", "int key should work")
+	println("Test 2 (int key): ok")
+	
+	// Test 3: Int64 key on int map - should work (integer coercion)
+	m3 := map[int]int{}
+	var box3 interface{} = m3
+	var key64 int64 = 5
+	box3~>[key64] = 50
+	assert(m3[5] == 50, "int64 on int map should work")
+	println("Test 3 (int64 on int map): ok")
+	
+	return nil
+}
+
+func testMapKeyTypeMismatch() error {
+	// Test 4: String key on int map - should fail
+	m := map[int]int{}
+	var box interface{} = m
+	box~>["wrong"] = 1  // This should fail
+	return nil
+}
+
+func main() {
+	err := testMapKeyTypeMatch()
+	assert(err == nil, "testMapKeyTypeMatch should succeed")
+	
+	err = testMapKeyTypeMismatch()
+	assert(err != nil, "testMapKeyTypeMismatch should fail")
+	println("Test 4 (wrong key type): error caught")
+	
+	println("done")
+}
+
+// expected output:
+// Test 1 (string key): ok
+// Test 2 (int key): ok
+// Test 3 (int64 on int map): ok
+// Test 4 (wrong key type): error caught
+// done
