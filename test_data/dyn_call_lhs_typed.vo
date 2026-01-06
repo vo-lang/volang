@@ -46,157 +46,85 @@ func main() {
 
 	// Test 1: LHS is any (short var decl) - should box
 	r1, err := obj~>GetInt()
-	if err != nil {
-		println("FAIL: GetInt should succeed")
-		return
-	}
+	assert(err == nil, "GetInt should succeed")
 	// r1 is any, need type assertion
-	if r1.(int) != 42 {
-		println("FAIL: expected 42, got", r1.(int))
-		return
-	}
+	assert(r1.(int) == 42, "expected 42")
 	println("Test 1 (any): GetInt() =", r1.(int))
 
 	// Test 2: LHS has concrete type - should NOT box
 	var result int
 	result, err = obj~>GetInt()
-	if err != nil {
-		println("FAIL: GetInt should succeed")
-		return
-	}
+	assert(err == nil, "GetInt should succeed")
 	// result is int directly, no type assertion needed
-	if result != 42 {
-		println("FAIL: expected 42, got", result)
-		return
-	}
+	assert(result == 42, "expected 42")
 	println("Test 2 (int): GetInt() =", result)
 
 	// Test 3: Multi-return with any
 	r1, r2, err := obj~>GetPair()
-	if err != nil {
-		println("FAIL: GetPair should succeed")
-		return
-	}
-	if r1.(int) != 42 || r2.(string) != "world" {
-		println("FAIL: GetPair mismatch")
-		return
-	}
+	assert(err == nil, "GetPair should succeed")
+	assert(r1.(int) == 42 && r2.(string) == "world", "GetPair mismatch")
 	println("Test 3 (any,any): GetPair() =", r1.(int), r2.(string))
 
 	// Test 4: Multi-return with concrete types
 	var n int
 	var s string
 	n, s, err = obj~>GetPair()
-	if err != nil {
-		println("FAIL: GetPair should succeed")
-		return
-	}
-	if n != 42 || s != "world" {
-		println("FAIL: GetPair mismatch")
-		return
-	}
+	assert(err == nil, "GetPair should succeed")
+	assert(n == 42 && s == "world", "GetPair mismatch")
 	println("Test 4 (int,string): GetPair() =", n, s)
 
 	// Test 4.1: Struct return with any
 	pAny, err := obj~>GetStruct()
-	if err != nil {
-		println("FAIL: GetStruct should succeed")
-		return
-	}
-	if pAny.(Pair).A != 42 || pAny.(Pair).B != 7 {
-		println("FAIL: GetStruct mismatch")
-		return
-	}
+	assert(err == nil, "GetStruct should succeed")
+	assert(pAny.(Pair).A == 42 && pAny.(Pair).B == 7, "GetStruct mismatch")
 	println("Test 4.1 (any): GetStruct() =", pAny.(Pair).A, pAny.(Pair).B)
 
 	// Test 4.2: Struct return with concrete type
 	var p Pair
 	p, err = obj~>GetStruct()
-	if err != nil {
-		println("FAIL: GetStruct should succeed")
-		return
-	}
-	if p.A != 42 || p.B != 7 {
-		println("FAIL: GetStruct mismatch")
-		return
-	}
+	assert(err == nil, "GetStruct should succeed")
+	assert(p.A == 42 && p.B == 7, "GetStruct mismatch")
 	println("Test 4.2 (Pair): GetStruct() =", p.A, p.B)
 
 	// Test 4.3: Multi-return with struct first (validates return layout/offset)
 	p2, i2, err := obj~>GetStructAndInt()
-	if err != nil {
-		println("FAIL: GetStructAndInt should succeed")
-		return
-	}
-	if p2.(Pair).A != 42 || p2.(Pair).B != 7 || i2.(int) != 42 {
-		println("FAIL: GetStructAndInt mismatch")
-		return
-	}
+	assert(err == nil, "GetStructAndInt should succeed")
+	assert(p2.(Pair).A == 42 && p2.(Pair).B == 7 && i2.(int) == 42, "GetStructAndInt mismatch")
 	println("Test 4.3 (any,any): GetStructAndInt() =", p2.(Pair).A, p2.(Pair).B, i2.(int))
 
 	// Test 4.4: Multi-return with struct first (concrete types)
 	var p3 Pair
 	var i3 int
 	p3, i3, err = obj~>GetStructAndInt()
-	if err != nil {
-		println("FAIL: GetStructAndInt should succeed")
-		return
-	}
-	if p3.A != 42 || p3.B != 7 || i3 != 42 {
-		println("FAIL: GetStructAndInt mismatch")
-		return
-	}
+	assert(err == nil, "GetStructAndInt should succeed")
+	assert(p3.A == 42 && p3.B == 7 && i3 == 42, "GetStructAndInt mismatch")
 	println("Test 4.4 (Pair,int): GetStructAndInt() =", p3.A, p3.B, i3)
 
 	// Test 4.5: Struct pointer return with any
 	ppAny, err := obj~>GetStructPtr()
-	if err != nil {
-		println("FAIL: GetStructPtr should succeed")
-		return
-	}
-	if ppAny.(*Pair).A != 42 || ppAny.(*Pair).B != 7 {
-		println("FAIL: GetStructPtr mismatch")
-		return
-	}
+	assert(err == nil, "GetStructPtr should succeed")
+	assert(ppAny.(*Pair).A == 42 && ppAny.(*Pair).B == 7, "GetStructPtr mismatch")
 	println("Test 4.5 (any): GetStructPtr() =", ppAny.(*Pair).A, ppAny.(*Pair).B)
 
 	// Test 4.6: Struct pointer return with concrete type
 	var pp *Pair
 	pp, err = obj~>GetStructPtr()
-	if err != nil {
-		println("FAIL: GetStructPtr should succeed")
-		return
-	}
-	if pp.A != 42 || pp.B != 7 {
-		println("FAIL: GetStructPtr mismatch")
-		return
-	}
+	assert(err == nil, "GetStructPtr should succeed")
+	assert(pp.A == 42 && pp.B == 7, "GetStructPtr mismatch")
 	println("Test 4.6 (*Pair): GetStructPtr() =", pp.A, pp.B)
 
 	// Test 4.7: Multi-return with pointer first (validates return layout/offset width=1)
 	pp2, i4, err := obj~>GetPtrAndInt()
-	if err != nil {
-		println("FAIL: GetPtrAndInt should succeed")
-		return
-	}
-	if pp2.(*Pair).A != 42 || pp2.(*Pair).B != 7 || i4.(int) != 42 {
-		println("FAIL: GetPtrAndInt mismatch")
-		return
-	}
+	assert(err == nil, "GetPtrAndInt should succeed")
+	assert(pp2.(*Pair).A == 42 && pp2.(*Pair).B == 7 && i4.(int) == 42, "GetPtrAndInt mismatch")
 	println("Test 4.7 (any,any): GetPtrAndInt() =", pp2.(*Pair).A, pp2.(*Pair).B, i4.(int))
 
 	// Test 4.8: Multi-return with pointer first (concrete types)
 	var pp3 *Pair
 	var i5 int
 	pp3, i5, err = obj~>GetPtrAndInt()
-	if err != nil {
-		println("FAIL: GetPtrAndInt should succeed")
-		return
-	}
-	if pp3.A != 42 || pp3.B != 7 || i5 != 42 {
-		println("FAIL: GetPtrAndInt mismatch")
-		return
-	}
+	assert(err == nil, "GetPtrAndInt should succeed")
+	assert(pp3.A == 42 && pp3.B == 7 && i5 == 42, "GetPtrAndInt mismatch")
 	println("Test 4.8 (*Pair,int): GetPtrAndInt() =", pp3.A, pp3.B, i5)
 
 	// ============================================================
@@ -213,39 +141,21 @@ func main() {
 
 	// Test 5: Field access with any LHS
 	f1, err := data~>Count
-	if err != nil {
-		println("FAIL: field Count should succeed")
-		return
-	}
-	if f1.(int) != 100 {
-		println("FAIL: expected 100")
-		return
-	}
+	assert(err == nil, "field Count should succeed")
+	assert(f1.(int) == 100, "expected 100")
 	println("Test 5 (any): data~>Count =", f1.(int))
 
 	// Test 6: Field access with concrete type LHS
 	var count int
 	count, err = data~>Count
-	if err != nil {
-		println("FAIL: field Count should succeed")
-		return
-	}
-	if count != 100 {
-		println("FAIL: expected 100")
-		return
-	}
+	assert(err == nil, "field Count should succeed")
+	assert(count == 100, "expected 100")
 	println("Test 6 (int): data~>Count =", count)
 
 	// Test 6.1: Field access on struct value (non-pointer)
 	f1v, err := dataVal~>Count
-	if err != nil {
-		println("FAIL: field Count on value should succeed")
-		return
-	}
-	if f1v.(int) != 101 {
-		println("FAIL: expected 101")
-		return
-	}
+	assert(err == nil, "field Count on value should succeed")
+	assert(f1v.(int) == 101, "expected 101")
 	println("Test 6.1 (any): dataVal~>Count =", f1v.(int))
 
 	// ============================================================
@@ -257,27 +167,15 @@ func main() {
 
 	// Test 7: Map index with any LHS
 	v1, err := m~>["a"]
-	if err != nil {
-		println("FAIL: map[a] should succeed")
-		return
-	}
-	if v1.(int) != 1 {
-		println("FAIL: expected 1")
-		return
-	}
+	assert(err == nil, "map[a] should succeed")
+	assert(v1.(int) == 1, "expected 1")
 	println("Test 7 (any): m~>[a] =", v1.(int))
 
 	// Test 8: Map index with concrete type LHS
 	var val int
 	val, err = m~>["b"]
-	if err != nil {
-		println("FAIL: map[b] should succeed")
-		return
-	}
-	if val != 2 {
-		println("FAIL: expected 2")
-		return
-	}
+	assert(err == nil, "map[b] should succeed")
+	assert(val == 2, "expected 2")
 	println("Test 8 (int): m~>[b] =", val)
 
 	// ============================================================
@@ -289,27 +187,15 @@ func main() {
 
 	// Test 9: Slice index with any LHS
 	s1, err := sl~>[1]
-	if err != nil {
-		println("FAIL: slice[1] should succeed")
-		return
-	}
-	if s1.(int) != 20 {
-		println("FAIL: expected 20")
-		return
-	}
+	assert(err == nil, "slice[1] should succeed")
+	assert(s1.(int) == 20, "expected 20")
 	println("Test 9 (any): sl~>[1] =", s1.(int))
 
 	// Test 10: Slice index with concrete type LHS
 	var elem int
 	elem, err = sl~>[2]
-	if err != nil {
-		println("FAIL: slice[2] should succeed")
-		return
-	}
-	if elem != 30 {
-		println("FAIL: expected 30")
-		return
-	}
+	assert(err == nil, "slice[2] should succeed")
+	assert(elem == 30, "expected 30")
 	println("Test 10 (int): sl~>[2] =", elem)
 
 	println("=== All LHS type tests passed! ===")

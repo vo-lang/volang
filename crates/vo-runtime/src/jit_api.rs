@@ -312,6 +312,11 @@ pub extern "C" fn vo_call_extern(
 /// # Returns
 /// - `JitResult::Ok` if function completed normally
 /// - `JitResult::Panic` if function panicked
+/// Maximum return slots supported for dynamic closure calls in JIT.
+/// JIT allocates a fixed-size buffer for return values.
+/// Codegen checks ret_slots before calling and returns error if exceeded.
+pub const MAX_DYN_RET_SLOTS: u32 = 64;
+
 #[no_mangle]
 pub extern "C" fn vo_call_closure(
     ctx: *mut JitContext,

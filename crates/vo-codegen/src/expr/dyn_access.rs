@@ -242,25 +242,24 @@ fn compile_dyn_closure_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let expected_ret_count = ret_types.len() as u16;
+    let max_dyn_ret_slots = vo_runtime::jit_api::MAX_DYN_RET_SLOTS as u16;
     
     // Build expected function signature rttid using LHS types
     let expected_sig_rttid = build_expected_sig_rttid(args, ret_types, ctx, info);
     
     // 1. dyn_call_check(callee, expected_sig_rttid) -> error[2]
     let check_extern_id = ctx.get_or_register_extern("dyn_call_check");
-    let check_args = func.alloc_temp(3);  // callee[2] + expected_sig_rttid[1]
+    let check_args = func.alloc_temp(3);
     func.emit_op(Opcode::Copy, check_args, callee_reg, 0);
     func.emit_op(Opcode::Copy, check_args + 1, callee_reg + 1, 0);
-    // Use LoadConst for 32-bit rttid value
     let rttid_const_idx = ctx.const_int(expected_sig_rttid as i64);
     func.emit_op(Opcode::LoadConst, check_args + 2, rttid_const_idx, 0);
     
-    let check_result = func.alloc_temp(2);  // error[2]
+    let check_result = func.alloc_temp(2);
     func.emit_with_flags(Opcode::CallExtern, 3, check_result, check_extern_id as u16, check_args);
     
-    // 2. Check error - if set, fill nil values and propagate error
+    // 2. Check error
     let skip_error = func.emit_jump(Opcode::JumpIfNot, check_result);
-    // Error case: fill all result slots with nil, then copy error
     let expected_dst_slots: u16 = ret_types.iter().map(|&t| if info.is_any_type(t) { 2 } else { info.type_slot_count(t) }).sum();
     for i in 0..expected_dst_slots {
         func.emit_op(Opcode::LoadInt, dst + i, 0, 0);
@@ -269,36 +268,34 @@ fn compile_dyn_closure_call(
     func.emit_op(Opcode::Copy, dst + expected_dst_slots + 1, check_result + 1, 0);
     let done_jump = func.emit_jump(Opcode::Jump, 0);
     
-    // 3. No error - call the closure
+    // 3. No error - get return metadata
     func.patch_jump(skip_error, func.current_pc());
     
-    // Get return value metadata for boxing
-    // dyn_get_ret_meta(callee) -> (ret_count, ret_slots, ret_meta_0, ret_meta_1, ...)
     let meta_extern_id = ctx.get_or_register_extern("dyn_get_ret_meta");
-    let meta_args = func.alloc_temp(2);  // callee[2]
+    let meta_args = func.alloc_temp(2);
     func.emit_op(Opcode::Copy, meta_args, callee_reg, 0);
     func.emit_op(Opcode::Copy, meta_args + 1, callee_reg + 1, 0);
     
-    // Allocate space for: ret_count[1], ret_slots[1], ret_meta_0..N[N]
     let meta_result = func.alloc_temp(2 + expected_ret_count);
     func.emit_with_flags(Opcode::CallExtern, 2, meta_result, meta_extern_id as u16, meta_args);
+    
+    let metas_start = meta_result + 2;
     
     // Get closure ref from callee (slot1)
     let closure_slot = func.alloc_temp(1);
     func.emit_op(Opcode::Copy, closure_slot, callee_reg + 1, 0);
     
-    // Calculate arg slots and return slots
+    // Calculate arg slots
     let arg_slots_total: u16 = args.iter().map(|a| info.expr_slots(a.id)).sum();
-
-    // Calculate max_ret_slots based on actual LHS types (ret_types)
-    // For any type, the actual function may return larger structs, so use a reasonable upper bound
-    // For typed LHS, use actual slot count
-    let lhs_ret_slots: u16 = ret_types.iter().map(|&t| {
-        if info.is_any_type(t) { 8 } else { info.type_slot_count(t) }  // 8 slots per any to handle large structs
-    }).sum();
-    // Use at least 16 slots to handle most practical cases
-    let max_ret_slots = lhs_ret_slots.max(16);
-    let args_start = func.alloc_temp(arg_slots_total.max(max_ret_slots));
+    
+    // Allocate [ret_slots_slot, args/returns buffer] together
+    // ret_slots_slot is at position 0, args start at position 1
+    // This allows us to use flags=0xFF mode which reads ret_slots from args_start - 1
+    let ret_slots_slot = func.alloc_temp(1 + arg_slots_total.max(max_dyn_ret_slots));
+    let args_start = ret_slots_slot + 1;
+    
+    // Store ret_slots value at ret_slots_slot (= args_start - 1)
+    func.emit_op(Opcode::Copy, ret_slots_slot, meta_result + 1, 0);
     
     // Compile arguments
     let mut arg_offset = 0u16;
@@ -308,35 +305,11 @@ fn compile_dyn_closure_call(
         arg_offset += arg_slots;
     }
     
-    let ret_slots_reg = meta_result + 1;
-    let const_reg = func.alloc_temp(1);
-    let cmp_reg = func.alloc_temp(1);
+    // 4. CallClosure with flags=1 (dynamic mode: read ret_slots from args_start - 1)
+    let c = crate::type_info::encode_call_args(arg_slots_total, 0);
+    func.emit_with_flags(Opcode::CallClosure, 1, closure_slot, args_start, c);
 
-    let mut call_jumps: Vec<usize> = Vec::new();
-    for k in 0..=max_ret_slots {
-        let (b, c) = encode_i32(k as i32);
-        func.emit_op(Opcode::LoadInt, const_reg, b, c);
-        func.emit_op(Opcode::EqI, cmp_reg, ret_slots_reg, const_reg);
-        let j = func.emit_jump(Opcode::JumpIf, cmp_reg);
-        call_jumps.push(j);
-    }
-
-    func.emit_op(Opcode::LoadInt, const_reg, 0, 0);
-    func.emit_op(Opcode::Panic, const_reg, 0, 0);
-
-    let mut end_call_jumps: Vec<usize> = Vec::new();
-    for (k, j) in call_jumps.into_iter().enumerate() {
-        func.patch_jump(j, func.current_pc());
-        let ret_slots = k as u16;
-        let c = crate::type_info::encode_call_args(arg_slots_total, ret_slots);
-        func.emit_op(Opcode::CallClosure, closure_slot, args_start, c);
-        end_call_jumps.push(func.emit_jump(Opcode::Jump, 0));
-    }
-    let end_call_pc = func.current_pc();
-    for j in end_call_jumps {
-        func.patch_jump(j, end_call_pc);
-    }
-
+    // 5. Process return values using existing extern helpers
     let read_ret_extern_id = ctx.get_or_register_extern("dyn_ret_read_advance");
     let box_extern_id = ctx.get_or_register_extern("dyn_box_returns");
 
@@ -354,7 +327,7 @@ fn compile_dyn_closure_call(
         let read_args = func.alloc_temp(3);
         func.emit_op(Opcode::Copy, read_args, base_off_reg, 0);
         func.emit_op(Opcode::Copy, read_args + 1, src_off_reg, 0);
-        func.emit_op(Opcode::Copy, read_args + 2, meta_result + 2 + i, 0);
+        func.emit_op(Opcode::Copy, read_args + 2, metas_start + i, 0);
 
         let read_result = func.alloc_temp(3);
         func.emit_with_flags(Opcode::CallExtern, 3, read_result, read_ret_extern_id as u16, read_args);
@@ -364,7 +337,7 @@ fn compile_dyn_closure_call(
             let box_args = func.alloc_temp(3);
             func.emit_op(Opcode::Copy, box_args, read_result, 0);
             func.emit_op(Opcode::Copy, box_args + 1, read_result + 1, 0);
-            func.emit_op(Opcode::Copy, box_args + 2, meta_result + 2 + i, 0);
+            func.emit_op(Opcode::Copy, box_args + 2, metas_start + i, 0);
 
             let box_result = func.alloc_temp(2);
             func.emit_with_flags(Opcode::CallExtern, 3, box_result, box_extern_id as u16, box_args);
@@ -383,9 +356,6 @@ fn compile_dyn_closure_call(
                 func.emit_op(Opcode::Copy, dst + dst_offset + 1, read_result + 1, 0);
                 dst_offset += 2;
             } else if vk == ValueKind::Struct || vk == ValueKind::Array {
-                // Large struct/array (> 2 slots): dyn_ret_read_advance boxed it into GcRef
-                // read_result+0 = 0 (marker), read_result+1 = GcRef
-                // Use PtrGet to read all slots from the GcRef
                 func.emit_ptr_get(dst + dst_offset, read_result + 1, 0, slots);
                 dst_offset += slots;
             } else {

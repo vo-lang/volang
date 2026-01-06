@@ -236,6 +236,19 @@ fn dyn_error_only(call: &mut ExternCallContext, msg: &str) -> ExternResult {
     ExternResult::Ok
 }
 
+/// Return error for dynamic call with too many return slots.
+/// Args: () -> error[2]
+fn dyn_ret_slots_overflow_error(call: &mut ExternCallContext) -> ExternResult {
+    write_error_to(call, 0, "dynamic call: return value exceeds maximum slots (64)");
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_DYN_RET_SLOTS_OVERFLOW: ExternEntryWithContext = ExternEntryWithContext {
+    name: "dyn_ret_slots_overflow_error",
+    func: dyn_ret_slots_overflow_error,
+};
+
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_get_attr",
@@ -727,33 +740,24 @@ static __VO_DYN_SET_INDEX_CAMEL: ExternEntryWithContext = ExternEntryWithContext
 /// dyn_call_check: Check closure signature before calling.
 ///
 /// Args: (callee: any[2], expected_sig_rttid: int[1]) -> error[2]
-/// - callee: closure wrapped as any
-/// - expected_sig_rttid: rttid of expected function signature (from codegen)
-///
-/// Returns: error (nil if signature compatible)
 fn dyn_call_check(call: &mut ExternCallContext) -> ExternResult {
     let callee_slot0 = call.arg_u64(0);
     let expected_sig_rttid = call.arg_u64(2) as u32;
     
-    // 1. Check nil
     if interface::is_nil(callee_slot0) {
         return dyn_error_only(call, "cannot call nil");
     }
     
-    // 2. Check is Closure type
     let vk = interface::unpack_value_kind(callee_slot0);
     if vk != ValueKind::Closure {
         return dyn_error_only(call, &format!("cannot call non-function type {:?}", vk));
     }
     
-    // 3. Check signature compatibility
     let closure_sig_rttid = interface::unpack_rttid(callee_slot0);
-    
     if let Err(msg) = call.check_func_signature_compatible(closure_sig_rttid, expected_sig_rttid) {
         return dyn_error_only(call, &msg);
     }
     
-    // Signature compatible - return nil error
     call.ret_nil(0);
     call.ret_nil(1);
     ExternResult::Ok
@@ -767,38 +771,30 @@ static __VO_DYN_CALL_CHECK: ExternEntryWithContext = ExternEntryWithContext {
 
 /// dyn_get_ret_meta: Get return value metadata for all return values.
 ///
-/// Args: (callee: any[2]) -> (ret_count: int[1], ret_slots: int[1], ret_meta_0: int[1], ret_meta_1: int[1], ...)
-/// - callee: closure wrapped as any
-///
-/// Returns: [ret_count, ret_slots, ret_meta_0, ret_meta_1, ...] where each ret_meta is (rttid << 8 | value_kind)
-/// Max 8 return values supported.
+/// Args: (callee: any[2]) -> (ret_count, ret_slots, ret_meta_0, ret_meta_1, ...)
 fn dyn_get_ret_meta(call: &mut ExternCallContext) -> ExternResult {
     let callee_slot0 = call.arg_u64(0);
     
     if interface::is_nil(callee_slot0) {
-        call.ret_u64(0, 0);  // ret_count = 0
-        call.ret_u64(1, 0);  // ret_slots = 0
+        call.ret_u64(0, 0);
+        call.ret_u64(1, 0);
         return ExternResult::Ok;
     }
     
     let vk = interface::unpack_value_kind(callee_slot0);
     if vk != ValueKind::Closure {
-        call.ret_u64(0, 0);  // ret_count = 0
-        call.ret_u64(1, 0);  // ret_slots = 0
+        call.ret_u64(0, 0);
+        call.ret_u64(1, 0);
         return ExternResult::Ok;
     }
     
-    // Get closure's function signature rttid
     let closure_rttid = interface::unpack_rttid(callee_slot0);
-    
-    // Get return info from signature
     let ret_value_rttids = call.get_func_results(closure_rttid);
     let ret_count = ret_value_rttids.len();
     let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
         call.get_type_slot_count(vr.rttid())
     }).sum();
     
-    // Return: [ret_count, ret_slots, ret_value_rttid_0, ret_value_rttid_1, ...]
     call.ret_u64(0, ret_count as u64);
     call.ret_u64(1, ret_slots as u64);
     for (i, vr) in ret_value_rttids.iter().enumerate().take(8) {
@@ -814,6 +810,198 @@ static __VO_DYN_GET_RET_META: ExternEntryWithContext = ExternEntryWithContext {
     func: dyn_get_ret_meta,
 };
 
+/// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check.
+///
+/// **NOTE**: This function has a subtle bug causing segfaults after multiple calls.
+/// The issue is not fully diagnosed. Use dyn_call_check + dyn_get_ret_meta instead.
+/// Kept for future investigation.
+///
+/// Args: (callee: any[2], expected_sig_rttid: int[1], max_ret_slots: int[1], expected_ret_count: int[1])
+///     -> (ok: int[1], ret_slots: int[1], ret_meta_0..N: int[N], error: any[2])
+///
+/// Returns:
+/// - ok = 1: ready to call, ret_slots and metas valid, error = nil
+/// - ok = 0: error occurred, error contains the error value
+#[allow(dead_code)]
+fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
+    let callee_slot0 = call.arg_u64(0);
+    let _callee_slot1 = call.arg_u64(1);
+    let expected_sig_rttid = call.arg_u64(2) as u32;
+    let max_ret_slots = call.arg_u64(3) as u16;
+    let expected_ret_count = call.arg_u64(4) as u16;
+    
+    
+    // Result layout: [ok, ret_slots, ret_meta_0..N, error[2]]
+    let error_slot = 2 + expected_ret_count;
+    
+    // Helper to return error
+    let mut return_error = |call: &mut ExternCallContext, msg: &str| {
+        call.ret_u64(0, 0);  // ok = 0
+        call.ret_u64(1, 0);  // ret_slots = 0
+        for i in 0..expected_ret_count {
+            call.ret_u64(2 + i, 0);
+        }
+        write_error_to(call, error_slot, msg);
+    };
+    
+    // 1. Check nil
+    if interface::is_nil(callee_slot0) {
+        return_error(call, "cannot call nil");
+        return ExternResult::Ok;
+    }
+    
+    // 2. Check is Closure type
+    let vk = interface::unpack_value_kind(callee_slot0);
+    if vk != ValueKind::Closure {
+        return_error(call, &format!("cannot call non-function type {:?}", vk));
+        return ExternResult::Ok;
+    }
+    
+    // 3. Check signature compatibility
+    let closure_sig_rttid = interface::unpack_rttid(callee_slot0);
+    if let Err(msg) = call.check_func_signature_compatible(closure_sig_rttid, expected_sig_rttid) {
+        return_error(call, &msg);
+        return ExternResult::Ok;
+    }
+    
+    // 4. Get return metadata
+    let ret_value_rttids = call.get_func_results(closure_sig_rttid);
+    let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
+        call.get_type_slot_count(vr.rttid())
+    }).sum();
+    
+    // 5. Check ret_slots limit
+    if ret_slots > max_ret_slots {
+        return_error(call, "dynamic call: return value exceeds maximum slots (64)");
+        return ExternResult::Ok;
+    }
+    
+    // Success: return ok=1, ret_slots, metas, nil error
+    call.ret_u64(0, 1);  // ok = 1
+    call.ret_u64(1, ret_slots as u64);
+    for (i, vr) in ret_value_rttids.iter().enumerate().take(expected_ret_count as usize) {
+        call.ret_u64(2 + i as u16, vr.to_raw() as u64);
+    }
+    call.ret_nil(error_slot);
+    call.ret_nil(error_slot + 1);
+    
+    ExternResult::Ok
+}
+
+// NOTE: dyn_call_prepare registration disabled due to unresolved bug
+// #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+// static __VO_DYN_CALL_PREPARE: ExternEntryWithContext = ExternEntryWithContext {
+//     name: "dyn_call_prepare",
+//     func: dyn_call_prepare,
+// };
+
+/// dyn_unpack_returns: Unpack all return values from call buffer to return slots.
+///
+/// **NOTE**: This function has a subtle bug causing segfaults. Not fully diagnosed.
+/// Use dyn_ret_read_advance + dyn_box_returns loop instead. Kept for future investigation.
+///
+/// Args: (src_base: int[1], ret_slots: int[1], expected_count: int[1],
+///        expected_types[N]: int[N], ret_metas[N]: int[N])
+///
+/// Returns: (results..., error[2]) written to ret_start
+///
+/// expected_types[i] = (expected_rttid << 8 | expected_vk) for LHS type, or 0 for any
+/// ret_metas[i] = (actual_rttid << 8 | actual_vk) from closure signature
+#[allow(dead_code)]
+fn dyn_unpack_returns(call: &mut ExternCallContext) -> ExternResult {
+    let src_base = call.arg_u64(0) as u16;
+    let ret_slots = call.arg_u64(1) as u16;
+    let expected_count = call.arg_u64(2) as u16;
+    // Args 3..3+N = expected_types
+    // Args 3+N..3+2N = ret_metas
+    
+    // Bounds check
+    let available = call.available_slots();
+    if (src_base + ret_slots) as usize > available {
+        return ExternResult::Panic(format!(
+            "dyn_unpack_returns: src_base={} + ret_slots={} > available={}",
+            src_base, ret_slots, available
+        ));
+    }
+    
+    let mut src_offset: u16 = 0;
+    let mut ret_offset: u16 = 0;
+    
+    for i in 0..expected_count {
+        let expected_type_raw = call.arg_u64(3 + i) as u32;
+        let ret_meta_raw = call.arg_u64(3 + expected_count + i) as u32;
+        
+        // 0 is special marker for "any" type (set in codegen)
+        let is_any = expected_type_raw == 0;
+        let expected_rttid = expected_type_raw >> 8;
+        
+        let actual_rttid = ret_meta_raw >> 8;
+        let actual_vk = ValueKind::from_u8((ret_meta_raw & 0xFF) as u8);
+        let actual_slots = call.get_type_slot_count(actual_rttid);
+        
+        // Ensure we have at least 1 slot to read
+        if actual_slots == 0 {
+            return ExternResult::Panic(format!(
+                "dyn_unpack_returns: actual_slots=0 for rttid={} vk={:?}",
+                actual_rttid, actual_vk
+            ));
+        }
+        
+        if is_any {
+            // LHS is any: box the value into interface format
+            let (slot0, slot1) = match actual_vk {
+                ValueKind::Struct | ValueKind::Array => {
+                    // Struct/Array: allocate GcRef and copy
+                    let new_ref = call.gc_alloc(actual_slots, &[]);
+                    for j in 0..actual_slots {
+                        let v = call.call().slot(src_base + src_offset + j);
+                        unsafe { Gc::write_slot(new_ref, j as usize, v) };
+                    }
+                    (interface::pack_slot0(0, actual_rttid, actual_vk), new_ref as u64)
+                }
+                ValueKind::Interface => {
+                    // Interface: extract concrete type
+                    let iface_slot0 = call.call().slot(src_base + src_offset);
+                    let iface_slot1 = call.call().slot(src_base + src_offset + 1);
+                    let concrete_rttid = interface::unpack_rttid(iface_slot0);
+                    let concrete_vk = interface::unpack_value_kind(iface_slot0);
+                    (interface::pack_slot0(0, concrete_rttid, concrete_vk), iface_slot1)
+                }
+                _ => {
+                    // Single slot (primitive or reference type like Slice/String)
+                    let val = call.call().slot(src_base + src_offset);
+                    (interface::pack_slot0(0, actual_rttid, actual_vk), val)
+                }
+            };
+            call.ret_u64(ret_offset, slot0);
+            call.ret_u64(ret_offset + 1, slot1);
+            ret_offset += 2;
+        } else {
+            // LHS is typed: copy slots directly
+            let expected_slots = call.get_type_slot_count(expected_rttid);
+            for j in 0..expected_slots {
+                let v = call.call().slot(src_base + src_offset + j);
+                call.ret_u64(ret_offset + j, v);
+            }
+            ret_offset += expected_slots;
+        }
+        src_offset += actual_slots;
+    }
+    
+    // Write nil error at the end
+    call.ret_nil(ret_offset);
+    call.ret_nil(ret_offset + 1);
+    
+    ExternResult::Ok
+}
+
+// NOTE: dyn_unpack_returns registration disabled due to unresolved bug
+// #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+// static __VO_DYN_UNPACK_RETURNS: ExternEntryWithContext = ExternEntryWithContext {
+//     name: "dyn_unpack_returns",
+//     func: dyn_unpack_returns,
+// };
+
 fn dyn_ret_read_advance(call: &mut ExternCallContext) -> ExternResult {
     let base_off = call.arg_u64(0) as u16;
     let src_off = call.arg_u64(1) as u16;
@@ -822,6 +1010,7 @@ fn dyn_ret_read_advance(call: &mut ExternCallContext) -> ExternResult {
     let rttid = value_rttid_raw >> 8;
     let vk = ValueKind::from_u8((value_rttid_raw & 0xFF) as u8);
     let width = call.get_type_slot_count(rttid);
+    
     
     // For struct with > 2 slots, we need to box it into a GcRef
     // This maintains the 2-slot return convention (raw0, raw1)

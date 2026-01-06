@@ -23,20 +23,9 @@ func main() {
     
     // Type assert back to error
     e, ok := v.(error)
-    if !ok {
-        println("FAIL: type assertion to error failed")
-        return
-    }
-    
-    if e == nil {
-        println("FAIL: error is nil")
-        return
-    }
-    
-    if e.Error() != "boom" {
-        println("FAIL: error message mismatch, got:", e.Error())
-        return
-    }
+    assert(ok, "type assertion to error failed")
+    assert(e != nil, "error is nil")
+    assert(e.Error() == "boom", "error message mismatch")
     
     println("PASS")
 }

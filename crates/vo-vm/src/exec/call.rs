@@ -71,7 +71,16 @@ pub fn exec_call_closure(
     let func_id = closure::func_id(closure_ref);
     let arg_start = inst.b as usize;
     let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as u16;
+    // Dynamic ret_slots handling:
+    // - flags == 0: ret_slots from c & 0xFF (static)
+    // - flags == 1: ret_slots from stack[caller_bp + arg_start - 1] (dynamic)
+    let ret_slots = if inst.flags == 0 {
+        (inst.c & 0xFF) as u16
+    } else {
+        // Dynamic mode: ret_slots stored at arg_start - 1
+        debug_assert_eq!(inst.flags, 1, "CallClosure: unexpected flags value {}", inst.flags);
+        stack[caller_bp + arg_start - 1] as u16
+    };
 
     let func = &module.functions[func_id as usize];
     let recv_slots = func.recv_slots as usize;

@@ -25,26 +25,17 @@ func main() {
 	
 	// Get the Get method
 	getMethod, err := box~>Get
-	if err != nil {
-		println("FAIL: get Get method error:", err)
-		return
-	}
+	assert(err == nil, "get Get method error")
 	
 	// Call it - should return 10
 	get := getMethod.(func() int)
 	result := get()
-	if result != 10 {
-		println("FAIL: expected 10, got", result)
-		return
-	}
+	assert(result == 10, "expected 10")
 	println("Get() via closure:", result)
 	
 	// Get the Inc method
 	incMethod, err := box~>Inc
-	if err != nil {
-		println("FAIL: get Inc method error:", err)
-		return
-	}
+	assert(err == nil, "get Inc method error")
 	
 	// Call Inc
 	inc := incMethod.(func())
@@ -52,25 +43,16 @@ func main() {
 	
 	// Verify value changed
 	result = get()
-	if result != 11 {
-		println("FAIL: after Inc expected 11, got", result)
-		return
-	}
+	assert(result == 11, "after Inc expected 11")
 	println("Get() after Inc:", result)
 	
 	// Get Add method with parameter
 	addMethod, err := box~>Add
-	if err != nil {
-		println("FAIL: get Add method error:", err)
-		return
-	}
+	assert(err == nil, "get Add method error")
 	
 	add := addMethod.(func(int) int)
 	result = add(5)
-	if result != 16 {
-		println("FAIL: Add(5) expected 16, got", result)
-		return
-	}
+	assert(result == 16, "Add(5) expected 16")
 	println("Add(5) result:", result)
 	
 	println("done")

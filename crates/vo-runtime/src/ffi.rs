@@ -350,6 +350,12 @@ impl<'a> ExternCallContext<'a> {
         &self.call
     }
 
+    /// Get mutable access to the base call context.
+    #[inline]
+    pub fn call_mut(&mut self) -> &mut ExternCall<'a> {
+        &mut self.call
+    }
+
     /// Get mutable GC reference.
     #[inline]
     pub fn gc(&mut self) -> &mut Gc {

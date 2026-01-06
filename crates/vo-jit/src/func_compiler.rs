@@ -317,7 +317,17 @@ impl<'a> FunctionCompiler<'a> {
         let closure_ref = self.builder.use_var(self.vars[inst.a as usize]);
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
-        let ret_slots = (inst.c & 0xFF) as usize;
+        // Dynamic ret_slots handling:
+        // - flags == 0: ret_slots from c & 0xFF (static)
+        // - flags == 1: ret_slots from stack[arg_start - 1] (dynamic)
+        let is_dynamic_ret = inst.flags == 1;
+        let static_ret_slots = (inst.c & 0xFF) as usize;
+        // For dynamic case, use max buffer size; actual count checked at runtime in vo_call_closure
+        let ret_slot_size = if is_dynamic_ret {
+            vo_runtime::jit_api::MAX_DYN_RET_SLOTS as usize
+        } else {
+            static_ret_slots
+        };
         
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
@@ -326,7 +336,7 @@ impl<'a> FunctionCompiler<'a> {
         ));
         let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (ret_slots.max(1) * 8) as u32,
+            (ret_slot_size.max(1) * 8) as u32,
             8,
         ));
         
@@ -339,17 +349,30 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-        let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
+        let ret_count = if is_dynamic_ret {
+            // Dynamic mode: ret_slots at arg_start - 1
+            let v = self.builder.use_var(self.vars[arg_start - 1]);
+            self.builder.ins().ireduce(types::I32, v)
+        } else {
+            // Static mode
+            self.builder.ins().iconst(types::I32, static_ret_slots as i64)
+        };
         
         let call = self.builder.ins().call(call_closure_func, &[ctx, closure_ref, args_ptr, arg_count, ret_ptr, ret_count]);
         let result = self.builder.inst_results(call)[0];
         
         self.check_call_result(result);
         
-        for i in 0..ret_slots {
-            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+        // For dynamic ret_slots, we can't statically unroll the loop
+        // The helper writes to ret_ptr, we read back what we need
+        // For static case, unroll as before
+        if !is_dynamic_ret {
+            for i in 0..static_ret_slots {
+                let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+                self.builder.def_var(self.vars[arg_start + i], val);
+            }
         }
+        // For dynamic case, caller (dyn_access codegen) handles reading return values
     }
 
     fn call_iface(&mut self, inst: &Instruction) {
