@@ -24,7 +24,7 @@ use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::bytecode::{
     Constant, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta, InterfaceMethodMeta,
-    Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
+    Itab, MethodInfo, Module, NamedTypeMeta, StructMeta, WellKnownTypes,
 };
 use crate::instruction::Instruction;
 
@@ -97,6 +97,19 @@ impl ByteWriter {
     }
 }
 
+// Helper functions for Option<u32> serialization
+fn write_option_u32(w: &mut ByteWriter, opt: Option<u32>) {
+    match opt {
+        Some(v) => w.write_u32(1 + v),  // 1+v for Some(v)
+        None => w.write_u32(0),          // 0 for None
+    }
+}
+
+fn read_option_u32(r: &mut ByteReader) -> Result<Option<u32>, SerializeError> {
+    let raw = r.read_u32()?;
+    Ok(if raw == 0 { None } else { Some(raw - 1) })
+}
+
 // RuntimeType serialization tags
 const RT_BASIC: u8 = 0;
 const RT_NAMED: u8 = 1;
@@ -116,9 +129,14 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             w.write_u8(RT_BASIC);
             w.write_u8(*vk as u8);
         }
-        RuntimeType::Named(id) => {
+        RuntimeType::Named { id, struct_meta_id } => {
             w.write_u8(RT_NAMED);
             w.write_u32(*id);
+            // Write struct_meta_id as Option<u32>: 0 = None, 1+id = Some(id)
+            match struct_meta_id {
+                Some(meta_id) => w.write_u32(1 + *meta_id),
+                None => w.write_u32(0),
+            }
         }
         RuntimeType::Pointer(elem_rttid) => {
             w.write_u8(RT_POINTER);
@@ -155,8 +173,9 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
                 w.write_u32(r.to_raw());
             }
         }
-        RuntimeType::Struct { fields } => {
+        RuntimeType::Struct { fields, meta_id } => {
             w.write_u8(RT_STRUCT);
+            w.write_u32(*meta_id);
             w.write_u32(fields.len() as u32);
             for f in fields {
                 w.write_string(&f.name);
@@ -166,8 +185,9 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
                 w.write_string(&f.pkg);
             }
         }
-        RuntimeType::Interface { methods } => {
+        RuntimeType::Interface { methods, meta_id } => {
             w.write_u8(RT_INTERFACE);
+            w.write_u32(*meta_id);
             w.write_u32(methods.len() as u32);
             for m in methods {
                 w.write_string(&m.name);
@@ -197,7 +217,9 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
         }
         RT_NAMED => {
             let id = r.read_u32()?;
-            Ok(RuntimeType::Named(id))
+            let struct_meta_raw = r.read_u32()?;
+            let struct_meta_id = if struct_meta_raw == 0 { None } else { Some(struct_meta_raw - 1) };
+            Ok(RuntimeType::Named { id, struct_meta_id })
         }
         RT_POINTER => {
             let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
@@ -243,6 +265,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
         }
         RT_STRUCT => {
             use crate::runtime_type::StructField;
+            let meta_id = r.read_u32()?;
             let field_count = r.read_u32()? as usize;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
@@ -253,10 +276,11 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
                 let pkg = r.read_string()?;
                 fields.push(StructField::new(name, typ, tag, embedded, pkg));
             }
-            Ok(RuntimeType::Struct { fields })
+            Ok(RuntimeType::Struct { fields, meta_id })
         }
         RT_INTERFACE => {
             use crate::runtime_type::InterfaceMethod;
+            let meta_id = r.read_u32()?;
             let method_count = r.read_u32()? as usize;
             let mut methods = Vec::with_capacity(method_count);
             for _ in 0..method_count {
@@ -264,7 +288,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
                 let sig = ValueRttid::from_raw(r.read_u32()?);
                 methods.push(InterfaceMethod::new(name, sig));
             }
-            Ok(RuntimeType::Interface { methods })
+            Ok(RuntimeType::Interface { methods, meta_id })
         }
         RT_TUPLE => {
             let type_count = r.read_u32()? as usize;
@@ -418,10 +442,20 @@ impl Module {
             write_runtime_type(w, rt);
         });
 
-        w.write_vec(&self.rttid_to_struct_meta, |w, (rttid, meta_id)| {
-            w.write_u32(*rttid);
-            w.write_u32(*meta_id);
-        });
+        // Write WellKnownTypes
+        write_option_u32(&mut w, self.well_known.error_named_type_id);
+        write_option_u32(&mut w, self.well_known.error_iface_meta_id);
+        write_option_u32(&mut w, self.well_known.error_ptr_rttid);
+        write_option_u32(&mut w, self.well_known.error_struct_meta_id);
+        match &self.well_known.error_field_offsets {
+            Some(offsets) => {
+                w.write_u8(1);
+                for o in offsets {
+                    w.write_u16(*o);
+                }
+            }
+            None => w.write_u8(0),
+        }
 
         w.write_vec(&self.constants, |w, c| match c {
             Constant::Nil => w.write_u8(0),
@@ -519,7 +553,12 @@ impl Module {
                 let type_info = ValueRttid::from_raw(r.read_u32()?);
                 Ok(FieldMeta { name, offset, slot_count, type_info })
             })?;
-            Ok(StructMeta { slot_types, fields })
+            // Build field_index from fields
+            let field_index: HashMap<String, usize> = fields.iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.clone(), i))
+                .collect();
+            Ok(StructMeta { slot_types, fields, field_index })
         })?;
 
         let interface_metas = r.read_vec(|r| {
@@ -559,11 +598,18 @@ impl Module {
 
         let runtime_types = r.read_vec(|r| read_runtime_type(r))?;
 
-        let rttid_to_struct_meta = r.read_vec(|r| {
-            let rttid = r.read_u32()?;
-            let meta_id = r.read_u32()?;
-            Ok((rttid, meta_id))
-        })?;
+        // Read WellKnownTypes
+        let well_known = WellKnownTypes {
+            error_named_type_id: read_option_u32(&mut r)?,
+            error_iface_meta_id: read_option_u32(&mut r)?,
+            error_ptr_rttid: read_option_u32(&mut r)?,
+            error_struct_meta_id: read_option_u32(&mut r)?,
+            error_field_offsets: if r.read_u8()? == 1 {
+                Some([r.read_u16()?, r.read_u16()?, r.read_u16()?, r.read_u16()?])
+            } else {
+                None
+            },
+        };
 
         let constants = r.read_vec(|r| {
             let tag = r.read_u8()?;
@@ -660,8 +706,8 @@ impl Module {
             interface_metas,
             named_type_metas,
             runtime_types,
-            rttid_to_struct_meta,
             itabs,
+            well_known,
             constants,
             globals,
             functions,

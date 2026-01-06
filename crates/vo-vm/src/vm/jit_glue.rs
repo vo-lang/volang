@@ -61,7 +61,7 @@ pub extern "C" fn call_extern_trampoline(
         &module.interface_metas,
         &module.named_type_metas,
         &module.runtime_types,
-        &module.rttid_to_struct_meta,
+        &module.well_known,
         itab_cache,
     );
     

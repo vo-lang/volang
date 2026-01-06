@@ -26,7 +26,7 @@ pub fn exec_call_extern(
     interface_metas: &[vo_common_core::bytecode::InterfaceMeta],
     named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[vo_runtime::RuntimeType],
-    rttid_to_struct_meta: &[(u32, u32)],
+    well_known: &vo_common_core::bytecode::WellKnownTypes,
     itab_cache: &mut vo_runtime::itab::ItabCache,
     fiber_panic_msg: &mut Option<String>,
 ) -> ExecResult {
@@ -55,7 +55,7 @@ pub fn exec_call_extern(
         interface_metas,
         named_type_metas,
         runtime_types,
-        rttid_to_struct_meta,
+        well_known,
         itab_cache,
     );
 

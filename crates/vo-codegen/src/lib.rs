@@ -44,7 +44,10 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     // 5. Build runtime_types after all codegen (all types have been assigned rttid)
     build_runtime_types(project, &mut ctx, &info);
     
-    // 6. Finalize debug info (sort entries by PC)
+    // 6. Fill WellKnownTypes for fast error creation
+    ctx.fill_well_known_types();
+    
+    // 7. Finalize debug info (sort entries by PC)
     ctx.finalize_debug_info();
     
     // 7. Final check: all IDs within 24-bit limit
@@ -142,7 +145,11 @@ fn register_types(
                     if slot_types.is_empty() {
                         slot_types.push(vo_runtime::SlotType::Value);
                     }
-                    let meta = StructMeta { slot_types, fields };
+                    let field_index: std::collections::HashMap<String, usize> = fields.iter()
+                        .enumerate()
+                        .map(|(i, f)| (f.name.clone(), i))
+                        .collect();
+                    let meta = StructMeta { slot_types, fields, field_index };
                     let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
                     ctx.alias_struct_meta_id(named_key, struct_meta_id);
                     ValueMeta::new(struct_meta_id as u32, vo_runtime::ValueKind::Struct)
@@ -215,8 +222,8 @@ fn register_types(
             ctx.register_named_type_meta(obj_key, named_type_meta);
         }
 
-        // Build rttid_to_struct_meta after all types are registered
-        ctx.build_rttid_to_struct_meta(info);
+        // Finalize runtime types: fill meta_id fields after all types are registered
+        ctx.finalize_runtime_types();
 
         Ok(())
     }

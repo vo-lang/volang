@@ -142,7 +142,7 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Named(named) = &tc_objs.types[type_key] {
             if let Some(obj_key) = named.obj() {
                 if let Some(id) = ctx.get_named_type_id(*obj_key) {
-                    return RuntimeType::Named(id);
+                    return RuntimeType::Named { id, struct_meta_id: None };
                 }
             }
             // Named type not registered - recurse on underlying type

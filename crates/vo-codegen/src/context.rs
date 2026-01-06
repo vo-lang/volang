@@ -89,8 +89,8 @@ impl CodegenContext {
                 }],
                 named_type_metas: Vec::new(),
                 runtime_types: Vec::new(),
-                rttid_to_struct_meta: Vec::new(),
                 itabs: Vec::new(),
+                well_known: vo_vm::bytecode::WellKnownTypes::default(),
                 constants: Vec::new(),
                 globals: Vec::new(),
                 functions: Vec::new(),
@@ -142,11 +142,6 @@ impl CodegenContext {
         self.struct_meta_ids.get(&type_key).copied()
     }
 
-    /// Register rttid -> struct_meta_id mapping for anonymous struct lookup at runtime
-    pub fn register_rttid_struct_meta(&mut self, rttid: u32, struct_meta_id: u32) {
-        self.module.rttid_to_struct_meta.push((rttid, struct_meta_id));
-    }
-
     /// Register named type meta using ObjKey as the identity key.
     pub fn register_named_type_meta(&mut self, obj_key: ObjKey, meta: NamedTypeMeta) -> u32 {
         let id = self.module.named_type_metas.len() as u32;
@@ -175,50 +170,126 @@ impl CodegenContext {
 
     /// Recursively intern a type_key, returning its rttid.
     /// For composite types, this first interns inner types to get their ValueRttids.
-    /// Note: rttid_to_struct_meta mapping is built separately via build_rttid_to_struct_meta()
-    /// after all types are registered.
     pub fn intern_type_key(&mut self, type_key: vo_analysis::objects::TypeKey, info: &crate::type_info::TypeInfoWrapper) -> u32 {
         let tc_objs = &info.project.tc_objs;
+        let ctx = crate::type_interner::InternContext {
+            named_type_ids: &self.named_type_ids,
+            struct_meta_ids: &self.struct_meta_ids,
+            interface_meta_ids: &self.interface_meta_ids,
+        };
         let value_rttid = crate::type_interner::intern_type_key(
             &mut self.type_interner,
             type_key,
             tc_objs,
             &info.project.interner,
-            &self.named_type_ids,
+            &ctx,
         );
         value_rttid.rttid()
     }
 
-    /// Build rttid_to_struct_meta mapping for all Named struct types.
+    /// Finalize runtime types: fill meta_id fields in RuntimeType.
     /// Should be called after all type declarations are processed.
-    /// This enables dynamic field access on struct values via `~>` operator.
-    pub fn build_rttid_to_struct_meta(&mut self, info: &crate::type_info::TypeInfoWrapper) {
-        use vo_runtime::ValueKind;
-        use vo_analysis::objects::TypeKey;
+    /// This enables O(1) dynamic field access via `~>` operator.
+    pub fn finalize_runtime_types(&mut self) {
+        use vo_runtime::RuntimeType;
         
-        // Collect struct info first to avoid borrow conflicts
-        let struct_infos: Vec<(u32, TypeKey)> = self.module.named_type_metas.iter()
-            .enumerate()
-            .filter(|(_, meta)| meta.underlying_meta.value_kind() == ValueKind::Struct)
-            .filter_map(|(named_type_id, meta)| {
-                let struct_meta_id = meta.underlying_meta.meta_id();
-                // Find the ObjKey for this named_type_id
-                let obj_key = self.named_type_ids.iter()
-                    .find(|(_, &id)| id == named_type_id as u32)
-                    .map(|(k, _)| *k)?;
-                // Get the type_key for this named type
-                let type_key = info.project.tc_objs.lobjs[obj_key].typ()?;
-                Some((struct_meta_id, type_key))
-            })
-            .collect();
+        // Collect updates to avoid borrow issues
+        let mut updates: Vec<(usize, Option<u32>, Option<u32>)> = Vec::new(); // (idx, struct_meta_id, iface_meta_id)
         
-        // Now register mappings
-        for (struct_meta_id, type_key) in struct_infos {
-            let rttid = self.intern_type_key(type_key, info);
-            if !self.module.rttid_to_struct_meta.iter().any(|(r, _)| *r == rttid) {
-                self.module.rttid_to_struct_meta.push((rttid, struct_meta_id));
+        for (idx, rt) in self.type_interner.types().iter().enumerate() {
+            match rt {
+                RuntimeType::Named { id, .. } => {
+                    // Get struct_meta_id from named_type_meta's underlying
+                    let struct_meta_id = self.module.named_type_metas.get(*id as usize)
+                        .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                        .map(|m| m.underlying_meta.meta_id());
+                    if struct_meta_id.is_some() {
+                        updates.push((idx, struct_meta_id, None));
+                    }
+                }
+                RuntimeType::Struct { .. } => {
+                    // Find struct_meta_id by matching fields
+                    // For anonymous structs, use struct_meta_ids map
+                    // Note: we already set meta_id during registration, so no update needed here
+                    // This case is handled during register_struct_meta
+                }
+                RuntimeType::Interface { .. } => {
+                    // Similar to struct, meta_id is set during registration
+                }
+                _ => {}
             }
         }
+        
+        // Apply updates
+        let types = self.type_interner.types_mut();
+        for (idx, struct_meta_id, _iface_meta_id) in updates {
+            if let RuntimeType::Named { struct_meta_id: ref mut smi, .. } = types[idx] {
+                *smi = struct_meta_id;
+            }
+        }
+    }
+
+    /// Fill WellKnownTypes with pre-computed IDs for errors.Error.
+    /// Should be called after all types are registered.
+    pub fn fill_well_known_types(&mut self) {
+        use vo_runtime::RuntimeType;
+        
+        // Find errors.Error named_type_id
+        let error_named_type_id = self.module.named_type_metas
+            .iter()
+            .position(|m| m.name == "errors.Error")
+            .map(|i| i as u32);
+        
+        // Find error interface meta_id
+        let error_iface_meta_id = self.module.interface_metas
+            .iter()
+            .position(|m| m.name == "error")
+            .map(|i| i as u32);
+        
+        // Find errors.Error rttid and *errors.Error rttid
+        let (error_named_rttid, error_struct_meta_id) = if let Some(named_id) = error_named_type_id {
+            let rttid = self.type_interner.types()
+                .iter()
+                .position(|rt| matches!(rt, RuntimeType::Named { id, .. } if *id == named_id))
+                .map(|i| i as u32);
+            let struct_meta_id = self.module.named_type_metas
+                .get(named_id as usize)
+                .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                .map(|m| m.underlying_meta.meta_id());
+            (rttid, struct_meta_id)
+        } else {
+            (None, None)
+        };
+        
+        let error_ptr_rttid = if let Some(named_rttid) = error_named_rttid {
+            self.type_interner.types()
+                .iter()
+                .position(|rt| match rt {
+                    RuntimeType::Pointer(elem) => elem.rttid() == named_rttid && elem.value_kind() == vo_runtime::ValueKind::Struct,
+                    _ => false,
+                })
+                .map(|i| i as u32)
+        } else {
+            None
+        };
+        
+        // Get field offsets for errors.Error: [code, msg, cause, data]
+        let error_field_offsets = error_struct_meta_id.and_then(|meta_id| {
+            let meta = self.module.struct_metas.get(meta_id as usize)?;
+            let code_offset = meta.get_field("code").map(|f| f.offset)?;
+            let msg_offset = meta.get_field("msg").map(|f| f.offset)?;
+            let cause_offset = meta.get_field("cause").map(|f| f.offset)?;
+            let data_offset = meta.get_field("data").map(|f| f.offset)?;
+            Some([code_offset, msg_offset, cause_offset, data_offset])
+        });
+        
+        self.module.well_known = vo_vm::bytecode::WellKnownTypes {
+            error_named_type_id,
+            error_iface_meta_id,
+            error_ptr_rttid,
+            error_struct_meta_id,
+            error_field_offsets,
+        };
     }
 
     /// Get the interned RuntimeTypes (in rttid order)
@@ -324,12 +395,17 @@ impl CodegenContext {
                     let obj = &tc_objs.lobjs[m];
                     let name = obj.name().to_string();
                     let sig_type = obj.typ().expect("interface method must have signature type");
+                    let ctx = crate::type_interner::InternContext {
+                        named_type_ids: &self.named_type_ids,
+                        struct_meta_ids: &self.struct_meta_ids,
+                        interface_meta_ids: &self.interface_meta_ids,
+                    };
                     let signature_rttid = crate::type_interner::intern_type_key(
                         &mut self.type_interner,
                         sig_type,
                         tc_objs,
                         interner,
-                        &self.named_type_ids,
+                        &ctx,
                     )
                     .rttid();
                     vo_vm::bytecode::InterfaceMethodMeta { name, signature_rttid }

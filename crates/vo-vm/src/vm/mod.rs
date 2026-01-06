@@ -580,7 +580,7 @@ impl Vm {
                         &module.interface_metas,
                         &module.named_type_metas,
                         &module.runtime_types,
-                        &module.rttid_to_struct_meta,
+                        &module.well_known,
                         &mut self.state.itab_cache,
                         &mut fiber.panic_msg,
                     )

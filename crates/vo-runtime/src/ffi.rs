@@ -25,7 +25,7 @@ use linkme::distributed_slice;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::{string, slice, array};
-use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
+use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use crate::itab::ItabCache;
@@ -228,8 +228,8 @@ pub struct ExternCallContext<'a> {
     interface_metas: &'a [InterfaceMeta],
     /// Runtime types for rttid resolution.
     runtime_types: &'a [RuntimeType],
-    /// rttid -> struct_meta_id mapping for anonymous structs.
-    rttid_to_struct_meta: &'a [(u32, u32)],
+    /// Pre-computed IDs for well-known types.
+    well_known: &'a WellKnownTypes,
     itab_cache: &'a mut ItabCache,
 }
 
@@ -247,7 +247,7 @@ impl<'a> ExternCallContext<'a> {
         named_type_metas: &'a [NamedTypeMeta],
         interface_metas: &'a [InterfaceMeta],
         runtime_types: &'a [RuntimeType],
-        rttid_to_struct_meta: &'a [(u32, u32)],
+        well_known: &'a WellKnownTypes,
         itab_cache: &'a mut ItabCache,
     ) -> Self {
         Self {
@@ -257,7 +257,7 @@ impl<'a> ExternCallContext<'a> {
             named_type_metas,
             interface_metas,
             runtime_types,
-            rttid_to_struct_meta,
+            well_known,
             itab_cache,
         }
     }
@@ -295,6 +295,11 @@ impl<'a> ExternCallContext<'a> {
     }
 
     #[inline]
+    pub fn well_known(&self) -> &'a WellKnownTypes {
+        self.well_known
+    }
+
+    #[inline]
     pub fn get_or_create_itab(&mut self, named_type_id: u32, iface_meta_id: u32) -> u32 {
         self.itab_cache.get_or_create(
             named_type_id,
@@ -304,12 +309,11 @@ impl<'a> ExternCallContext<'a> {
         )
     }
 
-    /// Get struct_meta_id from rttid by looking up rttid_to_struct_meta mapping.
-    /// This mapping is populated at codegen time for both Named and anonymous structs.
+    /// Get struct_meta_id from rttid using RuntimeType's embedded meta_id.
+    /// O(1) lookup via RuntimeType.struct_meta_id().
     pub fn get_struct_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
-        self.rttid_to_struct_meta.iter()
-            .find(|(r, _)| *r == rttid)
-            .map(|(_, meta_id)| *meta_id)
+        self.runtime_types.get(rttid as usize)
+            .and_then(|rt| rt.struct_meta_id())
     }
 
     /// Get named_type_id from rttid.
@@ -318,7 +322,7 @@ impl<'a> ExternCallContext<'a> {
         use vo_common_core::runtime_type::RuntimeType;
         let rt = self.runtime_types.get(rttid as usize)?;
         match rt {
-            RuntimeType::Named(named_id) => Some(*named_id),
+            RuntimeType::Named { id, .. } => Some(*id),
             _ => None,
         }
     }
@@ -509,7 +513,7 @@ impl<'a> ExternCallContext<'a> {
         
         // Check if target is any (empty interface)
         let target_rttid = target.rttid();
-        if let Some(RuntimeType::Interface { methods }) = self.runtime_types.get(target_rttid as usize) {
+        if let Some(RuntimeType::Interface { methods, .. }) = self.runtime_types.get(target_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
@@ -543,7 +547,7 @@ impl<'a> ExternCallContext<'a> {
                 crate::ValueRttid::new(crate::ValueKind::Uint8 as u32, crate::ValueKind::Uint8)
             }
             // Named type: recurse on underlying type
-            RuntimeType::Named(id) => {
+            RuntimeType::Named { id, .. } => {
                 let meta = &self.named_type_metas[*id as usize];
                 let underlying_rttid = meta.underlying_meta.meta_id();
                 self.get_elem_value_rttid_from_base(underlying_rttid)
@@ -563,7 +567,7 @@ impl<'a> ExternCallContext<'a> {
         
         match rt {
             // Named type: get underlying type info from named_type_meta
-            RuntimeType::Named(named_id) => {
+            RuntimeType::Named { id: named_id, .. } => {
                 if let Some(named_meta) = self.named_type_metas.get(*named_id as usize) {
                     let underlying_vk = named_meta.underlying_meta.value_kind();
                     let underlying_meta_id = named_meta.underlying_meta.meta_id();
@@ -579,14 +583,12 @@ impl<'a> ExternCallContext<'a> {
                 }
                 1
             }
-            // Anonymous struct: lookup in rttid_to_struct_meta
-            RuntimeType::Struct { .. } => {
-                if let Some(struct_meta_id) = self.get_struct_meta_id_from_rttid(rttid) {
-                    if let Some(meta) = self.struct_meta(struct_meta_id as usize) {
-                        return meta.slot_count();
-                    }
+            // Anonymous struct: use embedded meta_id
+            RuntimeType::Struct { meta_id, .. } => {
+                if let Some(meta) = self.struct_meta(*meta_id as usize) {
+                    return meta.slot_count();
                 }
-                2 // fallback
+                2
             }
             // Interface is always 2 slots
             RuntimeType::Interface { .. } => 2,
@@ -695,7 +697,7 @@ impl ExternRegistry {
         interface_metas: &[InterfaceMeta],
         named_type_metas: &[NamedTypeMeta],
         runtime_types: &[RuntimeType],
-        rttid_to_struct_meta: &[(u32, u32)],
+        well_known: &WellKnownTypes,
         itab_cache: &mut ItabCache,
     ) -> ExternResult {
         match self.funcs.get(id as usize) {
@@ -715,7 +717,7 @@ impl ExternRegistry {
                     named_type_metas,
                     interface_metas,
                     runtime_types,
-                    rttid_to_struct_meta,
+                    well_known,
                     itab_cache,
                 );
                 f(&mut call)

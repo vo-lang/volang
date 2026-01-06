@@ -65,6 +65,8 @@ pub struct FieldMeta {
 pub struct StructMeta {
     pub slot_types: Vec<SlotType>,
     pub fields: Vec<FieldMeta>,
+    /// Field name -> field index for O(1) lookup.
+    pub field_index: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,12 @@ impl StructMeta {
     #[inline]
     pub fn slot_count(&self) -> u16 {
         self.slot_types.len() as u16
+    }
+    
+    /// Get field by name (O(1) lookup).
+    #[inline]
+    pub fn get_field(&self, name: &str) -> Option<&FieldMeta> {
+        self.field_index.get(name).map(|&idx| &self.fields[idx])
     }
 }
 
@@ -107,6 +115,22 @@ pub struct Itab {
     pub methods: Vec<u32>,
 }
 
+/// Pre-computed type IDs for well-known types (errors.Error, etc.)
+/// Filled at codegen time to avoid runtime lookups.
+#[derive(Debug, Clone, Default)]
+pub struct WellKnownTypes {
+    /// errors.Error named_type_id
+    pub error_named_type_id: Option<u32>,
+    /// error interface meta_id
+    pub error_iface_meta_id: Option<u32>,
+    /// *errors.Error rttid
+    pub error_ptr_rttid: Option<u32>,
+    /// errors.Error struct_meta_id
+    pub error_struct_meta_id: Option<u32>,
+    /// Field offsets in errors.Error: [code, msg, cause, data]
+    pub error_field_offsets: Option<[u16; 4]>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
@@ -114,8 +138,8 @@ pub struct Module {
     pub interface_metas: Vec<InterfaceMeta>,
     pub named_type_metas: Vec<NamedTypeMeta>,
     pub runtime_types: Vec<RuntimeType>,  // rttid -> RuntimeType
-    pub rttid_to_struct_meta: Vec<(u32, u32)>,  // (rttid, struct_meta_id) for anonymous structs
     pub itabs: Vec<Itab>,  // compile-time built itabs
+    pub well_known: WellKnownTypes,  // pre-computed type IDs
     pub constants: Vec<Constant>,
     pub globals: Vec<GlobalDef>,
     pub functions: Vec<FunctionDef>,
@@ -132,8 +156,8 @@ impl Module {
             interface_metas: Vec::new(),
             named_type_metas: Vec::new(),
             runtime_types: Vec::new(),
-            rttid_to_struct_meta: Vec::new(),
             itabs: Vec::new(),
+            well_known: WellKnownTypes::default(),
             constants: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),

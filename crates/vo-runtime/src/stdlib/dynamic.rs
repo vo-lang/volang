@@ -73,8 +73,8 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         None => return dyn_error(call, &format!("struct meta {} not found", struct_meta_id)),
     };
     
-    // Find field by name
-    let field = match struct_meta.fields.iter().find(|f| f.name == field_name) {
+    // Find field by name using O(1) lookup
+    let field = match struct_meta.get_field(field_name) {
         Some(f) => f,
         None => {
             // Field not found - check if it's a method
@@ -162,67 +162,37 @@ fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64,
 }
 
 fn write_error_to(call: &mut ExternCallContext, ret_slot: u16, msg: &str) {
-    let named_type_id = call
-        .named_type_metas()
-        .iter()
-        .position(|m| m.name == "errors.Error")
-        .expect("dyn_error: errors.Error not found in named_type_metas") as u32;
-
-    let error_iface_meta_id = call
-        .interface_metas()
-        .iter()
-        .position(|m| m.name == "error")
-        .expect("dyn_error: builtin error interface meta not found") as u32;
-
-    let error_named_rttid = call
-        .runtime_types()
-        .iter()
-        .position(|rt| matches!(rt, RuntimeType::Named(id) if *id == named_type_id))
-        .expect("dyn_error: rttid for errors.Error not found") as u32;
-
-    let error_ptr_rttid = call
-        .runtime_types()
-        .iter()
-        .position(|rt| match rt {
-            RuntimeType::Pointer(elem) => elem.rttid() == error_named_rttid && elem.value_kind() == ValueKind::Struct,
-            _ => false,
-        })
-        .expect("dyn_error: rttid for *errors.Error not found") as u32;
-
-    let meta_id = call
-        .named_type_meta(named_type_id as usize)
-        .expect("dyn_error: named type meta index out of range")
-        .underlying_meta
-        .meta_id();
-
+    let wk = call.well_known();
+    
+    // Use pre-computed IDs from WellKnownTypes
+    let named_type_id = wk.error_named_type_id
+        .expect("dyn_error: errors.Error not found in WellKnownTypes");
+    let error_iface_meta_id = wk.error_iface_meta_id
+        .expect("dyn_error: error interface not found in WellKnownTypes");
+    let error_ptr_rttid = wk.error_ptr_rttid
+        .expect("dyn_error: *errors.Error rttid not found in WellKnownTypes");
+    let struct_meta_id = wk.error_struct_meta_id
+        .expect("dyn_error: errors.Error struct_meta_id not found in WellKnownTypes");
+    let field_offsets = wk.error_field_offsets
+        .expect("dyn_error: errors.Error field_offsets not found in WellKnownTypes");
+    
     let struct_meta = call
-        .struct_meta(meta_id as usize)
-        .expect("dyn_error: struct meta for errors.Error not found")
-        .clone();
-
+        .struct_meta(struct_meta_id as usize)
+        .expect("dyn_error: struct meta for errors.Error not found");
     let slots = struct_meta.slot_count() as usize;
-    let err_obj = struct_ops::create(call.gc(), meta_id, slots);
+    let err_obj = struct_ops::create(call.gc(), struct_meta_id, slots);
 
     let err_str = call.alloc_str(msg);
 
-    let set_field_by_name = |obj: GcRef, name: &str, values: &[u64]| {
-        let field = struct_meta
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .unwrap_or_else(|| panic!("dyn_error: field '{}' not found in errors.Error", name));
-        if field.slot_count as usize != values.len() {
-            panic!("dyn_error: field '{}' slot_count mismatch", name);
-        }
-        for (i, v) in values.iter().enumerate() {
-            unsafe { Gc::write_slot(obj, field.offset as usize + i, *v) };
-        }
-    };
-
-    set_field_by_name(err_obj, "code", &[0]);
-    set_field_by_name(err_obj, "msg", &[err_str as u64]);
-    set_field_by_name(err_obj, "cause", &[0, 0]);
-    set_field_by_name(err_obj, "data", &[0, 0]);
+    // Use pre-computed field offsets: [code, msg, cause, data]
+    unsafe {
+        Gc::write_slot(err_obj, field_offsets[0] as usize, 0);           // code = 0
+        Gc::write_slot(err_obj, field_offsets[1] as usize, err_str as u64); // msg
+        Gc::write_slot(err_obj, field_offsets[2] as usize, 0);           // cause slot0
+        Gc::write_slot(err_obj, field_offsets[2] as usize + 1, 0);       // cause slot1
+        Gc::write_slot(err_obj, field_offsets[3] as usize, 0);           // data slot0
+        Gc::write_slot(err_obj, field_offsets[3] as usize + 1, 0);       // data slot1
+    }
 
     let itab_id = call.get_or_create_itab(named_type_id, error_iface_meta_id);
     let err_slot0 = interface::pack_slot0(itab_id, error_ptr_rttid, ValueKind::Pointer);
@@ -244,9 +214,9 @@ fn dyn_error_only(call: &mut ExternCallContext, msg: &str) -> ExternResult {
 
 fn named_type_id_for_itab(call: &ExternCallContext, rttid: u32) -> Option<u32> {
     match call.runtime_types().get(rttid as usize) {
-        Some(RuntimeType::Named(id)) => Some(*id),
+        Some(RuntimeType::Named { id, .. }) => Some(*id),
         Some(RuntimeType::Pointer(elem)) => match call.runtime_types().get(elem.rttid() as usize) {
-            Some(RuntimeType::Named(id)) => Some(*id),
+            Some(RuntimeType::Named { id, .. }) => Some(*id),
             _ => None,
         },
         _ => None,
@@ -467,7 +437,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             None => return dyn_error_only(call, &format!("struct meta {} not found", struct_meta_id)),
         };
 
-        let field = match struct_meta.fields.iter().find(|f| f.name == field_name) {
+        let field = match struct_meta.get_field(field_name) {
             Some(f) => f,
             None => return dyn_error_only(call, &format!("field '{}' not found", field_name)),
         };

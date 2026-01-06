@@ -16,7 +16,7 @@ use crate::vm::ExecResult;
 /// Methods are always defined on the base Named type.
 fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
     match rt {
-        RuntimeType::Named(id) => Some(*id),
+        RuntimeType::Named { id, .. } => Some(*id),
         RuntimeType::Pointer(elem_value_rttid) => {
             runtime_types.get(elem_value_rttid.rttid() as usize)
                 .and_then(|inner| extract_named_type_id(inner, runtime_types))
