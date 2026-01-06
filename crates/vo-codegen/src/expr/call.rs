@@ -266,10 +266,23 @@ fn compile_method_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // 1. Check for package function call (e.g., bytes.Contains, fmt.Println)
+    // 1. Check for package function call or type conversion (e.g., bytes.Contains, json.Number)
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
         // Check if it's a package reference
         if info.package_path(pkg_ident).is_some() {
+            // Check if sel.sel refers to a type (type conversion: pkg.Type(x))
+            let obj_key = info.get_use(&sel.sel);
+            let obj = &info.project.tc_objs.lobjs[obj_key];
+            if obj.entity_type().is_type_name() {
+                // This is a type conversion: pkg.Type(x)
+                if call.args.len() == 1 {
+                    return super::conversion::compile_type_conversion(&call.args[0], dst, expr, ctx, func, info);
+                } else if call.args.is_empty() {
+                    // Zero value - already handled by default initialization
+                    return Ok(());
+                }
+            }
+            
             // Check if it's a Vo function (has body) or extern (no body)
             if ctx.is_vo_function(sel.sel.symbol) {
                 // Vo function - use normal Call
@@ -328,7 +341,9 @@ fn compile_method_call(
         ctx,
         &info.project.tc_objs,
         &info.project.interner,
-    ).ok_or_else(|| CodegenError::Internal("method not found".to_string()))?;
+    ).ok_or_else(|| {
+        CodegenError::Internal(format!("method not found: type_key={:?}.{}", recv_type, method_name))
+    })?;
     
     // Dispatch based on call type
     compile_method_call_dispatch(expr, call, sel, &call_info, dst, ctx, func, info)

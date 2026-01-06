@@ -1,17 +1,70 @@
 package json
 
-// Extern functions (implemented in Rust)
-func Valid(data []byte) bool
+import "errors"
 
-// Marshal returns the JSON encoding of v.
-func Marshal(v interface{}) ([]byte, error) {
-    // TODO: implement marshaling
-    return nil, nil
+// JSON error codes (range 2000-2099)
+const (
+    ErrSyntax        = 2000 // JSON syntax error
+    ErrUnexpectedEOF = 2001 // Unexpected end of input
+    ErrInvalidValue  = 2002 // Invalid value
+    ErrTypeMismatch  = 2003 // Type mismatch
+    ErrPathNotFound  = 2004 // Path not found
+    ErrNotObject     = 2005 // Not an object type
+    ErrNotArray      = 2006 // Not an array type
+    ErrMarshal       = 2007 // Serialization error
+    ErrUnmarshal     = 2008 // Deserialization error
+)
+
+// NewError creates a JSON error with the given code and message.
+func NewError(code int, msg string) error {
+    return errors.NewCode(code, msg)
 }
 
-// Unmarshal parses the JSON-encoded data and stores the result
-// in the value pointed to by v.
-func Unmarshal(data []byte, v interface{}) error {
-    // TODO: implement unmarshaling
-    return nil
+// Number represents a JSON number literal.
+// It preserves the original string representation for precision.
+type Number string
+
+// String returns the original JSON number literal.
+func (n Number) String() string {
+    return string(n)
+}
+
+// IsInt returns true if the number is an integer (no decimal point, no exponent).
+func (n Number) IsInt() bool {
+    s := string(n)
+    for i := 0; i < len(s); i++ {
+        c := s[i]
+        if c == '.' || c == 'e' || c == 'E' {
+            return false
+        }
+    }
+    return true
+}
+
+// Int converts to int. Returns error if not representable.
+func (n Number) Int() (int, error) {
+    if !n.IsInt() {
+        return 0, errors.NewCode(ErrInvalidValue, "json.Number is not an integer")
+    }
+    s := string(n)
+    neg := false
+    start := 0
+    if len(s) > 0 && s[0] == '-' {
+        neg = true
+        start = 1
+    } else if len(s) > 0 && s[0] == '+' {
+        start = 1
+    }
+    result := 0
+    for i := start; i < len(s); i++ {
+        c := s[i]
+        if c < '0' || c > '9' {
+            return 0, errors.NewCode(ErrInvalidValue, "invalid integer")
+        }
+        result = result*10 + int(c-'0')
+    }
+    if neg {
+        result = -result
+    }
+    return result, nil
 }

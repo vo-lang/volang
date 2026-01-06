@@ -623,7 +623,11 @@ x := nil          // ERROR: cannot infer type from nil
 ### 5.5 Type Declarations
 
 ```ebnf
-TypeDecl ::= "type" Ident Type ";" ;
+TypeDecl ::= AttributeList? "type" Ident Type ";" ;
+AttributeList ::= Attribute+ ;
+Attribute ::= "#[" AttrList "]" ;
+AttrList ::= Attr ("," Attr)* ;
+Attr ::= Ident ("(" AttrArgs ")")? ;
 ```
 
 The new type inherits the category (value/reference), zero value, and comparability from the underlying type (see §2.2).
@@ -631,11 +635,18 @@ The new type inherits the category (value/reference), zero value, and comparabil
 ```vo
 type User struct {
     name string
-    age  int "json:\"name\""
+    age  int `json:"age"`
+}
+
+// With type attribute - triggers compiler code generation
+#[json]
+type Response struct {
+    code    int    `json:"code"`
+    message string `json:"message"`
 }
 ```
 
-> **Note**: Struct field tags are metadata strings. Their semantics are defined by tooling/standard library (e.g., JSON serialization). The compiler preserves them in the AST but does not interpret them.
+> **Note**: Struct field tags (`` `...` ``) are metadata strings for field-level configuration. Type attributes (`#[...]`) trigger compile-time code generation. See [Type Attributes Spec](type-attributes.md) for full details.
 
 ---
 
