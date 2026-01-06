@@ -53,19 +53,6 @@ func WithData(cause error, data any) error {
     return &Error{code: cause.Code(), msg: cause.Error(), cause: cause, data: data}
 }
 
-// MakeCode packs domain/local into a 64-bit int.
-func MakeCode(domain uint32, local uint32) int {
-    return int((uint64(domain) << 32) | uint64(local))
-}
-
-func Domain(code int) uint32 {
-    return uint32(uint64(code) >> 32)
-}
-
-func Local(code int) uint32 {
-    return uint32(uint64(code) & 0xffffffff)
-}
-
 // IsCode checks whether any error in the unwrap chain matches code.
 func IsCode(err error, code int) bool {
     for err != nil {

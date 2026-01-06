@@ -431,9 +431,6 @@ fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter
     let key = ImportKey::new("errors", ".");
     let _ = importer.import(&key);
 
-    let key = ImportKey::new("dyn", ".");
-    let _ = importer.import(&key);
-
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;

@@ -1,45 +1,23 @@
 package dyn
 
-// Error is the canonical dynamic error type used by the runtime and dynamic operations.
-// It implements the predeclared `error` interface.
-//
-// Code is a stable numeric category for programmatic matching.
-// Msg is the human-readable message.
-type Error struct {
-    ErrCode int
-    Msg     string
-}
+import "errors"
 
-func (e *Error) Error() string {
-    return e.Msg
-}
-
-func (e *Error) Code() int {
-    return e.ErrCode
-}
-
-func (e *Error) Unwrap() error {
-    return nil
-}
-
-func (e *Error) Data() any {
-    return nil
-}
-
+// Error codes for dynamic access operations.
+// Range 1000-1099 is reserved for dyn package.
 const (
-    ErrUnknown       = 0
-    ErrNilBase       = 1
-    ErrBadField      = 2
-    ErrBadIndex      = 3
-    ErrOutOfBounds   = 4
-    ErrBadCall       = 5
-    ErrSigMismatch   = 6
-    ErrTypeMismatch  = 7
+    ErrUnknown      = 1000 // Unknown error
+    ErrNilBase      = 1001 // Base value is nil
+    ErrBadField     = 1002 // Field does not exist
+    ErrBadIndex     = 1003 // Invalid index type
+    ErrOutOfBounds  = 1004 // Index out of bounds
+    ErrBadCall      = 1005 // Cannot call value
+    ErrSigMismatch  = 1006 // Signature mismatch
+    ErrTypeMismatch = 1007 // Type mismatch
 )
 
-// NewError constructs a new error value.
+// NewError creates a dynamic access error with the given code and message.
 func NewError(code int, msg string) error {
-    return &Error{ErrCode: code, Msg: msg}
+    return errors.NewCode(code, msg)
 }
 
 type AttrObject interface {

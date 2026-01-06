@@ -67,19 +67,13 @@ fn compute_iface_assert_params(
     }
 }
 
-fn lookup_pkg_type(info: &TypeInfoWrapper, pkg_path: &str, type_name: &str) -> vo_analysis::objects::TypeKey {
+fn try_lookup_pkg_type(info: &TypeInfoWrapper, pkg_path: &str, type_name: &str) -> Option<vo_analysis::objects::TypeKey> {
     let tc_objs = &info.project.tc_objs;
-    let pkg = tc_objs
-        .find_package_by_path(pkg_path)
-        .unwrap_or_else(|| panic!("package '{}' not found (expected always-linked)", pkg_path));
+    let pkg = tc_objs.find_package_by_path(pkg_path)?;
     let scope_key = *tc_objs.pkgs[pkg].scope();
     let scope = &tc_objs.scopes[scope_key];
-    let obj = scope
-        .lookup(type_name)
-        .unwrap_or_else(|| panic!("type '{}' not found in package '{}'", type_name, pkg_path));
-    tc_objs.lobjs[obj]
-        .typ()
-        .unwrap_or_else(|| panic!("type object {}.{} has no type", pkg_path, type_name))
+    let obj = scope.lookup(type_name)?;
+    tc_objs.lobjs[obj].typ()
 }
 
 // =============================================================================
@@ -550,34 +544,40 @@ fn compile_stmt_with_label(
                             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
                             let any_type = info.any_type();
 
-                            // Fast-path: if base implements dyn.SetAttrObject, call __setattr via CallIface
-                            let set_attr_iface_type = lookup_pkg_type(info, "dyn", "SetAttrObject");
-                            let set_attr_iface_meta_id = info.get_or_create_interface_meta_id(set_attr_iface_type, ctx);
-                            let set_attr_method_idx = info.get_iface_meta_method_index(set_attr_iface_type, "__setattr", ctx);
-                            // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
-                            // Allocate 3 slots to keep ok in-bounds.
-                            let iface_reg = func.alloc_temp(3);
-                            let flags = 1 | (1 << 2) | (2 << 3);
-                            func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_attr_iface_meta_id as u16);
-                            let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
+                            // Fast-path: if dyn package is available and base implements dyn.SetAttrObject,
+                            // call __setattr via CallIface. Otherwise fall through to extern call.
+                            let end_jump = if let Some(set_attr_iface_type) = try_lookup_pkg_type(info, "dyn", "SetAttrObject") {
+                                let set_attr_iface_meta_id = info.get_or_create_interface_meta_id(set_attr_iface_type, ctx);
+                                let set_attr_method_idx = info.get_iface_meta_method_index(set_attr_iface_type, "__setattr", ctx);
+                                // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
+                                // Allocate 3 slots to keep ok in-bounds.
+                                let iface_reg = func.alloc_temp(3);
+                                let flags = 1 | (1 << 2) | (2 << 3);
+                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_attr_iface_meta_id as u16);
+                                let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
-                            // args: name[1] + value_any[2] => 3 slots, ret: error[2]
-                            let args_start = func.alloc_temp(3);
-                            let name_idx = ctx.const_string(field_name);
-                            func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
-                            crate::stmt::compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
+                                // args: name[1] + value_any[2] => 3 slots, ret: error[2]
+                                let args_start = func.alloc_temp(3);
+                                let name_idx = ctx.const_string(field_name);
+                                func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
+                                crate::stmt::compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
 
-                            let c = crate::type_info::encode_call_args(3, 2);
-                            func.emit_with_flags(Opcode::CallIface, set_attr_method_idx as u8, iface_reg, args_start, c);
+                                let c = crate::type_info::encode_call_args(3, 2);
+                                func.emit_with_flags(Opcode::CallIface, set_attr_method_idx as u8, iface_reg, args_start, c);
 
-                            // fail if err != nil
-                            let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
-                            emit_error_propagate_return(args_start, func, info);
-                            func.patch_jump(ok_err_jump, func.current_pc());
-                            let end_jump = func.emit_jump(Opcode::Jump, 0);
+                                // fail if err != nil
+                                let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
+                                emit_error_propagate_return(args_start, func, info);
+                                func.patch_jump(ok_err_jump, func.current_pc());
+                                let end_jump = func.emit_jump(Opcode::Jump, 0);
 
-                            // Fallback to extern dyn_SetAttr
-                            func.patch_jump(fallback_jump, func.current_pc());
+                                func.patch_jump(fallback_jump, func.current_pc());
+                                Some(end_jump)
+                            } else {
+                                None
+                            };
+
+                            // Fallback / only path: extern dyn_set_attr
                             let args_start = func.alloc_temp(5);
                             func.emit_copy(args_start, base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
@@ -590,7 +590,9 @@ fn compile_stmt_with_label(
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
                             emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
-                            func.patch_jump(end_jump, func.current_pc());
+                            if let Some(end_jump) = end_jump {
+                                func.patch_jump(end_jump, func.current_pc());
+                            }
                             return Ok(());
                         }
                         vo_syntax::ast::DynAccessOp::Index(key_expr) => {
@@ -605,34 +607,39 @@ fn compile_stmt_with_label(
 
                             let any_type = info.any_type();
 
-                            // Fast-path: if base implements dyn.SetIndexObject, call __setindex via CallIface
-                            let set_index_iface_type = lookup_pkg_type(info, "dyn", "SetIndexObject");
-                            let set_index_iface_meta_id = info.get_or_create_interface_meta_id(set_index_iface_type, ctx);
-                            let set_index_method_idx = info.get_iface_meta_method_index(set_index_iface_type, "__setindex", ctx);
-                            // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
-                            // Allocate 3 slots to keep ok in-bounds.
-                            let iface_reg = func.alloc_temp(3);
-                            let flags = 1 | (1 << 2) | (2 << 3);
-                            func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_index_iface_meta_id as u16);
-                            let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
+                            // Fast-path: if dyn package is available and base implements dyn.SetIndexObject,
+                            // call __setindex via CallIface. Otherwise fall through to extern call.
+                            let end_jump = if let Some(set_index_iface_type) = try_lookup_pkg_type(info, "dyn", "SetIndexObject") {
+                                let set_index_iface_meta_id = info.get_or_create_interface_meta_id(set_index_iface_type, ctx);
+                                let set_index_method_idx = info.get_iface_meta_method_index(set_index_iface_type, "__setindex", ctx);
+                                // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
+                                // Allocate 3 slots to keep ok in-bounds.
+                                let iface_reg = func.alloc_temp(3);
+                                let flags = 1 | (1 << 2) | (2 << 3);
+                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_index_iface_meta_id as u16);
+                                let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
-                            // args: key_any[2] + value_any[2] => 4 slots, ret: error[2]
-                            let args_start = func.alloc_temp(4);
-                            crate::stmt::compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
-                            crate::stmt::compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
+                                // args: key_any[2] + value_any[2] => 4 slots, ret: error[2]
+                                let args_start = func.alloc_temp(4);
+                                crate::stmt::compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
+                                crate::stmt::compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
 
-                            let c = crate::type_info::encode_call_args(4, 2);
-                            func.emit_with_flags(Opcode::CallIface, set_index_method_idx as u8, iface_reg, args_start, c);
+                                let c = crate::type_info::encode_call_args(4, 2);
+                                func.emit_with_flags(Opcode::CallIface, set_index_method_idx as u8, iface_reg, args_start, c);
 
-                            // fail if err != nil
-                            let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
+                                // fail if err != nil
+                                let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
+                                emit_error_propagate_return(args_start, func, info);
+                                func.patch_jump(ok_err_jump, func.current_pc());
+                                let end_jump = func.emit_jump(Opcode::Jump, 0);
 
-                            emit_error_propagate_return(args_start, func, info);
-                            func.patch_jump(ok_err_jump, func.current_pc());
-                            let end_jump = func.emit_jump(Opcode::Jump, 0);
+                                func.patch_jump(fallback_jump, func.current_pc());
+                                Some(end_jump)
+                            } else {
+                                None
+                            };
 
-                            // Fallback to extern dyn_SetIndex
-                            func.patch_jump(fallback_jump, func.current_pc());
+                            // Fallback / only path: extern dyn_set_index
                             let args_start = func.alloc_temp(6);
                             func.emit_copy(args_start, base_reg, 2);
                             crate::stmt::compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
@@ -644,7 +651,9 @@ fn compile_stmt_with_label(
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
                             emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
-                            func.patch_jump(end_jump, func.current_pc());
+                            if let Some(end_jump) = end_jump {
+                                func.patch_jump(end_jump, func.current_pc());
+                            }
                             return Ok(());
                         }
                         _ => {}
