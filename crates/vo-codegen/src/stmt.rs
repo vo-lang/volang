@@ -11,6 +11,43 @@ use crate::expr::{compile_expr_to, get_expr_source};
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
+/// Emit error propagation and return: fill return slots with nil, copy error, and return.
+/// `error_src` is the register containing the error (2 slots).
+fn emit_error_propagate_return(
+    error_src: u16,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    let ret_types: Vec<_> = func.return_types().to_vec();
+    let mut total_ret_slots = 0u16;
+    for ret_type in &ret_types {
+        total_ret_slots += info.type_slot_count(*ret_type);
+    }
+    let ret_start = func.alloc_temp(total_ret_slots);
+    for i in 0..total_ret_slots {
+        func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
+    }
+    if !ret_types.is_empty() {
+        let error_type = *ret_types.last().unwrap();
+        let error_slots = info.type_slot_count(error_type);
+        let error_start = ret_start + total_ret_slots - error_slots;
+        func.emit_copy(error_start, error_src, error_slots);
+    }
+    func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+}
+
+/// Emit error short-circuit for (any, error) tuple base in dynamic assignment.
+/// If base has an error (slot+2 != nil), fills return slots with nil and propagates error.
+fn emit_dyn_assign_error_short_circuit(
+    base_reg: u16,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    let ok_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
+    emit_error_propagate_return(base_reg + 2, func, info);
+    func.patch_jump(ok_jump, func.current_pc());
+}
+
 /// Compute IfaceAssert parameters for a target type.
 /// Returns (assert_kind, target_id) where:
 /// - assert_kind: 0 for concrete types (rttid), 1 for interface types (iface_meta_id)
@@ -507,26 +544,7 @@ fn compile_stmt_with_label(
                             compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
 
                             if info.is_tuple_any_error(base_type) {
-                                let ok_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
-
-                                let ret_types: Vec<_> = func.return_types().to_vec();
-                                let mut total_ret_slots = 0u16;
-                                for ret_type in &ret_types {
-                                    total_ret_slots += info.type_slot_count(*ret_type);
-                                }
-                                let ret_start = func.alloc_temp(total_ret_slots);
-                                for i in 0..total_ret_slots {
-                                    func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                                }
-                                if !ret_types.is_empty() {
-                                    let error_type = *ret_types.last().unwrap();
-                                    let error_slots = info.type_slot_count(error_type);
-                                    let error_start = ret_start + total_ret_slots - error_slots;
-                                    func.emit_copy(error_start, base_reg + 2, error_slots);
-                                }
-                                func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
-                                func.patch_jump(ok_jump, func.current_pc());
+                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
                             }
 
                             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
@@ -554,24 +572,7 @@ fn compile_stmt_with_label(
 
                             // fail if err != nil
                             let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
-
-                            let ret_types: Vec<_> = func.return_types().to_vec();
-                            let mut total_ret_slots = 0u16;
-                            for ret_type in &ret_types {
-                                total_ret_slots += info.type_slot_count(*ret_type);
-                            }
-                            let ret_start = func.alloc_temp(total_ret_slots);
-                            for i in 0..total_ret_slots {
-                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                            }
-                            if !ret_types.is_empty() {
-                                let error_type = *ret_types.last().unwrap();
-                                let error_slots = info.type_slot_count(error_type);
-                                let error_start = ret_start + total_ret_slots - error_slots;
-                                func.emit_copy(error_start, args_start, error_slots);
-                            }
-                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
+                            emit_error_propagate_return(args_start, func, info);
                             func.patch_jump(ok_err_jump, func.current_pc());
                             let end_jump = func.emit_jump(Opcode::Jump, 0);
 
@@ -587,24 +588,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
-
-                            let ret_types: Vec<_> = func.return_types().to_vec();
-                            let mut total_ret_slots = 0u16;
-                            for ret_type in &ret_types {
-                                total_ret_slots += info.type_slot_count(*ret_type);
-                            }
-                            let ret_start = func.alloc_temp(total_ret_slots);
-                            for i in 0..total_ret_slots {
-                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                            }
-                            if !ret_types.is_empty() {
-                                let error_type = *ret_types.last().unwrap();
-                                let error_slots = info.type_slot_count(error_type);
-                                let error_start = ret_start + total_ret_slots - error_slots;
-                                func.emit_copy(error_start, err_reg, error_slots);
-                            }
-                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
+                            emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
                             func.patch_jump(end_jump, func.current_pc());
                             return Ok(());
@@ -616,26 +600,7 @@ fn compile_stmt_with_label(
                             compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
 
                             if info.is_tuple_any_error(base_type) {
-                                let ok_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
-
-                                let ret_types: Vec<_> = func.return_types().to_vec();
-                                let mut total_ret_slots = 0u16;
-                                for ret_type in &ret_types {
-                                    total_ret_slots += info.type_slot_count(*ret_type);
-                                }
-                                let ret_start = func.alloc_temp(total_ret_slots);
-                                for i in 0..total_ret_slots {
-                                    func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                                }
-                                if !ret_types.is_empty() {
-                                    let error_type = *ret_types.last().unwrap();
-                                    let error_slots = info.type_slot_count(error_type);
-                                    let error_start = ret_start + total_ret_slots - error_slots;
-                                    func.emit_copy(error_start, base_reg + 2, error_slots);
-                                }
-                                func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
-                                func.patch_jump(ok_jump, func.current_pc());
+                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
                             }
 
                             let any_type = info.any_type();
@@ -662,23 +627,7 @@ fn compile_stmt_with_label(
                             // fail if err != nil
                             let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
 
-                            let ret_types: Vec<_> = func.return_types().to_vec();
-                            let mut total_ret_slots = 0u16;
-                            for ret_type in &ret_types {
-                                total_ret_slots += info.type_slot_count(*ret_type);
-                            }
-                            let ret_start = func.alloc_temp(total_ret_slots);
-                            for i in 0..total_ret_slots {
-                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                            }
-                            if !ret_types.is_empty() {
-                                let error_type = *ret_types.last().unwrap();
-                                let error_slots = info.type_slot_count(error_type);
-                                let error_start = ret_start + total_ret_slots - error_slots;
-                                func.emit_copy(error_start, args_start, error_slots);
-                            }
-                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
+                            emit_error_propagate_return(args_start, func, info);
                             func.patch_jump(ok_err_jump, func.current_pc());
                             let end_jump = func.emit_jump(Opcode::Jump, 0);
 
@@ -693,24 +642,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
-
-                            let ret_types: Vec<_> = func.return_types().to_vec();
-                            let mut total_ret_slots = 0u16;
-                            for ret_type in &ret_types {
-                                total_ret_slots += info.type_slot_count(*ret_type);
-                            }
-                            let ret_start = func.alloc_temp(total_ret_slots);
-                            for i in 0..total_ret_slots {
-                                func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-                            }
-                            if !ret_types.is_empty() {
-                                let error_type = *ret_types.last().unwrap();
-                                let error_slots = info.type_slot_count(error_type);
-                                let error_start = ret_start + total_ret_slots - error_slots;
-                                func.emit_copy(error_start, err_reg, error_slots);
-                            }
-                            func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
-
+                            emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
                             func.patch_jump(end_jump, func.current_pc());
                             return Ok(());

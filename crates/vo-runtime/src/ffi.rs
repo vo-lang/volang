@@ -317,12 +317,19 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Get named_type_id from rttid.
+    /// If `follow_pointer` is true, dereferences Pointer types to find the base Named type.
     /// Returns Some(named_type_id) if rttid refers to a Named type.
-    pub fn get_named_type_id_from_rttid(&self, rttid: u32) -> Option<u32> {
+    pub fn get_named_type_id_from_rttid(&self, rttid: u32, follow_pointer: bool) -> Option<u32> {
         use vo_common_core::runtime_type::RuntimeType;
         let rt = self.runtime_types.get(rttid as usize)?;
         match rt {
             RuntimeType::Named { id, .. } => Some(*id),
+            RuntimeType::Pointer(elem) if follow_pointer => {
+                match self.runtime_types.get(elem.rttid() as usize)? {
+                    RuntimeType::Named { id, .. } => Some(*id),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -331,15 +338,7 @@ impl<'a> ExternCallContext<'a> {
     /// Returns (func_id, is_pointer_receiver, signature_rttid) if found.
     /// For Pointer types, dereferences to find the base named type.
     pub fn lookup_method(&self, rttid: u32, method_name: &str) -> Option<(u32, bool, u32)> {
-        use vo_common_core::runtime_type::RuntimeType;
-        
-        // Handle Pointer types - dereference to get base type
-        let base_rttid = match self.runtime_types.get(rttid as usize)? {
-            RuntimeType::Pointer(elem_value_rttid) => elem_value_rttid.rttid(),
-            _ => rttid,
-        };
-        
-        let named_id = self.get_named_type_id_from_rttid(base_rttid)?;
+        let named_id = self.get_named_type_id_from_rttid(rttid, true)?;
         let named_meta = self.named_type_metas.get(named_id as usize)?;
         let method_info = named_meta.methods.get(method_name)?;
         Some((method_info.func_id, method_info.is_pointer_receiver, method_info.signature_rttid))

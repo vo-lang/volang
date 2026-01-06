@@ -13,6 +13,30 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::{array, interface, map, slice, string, struct_ops};
 use vo_common_core::runtime_type::RuntimeType;
 
+// ==================== Helper functions ====================
+
+/// Check if key is an integer type and extract its value.
+#[inline]
+fn check_int_key(key_slot0: u64, key_slot1: u64) -> Result<i64, &'static str> {
+    let key_vk = interface::unpack_value_kind(key_slot0);
+    if !matches!(key_vk, ValueKind::Int | ValueKind::Int64 | ValueKind::Int32 | ValueKind::Int16 | ValueKind::Int8) {
+        return Err("index must be integer");
+    }
+    Ok(key_slot1 as i64)
+}
+
+/// Check bounds for slice/string indexing.
+#[inline]
+fn check_bounds(idx: i64, len: usize, type_name: &'static str) -> Result<usize, &'static str> {
+    if idx < 0 {
+        return Err(if type_name == "slice" { "slice index out of bounds (negative)" } else { "string index out of bounds (negative)" });
+    }
+    if idx as usize >= len {
+        return Err(if type_name == "slice" { "slice index out of bounds" } else { "string index out of bounds" });
+    }
+    Ok(idx as usize)
+}
+
 /// dyn_get_attr: Get a field from an interface value by name.
 ///
 /// Args: (base: any[2], name: string[1]) -> (any, error)[4]
@@ -212,17 +236,6 @@ fn dyn_error_only(call: &mut ExternCallContext, msg: &str) -> ExternResult {
     ExternResult::Ok
 }
 
-fn named_type_id_for_itab(call: &ExternCallContext, rttid: u32) -> Option<u32> {
-    match call.runtime_types().get(rttid as usize) {
-        Some(RuntimeType::Named { id, .. }) => Some(*id),
-        Some(RuntimeType::Pointer(elem)) => match call.runtime_types().get(elem.rttid() as usize) {
-            Some(RuntimeType::Named { id, .. }) => Some(*id),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_get_attr",
@@ -255,20 +268,15 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
     
     match base_vk {
         ValueKind::Slice => {
-            // Get index from key (must be int)
-            let key_vk = interface::unpack_value_kind(key_slot0);
-            if !matches!(key_vk, ValueKind::Int | ValueKind::Int64 | ValueKind::Int32 | ValueKind::Int16 | ValueKind::Int8) {
-                return dyn_error(call, "slice index must be integer");
-            }
-            let idx = key_slot1 as i64;
-            if idx < 0 {
-                return dyn_error(call, "slice index out of bounds (negative)");
-            }
-            
+            let idx = match check_int_key(key_slot0, key_slot1) {
+                Ok(i) => i,
+                Err(e) => return dyn_error(call, e),
+            };
             let len = crate::objects::slice::len(base_ref);
-            if idx as usize >= len {
-                return dyn_error(call, "slice index out of bounds");
-            }
+            let idx = match check_bounds(idx, len, "slice") {
+                Ok(i) => i,
+                Err(e) => return dyn_error(call, e),
+            };
             
             // Get element type info from base's RuntimeType (preserves named types)
             let elem_meta = crate::objects::slice::elem_meta(base_ref);
@@ -300,21 +308,16 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
         }
         ValueKind::String => {
-            // Get index from key (must be int)
-            let key_vk = interface::unpack_value_kind(key_slot0);
-            if !matches!(key_vk, ValueKind::Int | ValueKind::Int64 | ValueKind::Int32 | ValueKind::Int16 | ValueKind::Int8) {
-                return dyn_error(call, "string index must be integer");
-            }
-            let idx = key_slot1 as i64;
-            if idx < 0 {
-                return dyn_error(call, "string index out of bounds (negative)");
-            }
-            
+            let idx = match check_int_key(key_slot0, key_slot1) {
+                Ok(i) => i,
+                Err(e) => return dyn_error(call, e),
+            };
             let s = string::as_str(base_ref);
             let bytes = s.as_bytes();
-            if idx as usize >= bytes.len() {
-                return dyn_error(call, "string index out of bounds");
-            }
+            let idx = match check_bounds(idx, bytes.len(), "string") {
+                Ok(i) => i,
+                Err(e) => return dyn_error(call, e),
+            };
             
             // Return byte as uint8
             // Basic type rttid = ValueKind value (pre-registered in TypeInterner)
@@ -455,7 +458,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     if expected_vk == ValueKind::Interface {
         let iface_meta_id = expected_rttid;
 
-        let named_type_id = match named_type_id_for_itab(call, val_rttid) {
+        let named_type_id = match call.get_named_type_id_from_rttid(val_rttid, true) {
             Some(id) => id,
             None => return dyn_error_only(call, "value does not have methods"),
         };
@@ -536,21 +539,15 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
 
     match base_vk {
         ValueKind::Slice => {
-            let key_vk = interface::unpack_value_kind(key_slot0);
-            if !matches!(
-                key_vk,
-                ValueKind::Int | ValueKind::Int64 | ValueKind::Int32 | ValueKind::Int16 | ValueKind::Int8
-            ) {
-                return dyn_error_only(call, "slice index must be integer");
-            }
-            let idx = key_slot1 as i64;
-            if idx < 0 {
-                return dyn_error_only(call, "slice index out of bounds (negative)");
-            }
+            let idx = match check_int_key(key_slot0, key_slot1) {
+                Ok(i) => i,
+                Err(e) => return dyn_error_only(call, e),
+            };
             let len = slice::len(base_ref);
-            if idx as usize >= len {
-                return dyn_error_only(call, "slice index out of bounds");
-            }
+            let idx = match check_bounds(idx, len, "slice") {
+                Ok(i) => i,
+                Err(e) => return dyn_error_only(call, e),
+            };
 
             let elem_meta = slice::elem_meta(base_ref);
             let elem_vk = elem_meta.value_kind();
@@ -561,7 +558,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
                 let iface_meta_id = elem_meta.meta_id();
                 let val_vk = interface::unpack_value_kind(val_slot0);
                 let val_rttid = interface::unpack_rttid(val_slot0);
-                let named_type_id = match named_type_id_for_itab(call, val_rttid) {
+                let named_type_id = match call.get_named_type_id_from_rttid(val_rttid, true) {
                     Some(id) => id,
                     None => return dyn_error_only(call, "value does not have methods"),
                 };
@@ -664,7 +661,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
                 let iface_meta_id = val_meta.meta_id();
                 let val_vk = interface::unpack_value_kind(val_slot0);
                 let val_rttid = interface::unpack_rttid(val_slot0);
-                let named_type_id = match named_type_id_for_itab(call, val_rttid) {
+                let named_type_id = match call.get_named_type_id_from_rttid(val_rttid, true) {
                     Some(id) => id,
                     None => return dyn_error_only(call, "value does not have methods"),
                 };
