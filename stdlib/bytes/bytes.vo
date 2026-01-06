@@ -1,18 +1,129 @@
 package bytes
 
+import "unicode/utf8"
+
 // Extern functions (implemented in Rust)
 func Index(s, sep []byte) int
 func LastIndex(s, sep []byte) int
-func IndexByte(s []byte, c byte) int
-func LastIndexByte(s []byte, c byte) int
 func Count(s, sep []byte) int
-func Compare(a, b []byte) int
-func Equal(a, b []byte) bool
 func ToLower(s []byte) []byte
 func ToUpper(s []byte) []byte
-func Repeat(s []byte, count int) []byte
+func Replace(s, old, new []byte, n int) []byte
 
-// GoX-implemented functions
+// Split splits s into all subslices separated by sep.
+func Split(s, sep []byte) [][]byte {
+    return splitGeneric(s, sep, 0, -1)
+}
+
+// SplitN splits s into at most n subslices separated by sep.
+func SplitN(s, sep []byte, n int) [][]byte {
+    return splitGeneric(s, sep, 0, n)
+}
+
+// SplitAfter splits s after each instance of sep.
+func SplitAfter(s, sep []byte) [][]byte {
+    return splitGeneric(s, sep, len(sep), -1)
+}
+
+// SplitAfterN splits s after each instance of sep, at most n times.
+func SplitAfterN(s, sep []byte, n int) [][]byte {
+    return splitGeneric(s, sep, len(sep), n)
+}
+
+// Fields splits s around each instance of one or more consecutive white space characters.
+func Fields(s []byte) [][]byte {
+    var result [][]byte
+    start := -1
+    for i := 0; i < len(s); i++ {
+        isWS := s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f'
+        if isWS {
+            if start >= 0 {
+                result = append(result, s[start:i])
+                start = -1
+            }
+        } else {
+            if start < 0 {
+                start = i
+            }
+        }
+    }
+    if start >= 0 {
+        result = append(result, s[start:])
+    }
+    return result
+}
+
+// Internal helper for split functions
+func splitGeneric(s, sep []byte, sepSave, n int) [][]byte {
+    if n == 0 {
+        return nil
+    }
+    if len(sep) == 0 {
+        // Split at each byte
+        if n < 0 || n > len(s) {
+            n = len(s)
+        }
+        result := make([][]byte, n)
+        for i := 0; i < n; i++ {
+            result[i] = s[i : i+1]
+        }
+        return result
+    }
+    
+    var result [][]byte
+    i := 0
+    for {
+        if n > 0 && len(result) >= n-1 {
+            break
+        }
+        idx := Index(s[i:], sep)
+        if idx < 0 {
+            break
+        }
+        result = append(result, s[i:i+idx+sepSave])
+        i += idx + len(sep)
+    }
+    result = append(result, s[i:])
+    return result
+}
+
+// Vo-implemented functions
+
+// Equal reports whether a and b are the same length and contain the same bytes.
+func Equal(a, b []byte) bool {
+    if len(a) != len(b) {
+        return false
+    }
+    for i := 0; i < len(a); i++ {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// Compare returns an integer comparing two byte slices lexicographically.
+func Compare(a, b []byte) int {
+    minLen := len(a)
+    if len(b) < minLen {
+        minLen = len(b)
+    }
+    for i := 0; i < minLen; i++ {
+        if a[i] < b[i] {
+            return -1
+        }
+        if a[i] > b[i] {
+            return 1
+        }
+    }
+    if len(a) < len(b) {
+        return -1
+    }
+    if len(a) > len(b) {
+        return 1
+    }
+    return 0
+}
 
 // HasPrefix tests whether the byte slice s begins with prefix.
 func HasPrefix(s, prefix []byte) bool {
@@ -29,18 +140,246 @@ func Contains(s, subslice []byte) bool {
     return Index(s, subslice) >= 0
 }
 
-// TrimPrefix returns s without the provided leading prefix byte slice.
-func TrimPrefix(s, prefix []byte) []byte {
-    if HasPrefix(s, prefix) {
-        return s[len(prefix):]
-    }
-    return s
+// ContainsAny reports whether any of the UTF-8-encoded code points in chars are within b.
+func ContainsAny(b []byte, chars string) bool {
+    return IndexAny(b, chars) >= 0
 }
 
-// TrimSuffix returns s without the provided trailing suffix byte slice.
-func TrimSuffix(s, suffix []byte) []byte {
-    if HasSuffix(s, suffix) {
-        return s[:len(s)-len(suffix)]
+// ContainsRune reports whether the rune is contained in the UTF-8-encoded byte slice b.
+func ContainsRune(b []byte, r rune) bool {
+    return IndexRune(b, r) >= 0
+}
+
+// Clone returns a copy of b.
+func Clone(b []byte) []byte {
+    if b == nil {
+        return nil
     }
-    return s
+    c := make([]byte, len(b))
+    copy(c, b)
+    return c
+}
+
+// Repeat returns a new byte slice consisting of count copies of b.
+func Repeat(b []byte, count int) []byte {
+    if count <= 0 || len(b) == 0 {
+        return []byte{}
+    }
+    n := len(b) * count
+    result := make([]byte, n)
+    bp := copy(result, b)
+    for bp < n {
+        copy(result[bp:], result[:bp])
+        bp *= 2
+    }
+    return result
+}
+
+// IndexByte returns the index of the first instance of c in b, or -1 if c is not present.
+func IndexByte(b []byte, c byte) int {
+    for i := 0; i < len(b); i++ {
+        if b[i] == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// LastIndexByte returns the index of the last instance of c in b, or -1 if c is not present.
+func LastIndexByte(b []byte, c byte) int {
+    for i := len(b) - 1; i >= 0; i-- {
+        if b[i] == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// IndexRune interprets b as a sequence of UTF-8-encoded code points and returns
+// the byte index of the first occurrence in b of the given rune.
+func IndexRune(b []byte, r rune) int {
+    i := 0
+    for i < len(b) {
+        c, size := utf8.DecodeRune(b[i:])
+        if c == r {
+            return i
+        }
+        i += size
+    }
+    return -1
+}
+
+// IndexAny interprets b as a sequence of UTF-8-encoded Unicode code points.
+// It returns the byte index of the first occurrence in b of any of the Unicode
+// code points in chars. It returns -1 if chars is empty or if there is no code
+// point in common.
+func IndexAny(b []byte, chars string) int {
+    if len(chars) == 0 {
+        return -1
+    }
+    i := 0
+    for i < len(b) {
+        c, size := utf8.DecodeRune(b[i:])
+        if indexRuneInString(chars, c) >= 0 {
+            return i
+        }
+        i += size
+    }
+    return -1
+}
+
+// LastIndexAny interprets b as a sequence of UTF-8-encoded Unicode code points.
+// It returns the byte index of the last occurrence in b of any of the Unicode
+// code points in chars. It returns -1 if chars is empty or if there is no code
+// point in common.
+func LastIndexAny(b []byte, chars string) int {
+    if len(chars) == 0 {
+        return -1
+    }
+    lastIdx := -1
+    i := 0
+    for i < len(b) {
+        c, size := utf8.DecodeRune(b[i:])
+        if indexRuneInString(chars, c) >= 0 {
+            lastIdx = i
+        }
+        i += size
+    }
+    return lastIdx
+}
+
+// TrimSpace returns a subslice of b by slicing off all leading and trailing white space.
+func TrimSpace(b []byte) []byte {
+    start := 0
+    for start < len(b) && isSpace(b[start]) {
+        start++
+    }
+    end := len(b)
+    for end > start && isSpace(b[end-1]) {
+        end--
+    }
+    return b[start:end]
+}
+
+// Trim returns a subslice of b by slicing off all leading and trailing
+// UTF-8-encoded code points contained in cutset.
+func Trim(b []byte, cutset string) []byte {
+    return TrimRight(TrimLeft(b, cutset), cutset)
+}
+
+// TrimLeft returns a subslice of b by slicing off all leading
+// UTF-8-encoded code points contained in cutset.
+func TrimLeft(b []byte, cutset string) []byte {
+    if len(b) == 0 || len(cutset) == 0 {
+        return b
+    }
+    i := 0
+    for i < len(b) {
+        c, size := utf8.DecodeRune(b[i:])
+        if indexRuneInString(cutset, c) < 0 {
+            break
+        }
+        i += size
+    }
+    return b[i:]
+}
+
+// TrimRight returns a subslice of b by slicing off all trailing
+// UTF-8-encoded code points contained in cutset.
+func TrimRight(b []byte, cutset string) []byte {
+    if len(b) == 0 || len(cutset) == 0 {
+        return b
+    }
+    end := len(b)
+    for end > 0 {
+        r, size := utf8.DecodeLastRune(b[:end])
+        if indexRuneInString(cutset, r) < 0 {
+            break
+        }
+        end -= size
+    }
+    return b[:end]
+}
+
+// TrimPrefix returns b without the provided leading prefix byte slice.
+func TrimPrefix(b, prefix []byte) []byte {
+    if HasPrefix(b, prefix) {
+        return b[len(prefix):]
+    }
+    return b
+}
+
+// TrimSuffix returns b without the provided trailing suffix byte slice.
+func TrimSuffix(b, suffix []byte) []byte {
+    if HasSuffix(b, suffix) {
+        return b[:len(b)-len(suffix)]
+    }
+    return b
+}
+
+// ReplaceAll returns a copy of b with all occurrences of old replaced by new.
+func ReplaceAll(b, old, new []byte) []byte {
+    return Replace(b, old, new, -1)
+}
+
+// Join concatenates the elements of s to create a new byte slice.
+func Join(s [][]byte, sep []byte) []byte {
+    if len(s) == 0 {
+        return []byte{}
+    }
+    if len(s) == 1 {
+        return Clone(s[0])
+    }
+    n := len(sep) * (len(s) - 1)
+    for i := 0; i < len(s); i++ {
+        n += len(s[i])
+    }
+    b := make([]byte, n)
+    bp := copy(b, s[0])
+    for i := 1; i < len(s); i++ {
+        bp += copy(b[bp:], sep)
+        bp += copy(b[bp:], s[i])
+    }
+    return b
+}
+
+// Cut slices b around the first instance of sep, returning the slices before and after sep.
+func Cut(b, sep []byte) (before, after []byte, found bool) {
+    if i := Index(b, sep); i >= 0 {
+        return b[:i], b[i+len(sep):], true
+    }
+    return b, nil, false
+}
+
+// CutPrefix returns b without the provided leading prefix byte slice and reports whether it found the prefix.
+func CutPrefix(b, prefix []byte) (after []byte, found bool) {
+    if !HasPrefix(b, prefix) {
+        return b, false
+    }
+    return b[len(prefix):], true
+}
+
+// CutSuffix returns b without the provided ending suffix byte slice and reports whether it found the suffix.
+func CutSuffix(b, suffix []byte) (before []byte, found bool) {
+    if !HasSuffix(b, suffix) {
+        return b, false
+    }
+    return b[:len(b)-len(suffix)], true
+}
+
+// Internal helper: check if byte is ASCII whitespace
+func isSpace(c byte) bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+}
+
+// Internal helper: find rune in string
+func indexRuneInString(s string, r rune) int {
+    i := 0
+    for _, c := range s {
+        if c == r {
+            return i
+        }
+        i += utf8.RuneLen(c)
+    }
+    return -1
 }

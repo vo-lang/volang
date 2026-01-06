@@ -1,23 +1,494 @@
 package strconv
 
-// Extern functions (implemented in Rust)
-func Atoi(s string) (int, error)
-func Itoa(i int) string
-func ParseInt(s string, base int) (int, error)
-func ParseFloat(s string) (float64, error)
-func FormatInt(i int, base int) string
-func FormatFloat(f float64, fmt string, prec int) string
-func FormatBool(b bool) string
-func ParseBool(s string) (bool, error)
-func Quote(s string) string
+import "errors"
+import "unicode/utf8"
 
-// GoX-implemented functions
+// Error codes for strconv
+const (
+    ErrSyntax = 3000 // Invalid syntax
+    ErrRange  = 3001 // Value out of range
+)
+
+// Extern functions (implemented in Rust)
+func ParseFloat(s string, bitSize int) (float64, bool)
+func FormatFloat(f float64, fmt byte, prec, bitSize int) string
+
+// Vo-implemented functions
+
+// Atoi is equivalent to ParseInt(s, 10).
+func Atoi(s string) (int, error) {
+    return ParseInt(s, 10)
+}
+
+// Itoa is equivalent to FormatInt(i, 10).
+func Itoa(i int) string {
+    return FormatInt(i, 10)
+}
+
+// ParseInt interprets a string s in the given base (2 to 36) and returns the corresponding value.
+func ParseInt(s string, base int) (int, error) {
+    if len(s) == 0 {
+        return 0, errors.NewCode(ErrSyntax, "empty string")
+    }
+    if base < 2 || base > 36 {
+        return 0, errors.NewCode(ErrSyntax, "invalid base")
+    }
+
+    neg := false
+    start := 0
+    if s[0] == '-' {
+        neg = true
+        start = 1
+    } else if s[0] == '+' {
+        start = 1
+    }
+
+    if start >= len(s) {
+        return 0, errors.NewCode(ErrSyntax, "invalid syntax")
+    }
+
+    var result int
+    for i := start; i < len(s); i++ {
+        c := s[i]
+        var digit int
+        if c >= '0' && c <= '9' {
+            digit = int(c - '0')
+        } else if c >= 'a' && c <= 'z' {
+            digit = int(c - 'a' + 10)
+        } else if c >= 'A' && c <= 'Z' {
+            digit = int(c - 'A' + 10)
+        } else {
+            return 0, errors.NewCode(ErrSyntax, "invalid character")
+        }
+        if digit >= base {
+            return 0, errors.NewCode(ErrSyntax, "invalid digit for base")
+        }
+        result = result*base + digit
+    }
+
+    if neg {
+        result = -result
+    }
+    return result, nil
+}
+
+// ParseUint is like ParseInt but for unsigned integers.
+func ParseUint(s string, base int) (uint, error) {
+    if len(s) == 0 {
+        return 0, errors.NewCode(ErrSyntax, "empty string")
+    }
+    if base < 2 || base > 36 {
+        return 0, errors.NewCode(ErrSyntax, "invalid base")
+    }
+
+    start := 0
+    if s[0] == '+' {
+        start = 1
+    }
+
+    if start >= len(s) {
+        return 0, errors.NewCode(ErrSyntax, "invalid syntax")
+    }
+
+    var result uint
+    for i := start; i < len(s); i++ {
+        c := s[i]
+        var digit uint
+        if c >= '0' && c <= '9' {
+            digit = uint(c - '0')
+        } else if c >= 'a' && c <= 'z' {
+            digit = uint(c - 'a' + 10)
+        } else if c >= 'A' && c <= 'Z' {
+            digit = uint(c - 'A' + 10)
+        } else {
+            return 0, errors.NewCode(ErrSyntax, "invalid character")
+        }
+        if digit >= uint(base) {
+            return 0, errors.NewCode(ErrSyntax, "invalid digit for base")
+        }
+        result = result*uint(base) + digit
+    }
+
+    return result, nil
+}
+
+// ParseBool returns the boolean value represented by the string.
+func ParseBool(s string) (bool, error) {
+    if s == "1" || s == "t" || s == "T" || s == "true" || s == "TRUE" || s == "True" {
+        return true, nil
+    }
+    if s == "0" || s == "f" || s == "F" || s == "false" || s == "FALSE" || s == "False" {
+        return false, nil
+    }
+    return false, errors.NewCode(ErrSyntax, "invalid bool syntax")
+}
+
+// FormatInt returns the string representation of i in the given base.
+func FormatInt(i int, base int) string {
+    if base < 2 || base > 36 {
+        return ""
+    }
+    if i == 0 {
+        return "0"
+    }
+
+    neg := i < 0
+    if neg {
+        i = -i
+    }
+
+    var buf [65]byte
+    pos := 64
+    for i > 0 {
+        digit := i % base
+        if digit < 10 {
+            buf[pos] = byte('0' + digit)
+        } else {
+            buf[pos] = byte('a' + digit - 10)
+        }
+        pos--
+        i = i / base
+    }
+
+    if neg {
+        buf[pos] = '-'
+        pos--
+    }
+
+    return string(buf[pos+1 : 65])
+}
+
+// FormatUint returns the string representation of u in the given base.
+func FormatUint(u uint, base int) string {
+    if base < 2 || base > 36 {
+        return ""
+    }
+    if u == 0 {
+        return "0"
+    }
+
+    var buf [64]byte
+    pos := 63
+    for u > 0 {
+        digit := u % uint(base)
+        if digit < 10 {
+            buf[pos] = byte('0' + digit)
+        } else {
+            buf[pos] = byte('a' + digit - 10)
+        }
+        pos--
+        u = u / uint(base)
+    }
+
+    return string(buf[pos+1 : 64])
+}
+
+// FormatBool returns "true" or "false" according to the value of b.
+func FormatBool(b bool) string {
+    if b {
+        return "true"
+    }
+    return "false"
+}
+
+// Quote returns a double-quoted Go string literal representing s.
+func Quote(s string) string {
+    return quoteWith(s, '"')
+}
+
+// QuoteRune returns a single-quoted Go character literal representing the rune.
+func QuoteRune(r rune) string {
+    buf := make([]byte, 0, 8)
+    buf = append(buf, '\'')
+    buf = appendQuotedRune(buf, r, '\'')
+    buf = append(buf, '\'')
+    return string(buf)
+}
+
+// QuoteToASCII returns a double-quoted Go string literal representing s,
+// with non-ASCII characters escaped.
+func QuoteToASCII(s string) string {
+    return quoteWithASCII(s, '"')
+}
+
+// Unquote interprets s as a single-quoted, double-quoted, or backquoted string literal.
+func Unquote(s string) (string, error) {
+    n := len(s)
+    if n < 2 {
+        return "", errors.NewCode(ErrSyntax, "invalid quoted string")
+    }
+
+    quote := s[0]
+    if quote != s[n-1] {
+        return "", errors.NewCode(ErrSyntax, "mismatched quotes")
+    }
+
+    s = s[1 : n-1]
+
+    if quote == '`' {
+        return s, nil
+    }
+
+    if quote != '"' && quote != '\'' {
+        return "", errors.NewCode(ErrSyntax, "invalid quote character")
+    }
+
+    buf := make([]byte, 0, len(s))
+    for i := 0; i < len(s); {
+        if s[i] == '\\' && i+1 < len(s) {
+            c := s[i+1]
+            switch c {
+            case 'a':
+                buf = append(buf, '\a')
+                i += 2
+            case 'b':
+                buf = append(buf, '\b')
+                i += 2
+            case 'f':
+                buf = append(buf, '\f')
+                i += 2
+            case 'n':
+                buf = append(buf, '\n')
+                i += 2
+            case 'r':
+                buf = append(buf, '\r')
+                i += 2
+            case 't':
+                buf = append(buf, '\t')
+                i += 2
+            case 'v':
+                buf = append(buf, '\v')
+                i += 2
+            case '\\':
+                buf = append(buf, '\\')
+                i += 2
+            case '\'':
+                buf = append(buf, '\'')
+                i += 2
+            case '"':
+                buf = append(buf, '"')
+                i += 2
+            case 'x':
+                if i+3 < len(s) {
+                    v, err := ParseUint(s[i+2:i+4], 16)
+                    if err != nil {
+                        return "", err
+                    }
+                    buf = append(buf, byte(v))
+                    i += 4
+                } else {
+                    return "", errors.NewCode(ErrSyntax, "invalid hex escape")
+                }
+            case 'u':
+                if i+5 < len(s) {
+                    v, err := ParseUint(s[i+2:i+6], 16)
+                    if err != nil {
+                        return "", err
+                    }
+                    buf = appendRune(buf, rune(v))
+                    i += 6
+                } else {
+                    return "", errors.NewCode(ErrSyntax, "invalid unicode escape")
+                }
+            case 'U':
+                if i+9 < len(s) {
+                    v, err := ParseUint(s[i+2:i+10], 16)
+                    if err != nil {
+                        return "", err
+                    }
+                    buf = appendRune(buf, rune(v))
+                    i += 10
+                } else {
+                    return "", errors.NewCode(ErrSyntax, "invalid unicode escape")
+                }
+            default:
+                if c >= '0' && c <= '7' {
+                    if i+3 < len(s) && s[i+2] >= '0' && s[i+2] <= '7' && s[i+3] >= '0' && s[i+3] <= '7' {
+                        v := int(c-'0')*64 + int(s[i+2]-'0')*8 + int(s[i+3]-'0')
+                        buf = append(buf, byte(v))
+                        i += 4
+                    } else {
+                        return "", errors.NewCode(ErrSyntax, "invalid octal escape")
+                    }
+                } else {
+                    return "", errors.NewCode(ErrSyntax, "invalid escape sequence")
+                }
+            }
+        } else {
+            buf = append(buf, s[i])
+            i++
+        }
+    }
+
+    return string(buf), nil
+}
 
 // AppendInt appends the string form of the integer i to dst.
 func AppendInt(dst []byte, i int, base int) []byte {
     s := FormatInt(i, base)
-    for j := 0; j < len(s); j += 1 {
-        dst = append(dst, s[j])
+    return append(dst, s...)
+}
+
+// AppendUint appends the string form of the unsigned integer u to dst.
+func AppendUint(dst []byte, u uint, base int) []byte {
+    s := FormatUint(u, base)
+    return append(dst, s...)
+}
+
+// AppendBool appends "true" or "false" to dst.
+func AppendBool(dst []byte, b bool) []byte {
+    if b {
+        return append(dst, "true"...)
     }
-    return dst
+    return append(dst, "false"...)
+}
+
+// AppendQuote appends a double-quoted Go string literal to dst.
+func AppendQuote(dst []byte, s string) []byte {
+    return append(dst, Quote(s)...)
+}
+
+// AppendQuoteRune appends a single-quoted Go character literal to dst.
+func AppendQuoteRune(dst []byte, r rune) []byte {
+    return append(dst, QuoteRune(r)...)
+}
+
+// IsPrint reports whether the rune is printable.
+func IsPrint(r rune) bool {
+    if r < 0x20 {
+        return false
+    }
+    if r < 0x7F {
+        return true
+    }
+    if r == 0x7F {
+        return false
+    }
+    return r >= 0xA0
+}
+
+// Internal helper: quote string with given quote character
+func quoteWith(s string, quote byte) string {
+    buf := make([]byte, 0, len(s)+2)
+    buf = append(buf, quote)
+    for i := 0; i < len(s); {
+        c := s[i]
+        if c == byte(quote) || c == '\\' {
+            buf = append(buf, '\\', c)
+            i++
+        } else if c < 0x20 {
+            buf = appendEscapedByte(buf, c)
+            i++
+        } else if c < 0x80 {
+            buf = append(buf, c)
+            i++
+        } else {
+            r, size := utf8.DecodeRuneInString(s[i:])
+            if r == utf8.RuneError && size == 1 {
+                buf = append(buf, '\\', 'x')
+                buf = appendHexByte(buf, c)
+            } else {
+                for j := 0; j < size; j++ {
+                    buf = append(buf, s[i+j])
+                }
+            }
+            i += size
+        }
+    }
+    buf = append(buf, quote)
+    return string(buf)
+}
+
+// Internal helper: quote string with ASCII-only output
+func quoteWithASCII(s string, quote byte) string {
+    buf := make([]byte, 0, len(s)*2+2)
+    buf = append(buf, quote)
+    for i := 0; i < len(s); {
+        c := s[i]
+        if c == byte(quote) || c == '\\' {
+            buf = append(buf, '\\', c)
+            i++
+        } else if c < 0x20 {
+            buf = appendEscapedByte(buf, c)
+            i++
+        } else if c < 0x7F {
+            buf = append(buf, c)
+            i++
+        } else {
+            r, size := utf8.DecodeRuneInString(s[i:])
+            buf = appendEscapedRune(buf, r)
+            i += size
+        }
+    }
+    buf = append(buf, quote)
+    return string(buf)
+}
+
+// Internal helper: append escaped byte
+func appendEscapedByte(buf []byte, c byte) []byte {
+    switch c {
+    case '\a':
+        return append(buf, '\\', 'a')
+    case '\b':
+        return append(buf, '\\', 'b')
+    case '\f':
+        return append(buf, '\\', 'f')
+    case '\n':
+        return append(buf, '\\', 'n')
+    case '\r':
+        return append(buf, '\\', 'r')
+    case '\t':
+        return append(buf, '\\', 't')
+    case '\v':
+        return append(buf, '\\', 'v')
+    default:
+        buf = append(buf, '\\', 'x')
+        return appendHexByte(buf, c)
+    }
+}
+
+// Internal helper: append hex representation of byte
+func appendHexByte(buf []byte, c byte) []byte {
+    const hex = "0123456789abcdef"
+    return append(buf, hex[c>>4], hex[c&0xF])
+}
+
+// Internal helper: append escaped rune
+func appendEscapedRune(buf []byte, r rune) []byte {
+    if r < 0x10000 {
+        buf = append(buf, '\\', 'u')
+        buf = appendHexNibbles(buf, int(r), 4)
+    } else {
+        buf = append(buf, '\\', 'U')
+        buf = appendHexNibbles(buf, int(r), 8)
+    }
+    return buf
+}
+
+// Internal helper: append n hex nibbles
+func appendHexNibbles(buf []byte, v int, n int) []byte {
+    const hex = "0123456789abcdef"
+    for i := n - 1; i >= 0; i-- {
+        buf = append(buf, hex[(v>>(i*4))&0xF])
+    }
+    return buf
+}
+
+// Internal helper: append quoted rune for QuoteRune
+func appendQuotedRune(buf []byte, r rune, quote byte) []byte {
+    if r == rune(quote) || r == '\\' {
+        return append(buf, '\\', byte(r))
+    }
+    if r < 0x20 {
+        return appendEscapedByte(buf, byte(r))
+    }
+    if r < 0x7F {
+        return append(buf, byte(r))
+    }
+    return appendRune(buf, r)
+}
+
+// Internal helper: append rune as UTF-8
+func appendRune(buf []byte, r rune) []byte {
+    return utf8.AppendRune(buf, r)
 }

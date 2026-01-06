@@ -1,20 +1,23 @@
 package strings
 
+import "unicode/utf8"
+
 // Extern functions (implemented in Rust)
 func Index(s, substr string) int
 func LastIndex(s, substr string) int
 func Count(s, substr string) int
 func ToLower(s string) string
 func ToUpper(s string) string
-func TrimSpace(s string) string
-func Trim(s, cutset string) string
-func TrimLeft(s, cutset string) string
-func TrimRight(s, cutset string) string
+func ToTitle(s string) string
 func Split(s, sep string) []string
+func SplitN(s, sep string, n int) []string
+func SplitAfter(s, sep string) []string
+func SplitAfterN(s, sep string, n int) []string
+func Fields(s string) []string
 func Replace(s, old, new string, n int) string
 func EqualFold(s, t string) bool
 
-// GoX-implemented functions
+// Vo-implemented functions
 
 // HasPrefix tests whether the string s begins with prefix.
 func HasPrefix(s, prefix string) bool {
@@ -33,14 +36,17 @@ func Contains(s, substr string) bool {
 
 // ContainsAny reports whether any Unicode code points in chars are within s.
 func ContainsAny(s, chars string) bool {
-    for i := 0; i < len(s); i += 1 {
-        for j := 0; j < len(chars); j += 1 {
-            if s[i] == chars[j] {
-                return true
-            }
+    for _, c := range s {
+        if IndexRune(chars, c) >= 0 {
+            return true
         }
     }
     return false
+}
+
+// ContainsRune reports whether the Unicode code point r is within s.
+func ContainsRune(s string, r rune) bool {
+    return IndexRune(s, r) >= 0
 }
 
 // Compare returns an integer comparing two strings lexicographically.
@@ -54,16 +60,147 @@ func Compare(a, b string) int {
     return 1
 }
 
-// Repeat returns a new string consisting of count copies of s.
-func Repeat(s string, count int) string {
-    if count <= 0 {
+// Clone returns a fresh copy of s.
+func Clone(s string) string {
+    if len(s) == 0 {
         return ""
     }
-    result := ""
-    for i := 0; i < count; i += 1 {
-        result = result + s
+    b := make([]byte, len(s))
+    copy(b, s)
+    return string(b)
+}
+
+// Repeat returns a new string consisting of count copies of s.
+func Repeat(s string, count int) string {
+    if count <= 0 || len(s) == 0 {
+        return ""
     }
-    return result
+    n := len(s) * count
+    b := make([]byte, n)
+    bp := copy(b, s)
+    for bp < n {
+        copy(b[bp:], b[:bp])
+        bp *= 2
+    }
+    return string(b)
+}
+
+// IndexByte returns the index of the first instance of c in s, or -1 if c is not present.
+func IndexByte(s string, c byte) int {
+    for i := 0; i < len(s); i++ {
+        if s[i] == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// LastIndexByte returns the index of the last instance of c in s, or -1 if c is not present.
+func LastIndexByte(s string, c byte) int {
+    for i := len(s) - 1; i >= 0; i-- {
+        if s[i] == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// IndexRune returns the index of the first instance of the Unicode code point r in s,
+// or -1 if r is not present.
+func IndexRune(s string, r rune) int {
+    i := 0
+    for _, c := range s {
+        if c == r {
+            return i
+        }
+        i += utf8.RuneLen(c)
+    }
+    return -1
+}
+
+// IndexAny returns the index of the first instance of any Unicode code point from chars in s,
+// or -1 if no Unicode code point from chars is present in s.
+func IndexAny(s, chars string) int {
+    if len(chars) == 0 {
+        return -1
+    }
+    i := 0
+    for _, c := range s {
+        if IndexRune(chars, c) >= 0 {
+            return i
+        }
+        i += utf8.RuneLen(c)
+    }
+    return -1
+}
+
+// LastIndexAny returns the index of the last instance of any Unicode code point from chars in s,
+// or -1 if no Unicode code point from chars is present in s.
+func LastIndexAny(s, chars string) int {
+    if len(chars) == 0 {
+        return -1
+    }
+    lastIdx := -1
+    i := 0
+    for _, c := range s {
+        if IndexRune(chars, c) >= 0 {
+            lastIdx = i
+        }
+        i += utf8.RuneLen(c)
+    }
+    return lastIdx
+}
+
+// TrimSpace returns a slice of the string s, with all leading and trailing white space removed.
+func TrimSpace(s string) string {
+    start := 0
+    for start < len(s) && isSpace(s[start]) {
+        start++
+    }
+    end := len(s)
+    for end > start && isSpace(s[end-1]) {
+        end--
+    }
+    return s[start:end]
+}
+
+// Trim returns a slice of the string s with all leading and trailing Unicode code points
+// contained in cutset removed.
+func Trim(s, cutset string) string {
+    return TrimRight(TrimLeft(s, cutset), cutset)
+}
+
+// TrimLeft returns a slice of the string s with all leading Unicode code points
+// contained in cutset removed.
+func TrimLeft(s, cutset string) string {
+    if len(s) == 0 || len(cutset) == 0 {
+        return s
+    }
+    i := 0
+    for _, c := range s {
+        if IndexRune(cutset, c) < 0 {
+            break
+        }
+        i += utf8.RuneLen(c)
+    }
+    return s[i:]
+}
+
+// TrimRight returns a slice of the string s with all trailing Unicode code points
+// contained in cutset removed.
+func TrimRight(s, cutset string) string {
+    if len(s) == 0 || len(cutset) == 0 {
+        return s
+    }
+    end := len(s)
+    for end > 0 {
+        r, size := utf8.DecodeLastRuneInString(s[:end])
+        if IndexRune(cutset, r) < 0 {
+            break
+        }
+        end -= size
+    }
+    return s[:end]
 }
 
 // TrimPrefix returns s without the provided leading prefix string.
@@ -87,22 +224,56 @@ func ReplaceAll(s, old, new string) string {
     return Replace(s, old, new, -1)
 }
 
-// SplitN slices s into substrings separated by sep and returns a slice of
-// the substrings between those separators.
-// n determines the number of substrings to return:
-//   n > 0: at most n substrings; the last substring will be the unsplit remainder.
-//   n == 0: the result is nil (zero substrings)
-//   n < 0: all substrings
-func SplitN(s, sep string, n int) []string
-
 // Join concatenates the elements of parts to create a single string.
 func Join(parts []string, sep string) string {
     if len(parts) == 0 {
         return ""
     }
-    result := parts[0]
-    for i := 1; i < len(parts); i += 1 {
-        result = result + sep + parts[i]
+    if len(parts) == 1 {
+        return parts[0]
     }
-    return result
+    n := len(sep) * (len(parts) - 1)
+    for i := 0; i < len(parts); i++ {
+        n += len(parts[i])
+    }
+    b := make([]byte, n)
+    bp := copy(b, parts[0])
+    for i := 1; i < len(parts); i++ {
+        bp += copy(b[bp:], sep)
+        bp += copy(b[bp:], parts[i])
+    }
+    return string(b)
+}
+
+// Cut slices s around the first instance of sep, returning the text before and after sep.
+// The found result reports whether sep appears in s.
+// If sep does not appear in s, cut returns s, "", false.
+func Cut(s, sep string) (before, after string, found bool) {
+    if i := Index(s, sep); i >= 0 {
+        return s[:i], s[i+len(sep):], true
+    }
+    return s, "", false
+}
+
+// CutPrefix returns s without the provided leading prefix string and reports whether it found the prefix.
+// If s doesn't start with prefix, CutPrefix returns s, false.
+func CutPrefix(s, prefix string) (after string, found bool) {
+    if !HasPrefix(s, prefix) {
+        return s, false
+    }
+    return s[len(prefix):], true
+}
+
+// CutSuffix returns s without the provided ending suffix string and reports whether it found the suffix.
+// If s doesn't end with suffix, CutSuffix returns s, false.
+func CutSuffix(s, suffix string) (before string, found bool) {
+    if !HasSuffix(s, suffix) {
+        return s, false
+    }
+    return s[:len(s)-len(suffix)], true
+}
+
+// Internal helper: check if byte is ASCII whitespace
+func isSpace(c byte) bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
