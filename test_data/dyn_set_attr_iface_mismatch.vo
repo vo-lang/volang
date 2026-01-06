@@ -1,0 +1,51 @@
+// Test dyn_set_attr with interface field type mismatch
+// Bug: when assigning to interface field, should check if value implements the interface
+package main
+
+type Reader interface {
+	Read() string
+}
+
+type Writer interface {
+	Write(s string)
+}
+
+type Container struct {
+	R Reader  // interface field
+}
+
+type MyWriter struct {
+	data string
+}
+
+func (w *MyWriter) Write(s string) {
+	w.data = s
+}
+
+// MyWriter implements Writer but NOT Reader
+
+func testSetMismatch() error {
+	c := &Container{}
+	var obj any = c
+	
+	w := &MyWriter{}
+	
+	// Try to assign Writer to Reader field - should fail
+	// MyWriter doesn't implement Reader (no Read method)
+	obj~>R = w
+	
+	// If we reach here without error, the bug exists
+	return nil
+}
+
+func main() {
+	err := testSetMismatch()
+	if err == nil {
+		println("FAIL: should have returned error for interface mismatch")
+		return
+	}
+	println("Got expected error:", err.Error())
+	println("PASS")
+}
+
+// Expected: error when assigning MyWriter to Reader field

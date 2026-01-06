@@ -13,7 +13,16 @@ use crate::type_info::TypeInfoWrapper;
 use super::compile_expr_to;
 
 /// Build expected function signature rttid from arguments and LHS return types.
-/// Uses actual LHS types when known, falls back to `any` for unknown types.
+///
+/// # Design: LHS determines expected signature
+///
+/// The expected signature is built from:
+/// - Parameter types: from actual argument expressions
+/// - Return types: from LHS variable types (must be explicitly declared)
+///
+/// This signature is used at runtime to verify the closure being called has
+/// matching parameter/return counts and compatible types. If LHS count doesn't
+/// match the closure's return count, the call fails with an error.
 fn build_expected_sig_rttid(
     args: &[Expr],
     ret_types: &[vo_analysis::TypeKey],

@@ -1,0 +1,34 @@
+// Test dynamic call returning large array (> 2 slots)
+// Bug: dyn_unpack_all_returns only handles Struct > 2 slots, not Array > 2 slots
+package main
+
+type Container struct {
+	data [4]int
+}
+
+func (c *Container) GetArray() [4]int {
+	return c.data
+}
+
+func main() {
+	c := &Container{data: [4]int{1, 2, 3, 4}}
+	var obj any = c
+	
+	// Dynamic call returning [4]int (4 slots)
+	result, err := obj~>GetArray()
+	if err != nil {
+		println("FAIL: unexpected error:", err.Error())
+		return
+	}
+	
+	arr := result.([4]int)
+	if arr[0] != 1 || arr[1] != 2 || arr[2] != 3 || arr[3] != 4 {
+		println("FAIL: array values mismatch:", arr[0], arr[1], arr[2], arr[3])
+		return
+	}
+	
+	println("PASS")
+}
+
+// Expected output:
+// PASS

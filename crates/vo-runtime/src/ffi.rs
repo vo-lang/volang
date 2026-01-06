@@ -309,6 +309,18 @@ impl<'a> ExternCallContext<'a> {
         )
     }
 
+    /// Try to get or create itab. Returns None if named type doesn't implement the interface.
+    /// Use this for dynamic access where type mismatch should return error, not panic.
+    #[inline]
+    pub fn try_get_or_create_itab(&mut self, named_type_id: u32, iface_meta_id: u32) -> Option<u32> {
+        self.itab_cache.try_get_or_create(
+            named_type_id,
+            iface_meta_id,
+            self.named_type_metas,
+            self.interface_metas,
+        )
+    }
+
     /// Get struct_meta_id from rttid using RuntimeType's embedded meta_id.
     /// O(1) lookup via RuntimeType.struct_meta_id().
     pub fn get_struct_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
@@ -458,12 +470,17 @@ impl<'a> ExternCallContext<'a> {
     
     /// Check if two function signatures are compatible for dynamic call.
     /// Returns Ok(()) if compatible, Err(message) if not.
-    /// 
-    /// Compatibility rules:
-    /// - Parameter count must match
-    /// - Return count must match
+    ///
+    /// # Design: LHS determines expected signature
+    ///
+    /// The `expected_sig_rttid` is built from LHS types at compile time.
+    /// This function enforces that:
+    /// - Parameter count must match exactly
+    /// - Return count must match exactly (LHS count == closure return count)
     /// - Each expected param type must be assignable from actual param type
     /// - Each actual return type must be assignable to expected return type (any accepts all)
+    ///
+    /// If return count mismatches, this returns an error before the call happens.
     pub fn check_func_signature_compatible(
         &self,
         closure_sig_rttid: u32,

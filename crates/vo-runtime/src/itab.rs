@@ -48,6 +48,7 @@ impl ItabCache {
 
     /// Get or create itab for interface-to-interface assignment (runtime).
     /// For concrete type assignments, itab_id is already in the constant.
+    /// Panics if named type doesn't implement the interface (compile-time checked).
     pub fn get_or_create(
         &mut self,
         named_type_id: u32,
@@ -55,43 +56,49 @@ impl ItabCache {
         named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
     ) -> u32 {
-        let key = (named_type_id, iface_meta_id);
-
-        if let Some(&itab_id) = self.cache.get(&key) {
-            return itab_id;
-        }
-
-        let itab = Self::build_itab(named_type_id, iface_meta_id, named_type_metas, interface_metas);
-        let itab_id = self.itabs.len() as u32;
-        self.itabs.push(itab);
-        self.cache.insert(key, itab_id);
-
-        itab_id
+        self.try_get_or_create(named_type_id, iface_meta_id, named_type_metas, interface_metas)
+            .expect("method not found in named type")
     }
 
-    fn build_itab(
+    /// Try to get or create itab. Returns None if named type doesn't implement the interface.
+    /// Use this for dynamic access where type mismatch should return error, not panic.
+    pub fn try_get_or_create(
+        &mut self,
         named_type_id: u32,
         iface_meta_id: u32,
         named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
-    ) -> Itab {
-        let named_type = &named_type_metas[named_type_id as usize];
-        let iface_meta = &interface_metas[iface_meta_id as usize];
+    ) -> Option<u32> {
+        let key = (named_type_id, iface_meta_id);
 
-        // Method set check done at compile time.
-        let methods: Vec<u32> = iface_meta
-            .method_names
-            .iter()
-            .map(|name| {
-                named_type
-                    .methods
-                    .get(name)
-                    .expect("method not found in named type")
-                    .func_id
-            })
-            .collect();
+        if let Some(&itab_id) = self.cache.get(&key) {
+            return Some(itab_id);
+        }
 
-        Itab { methods }
+        let itab = Self::try_build_itab(named_type_id, iface_meta_id, named_type_metas, interface_metas)?;
+        let itab_id = self.itabs.len() as u32;
+        self.itabs.push(itab);
+        self.cache.insert(key, itab_id);
+
+        Some(itab_id)
+    }
+
+    fn try_build_itab(
+        named_type_id: u32,
+        iface_meta_id: u32,
+        named_type_metas: &[NamedTypeMeta],
+        interface_metas: &[InterfaceMeta],
+    ) -> Option<Itab> {
+        let named_type = named_type_metas.get(named_type_id as usize)?;
+        let iface_meta = interface_metas.get(iface_meta_id as usize)?;
+
+        let mut methods = Vec::with_capacity(iface_meta.method_names.len());
+        for name in &iface_meta.method_names {
+            let method_info = named_type.methods.get(name)?;
+            methods.push(method_info.func_id);
+        }
+
+        Some(Itab { methods })
     }
 
     #[inline]

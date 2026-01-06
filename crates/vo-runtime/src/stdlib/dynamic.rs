@@ -475,7 +475,11 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             Some(id) => id,
             None => return dyn_error_only(call, "value does not have methods"),
         };
-        let itab_id = call.get_or_create_itab(named_type_id, iface_meta_id);
+        // Use try_get_or_create_itab to check if value implements the interface
+        let itab_id = match call.try_get_or_create_itab(named_type_id, iface_meta_id) {
+            Some(id) => id,
+            None => return dyn_error_only(call, "value does not implement the interface"),
+        };
         let stored_slot0 = interface::pack_slot0(itab_id, val_rttid, val_vk);
 
         unsafe {
@@ -569,7 +573,11 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
                     Some(id) => id,
                     None => return dyn_error_only(call, "value does not have methods"),
                 };
-                let itab_id = call.get_or_create_itab(named_type_id, iface_meta_id);
+                // Use try_get_or_create_itab to check if value implements the interface
+                let itab_id = match call.try_get_or_create_itab(named_type_id, iface_meta_id) {
+                    Some(id) => id,
+                    None => return dyn_error_only(call, "value does not implement the interface"),
+                };
                 let stored_slot0 = interface::pack_slot0(itab_id, val_rttid, val_vk);
                 let src = [stored_slot0, val_slot1];
                 slice::set_n(base_ref, idx as usize, &src, elem_bytes);
@@ -672,7 +680,11 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
                     Some(id) => id,
                     None => return dyn_error_only(call, "value does not have methods"),
                 };
-                let itab_id = call.get_or_create_itab(named_type_id, iface_meta_id);
+                // Use try_get_or_create_itab to check if value implements the interface
+                let itab_id = match call.try_get_or_create_itab(named_type_id, iface_meta_id) {
+                    Some(id) => id,
+                    None => return dyn_error_only(call, "value does not implement the interface"),
+                };
                 let stored_slot0 = interface::pack_slot0(itab_id, val_rttid, val_vk);
                 val_buf.push(stored_slot0);
                 val_buf.push(val_slot1);
@@ -726,6 +738,16 @@ static __VO_DYN_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
 };
 
 /// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check.
+///
+/// # Design: LHS determines expected signature
+///
+/// Dynamic calls require explicit LHS (left-hand side) variables, and the LHS count
+/// must exactly match the function's return count. This is enforced by:
+/// 1. Codegen builds `expected_sig_rttid` from LHS types (including return count)
+/// 2. This function checks closure signature against expected signature
+/// 3. If return count mismatches, `check_func_signature_compatible` returns error
+///
+/// This design avoids runtime ambiguity about how many values to return.
 ///
 /// Args: (callee: any[2], expected_sig_rttid: int[1], max_ret_slots: int[1], expected_ret_count: int[1])
 /// Returns: (ret_slots: int[1], ret_meta_0..N: int[N], error: error[2])
@@ -829,8 +851,8 @@ fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
         let width = call.get_type_slot_count(rttid);
         
         // Read raw slots from source
-        let (raw0, raw1, boxed_ref) = if vk == ValueKind::Struct && width > 2 {
-            // Large struct: allocate GcRef and copy all slots
+        let (raw0, raw1, boxed_ref) = if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
+            // Large struct/array (> 2 slots): allocate GcRef and copy all slots
             let new_ref = call.gc_alloc(width, &[]);
             for j in 0..width {
                 let val = call.call().slot(base_off + src_off + j);
