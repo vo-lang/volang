@@ -12,27 +12,13 @@ func main() {
     
     // Dynamic index access
     v, err := a~>[0]
-    if err != nil {
-        println("unexpected error:", err.Error())
-        return
-    }
+    assert(err == nil, "unexpected error")
     
     // Type assert to error
     e, ok := v.(error)
-    if !ok {
-        println("FAIL: type assertion to error failed")
-        return
-    }
-    
-    if e == nil {
-        println("FAIL: error is nil")
-        return
-    }
-    
-    if e.Error() != "err1" {
-        println("FAIL: error message mismatch, got:", e.Error())
-        return
-    }
+    assert(ok, "type assertion to error failed")
+    assert(e != nil, "error is nil")
+    assert(e.Error() == "err1", "error message mismatch")
     
     println("PASS")
 }

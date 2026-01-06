@@ -307,7 +307,9 @@ fn compile_dyn_closure_call(
     let args_start = ret_slots_slot + 1;
     
     // Store ret_slots value at ret_slots_slot (= args_start - 1)
-    func.emit_op(Opcode::Copy, ret_slots_slot, ret_slots_reg, 0);
+    // Note: dyn_call_prepare returns (ret_slots + 1) to distinguish error (0) from no-return (would be 0)
+    // So we need to subtract 1 here to get actual ret_slots for CallClosure
+    func.emit_op(Opcode::SubI, ret_slots_slot, ret_slots_reg, 1);
     
     // Compile arguments
     let mut arg_offset = 0u16;
@@ -321,85 +323,89 @@ fn compile_dyn_closure_call(
     let c = crate::type_info::encode_call_args(arg_slots_total, 0);
     func.emit_with_flags(Opcode::CallClosure, 1, closure_slot, args_start, c);
 
-    // 5. Process all return values in ONE extern call
-    // dyn_unpack_all_returns(base_off[1], metas[N], is_any[N]) -> results
-    let unpack_extern_id = ctx.get_or_register_extern("dyn_unpack_all_returns");
-    
-    // Args layout: [base_off, metas..., is_any...]
-    let unpack_args = func.alloc_temp(1 + 2 * expected_ret_count);
-    let (b, c) = encode_i32(args_start as i32);
-    func.emit_op(Opcode::LoadInt, unpack_args, b, c);  // base_off
-    
-    // Copy metas from prepare result
-    for i in 0..expected_ret_count {
-        func.emit_op(Opcode::Copy, unpack_args + 1 + i, metas_start + i, 0);
-    }
-    
-    // Set is_any flags
-    for (i, &ret_type) in ret_types.iter().enumerate() {
-        let is_any = info.is_any_type(ret_type);
-        func.emit_op(Opcode::LoadInt, unpack_args + 1 + expected_ret_count + i as u16, if is_any { 1 } else { 0 }, 0);
-    }
-    
-    // Calculate result slots: each any=2, each typed=min(slots,2) for extern return
-    // Large structs return (0, GcRef) and need PtrGet after
-    let mut unpack_result_slots = 0u16;
-    
-    for &ret_type in ret_types.iter() {
-        let is_any = info.is_any_type(ret_type);
-        let slots = info.type_slot_count(ret_type);
-        let vk = info.type_value_kind(ret_type);
-        
-        if is_any {
-            unpack_result_slots += 2;
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
-            unpack_result_slots += 2;  // (0, GcRef)
-        } else {
-            unpack_result_slots += slots.min(2);
-        }
-    }
-    
-    let unpack_result = func.alloc_temp(unpack_result_slots);
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        (1 + 2 * expected_ret_count) as u8,
-        unpack_result,
-        unpack_extern_id as u16,
-        unpack_args,
-    );
-    
-    // Copy results to dst, handling large structs specially
-    let mut src_off = 0u16;
+    // 5. Process return values (skip if no return values)
     let mut dst_off = 0u16;
     
-    for &ret_type in ret_types.iter() {
-        let is_any = info.is_any_type(ret_type);
-        let slots = info.type_slot_count(ret_type);
-        let vk = info.type_value_kind(ret_type);
+    if expected_ret_count > 0 {
+        // dyn_unpack_all_returns(base_off[1], metas[N], is_any[N]) -> results
+        let unpack_extern_id = ctx.get_or_register_extern("dyn_unpack_all_returns");
         
-        if is_any {
-            func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, unpack_result + src_off + 1, 0);
-            src_off += 2;
-            dst_off += 2;
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
-            // Large struct: result is (0, GcRef), use PtrGet
-            func.emit_ptr_get(dst + dst_off, unpack_result + src_off + 1, 0, slots);
-            src_off += 2;
-            dst_off += slots;
-        } else if slots == 1 {
-            func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
-            src_off += 1;
-            dst_off += 1;
-        } else {
-            func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
-            func.emit_op(Opcode::Copy, dst + dst_off + 1, unpack_result + src_off + 1, 0);
-            src_off += 2;
-            dst_off += 2;
+        // Args layout: [base_off, metas..., is_any...]
+        let unpack_args = func.alloc_temp(1 + 2 * expected_ret_count);
+        let (b, c) = encode_i32(args_start as i32);
+        func.emit_op(Opcode::LoadInt, unpack_args, b, c);  // base_off
+        
+        // Copy metas from prepare result
+        for i in 0..expected_ret_count {
+            func.emit_op(Opcode::Copy, unpack_args + 1 + i, metas_start + i, 0);
+        }
+        
+        // Set is_any flags
+        for (i, &ret_type) in ret_types.iter().enumerate() {
+            let is_any = info.is_any_type(ret_type);
+            func.emit_op(Opcode::LoadInt, unpack_args + 1 + expected_ret_count + i as u16, if is_any { 1 } else { 0 }, 0);
+        }
+        
+        // Calculate result slots: each any=2, each typed=min(slots,2) for extern return
+        // Large structs return (0, GcRef) and need PtrGet after
+        let mut unpack_result_slots = 0u16;
+        
+        for &ret_type in ret_types.iter() {
+            let is_any = info.is_any_type(ret_type);
+            let slots = info.type_slot_count(ret_type);
+            let vk = info.type_value_kind(ret_type);
+            
+            if is_any {
+                unpack_result_slots += 2;
+            } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
+                unpack_result_slots += 2;  // (0, GcRef)
+            } else {
+                unpack_result_slots += slots.min(2);
+            }
+        }
+        
+        let unpack_result = func.alloc_temp(unpack_result_slots);
+        func.emit_with_flags(
+            Opcode::CallExtern,
+            (1 + 2 * expected_ret_count) as u8,
+            unpack_result,
+            unpack_extern_id as u16,
+            unpack_args,
+        );
+        
+        // Copy results to dst, handling large structs specially
+        let mut src_off = 0u16;
+        
+        for &ret_type in ret_types.iter() {
+            let is_any = info.is_any_type(ret_type);
+            let slots = info.type_slot_count(ret_type);
+            let vk = info.type_value_kind(ret_type);
+            
+            if is_any {
+                func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
+                func.emit_op(Opcode::Copy, dst + dst_off + 1, unpack_result + src_off + 1, 0);
+                src_off += 2;
+                dst_off += 2;
+            } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
+                // Large struct: result is (0, GcRef), use PtrGet
+                func.emit_ptr_get(dst + dst_off, unpack_result + src_off + 1, 0, slots);
+                src_off += 2;
+                dst_off += slots;
+            } else if slots == 1 {
+                func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
+                src_off += 1;
+                dst_off += 1;
+            } else {
+                func.emit_op(Opcode::Copy, dst + dst_off, unpack_result + src_off, 0);
+                func.emit_op(Opcode::Copy, dst + dst_off + 1, unpack_result + src_off + 1, 0);
+                src_off += 2;
+                dst_off += 2;
+            }
         }
     }
+    // else: no return values, dst_off remains 0
     
-    // Write nil error
+    // Write nil error after return values
     func.emit_op(Opcode::LoadInt, dst + dst_off, 0, 0);
     func.emit_op(Opcode::LoadInt, dst + dst_off + 1, 0, 0);
     

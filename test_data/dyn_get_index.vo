@@ -7,25 +7,13 @@ func main() {
 	var obj interface{} = s
 	
 	v1, err := obj~>[0]
-	if err != nil {
-		println("Error slice[0]:", err)
-		return
-	}
-	if v1.(int) != 10 {
-		println("FAIL: slice[0] expected 10, got", v1.(int))
-		return
-	}
+	assert(err == nil, "slice[0] error")
+	assert(v1.(int) == 10, "slice[0] expected 10")
 	println("slice[0] =", v1.(int))
 	
 	v2, err := obj~>[2]
-	if err != nil {
-		println("Error slice[2]:", err)
-		return
-	}
-	if v2.(int) != 30 {
-		println("FAIL: slice[2] expected 30, got", v2.(int))
-		return
-	}
+	assert(err == nil, "slice[2] error")
+	assert(v2.(int) == 30, "slice[2] expected 30")
 	println("slice[2] =", v2.(int))
 	
 	// Dynamic map index
@@ -33,26 +21,14 @@ func main() {
 	var mobj interface{} = m
 	
 	v3, err := mobj~>["x"]
-	if err != nil {
-		println("Error map[x]:", err)
-		return
-	}
-	if v3.(int) != 100 {
-		println("FAIL: map[x] expected 100, got", v3.(int))
-		return
-	}
+	assert(err == nil, "map[x] error")
+	assert(v3.(int) == 100, "map[x] expected 100")
 	println("map[x] =", v3.(int))
 	
 	// Dynamic map non-existing key
 	v4, err := mobj~>["nonexistent"]
-	if err != nil {
-		println("Error map[nonexistent]:", err)
-		return
-	}
-	if v4.(int) != 0 {
-		println("FAIL: map[nonexistent] expected 0, got", v4.(int))
-		return
-	}
+	assert(err == nil, "map[nonexistent] error")
+	assert(v4.(int) == 0, "map[nonexistent] expected 0")
 	println("map[nonexistent] =", v4.(int))
 	
 	// Dynamic string index
@@ -60,14 +36,8 @@ func main() {
 	var sobj interface{} = str
 	
 	v5, err := sobj~>[1]
-	if err != nil {
-		println("Error string[1]:", err)
-		return
-	}
-	if v5.(uint8) != 'e' {
-		println("FAIL: string[1] expected 'e'")
-		return
-	}
+	assert(err == nil, "string[1] error")
+	assert(v5.(uint8) == 'e', "string[1] expected 'e'")
 	println("string[1] =", v5.(uint8))
 	
 	println("All dyn_get_index tests passed!")

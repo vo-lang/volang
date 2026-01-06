@@ -17,33 +17,18 @@ func main() {
 	var obj interface{} = p
 	
 	v1, err := obj~>Name
-	if err != nil {
-		println("Error Name:", err)
-		return
-	}
-	if v1.(string) != "Alice" {
-		println("FAIL: Name expected Alice, got", v1.(string))
-		return
-	}
+	assert(err == nil, "Name error")
+	assert(v1.(string) == "Alice", "Name expected Alice")
 	println("Name =", v1.(string))
 	
 	v2, err := obj~>Age
-	if err != nil {
-		println("Error Age:", err)
-		return
-	}
-	if v2.(int) != 30 {
-		println("FAIL: Age expected 30, got", v2.(int))
-		return
-	}
+	assert(err == nil, "Age error")
+	assert(v2.(int) == 30, "Age expected 30")
 	println("Age =", v2.(int))
 	
 	// Non-existing field
 	_, err = obj~>NonExistent
-	if err == nil {
-		println("FAIL: NonExistent should return error")
-		return
-	}
+	assert(err != nil, "NonExistent should return error")
 	println("NonExistent error:", err)
 	
 	// Nested struct
@@ -51,26 +36,14 @@ func main() {
 	var nobj interface{} = n
 	
 	v3, err := nobj~>Value
-	if err != nil {
-		println("Error Value:", err)
-		return
-	}
-	if v3.(int) != 100 {
-		println("FAIL: Value expected 100, got", v3.(int))
-		return
-	}
+	assert(err == nil, "Value error")
+	assert(v3.(int) == 100, "Value expected 100")
 	println("Value =", v3.(int))
 	
 	v4, err := nobj~>Inner
-	if err != nil {
-		println("Error Inner:", err)
-		return
-	}
+	assert(err == nil, "Inner error")
 	inner := v4.(*Person)
-	if inner.Name != "Bob" {
-		println("FAIL: Inner.Name expected Bob, got", inner.Name)
-		return
-	}
+	assert(inner.Name == "Bob", "Inner.Name expected Bob")
 	println("Inner.Name =", inner.Name)
 	
 	println("All dyn_get_attr tests passed!")

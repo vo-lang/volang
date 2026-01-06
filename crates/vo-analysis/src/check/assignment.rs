@@ -374,8 +374,9 @@ impl Checker {
         }
     }
 
-    /// Handle DynAccess assignment: v1, v2, err := obj~>Method()
+    /// Handle DynAccess assignment: v1, v2, err := obj~>Method() or err := obj~>Method()
     /// Return type is derived from lhs types, with last being error.
+    /// For no-return methods, ll == 1 (only error).
     fn assign_vars_dyn_access(
         &mut self,
         lhs: &[Expr],
@@ -385,11 +386,11 @@ impl Checker {
         use vo_syntax::ast::ExprKind;
         
         let ll = lhs.len();
-        if ll < 2 {
+        if ll < 1 {
             self.error_code_msg(
                 TypeError::AssignmentMismatch,
                 rhs_expr.span,
-                "dynamic access requires at least 2 lhs values (value, error)".to_string(),
+                "dynamic access requires at least 1 lhs value (error)".to_string(),
             );
             return;
         }
@@ -431,38 +432,50 @@ impl Checker {
             }
         }
         
-        // Build return type tuple from lhs types
-        // Last element must be error, others are value types
+        // Build return type: single error for ll==1, or tuple from lhs types for ll>1
         let error_type = self.universe().error_type();
         let any_type = self.new_t_empty_interface();
         
-        let mut tuple_vars = Vec::with_capacity(ll);
-        for (i, lhs_expr) in lhs.iter().enumerate() {
-            let elem_type = if i == ll - 1 {
-                // Last element is error
-                error_type
-            } else {
-                // Get lhs type, default to any for blank or untyped
-                self.get_lhs_type_for_dyn(lhs_expr).unwrap_or(any_type)
-            };
-            tuple_vars.push(self.new_var(0, None, String::new(), Some(elem_type)));
-        }
-        
-        let tuple_type = self.new_t_tuple(tuple_vars);
-        
-        // Record expression type
-        self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, tuple_type);
-        
-        // Assign each element to lhs
-        let tuple_detail = self.otype(tuple_type).try_as_tuple().unwrap();
-        let vars = tuple_detail.vars().to_vec();
-        for (i, l) in lhs.iter().enumerate() {
-            let var_type = self.lobj(vars[i]).typ();
+        if ll == 1 {
+            // No return values, only error - use error type directly (not tuple)
+            self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, error_type);
+            
+            // Assign error to lhs
             let mut x = Operand::new();
             x.mode = OperandMode::Value;
-            x.typ = var_type;
+            x.typ = Some(error_type);
             x.set_expr(rhs_expr);
-            self.assign_var(l, &mut x);
+            self.assign_var(&lhs[0], &mut x);
+        } else {
+            // Build tuple from lhs types
+            let mut tuple_vars = Vec::with_capacity(ll);
+            for (i, lhs_expr) in lhs.iter().enumerate() {
+                let elem_type = if i == ll - 1 {
+                    // Last element is error
+                    error_type
+                } else {
+                    // Get lhs type, default to any for blank or untyped
+                    self.get_lhs_type_for_dyn(lhs_expr).unwrap_or(any_type)
+                };
+                tuple_vars.push(self.new_var(0, None, String::new(), Some(elem_type)));
+            }
+            
+            let tuple_type = self.new_t_tuple(tuple_vars);
+            
+            // Record expression type
+            self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, tuple_type);
+            
+            // Assign each element to lhs
+            let tuple_detail = self.otype(tuple_type).try_as_tuple().unwrap();
+            let vars = tuple_detail.vars().to_vec();
+            for (i, l) in lhs.iter().enumerate() {
+                let var_type = self.lobj(vars[i]).typ();
+                let mut x = Operand::new();
+                x.mode = OperandMode::Value;
+                x.typ = var_type;
+                x.set_expr(rhs_expr);
+                self.assign_var(l, &mut x);
+            }
         }
     }
     
@@ -488,8 +501,9 @@ impl Checker {
         x.typ
     }
     
-    /// Handle DynAccess initialization for short var decl: v1, v2, err := obj~>Method()
+    /// Handle DynAccess initialization for short var decl: v1, v2, err := obj~>Method() or err := obj~>Method()
     /// Return type is derived from lhs count, with all values as any and last being error.
+    /// For no-return methods, ll == 1 (only error).
     fn init_vars_dyn_access(
         &mut self,
         lhs: &[ObjKey],
@@ -497,11 +511,11 @@ impl Checker {
         dyn_access: &vo_syntax::ast::DynAccessExpr,
     ) {
         let ll = lhs.len();
-        if ll < 2 {
+        if ll < 1 {
             self.error_code_msg(
                 TypeError::AssignmentMismatch,
                 rhs_expr.span,
-                "dynamic access requires at least 2 lhs values (value, error)".to_string(),
+                "dynamic access requires at least 1 lhs value (error)".to_string(),
             );
             return;
         }
@@ -543,29 +557,36 @@ impl Checker {
             }
         }
         
-        // Build return type tuple: (any, any, ..., error)
+        // Build return type: single error for ll==1, or tuple (any, any, ..., error) for ll>1
         let error_type = self.universe().error_type();
         let any_type = self.new_t_empty_interface();
         
-        let mut tuple_vars = Vec::with_capacity(ll);
-        for i in 0..ll {
-            let elem_type = if i == ll - 1 {
-                error_type
-            } else {
-                any_type
-            };
-            tuple_vars.push(self.new_var(0, None, String::new(), Some(elem_type)));
-        }
-        
-        let tuple_type = self.new_t_tuple(tuple_vars.clone());
-        
-        // Record expression type
-        self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, tuple_type);
-        
-        // Initialize each lhs variable with corresponding type
-        for (i, &l) in lhs.iter().enumerate() {
-            let elem_type = if i == ll - 1 { error_type } else { any_type };
-            self.lobj_mut(l).set_type(Some(elem_type));
+        if ll == 1 {
+            // No return values, only error - use error type directly (not tuple)
+            self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, error_type);
+            self.lobj_mut(lhs[0]).set_type(Some(error_type));
+        } else {
+            // Build tuple: (any, any, ..., error)
+            let mut tuple_vars = Vec::with_capacity(ll);
+            for i in 0..ll {
+                let elem_type = if i == ll - 1 {
+                    error_type
+                } else {
+                    any_type
+                };
+                tuple_vars.push(self.new_var(0, None, String::new(), Some(elem_type)));
+            }
+            
+            let tuple_type = self.new_t_tuple(tuple_vars.clone());
+            
+            // Record expression type
+            self.result.record_type_and_value(rhs_expr.id, OperandMode::Value, tuple_type);
+            
+            // Initialize each lhs variable with corresponding type
+            for (i, &l) in lhs.iter().enumerate() {
+                let elem_type = if i == ll - 1 { error_type } else { any_type };
+                self.lobj_mut(l).set_type(Some(elem_type));
+            }
         }
     }
 

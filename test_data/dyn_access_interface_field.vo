@@ -16,10 +16,7 @@ func main() {
     
     // Dynamic access to the error field
     v, err := a~>E
-    if err != nil {
-        println("unexpected error:", err.Error())
-        return
-    }
+    assert(err == nil, "unexpected error")
     
     // Type assert back to error
     e, ok := v.(error)

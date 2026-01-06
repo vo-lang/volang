@@ -14,10 +14,7 @@ func main() {
 	
 	// Get the method as closure
 	methodAny, err := box~>Get
-	if err != nil {
-		println("error:", err)
-		return
-	}
+	assert(err == nil, "get method error")
 	println("got method")
 	
 	// Call without type assertion - just as closure

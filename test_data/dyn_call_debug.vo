@@ -19,10 +19,7 @@ func main() {
 	
 	println("Calling obj~>Add(5)...")
 	result, err := obj~>Add(5)
-	if err != nil {
-		println("Error:", err)
-		return
-	}
+	assert(err == nil, "Add error")
 	println("Result type:", result)
 	val := result.(int)
 	println("Result value:", val)

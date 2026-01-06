@@ -40,65 +40,35 @@ func main() {
 	var obj interface{} = c
 	
 	// Test method with no args and no return
-	_, err := obj~>Inc()
-	if err != nil {
-		println("Error Inc:", err)
-		return
-	}
+	err := obj~>Inc()
+	assert(err == nil, "Inc error")
 	
 	r1, err := obj~>Get()
-	if err != nil {
-		println("Error Get:", err)
-		return
-	}
-	if r1.(int) != 1 {
-		println("FAIL: after Inc, expected 1, got", r1.(int))
-		return
-	}
+	assert(err == nil, "Get error")
+	assert(r1.(int) == 1, "after Inc, expected 1")
 	println("After Inc: count =", r1.(int))
 	
 	// Test method with one arg
 	r2, err := obj~>Add(5)
-	if err != nil {
-		println("Error Add:", err)
-		return
-	}
-	if r2.(int) != 6 {
-		println("FAIL: after Add(5), expected 6, got", r2.(int))
-		return
-	}
+	assert(err == nil, "Add error")
+	assert(r2.(int) == 6, "after Add(5), expected 6")
 	println("After Add(5): count =", r2.(int))
 	
 	// Test method with two args
 	r3, err := obj~>AddTwo(10, 20)
-	if err != nil {
-		println("Error AddTwo:", err)
-		return
-	}
-	if r3.(int) != 36 {
-		println("FAIL: after AddTwo(10,20), expected 36, got", r3.(int))
-		return
-	}
+	assert(err == nil, "AddTwo error")
+	assert(r3.(int) == 36, "after AddTwo(10,20), expected 36")
 	println("After AddTwo(10,20): count =", r3.(int))
 	
 	// Test value receiver method
 	r4, err := obj~>ValueMethod()
-	if err != nil {
-		println("Error ValueMethod:", err)
-		return
-	}
-	if r4.(int) != 72 {
-		println("FAIL: ValueMethod expected 72, got", r4.(int))
-		return
-	}
+	assert(err == nil, "ValueMethod error")
+	assert(r4.(int) == 72, "ValueMethod expected 72")
 	println("ValueMethod: count*2 =", r4.(int))
 	
 	// Test method not found error
 	_, err = obj~>NonExistent()
-	if err == nil {
-		println("FAIL: NonExistent should return error")
-		return
-	}
+	assert(err != nil, "NonExistent should return error")
 	println("NonExistent error:", err)
 	
 	// Test nested call: get method, then call it
@@ -106,15 +76,9 @@ func main() {
 	var wobj interface{} = w
 	
 	r5, err := wobj~>GetCounter()
-	if err != nil {
-		println("Error GetCounter:", err)
-		return
-	}
+	assert(err == nil, "GetCounter error")
 	inner := r5.(*Counter)
-	if inner.count != 100 {
-		println("FAIL: GetCounter expected count=100, got", inner.count)
-		return
-	}
+	assert(inner.count == 100, "GetCounter expected count=100")
 	println("GetCounter: inner.count =", inner.count)
 	
 	println("All method call tests passed!")

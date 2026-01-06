@@ -15,10 +15,7 @@ func main() {
 	
 	// First test: get method without calling
 	method, err := obj~>Add
-	if err != nil {
-		println("Error getting method:", err)
-		return
-	}
+	assert(err == nil, "Error getting method")
 	println("Got method:", method)
 	
 	// Test calling the method closure directly via type assertion

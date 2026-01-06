@@ -23,15 +23,8 @@ func main() {
     var data BigStruct
     var err error
     data, err = a~>Data
-    if err != nil {
-        println("unexpected error:", err.Error())
-        return
-    }
-    
-    if data.A != 1 || data.B != 2 || data.C != 3 || data.D != 4 {
-        println("FAIL: data mismatch")
-        return
-    }
+    assert(err == nil, "unexpected error")
+    assert(data.A == 1 && data.B == 2 && data.C == 3 && data.D == 4, "data mismatch")
     
     println("PASS")
 }

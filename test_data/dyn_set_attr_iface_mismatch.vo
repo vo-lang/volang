@@ -40,10 +40,7 @@ func testSetMismatch() error {
 
 func main() {
 	err := testSetMismatch()
-	if err == nil {
-		println("FAIL: should have returned error for interface mismatch")
-		return
-	}
+	assert(err != nil, "should have returned error for interface mismatch")
 	println("Got expected error:", err.Error())
 	println("PASS")
 }

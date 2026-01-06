@@ -28,33 +28,21 @@ func main() {
 	
 	// Type assert to Counter
 	counter, ok :=  box~>counter?.(Counter)
-	if !ok {
-		println("FAIL: type assert to Counter failed")
-		return
-	}
+	assert(ok, "type assert to Counter failed")
 	
 	// Call method on extracted Counter
-	if counter.Get() != 10 {
-		println("FAIL: expected 10, got", counter.Get())
-		return
-	}
+	assert(counter.Get() == 10, "expected 10")
 	println("Get() before Inc:", counter.Get())
 	
 	// Inc modifies local copy (value semantics)
 	counter.Inc()
-	if counter.Get() != 11 {
-		println("FAIL: after Inc expected 11, got", counter.Get())
-		return
-	}
+	assert(counter.Get() == 11, "after Inc expected 11")
 	println("Get() after Inc:", counter.Get())
 	
 	// Original should be unchanged (value semantics)
 	counterAny2, _ := box~>counter
 	counter2, _ := counterAny2.(Counter)
-	if counter2.Get() != 10 {
-		println("FAIL: original should be 10, got", counter2.Get())
-		return
-	}
+	assert(counter2.Get() == 10, "original should be 10")
 	println("original unchanged:", counter2.Get())
 	
 	println("done")

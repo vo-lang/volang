@@ -30,38 +30,20 @@ func main() {
 
 	// Test 1: (struct, int) - struct is 4 slots, int should be at offset 4
 	p1, n1, err := obj~>RetStructThenInt()
-	if err != nil {
-		println("FAIL: RetStructThenInt error:", err)
-		return
-	}
+	assert(err == nil, "RetStructThenInt error")
 	pt1 := p1.(Point)
 	num1 := n1.(int)
-	if pt1.X != 10 || pt1.Y != 20 || pt1.Z != 30 || pt1.W != 40 {
-		println("FAIL: RetStructThenInt Point wrong:", pt1.X, pt1.Y, pt1.Z, pt1.W)
-		return
-	}
-	if num1 != 42 {
-		println("FAIL: RetStructThenInt int wrong:", num1, "expected 42")
-		return
-	}
+	assert(pt1.X == 10 && pt1.Y == 20 && pt1.Z == 30 && pt1.W == 40, "RetStructThenInt Point wrong")
+	assert(num1 == 42, "RetStructThenInt int wrong")
 	println("RetStructThenInt: Point{", pt1.X, ",", pt1.Y, ",", pt1.Z, ",", pt1.W, "}, int:", num1)
 
 	// Test 2: (int, struct) - int is 1 slot, struct is 4 slots
 	n2, p2, err := obj~>RetIntThenStruct()
-	if err != nil {
-		println("FAIL: RetIntThenStruct error:", err)
-		return
-	}
+	assert(err == nil, "RetIntThenStruct error")
 	num2 := n2.(int)
 	pt2 := p2.(Point)
-	if num2 != 99 {
-		println("FAIL: RetIntThenStruct int wrong:", num2, "expected 99")
-		return
-	}
-	if pt2.X != 30 || pt2.Y != 40 || pt2.Z != 50 || pt2.W != 60 {
-		println("FAIL: RetIntThenStruct Point wrong:", pt2.X, pt2.Y, pt2.Z, pt2.W)
-		return
-	}
+	assert(num2 == 99, "RetIntThenStruct int wrong")
+	assert(pt2.X == 30 && pt2.Y == 40 && pt2.Z == 50 && pt2.W == 60, "RetIntThenStruct Point wrong")
 	println("RetIntThenStruct: int:", num2, ", Point{", pt2.X, ",", pt2.Y, ",", pt2.Z, ",", pt2.W, "}")
 
 	println("=== All multi-slot return tests passed! ===")

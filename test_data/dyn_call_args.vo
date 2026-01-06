@@ -48,91 +48,52 @@ func main() {
 	var obj interface{} = calc
 	
 	result, err := obj~>Add(5)
-	if err != nil {
-		println("Error:", err)
-		return
-	}
+	assert(err == nil, "Add error")
 	val := result.(int)
 	println("Add(5):", val) // expect: 15
-	if val != 15 {
-		println("FAIL: expected 15, got", val)
-		return
-	}
+	assert(val == 15, "expected 15")
 	
 	// Test 2: Method call with two arguments
 	result2, err2 := obj~>AddTwo(3, 7)
-	if err2 != nil {
-		println("Error:", err2)
-		return
-	}
+	assert(err2 == nil, "AddTwo error")
 	val2 := result2.(int)
 	println("AddTwo(3, 7):", val2) // expect: 25 (15 + 3 + 7)
-	if val2 != 25 {
-		println("FAIL: expected 25, got", val2)
-		return
-	}
+	assert(val2 == 25, "expected 25")
 	
 	// Test 3: Chain of method calls
 	result3, err3 := obj~>Multiply(2)
-	if err3 != nil {
-		println("Error:", err3)
-		return
-	}
+	assert(err3 == nil, "Multiply error")
 	val3 := result3.(int)
 	println("Multiply(2):", val3) // expect: 50 (25 * 2)
-	if val3 != 50 {
-		println("FAIL: expected 50, got", val3)
-		return
-	}
+	assert(val3 == 50, "expected 50")
 	
 	// Test 4: No-arg method call
 	result4, err4 := obj~>GetValue()
-	if err4 != nil {
-		println("Error:", err4)
-		return
-	}
+	assert(err4 == nil, "GetValue error")
 	val4 := result4.(int)
 	println("GetValue():", val4) // expect: 50
-	if val4 != 50 {
-		println("FAIL: expected 50, got", val4)
-		return
-	}
+	assert(val4 == 50, "expected 50")
 	
 	// Test 5: String method with argument
 	greeter := &Greeter{prefix: "Hello, "}
 	var strObj interface{} = greeter
 	
 	result5, err5 := strObj~>Greet("World")
-	if err5 != nil {
-		println("Error:", err5)
-		return
-	}
+	assert(err5 == nil, "Greet error")
 	str5 := result5.(string)
 	println("Greet:", str5) // expect: "Hello, World"
-	if str5 != "Hello, World" {
-		println("FAIL: expected 'Hello, World', got", str5)
-		return
-	}
+	assert(str5 == "Hello, World", "expected Hello, World")
 	
 	// Test 6: String method with two arguments
 	result6, err6 := strObj~>GreetTwo("Alice", "Bob")
-	if err6 != nil {
-		println("Error:", err6)
-		return
-	}
+	assert(err6 == nil, "GreetTwo error")
 	str6 := result6.(string)
 	println("GreetTwo:", str6) // expect: "Hello, Alice and Bob"
-	if str6 != "Hello, Alice and Bob" {
-		println("FAIL: expected 'Hello, Alice and Bob', got", str6)
-		return
-	}
+	assert(str6 == "Hello, Alice and Bob", "expected Hello, Alice and Bob")
 	
 	// Test 7: Method not found error
 	_, errNotFound := obj~>NonExistent(1)
-	if errNotFound == nil {
-		println("FAIL: expected error for non-existent method")
-		return
-	}
+	assert(errNotFound != nil, "expected error for non-existent method")
 	println("NonExistent error:", errNotFound)
 	
 	println("All tests passed!")

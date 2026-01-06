@@ -16,16 +16,10 @@ func main() {
 	
 	// Dynamic call returning [4]int (4 slots)
 	result, err := obj~>GetArray()
-	if err != nil {
-		println("FAIL: unexpected error:", err.Error())
-		return
-	}
-	
+	assert(err == nil, "unexpected error")
+    
 	arr := result.([4]int)
-	if arr[0] != 1 || arr[1] != 2 || arr[2] != 3 || arr[3] != 4 {
-		println("FAIL: array values mismatch:", arr[0], arr[1], arr[2], arr[3])
-		return
-	}
+	assert(arr[0] == 1 && arr[1] == 2 && arr[2] == 3 && arr[3] == 4, "array values mismatch")
 	
 	println("PASS")
 }

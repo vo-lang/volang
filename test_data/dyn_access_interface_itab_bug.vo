@@ -24,52 +24,28 @@ func main() {
     
     // Dynamic index access - returns any
     v, err := a~>[0]
-    if err != nil {
-        println("unexpected error:", err.Error())
-        return
-    }
+    assert(err == nil, "unexpected error")
     
     // v is now any, wrapping the original MyInterface value
     // The issue: if itab_id is not cleared, v might have wrong metadata
     
     // Test 1: Type assertion to the concrete type should work
     impl, ok := v.(*Impl)
-    if !ok {
-        println("FAIL: type assertion to *Impl failed")
-        return
-    }
-    if impl.Method() != 42 {
-        println("FAIL: method call returned wrong value")
-        return
-    }
+    assert(ok, "type assertion to *Impl failed")
+    assert(impl.Method() == 42, "method call returned wrong value")
     
     // Test 2: Type assertion to the interface should work
     mi, ok := v.(MyInterface)
-    if !ok {
-        println("FAIL: type assertion to MyInterface failed")
-        return
-    }
-    if mi.Method() != 42 {
-        println("FAIL: interface method call returned wrong value")
-        return
-    }
+    assert(ok, "type assertion to MyInterface failed")
+    assert(mi.Method() == 42, "interface method call returned wrong value")
     
     // Test 3: Chain dynamic access - this would fail if itab_id causes issues
     v2, err := a~>[1]
-    if err != nil {
-        println("unexpected error on second access:", err.Error())
-        return
-    }
+    assert(err == nil, "unexpected error on second access")
     
     impl2, ok := v2.(*Impl)
-    if !ok {
-        println("FAIL: second type assertion failed")
-        return
-    }
-    if impl2.Method() != 100 {
-        println("FAIL: second method call returned wrong value")
-        return
-    }
+    assert(ok, "second type assertion failed")
+    assert(impl2.Method() == 100, "second method call returned wrong value")
     
     println("PASS")
 }

@@ -805,8 +805,8 @@ fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
         return_error!("dynamic call: return value exceeds maximum slots (64)");
     }
     
-    // Success: return ret_slots, metas, nil error
-    call.ret_u64(0, ret_slots as u64);
+    // Success: return ret_slots + 1 (so 0 means error, >0 means success with ret_slots-1 slots)
+    call.ret_u64(0, (ret_slots + 1) as u64);
     for (i, vr) in ret_value_rttids.iter().enumerate().take(expected_ret_count as usize) {
         call.ret_u64(1 + i as u16, vr.to_raw() as u64);
     }
