@@ -424,20 +424,8 @@ fn parse_vfs_package(
     Ok(parsed_files)
 }
 
-/// Pre-load all imports from the parsed files.
-/// This must be called BEFORE swapping tc_objs with checker.
-/// Returns an error if any import fails (package not found, parse error, or type check error).
-fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter<F>) -> Result<(), String> {
-    // Always-link core packages required by runtime.
-    // This does not inject a package name into user scopes (no auto-import),
-    // but ensures the package is analyzed and compiled into the final module.
-    let key = ImportKey::new("errors", ".");
-    match importer.import(&key) {
-        ImportResult::Ok(_) => {}
-        ImportResult::Err(e) => return Err(e),
-        ImportResult::Cycle => return Err("import cycle detected for 'errors'".to_string()),
-    }
-
+/// Pre-load imports from files. Must be called BEFORE swapping tc_objs with checker.
+fn preload_file_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter<F>) -> Result<(), String> {
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;
@@ -450,6 +438,18 @@ fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter
         }
     }
     Ok(())
+}
+
+/// Pre-load all imports including core packages. For main package entry point.
+fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter<F>) -> Result<(), String> {
+    // Always-link core packages required by runtime.
+    let key = ImportKey::new("errors", ".");
+    match importer.import(&key) {
+        ImportResult::Ok(_) => {}
+        ImportResult::Err(e) => return Err(e),
+        ImportResult::Cycle => return Err("import cycle detected for 'errors'".to_string()),
+    }
+    preload_file_imports(files, importer)
 }
 
 /// Project-level importer that uses VFS to resolve packages.
@@ -507,6 +507,15 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
             }
         };
         
+        // Pre-load imports BEFORE swap (importer needs state.tc_objs)
+        {
+            let mut sub_importer = ProjectImporter::new(self.vfs, &self.working_dir, Rc::clone(&self.state));
+            if let Err(e) = preload_file_imports(&parsed_files, &mut sub_importer) {
+                self.state.borrow_mut().in_progress.remove(import_path);
+                return ImportResult::Err(e);
+            }
+        }
+        
         // Create package and type check
         // Use import_path (e.g., "encoding/hex") as path for find_package_by_path
         // But set name to short name (e.g., "hex") for local reference
@@ -518,17 +527,15 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
             pkg
         };
         
-        // Type check the package (recursively handles its imports)
+        // Type check the package (imports already preloaded, tc_objs can be swapped)
         let (check_result, pkg_type_info) = {
             let mut state_ref = self.state.borrow_mut();
             let mut checker = Checker::new(pkg_key, state_ref.interner.clone());
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
             drop(state_ref);
             
-            // Create a new importer for recursive imports
-            let mut sub_importer = ProjectImporter::new(self.vfs, &self.working_dir, Rc::clone(&self.state));
-            let result = checker.check_with_importer(&parsed_files, &mut sub_importer);
-            
+            // Use check() instead of check_with_importer - imports already preloaded
+            let result = checker.check(&parsed_files);
             
             let mut state_ref = self.state.borrow_mut();
             std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);

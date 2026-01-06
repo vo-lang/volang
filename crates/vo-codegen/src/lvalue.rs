@@ -73,7 +73,8 @@ pub fn resolve_lvalue(
             // Check global variable
             if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
                 let type_key = info.obj_type(info.get_use(ident), "global must have type");
-                let slots = info.type_slot_count(type_key);
+                // Global arrays are stored as GcRef (1 slot)
+                let slots = if info.is_array(type_key) { 1 } else { info.type_slot_count(type_key) };
                 return Ok(LValue::Variable(StorageKind::Global { 
                     index: global_idx as u16, 
                     slots 

@@ -404,9 +404,13 @@ fn collect_file_declarations(
                             panic!("global var must have type annotation or initializer")
                         };
                         
-                        let slots = info.type_slot_count(type_key);
+                        // Arrays are stored as GcRef (1 slot) in globals
+                        let (slots, slot_types) = if info.is_array(type_key) {
+                            (1, vec![vo_runtime::SlotType::GcRef])
+                        } else {
+                            (info.type_slot_count(type_key), info.type_slot_types(type_key))
+                        };
                         let value_kind = info.type_value_kind(type_key) as u8;
-                        let slot_types = info.type_slot_types(type_key);
                         ctx.register_global(
                             name.symbol,
                             vo_vm::bytecode::GlobalDef {
@@ -755,6 +759,78 @@ fn emit_global_set(builder: &mut FuncBuilder, global_idx: u32, src: u16, slots: 
     }
 }
 
+/// Compile global array initialization: allocate heap array and store GcRef in global.
+fn compile_global_array_init(
+    rhs: &vo_syntax::ast::Expr,
+    array_type: vo_analysis::objects::TypeKey,
+    global_idx: u32,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    use vo_vm::instruction::Opcode;
+    
+    let array_len = info.array_len(array_type);
+    let elem_type = info.array_elem_type(array_type);
+    let elem_slots = info.type_slot_count(elem_type);
+    let elem_bytes = (elem_slots as u32 * 8) as u16;
+    let elem_vk = info.type_value_kind(elem_type);
+    
+    // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
+    let gcref_slot = func.alloc_temp(1);
+    let meta_reg = func.alloc_temp(1);
+    let len_reg = func.alloc_temp(1);
+    
+    // Get elem_meta: (rttid << 8) | elem_vk
+    let elem_rttid = ctx.intern_type_key(elem_type, info);
+    let elem_meta = ((elem_rttid as u64) << 8) | (elem_vk as u64);
+    let meta_idx = ctx.const_int(elem_meta as i64);
+    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+    
+    // Load array length
+    let len_idx = ctx.const_int(array_len as i64);
+    func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
+    
+    // Emit ArrayNew: gcref_slot = ArrayNew(meta_reg, len_reg)
+    let flags = if elem_bytes <= 8 { elem_bytes as u8 } else { 0 };
+    if flags == 0 {
+        // Dynamic elem_bytes: need extra register
+        let eb_idx = ctx.const_int(elem_bytes as i64);
+        func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
+    }
+    func.emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
+    
+    // Compile array elements and set them
+    if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
+        let elem_slot_types = info.type_slot_types(elem_type);
+        let tmp_elem = func.alloc_temp_typed(&elem_slot_types);
+        // For dynamic elem_bytes (flags=0), need idx_reg and idx_reg+1 for elem_bytes
+        let idx_reg = func.alloc_temp(if flags == 0 { 2 } else { 1 });
+        
+        for (i, elem) in lit.elems.iter().enumerate() {
+            // Compile element value to tmp_elem
+            crate::expr::compile_expr_to(&elem.value, tmp_elem, ctx, func, info)?;
+            
+            // Load index
+            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+            
+            // For dynamic elem_bytes, load elem_bytes into idx_reg + 1
+            if flags == 0 {
+                let eb_idx = ctx.const_int(elem_bytes as i64);
+                func.emit_op(Opcode::LoadConst, idx_reg + 1, eb_idx, 0);
+            }
+            
+            // ArraySet: arr[idx] = tmp_elem
+            func.emit_with_flags(Opcode::ArraySet, flags, gcref_slot, idx_reg, tmp_elem);
+        }
+    }
+    
+    // Store GcRef in global (1 slot)
+    func.emit_op(Opcode::GlobalSet, global_idx as u16, gcref_slot, 0);
+    
+    Ok(())
+}
+
 fn compile_init_and_entry(
     project: &Project,
     ctx: &mut CodegenContext,
@@ -776,6 +852,18 @@ fn compile_init_and_entry(
             if let Some(symbol) = var_symbol {
                 if let Some(global_idx) = ctx.get_global_index(symbol) {
                     let type_key = obj.typ();
+                    
+                    // Special handling for arrays: allocate on heap
+                    if let Some(tk) = type_key {
+                        if info.is_array(tk) {
+                            compile_global_array_init(
+                                &initializer.rhs, tk, global_idx,
+                                ctx, &mut init_builder, info
+                            )?;
+                            continue;
+                        }
+                    }
+                    
                     let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
                     let slot_types = type_key
                         .map(|t| info.type_slot_types(t))

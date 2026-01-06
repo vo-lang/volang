@@ -46,7 +46,8 @@ pub fn get_expr_source(
             }
             if let Some(global_idx) = ctx.get_global_index(ident.symbol) {
                 if let Some(type_key) = info.try_obj_type(info.get_use(ident)) {
-                    let slots = info.type_slot_count(type_key);
+                    // Global arrays are stored as GcRef (1 slot)
+                    let slots = if info.is_array(type_key) { 1 } else { info.type_slot_count(type_key) };
                     return ExprSource::Location(StorageKind::Global { index: global_idx as u16, slots });
                 }
             }
