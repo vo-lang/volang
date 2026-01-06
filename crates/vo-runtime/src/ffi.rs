@@ -552,6 +552,54 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    /// Get the slot count for a type based on its rttid.
+    /// Uses runtime_types to resolve the actual type and compute slot count.
+    pub fn get_type_slot_count(&self, rttid: u32) -> u16 {
+        use crate::RuntimeType;
+        
+        // Get the RuntimeType for this rttid
+        let rt = self.runtime_types.get(rttid as usize)
+            .expect("get_type_slot_count: rttid not found in runtime_types");
+        
+        match rt {
+            // Named type: get underlying type info from named_type_meta
+            RuntimeType::Named(named_id) => {
+                if let Some(named_meta) = self.named_type_metas.get(*named_id as usize) {
+                    let underlying_vk = named_meta.underlying_meta.value_kind();
+                    let underlying_meta_id = named_meta.underlying_meta.meta_id();
+                    match underlying_vk {
+                        crate::ValueKind::Struct => {
+                            if let Some(meta) = self.struct_meta(underlying_meta_id as usize) {
+                                return meta.slot_count();
+                            }
+                        }
+                        crate::ValueKind::Interface => return 2,
+                        _ => return 1,
+                    }
+                }
+                1
+            }
+            // Anonymous struct: lookup in rttid_to_struct_meta
+            RuntimeType::Struct { .. } => {
+                if let Some(struct_meta_id) = self.get_struct_meta_id_from_rttid(rttid) {
+                    if let Some(meta) = self.struct_meta(struct_meta_id as usize) {
+                        return meta.slot_count();
+                    }
+                }
+                2 // fallback
+            }
+            // Interface is always 2 slots
+            RuntimeType::Interface { .. } => 2,
+            // Array: compute total slots from element slots * length
+            RuntimeType::Array { len, elem } => {
+                let elem_slots = self.get_type_slot_count(elem.rttid());
+                elem_slots * (*len as u16)
+            }
+            // All other types are 1 slot (reference types)
+            _ => 1,
+        }
+    }
+
     /// Allocate and return a new byte slice.
     #[inline]
     pub fn ret_bytes(&mut self, n: u16, data: &[u8]) {

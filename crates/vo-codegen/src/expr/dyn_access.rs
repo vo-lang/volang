@@ -80,15 +80,23 @@ pub fn compile_dyn_access(
     
     if is_tuple_any_error {
         // Short-circuit: if error slot is not nil, propagate error
-        // base_reg+2, base_reg+3 = error (any)
+        // base_reg+2, base_reg+3 = error (interface[2])
         // Check if error is nil (slot0 == 0) - JumpIfNot skips when false (i.e., nil)
         let skip_error_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
         
-        // Error is set - copy (nil, error) to dst and skip operation
-        func.emit_op(Opcode::LoadInt, dst, 0, 0);     // result.slot0 = nil
-        func.emit_op(Opcode::LoadInt, dst + 1, 0, 0); // result.slot1 = nil
-        func.emit_op(Opcode::Copy, dst + 2, base_reg + 2, 0); // error.slot0
-        func.emit_op(Opcode::Copy, dst + 3, base_reg + 3, 0); // error.slot1
+        // Error is set - fill nil values for return slots, then copy error
+        // Calculate actual dst slots based on LHS types (ret_types excludes error)
+        let mut result_slots = 0u16;
+        for &ret_type in ret_types.iter() {
+            result_slots += if info.is_any_type(ret_type) { 2 } else { info.type_slot_count(ret_type) };
+        }
+        // Fill result slots with nil
+        for i in 0..result_slots {
+            func.emit_op(Opcode::LoadInt, dst + i, 0, 0);
+        }
+        // Copy error (2 slots) after result slots
+        func.emit_op(Opcode::Copy, dst + result_slots, base_reg + 2, 0);     // error.slot0
+        func.emit_op(Opcode::Copy, dst + result_slots + 1, base_reg + 3, 0); // error.slot1
         let done_jump = func.emit_jump(Opcode::Jump, 0);
         
         // No error - continue with base value (first 2 slots)
@@ -282,7 +290,14 @@ fn compile_dyn_closure_call(
     // Calculate arg slots and return slots
     let arg_slots_total: u16 = args.iter().map(|a| info.expr_slots(a.id)).sum();
 
-    let max_ret_slots: u16 = expected_ret_count * 2;
+    // Calculate max_ret_slots based on actual LHS types (ret_types)
+    // For any type, the actual function may return larger structs, so use a reasonable upper bound
+    // For typed LHS, use actual slot count
+    let lhs_ret_slots: u16 = ret_types.iter().map(|&t| {
+        if info.is_any_type(t) { 8 } else { info.type_slot_count(t) }  // 8 slots per any to handle large structs
+    }).sum();
+    // Use at least 16 slots to handle most practical cases
+    let max_ret_slots = lhs_ret_slots.max(16);
     let args_start = func.alloc_temp(arg_slots_total.max(max_ret_slots));
     
     // Compile arguments
@@ -359,6 +374,7 @@ fn compile_dyn_closure_call(
             dst_offset += 2;
         } else {
             let slots = info.type_slot_count(ret_type);
+            let vk = info.type_value_kind(ret_type);
             if slots == 1 {
                 func.emit_op(Opcode::Copy, dst + dst_offset, read_result, 0);
                 dst_offset += 1;
@@ -366,6 +382,12 @@ fn compile_dyn_closure_call(
                 func.emit_op(Opcode::Copy, dst + dst_offset, read_result, 0);
                 func.emit_op(Opcode::Copy, dst + dst_offset + 1, read_result + 1, 0);
                 dst_offset += 2;
+            } else if vk == ValueKind::Struct || vk == ValueKind::Array {
+                // Large struct/array (> 2 slots): dyn_ret_read_advance boxed it into GcRef
+                // read_result+0 = 0 (marker), read_result+1 = GcRef
+                // Use PtrGet to read all slots from the GcRef
+                func.emit_ptr_get(dst + dst_offset, read_result + 1, 0, slots);
+                dst_offset += slots;
             } else {
                 let tmp = func.alloc_temp(1);
                 func.emit_op(Opcode::LoadInt, tmp, 0, 0);

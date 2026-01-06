@@ -4,22 +4,22 @@
 package main
 
 type Point struct {
-	X, Y int
+	X, Y, Z, W int
 }
 
 type Caller struct {
 	val int
 }
 
-// Returns (struct[2 slots], int[1 slot])
+// Returns (struct[4 slots], int[1 slot])
 // Bug: second return value would be read from wrong offset
 func (c *Caller) RetStructThenInt() (Point, int) {
-	return Point{X: 10, Y: 20}, 42
+	return Point{X: 10, Y: 20, Z: 30, W: 40}, 42
 }
 
-// Returns (int[1 slot], struct[2 slots])
+// Returns (int[1 slot], struct[4 slots])
 func (c *Caller) RetIntThenStruct() (int, Point) {
-	return 99, Point{X: 30, Y: 40}
+	return 99, Point{X: 30, Y: 40, Z: 50, W: 60}
 }
 
 func main() {
@@ -28,7 +28,7 @@ func main() {
 	caller := &Caller{val: 1}
 	var obj interface{} = caller
 
-	// Test 1: (struct, int) - struct is 2 slots, int should be at offset 2
+	// Test 1: (struct, int) - struct is 4 slots, int should be at offset 4
 	p1, n1, err := obj~>RetStructThenInt()
 	if err != nil {
 		println("FAIL: RetStructThenInt error:", err)
@@ -36,17 +36,17 @@ func main() {
 	}
 	pt1 := p1.(Point)
 	num1 := n1.(int)
-	if pt1.X != 10 || pt1.Y != 20 {
-		println("FAIL: RetStructThenInt Point wrong:", pt1.X, pt1.Y)
+	if pt1.X != 10 || pt1.Y != 20 || pt1.Z != 30 || pt1.W != 40 {
+		println("FAIL: RetStructThenInt Point wrong:", pt1.X, pt1.Y, pt1.Z, pt1.W)
 		return
 	}
 	if num1 != 42 {
 		println("FAIL: RetStructThenInt int wrong:", num1, "expected 42")
 		return
 	}
-	println("RetStructThenInt: Point{", pt1.X, ",", pt1.Y, "}, int:", num1)
+	println("RetStructThenInt: Point{", pt1.X, ",", pt1.Y, ",", pt1.Z, ",", pt1.W, "}, int:", num1)
 
-	// Test 2: (int, struct) - int is 1 slot, struct should be at offset 1
+	// Test 2: (int, struct) - int is 1 slot, struct is 4 slots
 	n2, p2, err := obj~>RetIntThenStruct()
 	if err != nil {
 		println("FAIL: RetIntThenStruct error:", err)
@@ -58,11 +58,11 @@ func main() {
 		println("FAIL: RetIntThenStruct int wrong:", num2, "expected 99")
 		return
 	}
-	if pt2.X != 30 || pt2.Y != 40 {
-		println("FAIL: RetIntThenStruct Point wrong:", pt2.X, pt2.Y)
+	if pt2.X != 30 || pt2.Y != 40 || pt2.Z != 50 || pt2.W != 60 {
+		println("FAIL: RetIntThenStruct Point wrong:", pt2.X, pt2.Y, pt2.Z, pt2.W)
 		return
 	}
-	println("RetIntThenStruct: int:", num2, ", Point{", pt2.X, ",", pt2.Y, "}")
+	println("RetIntThenStruct: int:", num2, ", Point{", pt2.X, ",", pt2.Y, ",", pt2.Z, ",", pt2.W, "}")
 
 	println("=== All multi-slot return tests passed! ===")
 }

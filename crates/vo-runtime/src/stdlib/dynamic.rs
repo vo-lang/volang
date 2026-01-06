@@ -770,29 +770,20 @@ fn dyn_call_check(call: &mut ExternCallContext) -> ExternResult {
     
     // 1. Check nil
     if interface::is_nil(callee_slot0) {
-        let err = call.alloc_str("cannot call nil");
-        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
-        call.ret_ref(1, err);
-        return ExternResult::Ok;
+        return dyn_error_only(call, "cannot call nil");
     }
     
     // 2. Check is Closure type
     let vk = interface::unpack_value_kind(callee_slot0);
     if vk != ValueKind::Closure {
-        let err = call.alloc_str(&format!("cannot call non-function type {:?}", vk));
-        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
-        call.ret_ref(1, err);
-        return ExternResult::Ok;
+        return dyn_error_only(call, &format!("cannot call non-function type {:?}", vk));
     }
     
     // 3. Check signature compatibility
     let closure_sig_rttid = interface::unpack_rttid(callee_slot0);
     
     if let Err(msg) = call.check_func_signature_compatible(closure_sig_rttid, expected_sig_rttid) {
-        let err = call.alloc_str(&msg);
-        call.ret_u64(0, interface::pack_slot0(0, 0, ValueKind::String));
-        call.ret_ref(1, err);
-        return ExternResult::Ok;
+        return dyn_error_only(call, &msg);
     }
     
     // Signature compatible - return nil error
@@ -837,10 +828,7 @@ fn dyn_get_ret_meta(call: &mut ExternCallContext) -> ExternResult {
     let ret_value_rttids = call.get_func_results(closure_rttid);
     let ret_count = ret_value_rttids.len();
     let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
-        match vr.value_kind() {
-            ValueKind::Struct | ValueKind::Array => 2,  // GcRef
-            _ => 1,
-        }
+        call.get_type_slot_count(vr.rttid())
     }).sum();
     
     // Return: [ret_count, ret_slots, ret_value_rttid_0, ret_value_rttid_1, ...]
@@ -864,18 +852,35 @@ fn dyn_ret_read_advance(call: &mut ExternCallContext) -> ExternResult {
     let src_off = call.arg_u64(1) as u16;
     let value_rttid_raw = call.arg_u64(2) as u32;
 
+    let rttid = value_rttid_raw >> 8;
     let vk = ValueKind::from_u8((value_rttid_raw & 0xFF) as u8);
-    let width: u16 = match vk {
-        ValueKind::Struct | ValueKind::Array => 2,
-        _ => 1,
-    };
-
-    let raw0 = call.call().slot(base_off + src_off);
-    let raw1 = call.call().slot(base_off + src_off + 1);
-
-    call.ret_u64(0, raw0);
-    call.ret_u64(1, raw1);
-    call.ret_u64(2, (src_off + width) as u64);
+    let width = call.get_type_slot_count(rttid);
+    
+    // For struct with > 2 slots, we need to box it into a GcRef
+    // This maintains the 2-slot return convention (raw0, raw1)
+    if vk == ValueKind::Struct && width > 2 {
+        // Allocate GcRef and copy all slots
+        let new_ref = call.gc_alloc(width, &[]);
+        for i in 0..width {
+            let val = call.call().slot(base_off + src_off + i);
+            unsafe { Gc::write_slot(new_ref, i as usize, val) };
+        }
+        // Return (0, GcRef) - raw0=0 indicates boxed, raw1=GcRef
+        call.ret_u64(0, 0);
+        call.ret_u64(1, new_ref as u64);
+        call.ret_u64(2, (src_off + width) as u64);
+    } else {
+        // Read slots directly (1 or 2 slots)
+        let raw0 = call.call().slot(base_off + src_off);
+        let raw1 = if width > 1 {
+            call.call().slot(base_off + src_off + 1)
+        } else {
+            0
+        };
+        call.ret_u64(0, raw0);
+        call.ret_u64(1, raw1);
+        call.ret_u64(2, (src_off + width) as u64);
+    }
 
     ExternResult::Ok
 }
@@ -894,19 +899,43 @@ fn dyn_box_returns(call: &mut ExternCallContext) -> ExternResult {
     let rttid = value_rttid_raw >> 8;
     let vk = ValueKind::from_u8((value_rttid_raw & 0xFF) as u8);
 
-    let result_slot1 = match vk {
+    let (result_slot0, result_slot1) = match vk {
         ValueKind::Struct | ValueKind::Array => {
-            let new_ref = call.gc_alloc(2, &[]);
-            unsafe {
-                Gc::write_slot(new_ref, 0, raw_slot0);
-                Gc::write_slot(new_ref, 1, raw_slot1);
+            // Check if already boxed by dyn_ret_read_advance (raw_slot0 == 0 means boxed)
+            let width = call.get_type_slot_count(rttid);
+            if width > 2 && raw_slot0 == 0 {
+                // Already boxed - raw_slot1 is the GcRef
+                let slot0 = interface::pack_slot0(0, rttid, vk);
+                (slot0, raw_slot1)
+            } else {
+                // Small struct (<=2 slots) - box into new GcRef
+                let new_ref = call.gc_alloc(width, &[]);
+                unsafe {
+                    Gc::write_slot(new_ref, 0, raw_slot0);
+                    if width > 1 {
+                        Gc::write_slot(new_ref, 1, raw_slot1);
+                    }
+                }
+                let slot0 = interface::pack_slot0(0, rttid, vk);
+                (slot0, new_ref as u64)
             }
-            new_ref as u64
         }
-        _ => raw_slot0,
+        ValueKind::Interface => {
+            // Interface is 2 slots (meta, data) - extract concrete type info
+            // raw_slot0 is the interface meta (itab_id, rttid, vk)
+            // raw_slot1 is the interface data
+            let concrete_rttid = interface::unpack_rttid(raw_slot0);
+            let concrete_vk = interface::unpack_value_kind(raw_slot0);
+            // Wrap in any (itab_id=0 for empty interface)
+            let slot0 = interface::pack_slot0(0, concrete_rttid, concrete_vk);
+            (slot0, raw_slot1)
+        }
+        _ => {
+            // Single slot value - raw_slot0 is the value
+            let slot0 = interface::pack_slot0(0, rttid, vk);
+            (slot0, raw_slot0)
+        }
     };
-
-    let result_slot0 = interface::pack_slot0(0, rttid, vk);
 
     call.ret_u64(0, result_slot0);
     call.ret_u64(1, result_slot1);

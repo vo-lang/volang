@@ -225,8 +225,8 @@ pub fn exec_return(
     let has_defers = defer_stack.last()
         .map_or(false, |e| e.frame_depth == current_frame_depth);
 
-    if !has_defers {
-        // Fast path: no defers - avoid Vec allocation for common case (<=4 return values)
+    if !has_defers && ret_count <= 4 {
+        // Fast path: no defers AND small return count - use fixed buffer
         let frame = frames.last().unwrap();
         let current_bp = frame.bp;
         let ret_reg = frame.ret_reg;
@@ -235,9 +235,8 @@ pub fn exec_return(
         let write_count = (ret_slots as usize).min(ret_count);
         
         // Read return values before pop_frame truncates stack
-        // Use fixed array for common case (most functions return 0-4 values)
         let mut ret_buf = [0u64; 4];
-        for i in 0..write_count.min(4) {
+        for i in 0..write_count {
             ret_buf[i] = stack[current_bp + ret_start + i];
         }
         
@@ -245,18 +244,17 @@ pub fn exec_return(
         pop_frame(stack, frames);
         
         if frames.is_empty() {
-            // Top-level return (e.g., trampoline fiber) - write return values to stack start
-            stack.resize(write_count.min(4), 0);
-            for i in 0..write_count.min(4) {
+            // Top-level return - write return values to stack start
+            stack.resize(write_count, 0);
+            for i in 0..write_count {
                 stack[i] = ret_buf[i];
             }
             return ExecResult::Done;
         }
         
         // Write return values to caller's frame
-        // Stack is guaranteed large enough (ensured at call site)
         let caller_bp = frames.last().unwrap().bp;
-        for i in 0..write_count.min(4) {
+        for i in 0..write_count {
             stack[caller_bp + ret_reg as usize + i] = ret_buf[i];
         }
         
