@@ -308,11 +308,12 @@ impl JitCompiler {
         
         let call_extern = module.declare_function("vo_call_extern", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
+            sig.params.push(AbiParam::new(ptr));       // ctx
+            sig.params.push(AbiParam::new(types::I32)); // extern_id
+            sig.params.push(AbiParam::new(ptr));       // args
+            sig.params.push(AbiParam::new(types::I32)); // arg_count
+            sig.params.push(AbiParam::new(ptr));       // ret
+            sig.params.push(AbiParam::new(types::I32)); // ret_slots
             sig.returns.push(AbiParam::new(types::I32));
             sig
         })?;

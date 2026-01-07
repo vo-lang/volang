@@ -279,9 +279,17 @@ impl<'a> FunctionCompiler<'a> {
         let arg_start = inst.c as usize;
         let arg_count = inst.flags as usize;
         
+        // Get ret_slots from extern definition for buffer sizing
+        let extern_ret_slots = self.vo_module.externs[extern_id as usize].ret_slots as usize;
+        let buffer_size = arg_count.max(extern_ret_slots).max(1);
+        
+        // Limit copy-back to available variables (codegen allocates dst + needed slots)
+        let available_vars = self.vars.len().saturating_sub(dst);
+        let copy_back_slots = extern_ret_slots.min(available_vars);
+        
         let slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (arg_count.max(1) * 8) as u32,
+            (buffer_size * 8) as u32,
             8,
         ));
         
@@ -294,13 +302,14 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let extern_id_val = self.builder.ins().iconst(types::I32, extern_id as i64);
         let arg_count_val = self.builder.ins().iconst(types::I32, arg_count as i64);
+        let ret_slots_val = self.builder.ins().iconst(types::I32, extern_ret_slots as i64);
         
-        let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr]);
+        let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
         let result = self.builder.inst_results(call)[0];
         
         self.check_call_result(result);
         
-        for i in 0..arg_count {
+        for i in 0..copy_back_slots {
             let val = self.builder.ins().stack_load(types::I64, slot, (i * 8) as i32);
             self.builder.def_var(self.vars[dst + i], val);
         }

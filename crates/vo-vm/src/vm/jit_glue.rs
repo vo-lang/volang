@@ -35,6 +35,7 @@ pub extern "C" fn call_extern_trampoline(
     args: *const u64,
     arg_count: u32,
     ret: *mut u64,
+    ret_slots: u32,
 ) -> JitResult {
     use vo_runtime::ffi::{ExternResult, ExternRegistry};
     use crate::bytecode::Module;
@@ -45,9 +46,12 @@ pub extern "C" fn call_extern_trampoline(
     let ctx = unsafe { &mut *ctx };
     let itab_cache = unsafe { &mut *(ctx.itab_cache as *mut vo_runtime::itab::ItabCache) };
     
-    let mut temp_stack: Vec<u64> = (0..arg_count as usize)
-        .map(|i| unsafe { *args.add(i) })
-        .collect();
+    // Buffer must be large enough for both args and return values
+    let buffer_size = (arg_count as usize).max(ret_slots as usize).max(1);
+    let mut temp_stack: Vec<u64> = vec![0; buffer_size];
+    for i in 0..arg_count as usize {
+        temp_stack[i] = unsafe { *args.add(i) };
+    }
     
     let result = registry.call(
         extern_id,
@@ -67,7 +71,8 @@ pub extern "C" fn call_extern_trampoline(
     
     match result {
         ExternResult::Ok => {
-            for i in 0..arg_count as usize {
+            // Copy back ret_slots (not arg_count) since extern may return more than args
+            for i in 0..ret_slots as usize {
                 unsafe { *ret.add(i) = temp_stack[i] };
             }
             JitResult::Ok

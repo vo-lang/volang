@@ -4,6 +4,35 @@ use std::collections::HashMap;
 
 /// Maximum value for 24-bit IDs (rttid, meta_id, etc.)
 const MAX_24BIT_ID: u32 = 0xFF_FFFF;
+
+/// Get ret_slots for known builtin extern functions.
+/// This is critical for JIT to allocate correct buffer sizes.
+fn builtin_extern_ret_slots(name: &str) -> u16 {
+    match name {
+        // Dynamic access: (data[2], error[2]) = 4 slots
+        "dyn_get_attr" | "dyn_get_index" => 4,
+        // Dynamic set: error[2] = 2 slots
+        "dyn_set_attr" | "dyn_set_index" => 2,
+        // Dynamic call prepare: (ret_slots[1], metas[N], error[2]) - use max
+        "dyn_call_prepare" => 67, // 1 + 64 + 2
+        // Dynamic unpack: variable, use max
+        "dyn_unpack_all_returns" => 64,
+        // Type assertion error: error[2]
+        "dyn_type_assert_error" => 2,
+        // Return slots overflow error: error[2]
+        "dyn_ret_slots_overflow_error" => 2,
+        // Print functions: no return
+        "vo_print" | "vo_println" => 0,
+        // Copy: returns int
+        "vo_copy" => 1,
+        // Assert: no return (may panic)
+        "vo_assert" => 0,
+        // String conversion
+        "vo_string_to_bytes" | "vo_bytes_to_string" => 1,
+        // Default: assume 1 slot return for safety
+        _ => 1,
+    }
+}
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use crate::type_interner::TypeInterner;
@@ -701,12 +730,14 @@ impl CodegenContext {
         if let Some(&id) = self.extern_names.get(name) {
             return id;
         }
+        // Get ret_slots for known builtins
+        let ret_slots = builtin_extern_ret_slots(name);
         // Register new extern
         let id = self.module.externs.len() as u32;
         self.module.externs.push(vo_vm::bytecode::ExternDef {
             name: name.to_string(),
             param_slots: 0,  // variadic
-            ret_slots: 0,
+            ret_slots,
         });
         self.extern_names.insert(name.to_string(), id);
         id
