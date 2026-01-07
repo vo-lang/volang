@@ -97,8 +97,6 @@ tests:
     reason: "stdlib not ready"
   - file: stdlib/bytes.vo
   - file: io_package.vo
-    skip: [vm, jit]
-    reason: "waiting for Bug 5 (cross-package interface global nil compare) and Bug 6 (variadic interface params)"
   - file: stdlib/errors.vo
     skip: [vm, jit]
     reason: "stdlib not ready"
@@ -207,8 +205,6 @@ tests:
   - file: typechecker/method_sig_func_types.vo
   - file: typechecker/type_assertion.vo
   - file: typechecker/type_conversion.vo
-    skip: [jit]
-    reason: "JIT - untyped int to float64 conversion bug"
   - file: typechecker/interface_complex_hierarchy.vo
 
 # Typechecker tests - known bugs (now fixed)

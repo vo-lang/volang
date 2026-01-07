@@ -35,7 +35,15 @@ pub fn compile_const_value(
             func.emit_op(Opcode::LoadInt, dst, v, 0);
         }
         Value::Int64(i) => {
-            if *i >= i16::MIN as i64 && *i <= i16::MAX as i64 {
+            // Check if target type is float - need to convert int constant to float
+            if info.is_float(target_type) {
+                let f = *i as f64;
+                let idx = ctx.const_float(f);
+                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+                if info.is_float32(target_type) {
+                    func.emit_op(Opcode::ConvF64F32, dst, dst, 0);
+                }
+            } else if *i >= i16::MIN as i64 && *i <= i16::MAX as i64 {
                 let (b, c) = encode_i32(*i as i32);
                 func.emit_op(Opcode::LoadInt, dst, b, c);
             } else {
@@ -44,15 +52,26 @@ pub fn compile_const_value(
             }
         }
         Value::IntBig(big) => {
-            // Use target type to determine signed vs unsigned conversion
-            let val: i64 = if info.is_unsigned(target_type) {
-                let u: u64 = big.try_into().expect("type checker should ensure value fits u64");
-                u as i64
+            // Check if target type is float - need to convert int constant to float
+            if info.is_float(target_type) {
+                let val: i64 = big.try_into().expect("type checker should ensure value fits i64");
+                let f = val as f64;
+                let idx = ctx.const_float(f);
+                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+                if info.is_float32(target_type) {
+                    func.emit_op(Opcode::ConvF64F32, dst, dst, 0);
+                }
             } else {
-                big.try_into().expect("type checker should ensure value fits i64")
-            };
-            let idx = ctx.const_int(val);
-            func.emit_op(Opcode::LoadConst, dst, idx, 0);
+                // Use target type to determine signed vs unsigned conversion
+                let val: i64 = if info.is_unsigned(target_type) {
+                    let u: u64 = big.try_into().expect("type checker should ensure value fits u64");
+                    u as i64
+                } else {
+                    big.try_into().expect("type checker should ensure value fits i64")
+                };
+                let idx = ctx.const_int(val);
+                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+            }
         }
         Value::Float(f) => {
             let idx = ctx.const_float(*f);
