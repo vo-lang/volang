@@ -223,14 +223,10 @@ tests:
     skip: [jit]
     reason: "JIT timeout - channel"
   - file: typechecker/assignable_identical.vo
-    skip: [jit]
-    reason: "JIT bug"
   - file: typechecker/assignable_interface.vo
   - file: typechecker/assignable_nil.vo
   - file: typechecker/interface_embedding.vo
   - file: typechecker/method_sig_complex_params.vo
-    skip: [jit]
-    reason: "JIT bug"
   - file: typechecker/method_sig_func_types.vo
   - file: typechecker/type_assertion.vo
   - file: typechecker/type_conversion.vo

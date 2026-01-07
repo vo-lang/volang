@@ -146,7 +146,8 @@ fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn copy_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    for i in 0..inst.flags as usize {
+    let count = inst.c as usize;
+    for i in 0..count {
         let v = e.read_var(inst.b + i as u16);
         e.write_var(inst.a + i as u16, v);
     }
