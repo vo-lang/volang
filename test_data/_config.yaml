@@ -144,8 +144,6 @@ tests:
   - file: fail_stmt.vo
   - file: question_operator.vo
   - file: errdefer_stmt.vo
-    skip: [jit]
-    reason: "JIT design - errdefer requires VM execution"
   - file: debug_nil_interface.vo
   - file: debug_iface.vo
 
@@ -189,8 +187,6 @@ tests:
   - file: dyn_try_unwrap.vo
   - file: dyn_write.vo
   - file: error_handling_sugar.vo
-    skip: [jit]
-    reason: "JIT design - errdefer requires VM execution"
   - file: gc_closure_capture.vo
   - file: iface_to_iface_assign.vo
   - file: io_readfull_only.vo

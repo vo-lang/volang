@@ -207,22 +207,7 @@ pub fn exec_return(
             // Pop the defer frame before writing to caller's registers
             pop_frame(stack, frames);
 
-            if frames.is_empty() {
-                // Top-level return (e.g., trampoline fiber) - write return values to stack start
-                let write_count = caller_ret_count.min(ret_vals.len());
-                stack.resize(write_count, 0);
-                for i in 0..write_count {
-                    stack[i] = ret_vals[i];
-                }
-                return ExecResult::Done;
-            }
-
-            let caller_bp = frames.last().unwrap().bp;
-            let write_count = caller_ret_count.min(ret_vals.len());
-            for i in 0..write_count {
-                stack[caller_bp + caller_ret_reg as usize + i] = ret_vals[i];
-            }
-            return ExecResult::Return;
+            return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
         }
     }
 
@@ -252,22 +237,7 @@ pub fn exec_return(
         // Pop frame (truncates stack)
         pop_frame(stack, frames);
         
-        if frames.is_empty() {
-            // Top-level return - write return values to stack start
-            stack.resize(write_count, 0);
-            for i in 0..write_count {
-                stack[i] = ret_buf[i];
-            }
-            return ExecResult::Done;
-        }
-        
-        // Write return values to caller's frame
-        let caller_bp = frames.last().unwrap().bp;
-        for i in 0..write_count {
-            stack[caller_bp + ret_reg as usize + i] = ret_buf[i];
-        }
-        
-        return ExecResult::Return;
+        return write_return_values(stack, frames, &ret_buf[..write_count], ret_reg, ret_slots as usize);
     }
 
     // Slow path: has defers - need to save return values in Vec
@@ -317,17 +287,7 @@ pub fn exec_return(
     }
 
     // No defers after filtering - normal return
-    if frames.is_empty() {
-        return ExecResult::Done;
-    }
-
-    let caller_bp = frames.last().unwrap().bp;
-    let write_count = (frame.ret_count as usize).min(ret_vals.len());
-    for i in 0..write_count {
-        stack[caller_bp + frame.ret_reg as usize + i] = ret_vals[i];
-    }
-
-    ExecResult::Return
+    write_return_values(stack, frames, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 
 #[inline]
@@ -337,6 +297,33 @@ fn pop_frame(stack: &mut Vec<u64>, frames: &mut Vec<CallFrame>) -> Option<CallFr
         Some(frame)
     } else {
         None
+    }
+}
+
+/// Write return values to caller's stack or stack start (for trampoline fiber).
+/// Returns `ExecResult::Done` if no caller frame, `ExecResult::Return` otherwise.
+#[inline]
+fn write_return_values(
+    stack: &mut Vec<u64>,
+    frames: &[CallFrame],
+    ret_vals: &[u64],
+    ret_reg: u16,
+    ret_count: usize,
+) -> ExecResult {
+    let write_count = ret_count.min(ret_vals.len());
+    if frames.is_empty() {
+        // Top-level return (trampoline fiber) - write to stack start
+        stack.resize(write_count, 0);
+        for i in 0..write_count {
+            stack[i] = ret_vals[i];
+        }
+        ExecResult::Done
+    } else {
+        let caller_bp = frames.last().unwrap().bp;
+        for i in 0..write_count {
+            stack[caller_bp + ret_reg as usize + i] = ret_vals[i];
+        }
+        ExecResult::Return
     }
 }
 
