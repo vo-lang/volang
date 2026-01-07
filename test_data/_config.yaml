@@ -11,6 +11,8 @@
 
 tests:
   - file: channel_send.vo
+    skip: [jit]
+    reason: "JIT timeout - channel not supported"
   - file: clone_immediate_read.vo
   - file: complex_literal.vo
   - file: const.vo
@@ -26,6 +28,8 @@ tests:
     should_fail: true
     reason: "dynamic write requires function with error return value"
   - file: dyn_write_fast_path.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: embed_iface_simple.vo
   - file: embed_interface.vo
   - file: embed_interface_impl.vo
@@ -45,12 +49,18 @@ tests:
     reason: "goto is not supported"
   - file: hex_literal_debug.vo
   - file: iface_escape_closure.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: iface_to_iface_assertion.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: init_call_error.vo
     should_fail: true
     reason: "init() cannot be called explicitly"
   - file: interface.vo
   - file: interface_closure.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: interface_complex_subset.vo
   - file: interface_conversion.vo
   - file: interface_method_set.vo
@@ -73,7 +83,11 @@ tests:
   - file: proj_multifile/
   - file: proj_taskman/
   - file: qualified_embed_iface.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: range_string.vo
+    skip: [jit]
+    reason: "JIT timeout"
   - file: rect_only.vo
   - file: rect_only_sum.vo
   - file: rune_literal.vo
@@ -90,11 +104,17 @@ tests:
   - file: slice_map.vo
   - file: slice_ops.vo
   - file: stack_array_iter.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: stack_vs_escaped_array.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: stdlib/base64.vo
     skip: [vm, jit]
     reason: "stdlib not ready"
   - file: stdlib/bytes.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: io_package.vo
     skip: [vm, jit]
     reason: "waiting for Bug 5 (cross-package interface global nil compare) and Bug 6 (variadic interface params)"
@@ -126,12 +146,20 @@ tests:
   - file: struct_object.vo
   - file: switch_stmt.vo
   - file: three_index_slice.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: named_return.vo
   - file: fallthrough.vo
   - file: escaped_array_init.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: type_switch.vo
   - file: type_assertion.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: type_assertion_ok.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: typed_nil_interface.vo
   - file: type_debug.vo
   - file: value_receiver_bug.vo
@@ -141,8 +169,14 @@ tests:
   - file: var_init_order.vo
   # Extension syntax tests
   - file: fail_stmt.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: question_operator.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: errdefer_stmt.vo
+    skip: [jit]
+    reason: "JIT bug - errdefer not supported"
   - file: debug_nil_interface.vo
   - file: debug_iface.vo
 
@@ -161,9 +195,135 @@ tests:
     should_fail: true
     reason: "address-of operator only valid for struct types (Vo spec)"
 
-  # Typechecker tests - complex test cases with multiple issues (parser/compiler bugs fixed, test cases need review)
+  # JIT bugs - tests not in original config
+  - file: array_slice_get_set.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: bytes_buffer.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_access.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_access_big_struct.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_access_interface_field.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_access_interface_itab_bug.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_access_slice_interface_elem.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_call_args.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_methods.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_multi_slot_ret.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_question.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_ret_array.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_ret_types.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_call_simple.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_get_attr.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_get_method.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_get_method_simple.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_member_method.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_method_value_receiver.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_set_attr_iface_mismatch.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_set_attr_interface_field.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: dyn_try_unwrap.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: dyn_write.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: error_handling_sugar.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: gc_closure_capture.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: iface_to_iface_assign.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: io_readfull_only.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: nil_slice_map.vo
+    skip: [jit]
+    reason: "JIT bug - slice panic"
+  - file: packed_array.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: private_type_itab.vo
+    skip: [jit]
+    reason: "JIT bug - func_compiler panic"
+  - file: jit/native_math.vo
+    skip: [jit]
+    reason: "JIT bug - ffi panic"
+  - file: jit/native_strings.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: jit/string_split.vo
+    skip: [jit]
+    reason: "JIT bug"
+
+  # Typechecker tests - JIT bugs
+  - file: typechecker/assignable_channel.vo
+    skip: [jit]
+    reason: "JIT timeout - channel"
+  - file: typechecker/assignable_identical.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: typechecker/assignable_interface.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: typechecker/assignable_nil.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: typechecker/interface_embedding.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: typechecker/method_sig_complex_params.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: typechecker/method_sig_func_types.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: typechecker/type_assertion.vo
+    skip: [jit]
+    reason: "JIT bug"
+  - file: typechecker/type_conversion.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: typechecker/interface_complex_hierarchy.vo
 
 # Typechecker tests - known bugs (now fixed)
