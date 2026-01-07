@@ -947,8 +947,12 @@ fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[s, idx]);
-    let result = e.builder().inst_results(call)[0];
-    e.write_var(inst.a, result);
+    let packed = e.builder().inst_results(call)[0];
+    // Unpack: packed = (rune << 32) | width
+    let rune = e.builder().ins().ushr_imm(packed, 32);
+    let width = e.builder().ins().band_imm(packed, 0xFFFFFFFF);
+    e.write_var(inst.a, rune);
+    e.write_var(inst.a + 1, width);
 }
 
 // =============================================================================

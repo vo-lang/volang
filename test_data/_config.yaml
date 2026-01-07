@@ -11,8 +11,6 @@
 
 tests:
   - file: channel_send.vo
-    skip: [jit]
-    reason: "JIT timeout - channel not supported"
   - file: clone_immediate_read.vo
   - file: complex_literal.vo
   - file: const.vo
@@ -76,11 +74,12 @@ tests:
   - file: proj_taskman/
   - file: qualified_embed_iface.vo
   - file: range_string.vo
-    skip: [jit]
-    reason: "JIT timeout"
   - file: rect_only.vo
   - file: rect_only_sum.vo
   - file: rune_literal.vo
+  - file: select_stmt.vo
+    skip: [jit]
+    reason: "JIT bug"
   - file: select_stmt_assert_fail.vo
     should_fail: true
     reason: "assert(false) is compile-time error"
@@ -99,8 +98,6 @@ tests:
     skip: [vm, jit]
     reason: "stdlib not ready"
   - file: stdlib/bytes.vo
-    skip: [jit]
-    reason: "JIT bug"
   - file: io_package.vo
     skip: [vm, jit]
     reason: "waiting for Bug 5 (cross-package interface global nil compare) and Bug 6 (variadic interface params)"
@@ -172,8 +169,6 @@ tests:
   # JIT bugs - tests not in original config
   - file: array_slice_get_set.vo
   - file: bytes_buffer.vo
-    skip: [jit]
-    reason: "JIT bug"
   - file: dyn_access.vo
   - file: dyn_access_big_struct.vo
   - file: dyn_access_interface_field.vo
@@ -184,8 +179,6 @@ tests:
   - file: dyn_call_multi_slot_ret.vo
   - file: dyn_call_question.vo
   - file: dyn_call_ret_array.vo
-    skip: [jit]
-    reason: "JIT bug - ffi panic"
   - file: dyn_call_ret_types.vo
   - file: dyn_call_simple.vo
   - file: dyn_get_attr.vo
@@ -223,7 +216,7 @@ tests:
   - file: typechecker/type_assertion.vo
   - file: typechecker/type_conversion.vo
     skip: [jit]
-    reason: "JIT bug"
+    reason: "JIT timeout - contains channel operations"
   - file: typechecker/interface_complex_hierarchy.vo
 
 # Typechecker tests - known bugs (now fixed)

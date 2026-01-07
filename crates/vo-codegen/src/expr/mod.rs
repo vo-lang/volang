@@ -158,6 +158,27 @@ pub fn compile_expr(
     Ok(dst)
 }
 
+/// Compile expression with implicit conversion to target type.
+/// Handles cases like struct -> interface conversion automatically.
+pub fn compile_expr_to_type(
+    expr: &Expr,
+    target_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let src_type = info.expr_type(expr.id);
+    
+    // Check if implicit interface conversion is needed
+    if info.is_interface(target_type) && !info.is_interface(src_type) {
+        let dst = func.alloc_temp(2); // interface is 2 slots
+        crate::stmt::compile_iface_assign(dst, expr, target_type, ctx, func, info)?;
+        Ok(dst)
+    } else {
+        compile_expr(expr, ctx, func, info)
+    }
+}
+
 /// Compile expression to specified slot.
 pub fn compile_expr_to(
     expr: &Expr,

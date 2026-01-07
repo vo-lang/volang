@@ -318,9 +318,9 @@ fn format_instruction(instr: &Instruction) -> String {
         }
 
         // CHAN
-        Opcode::ChanNew => format!("ChanNew       r{}, cap={}", a, b),
-        Opcode::ChanSend => format!("ChanSend      r{}, r{}", a, b),
-        Opcode::ChanRecv => format!("ChanRecv      r{}, r{}", a, b),
+        Opcode::ChanNew => format!("ChanNew       r{}, meta=r{}, cap=r{}, slots={}", a, b, c, flags),
+        Opcode::ChanSend => format!("ChanSend      r{}, r{}, slots={}", a, b, flags),
+        Opcode::ChanRecv => format!("ChanRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
         Opcode::ChanClose => format!("ChanClose     r{}", a),
 
         // SELECT

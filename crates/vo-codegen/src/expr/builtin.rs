@@ -158,6 +158,16 @@ pub fn compile_builtin_call(
                     func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
                 } else if info.is_chan(type_key) {
                     // make(chan T) or make(chan T, cap)
+                    // ChanNew: a=dst, b=elem_meta, c=cap, flags=elem_slots
+                    let elem_type_key = info.chan_elem_type(type_key);
+                    let elem_slots = info.type_slot_count(elem_type_key);
+                    let elem_slot_types = info.type_slot_types(elem_type_key);
+                    let elem_vk = info.type_value_kind(elem_type_key);
+                    let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(None, elem_slots, &elem_slot_types, Some(elem_vk));
+                    
+                    let elem_meta_reg = func.alloc_temp(1);
+                    func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
+                    
                     let cap_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], ctx, func, info)?
                     } else {
@@ -165,7 +175,7 @@ pub fn compile_builtin_call(
                         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                         tmp
                     };
-                    func.emit_op(Opcode::ChanNew, dst, cap_reg, 0);
+                    func.emit_with_flags(Opcode::ChanNew, elem_slots as u8, dst, elem_meta_reg, cap_reg);
             } else {
                 return Err(CodegenError::UnsupportedExpr("make with unsupported type".to_string()));
             }

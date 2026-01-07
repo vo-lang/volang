@@ -240,6 +240,21 @@ impl FuncBuilder {
         slot
     }
 
+    /// Bind a local variable name to an already-allocated slot.
+    /// 
+    /// This is used when a slot was pre-allocated (e.g., by SelectRecv) and we need
+    /// to bind a variable name to it later (in the case body). The slot_types are
+    /// already set by the original alloc_temp call, so we only bind the symbol.
+    pub fn define_local_at(&mut self, sym: Symbol, slot: u16, slots: u16) {
+        self.locals.insert(
+            sym,
+            LocalVar {
+                symbol: sym,
+                storage: StorageKind::StackValue { slot, slots },
+            },
+        );
+    }
+
     /// Heap allocation for struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access).
     pub fn define_local_heap_boxed(&mut self, sym: Symbol, value_slots: u16) -> u16 {
         let gcref_slot = self.next_slot;

@@ -1145,9 +1145,10 @@ fn compile_stmt_with_label(
         // === Send (channel send) ===
         StmtKind::Send(send_stmt) => {
             let chan_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
-            let val_reg = crate::expr::compile_expr(&send_stmt.value, ctx, func, info)?;
             let chan_type = info.expr_type(send_stmt.chan.id);
+            let elem_type = info.chan_elem_type(chan_type);
             let elem_slots = info.chan_elem_slots(chan_type) as u8;
+            let val_reg = crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
             func.emit_with_flags(Opcode::ChanSend, elem_slots, chan_reg, val_reg, 0);
         }
 
@@ -1526,11 +1527,15 @@ fn compile_select(
     // SelectBegin: a=case_count, flags=has_default
     func.emit_with_flags(Opcode::SelectBegin, flags, case_count, 0, 0);
     
+    // Track dst_reg for each recv case so we can bind variables to them later
+    let mut recv_dst_regs: Vec<Option<(u16, u16, bool)>> = Vec::new(); // (dst_reg, elem_slots, has_ok)
+    
     // Add each case
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
         match &case.comm {
             None => {
                 // Default case - no instruction needed, handled by SelectExec
+                recv_dst_regs.push(None);
             }
             Some(CommClause::Send(send)) => {
                 // SelectSend: a=chan_reg, b=val_reg, flags=elem_slots
@@ -1539,6 +1544,7 @@ fn compile_select(
                 let chan_type = info.expr_type(send.chan.id);
                 let elem_slots = info.chan_elem_slots(chan_type) as u8;
                 func.emit_with_flags(Opcode::SelectSend, elem_slots, chan_reg, val_reg, case_idx as u16);
+                recv_dst_regs.push(None);
             }
             Some(CommClause::Recv(recv)) => {
                 // SelectRecv: a=dst_reg, b=chan_reg, flags=(elem_slots<<1|has_ok)
@@ -1553,6 +1559,7 @@ fn compile_select(
                 
                 let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
                 func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, chan_reg, case_idx as u16);
+                recv_dst_regs.push(Some((dst_reg, elem_slots, has_ok)));
             }
         }
     }
@@ -1593,21 +1600,18 @@ fn compile_select(
             }
         }
         
-        // Define variables for recv case if needed
+        // Define variables for recv case - use the dst_reg from SelectRecv
         if let Some(CommClause::Recv(recv)) = &case.comm {
             if recv.define && !recv.lhs.is_empty() {
-                // Define the received value variable(s)
-                let chan_type = info.expr_type(recv.expr.id);
-                let elem_slots = info.chan_elem_slots(chan_type);
-                
-                for (i, name) in recv.lhs.iter().enumerate() {
-                    if i == 0 {
-                        // First variable gets the value
-                        let slot_types = vec![vo_runtime::SlotType::Value; elem_slots as usize];
-                        func.define_local_stack(name.symbol, elem_slots, &slot_types);
-                    } else {
-                        // Second variable gets the ok bool
-                        func.define_local_stack(name.symbol, 1, &[vo_runtime::SlotType::Value]);
+                if let Some((dst_reg, elem_slots, has_ok)) = recv_dst_regs[case_idx] {
+                    for (i, name) in recv.lhs.iter().enumerate() {
+                        if i == 0 {
+                            // First variable gets the value - bind to dst_reg
+                            func.define_local_at(name.symbol, dst_reg, elem_slots);
+                        } else if has_ok {
+                            // Second variable gets the ok bool - bind to dst_reg + elem_slots
+                            func.define_local_at(name.symbol, dst_reg + elem_slots, 1);
+                        }
                     }
                 }
             }

@@ -945,9 +945,7 @@ impl Vm {
                     }
                 }
                 Opcode::ChanRecv => {
-                    if is_trampoline {
-                        panic!("ChanRecv not supported in trampoline fiber");
-                    }
+                    // Allow ChanRecv on trampoline - if it blocks, execute_jit_call will handle it
                     match exec::exec_chan_recv(stack, bp, fiber_id, &inst) {
                         exec::ChanResult::Continue => ExecResult::Continue,
                         exec::ChanResult::Yield => {
@@ -966,9 +964,7 @@ impl Vm {
                     }
                 }
                 Opcode::ChanClose => {
-                    if is_trampoline {
-                        panic!("ChanClose not supported in trampoline fiber");
-                    }
+                    // Allow ChanClose on trampoline - it doesn't block
                     match exec::exec_chan_close(&stack, bp, &inst) {
                         exec::ChanResult::WakeMultiple(ids) => {
                             for id in ids { self.scheduler.wake(id); }

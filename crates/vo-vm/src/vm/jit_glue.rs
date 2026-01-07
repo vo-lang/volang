@@ -278,11 +278,20 @@ impl Vm {
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
-                ExecResult::Osr(_, _, _) => {
-                    // OSR is now handled at HINT_LOOP_BEGIN, this shouldn't happen
-                    // Continue VM execution
+                ExecResult::Continue => {
+                    // Time slice exhausted, continue execution
                 }
-                _ => {}
+                ExecResult::Return => break JitResult::Ok,
+                ExecResult::Osr(_, _, _) => {
+                    // OSR is now handled at HINT_LOOP_BEGIN, continue VM execution
+                }
+                ExecResult::Yield | ExecResult::Block => {
+                    // Channel/select operations require scheduler coordination.
+                    // JIT calls are synchronous and cannot handle blocking operations.
+                    let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                    fiber.panic_msg = Some("blocking operation (channel/select) not supported in JIT call path".to_string());
+                    break JitResult::Panic;
+                }
             }
         };
         
