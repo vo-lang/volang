@@ -218,8 +218,6 @@ tests:
     reason: "JIT bug - slice panic"
   - file: packed_array.vo
   - file: private_type_itab.vo
-    skip: [jit]
-    reason: "JIT bug - func_compiler panic"
   - file: jit/native_math.vo
   - file: jit/native_strings.vo
     skip: [jit]

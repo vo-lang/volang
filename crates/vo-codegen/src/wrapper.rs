@@ -83,8 +83,11 @@ pub fn generate_iface_wrapper(
         .map(|r| info.type_expr_layout(r.ty.id).0)
         .sum();
     
-    // Allocate args area for call: recv_value + params
-    let args_start = builder.alloc_temp_typed(&recv_slot_types);
+    // Allocate args area for call (ensure enough space for return values)
+    let forwarded_param_slots: u16 = wrapper_param_slots.iter().map(|(_, s)| *s).sum();
+    let total_arg_slots = recv_slots + forwarded_param_slots;
+    let alloc_slots = total_arg_slots.max(ret_slots);
+    let args_start = builder.alloc_temp(alloc_slots);
     
     if needs_unbox {
         // Struct/Array: dereference GcRef to get value
@@ -98,15 +101,12 @@ pub fn generate_iface_wrapper(
     let mut dest_offset = args_start + recv_slots;
     for (src_slot, slots) in &wrapper_param_slots {
         if *slots > 0 {
-            builder.alloc_temp(*slots);
             builder.emit_copy(dest_offset, *src_slot, *slots);
             dest_offset += *slots;
         }
     }
     
     // Call original function
-    let forwarded_param_slots: u16 = wrapper_param_slots.iter().map(|(_, s)| *s).sum();
-    let total_arg_slots = recv_slots + forwarded_param_slots;
     emit_call(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
     
     // Return
@@ -172,9 +172,10 @@ pub fn generate_promoted_wrapper(
     // Define forwarded params
     let first_param_slot = define_forwarded_params(&mut builder, forwarded_param_slots);
     
-    // Allocate args area for call
+    // Allocate args area for call (ensure enough space for return values)
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
-    let args_start = builder.alloc_temp(total_arg_slots);
+    let alloc_slots = total_arg_slots.max(ret_slots);
+    let args_start = builder.alloc_temp(alloc_slots);
     
     // Emit receiver loading based on embedding type
     emit_promoted_receiver(
