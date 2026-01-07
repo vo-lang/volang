@@ -31,22 +31,24 @@ pub mod jit_mgr;
 pub use jit_mgr::{JitManager, JitConfig};
 
 pub struct Vm {
+    /// JIT manager (only available with "jit" feature).
+    /// IMPORTANT: Must be first field so it's dropped LAST (Rust drops in reverse order).
+    /// JIT code memory must remain valid while scheduler/fibers are being dropped.
+    #[cfg(feature = "jit")]
+    pub jit_mgr: Option<JitManager>,
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
-    /// JIT manager (only available with "jit" feature).
-    #[cfg(feature = "jit")]
-    pub jit_mgr: Option<JitManager>,
 }
 
 impl Vm {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "jit")]
+            jit_mgr: None,
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
-            #[cfg(feature = "jit")]
-            jit_mgr: None,
         }
     }
     
@@ -555,7 +557,7 @@ impl Vm {
                     let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
                     let arg_start = inst.b;
                     let arg_slots = (inst.c >> 8) as usize;
-                    let ret_slots = (inst.c & 0xFF) as u16;
+                    let call_ret_slots = (inst.c & 0xFF) as usize;
                     
                     // Try JIT via resolve_call
                     let target_func = &module.functions[target_func_id as usize];
@@ -563,7 +565,10 @@ impl Vm {
                         .and_then(|mgr| mgr.resolve_call(target_func_id, target_func, module));
                     
                     if let Some(jit_func) = jit_func {
-                        self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, ret_slots as usize)
+                        // Use func_def.ret_slots for buffer allocation (JIT writes based on func definition)
+                        // but only copy back call_ret_slots to caller's stack
+                        let func_ret_slots = target_func.ret_slots as usize;
+                        self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, func_ret_slots, call_ret_slots)
                     } else {
                         exec::exec_call(stack, &mut fiber.frames, &inst, module)
                     }

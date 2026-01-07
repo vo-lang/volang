@@ -163,8 +163,6 @@ tests:
   - file: var_init_order.vo
   # Extension syntax tests
   - file: fail_stmt.vo
-    skip: [jit]
-    reason: "JIT bug"
   - file: question_operator.vo
     skip: [jit]
     reason: "JIT bug"

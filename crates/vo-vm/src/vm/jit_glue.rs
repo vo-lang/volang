@@ -280,16 +280,21 @@ impl Vm {
     }
 
     /// Call a JIT function inline (used by resolve_call path).
+    /// 
+    /// - `func_ret_slots`: Number of slots the JIT function will write (from func_def.ret_slots)
+    /// - `call_ret_slots`: Number of slots the caller expects (from call instruction)
     pub(super) fn call_jit_inline(
         &mut self,
         fiber_id: u32,
         jit_func: JitFunc,
         arg_start: u16,
         arg_slots: usize,
-        ret_slots: usize,
+        func_ret_slots: usize,
+        call_ret_slots: usize,
     ) -> ExecResult {
         let mut args = JitCallContext::read_args(self, fiber_id, arg_start, arg_slots);
-        let mut ret_buf = vec![0u64; ret_slots];
+        // Allocate buffer for func_ret_slots (what JIT will write), but at least 1 to avoid null ptr
+        let mut ret_buf = vec![0u64; func_ret_slots.max(1)];
         
         let safepoint_flag = false;
         let mut panic_flag = false;
@@ -297,6 +302,8 @@ impl Vm {
         let result = jit_func(&mut jit_ctx, args.as_mut_ptr(), ret_buf.as_mut_ptr());
         
         if result == JitResult::Ok {
+            // Only copy back call_ret_slots to caller's stack
+            ret_buf.truncate(call_ret_slots);
             JitCallContext::write_returns(self, fiber_id, arg_start, &ret_buf);
         }
         
