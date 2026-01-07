@@ -1,0 +1,54 @@
+package errors
+
+// Dynamic access error codes (used by runtime).
+// Range 1000-1099 is reserved for dyn package.
+const (
+    dynUnknown      = 1000 // Unknown error
+    dynNilBase      = 1001 // Base value is nil
+    dynBadField     = 1002 // Field does not exist
+    dynBadIndex     = 1003 // Invalid index type
+    dynOutOfBounds  = 1004 // Index out of bounds
+    dynBadCall      = 1005 // Cannot call value
+    dynSigMismatch  = 1006 // Signature mismatch
+    dynTypeMismatch = 1007 // Type mismatch
+)
+
+// NewDynUnknown creates a dynamic access unknown error.
+func NewDynUnknown(msg string) error {
+    return &Error{code: dynUnknown, msg: msg}
+}
+
+// NewDynNilBase creates a dynamic access nil base error.
+func NewDynNilBase(msg string) error {
+    return &Error{code: dynNilBase, msg: msg}
+}
+
+// NewDynBadField creates a dynamic access bad field error.
+func NewDynBadField(msg string) error {
+    return &Error{code: dynBadField, msg: msg}
+}
+
+// NewDynBadIndex creates a dynamic access bad index error.
+func NewDynBadIndex(msg string) error {
+    return &Error{code: dynBadIndex, msg: msg}
+}
+
+// NewDynOutOfBounds creates a dynamic access out of bounds error.
+func NewDynOutOfBounds(msg string) error {
+    return &Error{code: dynOutOfBounds, msg: msg}
+}
+
+// NewDynBadCall creates a dynamic access bad call error.
+func NewDynBadCall(msg string) error {
+    return &Error{code: dynBadCall, msg: msg}
+}
+
+// NewDynSigMismatch creates a dynamic access signature mismatch error.
+func NewDynSigMismatch(msg string) error {
+    return &Error{code: dynSigMismatch, msg: msg}
+}
+
+// NewDynTypeMismatch creates a dynamic access type mismatch error.
+func NewDynTypeMismatch(msg string) error {
+    return &Error{code: dynTypeMismatch, msg: msg}
+}

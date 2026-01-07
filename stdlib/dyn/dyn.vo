@@ -2,22 +2,15 @@ package dyn
 
 import "errors"
 
-// Re-export error codes from errors package for backward compatibility.
-const (
-    ErrUnknown      = errors.DynUnknown
-    ErrNilBase      = errors.DynNilBase
-    ErrBadField     = errors.DynBadField
-    ErrBadIndex     = errors.DynBadIndex
-    ErrOutOfBounds  = errors.DynOutOfBounds
-    ErrBadCall      = errors.DynBadCall
-    ErrSigMismatch  = errors.DynSigMismatch
-    ErrTypeMismatch = errors.DynTypeMismatch
-)
-
-// NewError creates a dynamic access error with the given code and message.
-func NewError(code int, msg string) error {
-    return errors.NewCode(code, msg)
-}
+// Dynamic access error values (use with errors.Is).
+var ErrUnknown      = errors.NewDynUnknown("dynamic access: unknown error")
+var ErrNilBase      = errors.NewDynNilBase("dynamic access: base value is nil")
+var ErrBadField     = errors.NewDynBadField("dynamic access: field does not exist")
+var ErrBadIndex     = errors.NewDynBadIndex("dynamic access: invalid index type")
+var ErrOutOfBounds  = errors.NewDynOutOfBounds("dynamic access: index out of bounds")
+var ErrBadCall      = errors.NewDynBadCall("dynamic access: cannot call value")
+var ErrSigMismatch  = errors.NewDynSigMismatch("dynamic access: signature mismatch")
+var ErrTypeMismatch = errors.NewDynTypeMismatch("dynamic access: type mismatch")
 
 type AttrObject interface {
     __attr(name string) (any, error)
@@ -65,11 +58,11 @@ func (m MapObject) __attr(name string) (any, error) {
 func (m MapObject) __index(key any) (any, error) {
     k, ok := key.(string)
     if !ok {
-        return nil, NewError(ErrBadIndex, "map key must be string")
+        return nil, ErrBadIndex
     }
     v, ok := m[k]
     if !ok {
-        return nil, NewError(ErrBadField, "key not found")
+        return nil, ErrBadField
     }
     return v, nil
 }
@@ -81,7 +74,7 @@ func (m MapObject) __setattr(name string, value any) error {
 func (m MapObject) __setindex(key any, value any) error {
     k, ok := key.(string)
     if !ok {
-        return NewError(ErrBadIndex, "map key must be string")
+        return ErrBadIndex
     }
     m[k] = value
     return nil
@@ -93,10 +86,10 @@ type SliceObject []any
 func (s SliceObject) __index(key any) (any, error) {
     i, ok := key.(int)
     if !ok {
-        return nil, NewError(ErrBadIndex, "slice index must be int")
+        return nil, ErrBadIndex
     }
     if i < 0 || i >= len(s) {
-        return nil, NewError(ErrOutOfBounds, "slice index out of bounds")
+        return nil, ErrOutOfBounds
     }
     return s[i], nil
 }
@@ -104,10 +97,10 @@ func (s SliceObject) __index(key any) (any, error) {
 func (s SliceObject) __setindex(key any, value any) error {
     i, ok := key.(int)
     if !ok {
-        return NewError(ErrBadIndex, "slice index must be int")
+        return ErrBadIndex
     }
     if i < 0 || i >= len(s) {
-        return NewError(ErrOutOfBounds, "slice index out of bounds")
+        return ErrOutOfBounds
     }
     s[i] = value
     return nil

@@ -28,19 +28,6 @@ const (
     CodeUnknown int = 0
 )
 
-// Dynamic access error codes (used by runtime).
-// Range 1000-1099 is reserved for dyn package.
-const (
-    DynUnknown      = 1000 // Unknown error
-    DynNilBase      = 1001 // Base value is nil
-    DynBadField     = 1002 // Field does not exist
-    DynBadIndex     = 1003 // Invalid index type
-    DynOutOfBounds  = 1004 // Index out of bounds
-    DynBadCall      = 1005 // Cannot call value
-    DynSigMismatch  = 1006 // Signature mismatch
-    DynTypeMismatch = 1007 // Type mismatch
-)
-
 // New returns a new error with default code CodeUnknown.
 func New(msg string) error {
     return &Error{code: CodeUnknown, msg: msg}
