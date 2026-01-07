@@ -381,7 +381,7 @@ fn ptr_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slot_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let base = e.read_var(inst.b);
+    let base = e.var_addr(inst.b);
     let idx = e.read_var(inst.c);
     let offset = e.builder().ins().imul_imm(idx, 8);
     let addr = e.builder().ins().iadd(base, offset);
@@ -390,7 +390,7 @@ fn slot_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slot_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let base = e.read_var(inst.a);
+    let base = e.var_addr(inst.a);
     let idx = e.read_var(inst.b);
     let v = e.read_var(inst.c);
     let offset = e.builder().ins().imul_imm(idx, 8);
@@ -399,7 +399,7 @@ fn slot_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slot_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let base = e.read_var(inst.b);
+    let base = e.var_addr(inst.b);
     let idx = e.read_var(inst.c);
     let elem_slots = inst.flags as usize;
     let byte_off = e.builder().ins().imul_imm(idx, (elem_slots * 8) as i64);
@@ -412,7 +412,7 @@ fn slot_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slot_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let base = e.read_var(inst.a);
+    let base = e.var_addr(inst.a);
     let idx = e.read_var(inst.b);
     let elem_slots = inst.flags as usize;
     let byte_off = e.builder().ins().imul_imm(idx, (elem_slots * 8) as i64);
@@ -489,6 +489,35 @@ fn resolve_elem_slots<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> usi
     if flags == 0 { (elem_bytes + 7) / 8 } else { elem_bytes }
 }
 
+fn emit_elem_slots_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
+    if flags == 0 {
+        let eb_raw = e.read_var(eb_reg);
+        e.builder().ins().ireduce(types::I32, eb_raw)
+    } else {
+        let slots = match flags {
+            0x81 | 0x82 => 1,
+            0x84 | 0x44 => 1,
+            f => f as i64,
+        };
+        e.builder().ins().iconst(types::I32, slots)
+    }
+}
+
+fn emit_elem_bytes_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
+    if flags == 0 {
+        let eb_raw = e.read_var(eb_reg);
+        e.builder().ins().ireduce(types::I32, eb_raw)
+    } else {
+        let bytes = match flags {
+            0x81 => 1,
+            0x82 => 2,
+            0x84 | 0x44 => 4,
+            f => f as i64,
+        };
+        e.builder().ins().iconst(types::I32, bytes)
+    }
+}
+
 // =============================================================================
 // Slice operations
 // =============================================================================
@@ -546,19 +575,7 @@ fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         Some(f) => f,
         None => return,
     };
-    let elem_bytes: usize = match inst.flags {
-        0 => 0,
-        0x81 => 1,
-        0x82 => 2,
-        0x84 | 0x44 => 4,
-        f => f as usize,
-    };
-    let elem_bytes_val = if inst.flags == 0 {
-        let eb = e.read_var(inst.c + 2);
-        e.builder().ins().ireduce(types::I32, eb)
-    } else {
-        e.builder().ins().iconst(types::I32, elem_bytes as i64)
-    };
+    let elem_bytes_val = emit_elem_bytes_i32(e, inst.flags, inst.c + 2);
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -673,16 +690,37 @@ fn slice_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_slice_func = match e.helpers().slice_slice {
-        Some(f) => f,
-        None => return,
-    };
     let gc_ptr = e.gc_ptr();
-    let s = e.read_var(inst.b);
+    let src = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
     let hi = e.read_var(inst.c + 1);
-    let call = e.builder().ins().call(slice_slice_func, &[gc_ptr, s, lo, hi]);
-    let result = e.builder().inst_results(call)[0];
+    
+    let is_array = (inst.flags & 0b01) != 0;
+    let has_max = (inst.flags & 0b10) != 0;
+    
+    let result = if is_array {
+        if has_max {
+            let max = e.read_var(inst.c + 2);
+            let func = e.helpers().slice_from_array3.unwrap();
+            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
+            e.builder().inst_results(call)[0]
+        } else {
+            let func = e.helpers().slice_from_array.unwrap();
+            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
+            e.builder().inst_results(call)[0]
+        }
+    } else {
+        if has_max {
+            let max = e.read_var(inst.c + 2);
+            let func = e.helpers().slice_slice3.unwrap();
+            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
+            e.builder().inst_results(call)[0]
+        } else {
+            let func = e.helpers().slice_slice.unwrap();
+            let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
+            e.builder().inst_results(call)[0]
+        }
+    };
     e.write_var(inst.a, result);
 }
 
@@ -729,7 +767,7 @@ fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
-    let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let elem_slots_i32 = emit_elem_slots_i32(e, inst.flags, inst.c + 1);
     let len = e.read_var(inst.c);
     let call = e.builder().ins().call(array_new_func, &[gc_ptr, meta_i32, elem_slots_i32, len]);
     let result = e.builder().inst_results(call)[0];

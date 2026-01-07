@@ -195,6 +195,7 @@ impl Vm {
     pub(super) fn call_jit_direct(
         &mut self,
         jit_func: JitFunc,
+        fiber_ptr: *mut std::ffi::c_void,
         args: *mut u64,
         ret: *mut u64,
     ) -> JitResult {
@@ -210,7 +211,7 @@ impl Vm {
         
         let mut ctx = build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,
-            vm_ptr, std::ptr::null_mut(), module_ptr,
+            vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
         );
         jit_func(&mut ctx, args, ret)
@@ -231,17 +232,25 @@ impl Vm {
         };
         let module = unsafe { &*module };
         
+        // Acquire trampoline fiber for potential VM fallback and for passing to JIT context
+        let trampoline_id = self.scheduler.acquire_trampoline_fiber();
+        let fiber_ptr = self.scheduler.trampoline_fiber_mut(trampoline_id) as *mut Fiber as *mut std::ffi::c_void;
+        
         // Use JitManager unified entry point
         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
             if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-                return self.call_jit_direct(jit_func, args as *mut u64, ret);
+                let result = self.call_jit_direct(jit_func, fiber_ptr, args as *mut u64, ret);
+                self.scheduler.release_trampoline_fiber(trampoline_id);
+                return result;
             }
             
             if jit_mgr.record_call(func_id) {
                 let func_def = &module.functions[func_id as usize];
                 if jit_mgr.compile_full(func_id, func_def, module).is_ok() {
                     if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-                        return self.call_jit_direct(jit_func, args as *mut u64, ret);
+                        let result = self.call_jit_direct(jit_func, fiber_ptr, args as *mut u64, ret);
+                        self.scheduler.release_trampoline_fiber(trampoline_id);
+                        return result;
                     }
                 }
             }
@@ -252,8 +261,6 @@ impl Vm {
         let local_slots = func_def.local_slots;
         let param_slots = func_def.param_slots as usize;
         let func_ret_slots = func_def.ret_slots as usize;
-        
-        let trampoline_id = self.scheduler.acquire_trampoline_fiber();
         
         {
             let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
@@ -401,20 +408,21 @@ impl Vm {
             .map(|m| m as *const _)
             .unwrap_or(std::ptr::null());
         
-        // Build JIT context
-        let mut ctx = build_jit_ctx(
-            &mut self.state, func_table_ptr, func_table_len,
-            vm_ptr, std::ptr::null_mut(), module_ptr,
-            &safepoint_flag, &mut panic_flag,
-        );
-        
-        // Get locals pointer from fiber stack
+        // Get fiber pointer for JIT context
         let fiber = if is_trampoline_fiber(fiber_id) {
             self.scheduler.trampoline_fiber_mut(fiber_id)
         } else {
             &mut self.scheduler.fibers[fiber_id as usize]
         };
+        let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let locals_ptr = fiber.stack[bp..].as_mut_ptr();
+        
+        // Build JIT context with valid fiber pointer
+        let mut ctx = build_jit_ctx(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, fiber_ptr, module_ptr,
+            &safepoint_flag, &mut panic_flag,
+        );
         
         // Call loop function
         let exit_pc = loop_func(&mut ctx, locals_ptr);

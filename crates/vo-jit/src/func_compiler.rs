@@ -22,6 +22,7 @@ pub struct FunctionCompiler<'a> {
     current_pc: usize,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    args_ptr: Value,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -46,6 +47,7 @@ impl<'a> FunctionCompiler<'a> {
             current_pc: 0,
             helpers,
             reg_consts: HashMap::new(),
+            args_ptr: Value::from_u32(0),
         }
     }
 
@@ -117,6 +119,8 @@ impl<'a> FunctionCompiler<'a> {
         let _ctx = params[0];
         let args = params[1];
         let _ret = params[2];
+        
+        self.args_ptr = args;
         
         let param_slots = self.func_def.param_slots as usize;
         for i in 0..param_slots {
@@ -507,4 +511,8 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn set_reg_const(&mut self, reg: u16, val: i64) { self.reg_consts.insert(reg, val); }
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { 1 }
+    fn var_addr(&mut self, slot: u16) -> Value {
+        let offset = (slot as i64) * 8;
+        self.builder.ins().iadd_imm(self.args_ptr, offset)
+    }
 }

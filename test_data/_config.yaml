@@ -138,13 +138,9 @@ tests:
   - file: struct_object.vo
   - file: switch_stmt.vo
   - file: three_index_slice.vo
-    skip: [jit]
-    reason: "JIT bug - ctx.fiber null"
   - file: named_return.vo
   - file: fallthrough.vo
   - file: escaped_array_init.vo
-    skip: [jit]
-    reason: "JIT bug - ctx.fiber null"
   - file: type_switch.vo
   - file: type_assertion.vo
   - file: type_assertion_ok.vo
@@ -181,8 +177,6 @@ tests:
 
   # JIT bugs - tests not in original config
   - file: array_slice_get_set.vo
-    skip: [jit]
-    reason: "JIT bug - ctx.fiber null"
   - file: bytes_buffer.vo
     skip: [jit]
     reason: "JIT bug"
@@ -223,8 +217,6 @@ tests:
     skip: [jit]
     reason: "JIT bug - slice panic"
   - file: packed_array.vo
-    skip: [jit]
-    reason: "JIT bug - ctx.fiber null"
   - file: private_type_itab.vo
     skip: [jit]
     reason: "JIT bug - func_compiler panic"

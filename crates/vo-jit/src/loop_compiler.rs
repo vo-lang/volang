@@ -590,4 +590,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn set_reg_const(&mut self, reg: u16, val: i64) { self.reg_consts.insert(reg, val); }
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { LOOP_RESULT_PANIC as i32 }
+    fn var_addr(&mut self, slot: u16) -> Value {
+        let offset = (slot as i64) * 8;
+        self.builder.ins().iadd_imm(self.locals_ptr, offset)
+    }
 }

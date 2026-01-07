@@ -96,4 +96,8 @@ pub trait IrEmitter<'a> {
     
     /// Panic return value (FunctionCompiler=1, LoopCompiler=LOOP_RESULT_PANIC)
     fn panic_return_value(&self) -> i32;
+    
+    /// Get memory address of a variable slot.
+    /// Used by SlotGet/SlotSet for stack array access.
+    fn var_addr(&mut self, slot: u16) -> Value;
 }
