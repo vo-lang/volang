@@ -456,6 +456,40 @@ fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 // =============================================================================
+// Slice/Array element size helpers
+// =============================================================================
+
+/// Resolve elem_bytes from instruction flags.
+/// When flags==0, elem_bytes is stored in the specified register (set by preceding LoadConst).
+/// Returns (elem_bytes, needs_sign_extend).
+fn resolve_elem_bytes<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> (usize, bool) {
+    match flags {
+        0 => {
+            // Dynamic: elem_bytes > 63, stored in register by LoadConst
+            let eb = e.get_reg_const(eb_reg).unwrap() as usize;
+            (eb, false)
+        }
+        0x81 => (1, true),   // int8
+        0x82 => (2, true),   // int16
+        0x84 => (4, true),   // int32
+        0x44 => (4, false),  // float32
+        f => (f as usize, false),
+    }
+}
+
+/// Resolve elem_bytes for SliceAppend/ArrayNew etc.
+/// Returns elem_slots (not elem_bytes).
+fn resolve_elem_slots<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> usize {
+    let elem_bytes = match flags {
+        0 => e.get_reg_const(eb_reg).unwrap() as usize,
+        0x81 | 0x82 => 1,
+        0x84 | 0x44 => 1,
+        f => f as usize,
+    };
+    if flags == 0 { (elem_bytes + 7) / 8 } else { elem_bytes }
+}
+
+// =============================================================================
 // Slice operations
 // =============================================================================
 
@@ -538,14 +572,7 @@ fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let (elem_bytes, needs_sext) = match inst.flags {
-        0 => (e.get_reg_const(inst.c + 1).unwrap_or(8) as usize, false),
-        0x81 => (1, true),
-        0x82 => (2, true),
-        0x84 => (4, true),
-        0x44 => (4, false),
-        f => (f as usize, false),
-    };
+    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
     
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     if elem_bytes <= 8 {
@@ -588,13 +615,7 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let s = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
     let val = e.read_var(inst.c);
-    let elem_bytes = match inst.flags {
-        0 => e.get_reg_const(inst.b + 1).unwrap_or(8) as usize,
-        0x81 => 1,
-        0x82 => 2,
-        0x84 | 0x44 => 4,
-        f => f as usize,
-    };
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
     
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     if elem_bytes <= 8 {
@@ -672,9 +693,13 @@ fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     };
     let gc_ptr = e.gc_ptr();
     let s = e.read_var(inst.b);
-    let elem_ptr = e.read_var(inst.c);
-    let elem_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
-    let call = e.builder().ins().call(slice_append_func, &[gc_ptr, s, elem_ptr, elem_slots]);
+    
+    // flags==0: elem at c+2 (c+1 is elem_bytes); flags!=0: elem at c+1
+    let elem_slots = resolve_elem_slots(e, inst.flags, inst.c + 1);
+    let elem_ptr = e.read_var(inst.c + if inst.flags == 0 { 2 } else { 1 });
+    let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
+    
+    let call = e.builder().ins().call(slice_append_func, &[gc_ptr, s, elem_ptr, elem_slots_val]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
@@ -714,14 +739,7 @@ fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let arr = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let (elem_bytes, needs_sext) = match inst.flags {
-        0 => (e.get_reg_const(inst.c + 1).unwrap_or(8) as usize, false),
-        0x81 => (1, true),
-        0x82 => (2, true),
-        0x84 => (4, true),
-        0x44 => (4, false),
-        f => (f as usize, false),
-    };
+    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
     if elem_bytes <= 8 {
         let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
         let off = e.builder().ins().imul(idx, eb);
@@ -764,13 +782,7 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let arr = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
     let val = e.read_var(inst.c);
-    let elem_bytes = match inst.flags {
-        0 => e.get_reg_const(inst.b + 1).unwrap_or(8) as usize,
-        0x81 => 1,
-        0x82 => 2,
-        0x84 | 0x44 => 4,
-        f => f as usize,
-    };
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
     if elem_bytes <= 8 {
         let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
         let off = e.builder().ins().imul(idx, eb);

@@ -1,5 +1,10 @@
 // Test: comprehensive array/slice get/set operations
-// Covers: int8, int16, int32, int64, float32, float64, small struct, large struct
+// Covers all flags==0 and flags!=0 scenarios for:
+// - SliceNew, SliceGet, SliceSet, SliceAppend
+// - ArrayNew, ArrayGet, ArraySet (heap arrays)
+//
+// flags!=0: elem_bytes <= 63 (int8/16/32/64, float32/64, small/medium structs)
+// flags==0: elem_bytes > 63 (large structs with >8 slots)
 
 package main
 
@@ -156,19 +161,50 @@ func testLargeStruct() {
     println("LargeStruct OK")
 }
 
-func testArrayInt() {
-    // Fixed-size array
+func testStackArray() {
+    // Stack array (SlotGet/SlotSet, not ArrayGet/ArraySet)
     var arr [4]int64
     arr[0] = 100
     arr[1] = 200
     arr[2] = 300
     arr[3] = 400
     
-    if arr[0] != 100 { println("FAIL: array arr[0]") }
-    if arr[1] != 200 { println("FAIL: array arr[1]") }
-    if arr[2] != 300 { println("FAIL: array arr[2]") }
-    if arr[3] != 400 { println("FAIL: array arr[3]") }
-    println("Array int64 OK")
+    if arr[0] != 100 { println("FAIL: stack array arr[0]") }
+    if arr[1] != 200 { println("FAIL: stack array arr[1]") }
+    if arr[2] != 300 { println("FAIL: stack array arr[2]") }
+    if arr[3] != 400 { println("FAIL: stack array arr[3]") }
+    println("Stack Array OK")
+}
+
+func testHeapArraySmall() {
+    // Heap array with SmallStruct (flags != 0)
+    // Array escapes via slice operation, uses ArrayGet/ArraySet
+    var arr [3]SmallStruct
+    arr[0] = SmallStruct{1, 2}
+    arr[1] = SmallStruct{10, 20}
+    arr[2] = SmallStruct{100, 200}
+    
+    // Force escape by taking slice
+    s := arr[:]
+    
+    if s[0].a != 1 || s[0].b != 2 { println("FAIL: heap array small s[0]") }
+    if s[1].a != 10 || s[1].b != 20 { println("FAIL: heap array small s[1]") }
+    if s[2].a != 100 || s[2].b != 200 { println("FAIL: heap array small s[2]") }
+    println("Heap Array SmallStruct OK")
+}
+
+func testHeapArrayLarge() {
+    // Heap array with LargeStruct (flags == 0)
+    var arr [2]LargeStruct
+    arr[0] = LargeStruct{1, 2, 3, 4, 5, 6, 7, 8, 9}
+    arr[1] = LargeStruct{10, 20, 30, 40, 50, 60, 70, 80, 90}
+    
+    // Force escape
+    s := arr[:]
+    
+    if s[0].a != 1 || s[0].i != 9 { println("FAIL: heap array large s[0]") }
+    if s[1].a != 10 || s[1].i != 90 { println("FAIL: heap array large s[1]") }
+    println("Heap Array LargeStruct OK")
 }
 
 func testSliceLiteral() {
@@ -206,6 +242,7 @@ func testAppendLargeStruct() {
 }
 
 func main() {
+    // Slice tests (flags != 0)
     testInt8()
     testInt16()
     testInt32()
@@ -214,10 +251,21 @@ func main() {
     testFloat64()
     testSmallStruct()
     testMediumStruct()
+    
+    // Slice tests (flags == 0)
     testLargeStruct()
-    testArrayInt()
+    
+    // Stack array (SlotGet/SlotSet)
+    testStackArray()
+    
+    // Heap array tests (ArrayGet/ArraySet)
+    testHeapArraySmall()  // flags != 0
+    testHeapArrayLarge()  // flags == 0
+    
+    // Slice literal and append
     testSliceLiteral()
-    testAppend()
-    testAppendLargeStruct()
+    testAppend()           // flags != 0
+    testAppendLargeStruct() // flags == 0
+    
     println("All tests passed!")
 }
