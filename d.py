@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -304,7 +305,9 @@ class TestRunner:
         if self.verbose:
             print(f"{Colors.DIM}Running (should_fail): {' '.join(cmd)}{Colors.NC}")
 
+        start_time = time.time()
         code, stdout, stderr = run_cmd(cmd)
+        elapsed = time.time() - start_time
         output = stdout + stderr
 
         # Check for compile/type-check errors (new tags: PARSE, CHECK, CODEGEN, IO)
@@ -315,15 +318,19 @@ class TestRunner:
                               '[VO:IO:' in output)
         has_rust_panic = 'panicked at' in output
 
+        time_color = Colors.YELLOW if elapsed > 1.0 else (Colors.DIM + Colors.YELLOW if elapsed > 0.1 else Colors.DIM)
         if has_rust_panic:
             panic_line = next((l for l in output.split('\n') if 'panicked at' in l), '')[:60]
             self._record_fail('vm', f"{file} [should_fail] [RUST PANIC: {panic_line}]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [should_fail] {time_color}({elapsed:.2f}s){Colors.NC}")
         elif has_analysis_error and code != 0:
             # Test correctly failed at compile/type-check stage
             self._record_pass('vm', f"{file} [should_fail]")
+            print(f"  {Colors.GREEN}✓{Colors.NC} {file} [should_fail] {time_color}({elapsed:.2f}s){Colors.NC}")
         else:
             # Test should have failed but didn't
             self._record_fail('vm', f"{file} [should_fail] (expected compile error but passed)")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [should_fail] {time_color}({elapsed:.2f}s){Colors.NC}")
 
         if self.verbose:
             print(output)
@@ -345,7 +352,9 @@ class TestRunner:
         if self.verbose:
             print(f"{Colors.DIM}Running: {' '.join(cmd)}{Colors.NC}")
 
+        start_time = time.time()
         code, stdout, stderr = run_cmd(cmd, env=run_env)
+        elapsed = time.time() - start_time
         output = stdout + stderr
 
         has_vo_error = ('[VO:PANIC:' in output or 
@@ -357,19 +366,25 @@ class TestRunner:
         has_ok = '[VO:OK]' in output
         has_cli_error = output.strip().startswith('error:')
 
+        time_color = Colors.YELLOW if elapsed > 1.0 else (Colors.DIM + Colors.YELLOW if elapsed > 0.1 else Colors.DIM)
         if has_ok and not has_vo_error and not has_rust_panic:
             self._record_pass(mode, f"{file} [{mode}]")
+            print(f"  {Colors.GREEN}✓{Colors.NC} {file} [{mode}] {time_color}({elapsed:.2f}s){Colors.NC}")
         elif has_rust_panic:
             panic_line = next((l for l in output.split('\n') if 'panicked at' in l), '')[:60]
             self._record_fail(mode, f"{file} [{mode}] [RUST PANIC: {panic_line}]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [{mode}] {time_color}({elapsed:.2f}s){Colors.NC}")
         elif has_vo_error:
             msg = next((l for l in output.split('\n') if '[VO:PANIC:' in l or '[VO:PARSE:' in l or '[VO:CHECK:' in l or '[VO:CODEGEN:' in l or '[VO:IO:' in l), '')
             self._record_fail(mode, f"{file} [{mode}] {msg[:60]}")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [{mode}] {time_color}({elapsed:.2f}s){Colors.NC}")
         elif has_cli_error:
             err_line = next((l for l in output.split('\n') if l.startswith('error:')), '')[:60]
             self._record_fail(mode, f"{file} [{mode}] [{err_line}]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [{mode}] {time_color}({elapsed:.2f}s){Colors.NC}")
         else:
             self._record_fail(mode, f"{file} [{mode}] [no [VO:OK] marker]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [{mode}] {time_color}({elapsed:.2f}s){Colors.NC}")
 
         if self.verbose:
             print(output)

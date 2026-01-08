@@ -139,8 +139,14 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             } else {
                 self.alloc_escaped_boxed(sym, type_key, slots, &slot_types)
             }
+        } else if self.info.is_array(type_key) {
+            // Stack array: memory semantics, accessed via SlotGet/SlotSet
+            let elem_slots = self.info.array_elem_slots(type_key);
+            let len = self.info.array_len(type_key) as u16;
+            let base_slot = self.func.define_local_stack_array(sym, slots, elem_slots, len, &slot_types);
+            Ok(StorageKind::StackArray { base_slot, elem_slots, len })
         } else {
-            // Stack allocation
+            // Stack value (struct/primitive): register semantics
             let slot = self.func.define_local_stack(sym, slots, &slot_types);
             Ok(StorageKind::StackValue { slot, slots })
         }
@@ -209,6 +215,9 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             StorageKind::HeapArray { gcref_slot, elem_slots } => {
                 compile_escaped_array_init(gcref_slot, expr, target_type, elem_slots, self.ctx, self.func, self.info)
             }
+            StorageKind::StackArray { base_slot, elem_slots, .. } => {
+                compile_stack_array_init(base_slot, expr, target_type, elem_slots, self.ctx, self.func, self.info)
+            }
             StorageKind::HeapBoxed { gcref_slot, value_slots } => {
                 let tmp = self.func.alloc_temp(value_slots);
                 self.compile_value(expr, tmp, target_type)?;
@@ -243,6 +252,10 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         match storage {
             StorageKind::HeapArray { .. } | StorageKind::HeapBoxed { .. } => {
                 // Heap allocations are already zero-initialized by PtrNew/ArrayNew
+            }
+            StorageKind::StackArray { .. } => {
+                // Stack arrays rely on JIT/VM prologue zero-initialization
+                // No codegen needed - locals_slot is zeroed before function execution
             }
             StorageKind::StackValue { slot, slots } => {
                 for i in 0..slots {
@@ -283,8 +296,25 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
             self.func.emit_ptr_set(gcref_slot, 0, src_slot, slots);
             Ok(StorageKind::HeapBoxed { gcref_slot, value_slots: slots })
+        } else if self.info.is_array(type_key) && !escapes {
+            // Stack array: copy using SlotSet
+            let elem_slots = self.info.array_elem_slots(type_key);
+            let len = self.info.array_len(type_key) as u16;
+            let base_slot = self.func.define_local_stack_array(sym, slots, elem_slots, len, &slot_types);
+            // Copy element by element using SlotSet
+            for i in 0..len {
+                let idx_reg = self.func.alloc_temp(1);
+                self.func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                let src_offset = src_slot + i * elem_slots;
+                if elem_slots == 1 {
+                    self.func.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
+                } else {
+                    self.func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
+                }
+            }
+            Ok(StorageKind::StackArray { base_slot, elem_slots, len })
         } else {
-            // Stack: just copy
+            // Stack value (struct/primitive): just copy
             let slot = self.func.define_local_stack(sym, slots, &slot_types);
             self.func.emit_copy(slot, src_slot, slots);
             Ok(StorageKind::StackValue { slot, slots })
@@ -297,6 +327,19 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         match storage {
             StorageKind::StackValue { slot, slots } => {
                 self.func.emit_copy(slot, src_slot, slots);
+            }
+            StorageKind::StackArray { base_slot, elem_slots, len } => {
+                // Copy element by element using SlotSet
+                for i in 0..len {
+                    let idx_reg = self.func.alloc_temp(1);
+                    self.func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    let src_offset = src_slot + i * elem_slots;
+                    if elem_slots == 1 {
+                        self.func.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
+                    } else {
+                        self.func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
+                    }
+                }
             }
             StorageKind::HeapBoxed { gcref_slot, .. } => {
                 self.func.emit_ptr_set_with_slot_types(gcref_slot, 0, src_slot, slot_types);
@@ -961,7 +1004,7 @@ fn compile_stmt_with_label(
                         let len = info.array_len(range_type) as i64;
                         let src = crate::expr::get_expr_source(expr, sc.ctx, sc.func, sc.info);
                         let (reg, stk, base) = match src {
-                            ExprSource::Location(StorageKind::StackValue { slot, .. }) => (0, true, slot),
+                            ExprSource::Location(StorageKind::StackArray { base_slot, .. }) => (0, true, base_slot),
                             _ => (crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?, false, 0),
                         };
                         let evk = info.type_value_kind(et);
@@ -2071,6 +2114,61 @@ pub fn compile_iface_assign(
         let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
         func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
     }
+    Ok(())
+}
+
+/// Initialize a stack-allocated array from a composite literal using SlotSet.
+/// Stack arrays use memory semantics - all access goes through SlotGet/SlotSet.
+fn compile_stack_array_init(
+    base_slot: u16,
+    value: &vo_syntax::ast::Expr,
+    _array_type: vo_analysis::objects::TypeKey,
+    elem_slots: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    use vo_syntax::ast::ExprKind;
+    
+    if let ExprKind::CompositeLit(lit) = &value.kind {
+        // Array literal: [N]T{e1, e2, ...}
+        for (i, elem) in lit.elems.iter().enumerate() {
+            // Compile element value to temp
+            let val_reg = func.alloc_temp(elem_slots);
+            crate::expr::compile_expr_to(&elem.value, val_reg, ctx, func, info)?;
+            
+            // Load index
+            let idx_reg = func.alloc_temp(1);
+            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+            
+            // SlotSet: base[idx] = val (memory semantics)
+            if elem_slots == 1 {
+                func.emit_op(Opcode::SlotSet, base_slot, idx_reg, val_reg);
+            } else {
+                func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, val_reg);
+            }
+        }
+    } else {
+        // Non-literal initialization: compile entire value and copy element by element
+        // This handles cases like: var a [3]int = someOtherArray
+        let src_reg = crate::expr::compile_expr(value, ctx, func, info)?;
+        let arr_len = info.array_len(info.expr_type(value.id));
+        
+        for i in 0..arr_len as usize {
+            // Load index
+            let idx_reg = func.alloc_temp(1);
+            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+            
+            // SlotSet from src position
+            let src_offset = src_reg + (i as u16) * elem_slots;
+            if elem_slots == 1 {
+                func.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
+            } else {
+                func.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
+            }
+        }
+    }
+    
     Ok(())
 }
 

@@ -523,11 +523,8 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value { self.builder.use_var(self.vars[slot as usize]) }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
-        // Also write to stack_slot to keep SSA and memory in sync
-        // (needed for array literal initialization which uses LoadInt but SlotGetN reads from memory)
-        if let Some(locals_slot) = self.locals_slot {
-            self.builder.ins().stack_store(val, locals_slot, (slot as i32) * 8);
-        }
+        // Pure SSA - no memory sync needed
+        // StackArray uses SlotSet (via var_addr), not write_var
     }
     fn ctx_param(&mut self) -> Value { self.builder.block_params(self.entry_block)[0] }
     fn gc_ptr(&mut self) -> Value {

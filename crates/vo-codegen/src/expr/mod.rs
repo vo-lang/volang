@@ -90,7 +90,7 @@ pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
         StorageKind::HeapBoxed { gcref_slot, .. } => Some(*gcref_slot),
         StorageKind::HeapArray { gcref_slot, .. } => Some(*gcref_slot),
         StorageKind::Reference { slot } => Some(*slot),
-        StorageKind::StackValue { .. } | StorageKind::Global { .. } => None,
+        StorageKind::StackValue { .. } | StorageKind::StackArray { .. } | StorageKind::Global { .. } => None,
     }
 }
 

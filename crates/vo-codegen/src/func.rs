@@ -15,8 +15,15 @@ use vo_vm::instruction::{Instruction, Opcode};
 /// eliminating scattered is_array/is_interface checks at usage sites.
 #[derive(Debug, Clone, Copy)]
 pub enum StorageKind {
-    /// Stack-allocated value (N slots, Copy/CopyN access)
+    /// Stack-allocated value (N slots, direct slot access via Copy/CopyN)
+    /// Used for: primitives, structs
+    /// Semantics: register-like, JIT maps to SSA variables
     StackValue { slot: u16, slots: u16 },
+    
+    /// Stack-allocated array (N slots, indirect access via SlotGet/SlotSet)
+    /// Used for: non-escaping arrays
+    /// Semantics: memory-like, JIT accesses via locals_slot memory
+    StackArray { base_slot: u16, elem_slots: u16, len: u16 },
     
     /// Heap-boxed struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access)
     /// Layout: [GcHeader][data...]
@@ -38,6 +45,7 @@ impl StorageKind {
     pub fn slot(&self) -> u16 {
         match self {
             StorageKind::StackValue { slot, .. } => *slot,
+            StorageKind::StackArray { base_slot, .. } => *base_slot,
             StorageKind::HeapBoxed { gcref_slot, .. } => *gcref_slot,
             StorageKind::HeapArray { gcref_slot, .. } => *gcref_slot,
             StorageKind::Reference { slot } => *slot,
@@ -49,6 +57,7 @@ impl StorageKind {
     pub fn value_slots(&self) -> u16 {
         match self {
             StorageKind::StackValue { slots, .. } => *slots,
+            StorageKind::StackArray { elem_slots, .. } => *elem_slots, // per-element
             StorageKind::HeapBoxed { value_slots, .. } => *value_slots,
             StorageKind::HeapArray { elem_slots, .. } => *elem_slots, // per-element
             StorageKind::Reference { .. } => 1,
@@ -225,7 +234,7 @@ impl FuncBuilder {
         self.locals.insert(sym, LocalVar { symbol: sym, storage });
     }
 
-    /// Stack allocation (non-escaping).
+    /// Stack allocation (non-escaping) for values (struct/primitive).
     pub fn define_local_stack(&mut self, sym: Symbol, slots: u16, types: &[SlotType]) -> u16 {
         let slot = self.next_slot;
         self.locals.insert(
@@ -238,6 +247,21 @@ impl FuncBuilder {
         self.slot_types.extend_from_slice(types);
         self.next_slot += slots;
         slot
+    }
+
+    /// Stack allocation for arrays (memory semantics).
+    pub fn define_local_stack_array(&mut self, sym: Symbol, total_slots: u16, elem_slots: u16, len: u16, types: &[SlotType]) -> u16 {
+        let base_slot = self.next_slot;
+        self.locals.insert(
+            sym,
+            LocalVar {
+                symbol: sym,
+                storage: StorageKind::StackArray { base_slot, elem_slots, len },
+            },
+        );
+        self.slot_types.extend_from_slice(types);
+        self.next_slot += total_slots;
+        base_slot
     }
 
     /// Bind a local variable name to an already-allocated slot.
@@ -446,6 +470,19 @@ impl FuncBuilder {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(dst, slot, slots);
             }
+            StorageKind::StackArray { base_slot, elem_slots, len } => {
+                // Copy element by element using SlotGet
+                for i in 0..len {
+                    let idx_reg = self.alloc_temp(1);
+                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    let dst_offset = dst + i * elem_slots;
+                    if elem_slots == 1 {
+                        self.emit_op(Opcode::SlotGet, dst_offset, base_slot, idx_reg);
+                    } else {
+                        self.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst_offset, base_slot, idx_reg);
+                    }
+                }
+            }
             StorageKind::HeapBoxed { gcref_slot, value_slots } => {
                 self.emit_ptr_get(dst, gcref_slot, 0, value_slots);
             }
@@ -473,6 +510,19 @@ impl FuncBuilder {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(slot, src, slots);
             }
+            StorageKind::StackArray { base_slot, elem_slots, len } => {
+                // Copy element by element using SlotSet
+                for i in 0..len {
+                    let idx_reg = self.alloc_temp(1);
+                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    let src_offset = src + i * elem_slots;
+                    if elem_slots == 1 {
+                        self.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
+                    } else {
+                        self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
+                    }
+                }
+            }
             StorageKind::HeapBoxed { gcref_slot, value_slots } => {
                 self.emit_ptr_set(gcref_slot, 0, src, value_slots);
             }
@@ -497,6 +547,19 @@ impl FuncBuilder {
         match storage {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(slot, src, slots);
+            }
+            StorageKind::StackArray { base_slot, elem_slots, len } => {
+                // Copy element by element using SlotSet
+                for i in 0..len {
+                    let idx_reg = self.alloc_temp(1);
+                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    let src_offset = src + i * elem_slots;
+                    if elem_slots == 1 {
+                        self.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
+                    } else {
+                        self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
+                    }
+                }
             }
             StorageKind::HeapBoxed { gcref_slot, .. } => {
                 self.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);

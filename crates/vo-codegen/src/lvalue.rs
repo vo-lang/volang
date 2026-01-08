@@ -172,10 +172,11 @@ pub fn resolve_lvalue(
                 // Check if stack or heap array using StorageKind
                 let container_source = crate::expr::get_expr_source(&idx.expr, ctx, func, info);
                 match container_source {
-                    crate::func::ExprSource::Location(StorageKind::StackValue { slot, .. }) => {
+                    crate::func::ExprSource::Location(StorageKind::StackArray { base_slot, elem_slots: es, .. }) => {
+                        // Stack array: memory semantics via SlotGet/SlotSet
                         Ok(LValue::Index {
-                            kind: ContainerKind::StackArray { base_slot: slot, elem_slots },
-                            container_reg: slot,
+                            kind: ContainerKind::StackArray { base_slot, elem_slots: es },
+                            container_reg: base_slot,
                             index_reg,
                         })
                     }
@@ -194,7 +195,7 @@ pub fn resolve_lvalue(
                         })
                     }
                     _ => {
-                        // Compile container expression
+                        // Compile container expression (temporary or other)
                         let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
                         Ok(LValue::Index {
                             kind: ContainerKind::HeapArray { elem_bytes, elem_vk },
@@ -430,6 +431,7 @@ fn flatten_field(lv: &LValue) -> FlattenedField {
     match lv {
         LValue::Variable(storage) => match storage {
             StorageKind::StackValue { slot, .. } => FlattenedField::Stack { slot: *slot, total_offset: 0 },
+            StorageKind::StackArray { base_slot, .. } => FlattenedField::Stack { slot: *base_slot, total_offset: 0 },
             StorageKind::HeapBoxed { gcref_slot, .. } => FlattenedField::HeapBoxed { gcref_slot: *gcref_slot, total_offset: 0 },
             StorageKind::HeapArray { gcref_slot, .. } => FlattenedField::HeapBoxed { gcref_slot: *gcref_slot, total_offset: 0 },
             StorageKind::Reference { slot } => FlattenedField::HeapBoxed { gcref_slot: *slot, total_offset: 0 },
