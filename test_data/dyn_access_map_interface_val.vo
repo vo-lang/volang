@@ -16,6 +16,20 @@ func main() {
     // Dynamic index access
     v, err := a~>["a"]
     assert(err == nil, "unexpected error")
+
+    // Dynamic field access (equivalent to a~>["a"] for map[string]T)
+    v, err = a~>a
+    assert(err == nil, "unexpected error")
+
+    f := func () error {
+        a~>a = "xxxxx"
+        var x string
+        x = a~>a?
+        assert(x == "xxxxx", "dyn set get error")
+        return nil
+    }
+    
+    f()
     
     // Type assert to error
     e, ok := v.(error)

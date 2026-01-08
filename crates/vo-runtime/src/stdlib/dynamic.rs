@@ -99,6 +99,44 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     let vk = interface::unpack_value_kind(slot0);
     let rttid = interface::unpack_rttid(slot0);
     
+    // For Map types with string keys, treat field_name as map key
+    if vk == ValueKind::Map {
+        let base_ref = slot1 as GcRef;
+        let map_key_vk = map::key_kind(base_ref);
+        
+        if map_key_vk != ValueKind::String {
+            return dyn_error(call, call.dyn_err().type_mismatch, 
+                &format!("cannot use field access on map with non-string key type {:?}", map_key_vk));
+        }
+        
+        // Allocate string for field_name as key
+        let key_ref = call.alloc_str(field_name);
+        let key_data = [key_ref as u64];
+        
+        let val_meta = map::val_meta(base_ref);
+        let val_vk = val_meta.value_kind();
+        let val_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+        
+        let found = map::get(base_ref, &key_data);
+        
+        // Get raw slots from map value (or zeros if not found)
+        let raw_slots: Vec<u64> = if let Some(val_slice) = found {
+            val_slice.to_vec()
+        } else {
+            let val_slots = call.get_type_slot_count(val_value_rttid.rttid()) as usize;
+            vec![0u64; val_slots]
+        };
+        
+        // Box to interface format
+        let (data0, data1) = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
+        call.ret_u64(0, data0);
+        call.ret_u64(1, data1);
+        call.ret_nil(2);
+        call.ret_nil(3);
+        
+        return ExternResult::Ok;
+    }
+    
     // For Pointer types, dereference to access struct fields (Go auto-dereference)
     // slot1 is the pointer value (GcRef to struct data)
     let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
@@ -415,6 +453,73 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
 
     let base_vk = interface::unpack_value_kind(base_slot0);
     let base_rttid = interface::unpack_rttid(base_slot0);
+
+    // For Map types with string keys, treat field_name as map key
+    if base_vk == ValueKind::Map {
+        let base_ref = base_slot1 as GcRef;
+        let map_key_vk = map::key_kind(base_ref);
+        
+        if map_key_vk != ValueKind::String {
+            return dyn_error_only(call, call.dyn_err().type_mismatch, 
+                &format!("cannot use field access on map with non-string key type {:?}", map_key_vk));
+        }
+        
+        // Allocate string for field_name as key
+        let key_ref = call.alloc_str(field_name);
+        let key_buf = [key_ref as u64];
+        
+        let val_meta = map::val_meta(base_ref);
+        let map_val_vk = val_meta.value_kind();
+        let map_val_slots = map::val_slots(base_ref) as usize;
+        let map_val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
+        
+        let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
+        if map_val_vk == ValueKind::Interface {
+            let iface_meta_id = val_meta.meta_id();
+            let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
+                Ok(v) => v,
+                Err(e) => return dyn_error_only(call, call.dyn_err().type_mismatch, e),
+            };
+            val_buf.push(stored_slot0);
+            val_buf.push(stored_slot1);
+        } else {
+            let val_vk = interface::unpack_value_kind(val_slot0);
+            let val_rttid = interface::unpack_rttid(val_slot0);
+            if val_vk != map_val_vk || val_rttid != map_val_value_rttid.rttid() {
+                return dyn_error_only(
+                    call,
+                    call.dyn_err().type_mismatch,
+                    &format!(
+                        "map value type mismatch: expected {:?} (rttid {}), got {:?} (rttid {})",
+                        map_val_vk,
+                        map_val_value_rttid.rttid(),
+                        val_vk,
+                        val_rttid
+                    ),
+                );
+            }
+            
+            match map_val_vk {
+                ValueKind::Struct | ValueKind::Array => {
+                    let src_ref = val_slot1 as GcRef;
+                    if src_ref.is_null() {
+                        return dyn_error_only(call, call.dyn_err().nil_base, "struct/array value is nil");
+                    }
+                    for i in 0..map_val_slots {
+                        val_buf.push(unsafe { Gc::read_slot(src_ref, i) });
+                    }
+                }
+                _ => {
+                    val_buf.push(val_slot1);
+                }
+            }
+        }
+        
+        map::set(base_ref, &key_buf, &val_buf);
+        call.ret_nil(0);
+        call.ret_nil(1);
+        return ExternResult::Ok;
+    }
 
     let (effective_rttid, data_ref) = if base_vk == ValueKind::Pointer {
         let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
