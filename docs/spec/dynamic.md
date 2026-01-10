@@ -4,9 +4,25 @@
 
 Vo supports opt-in dynamic (duck-typing) operations on values whose structure is unknown at compile time.
 
-Dynamic access is enabled by the `~>` operator on `any`/`interface` values. The `~>` operator does not introduce a new runtime representation: the base value is still a normal interface value.
+Dynamic access is enabled by the `~>` operator. The `~>` operator does not introduce a new runtime representation: the base value is boxed to `any` if not already an interface.
 
 Dynamic operations return `(any, error)` and are intended to compose with Vo's existing error handling (`?`, `fail`, `errdefer`). There is no error-carrying payload.
+
+### Supported Base Types
+
+The `~>` operator can be used on:
+
+| Type | Allowed | Reason |
+|------|---------|--------|
+| `any` / `interface` | ✅ | Dynamic dispatch |
+| `(any, error)` tuple | ✅ | Chained access with short-circuit |
+| Named types | ✅ | May have protocol methods |
+| Pointers | ✅ | Base type may have methods |
+| Structs | ✅ | Reflection field access |
+| Maps | ✅ | Reflection key access |
+| Slices / Arrays | ✅ | Reflection index access |
+| `string` | ✅ | Index access to characters |
+| `int`, `bool`, `float` | ❌ | No methods, no fields, no indexing |
 
 ## Syntax
 
@@ -62,6 +78,94 @@ Dynamic access does not participate in normal static member lookup or overload r
 - Error propagation: apply postfix `?` to unwrap and propagate the `error`
 
 All other dynamic operations are compile errors.
+
+## Protocol Methods
+
+Vo defines five **language-level protocol methods** that customize dynamic access behavior. These are reserved method names with fixed signatures.
+
+### Protocol Definition
+
+| Method | Signature | Triggered By |
+|--------|-----------|--------------|
+| `DynAttr` | `(name string) (any, error)` | `a~>field` |
+| `DynSetAttr` | `(name string, value any) error` | `a~>field = v` |
+| `DynIndex` | `(key any) (any, error)` | `a~>[key]` |
+| `DynSetIndex` | `(key any, value any) error` | `a~>[key] = v` |
+| `DynCall` | `(args ...any) (any, error)` | `a~>(args)` |
+
+### Semantics
+
+1. **Duck Typing**: Any type with a matching method name and signature participates in the protocol. No interface implementation is required.
+
+2. **Protocol-First**: When `~>` is used, the runtime first checks for the corresponding protocol method. If found, it is called. If not found, the runtime falls back to reflection-based access (struct fields, map keys, etc.).
+
+3. **Inheritance via Embedding**: Protocol methods can be inherited through struct embedding.
+
+4. **Signature Enforcement**: If a type defines a method with a protocol name (e.g., `DynAttr`) but the signature does not match, it is a **compile-time error**.
+
+### Example: Custom Dynamic Object
+
+```go
+type Config struct {
+    data map[string]any
+}
+
+func (c *Config) DynAttr(name string) (any, error) {
+    v, ok := c.data[name]
+    if !ok {
+        return nil, dyn.ErrBadField
+    }
+    return v, nil
+}
+
+func (c *Config) DynSetAttr(name string, value any) error {
+    c.data[name] = value
+    return nil
+}
+
+func main() {
+    c := &Config{data: map[string]any{}}
+    c~>name = "hello"     // calls DynSetAttr("name", "hello")
+    v := c~>name?         // calls DynAttr("name") → "hello"
+}
+```
+
+### Example: Embedding dyn.MapObject
+
+```go
+import "dyn"
+
+type Config struct {
+    dyn.MapObject  // embed: inherits DynAttr, DynSetAttr, DynIndex, DynSetIndex
+}
+
+func main() {
+    c := Config{dyn.MapObject{}}
+    c~>name = "hello"     // calls inherited DynSetAttr
+    v := c~>name?         // calls inherited DynAttr
+}
+```
+
+### Signature Error Example
+
+```go
+type Bad struct{}
+
+// Compile error: DynAttr has wrong signature
+// Expected: (string) (any, error)
+// Got: (int) string
+func (b Bad) DynAttr(x int) string { return "" }
+```
+
+### Dispatch Priority
+
+When `a~>field` is evaluated:
+
+1. **Protocol method**: If type has `DynAttr(string) (any, error)` → call it
+2. **Map with string key**: If type is `map[string]V` → access key
+3. **Struct field**: If type is struct/pointer-to-struct → access field by name
+4. **Method as closure**: If field not found but method exists → return method as closure
+5. **Error**: Return `ErrBadField`
 
 ## Error Mechanism
 
@@ -407,8 +511,11 @@ func safeGet(data any, field string) (any, error) {
 
 | Aspect | Design |
 |--------|--------|
-| Entry Point | `~>` operator on `any`/`interface` |
+| Entry Point | `~>` operator on supported types (see Supported Base Types) |
+| Protocol Methods | `DynAttr`, `DynSetAttr`, `DynIndex`, `DynSetIndex`, `DynCall` |
+| Dispatch | Protocol-first, then reflection fallback |
 | Result Type | Dynamic operations return `(any, error)` |
 | Error Handling | No error-carrying payload; check per-step via `?` |
-| Runtime Layout | Uses ordinary `any`/`interface` values |
+| Runtime Layout | Base boxed to `any`, uses ordinary interface values |
 | Semantics | Whitelist + compile-time desugaring to helper calls |
+| Signature Check | Protocol method names require matching signatures (compile error otherwise) |

@@ -1458,24 +1458,40 @@ impl Checker {
     // =========================================================================
 
     /// Check if type is valid for dynamic access (~> operator base).
-    /// Valid types: any/interface, or (any, error) tuple.
+    /// 
+    /// Allowed: interface, (any, error) tuple, named types, pointers, structs, 
+    /// maps, slices, arrays, string.
+    /// 
+    /// Disallowed: primitive types (int, bool, float), func, chan.
     pub(crate) fn is_dyn_access_base_type(&self, type_key: TypeKey) -> bool {
-        // Check if it's an interface type
-        if self.otype(type_key).try_as_interface().is_some() {
-            return true;
+        use crate::typ::BasicType;
+        
+        let typ = self.otype(type_key);
+        
+        // Disallow basic types except string
+        if let Some(basic) = typ.try_as_basic() {
+            return matches!(basic.typ(), BasicType::Str | BasicType::UntypedString);
         }
-        // Check if it's (any, error) tuple
-        let Some(tuple) = self.otype(type_key).try_as_tuple() else { return false };
-        let vars = tuple.vars();
-        if vars.len() != 2 { return false }
         
-        let Some(first_type) = self.lobj(vars[0]).typ() else { return false };
-        let is_interface = self.otype(first_type).try_as_interface().is_some();
+        // Disallow func types - cannot access fields/methods dynamically
+        if typ.try_as_signature().is_some() {
+            return false;
+        }
         
-        let Some(second_type) = self.lobj(vars[1]).typ() else { return false };
-        let is_error = typ::identical(second_type, self.universe().error_type(), self.objs());
+        // Disallow channel types - no dynamic access semantics
+        if typ.try_as_chan().is_some() {
+            return false;
+        }
         
-        is_interface && is_error
+        // All other types are allowed:
+        // - interface: dynamic dispatch
+        // - named types: may have protocol methods
+        // - pointer: base may have methods
+        // - struct: field access
+        // - map: key access
+        // - slice/array: index access
+        // - tuple: (any, error) for chaining
+        true
     }
 
     // =========================================================================

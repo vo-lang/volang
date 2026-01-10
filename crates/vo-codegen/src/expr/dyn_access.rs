@@ -122,25 +122,57 @@ fn compile_dyn_op(
 ) -> Result<(), CodegenError> {
     match op {
         DynAccessOp::Field(ident) => {
-            // dyn_get_attr(base[2], name[1]) -> (data[2], error[2])
-            let extern_id = ctx.get_or_register_extern("dyn_get_attr");
             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
+            let ret_type = ret_types.first().copied().unwrap_or_else(|| info.any_type());
+            let ret_slots = info.type_slot_count(ret_type);
+            let error_slot = dst + ret_slots;
             
-            // Args: base[2] + name[1] = 3 slots
+            // Protocol-first: check if base implements dyn.AttrObject via IfaceAssert
+            let end_jump = if let Some(attr_iface_type) = info.lookup_pkg_type("dyn", "AttrObject") {
+                let attr_iface_meta_id = info.get_or_create_interface_meta_id(attr_iface_type, ctx);
+                let attr_method_idx = info.get_iface_meta_method_index(attr_iface_type, "DynAttr", ctx);
+                
+                // IfaceAssert with has_ok flag
+                let iface_reg = func.alloc_temp(3);
+                let flags = 1 | (1 << 2) | (2 << 3);
+                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, attr_iface_meta_id as u16);
+                let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
+                
+                // Protocol method call: DynAttr(name string) (any, error)
+                // Allocate max(args, returns) = max(1, 4) = 4 slots
+                let args_start = func.alloc_temp(4);
+                let name_idx = ctx.const_string(field_name);
+                func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
+                
+                // CallIface: returns (any[2], error[2]) = 4 slots, writes to args_start
+                let c = crate::type_info::encode_call_args(1, 4);
+                func.emit_with_flags(Opcode::CallIface, attr_method_idx as u8, iface_reg, args_start, c);
+                
+                // Unbox result with type check (result is at args_start)
+                emit_unbox_with_type_check(ret_type, dst, args_start, error_slot, ctx, func, info);
+                let end_jump = func.emit_jump(Opcode::Jump, 0);
+                
+                func.patch_jump(fallback_jump, func.current_pc());
+                Some(end_jump)
+            } else {
+                None
+            };
+            
+            // Fallback: extern dyn_get_attr
+            let extern_id = ctx.get_or_register_extern("dyn_get_attr");
             let args_start = func.alloc_temp(3);
             func.emit_op(Opcode::Copy, args_start, base_reg, 0);
             func.emit_op(Opcode::Copy, args_start + 1, base_reg + 1, 0);
             let name_idx = ctx.const_string(field_name);
             func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
             
-            // Call: 3 arg slots, 4 ret slots (data[2], error[2])
             let result = func.alloc_temp(4);
             func.emit_with_flags(Opcode::CallExtern, 3, result, extern_id as u16, args_start);
-            
-            // Unbox with type check, merge dyn error and type assertion error
-            let ret_type = ret_types.first().copied().unwrap_or_else(|| info.any_type());
-            let error_slot = dst + info.type_slot_count(ret_type);
             emit_unbox_with_type_check(ret_type, dst, result, error_slot, ctx, func, info);
+            
+            if let Some(end_jump) = end_jump {
+                func.patch_jump(end_jump, func.current_pc());
+            }
         }
         DynAccessOp::Index(index_expr) => {
             // dyn_get_index(base[2], key[2]) -> (data[2], error[2])

@@ -648,7 +648,10 @@ fn collect_promoted_methods(
                     };
                     
                     let sig_rttid = tc_objs.lobjs[obj_key].typ()
-                        .map(|sig_type| ctx.intern_signature_rttid(sig_type, tc_objs))
+                        .map(|sig_type| {
+                            let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
+                            ctx.intern_rttid(sig)
+                        })
                         .unwrap_or(0);
                     
                     ctx.update_named_type_method_if_absent(

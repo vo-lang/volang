@@ -454,6 +454,9 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     let base_vk = interface::unpack_value_kind(base_slot0);
     let base_rttid = interface::unpack_rttid(base_slot0);
 
+    // Note: Protocol method dispatch (DynSetAttr) is handled at codegen level
+    // via IfaceAssert + CallIface. This extern only handles reflection fallback.
+
     // For Map types with string keys, treat field_name as map key
     if base_vk == ValueKind::Map {
         let base_ref = base_slot1 as GcRef;

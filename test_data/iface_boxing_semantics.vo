@@ -1,0 +1,152 @@
+// Test: Interface boxing value semantics
+// Verifies that struct/array assigned to interface are value-copied (Go semantics),
+// while reference types (map/slice) share underlying data.
+
+package main
+
+type Point struct {
+    X int
+    Y int
+}
+
+// Force heap allocation by taking address or assigning to interface
+func escape(p *Point) *Point {
+    return p
+}
+
+func main() {
+    testStackStructToAny()
+    testHeapBoxedStructToAny()
+    testHeapBoxedStructMultiAssign()
+    testMapToAny()
+    testSliceToAny()
+    testArrayToAny()
+    testInterfaceToInterface()
+    println("ok")
+}
+
+// Test 1: Stack struct -> any (should be value copy)
+func testStackStructToAny() {
+    var p Point
+    p.X = 10
+    p.Y = 20
+    
+    var a any = p  // Should copy p's value
+    
+    // Modify original
+    p.X = 100
+    
+    // Extract from any and verify it's unchanged
+    p2 := a.(Point)
+    assert(p2.X == 10, "testStackStructToAny: X should be 10, got modified")
+    assert(p2.Y == 20, "testStackStructToAny: Y should be 20")
+}
+
+// Test 2: HeapBoxed struct -> any (should STILL be value copy)
+// This is the bug case: struct escapes to heap, then assigned to any
+func testHeapBoxedStructToAny() {
+    // Method 1: escape by assigning to interface first, then re-assign
+    var p Point
+    p.X = 10
+    p.Y = 20
+    
+    // Force p to escape to heap by taking address
+    ptr := escape(&p)
+    _ = ptr
+    
+    // Now p is HeapBoxed. Assign to any should still copy.
+    var a any = p
+    
+    // Modify original via pointer (modifies the heap-boxed p)
+    p.X = 100
+    
+    // Extract from any - should be unchanged if value copy was done
+    p2 := a.(Point)
+    assert(p2.X == 10, "testHeapBoxedStructToAny: X should be 10, got modified (alias bug!)")
+    assert(p2.Y == 20, "testHeapBoxedStructToAny: Y should be 20")
+}
+
+// Test 2b: Multiple interface assignments from same escaped struct
+func testHeapBoxedStructMultiAssign() {
+    var p Point
+    p.X = 10
+    
+    // Force escape
+    ptr := escape(&p)
+    _ = ptr
+    
+    // Two interface assignments from same HeapBoxed source
+    var a any = p
+    var b any = p
+    
+    // Modify original
+    p.X = 100
+    
+    // Both should be independent copies
+    p1 := a.(Point)
+    p2 := b.(Point)
+    assert(p1.X == 10, "testHeapBoxedStructMultiAssign: a.X should be 10")
+    assert(p2.X == 10, "testHeapBoxedStructMultiAssign: b.X should be 10")
+}
+
+// Test 3: Map -> any (reference semantics: should share underlying)
+func testMapToAny() {
+    m := make(map[string]int)
+    m["key"] = 10
+    
+    var a any = m  // Reference copy
+    
+    // Modify original
+    m["key"] = 100
+    
+    // Extract from any - should see the change (shared)
+    m2 := a.(map[string]int)
+    assert(m2["key"] == 100, "testMapToAny: should share underlying map")
+}
+
+// Test 4: Slice -> any (reference semantics: should share underlying)
+func testSliceToAny() {
+    s := []int{10, 20, 30}
+    
+    var a any = s  // Reference copy
+    
+    // Modify original
+    s[0] = 100
+    
+    // Extract from any - should see the change (shared)
+    s2 := a.([]int)
+    assert(s2[0] == 100, "testSliceToAny: should share underlying slice")
+}
+
+// Test 5: Array -> any (value semantics: should copy)
+func testArrayToAny() {
+    var arr [3]int
+    arr[0] = 10
+    arr[1] = 20
+    arr[2] = 30
+    
+    var a any = arr  // Should copy array value
+    
+    // Modify original
+    arr[0] = 100
+    
+    // Extract from any - should be unchanged
+    arr2 := a.([3]int)
+    assert(arr2[0] == 10, "testArrayToAny: should be value copy, arr[0] should be 10")
+}
+
+// Test 6: Interface -> interface (copy interface value)
+func testInterfaceToInterface() {
+    var p Point
+    p.X = 10
+    
+    var a any = p
+    var b any = a  // Copy interface value
+    
+    // a and b should have independent copies of Point
+    // (since Point was value-copied into a, and a's value is copied into b)
+    p2 := a.(Point)
+    p3 := b.(Point)
+    assert(p2.X == 10, "testInterfaceToInterface: a should have X=10")
+    assert(p3.X == 10, "testInterfaceToInterface: b should have X=10")
+}

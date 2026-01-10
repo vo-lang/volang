@@ -613,55 +613,6 @@ impl CodegenContext {
         itab_id
     }
     
-    /// Intern a signature type and return its rttid.
-    /// For promoted methods, signature_rttid is used for runtime type checking.
-    /// We use a simplified approach here - the full signature is already checked at compile time.
-    pub fn intern_signature_rttid(&mut self, sig_type: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u32 {
-        use vo_analysis::typ::Type;
-        use vo_runtime::{RuntimeType, ValueRttid, ValueKind};
-        
-        if let Type::Signature(sig) = &tc_objs.types[sig_type] {
-            // Build params - use basic rttid lookup for each param type
-            let params: Vec<ValueRttid> = if let Type::Tuple(t) = &tc_objs.types[sig.params()] {
-                t.vars().iter()
-                    .filter_map(|&v| {
-                        tc_objs.lobjs[v].typ().map(|t| {
-                            let vk = vo_analysis::check::type_info::type_value_kind(t, tc_objs);
-                            // For basic types, rttid = vk; for others, we'd need full interning
-                            // but for signature comparison, this simple approach works
-                            ValueRttid::new(vk as u32, vk)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            
-            // Build results
-            let results: Vec<ValueRttid> = if let Type::Tuple(t) = &tc_objs.types[sig.results()] {
-                t.vars().iter()
-                    .filter_map(|&v| {
-                        tc_objs.lobjs[v].typ().map(|t| {
-                            let vk = vo_analysis::check::type_info::type_value_kind(t, tc_objs);
-                            ValueRttid::new(vk as u32, vk)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            
-            let rt = RuntimeType::Func {
-                params,
-                results,
-                variadic: sig.variadic(),
-            };
-            self.type_interner.intern(rt)
-        } else {
-            0
-        }
-    }
-    
     // === Function registration ===
 
     /// Pre-register a function name for forward references.

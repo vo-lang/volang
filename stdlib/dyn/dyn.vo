@@ -84,35 +84,50 @@ func SetAttr(base any, name string, value any) error
 func SetIndex(base any, key any, value any) error
 
 // =============================================================================
-// Custom Dynamic Access Interfaces
+// Protocol Methods (Language-Level)
 // =============================================================================
 //
-// Implement these interfaces to customize dynamic access for your types.
-// The runtime checks for these interfaces before using reflection.
+// The ~> operator recognizes these methods on any type:
+//
+//   DynAttr(name string) (any, error)      - a~>field
+//   DynSetAttr(name string, val any) error - a~>field = val
+//   DynIndex(key any) (any, error)         - a~>[key]
+//   DynSetIndex(key any, val any) error    - a~>[key] = val
+//   DynCall(args ...any) (any, error)      - a~>(args)
+//
+// No interface implementation required. The runtime looks up
+// these methods by name (duck typing).
+//
+// =============================================================================
+// Type Constraint Interfaces (Optional)
+// =============================================================================
+//
+// These interfaces are for documentation and compile-time type constraints.
+// The ~> operator does NOT check interface implementation.
 
-// AttrObject enables custom field/attribute access.
+// AttrObject is a type constraint for types with DynAttr.
 type AttrObject interface {
-    __attr(name string) (any, error)
+    DynAttr(name string) (any, error)
 }
 
-// IndexObject enables custom index-based access.
+// IndexObject is a type constraint for types with DynIndex.
 type IndexObject interface {
-    __index(key any) (any, error)
+    DynIndex(key any) (any, error)
 }
 
-// CallObject enables custom call behavior.
+// CallObject is a type constraint for types with DynCall.
 type CallObject interface {
-    __call(args ...any) (any, error)
+    DynCall(args ...any) (any, error)
 }
 
-// SetAttrObject enables custom field/attribute setting.
+// SetAttrObject is a type constraint for types with DynSetAttr.
 type SetAttrObject interface {
-    __setattr(name string, value any) error
+    DynSetAttr(name string, value any) error
 }
 
-// SetIndexObject enables custom index-based setting.
+// SetIndexObject is a type constraint for types with DynSetIndex.
 type SetIndexObject interface {
-    __setindex(key any, value any) error
+    DynSetIndex(key any, value any) error
 }
 
 // Object combines all read-only dynamic access interfaces.
@@ -135,11 +150,11 @@ type SetObject interface {
 // MapObject is a dynamic object container using string keys.
 type MapObject map[string]any
 
-func (m MapObject) __attr(name string) (any, error) {
-    return m.__index(name)
+func (m MapObject) DynAttr(name string) (any, error) {
+    return m.DynIndex(name)
 }
 
-func (m MapObject) __index(key any) (any, error) {
+func (m MapObject) DynIndex(key any) (any, error) {
     k, ok := key.(string)
     if !ok {
         return nil, ErrBadIndex
@@ -151,11 +166,11 @@ func (m MapObject) __index(key any) (any, error) {
     return v, nil
 }
 
-func (m MapObject) __setattr(name string, value any) error {
-    return m.__setindex(name, value)
+func (m MapObject) DynSetAttr(name string, value any) error {
+    return m.DynSetIndex(name, value)
 }
 
-func (m MapObject) __setindex(key any, value any) error {
+func (m MapObject) DynSetIndex(key any, value any) error {
     k, ok := key.(string)
     if !ok {
         return ErrBadIndex
@@ -167,7 +182,7 @@ func (m MapObject) __setindex(key any, value any) error {
 // SliceObject is a dynamic array container.
 type SliceObject []any
 
-func (s SliceObject) __index(key any) (any, error) {
+func (s SliceObject) DynIndex(key any) (any, error) {
     i, ok := key.(int)
     if !ok {
         return nil, ErrBadIndex
@@ -178,7 +193,7 @@ func (s SliceObject) __index(key any) (any, error) {
     return s[i], nil
 }
 
-func (s SliceObject) __setindex(key any, value any) error {
+func (s SliceObject) DynSetIndex(key any, value any) error {
     i, ok := key.(int)
     if !ok {
         return ErrBadIndex

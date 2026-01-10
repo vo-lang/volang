@@ -1,0 +1,77 @@
+// Test: Protocol methods on MapObject and embedded types
+// Verifies that ~> operator works with dyn.MapObject directly and via embedding.
+
+package main
+
+import "dyn"
+
+type Config struct {
+    dyn.MapObject
+}
+
+func main() {
+    err := testMapObject()
+    if err != nil {
+        panic(err.Error())
+    }
+    
+    err = testEmbedded()
+    if err != nil {
+        panic(err.Error())
+    }
+    
+    println("ok")
+}
+
+func testMapObject() error {
+    // Test with MapObject directly
+    m := make(dyn.MapObject)
+    
+    // Box to any and use ~> operator
+    var a any = m
+    a~>name = "hello"
+    a~>count = 42
+    
+    // Read back
+    name := a~>name?
+    if name.(string) != "hello" {
+        panic("name mismatch")
+    }
+    
+    count := a~>count?
+    if count.(int) != 42 {
+        panic("count mismatch")
+    }
+    
+    // Index access
+    a~>["key1"] = "value1"
+    v := a~>["key1"]?
+    if v.(string) != "value1" {
+        panic("key1 mismatch")
+    }
+    
+    return nil
+}
+
+func testEmbedded() error {
+    // Test with Config embedding MapObject
+    c := Config{make(dyn.MapObject)}
+    
+    // Box to any and use ~> operator (tests promoted method via interface)
+    var a any = c
+    a~>field1 = "hello"
+    a~>field2 = 123
+    
+    // Read back
+    v1 := a~>field1?
+    if v1.(string) != "hello" {
+        panic("field1 mismatch")
+    }
+    
+    v2 := a~>field2?
+    if v2.(int) != 123 {
+        panic("field2 mismatch")
+    }
+    
+    return nil
+}

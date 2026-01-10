@@ -67,15 +67,6 @@ fn compute_iface_assert_params(
     }
 }
 
-fn try_lookup_pkg_type(info: &TypeInfoWrapper, pkg_path: &str, type_name: &str) -> Option<vo_analysis::objects::TypeKey> {
-    let tc_objs = &info.project.tc_objs;
-    let pkg = tc_objs.find_package_by_path(pkg_path)?;
-    let scope_key = *tc_objs.pkgs[pkg].scope();
-    let scope = &tc_objs.scopes[scope_key];
-    let obj = scope.lookup(type_name)?;
-    tc_objs.lobjs[obj].typ()
-}
-
 // =============================================================================
 // StmtCompiler - Unified statement compilation context
 // =============================================================================
@@ -576,39 +567,50 @@ fn compile_stmt_with_label(
                     match &dyn_access.op {
                         vo_syntax::ast::DynAccessOp::Field(ident) => {
                             let base_type = info.expr_type(dyn_access.base.id);
-                            let base_slots = info.type_slot_count(base_type);
-                            let base_reg = func.alloc_temp(base_slots);
-                            compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
-
-                            if info.is_tuple_any_error(base_type) {
+                            let any_type = info.any_type();
+                            
+                            // Get base as any (2 slots)
+                            // - interface/any: compile directly
+                            // - (any, error) tuple: compile and short-circuit on error
+                            // - other types: box to any
+                            let any_base_reg = if info.is_tuple_any_error(base_type) {
+                                let base_reg = func.alloc_temp(4);
+                                compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
                                 emit_dyn_assign_error_short_circuit(base_reg, func, info);
-                            }
+                                base_reg  // first 2 slots are the any value
+                            } else if info.is_interface(base_type) {
+                                let base_reg = func.alloc_temp(2);
+                                compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
+                                base_reg
+                            } else {
+                                let any_reg = func.alloc_temp(2);
+                                compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+                                any_reg
+                            };
 
                             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
-                            let any_type = info.any_type();
 
-                            // Fast-path: if dyn package is available and base implements dyn.SetAttrObject,
-                            // call __setattr via CallIface. Otherwise fall through to extern call.
-                            let end_jump = if let Some(set_attr_iface_type) = try_lookup_pkg_type(info, "dyn", "SetAttrObject") {
+                            // Protocol-first: check if base implements dyn.SetAttrObject via IfaceAssert
+                            let end_jump = if let Some(set_attr_iface_type) = info.lookup_pkg_type("dyn", "SetAttrObject") {
                                 let set_attr_iface_meta_id = info.get_or_create_interface_meta_id(set_attr_iface_type, ctx);
-                                let set_attr_method_idx = info.get_iface_meta_method_index(set_attr_iface_type, "__setattr", ctx);
-                                // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
-                                // Allocate 3 slots to keep ok in-bounds.
+                                let set_attr_method_idx = info.get_iface_meta_method_index(set_attr_iface_type, "DynSetAttr", ctx);
+                                
+                                // IfaceAssert with has_ok flag to check interface implementation
                                 let iface_reg = func.alloc_temp(3);
                                 let flags = 1 | (1 << 2) | (2 << 3);
-                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_attr_iface_meta_id as u16);
+                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, any_base_reg, set_attr_iface_meta_id as u16);
                                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
-                                // args: name[1] + value_any[2] => 3 slots, ret: error[2]
+                                // Protocol method call: DynSetAttr(name string, value any) error
                                 let args_start = func.alloc_temp(3);
                                 let name_idx = ctx.const_string(field_name);
                                 func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
-                                crate::stmt::compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
+                                compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
 
                                 let c = crate::type_info::encode_call_args(3, 2);
                                 func.emit_with_flags(Opcode::CallIface, set_attr_method_idx as u8, iface_reg, args_start, c);
 
-                                // fail if err != nil
+                                // Check error from protocol method
                                 let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
                                 emit_error_propagate_return(args_start, func, info);
                                 func.patch_jump(ok_err_jump, func.current_pc());
@@ -620,12 +622,12 @@ fn compile_stmt_with_label(
                                 None
                             };
 
-                            // Fallback / only path: extern dyn_set_attr
+                            // Fallback: extern dyn_set_attr for reflection
                             let args_start = func.alloc_temp(5);
-                            func.emit_copy(args_start, base_reg, 2);
+                            func.emit_copy(args_start, any_base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
                             func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
-                            crate::stmt::compile_iface_assign(args_start + 3, &assign.rhs[0], any_type, ctx, func, info)?;
+                            compile_iface_assign(args_start + 3, &assign.rhs[0], any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_attr");
                             let err_reg = func.alloc_temp(2);
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
@@ -633,6 +635,7 @@ fn compile_stmt_with_label(
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
                             emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
+                            
                             if let Some(end_jump) = end_jump {
                                 func.patch_jump(end_jump, func.current_pc());
                             }
@@ -640,37 +643,47 @@ fn compile_stmt_with_label(
                         }
                         vo_syntax::ast::DynAccessOp::Index(key_expr) => {
                             let base_type = info.expr_type(dyn_access.base.id);
-                            let base_slots = info.type_slot_count(base_type);
-                            let base_reg = func.alloc_temp(base_slots);
-                            compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
-
-                            if info.is_tuple_any_error(base_type) {
-                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
-                            }
-
                             let any_type = info.any_type();
+                            
+                            // Get base as any (2 slots)
+                            // - (any, error) tuple: compile and short-circuit on error
+                            // - interface/any: compile directly
+                            // - other types: box to any
+                            let any_base_reg = if info.is_tuple_any_error(base_type) {
+                                let base_reg = func.alloc_temp(4);
+                                compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
+                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
+                                base_reg
+                            } else if info.is_interface(base_type) {
+                                let base_reg = func.alloc_temp(2);
+                                compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
+                                base_reg
+                            } else {
+                                let any_reg = func.alloc_temp(2);
+                                compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+                                any_reg
+                            };
 
-                            // Fast-path: if dyn package is available and base implements dyn.SetIndexObject,
-                            // call __setindex via CallIface. Otherwise fall through to extern call.
-                            let end_jump = if let Some(set_index_iface_type) = try_lookup_pkg_type(info, "dyn", "SetIndexObject") {
+                            // Protocol-first: check if base implements dyn.SetIndexObject via IfaceAssert
+                            let end_jump = if let Some(set_index_iface_type) = info.lookup_pkg_type("dyn", "SetIndexObject") {
                                 let set_index_iface_meta_id = info.get_or_create_interface_meta_id(set_index_iface_type, ctx);
-                                let set_index_method_idx = info.get_iface_meta_method_index(set_index_iface_type, "__setindex", ctx);
-                                // IfaceAssert (interface kind) with has_ok stores ok at dst+2.
-                                // Allocate 3 slots to keep ok in-bounds.
+                                let set_index_method_idx = info.get_iface_meta_method_index(set_index_iface_type, "DynSetIndex", ctx);
+                                
+                                // IfaceAssert with has_ok flag to check interface implementation
                                 let iface_reg = func.alloc_temp(3);
                                 let flags = 1 | (1 << 2) | (2 << 3);
-                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, base_reg, set_index_iface_meta_id as u16);
+                                func.emit_with_flags(Opcode::IfaceAssert, flags, iface_reg, any_base_reg, set_index_iface_meta_id as u16);
                                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
-                                // args: key_any[2] + value_any[2] => 4 slots, ret: error[2]
+                                // Protocol method call: DynSetIndex(key any, value any) error
                                 let args_start = func.alloc_temp(4);
-                                crate::stmt::compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
-                                crate::stmt::compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
+                                compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
+                                compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
 
                                 let c = crate::type_info::encode_call_args(4, 2);
                                 func.emit_with_flags(Opcode::CallIface, set_index_method_idx as u8, iface_reg, args_start, c);
 
-                                // fail if err != nil
+                                // Check error from protocol method
                                 let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
                                 emit_error_propagate_return(args_start, func, info);
                                 func.patch_jump(ok_err_jump, func.current_pc());
@@ -682,11 +695,11 @@ fn compile_stmt_with_label(
                                 None
                             };
 
-                            // Fallback / only path: extern dyn_set_index
+                            // Fallback: extern dyn_set_index for reflection
                             let args_start = func.alloc_temp(6);
-                            func.emit_copy(args_start, base_reg, 2);
-                            crate::stmt::compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
-                            crate::stmt::compile_iface_assign(args_start + 4, &assign.rhs[0], any_type, ctx, func, info)?;
+                            func.emit_copy(args_start, any_base_reg, 2);
+                            compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
+                            compile_iface_assign(args_start + 4, &assign.rhs[0], any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_index");
                             let err_reg = func.alloc_temp(2);
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
@@ -694,6 +707,7 @@ fn compile_stmt_with_label(
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
                             emit_error_propagate_return(err_reg, func, info);
                             func.patch_jump(done_jump, func.current_pc());
+                            
                             if let Some(end_jump) = end_jump {
                                 func.patch_jump(end_jump, func.current_pc());
                             }
@@ -2106,20 +2120,54 @@ pub fn compile_iface_assign(
     };
     
     if src_vk.needs_boxing() {
-        let src_slots = info.type_slot_count(src_type);
-        let src_slot_types = info.type_slot_types(src_type);
-        let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
-        
-        let tmp_data = func.alloc_temp(src_slots);
-        compile_expr_to(rhs, tmp_data, ctx, func, info)?;
-        
-        let gcref_slot = func.alloc_temp(1);
-        let meta_reg = func.alloc_temp(1);
-        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-        func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
-        
-        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+        // IfaceAssign does ptr_clone internally for Struct/Array, so we just need to
+        // pass a GcRef. The VM ensures value semantics (deep copy).
+        let expr_source = crate::expr::get_expr_source(rhs, ctx, func, info);
+        match expr_source {
+            crate::func::ExprSource::Location(crate::func::StorageKind::HeapBoxed { gcref_slot, .. }) => {
+                // HeapBoxed struct: pass GcRef directly, IfaceAssign will ptr_clone
+                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+            }
+            crate::func::ExprSource::Location(crate::func::StorageKind::HeapArray { gcref_slot, .. }) => {
+                // HeapArray has different layout: [GcHeader][ArrayHeader(2 slots)][elems...]
+                // We need to create a boxed value with just the element data.
+                // IfaceAssign expects a boxed value layout: [GcHeader][data...]
+                let src_slots = info.type_slot_count(src_type);
+                let src_slot_types = info.type_slot_types(src_type);
+                let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+                
+                // Read element data from array (skip ArrayHeader at offset 2)
+                let tmp_data = func.alloc_temp(src_slots);
+                const ARRAY_HEADER_SLOTS: u16 = 2;
+                func.emit_ptr_get(tmp_data, gcref_slot, ARRAY_HEADER_SLOTS, src_slots);
+                
+                // Create new boxed value and copy data
+                let new_gcref_slot = func.alloc_temp(1);
+                let meta_reg = func.alloc_temp(1);
+                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+                func.emit_with_flags(Opcode::PtrNew, src_slots as u8, new_gcref_slot, meta_reg, 0);
+                func.emit_ptr_set(new_gcref_slot, 0, tmp_data, src_slots);
+                
+                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, new_gcref_slot, const_idx);
+            }
+            _ => {
+                // Stack value or expression: allocate box and copy data
+                let src_slots = info.type_slot_count(src_type);
+                let src_slot_types = info.type_slot_types(src_type);
+                let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+                
+                let tmp_data = func.alloc_temp(src_slots);
+                compile_expr_to(rhs, tmp_data, ctx, func, info)?;
+                
+                let gcref_slot = func.alloc_temp(1);
+                let meta_reg = func.alloc_temp(1);
+                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+                func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
+                func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
+                
+                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+            }
+        }
     } else {
         let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
         func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);

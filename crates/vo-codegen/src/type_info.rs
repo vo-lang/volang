@@ -247,6 +247,17 @@ impl<'a> TypeInfoWrapper<'a> {
         ctx.get_interface_method_index(type_key, method_name, &self.project.tc_objs, &self.project.interner)
     }
 
+    /// Lookup a type by package path and name.
+    /// Returns None if the package is not imported or type doesn't exist.
+    pub fn lookup_pkg_type(&self, pkg_path: &str, type_name: &str) -> Option<TypeKey> {
+        let tc_objs = &self.project.tc_objs;
+        let pkg = tc_objs.find_package_by_path(pkg_path)?;
+        let scope_key = *tc_objs.pkgs[pkg].scope();
+        let scope = &tc_objs.scopes[scope_key];
+        let obj = scope.lookup(type_name)?;
+        tc_objs.lobjs[obj].typ()
+    }
+
     /// Get the empty interface type (any) from Universe.
     pub fn any_type(&self) -> TypeKey {
         self.tc_objs().universe().any_type()
