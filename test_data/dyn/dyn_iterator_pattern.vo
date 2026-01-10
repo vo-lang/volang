@@ -1,0 +1,141 @@
+// Test iterator pattern using dynamic protocol
+// Custom iterators can be consumed via dynamic calls.
+package main
+
+// Range iterator implementing DynIndex
+type RangeIter struct {
+    current int
+    end     int
+    step    int
+}
+
+func NewRange(start, end, step int) *RangeIter {
+    return &RangeIter{current: start, end: end, step: step}
+}
+
+func (r *RangeIter) HasNext() bool {
+    if r.step > 0 {
+        return r.current < r.end
+    }
+    return r.current > r.end
+}
+
+func (r *RangeIter) Next() int {
+    v := r.current
+    r.current += r.step
+    return v
+}
+
+// Filter iterator wraps another iterator
+type FilterIter struct {
+    source    any
+    predicate func(int) bool
+    buffered  int
+    hasBuffer bool
+}
+
+func NewFilter(source any, pred func(int) bool) *FilterIter {
+    return &FilterIter{source: source, predicate: pred}
+}
+
+func (f *FilterIter) advance() bool {
+    for {
+        hasNext, err := f.source~>HasNext()
+        if err != nil || !hasNext.(bool) {
+            return false
+        }
+        
+        next, err := f.source~>Next()
+        if err != nil {
+            return false
+        }
+        
+        if f.predicate(next.(int)) {
+            f.buffered = next.(int)
+            f.hasBuffer = true
+            return true
+        }
+    }
+}
+
+func (f *FilterIter) HasNext() bool {
+    if f.hasBuffer {
+        return true
+    }
+    return f.advance()
+}
+
+func (f *FilterIter) Next() int {
+    if !f.hasBuffer {
+        f.advance()
+    }
+    f.hasBuffer = false
+    return f.buffered
+}
+
+// Collect all values from an iterator dynamically
+func collect(iter any) []int {
+    var result []int
+    for {
+        hasNext, err := iter~>HasNext()
+        if err != nil || !hasNext.(bool) {
+            break
+        }
+        val, err := iter~>Next()
+        if err != nil {
+            break
+        }
+        result = append(result, val.(int))
+    }
+    return result
+}
+
+// Sum values from iterator dynamically
+func sumIter(iter any) int {
+    sum := 0
+    for {
+        hasNext := iter~>HasNext()?
+        if !hasNext.(bool) {
+            break
+        }
+        val := iter~>Next()?
+        sum += val.(int)
+    }
+    return sum
+}
+
+func main() error {
+    // Test basic range
+    r := NewRange(0, 5, 1)
+    vals := collect(r)
+    assert(len(vals) == 5, "range should have 5 elements")
+    assert(vals[0] == 0 && vals[4] == 4, "range values check")
+    
+    // Test range with step
+    r2 := NewRange(0, 10, 2)
+    vals2 := collect(r2)
+    assert(len(vals2) == 5, "step range should have 5 elements")
+    assert(vals2[0] == 0 && vals2[2] == 4 && vals2[4] == 8, "step values")
+    
+    // Test reverse range
+    r3 := NewRange(5, 0, -1)
+    vals3 := collect(r3)
+    assert(len(vals3) == 5, "reverse range should have 5 elements")
+    assert(vals3[0] == 5 && vals3[4] == 1, "reverse values")
+    
+    // Test filter iterator (evens only)
+    r4 := NewRange(0, 10, 1)
+    isEven := func(x int) bool { return x%2 == 0 }
+    filtered := NewFilter(r4, isEven)
+    evens := collect(filtered)
+    assert(len(evens) == 5, "should have 5 even numbers")
+    assert(evens[0] == 0 && evens[2] == 4 && evens[4] == 8, "even values")
+    
+    // Test sum through iterator
+    r5 := NewRange(1, 6, 1)
+    sum := sumIter(r5)
+    assert(sum == 15, "sum 1..5 should be 15, got ", sum)
+    
+    println("dyn_iterator_pattern: ok")
+    return nil
+}

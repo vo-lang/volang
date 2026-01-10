@@ -1,0 +1,215 @@
+// Test state machine with dynamic transitions
+// States and transitions accessed dynamically.
+package main
+
+import "dyn"
+
+type State struct {
+    name        string
+    transitions map[string]string
+    onEnter     func()
+    enterCount  int
+}
+
+func NewState(name string) *State {
+    return &State{
+        name:        name,
+        transitions: make(map[string]string),
+        enterCount:  0,
+    }
+}
+
+func (s *State) AddTransition(event string, target string) {
+    s.transitions[event] = target
+}
+
+func (s *State) DynAttr(name string) (any, error) {
+    if name == "name" {
+        return s.name, nil
+    }
+    if name == "enterCount" {
+        return s.enterCount, nil
+    }
+    return nil, dyn.ErrBadField
+}
+
+func (s *State) DynIndex(key any) (any, error) {
+    event := key.(string)
+    target, ok := s.transitions[event]
+    if !ok {
+        return nil, dyn.ErrBadIndex
+    }
+    return target, nil
+}
+
+func (s *State) Enter() {
+    s.enterCount++
+    if s.onEnter != nil {
+        s.onEnter()
+    }
+}
+
+type StateMachine struct {
+    states   map[string]*State
+    current  string
+    history  []string
+}
+
+func NewStateMachine() *StateMachine {
+    return &StateMachine{
+        states:  make(map[string]*State),
+        history: []string{},
+    }
+}
+
+func (sm *StateMachine) AddState(s *State) {
+    sm.states[s.name] = s
+}
+
+func (sm *StateMachine) SetInitial(name string) {
+    sm.current = name
+    sm.states[name].Enter()
+    sm.history = append(sm.history, name)
+}
+
+func (sm *StateMachine) DynAttr(name string) (any, error) {
+    if name == "current" {
+        return sm.current, nil
+    }
+    if name == "history" {
+        return sm.history, nil
+    }
+    // Allow accessing state by name via DynAttr for static names
+    s, ok := sm.states[name]
+    if ok {
+        return s, nil
+    }
+    return nil, dyn.ErrBadField
+}
+
+func (sm *StateMachine) DynIndex(key any) (any, error) {
+    name, ok := key.(string)
+    if !ok {
+        return nil, dyn.ErrBadIndex
+    }
+    s, ok := sm.states[name]
+    if ok {
+        return s, nil
+    }
+    return nil, dyn.ErrBadIndex
+}
+
+func (sm *StateMachine) Trigger(event string) error {
+    state := sm.states[sm.current]
+    target, ok := state.transitions[event]
+    if !ok {
+        return dyn.ErrBadIndex
+    }
+    sm.current = target
+    sm.states[target].Enter()
+    sm.history = append(sm.history, target)
+    return nil
+}
+
+// Trigger transition via dynamic access
+func triggerDyn(machine any, event string) error {
+    // Get current state name
+    currentName := machine~>current?
+    
+    // Get the current state object
+    currentState, err := machine~>[currentName.(string)]
+    if err != nil {
+        return err
+    }
+    
+    // Get target from state's transitions
+    targetName, err := currentState~>[event]
+    if err != nil {
+        return err
+    }
+    
+    // Actually trigger (need the real object here)
+    sm := machine.(*StateMachine)
+    return sm.Trigger(event)
+}
+
+func main() error {
+    // Build state machine: Idle -> Running -> Paused -> Running | Idle
+    idle := NewState("Idle")
+    running := NewState("Running")
+    paused := NewState("Paused")
+    
+    idle.AddTransition("start", "Running")
+    running.AddTransition("pause", "Paused")
+    running.AddTransition("stop", "Idle")
+    paused.AddTransition("resume", "Running")
+    paused.AddTransition("stop", "Idle")
+    
+    sm := NewStateMachine()
+    sm.AddState(idle)
+    sm.AddState(running)
+    sm.AddState(paused)
+    sm.SetInitial("Idle")
+    
+    var machine any = sm
+    
+    // Check initial state
+    current := machine~>current?
+    assert(current.(string) == "Idle", "should start in Idle")
+    
+    // Get Idle state and check transition
+    idleState := machine~>Idle?
+    nextOnStart := idleState~>["start"]?
+    assert(nextOnStart.(string) == "Running", "Idle->start should go to Running")
+    
+    // Trigger start
+    err := triggerDyn(machine, "start")
+    assert(err == nil, "start should succeed")
+    
+    current = machine~>current?
+    assert(current.(string) == "Running", "should be Running after start")
+    
+    // Trigger pause
+    err = triggerDyn(machine, "pause")
+    assert(err == nil, "pause should succeed")
+    
+    current = machine~>current?
+    assert(current.(string) == "Paused", "should be Paused after pause")
+    
+    // Resume
+    err = triggerDyn(machine, "resume")
+    assert(err == nil, "resume should succeed")
+    
+    current = machine~>current?
+    assert(current.(string) == "Running", "should be Running after resume")
+    
+    // Stop
+    err = triggerDyn(machine, "stop")
+    assert(err == nil, "stop should succeed")
+    
+    current = machine~>current?
+    assert(current.(string) == "Idle", "should be Idle after stop")
+    
+    // Check history
+    history := machine~>history?
+    h := history.([]string)
+    assert(len(h) == 5, "history should have 5 entries")
+    assert(h[0] == "Idle" && h[1] == "Running" && h[2] == "Paused", "history check 1")
+    assert(h[3] == "Running" && h[4] == "Idle", "history check 2")
+    
+    // Check enter counts
+    idleState = machine~>Idle?
+    idleCount := idleState~>enterCount?
+    assert(idleCount.(int) == 2, "Idle entered twice")
+    
+    runningState := machine~>Running?
+    runCount := runningState~>enterCount?
+    assert(runCount.(int) == 2, "Running entered twice")
+    
+    pausedState := machine~>Paused?
+    pauseCount := pausedState~>enterCount?
+    assert(pauseCount.(int) == 1, "Paused entered once")
+    
+    println("dyn_state_machine: ok")
+    return nil
+}

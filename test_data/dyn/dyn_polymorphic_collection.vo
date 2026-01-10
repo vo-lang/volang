@@ -1,0 +1,158 @@
+// Test polymorphic collection with unified dynamic access
+// Different types with same dynamic interface in a collection.
+package main
+
+// Shape interface - all shapes have Area and Perimeter
+type Circle struct {
+    radius float64
+}
+
+func (c *Circle) Area() float64 {
+    return 3.14159 * c.radius * c.radius
+}
+
+func (c *Circle) Perimeter() float64 {
+    return 2.0 * 3.14159 * c.radius
+}
+
+func (c *Circle) Name() string {
+    return "Circle"
+}
+
+type Rectangle struct {
+    width  float64
+    height float64
+}
+
+func (r *Rectangle) Area() float64 {
+    return r.width * r.height
+}
+
+func (r *Rectangle) Perimeter() float64 {
+    return 2.0 * (r.width + r.height)
+}
+
+func (r *Rectangle) Name() string {
+    return "Rectangle"
+}
+
+type Triangle struct {
+    base   float64
+    height float64
+    side1  float64
+    side2  float64
+    side3  float64
+}
+
+func NewTriangle(base, height, s1, s2, s3 float64) *Triangle {
+    return &Triangle{base: base, height: height, side1: s1, side2: s2, side3: s3}
+}
+
+func (t *Triangle) Area() float64 {
+    return 0.5 * t.base * t.height
+}
+
+func (t *Triangle) Perimeter() float64 {
+    return t.side1 + t.side2 + t.side3
+}
+
+func (t *Triangle) Name() string {
+    return "Triangle"
+}
+
+// Process shapes dynamically
+func totalArea(shapes []any) float64 {
+    total := 0.0
+    for _, s := range shapes {
+        area, err := s~>Area()
+        if err == nil {
+            total += area.(float64)
+        }
+    }
+    return total
+}
+
+func totalPerimeter(shapes []any) float64 {
+    total := 0.0
+    for _, s := range shapes {
+        peri, err := s~>Perimeter()
+        if err == nil {
+            total += peri.(float64)
+        }
+    }
+    return total
+}
+
+func describeAll(shapes []any) []string {
+    var names []string
+    for _, s := range shapes {
+        name, err := s~>Name()
+        if err == nil {
+            names = append(names, name.(string))
+        }
+    }
+    return names
+}
+
+// Find largest by area
+func largestShape(shapes []any) any {
+    var largest any = nil
+    maxArea := 0.0
+    for _, s := range shapes {
+        area, err := s~>Area()
+        if err == nil {
+            a := area.(float64)
+            if a > maxArea {
+                maxArea = a
+                largest = s
+            }
+        }
+    }
+    return largest
+}
+
+func main() error {
+    shapes := []any{
+        &Circle{radius: 5.0},           // Area ≈ 78.54
+        &Rectangle{width: 4.0, height: 6.0},  // Area = 24
+        NewTriangle(8.0, 5.0, 5.0, 5.0, 8.0), // Area = 20
+        &Circle{radius: 2.0},           // Area ≈ 12.57
+        &Rectangle{width: 10.0, height: 10.0}, // Area = 100
+    }
+    
+    // Test totalArea
+    area := totalArea(shapes)
+    assert(area > 234.0 && area < 236.0, "total area should be ~235")
+    
+    // Test totalPerimeter
+    peri := totalPerimeter(shapes)
+    assert(peri > 100.0, "total perimeter should be significant")
+    
+    // Test describeAll
+    names := describeAll(shapes)
+    assert(len(names) == 5, "should have 5 names")
+    assert(names[0] == "Circle", "first should be Circle")
+    assert(names[1] == "Rectangle", "second should be Rectangle")
+    assert(names[2] == "Triangle", "third should be Triangle")
+    
+    // Test largestShape - should be the 10x10 rectangle
+    largest := largestShape(shapes)
+    lname := largest~>Name()?
+    assert(lname.(string) == "Rectangle", "largest should be Rectangle")
+    larea := largest~>Area()?
+    assert(larea.(float64) == 100.0, "largest area should be 100")
+    
+    // Access specific shape fields dynamically
+    circle := shapes[0]
+    radius, err := circle~>radius
+    assert(err == nil, "should access radius")
+    assert(radius.(float64) == 5.0, "radius should be 5.0")
+    
+    rect := shapes[1]
+    w := rect~>width?
+    h := rect~>height?
+    assert(w.(float64) == 4.0 && h.(float64) == 6.0, "rect dimensions")
+    
+    println("dyn_polymorphic_collection: ok")
+    return nil
+}

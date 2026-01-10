@@ -1,0 +1,135 @@
+// Test method composition via dynamic access
+// Extract methods dynamically and compose them.
+package main
+
+type MathOps struct {
+    offset int
+}
+
+func (m *MathOps) Add(x int) int {
+    return x + m.offset
+}
+
+func (m *MathOps) Mul(x int) int {
+    return x * m.offset
+}
+
+func (m *MathOps) Sub(x int) int {
+    return x - m.offset
+}
+
+func (m *MathOps) Square(x int) int {
+    return x * x
+}
+
+func (m *MathOps) Double(x int) int {
+    return x * 2
+}
+
+type StringOps struct{}
+
+func (s *StringOps) Upper(str string) string {
+    // Simplified: just return as-is for test
+    return str + "_UPPER"
+}
+
+func (s *StringOps) Lower(str string) string {
+    return str + "_lower"
+}
+
+func (s *StringOps) Exclaim(str string) string {
+    return str + "!"
+}
+
+// Compose int functions
+func compose2Int(f1, f2 func(int) int) func(int) int {
+    return func(x int) int {
+        return f2(f1(x))
+    }
+}
+
+// Compose string functions
+func compose2Str(f1, f2 func(string) string) func(string) string {
+    return func(s string) string {
+        return f2(f1(s))
+    }
+}
+
+// Apply method by name using a dispatch map
+func applyDynMethod(obj any, methodName string, val int) (int, error) {
+    // Build dispatch map from dynamically retrieved methods
+    add := obj~>Add?
+    square := obj~>Square?
+    
+    methods := map[string]func(int) int{
+        "Add":    add.(func(int) int),
+        "Square": square.(func(int) int),
+    }
+    
+    fn, ok := methods[methodName]
+    if !ok {
+        return 0, nil
+    }
+    return fn(val), nil
+}
+
+func main() error {
+    math := &MathOps{offset: 10}
+    var obj any = math
+    
+    // Extract methods dynamically
+    addMethod := obj~>Add?
+    mulMethod := obj~>Mul?
+    squareMethod := obj~>Square?
+    doubleMethod := obj~>Double?
+    
+    add := addMethod.(func(int) int)
+    mul := mulMethod.(func(int) int)
+    square := squareMethod.(func(int) int)
+    double := doubleMethod.(func(int) int)
+    
+    // Test individual methods
+    assert(add(5) == 15, "5 + 10 = 15")
+    assert(mul(5) == 50, "5 * 10 = 50")
+    assert(square(5) == 25, "5^2 = 25")
+    assert(double(5) == 10, "5 * 2 = 10")
+    
+    // Compose: add then mul
+    addThenMul := compose2Int(add, mul)
+    result := addThenMul(5)  // (5 + 10) * 10 = 150
+    assert(result == 150, "addThenMul(5) should be 150, got ", result)
+    
+    // Compose: square then double
+    squareThenDouble := compose2Int(square, double)
+    result = squareThenDouble(5)  // 25 * 2 = 50
+    assert(result == 50, "squareThenDouble(5) should be 50, got ", result)
+    
+    // Compose: double then square then add
+    pipe := compose2Int(compose2Int(double, square), add)
+    result = pipe(3)  // ((3*2)^2) + 10 = 36 + 10 = 46
+    assert(result == 46, "pipe(3) should be 46, got ", result)
+    
+    // String composition
+    strOps := &StringOps{}
+    var strObj any = strOps
+    
+    upper := strObj~>Upper?
+    exclaim := strObj~>Exclaim?
+    
+    upperFn := upper.(func(string) string)
+    exclaimFn := exclaim.(func(string) string)
+    
+    shout := compose2Str(upperFn, exclaimFn)
+    msg := shout("hello")
+    assert(msg == "hello_UPPER!", "shout should be 'hello_UPPER!'")
+    
+    // Dynamic method selection
+    val, err := applyDynMethod(obj, "Add", 7)
+    assert(err == nil && val == 17, "dynamic Add(7) should be 17")
+    
+    val, err = applyDynMethod(obj, "Square", 4)
+    assert(err == nil && val == 16, "dynamic Square(4) should be 16")
+    
+    println("dyn_method_composition: ok")
+    return nil
+}

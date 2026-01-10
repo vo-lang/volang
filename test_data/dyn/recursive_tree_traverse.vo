@@ -1,0 +1,130 @@
+// Test dynamic access on recursive tree structures
+// Traverse a tree using dynamic field access.
+package main
+
+type TreeNode struct {
+    value int
+    left  *TreeNode
+    right *TreeNode
+}
+
+func NewNode(v int) *TreeNode {
+    return &TreeNode{value: v}
+}
+
+func (n *TreeNode) Insert(v int) {
+    if v < n.value {
+        if n.left == nil {
+            n.left = NewNode(v)
+        } else {
+            n.left.Insert(v)
+        }
+    } else {
+        if n.right == nil {
+            n.right = NewNode(v)
+        } else {
+            n.right.Insert(v)
+        }
+    }
+}
+
+// Sum all values using dynamic access
+func dynSum(obj any) int {
+    // Check for nil by trying to access a field
+    val, err := obj~>value
+    if err != nil {
+        return 0
+    }
+    
+    leftObj, _ := obj~>left
+    rightObj, _ := obj~>right
+    
+    return val.(int) + dynSum(leftObj) + dynSum(rightObj)
+}
+
+// Find max depth using dynamic access
+func dynMaxDepth(obj any) int {
+    // Check for nil by trying to access a field
+    _, err := obj~>value
+    if err != nil {
+        return 0
+    }
+    
+    leftObj, _ := obj~>left
+    rightObj, _ := obj~>right
+    
+    leftDepth := dynMaxDepth(leftObj)
+    rightDepth := dynMaxDepth(rightObj)
+    
+    if leftDepth > rightDepth {
+        return 1 + leftDepth
+    }
+    return 1 + rightDepth
+}
+
+// Check if value exists using dynamic access
+func dynContains(obj any, target int) bool {
+    // Check for nil by trying to access a field
+    val, err := obj~>value
+    if err != nil {
+        return false
+    }
+    
+    if val.(int) == target {
+        return true
+    }
+    
+    leftObj, _ := obj~>left
+    rightObj, _ := obj~>right
+    
+    return dynContains(leftObj, target) || dynContains(rightObj, target)
+}
+
+func main() error {
+    root := NewNode(50)
+    root.Insert(30)
+    root.Insert(70)
+    root.Insert(20)
+    root.Insert(40)
+    root.Insert(60)
+    root.Insert(80)
+    
+    //       50
+    //      /  \
+    //    30    70
+    //   /  \  /  \
+    //  20  40 60  80
+    
+    var obj any = root
+    
+    // Test sum: 50+30+70+20+40+60+80 = 350
+    sum := dynSum(obj)
+    assert(sum == 350, "tree sum should be 350, got ", sum)
+    
+    // Test max depth: 3 levels (root=1, children=2, grandchildren=3)
+    depth := dynMaxDepth(obj)
+    assert(depth == 3, "tree depth should be 3, got ", depth)
+    // Note: dynMaxDepth counts levels: leaf returns 1, so 7-node complete tree = 3 levels
+    
+    // Test contains
+    assert(dynContains(obj, 40) == true, "should contain 40")
+    assert(dynContains(obj, 60) == true, "should contain 60")
+    assert(dynContains(obj, 99) == false, "should not contain 99")
+    
+    // Navigate manually via dynamic access
+    leftNode := obj~>left?
+    leftVal := leftNode~>value?
+    assert(leftVal.(int) == 30, "left child should be 30")
+    
+    rightNode := obj~>right?
+    rightVal := rightNode~>value?
+    assert(rightVal.(int) == 70, "right child should be 70")
+    
+    // Deep navigation
+    leftLeftNode := leftNode~>left?
+    llVal := leftLeftNode~>value?
+    assert(llVal.(int) == 20, "left-left should be 20")
+    
+    println("recursive_tree_traverse: ok")
+    return nil
+}
