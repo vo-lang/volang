@@ -25,10 +25,8 @@ func main() {
 
 func testMapObject() error {
     // Test with MapObject directly
-    m := make(dyn.MapObject)
+    a := make(dyn.MapObject)
     
-    // Box to any and use ~> operator
-    var a any = m
     a~>name = "hello"
     a~>count = 42
     
@@ -55,10 +53,8 @@ func testMapObject() error {
 
 func testEmbedded() error {
     // Test with Config embedding MapObject
-    c := Config{make(dyn.MapObject)}
+    a := Config{make(dyn.MapObject)}
     
-    // Box to any and use ~> operator (tests promoted method via interface)
-    var a any = c
     a~>field1 = "hello"
     a~>field2 = 123
     

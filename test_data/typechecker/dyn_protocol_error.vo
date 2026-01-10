@@ -1,0 +1,17 @@
+// Test: Compile error when concrete type doesn't implement protocol
+// Expected: compile error "type X does not implement protocol method DynAttr"
+
+package main
+
+type NoProtocol struct {
+    value int
+}
+
+func main() error {
+    x := NoProtocol{42}
+    
+    // This should be a compile error: NoProtocol doesn't implement DynAttr
+    v, err := x~>field
+    _ = v
+    return err
+}

@@ -1439,6 +1439,17 @@ impl Checker {
                     }
                 }
 
+                // Resolve protocol method for static dispatch
+                let dyn_resolve = match self.resolve_dyn_access_method(base_type, &dyn_access.op, e.span) {
+                    Ok(resolve) => resolve,
+                    Err(()) => {
+                        // Error already reported
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                };
+                self.result.record_dyn_access(e.id, dyn_resolve);
+
                 // Result is (any, error)
                 let any_type = self.new_t_empty_interface();
                 let error_type = self.universe().error_type();
@@ -1492,6 +1503,200 @@ impl Checker {
         // - slice/array: index access
         // - tuple: (any, error) for chaining
         true
+    }
+
+    /// Resolve protocol method for dynamic access operation.
+    /// 
+    /// Returns:
+    /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
+    /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
+    /// - `Err(())` if concrete type doesn't implement protocol (error already reported)
+    pub(crate) fn resolve_dyn_access_method(
+        &mut self,
+        base_type: TypeKey,
+        op: &vo_syntax::ast::DynAccessOp,
+        span: Span,
+    ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
+        use vo_syntax::ast::DynAccessOp;
+        
+        // Get the actual base type (unwrap tuple for chaining case)
+        let actual_base_type = if self.is_tuple_any_error(base_type) {
+            // For (any, error) tuple, the first element is the actual base
+            if let Some(tuple) = self.otype(base_type).try_as_tuple() {
+                let vars = tuple.vars();
+                if !vars.is_empty() {
+                    self.lobj(vars[0]).typ().unwrap_or(base_type)
+                } else {
+                    base_type
+                }
+            } else {
+                base_type
+            }
+        } else {
+            base_type
+        };
+        
+        // If base is interface, use dynamic dispatch
+        if self.otype(actual_base_type).try_as_interface().is_some() {
+            return Ok(None);
+        }
+        
+        // Determine protocol method name based on operation
+        let method_name = match op {
+            DynAccessOp::Field(_) | DynAccessOp::MethodCall { .. } => "DynAttr",
+            DynAccessOp::Index(_) => "DynIndex",
+            DynAccessOp::Call { .. } => "DynCall",
+        };
+        
+        // Lookup method on concrete type
+        let pkg = self.pkg;
+        let result = crate::lookup::lookup_field_or_method(
+            actual_base_type,
+            true,  // addressable
+            Some(pkg),
+            method_name,
+            self.objs(),
+        );
+        
+        match result {
+            crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
+                Ok(Some(crate::check::type_info::DynAccessResolve {
+                    method: method_key,
+                    indices,
+                    indirect,
+                }))
+            }
+            crate::lookup::LookupResult::NotFound => {
+                let type_name = crate::display::type_string(actual_base_type, self.objs());
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("type {} does not implement protocol method {}", type_name, method_name),
+                );
+                Err(())
+            }
+            crate::lookup::LookupResult::Ambiguous(_) => {
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("ambiguous protocol method {}", method_name),
+                );
+                Err(())
+            }
+            crate::lookup::LookupResult::BadMethodReceiver => {
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("cannot call {} on non-addressable value", method_name),
+                );
+                Err(())
+            }
+        }
+    }
+
+    /// Resolve protocol method for dynamic set operation (assignment LHS).
+    /// 
+    /// Returns:
+    /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
+    /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
+    /// - `Err(())` if concrete type doesn't implement protocol (error already reported)
+    pub(crate) fn resolve_dyn_set_method(
+        &mut self,
+        base_type: TypeKey,
+        op: &vo_syntax::ast::DynAccessOp,
+        span: Span,
+    ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
+        use vo_syntax::ast::DynAccessOp;
+        
+        // Get the actual base type (unwrap tuple for chaining case)
+        let actual_base_type = if self.is_tuple_any_error(base_type) {
+            if let Some(tuple) = self.otype(base_type).try_as_tuple() {
+                let vars = tuple.vars();
+                if !vars.is_empty() {
+                    self.lobj(vars[0]).typ().unwrap_or(base_type)
+                } else {
+                    base_type
+                }
+            } else {
+                base_type
+            }
+        } else {
+            base_type
+        };
+        
+        // If base is interface, use dynamic dispatch
+        if self.otype(actual_base_type).try_as_interface().is_some() {
+            return Ok(None);
+        }
+        
+        // Determine protocol method name based on operation
+        let method_name = match op {
+            DynAccessOp::Field(_) => "DynSetAttr",
+            DynAccessOp::Index(_) => "DynSetIndex",
+            _ => return Ok(None), // Call operations not applicable for set
+        };
+        
+        // Lookup method on concrete type
+        let pkg = self.pkg;
+        let result = crate::lookup::lookup_field_or_method(
+            actual_base_type,
+            true,  // addressable
+            Some(pkg),
+            method_name,
+            self.objs(),
+        );
+        
+        match result {
+            crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
+                Ok(Some(crate::check::type_info::DynAccessResolve {
+                    method: method_key,
+                    indices,
+                    indirect,
+                }))
+            }
+            crate::lookup::LookupResult::NotFound => {
+                let type_name = crate::display::type_string(actual_base_type, self.objs());
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("type {} does not implement protocol method {}", type_name, method_name),
+                );
+                Err(())
+            }
+            crate::lookup::LookupResult::Ambiguous(_) => {
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("ambiguous protocol method {}", method_name),
+                );
+                Err(())
+            }
+            crate::lookup::LookupResult::BadMethodReceiver => {
+                self.error_code_msg(
+                    TypeError::InvalidOp,
+                    span,
+                    format!("cannot call {} on non-addressable value", method_name),
+                );
+                Err(())
+            }
+        }
+    }
+
+    /// Check if type is (any, error) tuple used for dyn access chaining.
+    fn is_tuple_any_error(&self, type_key: TypeKey) -> bool {
+        let typ = self.otype(type_key);
+        if let Some(tuple) = typ.try_as_tuple() {
+            let vars = tuple.vars();
+            if vars.len() == 2 {
+                let first_type = self.lobj(vars[0]).typ();
+                let second_type = self.lobj(vars[1]).typ();
+                if let (Some(ft), Some(st)) = (first_type, second_type) {
+                    return self.otype(ft).try_as_interface().is_some()
+                        && st == self.universe().error_type();
+                }
+            }
+        }
+        false
     }
 
     // =========================================================================

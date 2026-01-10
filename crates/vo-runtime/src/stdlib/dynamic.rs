@@ -988,11 +988,10 @@ static __VO_DYN_UNPACK_ALL_RETURNS: ExternEntryWithContext = ExternEntryWithCont
 
 /// dyn_type_assert_error: Create a type assertion error for dynamic access.
 ///
-/// Args: (expected_rttid[1], expected_vk[1], got_rttid[1], got_vk[1]) -> error[2]
-/// - expected_rttid: expected runtime type id
+/// Args: (expected_rttid[1], expected_vk[1], got_slot0[1]) -> error[2]
+/// - expected_rttid: expected runtime type id (0 for interface targets)
 /// - expected_vk: expected value kind
-/// - got_rttid: actual runtime type id from interface
-/// - got_vk: actual value kind from interface
+/// - got_slot0: raw interface slot0 (runtime extracts rttid/vk from it)
 ///
 /// Returns (2 slots): error interface
 ///
@@ -1000,7 +999,6 @@ static __VO_DYN_UNPACK_ALL_RETURNS: ExternEntryWithContext = ExternEntryWithCont
 fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
     let expected_rttid = call.arg_u64(0) as u32;
     let expected_vk = call.arg_u64(1) as u8;
-    // Args 2 and 3 are both the raw slot0 from the interface
     // slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
     let got_slot0 = call.arg_u64(2);
     

@@ -159,6 +159,9 @@ tests:
   - file: typechecker/addr_of_must_be_struct.vo
     should_fail: true
     reason: "address-of operator only valid for struct types (Vo spec)"
+  - file: typechecker/dyn_protocol_error.vo
+    should_fail: true
+    reason: "concrete type without protocol method should fail"
 
   # JIT bugs - tests not in original config
   - file: array_slice_get_set.vo

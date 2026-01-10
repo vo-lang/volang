@@ -109,9 +109,17 @@ pub fn compile_dyn_access(
         compile_dyn_op(&dyn_access.op, base_reg, dst, &ret_types, ctx, func, info)?;
         
         func.patch_jump(done_jump, func.current_pc());
-    } else {
-        // Base is just `any` (2 slots) - compile operation directly
+    } else if info.is_interface(base_type) {
+        // Dynamic dispatch: base is interface (any or other interface)
         compile_dyn_op(&dyn_access.op, base_reg, dst, &ret_types, ctx, func, info)?;
+    } else {
+        // Concrete type with resolved protocol method (validated by checker)
+        // Box to any and use protocol dispatch
+        // TODO: optimize to direct static call in the future
+        let any_type = info.any_type();
+        let any_reg = func.alloc_temp(2);
+        crate::stmt::compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+        compile_dyn_op(&dyn_access.op, any_reg, dst, &ret_types, ctx, func, info)?;
     }
     
     Ok(())
@@ -162,7 +170,7 @@ fn compile_dyn_op(
                 None
             };
             
-            // Fallback: extern dyn_get_attr
+            // Reflection path: extern dyn_get_attr for types not implementing AttrObject
             let extern_id = ctx.get_or_register_extern("dyn_get_attr");
             let args_start = func.alloc_temp(3);
             func.emit_op(Opcode::Copy, args_start, base_reg, 0);
@@ -216,7 +224,7 @@ fn compile_dyn_op(
                 None
             };
             
-            // Fallback: extern dyn_get_index for reflection
+            // Reflection path: extern dyn_get_index for types not implementing IndexObject
             let extern_id = ctx.get_or_register_extern("dyn_get_index");
             
             let key_type = info.expr_type(index_expr.id);
@@ -278,7 +286,7 @@ fn compile_dyn_op(
                 
                 func.patch_jump(fallback_jump, func.current_pc());
                 
-                // Fallback path needs its own get_result
+                // Reflection path needs its own get_result
                 let extern_id = ctx.get_or_register_extern("dyn_get_attr");
                 let attr_args = func.alloc_temp(3);
                 func.emit_op(Opcode::Copy, attr_args, base_reg, 0);
@@ -561,7 +569,7 @@ fn emit_unbox_interface(
     
     // Success path: copy value, clear error
     func.patch_jump(ok_jump, func.current_pc());
-    copy_slots(dst, assert_result, slots, vk, assert_kind, func);
+    copy_slots(dst, assert_result, slots, vk, func);
     func.emit_op(Opcode::LoadInt, error_slot, 0, 0);
     func.emit_op(Opcode::LoadInt, error_slot + 1, 0, 0);
     
@@ -583,6 +591,7 @@ fn compute_assert_params(
 }
 
 /// Emit code to create a type assertion error.
+/// Args: (expected_rttid, expected_vk, got_slot0) -> error[2]
 fn emit_type_assert_error(
     assert_kind: u8,
     target_id: u32,
@@ -593,25 +602,25 @@ fn emit_type_assert_error(
     func: &mut FuncBuilder,
 ) {
     let extern_id = ctx.get_or_register_extern("dyn_type_assert_error");
-    let args = func.alloc_temp(4);
+    let args = func.alloc_temp(3);
     
     // Expected: (rttid, vk)
     let expected_rttid = if assert_kind == 1 { 0 } else { target_id };
     func.emit_op(Opcode::LoadConst, args, ctx.const_int(expected_rttid as i64), 0);
     func.emit_op(Opcode::LoadConst, args + 1, ctx.const_int(expected_vk as i64), 0);
     
-    // Got: pass raw slot0 (runtime extracts rttid/vk)
+    // Got: raw slot0 (runtime extracts rttid/vk from it)
     func.emit_op(Opcode::Copy, args + 2, src, 0);
-    func.emit_op(Opcode::Copy, args + 3, src, 0);
     
-    func.emit_with_flags(Opcode::CallExtern, 4, err_dst, extern_id as u16, args);
+    func.emit_with_flags(Opcode::CallExtern, 3, err_dst, extern_id as u16, args);
 }
 
 /// Copy slots from src to dst based on type characteristics.
-fn copy_slots(dst: u16, src: u16, slots: u16, vk: ValueKind, assert_kind: u8, func: &mut FuncBuilder) {
+fn copy_slots(dst: u16, src: u16, slots: u16, vk: ValueKind, func: &mut FuncBuilder) {
     if slots == 1 {
         func.emit_op(Opcode::Copy, dst, src, 0);
-    } else if vk == ValueKind::Interface || assert_kind == 1 {
+    } else if vk == ValueKind::Interface {
+        // Interface is always 2 slots
         func.emit_op(Opcode::Copy, dst, src, 0);
         func.emit_op(Opcode::Copy, dst + 1, src + 1, 0);
     } else {

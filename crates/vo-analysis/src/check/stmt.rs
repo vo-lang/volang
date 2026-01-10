@@ -578,6 +578,16 @@ impl Checker {
                                         return;
                                     }
                                     self.assignment(&mut val_x, Some(any_type), "dynamic write value");
+
+                                    // Resolve protocol method for static dispatch (SetAttr or SetIndex)
+                                    let dyn_resolve = match self.resolve_dyn_set_method(base_type, &dyn_access.op, astmt.lhs[0].span) {
+                                        Ok(resolve) => resolve,
+                                        Err(()) => {
+                                            // Error already reported
+                                            return;
+                                        }
+                                    };
+                                    self.result.record_dyn_access(astmt.lhs[0].id, dyn_resolve);
                                     return;
                                 }
                             }

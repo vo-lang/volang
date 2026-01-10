@@ -625,7 +625,7 @@ fn compile_stmt_with_label(
                                 None
                             };
 
-                            // Fallback: extern dyn_set_attr for reflection
+                            // Reflection path: extern dyn_set_attr for types not implementing SetAttrObject
                             let args_start = func.alloc_temp(5);
                             func.emit_copy(args_start, any_base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
@@ -695,7 +695,7 @@ fn compile_stmt_with_label(
                                 None
                             };
 
-                            // Fallback: extern dyn_set_index for reflection
+                            // Reflection path: extern dyn_set_index for types not implementing SetIndexObject
                             let args_start = func.alloc_temp(6);
                             func.emit_copy(args_start, any_base_reg, 2);
                             compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;

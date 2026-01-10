@@ -17,6 +17,20 @@ pub struct TypeAndValue {
     pub typ: TypeKey,
 }
 
+/// Resolved dynamic access method for static dispatch.
+/// 
+/// When a `~>` operation is used on a concrete type (not any/interface),
+/// the checker resolves the protocol method at compile time.
+#[derive(Debug, Clone)]
+pub struct DynAccessResolve {
+    /// Method object key for static call.
+    pub method: ObjKey,
+    /// Index path for embedded types (empty if method is on the type itself).
+    pub indices: Vec<usize>,
+    /// Whether receiver needs indirection (pointer dereference).
+    pub indirect: bool,
+}
+
 impl TypeAndValue {
     pub(crate) fn new(mode: OperandMode, typ: TypeKey) -> Self {
         TypeAndValue { mode, typ }
@@ -68,6 +82,11 @@ pub struct TypeInfo {
 
     /// Closure captures: FuncLit ExprId -> captured variables (set by escape analysis pass).
     pub closure_captures: HashMap<ExprId, Vec<ObjKey>>,
+
+    /// Dynamic access method resolution for static dispatch.
+    /// Key: DynAccess expression ID
+    /// Value: Some = static call info, None = dynamic dispatch (any/interface base)
+    pub dyn_access_methods: HashMap<ExprId, Option<DynAccessResolve>>,
 }
 
 impl TypeInfo {
@@ -118,6 +137,12 @@ impl TypeInfo {
     /// Records init order.
     pub(crate) fn record_init_order(&mut self, init_order: Vec<Initializer>) {
         self.init_order = init_order;
+    }
+
+    /// Records dynamic access method resolution.
+    /// `resolve` is Some for static dispatch (concrete type), None for dynamic dispatch (any/interface).
+    pub(crate) fn record_dyn_access(&mut self, expr_id: ExprId, resolve: Option<DynAccessResolve>) {
+        self.dyn_access_methods.insert(expr_id, resolve);
     }
 
     /// Records builtin type signature for a builtin function expression.

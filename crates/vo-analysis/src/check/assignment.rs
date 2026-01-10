@@ -559,6 +559,27 @@ impl Checker {
             }
         }
 
+        // Resolve protocol method for static dispatch
+        let dyn_resolve = match self.resolve_dyn_access_method(base_type, &dyn_access.op, dyn_access_expr.span) {
+            Ok(resolve) => resolve,
+            Err(()) => {
+                // Error already reported - initialize LHS with invalid types
+                let invalid_type = self.invalid_type();
+                match &lhs {
+                    DynAccessLhs::Assign(_) => {}
+                    DynAccessLhs::Init(objs) => {
+                        for &obj in objs.iter() {
+                            if self.lobj(obj).typ().is_none() {
+                                self.lobj_mut(obj).set_type(Some(invalid_type));
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        };
+        self.result.record_dyn_access(dyn_access_expr.id, dyn_resolve);
+
         // Build return type and assign to LHS
         let error_type = self.universe().error_type();
         let any_type = self.new_t_empty_interface();

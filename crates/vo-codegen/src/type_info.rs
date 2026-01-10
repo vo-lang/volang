@@ -366,6 +366,14 @@ impl<'a> TypeInfoWrapper<'a> {
         self.type_info().selections.get(&expr_id)
     }
 
+    // === Dynamic access queries ===
+
+    /// Get resolved protocol method for a dynamic access expression.
+    /// Returns Some(Some(resolve)) for static dispatch, Some(None) for dynamic dispatch, None if not recorded.
+    pub fn get_dyn_access_resolve(&self, expr_id: ExprId) -> Option<&Option<vo_analysis::check::type_info::DynAccessResolve>> {
+        self.type_info().dyn_access_methods.get(&expr_id)
+    }
+
     // === Slot layout calculation (delegates to vo_analysis::check::type_info) ===
 
     pub fn type_slot_count(&self, type_key: TypeKey) -> u16 {
