@@ -234,3 +234,24 @@ tests:
   - file: interface_value_compare.vo
   - file: slice_append_semantics.vo
   - file: type_conversion_edge.vo
+
+# New tests added - passing
+  - file: type_switch_multi_type.vo
+  - file: variadic_spread.vo
+  - file: composite_literal_nested.vo
+  - file: for_range_edge_cases.vo
+  - file: iota_complex.vo
+
+# New tests - skipped due to Vo implementation bugs
+  - file: defer_eval_timing.vo
+    skip: [vm, jit]
+    reason: "BUG: defer closure captures variable value instead of reference"
+  - file: short_var_redecl.vo
+    skip: [vm, jit]
+    reason: "BUG: inner scope := incorrectly affects outer scope variable"
+  - file: method_value.vo
+    skip: [vm, jit]
+    reason: "BUG: compiler panic - struct field index not found"
+  - file: switch_nested_break.vo
+    skip: [vm, jit]
+    reason: "BUG: break in switch incorrectly exits enclosing for loop"

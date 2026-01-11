@@ -1,0 +1,82 @@
+// Test: variadic functions and spread operator
+// Go spec: variadic final parameter, spread with ...
+package main
+
+func sum(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+func concat(sep string, strs ...string) string {
+    result := ""
+    for i, s := range strs {
+        if i > 0 {
+            result = result + sep
+        }
+        result = result + s
+    }
+    return result
+}
+
+func countArgs(args ...any) int {
+    return len(args)
+}
+
+func first(vals ...int) int {
+    if len(vals) == 0 {
+        return -1
+    }
+    return vals[0]
+}
+
+func passThrough(nums ...int) int {
+    // Pass variadic to another variadic function
+    return sum(nums...)
+}
+
+func main() {
+    // Test 1: Basic variadic call
+    assert(sum(1, 2, 3) == 6, "sum(1,2,3) should be 6")
+    assert(sum(10) == 10, "sum(10) should be 10")
+    assert(sum() == 0, "sum() should be 0")
+    
+    // Test 2: Many arguments
+    assert(sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55, "sum 1-10 should be 55")
+    
+    // Test 3: Spread slice to variadic
+    nums := []int{5, 10, 15}
+    assert(sum(nums...) == 30, "sum(slice...) should be 30")
+    
+    // Test 4: Empty slice spread
+    empty := []int{}
+    assert(sum(empty...) == 0, "sum(empty...) should be 0")
+    
+    // Test 5: Mixed type variadic with any
+    assert(countArgs(1, "hello", true, 3.14) == 4, "countArgs should be 4")
+    assert(countArgs() == 0, "countArgs() should be 0")
+    
+    // Test 6: Variadic with leading params
+    assert(concat(", ", "a", "b", "c") == "a, b, c", "concat with sep")
+    assert(concat("-", "x") == "x", "concat single")
+    assert(concat(":") == "", "concat empty")
+    
+    // Test 7: First element helper
+    assert(first(42, 100, 200) == 42, "first should be 42")
+    assert(first() == -1, "first() should be -1")
+    
+    // Test 8: Pass-through spread
+    assert(passThrough(1, 2, 3, 4) == 10, "passThrough should work")
+    arr := []int{2, 4, 6}
+    assert(passThrough(arr...) == 12, "passThrough with spread")
+    
+    // Test 9: Slice created from variadic is independent
+    original := []int{1, 2, 3}
+    result := sum(original...)
+    original[0] = 100  // modify original
+    assert(result == 6, "result should not be affected by original modification")
+    
+    println("variadic_spread: ok")
+}

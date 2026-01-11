@@ -1,0 +1,85 @@
+// Test: closure capturing loop variables
+// This tests that closures capture the correct value
+package main
+
+func main() {
+    // Test 1: Explicit copy pattern (always works)
+    funcs := make([]func() int, 3)
+    for i := 0; i < 3; i += 1 {
+        i := i  // explicit shadow copy
+        funcs[i] = func() int {
+            return i
+        }
+    }
+    assert(funcs[0]() == 0, "funcs[0] should return 0")
+    assert(funcs[1]() == 1, "funcs[1] should return 1")
+    assert(funcs[2]() == 2, "funcs[2] should return 2")
+    
+    // Test 2: Range loop capture with explicit copy
+    values := []string{"a", "b", "c"}
+    getters := make([]func() string, 3)
+    for i, v := range values {
+        v := v  // explicit copy
+        getters[i] = func() string {
+            return v
+        }
+    }
+    assert(getters[0]() == "a", "getters[0] should return 'a'")
+    assert(getters[1]() == "b", "getters[1] should return 'b'")
+    assert(getters[2]() == "c", "getters[2] should return 'c'")
+    
+    // Test 3: Closure modifying captured variable
+    counter := 0
+    increment := func() {
+        counter += 1
+    }
+    increment()
+    increment()
+    increment()
+    assert(counter == 3, "counter should be 3")
+    
+    // Test 4: Multiple closures sharing same variable
+    shared := 10
+    add := func(n int) { shared += n }
+    sub := func(n int) { shared -= n }
+    mul := func(n int) { shared *= n }
+    
+    add(5)   // 15
+    mul(2)   // 30
+    sub(10)  // 20
+    assert(shared == 20, "shared should be 20")
+    
+    // Test 5: Nested closure capture
+    outer := 100
+    makeClosure := func() func() int {
+        inner := 50
+        return func() int {
+            return outer + inner
+        }
+    }
+    f := makeClosure()
+    assert(f() == 150, "nested capture should return 150")
+    outer = 200
+    assert(f() == 250, "nested capture should see updated outer")
+    
+    // Test 6: Closure as argument
+    apply := func(fn func() int) int {
+        return fn()
+    }
+    x := 42
+    result := apply(func() int { return x })
+    assert(result == 42, "closure as arg")
+    
+    // Test 7: Closure returning closure
+    makeAdder := func(base int) func(int) int {
+        return func(n int) int {
+            return base + n
+        }
+    }
+    add5 := makeAdder(5)
+    add10 := makeAdder(10)
+    assert(add5(3) == 8, "add5(3) should be 8")
+    assert(add10(3) == 13, "add10(3) should be 13")
+    
+    println("closure_loop_capture: ok")
+}

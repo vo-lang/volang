@@ -1,0 +1,110 @@
+// Test: for-range edge cases - empty, nil, single element
+// Go spec: range over nil slice/map is valid (zero iterations)
+package main
+
+func main() {
+    // Test 1: Range over empty slice
+    emptySlice := []int{}
+    count1 := 0
+    for range emptySlice {
+        count1 += 1
+    }
+    assert(count1 == 0, "empty slice should have 0 iterations")
+    
+    // Test 2: Range over nil slice
+    var nilSlice []int
+    count2 := 0
+    for range nilSlice {
+        count2 += 1
+    }
+    assert(count2 == 0, "nil slice should have 0 iterations")
+    
+    // Test 3: Range over nil map
+    var nilMap map[string]int
+    count3 := 0
+    for range nilMap {
+        count3 += 1
+    }
+    assert(count3 == 0, "nil map should have 0 iterations")
+    
+    // Test 4: Range over empty map
+    emptyMap := map[string]int{}
+    count4 := 0
+    for range emptyMap {
+        count4 += 1
+    }
+    assert(count4 == 0, "empty map should have 0 iterations")
+    
+    // Test 5: Range over single element slice
+    singleSlice := []int{42}
+    sum5 := 0
+    idx5 := -1
+    for i, v := range singleSlice {
+        idx5 = i
+        sum5 = v
+    }
+    assert(idx5 == 0, "single slice index should be 0")
+    assert(sum5 == 42, "single slice value should be 42")
+    
+    // Test 6: Range over single element array
+    singleArr := [1]string{"hello"}
+    var result6 string
+    for _, v := range singleArr {
+        result6 = v
+    }
+    assert(result6 == "hello", "single array value")
+    
+    // Test 7: Range over empty string
+    emptyStr := ""
+    count7 := 0
+    for range emptyStr {
+        count7 += 1
+    }
+    assert(count7 == 0, "empty string should have 0 iterations")
+    
+    // Test 8: Range over single char string
+    singleChar := "A"
+    var rune8 rune
+    for _, r := range singleChar {
+        rune8 = r
+    }
+    assert(rune8 == 'A', "single char should be 'A'")
+    
+    // Test 9: Range with blank identifiers
+    data := []int{1, 2, 3}
+    count9 := 0
+    for _, _ = range data {
+        count9 += 1
+    }
+    assert(count9 == 3, "blank identifiers should work")
+    
+    // Test 10: Range modifying slice during iteration (append safe)
+    slice10 := []int{1, 2, 3}
+    originalLen := len(slice10)
+    count10 := 0
+    for range slice10 {
+        count10 += 1
+        // This creates a new slice, doesn't affect iteration
+        slice10 = append(slice10, 99)
+    }
+    assert(count10 == originalLen, "iteration count should match original len")
+    
+    // Test 11: Range over zero-length array
+    var zeroArr [0]int
+    count11 := 0
+    for range zeroArr {
+        count11 += 1
+    }
+    assert(count11 == 0, "zero-length array should have 0 iterations")
+    
+    // Test 12: Range assigns to existing vars
+    var existingIdx int = 99
+    var existingVal int = 99
+    small := []int{10}
+    for existingIdx, existingVal = range small {
+    }
+    assert(existingIdx == 0, "existing idx should be 0")
+    assert(existingVal == 10, "existing val should be 10")
+    
+    println("for_range_edge_cases: ok")
+}

@@ -134,6 +134,10 @@ pub struct FuncBuilder {
     // Label support for goto
     labels: HashMap<Symbol, usize>,           // label -> pc
     goto_patches: Vec<(usize, Symbol)>,       // (jump_pc, target_label)
+    // Scope stack for variable shadowing: each entry is a list of (symbol, previous_local)
+    // When a variable is defined that shadows an existing one, we save the old LocalVar here.
+    // On exit_scope, we restore the saved values.
+    scope_stack: Vec<Vec<(Symbol, Option<LocalVar>)>>,
 }
 
 impl FuncBuilder {
@@ -154,6 +158,7 @@ impl FuncBuilder {
             return_types: Vec::new(),
             labels: HashMap::new(),
             goto_patches: Vec::new(),
+            scope_stack: Vec::new(),
         }
     }
 
@@ -228,99 +233,66 @@ impl FuncBuilder {
 
     // === Local variable definition ===
 
+    /// Bind a symbol to a storage location. Handles shadowing automatically.
+    /// This is the core primitive - all define_local_* methods use this.
+    fn bind_local(&mut self, sym: Symbol, storage: StorageKind) {
+        self.save_shadowed(sym);
+        self.locals.insert(sym, LocalVar { symbol: sym, storage });
+    }
+
     /// Define a local variable with the given StorageKind.
     /// This is the unified entry point - all type decisions are made by the caller.
     pub fn define_local(&mut self, sym: Symbol, storage: StorageKind) {
-        self.locals.insert(sym, LocalVar { symbol: sym, storage });
+        self.bind_local(sym, storage);
+    }
+
+    /// Allocate slots and extend slot_types. Returns the starting slot.
+    fn alloc_slots(&mut self, types: &[SlotType]) -> u16 {
+        let slot = self.next_slot;
+        self.slot_types.extend_from_slice(types);
+        self.next_slot += types.len() as u16;
+        slot
     }
 
     /// Stack allocation (non-escaping) for values (struct/primitive).
     pub fn define_local_stack(&mut self, sym: Symbol, slots: u16, types: &[SlotType]) -> u16 {
-        let slot = self.next_slot;
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::StackValue { slot, slots },
-            },
-        );
-        self.slot_types.extend_from_slice(types);
-        self.next_slot += slots;
+        let slot = self.alloc_slots(types);
+        self.bind_local(sym, StorageKind::StackValue { slot, slots });
         slot
     }
 
     /// Stack allocation for arrays (memory semantics).
     pub fn define_local_stack_array(&mut self, sym: Symbol, total_slots: u16, elem_slots: u16, len: u16, types: &[SlotType]) -> u16 {
-        let base_slot = self.next_slot;
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::StackArray { base_slot, elem_slots, len },
-            },
-        );
-        self.slot_types.extend_from_slice(types);
-        self.next_slot += total_slots;
+        let base_slot = self.alloc_slots(types);
+        debug_assert_eq!(types.len() as u16, total_slots);
+        self.bind_local(sym, StorageKind::StackArray { base_slot, elem_slots, len });
         base_slot
     }
 
     /// Bind a local variable name to an already-allocated slot.
-    /// 
-    /// This is used when a slot was pre-allocated (e.g., by SelectRecv) and we need
-    /// to bind a variable name to it later (in the case body). The slot_types are
-    /// already set by the original alloc_temp call, so we only bind the symbol.
+    /// Used when a slot was pre-allocated (e.g., by SelectRecv).
     pub fn define_local_at(&mut self, sym: Symbol, slot: u16, slots: u16) {
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::StackValue { slot, slots },
-            },
-        );
+        self.bind_local(sym, StorageKind::StackValue { slot, slots });
     }
 
     /// Heap allocation for struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access).
     pub fn define_local_heap_boxed(&mut self, sym: Symbol, value_slots: u16) -> u16 {
-        let gcref_slot = self.next_slot;
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::HeapBoxed { gcref_slot, value_slots },
-            },
-        );
-        self.slot_types.push(SlotType::GcRef);
-        self.next_slot += 1;
+        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
+        self.bind_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots });
         gcref_slot
     }
 
     /// Heap allocation for array (1 slot GcRef, ArrayGet/ArraySet access).
     pub fn define_local_heap_array(&mut self, sym: Symbol, elem_slots: u16) -> u16 {
-        let gcref_slot = self.next_slot;
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::HeapArray { gcref_slot, elem_slots },
-            },
-        );
-        self.slot_types.push(SlotType::GcRef);
-        self.next_slot += 1;
+        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
+        self.bind_local(sym, StorageKind::HeapArray { gcref_slot, elem_slots });
         gcref_slot
     }
 
     /// Reference type (1 slot GcRef IS the value).
     pub fn define_local_reference(&mut self, sym: Symbol) -> u16 {
-        let slot = self.next_slot;
-        self.locals.insert(
-            sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::Reference { slot },
-            },
-        );
-        self.slot_types.push(SlotType::GcRef);
-        self.next_slot += 1;
+        let slot = self.alloc_slots(&[SlotType::GcRef]);
+        self.bind_local(sym, StorageKind::Reference { slot });
         slot
     }
 
@@ -332,6 +304,36 @@ impl FuncBuilder {
     /// Get named return variable slots (for bare return statement).
     pub fn named_return_slots(&self) -> &[(u16, u16, bool)] {
         &self.named_return_slots
+    }
+
+    // === Scope management for variable shadowing ===
+
+    /// Enter a new scope. Variables defined in this scope that shadow outer
+    /// variables will have the outer variable saved for restoration on exit.
+    pub fn enter_scope(&mut self) {
+        self.scope_stack.push(Vec::new());
+    }
+
+    /// Exit the current scope, restoring any shadowed variables.
+    pub fn exit_scope(&mut self) {
+        if let Some(saved) = self.scope_stack.pop() {
+            for (sym, old_local) in saved {
+                if let Some(local) = old_local {
+                    self.locals.insert(sym, local);
+                } else {
+                    self.locals.remove(&sym);
+                }
+            }
+        }
+    }
+
+    /// Save the current binding for a symbol if we're in a scope.
+    /// Called before inserting a new binding that shadows an existing one.
+    fn save_shadowed(&mut self, sym: Symbol) {
+        if let Some(scope) = self.scope_stack.last_mut() {
+            let old = self.locals.get(&sym).cloned();
+            scope.push((sym, old));
+        }
     }
 
     // === Query ===

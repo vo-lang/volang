@@ -1,0 +1,93 @@
+// Test: short variable declaration redeclaration semantics
+// Go spec: := can reassign existing vars if at least one is new
+package main
+
+func main() {
+    // Test 1: Basic redeclaration
+    x := 10
+    x, y := 20, 30  // x reassigned, y newly declared
+    assert(x == 20, "x should be 20")
+    assert(y == 30, "y should be 30")
+    
+    // Test 2: Multiple existing, one new
+    a, b := 1, 2
+    a, b, c := 10, 20, 30  // a, b reassigned, c new
+    assert(a == 10, "a should be 10")
+    assert(b == 20, "b should be 20")
+    assert(c == 30, "c should be 30")
+    
+    // Test 3: Redeclaration preserves type
+    var n int = 100
+    n, m := 200, 300
+    assert(n == 200, "n should be 200")
+    assert(m == 300, "m should be 300")
+    
+    // Test 4: Error return pattern (common idiom)
+    result, err := getData()
+    assert(result == 42, "first result")
+    assert(err == nil, "first err should be nil")
+    
+    result, err = getMore()  // both exist, use =
+    assert(result == 100, "second result")
+    assert(err == nil, "second err")
+    
+    // Test 5: Shadowing in new scope
+    outer := "outer"
+    {
+        outer := "inner"  // shadows outer
+        assert(outer == "inner", "inner scope")
+    }
+    assert(outer == "outer", "outer scope unchanged")
+    
+    // Test 6: := in if init
+    if val, ok := lookup("key"); ok {
+        assert(val == 42, "val from lookup")
+        assert(ok == true, "ok from lookup")
+    }
+    
+    // Test 7: := in for init
+    sum := 0
+    for i, max := 0, 5; i < max; i += 1 {
+        sum += i
+    }
+    assert(sum == 10, "for init sum: 0+1+2+3+4")
+    
+    // Test 8: := with blank identifier
+    _, second := twoValues()
+    assert(second == "world", "second value")
+    
+    first, _ := twoValues()
+    assert(first == 42, "first value")
+    
+    // Test 9: Redeclaration in same statement
+    p := 1
+    p, q := p+1, p+2  // RHS evaluated first with p=1, then assigned
+    assert(p == 2, "p should be 2 (1+1)")
+    assert(q == 3, "q should be 3 (1+2)")
+    
+    // Test 10: Type changes not allowed with redeclaration
+    // This should not compile:
+    // var s string = "hello"
+    // s, t := 42, 43  // error: cannot use 42 (int) as string
+    
+    println("short_var_redecl: ok")
+}
+
+func getData() (int, error) {
+    return 42, nil
+}
+
+func getMore() (int, error) {
+    return 100, nil
+}
+
+func lookup(key string) (int, bool) {
+    if key == "key" {
+        return 42, true
+    }
+    return 0, false
+}
+
+func twoValues() (int, string) {
+    return 42, "world"
+}

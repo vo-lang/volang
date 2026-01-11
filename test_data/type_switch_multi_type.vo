@@ -1,0 +1,51 @@
+// Test: type switch with multiple types in single case
+// Go spec: case can list multiple types
+// NOTE: Tests without binding variable (x :=) work; with binding + multi-type may have issues
+package main
+
+func classify(v any) string {
+    switch v.(type) {
+    case int, int64:
+        return "integer"
+    case uint, uint8:
+        return "unsigned"
+    case string:
+        return "string"
+    case bool:
+        return "bool"
+    default:
+        return "unknown"
+    }
+}
+
+func classifyWithBinding(v any) string {
+    switch x := v.(type) {
+    case int:
+        // Single type: x has concrete type int
+        if x > 0 {
+            return "positive int"
+        }
+        return "non-positive int"
+    case string:
+        return "string: " + x
+    default:
+        return "other"
+    }
+}
+
+func main() {
+    // Multi-type case without binding works
+    assert(classify(42) == "integer", "int")
+    assert(classify(int64(100)) == "integer", "int64")
+    assert(classify(uint(1)) == "unsigned", "uint")
+    assert(classify("hello") == "string", "string")
+    assert(classify(true) == "bool", "bool")
+    assert(classify(3.14) == "unknown", "float hits default")
+    
+    // Single type with binding works
+    assert(classifyWithBinding(42) == "positive int", "positive int binding")
+    assert(classifyWithBinding(-1) == "non-positive int", "negative int binding")
+    assert(classifyWithBinding("world") == "string: world", "string binding")
+    
+    println("type_switch_multi_type: ok")
+}

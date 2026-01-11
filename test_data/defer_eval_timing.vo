@@ -1,0 +1,117 @@
+// Test: defer argument evaluation timing
+// Go spec: deferred function arguments are evaluated immediately, call is deferred
+package main
+
+var results []string
+
+func appendResult(s string) {
+    results = append(results, s)
+}
+
+func getArg(name string) string {
+    appendResult("eval:" + name)
+    return name
+}
+
+func testDeferEval() {
+    results = []string{}
+    
+    defer appendResult(getArg("third"))  // eval immediately: "third"
+    defer appendResult(getArg("second")) // eval immediately: "second"
+    defer appendResult(getArg("first"))  // eval immediately: "first"
+    
+    appendResult("body")
+}
+
+func testDeferWithVar() (result string) {
+    x := "initial"
+    defer func() {
+        // Closure captures x by reference
+        result = x
+    }()
+    x = "modified"
+    return // result should be "modified"
+}
+
+func testDeferArgCopy() string {
+    results = []string{}
+    x := "before"
+    defer appendResult(x)  // x evaluated NOW, copies "before"
+    x = "after"
+    appendResult("body:" + x)
+    return x
+}
+
+func testDeferFuncValue() {
+    results = []string{}
+    
+    f := func() { appendResult("first-f") }
+    defer f()  // f is evaluated now (captures current f)
+    
+    f = func() { appendResult("second-f") }
+    appendResult("body")
+}
+
+func testDeferMethodReceiver() {
+    results = []string{}
+    
+    type Counter struct { value int }
+    c := Counter{value: 10}
+    
+    // For value receiver, receiver is copied at defer time
+    defer func(val int) {
+        appendResult("deferred:" + itoa(val))
+    }(c.value)  // c.value evaluated now = 10
+    
+    c.value = 20
+    appendResult("body:" + itoa(c.value))
+}
+
+func itoa(n int) string {
+    if n == 0 {
+        return "0"
+    }
+    s := ""
+    for n > 0 {
+        s = string('0' + rune(n % 10)) + s
+        n = n / 10
+    }
+    return s
+}
+
+func main() {
+    // Test 1: Arguments evaluated in order, calls in reverse
+    testDeferEval()
+    assert(len(results) == 7, "should have 7 results")
+    // Eval order: third, second, first, body
+    // Call order (after body): first, second, third
+    assert(results[0] == "eval:third", "first eval should be third")
+    assert(results[1] == "eval:second", "second eval should be second")
+    assert(results[2] == "eval:first", "third eval should be first")
+    assert(results[3] == "body", "fourth should be body")
+    assert(results[4] == "first", "first deferred call")
+    assert(results[5] == "second", "second deferred call")
+    assert(results[6] == "third", "third deferred call")
+    
+    // Test 2: Closure captures variable by reference
+    result2 := testDeferWithVar()
+    assert(result2 == "modified", "closure should see modified x")
+    
+    // Test 3: Arg value copied at defer time
+    result3 := testDeferArgCopy()
+    assert(result3 == "after", "return should be 'after'")
+    assert(results[0] == "body:after", "body executed with 'after'")
+    assert(results[1] == "before", "defer arg was copied as 'before'")
+    
+    // Test 4: Function value captured at defer time
+    testDeferFuncValue()
+    assert(results[0] == "body", "body first")
+    assert(results[1] == "first-f", "deferred f should be first-f, not second-f")
+    
+    // Test 5: Receiver value copied at defer time
+    testDeferMethodReceiver()
+    assert(results[0] == "body:20", "body sees 20")
+    assert(results[1] == "deferred:10", "defer sees original 10")
+    
+    println("defer_eval_timing: ok")
+}

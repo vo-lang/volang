@@ -1,0 +1,64 @@
+// Test: composite literal with explicit types (Vo requires explicit types)
+// Note: Unlike Go, Vo does not support nested type elision
+package main
+
+type Point struct { X, Y int }
+type Line struct { Start, End Point }
+
+func main() {
+    // Test 1: Nested slice - explicit types
+    matrix := [][]int{[]int{1, 2, 3}, []int{4, 5, 6}, []int{7, 8, 9}}
+    assert(matrix[0][0] == 1, "matrix[0][0]")
+    assert(matrix[1][1] == 5, "matrix[1][1]")
+    assert(matrix[2][2] == 9, "matrix[2][2]")
+    assert(len(matrix) == 3, "matrix len")
+    assert(len(matrix[0]) == 3, "matrix[0] len")
+    
+    // Test 2: Slice of structs - explicit type
+    points := []Point{Point{1, 2}, Point{3, 4}, Point{5, 6}}
+    assert(points[0].X == 1, "points[0].X")
+    assert(points[1].Y == 4, "points[1].Y")
+    assert(len(points) == 3, "points len")
+    
+    // Test 3: Nested struct - explicit Point type
+    line := Line{Start: Point{0, 0}, End: Point{10, 10}}
+    assert(line.Start.X == 0, "line.Start.X")
+    assert(line.End.Y == 10, "line.End.Y")
+    
+    // Test 4: Array of structs
+    corners := [4]Point{Point{0, 0}, Point{10, 0}, Point{10, 10}, Point{0, 10}}
+    assert(corners[0].X == 0 && corners[0].Y == 0, "corners[0]")
+    assert(corners[2].X == 10 && corners[2].Y == 10, "corners[2]")
+    
+    // Test 5: Map with struct values - explicit type
+    pointMap := map[string]Point{
+        "origin": Point{0, 0},
+        "unit":   Point{1, 1},
+    }
+    assert(pointMap["origin"].X == 0, "pointMap origin")
+    assert(pointMap["unit"].Y == 1, "pointMap unit")
+    
+    // Test 6: Deeply nested slices
+    cube := [][][]int{
+        [][]int{[]int{1, 2}, []int{3, 4}},
+        [][]int{[]int{5, 6}, []int{7, 8}},
+    }
+    assert(cube[0][0][0] == 1, "cube[0][0][0]")
+    assert(cube[1][1][1] == 8, "cube[1][1][1]")
+    
+    // Test 7: Slice of Lines (double nesting)
+    lines := []Line{
+        Line{Start: Point{0, 0}, End: Point{5, 5}},
+        Line{Start: Point{10, 10}, End: Point{20, 20}},
+    }
+    assert(lines[0].Start.X == 0, "lines[0].Start.X")
+    assert(lines[1].End.Y == 20, "lines[1].End.Y")
+    
+    // Test 8: Empty nested slices
+    emptyMatrix := [][]int{[]int{}, []int{1}, []int{2, 3}}
+    assert(len(emptyMatrix[0]) == 0, "emptyMatrix[0] len")
+    assert(len(emptyMatrix[1]) == 1, "emptyMatrix[1] len")
+    assert(len(emptyMatrix[2]) == 2, "emptyMatrix[2] len")
+    
+    println("composite_literal_nested: ok")
+}
