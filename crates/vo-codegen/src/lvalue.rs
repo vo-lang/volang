@@ -54,6 +54,16 @@ pub enum LValue {
     
     /// Closure capture variable
     Capture { capture_index: u16, value_slots: u16 },
+    
+    /// Stack array element field: arr[i].field where arr is on stack
+    /// Needs dynamic index calculation: base_slot + index * elem_slots + field_offset
+    StackArrayField {
+        base_slot: u16,
+        elem_slots: u16,
+        index_reg: u16,
+        field_offset: u16,
+        field_slots: u16,
+    },
 }
 
 /// Resolve an expression to an LValue (if it's assignable).
@@ -125,10 +135,31 @@ pub fn resolve_lvalue(
                 // Special case: Index expression base (slice/array/map element field access)
                 if let ExprKind::Index(idx) = &sel.expr.kind {
                     let container_type = info.expr_type(idx.expr.id);
-                    if info.is_slice(container_type) || info.is_array(container_type) {
-                        // Slice/array: get element address then access field
+                    if info.is_slice(container_type) {
+                        // Slice: get element address then access field
                         let elem_addr_reg = compile_index_addr_to_reg(&idx.expr, &idx.index, ctx, func, info)?;
                         return Ok(LValue::Deref { ptr_reg: elem_addr_reg, offset, elem_slots: slots });
+                    } else if info.is_array(container_type) {
+                        // Array: check if stack or heap array
+                        let container_source = crate::expr::get_expr_source(&idx.expr, ctx, func, info);
+                        match container_source {
+                            crate::func::ExprSource::Location(StorageKind::StackArray { base_slot, elem_slots: es, .. }) => {
+                                // Stack array element field: use StackArrayField for dynamic access
+                                let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
+                                return Ok(LValue::StackArrayField {
+                                    base_slot,
+                                    elem_slots: es,
+                                    index_reg,
+                                    field_offset: offset,
+                                    field_slots: slots,
+                                });
+                            }
+                            _ => {
+                                // Heap array: get element address then access field
+                                let elem_addr_reg = compile_index_addr_to_reg(&idx.expr, &idx.index, ctx, func, info)?;
+                                return Ok(LValue::Deref { ptr_reg: elem_addr_reg, offset, elem_slots: slots });
+                            }
+                        }
                     } else if info.is_map(container_type) {
                         // Map: get value to temp, then access field from temp
                         // maps[k].field - map returns by value, so we get a copy
@@ -307,11 +338,7 @@ pub fn emit_lvalue_load(
         LValue::Index { kind, container_reg, index_reg } => {
             match kind {
                 ContainerKind::StackArray { base_slot, elem_slots } => {
-                    if *elem_slots == 1 {
-                        func.emit_op(Opcode::SlotGet, dst, *base_slot, *index_reg);
-                    } else {
-                        func.emit_with_flags(Opcode::SlotGetN, *elem_slots as u8, dst, *base_slot, *index_reg);
-                    }
+                    func.emit_slot_get(dst, *base_slot, *index_reg, *elem_slots);
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
                     func.emit_array_get(dst, *container_reg, *index_reg, *elem_bytes as usize, *elem_vk, ctx);
@@ -322,13 +349,7 @@ pub fn emit_lvalue_load(
                 ContainerKind::Map { key_slots, val_slots, key_may_gc, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
-                    let mut map_get_slot_types = vec![SlotType::Value]; // meta
-                    // Use key_may_gc to determine slot types for key
-                    let key_slot_type = if *key_may_gc { SlotType::GcRef } else { SlotType::Value };
-                    for _ in 0..*key_slots {
-                        map_get_slot_types.push(key_slot_type);
-                    }
-                    let meta_reg = func.alloc_temp_typed(&map_get_slot_types);
+                    let meta_reg = func.alloc_temp_typed(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
@@ -345,6 +366,13 @@ pub fn emit_lvalue_load(
             let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, 0, *value_slots);
+        }
+        
+        LValue::StackArrayField { base_slot, elem_slots, index_reg, field_offset, field_slots } => {
+            // Read element to temp, then copy field to dst
+            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; *elem_slots as usize]);
+            func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
+            func.emit_copy(dst, tmp + *field_offset, *field_slots);
         }
     }
 }
@@ -388,11 +416,7 @@ pub fn emit_lvalue_store(
         LValue::Index { kind, container_reg, index_reg } => {
             match kind {
                 ContainerKind::StackArray { base_slot, elem_slots } => {
-                    if *elem_slots == 1 {
-                        func.emit_op(Opcode::SlotSet, *base_slot, *index_reg, src);
-                    } else {
-                        func.emit_with_flags(Opcode::SlotSetN, *elem_slots as u8, *base_slot, *index_reg, src);
-                    }
+                    func.emit_slot_set(*base_slot, *index_reg, src, *elem_slots);
                 }
                 ContainerKind::HeapArray { elem_bytes, elem_vk } => {
                     func.emit_array_set(*container_reg, *index_reg, src, *elem_bytes as usize, *elem_vk, ctx);
@@ -404,13 +428,7 @@ pub fn emit_lvalue_store(
                     // MapSet: a=map, b=meta_and_key, c=val
                     // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
-                    let mut map_set_slot_types = vec![SlotType::Value]; // meta
-                    // Use key_may_gc to determine slot types for key
-                    let key_slot_type = if *key_may_gc { SlotType::GcRef } else { SlotType::Value };
-                    for _ in 0..*key_slots {
-                        map_set_slot_types.push(key_slot_type);
-                    }
-                    let meta_and_key_reg = func.alloc_temp_typed(&map_set_slot_types);
+                    let meta_and_key_reg = func.alloc_temp_typed(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
@@ -430,11 +448,27 @@ pub fn emit_lvalue_store(
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
         }
+        
+        LValue::StackArrayField { base_slot, elem_slots, index_reg, field_offset, field_slots } => {
+            // Read element to temp, modify field, write back
+            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; *elem_slots as usize]);
+            func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
+            func.emit_copy(tmp + *field_offset, src, *field_slots);
+            func.emit_slot_set(*base_slot, *index_reg, tmp, *elem_slots);
+        }
     }
 }
 
 
 // === Internal helpers ===
+
+/// Build slot types for map meta + key: [Value (meta), key_slots...]
+fn build_map_meta_key_slot_types(key_slots: u16, key_may_gc: bool) -> Vec<SlotType> {
+    let key_slot_type = if key_may_gc { SlotType::GcRef } else { SlotType::Value };
+    let mut slot_types = vec![SlotType::Value]; // meta
+    slot_types.extend(std::iter::repeat(key_slot_type).take(key_slots as usize));
+    slot_types
+}
 
 /// Flattened field access - after walking through nested Field LValues.
 enum FlattenedField {
@@ -468,6 +502,7 @@ fn flatten_field(lv: &LValue) -> FlattenedField {
         }
         LValue::Index { .. } => panic!("Index cannot be base of Field"),
         LValue::Capture { .. } => panic!("Capture cannot be base of Field"),
+        LValue::StackArrayField { .. } => panic!("StackArrayField cannot be base of Field"),
     }
 }
 

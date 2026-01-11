@@ -488,12 +488,7 @@ impl FuncBuilder {
                 for i in 0..len {
                     let idx_reg = self.alloc_temp_typed(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    let dst_offset = dst + i * elem_slots;
-                    if elem_slots == 1 {
-                        self.emit_op(Opcode::SlotGet, dst_offset, base_slot, idx_reg);
-                    } else {
-                        self.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst_offset, base_slot, idx_reg);
-                    }
+                    self.emit_slot_get(dst + i * elem_slots, base_slot, idx_reg, elem_slots);
                 }
             }
             StorageKind::HeapBoxed { gcref_slot, value_slots } => {
@@ -527,12 +522,7 @@ impl FuncBuilder {
                 for i in 0..len {
                     let idx_reg = self.alloc_temp_typed(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    let src_offset = src + i * elem_slots;
-                    if elem_slots == 1 {
-                        self.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
-                    } else {
-                        self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
-                    }
+                    self.emit_slot_set(base_slot, idx_reg, src + i * elem_slots, elem_slots);
                 }
             }
             StorageKind::HeapBoxed { gcref_slot, .. } => {
@@ -554,6 +544,26 @@ impl FuncBuilder {
                     self.emit_with_flags(Opcode::GlobalSetN, slots as u8, index, src, 0);
                 }
             }
+        }
+    }
+
+    // === Stack array slot access helpers ===
+    
+    /// Emit SlotGet/SlotGetN for stack array element access.
+    pub fn emit_slot_get(&mut self, dst: u16, base: u16, index: u16, elem_slots: u16) {
+        if elem_slots == 1 {
+            self.emit_op(Opcode::SlotGet, dst, base, index);
+        } else {
+            self.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst, base, index);
+        }
+    }
+    
+    /// Emit SlotSet/SlotSetN for stack array element access.
+    pub fn emit_slot_set(&mut self, base: u16, index: u16, src: u16, elem_slots: u16) {
+        if elem_slots == 1 {
+            self.emit_op(Opcode::SlotSet, base, index, src);
+        } else {
+            self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base, index, src);
         }
     }
 

@@ -302,9 +302,7 @@ tests:
   # FIXED: bug_ptr_receiver_method_value.vo - escape analysis + codegen for pointer receiver method value
   # FIXED: bug_global_func_var.vo - global func var support (codegen + VM CallClosure fix)
   # FIXED: bug_partial_struct_init.vo - lvalue StackArray handling + JIT write_var stack sync
-  - file: bug_array_of_struct.vo
-    skip: [vm, jit]
-    reason: "BUG #4: var arr [3]Struct causes segfault"
+  # FIXED: bug_array_of_struct.vo - LValue::StackArrayField for stack array element field access
   - file: bug_struct_arr_and_func_field.vo
     skip: [vm, jit]
     reason: "BUG #5: struct with both array field and func field causes segfault"
