@@ -1,0 +1,88 @@
+// Test type conversion edge cases
+package main
+
+func main() {
+    // Test 1: int to float (no precision loss for small ints)
+    var i int = 42
+    var f float64 = float64(i)
+    assert(f == 42.0, "int to float64")
+    
+    // Test 2: float to int (truncation)
+    var f2 float64 = 3.9
+    var i2 int = int(f2)
+    assert(i2 == 3, "float to int truncates, got ", i2)
+    
+    // Test 3: Negative float to int
+    var f3 float64 = -3.9
+    var i3 int = int(f3)
+    assert(i3 == -3, "negative float to int truncates toward zero")
+    
+    // Test 4: int8 overflow behavior
+    var big int = 200
+    var small int8 = int8(big)
+    // 200 as int8 wraps: 200 - 256 = -56
+    assert(small == -56, "int8 overflow wraps, got ", int(small))
+    
+    // Test 5: uint8 range
+    var neg int = -1
+    var u uint8 = uint8(neg)
+    // -1 as uint8 wraps: 256 - 1 = 255
+    assert(u == 255, "negative to uint8 wraps")
+    
+    // Test 6: int to string (Go semantics: string(65) = "A")
+    var code int = 65
+    var ch string = string(code)
+    assert(ch == "A", "int to string gives character")
+    
+    // Test 7: rune to string
+    var r rune = '世'
+    var s string = string(r)
+    assert(s == "世", "rune to string")
+    
+    // Test 8: string to []byte
+    var str string = "hello"
+    var bytes []byte = []byte(str)
+    assert(len(bytes) == 5, "string to bytes length")
+    assert(bytes[0] == 'h', "bytes[0] is 'h'")
+    
+    // Test 9: []byte to string
+    var b2 []byte = []byte{'w', 'o', 'r', 'l', 'd'}
+    var s2 string = string(b2)
+    assert(s2 == "world", "bytes to string")
+    
+    // Test 10: Named type conversion
+    type MyInt int
+    var x MyInt = 10
+    var y int = int(x)
+    var z MyInt = MyInt(y)
+    assert(y == 10, "MyInt to int")
+    assert(z == 10, "int to MyInt")
+    
+    // Test 11: int64 to int (potential truncation on 32-bit)
+    var big64 int64 = 1000000
+    var asInt int = int(big64)
+    assert(asInt == 1000000, "int64 to int")
+    
+    // Test 12: float32 to float64 (precision preserved)
+    var f32 float32 = 3.14
+    var f64 float64 = float64(f32)
+    assert(f64 > 3.13 && f64 < 3.15, "float32 to float64 approx")
+    
+    // Test 13: uint to int (same size, reinterpret)
+    var u2 uint = 100
+    var i4 int = int(u2)
+    assert(i4 == 100, "uint to int")
+    
+    // Test 14: Slice of named type
+    type MyByte byte
+    var mb []MyByte = []MyByte{1, 2, 3}
+    assert(len(mb) == 3, "slice of named type")
+    
+    // Test 15: int16 overflow
+    var bigInt int = 40000
+    var small16 int16 = int16(bigInt)
+    // 40000 as int16 wraps: 40000 - 65536 = -25536
+    assert(small16 == -25536, "int16 overflow wraps, got ", int(small16))
+    
+    println("type_conversion_edge: ok")
+}

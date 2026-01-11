@@ -191,6 +191,7 @@ pub fn compile_builtin_call(
         }
         "append" => {
             // append(slice, elem...) - variadic, supports multiple elements
+            // append(slice, other...) - spread: append all elements from other slice
             if call.args.len() < 2 {
                 return Err(CodegenError::Internal("append requires at least 2 args".to_string()));
             }
@@ -206,32 +207,44 @@ pub fn compile_builtin_call(
             // Get elem_meta as raw u32 value
             let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
             
-            let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-            // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
-            // When flags!=0: c=[elem_meta], c+1..=[elem]
-            // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
-            let extra_slot = if flags == 0 { 1 } else { 0 };
-            let meta_and_elem_reg = func.alloc_temp(1 + extra_slot + elem_slots);
-            
-            // Current slice (updated after each append)
-            let mut current_slice = slice_reg;
-            
-            // Append each element (args[1], args[2], ...)
-            for (i, arg) in call.args.iter().skip(1).enumerate() {
-                let is_last = i == call.args.len() - 2;
-                let append_dst = if is_last { dst } else { func.alloc_temp(1) };
+            // Check for spread: append(a, b...)
+            if call.spread && call.args.len() == 2 {
+                // Spread append: append all elements from second slice
+                let other_slice_reg = compile_expr(&call.args[1], ctx, func, info)?;
+                let extern_id = ctx.get_or_register_extern("vo_slice_append_slice");
+                let args_reg = func.alloc_temp(3);
+                func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
+                func.emit_op(Opcode::Copy, args_reg + 1, other_slice_reg, 0);
+                func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
+                func.emit_with_flags(Opcode::CallExtern, 3, dst, extern_id as u16, args_reg);
+            } else {
+                let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
+                // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
+                // When flags!=0: c=[elem_meta], c+1..=[elem]
+                // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
+                let extra_slot = if flags == 0 { 1 } else { 0 };
+                let meta_and_elem_reg = func.alloc_temp(1 + extra_slot + elem_slots);
                 
-                func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
-                if flags == 0 {
-                    let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
-                    func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                    crate::stmt::compile_value_to(arg, meta_and_elem_reg + 2, elem_type, ctx, func, info)?;
-                } else {
-                    crate::stmt::compile_value_to(arg, meta_and_elem_reg + 1, elem_type, ctx, func, info)?;
+                // Current slice (updated after each append)
+                let mut current_slice = slice_reg;
+                
+                // Append each element (args[1], args[2], ...)
+                for (i, arg) in call.args.iter().skip(1).enumerate() {
+                    let is_last = i == call.args.len() - 2;
+                    let append_dst = if is_last { dst } else { func.alloc_temp(1) };
+                    
+                    func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
+                    if flags == 0 {
+                        let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
+                        func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
+                        crate::stmt::compile_value_to(arg, meta_and_elem_reg + 2, elem_type, ctx, func, info)?;
+                    } else {
+                        crate::stmt::compile_value_to(arg, meta_and_elem_reg + 1, elem_type, ctx, func, info)?;
+                    }
+                    
+                    func.emit_with_flags(Opcode::SliceAppend, flags, append_dst, current_slice, meta_and_elem_reg);
+                    current_slice = append_dst;
                 }
-                
-                func.emit_with_flags(Opcode::SliceAppend, flags, append_dst, current_slice, meta_and_elem_reg);
-                current_slice = append_dst;
             }
         }
         "copy" => {

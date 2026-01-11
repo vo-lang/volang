@@ -228,3 +228,11 @@ tests:
 # FIXED: typechecker/method_set_equivalence.vo - interface parameter works
 # FIXED: typechecker/bug_ptr_embed_interface.vo - promoted method wrapper for pointer embedding
 # FIXED: typechecker/type_assertion.vo - interface-to-interface assignment now preserves reference semantics
+
+# Blind spot tests - known bugs to fix
+  - file: defer_named_return.vo
+    skip: [vm, jit]
+    reason: "BUG: defer closure capturing named return causes GC crash"
+  - file: interface_value_compare.vo
+  - file: slice_append_semantics.vo
+  - file: type_conversion_edge.vo

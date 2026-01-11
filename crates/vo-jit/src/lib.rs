@@ -158,6 +158,7 @@ struct HelperFuncIds {
     map_iter_get: cranelift_module::FuncId,
     iface_assert: cranelift_module::FuncId,
     iface_to_iface: cranelift_module::FuncId,
+    iface_eq: cranelift_module::FuncId,
 }
 
 // =============================================================================
@@ -238,6 +239,7 @@ impl JitCompiler {
         builder.symbol("vo_map_iter_get", vo_runtime::jit_api::vo_map_iter_get as *const u8);
         builder.symbol("vo_iface_assert", vo_runtime::jit_api::vo_iface_assert as *const u8);
         builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
+        builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
     }
 
     fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
@@ -594,13 +596,24 @@ impl JitCompiler {
             sig
         })?;
         
+        let iface_eq = module.declare_function("vo_iface_eq", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));        // ctx
+            sig.params.push(AbiParam::new(types::I64)); // b_slot0
+            sig.params.push(AbiParam::new(types::I64)); // b_slot1
+            sig.params.push(AbiParam::new(types::I64)); // c_slot0
+            sig.params.push(AbiParam::new(types::I64)); // c_slot1
+            sig.returns.push(AbiParam::new(types::I64)); // 0=false, 1=true, 2=panic
+            sig
+        })?;
+        
         Ok(HelperFuncIds {
             safepoint, call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
             ptr_clone, closure_new, chan_new, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
             slice_from_array, slice_from_array3,
-            map_new, map_len, map_get, map_set, map_delete, map_iter_get, iface_assert, iface_to_iface,
+            map_new, map_len, map_get, map_set, map_delete, map_iter_get, iface_assert, iface_to_iface, iface_eq,
         })
     }
 
@@ -655,6 +668,7 @@ impl JitCompiler {
             map_iter_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_get, &mut self.ctx.func)),
             iface_assert: Some(self.module.declare_func_in_func(self.helper_funcs.iface_assert, &mut self.ctx.func)),
             iface_to_iface: Some(self.module.declare_func_in_func(self.helper_funcs.iface_to_iface, &mut self.ctx.func)),
+            iface_eq: Some(self.module.declare_func_in_func(self.helper_funcs.iface_eq, &mut self.ctx.func)),
         }
     }
 

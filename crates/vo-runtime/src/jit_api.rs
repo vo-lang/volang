@@ -872,6 +872,24 @@ pub extern "C" fn vo_iface_to_iface(
     interface::pack_slot0(new_itab_id, src_rttid, src_vk)
 }
 
+/// Interface equality comparison.
+/// Returns: 0 = not equal, 1 = equal, 2 = panic (uncomparable type)
+#[no_mangle]
+pub extern "C" fn vo_iface_eq(
+    ctx: *mut JitContext,
+    b_slot0: u64,
+    b_slot1: u64,
+    c_slot0: u64,
+    c_slot1: u64,
+) -> u64 {
+    use crate::objects::compare;
+    
+    let ctx_ref = unsafe { &*ctx };
+    let module = unsafe { &*ctx_ref.module };
+    
+    compare::iface_eq(b_slot0, b_slot1, c_slot0, c_slot1, module)
+}
+
 /// Interface assertion.
 /// Returns: 1 if matches, 0 if not (when has_ok), or panics (when !has_ok && !matches)
 /// dst layout: [result_slots...][ok_flag if has_ok]
@@ -1066,6 +1084,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_slice_from_array3", vo_slice_from_array3 as *const u8),
         ("vo_iface_pack_slot0", vo_iface_pack_slot0 as *const u8),
         ("vo_iface_to_iface", vo_iface_to_iface as *const u8),
+        ("vo_iface_eq", vo_iface_eq as *const u8),
         ("vo_iface_assert", vo_iface_assert as *const u8),
         ("vo_ptr_clone", vo_ptr_clone as *const u8),
         ("vo_map_new", vo_map_new as *const u8),

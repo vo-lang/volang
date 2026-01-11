@@ -807,11 +807,20 @@ fn compile_stmt_with_label(
                     func.emit_op(Opcode::Return, 0, 0, 0);
                 } else {
                     // Copy named return values to return area
-                    let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s)| *s).sum();
+                    let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s, _)| *s).sum();
                     let ret_start = func.alloc_temp(total_ret_slots);
                     let mut offset = 0u16;
-                    for &(slot, slots) in &named_return_slots {
-                        func.emit_copy(ret_start + offset, slot, slots);
+                    for &(slot, slots, escaped) in &named_return_slots {
+                        if escaped {
+                            // Escaped variable: slot is GcRef, need PtrGet to read value
+                            if slots == 1 {
+                                func.emit_op(Opcode::PtrGet, ret_start + offset, slot, 0);
+                            } else {
+                                func.emit_with_flags(Opcode::PtrGetN, slots as u8, ret_start + offset, slot, 0);
+                            }
+                        } else {
+                            func.emit_copy(ret_start + offset, slot, slots);
+                        }
                         offset += slots;
                     }
                     func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);

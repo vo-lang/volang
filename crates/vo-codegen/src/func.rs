@@ -126,7 +126,7 @@ pub struct FuncBuilder {
     next_slot: u16,
     locals: HashMap<Symbol, LocalVar>,
     captures: HashMap<Symbol, CaptureVar>,  // closure captures
-    named_return_slots: Vec<(u16, u16)>,    // (slot, slots) for named return variables
+    named_return_slots: Vec<(u16, u16, bool)>,    // (slot, slots, escaped) for named return variables
     slot_types: Vec<SlotType>,
     code: Vec<Instruction>,
     loop_stack: Vec<LoopContext>,
@@ -325,12 +325,12 @@ impl FuncBuilder {
     }
 
     /// Register a named return variable's slot info (for bare return).
-    pub fn register_named_return(&mut self, slot: u16, slots: u16) {
-        self.named_return_slots.push((slot, slots));
+    pub fn register_named_return(&mut self, slot: u16, slots: u16, escaped: bool) {
+        self.named_return_slots.push((slot, slots, escaped));
     }
 
     /// Get named return variable slots (for bare return statement).
-    pub fn named_return_slots(&self) -> &[(u16, u16)] {
+    pub fn named_return_slots(&self) -> &[(u16, u16, bool)] {
         &self.named_return_slots
     }
 

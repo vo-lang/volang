@@ -996,11 +996,24 @@ fn compile_func_decl(
     builder.set_return_types(return_types.clone());
     
     // Define named return variables as locals (zero-initialized)
+    // Check if they escape (e.g. captured by defer closure)
     for result in &func_decl.sig.results {
         if let Some(name) = &result.name {
+            let result_type = info.type_expr_type(result.ty.id);
             let (slots, slot_types) = info.type_expr_layout(result.ty.id);
-            let slot = builder.define_local_stack(name.symbol, slots, &slot_types);
-            builder.register_named_return(slot, slots);
+            let obj_key = info.get_def(name);
+            let escapes = info.is_escaped(obj_key);
+            
+            let slot = if escapes {
+                // Named return escapes (e.g. captured by defer closure)
+                let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots);
+                // Allocate heap storage and zero-initialize
+                builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, slots as u8, gcref_slot, 0, 0);
+                gcref_slot
+            } else {
+                builder.define_local_stack(name.symbol, slots, &slot_types)
+            };
+            builder.register_named_return(slot, slots, escapes);
         }
     }
     

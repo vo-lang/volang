@@ -235,3 +235,24 @@ pub fn exec_iface_assert(
         ExecResult::Panic
     }
 }
+
+/// IfaceEq: a = (b == c) where b,c are 2-slot interface values
+/// Go interface equality: same dynamic type (rttid + vk) AND same dynamic value
+/// Panics if dynamic type is not comparable (slice, map, func, chan).
+pub fn exec_iface_eq(stack: &mut [u64], bp: usize, inst: &Instruction, module: &Module) -> ExecResult {
+    use vo_runtime::objects::compare;
+    
+    let b0 = stack[bp + inst.b as usize];
+    let b1 = stack[bp + inst.b as usize + 1];
+    let c0 = stack[bp + inst.c as usize];
+    let c1 = stack[bp + inst.c as usize + 1];
+    
+    let result = compare::iface_eq(b0, b1, c0, c1, module);
+    
+    if result == 2 {
+        return ExecResult::Panic;
+    }
+    
+    stack[bp + inst.a as usize] = result;
+    ExecResult::Continue
+}

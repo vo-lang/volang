@@ -246,9 +246,39 @@ pub fn compile_expr_to(
                 return compile_short_circuit(expr, &bin.op, &bin.left, &bin.right, dst, ctx, func, info);
             }
             
+            let operand_type = info.expr_type(bin.left.id);
+            
+            // Interface comparison with IfaceEq opcode for proper deep comparison
+            // Skip if comparing with nil (use simple EqI for nil checks)
+            if info.is_interface(operand_type) && matches!(bin.op, BinaryOp::Eq | BinaryOp::NotEq) {
+                let check_nil = |e: &Expr| -> bool {
+                    if let ExprKind::Ident(id) = &e.kind {
+                        info.project.interner.resolve(id.symbol) == Some("nil")
+                    } else {
+                        false
+                    }
+                };
+                let left_is_nil = check_nil(&bin.left);
+                let right_is_nil = check_nil(&bin.right);
+                
+                // Only use IfaceEq for non-nil comparisons (deep comparison needed)
+                if !left_is_nil && !right_is_nil {
+                    let left_reg = func.alloc_interfaces(1);
+                    let right_reg = func.alloc_interfaces(1);
+                    compile_expr_to(&bin.left, left_reg, ctx, func, info)?;
+                    compile_expr_to(&bin.right, right_reg, ctx, func, info)?;
+                    func.emit_op(Opcode::IfaceEq, dst, left_reg, right_reg);
+                    if bin.op == BinaryOp::NotEq {
+                        func.emit_op(Opcode::BoolNot, dst, dst, 0);
+                    }
+                    return Ok(());
+                }
+                // For nil comparisons, fall through to use EqI (simpler and correct)
+            }
+            
             let left_reg = compile_expr(&bin.left, ctx, func, info)?;
             let right_reg = compile_expr(&bin.right, ctx, func, info)?;
-            let operand_type = info.expr_type(bin.left.id);
+            
             let is_float = info.is_float(operand_type);
             let is_float32 = info.is_float32(operand_type);
             let is_string = info.is_string(operand_type);

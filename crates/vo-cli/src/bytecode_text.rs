@@ -377,12 +377,27 @@ fn format_instruction(instr: &Instruction) -> String {
         // IfaceAssign: a=dst(2 slots), b=src, c=const_idx, flags=value_kind
         Opcode::IfaceAssign => format!("IfaceAssign   r{}, r{}, const={}, vk={}", a, b, c, flags),
         Opcode::IfaceAssert => format!("IfaceAssert   r{}, r{}, target_meta={}, flags={}", a, b, c, flags),
+        Opcode::IfaceEq => format!("IfaceEq       r{}, r{}, r{}", a, b, c),
 
         // CONV
         Opcode::ConvI2F => format!("ConvI2F       r{}, r{}", a, b),
         Opcode::ConvF2I => format!("ConvF2I       r{}, r{}", a, b),
         Opcode::ConvF64F32 => format!("ConvF64F32    r{}, r{}", a, b),
         Opcode::ConvF32F64 => format!("ConvF32F64    r{}, r{}", a, b),
+        Opcode::Trunc => {
+            let signed = (flags & 0x80) != 0;
+            let bytes = flags & 0x7F;
+            let ty = match (bytes, signed) {
+                (1, true) => "i8",
+                (2, true) => "i16",
+                (4, true) => "i32",
+                (1, false) => "u8",
+                (2, false) => "u16",
+                (4, false) => "u32",
+                _ => "?",
+            };
+            format!("Trunc         r{}, r{}, {}", a, b, ty)
+        }
 
         Opcode::Invalid => format!("Invalid       op={}, flags={}, a={}, b={}, c={}", instr.op, flags, a, b, c),
     }

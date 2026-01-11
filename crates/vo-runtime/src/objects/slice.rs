@@ -188,6 +188,19 @@ pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, new_start: usize, new_end: usize
     new_s
 }
 
+/// Create new slice header with updated length (same backing array, same start).
+/// Used by append when capacity is sufficient.
+pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
+    let data = SliceData::as_ref(s);
+    let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
+    let new_data = SliceData::as_mut(new_s);
+    new_data.array = data.array;
+    new_data.data_ptr = data.data_ptr;
+    new_data.len = new_len;
+    new_data.cap = data.cap;
+    new_s
+}
+
 /// Append single element to slice.
 /// elem_bytes: actual byte size per element
 pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u64]) -> GcRef {
@@ -212,8 +225,8 @@ pub fn append(gc: &mut Gc, em: ValueMeta, elem_bytes: usize, s: GcRef, val: &[u6
                 unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, elem_bytes) };
             }
         }
-        SliceData::as_mut(s).len = cur_len + 1;
-        s
+        // Go semantics: append never modifies original slice header
+        with_new_len(gc, s, cur_len + 1)
     } else {
         let new_cap = if cur_cap == 0 { 4 } else { cur_cap * 2 };
         let aem = elem_meta(s);

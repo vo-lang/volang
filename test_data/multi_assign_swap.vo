@@ -1,0 +1,64 @@
+// Test multi-assignment swap semantics
+// Go spec: all RHS evaluated before any LHS assignment
+package main
+
+func main() {
+    // Test 1: Basic variable swap
+    a, b := 1, 2
+    a, b = b, a
+    assert(a == 2, "a should be 2 after swap, got ", a)
+    assert(b == 1, "b should be 1 after swap, got ", b)
+    
+    // Test 2: Triple swap (rotation)
+    x, y, z := 10, 20, 30
+    x, y, z = y, z, x
+    assert(x == 20, "x should be 20")
+    assert(y == 30, "y should be 30")
+    assert(z == 10, "z should be 10")
+    
+    // Test 3: Swap with expressions
+    m, n := 5, 7
+    m, n = n+1, m-1
+    assert(m == 8, "m should be 8 (7+1)")
+    assert(n == 4, "n should be 4 (5-1)")
+    
+    // Test 4: Slice element swap
+    arr := []int{1, 2, 3, 4, 5}
+    arr[0], arr[4] = arr[4], arr[0]
+    assert(arr[0] == 5, "arr[0] should be 5")
+    assert(arr[4] == 1, "arr[4] should be 1")
+    
+    // Test 5: Map element swap
+    mp := map[string]int{"a": 100, "b": 200}
+    mp["a"], mp["b"] = mp["b"], mp["a"]
+    assert(mp["a"] == 200, "mp[a] should be 200")
+    assert(mp["b"] == 100, "mp[b] should be 100")
+    
+    // Test 6: Mixed slice indices
+    s := []int{10, 20, 30}
+    i, j := 0, 2
+    s[i], s[j] = s[j], s[i]
+    assert(s[0] == 30, "s[0] should be 30")
+    assert(s[2] == 10, "s[2] should be 10")
+    
+    // Test 7: Self-referential (index computed from swapped values)
+    vals := []int{0, 1, 2, 3, 4}
+    p, q := 1, 3
+    vals[p], vals[q], p, q = vals[q], vals[p], q, p
+    // Before: vals = [0,1,2,3,4], p=1, q=3
+    // RHS eval: vals[q]=3, vals[p]=1, q=3, p=1
+    // After: vals[1]=3, vals[3]=1, p=3, q=1
+    assert(vals[1] == 3, "vals[1] should be 3")
+    assert(vals[3] == 1, "vals[3] should be 1")
+    assert(p == 3, "p should be 3")
+    assert(q == 1, "q should be 1")
+    
+    // Test 8: Struct field swap
+    type Point struct { X, Y int }
+    pt := Point{X: 5, Y: 10}
+    pt.X, pt.Y = pt.Y, pt.X
+    assert(pt.X == 10, "pt.X should be 10")
+    assert(pt.Y == 5, "pt.Y should be 5")
+    
+    println("multi_assign_swap: ok")
+}

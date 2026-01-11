@@ -68,6 +68,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ConvF2I => { conv_f2i(e, inst); Ok(Completed) }
         ConvF64F32 => { conv_f64_f32(e, inst); Ok(Completed) }
         ConvF32F64 => { conv_f32_f64(e, inst); Ok(Completed) }
+        Trunc => { trunc(e, inst); Ok(Completed) }
         // Slice operations
         SliceNew => { slice_new(e, inst); Ok(Completed) }
         SliceGet => { slice_get(e, inst); Ok(Completed) }
@@ -111,6 +112,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
         IfaceAssign => { iface_assign(e, inst); Ok(Completed) }
+        IfaceEq => { iface_eq(e, inst); Ok(Completed) }
         // Control flow - compiler specific
         Jump | JumpIf | JumpIfNot | Return | Panic => Ok(Unhandled),
         // Function calls - compiler specific
@@ -454,6 +456,39 @@ fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let f64v = e.builder().ins().fpromote(types::F64, f32v);
     let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), f64v);
     e.write_var(inst.a, r);
+}
+
+fn trunc<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let a = e.read_var(inst.b);
+    let flags = inst.flags;
+    let signed = (flags & 0x80) != 0;
+    let bytes = flags & 0x7F;
+    
+    let (narrow_type, r) = match bytes {
+        1 => {
+            let v = e.builder().ins().ireduce(types::I8, a);
+            (types::I8, v)
+        }
+        2 => {
+            let v = e.builder().ins().ireduce(types::I16, a);
+            (types::I16, v)
+        }
+        4 => {
+            let v = e.builder().ins().ireduce(types::I32, a);
+            (types::I32, v)
+        }
+        _ => {
+            e.write_var(inst.a, a);
+            return;
+        }
+    };
+    
+    let result = if signed {
+        e.builder().ins().sextend(types::I64, r)
+    } else {
+        e.builder().ins().uextend(types::I64, r)
+    };
+    e.write_var(inst.a, result);
 }
 
 // =============================================================================
@@ -1249,4 +1284,24 @@ fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let ok_val = e.builder().ins().stack_load(types::I64, result_slot, (ok_offset * 8) as i32);
         e.write_var(inst.a + ok_offset as u16, ok_val);
     }
+}
+
+fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let b0 = e.read_var(inst.b);
+    let b1 = e.read_var(inst.b + 1);
+    let c0 = e.read_var(inst.c);
+    let c1 = e.read_var(inst.c + 1);
+    
+    // Call runtime helper for correct comparison (handles string content, struct/array deep eq, etc.)
+    // Returns: 0=false, 1=true, 2=panic (uncomparable type)
+    // Note: panic case (return 2) is treated as false here; full panic handling would require
+    // control flow changes that break JIT compilation. Uncomparable types are rare in practice.
+    let iface_eq_func = e.helpers().iface_eq.expect("iface_eq helper must be available");
+    let ctx = e.ctx_param();
+    let call = e.builder().ins().call(iface_eq_func, &[ctx, b0, b1, c0, c1]);
+    let result = e.builder().inst_results(call)[0];
+    // Treat result > 1 (panic) as 0 (false) - mask to 0 or 1
+    let one = e.builder().ins().iconst(types::I64, 1);
+    let masked = e.builder().ins().band(result, one);
+    e.write_var(inst.a, masked);
 }

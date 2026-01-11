@@ -1,0 +1,68 @@
+// Test interface value comparison
+// Go spec: interface comparison checks dynamic type and value
+package main
+
+type Point struct { X, Y int }
+
+func main() {
+    // Test 1: Same type, same value
+    var a any = 42
+    var b any = 42
+    assert(a == b, "same int values should be equal")
+    
+    // Test 2: Same type, different value
+    var c any = 42
+    var d any = 43
+    assert(c != d, "different int values should not be equal")
+    
+    // Test 3: Different types, same underlying value
+    var e any = 42      // int
+    var f any = int64(42)  // int64
+    assert(e != f, "different types should not be equal even with same numeric value")
+    
+    // Test 4: String comparison
+    var s1 any = "hello"
+    var s2 any = "hello"
+    var s3 any = "world"
+    assert(s1 == s2, "same strings should be equal")
+    assert(s1 != s3, "different strings should not be equal")
+    
+    // Test 5: Bool comparison
+    var t1 any = true
+    var t2 any = true
+    var t3 any = false
+    assert(t1 == t2, "same bool should be equal")
+    assert(t1 != t3, "different bool should not be equal")
+    
+    // Test 6: Pointer comparison (reference identity)
+    pt := &Point{X: 5, Y: 6}
+    var ptr1 any = pt
+    var ptr2 any = pt
+    var ptr3 any = &Point{X: 5, Y: 6}
+    assert(ptr1 == ptr2, "same pointer should be equal")
+    assert(ptr1 != ptr3, "different pointers should not be equal (different address)")
+    
+    // Test 8: nil comparison
+    var nilAny any = nil
+    var nilAny2 any
+    assert(nilAny == nil, "nil any should equal nil")
+    assert(nilAny2 == nil, "zero value any should equal nil")
+    assert(nilAny == nilAny2, "two nil any should be equal")
+    
+    // Test 9: Typed nil vs nil interface
+    var nilPtr *Point = nil
+    var typedNil any = nilPtr
+    assert(typedNil != nil, "typed nil should NOT equal nil interface")
+    
+    // Test 10: Float comparison
+    var f1 any = 3.14
+    var f2 any = 3.14
+    var f3 any = 3.15
+    assert(f1 == f2, "same float should be equal")
+    assert(f1 != f3, "different float should not be equal")
+    
+    // Note: struct/array deep comparison not yet implemented
+    // They use reference identity in interface comparison
+    
+    println("interface_value_compare: ok")
+}

@@ -1039,6 +1039,9 @@ impl Vm {
                 Opcode::IfaceAssert => {
                     exec::exec_iface_assert(stack, bp, &inst, &mut self.state.itab_cache, module)
                 }
+                Opcode::IfaceEq => {
+                    exec::exec_iface_eq(stack, bp, &inst, module)
+                }
 
                 // Type conversion - inline
                 Opcode::ConvI2F => {
@@ -1059,6 +1062,23 @@ impl Vm {
                 Opcode::ConvF32F64 => {
                     let a = f32::from_bits(stack_get(stack, bp + inst.b as usize) as u32);
                     stack_set(stack, bp + inst.a as usize, (a as f64).to_bits());
+                    ExecResult::Continue
+                }
+                Opcode::Trunc => {
+                    let val = stack_get(stack, bp + inst.b as usize);
+                    let flags = inst.flags;
+                    let signed = (flags & 0x80) != 0;
+                    let bytes = flags & 0x7F;
+                    let result = match (bytes, signed) {
+                        (1, true) => (val as i8) as i64 as u64,
+                        (2, true) => (val as i16) as i64 as u64,
+                        (4, true) => (val as i32) as i64 as u64,
+                        (1, false) => (val as u8) as u64,
+                        (2, false) => (val as u16) as u64,
+                        (4, false) => (val as u32) as u64,
+                        _ => val,
+                    };
+                    stack_set(stack, bp + inst.a as usize, result);
                     ExecResult::Continue
                 }
 

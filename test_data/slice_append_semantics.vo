@@ -1,0 +1,83 @@
+// Test slice append value semantics
+// Append returns new slice; original may share backing array or not
+package main
+
+func main() {
+    // Test 1: Basic append creates new slice header
+    original := []int{1, 2, 3}
+    appended := append(original, 4)
+    assert(len(original) == 3, "original length unchanged")
+    assert(len(appended) == 4, "appended has new element")
+    assert(appended[3] == 4, "appended[3] should be 4")
+    
+    // Test 2: Append may share backing array (within capacity)
+    base := make([]int, 2, 5)
+    base[0], base[1] = 10, 20
+    extended := append(base, 30)
+    // base and extended may share backing array
+    assert(len(base) == 2, "base length unchanged")
+    assert(len(extended) == 3, "extended length is 3")
+    assert(extended[2] == 30, "extended[2] should be 30")
+    
+    // Test 3: Append beyond capacity creates new array
+    small := []int{1, 2}
+    // Force reallocation by appending many elements
+    big := append(small, 3, 4, 5, 6, 7, 8, 9, 10)
+    assert(len(small) == 2, "small unchanged after big append")
+    assert(len(big) == 10, "big should have 10 elements")
+    // Modify big, small should be unaffected
+    big[0] = 999
+    assert(small[0] == 1, "small[0] should still be 1 after modifying big")
+    
+    // Test 4: Slice of slice and append independence
+    arr := []int{1, 2, 3, 4, 5}
+    slice1 := arr[1:3]  // [2, 3], cap = 4
+    slice2 := append(slice1, 100)
+    assert(slice1[0] == 2, "slice1[0] unchanged")
+    assert(len(slice1) == 2, "slice1 length unchanged")
+    assert(slice2[2] == 100, "slice2[2] is 100")
+    
+    // Test 5: Empty slice append
+    var empty []int
+    filled := append(empty, 1, 2, 3)
+    assert(empty == nil, "empty still nil")
+    assert(len(filled) == 3, "filled has 3 elements")
+    
+    // Test 6: Append to nil slice
+    var nilSlice []string
+    result := append(nilSlice, "hello")
+    assert(nilSlice == nil, "nilSlice still nil")
+    assert(result[0] == "hello", "result has element")
+    
+    // Test 7: Chain appends
+    s := []int{1}
+    s = append(append(append(s, 2), 3), 4)
+    assert(len(s) == 4, "chain append length")
+    assert(s[0] == 1 && s[1] == 2 && s[2] == 3 && s[3] == 4, "chain values")
+    
+    // Test 8: Append slice to slice with spread
+    a := []int{1, 2}
+    b := []int{3, 4, 5}
+    c := append(a, b...)
+    assert(len(c) == 5, "spread append length")
+    assert(c[4] == 5, "spread append last element")
+    // a should be unchanged
+    assert(len(a) == 2, "a unchanged after spread append")
+    
+    // Test 9: Capacity after append
+    s2 := make([]int, 0, 10)
+    s2 = append(s2, 1, 2, 3)
+    assert(len(s2) == 3, "s2 length is 3")
+    assert(cap(s2) >= 10, "s2 capacity preserved")
+    
+    // Test 10: Multiple slices from same array, append independence
+    base2 := make([]int, 3, 10)
+    base2[0], base2[1], base2[2] = 1, 2, 3
+    view1 := base2[0:2]  // [1, 2]
+    view2 := base2[1:3]  // [2, 3]
+    view1 = append(view1, 99)
+    // view1 appended within capacity, may affect base2
+    assert(view2[0] == 2, "view2[0] unchanged")
+    
+    println("slice_append_semantics: ok")
+}

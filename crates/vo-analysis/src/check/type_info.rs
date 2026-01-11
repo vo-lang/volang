@@ -274,7 +274,14 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
 pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> {
     let underlying = typ::underlying_type(type_key, tc_objs);
     match &tc_objs.types[underlying] {
-        Type::Basic(_) => vec![SlotType::Value],
+        Type::Basic(b) => {
+            // String is a GcRef, other basic types are Value
+            if matches!(b.typ(), typ::BasicType::Str | typ::BasicType::UntypedString) {
+                vec![SlotType::GcRef]
+            } else {
+                vec![SlotType::Value]
+            }
+        }
         Type::Pointer(_) => vec![SlotType::GcRef],
         Type::Slice(_) => vec![SlotType::GcRef],
         Type::Map(_) => vec![SlotType::GcRef],

@@ -1,0 +1,97 @@
+// Test defer modifying named return values
+// Go spec: deferred functions can read and modify named results
+package main
+
+// Basic: defer modifies named return
+func addOne() (result int) {
+    result = 10
+    defer func() {
+        result = result + 1
+    }()
+    return // returns 11, not 10
+}
+
+// Defer sets result on zero return
+func setIfZero() (result int) {
+    defer func() {
+        if result == 0 {
+            result = 42
+        }
+    }()
+    return 0 // returns 42
+}
+
+// Multiple defers, LIFO order
+func multiDefer() (result int) {
+    result = 0
+    defer func() { result = result * 2 }()  // runs second: 5 * 2 = 10
+    defer func() { result = result + 5 }()  // runs first: 0 + 5 = 5
+    return // returns 10
+}
+
+// Defer with explicit return value
+func explicitReturn() (result int) {
+    defer func() {
+        result = result + 100
+    }()
+    return 5 // sets result=5, then defer adds 100, returns 105
+}
+
+// Multiple named returns
+func multiReturn() (a, b int) {
+    defer func() {
+        a = a + 1
+        b = b + 2
+    }()
+    a = 10
+    b = 20
+    return // returns 11, 22
+}
+
+// Defer captures named return by reference
+func captureRef() (result int) {
+    result = 1
+    defer func() {
+        result = result * result
+    }()
+    result = 5
+    return // defer runs with result=5, returns 25
+}
+
+// Nested function with defer
+func nested() (result int) {
+    inner := func() int {
+        return 7
+    }
+    defer func() {
+        result = result + inner()
+    }()
+    result = 3
+    return // 3 + 7 = 10
+}
+
+func main() {
+    r1 := addOne()
+    assert(r1 == 11, "addOne should return 11, got ", r1)
+    
+    r2 := setIfZero()
+    assert(r2 == 42, "setIfZero should return 42, got ", r2)
+    
+    r3 := multiDefer()
+    assert(r3 == 10, "multiDefer should return 10, got ", r3)
+    
+    r4 := explicitReturn()
+    assert(r4 == 105, "explicitReturn should return 105, got ", r4)
+    
+    a, b := multiReturn()
+    assert(a == 11, "multiReturn a should be 11, got ", a)
+    assert(b == 22, "multiReturn b should be 22, got ", b)
+    
+    r5 := captureRef()
+    assert(r5 == 25, "captureRef should return 25, got ", r5)
+    
+    r6 := nested()
+    assert(r6 == 10, "nested should return 10, got ", r6)
+    
+    println("defer_named_return: ok")
+}

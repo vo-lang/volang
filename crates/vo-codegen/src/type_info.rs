@@ -150,71 +150,59 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Named(named) = &tc_objs.types[type_key] {
             if let Some(obj_key) = named.obj() {
                 if let Some(id) = ctx.get_named_type_id(*obj_key) {
-                    return RuntimeType::Named { id, struct_meta_id: None };
+                    let struct_meta_id = ctx.get_struct_meta_id(type_key);
+                    return RuntimeType::Named { id, struct_meta_id };
                 }
             }
             // Named type not registered - recurse on underlying type
-            // This can happen for builtin named types like error
-            let underlying = named.underlying();
-            return self.type_to_runtime_type(underlying, ctx);
+            return self.type_to_runtime_type(named.underlying(), ctx);
         }
         
-        // Use ValueKind to identify type category
-        let vk = self.type_value_kind(type_key);
-        
-        match vk {
-            ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
-            ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
-            ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String => {
+        match self.type_value_kind(type_key) {
+            vk @ (ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32 | ValueKind::Int64 |
+                  ValueKind::Uint | ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
+                  ValueKind::Float32 | ValueKind::Float64 | ValueKind::Bool | ValueKind::String) => {
                 RuntimeType::Basic(vk)
             }
             ValueKind::Struct | ValueKind::Array | ValueKind::Interface => {
-                // Preserve structural identity via ctx interning
                 let rttid = ctx.intern_type_key(type_key, self);
                 ctx.runtime_type(rttid).clone()
             }
-            ValueKind::Pointer => {
-                let elem_type = self.pointer_elem(type_key);
-                let elem_rttid = ctx.intern_type_key(elem_type, self);
-                let elem_vk = self.type_value_kind(elem_type);
-                RuntimeType::Pointer(ValueRttid::new(elem_rttid, elem_vk))
-            }
-            ValueKind::Slice => {
-                let elem_type = self.slice_elem_type(type_key);
-                let elem_rttid = ctx.intern_type_key(elem_type, self);
-                let elem_vk = self.type_value_kind(elem_type);
-                RuntimeType::Slice(ValueRttid::new(elem_rttid, elem_vk))
-            }
+            ValueKind::Pointer => RuntimeType::Pointer(self.intern_value_rttid(self.pointer_elem(type_key), ctx)),
+            ValueKind::Slice => RuntimeType::Slice(self.intern_value_rttid(self.slice_elem_type(type_key), ctx)),
             ValueKind::Map => {
                 let (key_type, val_type) = self.map_key_val_types(type_key);
-                let key_rttid = ctx.intern_type_key(key_type, self);
-                let key_vk = self.type_value_kind(key_type);
-                let val_rttid = ctx.intern_type_key(val_type, self);
-                let val_vk = self.type_value_kind(val_type);
                 RuntimeType::Map {
-                    key: ValueRttid::new(key_rttid, key_vk),
-                    val: ValueRttid::new(val_rttid, val_vk),
+                    key: self.intern_value_rttid(key_type, ctx),
+                    val: self.intern_value_rttid(val_type, ctx),
                 }
             }
             ValueKind::Channel => {
-                let elem_type = self.chan_elem_type(type_key);
-                let elem_rttid = ctx.intern_type_key(elem_type, self);
-                let elem_vk = self.type_value_kind(elem_type);
-                let dir = self.chan_dir(type_key);
-                RuntimeType::Chan { dir, elem: ValueRttid::new(elem_rttid, elem_vk) }
+                RuntimeType::Chan {
+                    dir: self.chan_dir(type_key),
+                    elem: self.intern_value_rttid(self.chan_elem_type(type_key), ctx),
+                }
             }
             ValueKind::Closure => {
                 let underlying = typ::underlying_type(type_key, tc_objs);
                 if let Type::Signature(sig) = &tc_objs.types[underlying] {
-                    let params = self.tuple_to_value_rttids(sig.params(), ctx);
-                    let results = self.tuple_to_value_rttids(sig.results(), ctx);
-                    RuntimeType::Func { params, results, variadic: sig.variadic() }
+                    RuntimeType::Func {
+                        params: self.tuple_to_value_rttids(sig.params(), ctx),
+                        results: self.tuple_to_value_rttids(sig.results(), ctx),
+                        variadic: sig.variadic(),
+                    }
                 } else {
                     RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false }
                 }
             }
             _ => RuntimeType::Basic(ValueKind::Void),
         }
+    }
+    
+    /// Intern a type and return its ValueRttid.
+    #[inline]
+    fn intern_value_rttid(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> vo_runtime::ValueRttid {
+        vo_runtime::ValueRttid::new(ctx.intern_type_key(type_key, self), self.type_value_kind(type_key))
     }
     
     /// Convert tuple type to Vec<ValueRttid>

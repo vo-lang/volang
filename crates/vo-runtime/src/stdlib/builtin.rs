@@ -156,6 +156,158 @@ static __VO_BUILTIN_COPY: ExternEntryWithContext = ExternEntryWithContext {
     func: builtin_copy,
 };
 
+/// append(slice, other...) - append all elements from other slice
+fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
+    use crate::objects::{slice, array};
+    use vo_common_core::types::ValueMeta;
+    
+    let dst = call.arg_ref(0);
+    let src = call.arg_ref(1);
+    let elem_meta = ValueMeta::from_raw(call.arg_u64(2) as u32);
+    
+    // Handle nil src
+    if src.is_null() {
+        call.ret_ref(0, dst);
+        return ExternResult::Ok;
+    }
+    
+    let src_len = slice::len(src);
+    if src_len == 0 {
+        call.ret_ref(0, dst);
+        return ExternResult::Ok;
+    }
+    
+    let elem_bytes = if dst.is_null() {
+        array::elem_bytes(slice::array_ref(src))
+    } else {
+        array::elem_bytes(slice::array_ref(dst))
+    };
+    
+    // Handle nil dst
+    if dst.is_null() {
+        let new_cap = src_len.max(4);
+        let new_arr = array::create(call.gc(), elem_meta, elem_bytes, new_cap);
+        let src_ptr = slice::data_ptr(src);
+        let dst_ptr = array::data_ptr_bytes(new_arr);
+        unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, src_len * elem_bytes) };
+        let result = slice::from_array_range(call.gc(), new_arr, 0, src_len, new_cap);
+        call.ret_ref(0, result);
+        return ExternResult::Ok;
+    }
+    
+    let dst_len = slice::len(dst);
+    let dst_cap = slice::cap(dst);
+    let new_len = dst_len + src_len;
+    
+    if new_len <= dst_cap {
+        // Enough capacity - write to existing backing array, return new slice header
+        let dst_ptr = slice::data_ptr(dst);
+        let src_ptr = slice::data_ptr(src);
+        unsafe {
+            let write_ptr = dst_ptr.add(dst_len * elem_bytes);
+            core::ptr::copy_nonoverlapping(src_ptr, write_ptr, src_len * elem_bytes);
+        }
+        // Go semantics: append never modifies original slice header
+        let new_s = slice::with_new_len(call.gc(), dst, new_len);
+        call.ret_ref(0, new_s);
+    } else {
+        // Need to grow - allocate new array
+        let new_cap = (new_len * 2).max(4);
+        let new_arr = array::create(call.gc(), elem_meta, elem_bytes, new_cap);
+        let new_arr_ptr = array::data_ptr_bytes(new_arr);
+        let dst_ptr = slice::data_ptr(dst);
+        let src_ptr = slice::data_ptr(src);
+        unsafe {
+            core::ptr::copy_nonoverlapping(dst_ptr, new_arr_ptr, dst_len * elem_bytes);
+            core::ptr::copy_nonoverlapping(src_ptr, new_arr_ptr.add(dst_len * elem_bytes), src_len * elem_bytes);
+        }
+        let result = slice::from_array_range(call.gc(), new_arr, 0, new_len, new_cap);
+        call.ret_ref(0, result);
+    }
+    
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_SLICE_APPEND_SLICE: ExternEntryWithContext = ExternEntryWithContext {
+    name: "vo_slice_append_slice",
+    func: builtin_slice_append_slice,
+};
+
+/// Interface equality comparison
+/// Args: (left_slot0, left_slot1, right_slot0, right_slot1)
+/// Returns: bool (1 if equal, 0 if not)
+fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
+    use crate::objects::string as str_obj;
+    
+    let left_slot0 = call.arg_u64(0);
+    let left_slot1 = call.arg_u64(1);
+    let right_slot0 = call.arg_u64(2);
+    let right_slot1 = call.arg_u64(3);
+    
+    // slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
+    let left_vk = ValueKind::from_u8((left_slot0 & 0xFF) as u8);
+    let right_vk = ValueKind::from_u8((right_slot0 & 0xFF) as u8);
+    
+    // If value_kinds differ, not equal (different dynamic types)
+    if left_vk != right_vk {
+        call.ret_bool(0, false);
+        return ExternResult::Ok;
+    }
+    
+    // Compare based on value_kind
+    let equal = match left_vk {
+        ValueKind::Void => true, // both nil
+        ValueKind::Bool | ValueKind::Int | ValueKind::Int8 | ValueKind::Int16 | 
+        ValueKind::Int32 | ValueKind::Int64 | ValueKind::Uint | ValueKind::Uint8 | 
+        ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
+        ValueKind::Float32 | ValueKind::Float64 | ValueKind::Pointer | 
+        ValueKind::Slice | ValueKind::Map | ValueKind::Channel | ValueKind::Closure => {
+            // Immediate or reference identity comparison
+            left_slot1 == right_slot1
+        }
+        ValueKind::String => {
+            // String content comparison
+            let left_ref = left_slot1 as crate::gc::GcRef;
+            let right_ref = right_slot1 as crate::gc::GcRef;
+            if left_ref == right_ref {
+                true
+            } else if left_ref.is_null() || right_ref.is_null() {
+                false
+            } else {
+                str_obj::as_str(left_ref) == str_obj::as_str(right_ref)
+            }
+        }
+        ValueKind::Struct | ValueKind::Array => {
+            // For struct/array in interface, compare rttid first, then data
+            // rttid is in bits 8-31 of slot0
+            let left_rttid = (left_slot0 >> 8) & 0xFFFFFF;
+            let right_rttid = (right_slot0 >> 8) & 0xFFFFFF;
+            if left_rttid != right_rttid {
+                false
+            } else {
+                // Same type - compare slot1 (GcRef to boxed data)
+                // For now, just compare references (identity)
+                // TODO: deep comparison for value equality
+                left_slot1 == right_slot1
+            }
+        }
+        ValueKind::Interface => {
+            // Nested interface - compare both slots
+            left_slot0 == right_slot0 && left_slot1 == right_slot1
+        }
+    };
+    
+    call.ret_bool(0, equal);
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_BUILTIN_IFACE_EQ: ExternEntryWithContext = ExternEntryWithContext {
+    name: "vo_iface_eq",
+    func: builtin_iface_eq,
+};
+
 // ==================== String Conversion Functions ====================
 
 /// int -> string (unicode code point)

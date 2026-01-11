@@ -98,6 +98,8 @@ fn emit_numeric_conversion(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) {
+    use vo_runtime::ValueKind;
+    
     let src_is_int = info.is_int(src_type);
     let src_is_float = info.is_float(src_type);
     let dst_is_int = info.is_int(dst_type);
@@ -118,6 +120,8 @@ fn emit_numeric_conversion(
         } else {
             func.emit_op(Opcode::ConvF2I, dst, src_reg, 0);
         }
+        // Apply truncation for narrower int types
+        emit_int_truncation(dst, dst, dst_type, func, info);
     } else if src_is_float && dst_is_float {
         let src_is_f32 = info.is_float32(src_type);
         let dst_is_f32 = info.is_float32(dst_type);
@@ -129,7 +133,23 @@ fn emit_numeric_conversion(
             func.emit_op(Opcode::Copy, dst, src_reg, 0);
         }
     } else if src_is_int && dst_is_int {
-        func.emit_op(Opcode::Copy, dst, src_reg, 0);
+        let dst_vk = info.type_value_kind(dst_type);
+        let src_vk = info.type_value_kind(src_type);
+        // Check if we need truncation (narrowing conversion)
+        // flags: high bit (0x80) = signed, low bits = byte width
+        match dst_vk {
+            ValueKind::Int8 => func.emit_with_flags(Opcode::Trunc, 0x81, dst, src_reg, 0),
+            ValueKind::Int16 => func.emit_with_flags(Opcode::Trunc, 0x82, dst, src_reg, 0),
+            ValueKind::Int32 if !matches!(src_vk, ValueKind::Int8 | ValueKind::Int16 | ValueKind::Int32) => {
+                func.emit_with_flags(Opcode::Trunc, 0x84, dst, src_reg, 0)
+            }
+            ValueKind::Uint8 => func.emit_with_flags(Opcode::Trunc, 0x01, dst, src_reg, 0),
+            ValueKind::Uint16 => func.emit_with_flags(Opcode::Trunc, 0x02, dst, src_reg, 0),
+            ValueKind::Uint32 if !matches!(src_vk, ValueKind::Uint8 | ValueKind::Uint16 | ValueKind::Uint32) => {
+                func.emit_with_flags(Opcode::Trunc, 0x04, dst, src_reg, 0)
+            }
+            _ => func.emit_op(Opcode::Copy, dst, src_reg, 0),
+        }
     } else {
         let src_slots = info.type_slot_count(src_type);
         let dst_slots = info.type_slot_count(dst_type);
@@ -142,5 +162,27 @@ fn emit_numeric_conversion(
         } else {
             func.emit_op(Opcode::Copy, dst, src_reg, 0);
         }
+    }
+}
+
+/// Emit truncation for narrower int types after float->int conversion
+fn emit_int_truncation(
+    src_reg: u16,
+    dst: u16,
+    dst_type: vo_analysis::objects::TypeKey,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    use vo_runtime::ValueKind;
+    let dst_vk = info.type_value_kind(dst_type);
+    // flags: high bit (0x80) = signed, low bits = byte width
+    match dst_vk {
+        ValueKind::Int8 => func.emit_with_flags(Opcode::Trunc, 0x81, dst, src_reg, 0),
+        ValueKind::Int16 => func.emit_with_flags(Opcode::Trunc, 0x82, dst, src_reg, 0),
+        ValueKind::Int32 => func.emit_with_flags(Opcode::Trunc, 0x84, dst, src_reg, 0),
+        ValueKind::Uint8 => func.emit_with_flags(Opcode::Trunc, 0x01, dst, src_reg, 0),
+        ValueKind::Uint16 => func.emit_with_flags(Opcode::Trunc, 0x02, dst, src_reg, 0),
+        ValueKind::Uint32 => func.emit_with_flags(Opcode::Trunc, 0x04, dst, src_reg, 0),
+        _ => {} // No truncation needed for Int, Int64, Uint, Uint64
     }
 }

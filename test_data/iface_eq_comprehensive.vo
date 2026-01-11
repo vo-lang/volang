@@ -1,0 +1,169 @@
+// Comprehensive test for interface equality (IfaceEq opcode)
+// Tests all scenarios: basic types, strings, structs, arrays, pointers, nil
+
+package main
+
+type Point struct { x, y int }
+type Point3D struct { x, y, z int }
+type Named struct { name string }
+type Nested struct { p Point; name string }
+type WithIface struct { val interface{} }
+
+func main() {
+    passed := 0
+    failed := 0
+    
+    // === 1-5: Basic int comparisons ===
+    var i1 interface{} = 42
+    var i2 interface{} = 42
+    var i3 interface{} = 100
+    
+    if i1 == i2 { passed++ } else { failed++; println("FAIL 1: int 42 == 42") }
+    if i1 != i3 { passed++ } else { failed++; println("FAIL 2: int 42 != 100") }
+    if i2 == i1 { passed++ } else { failed++; println("FAIL 3: int 42 == 42 (reverse)") }
+    if i3 != i1 { passed++ } else { failed++; println("FAIL 4: int 100 != 42") }
+    if !(i1 != i2) { passed++ } else { failed++; println("FAIL 5: !(42 != 42)") }
+    
+    // === 6-10: String content comparisons ===
+    var s1 interface{} = "hello"
+    var s2 interface{} = "hel" + "lo"
+    var s3 interface{} = "world"
+    var s4 interface{} = ""
+    var s5 interface{} = ""
+    
+    if s1 == s2 { passed++ } else { failed++; println("FAIL 6: string content eq") }
+    if s1 != s3 { passed++ } else { failed++; println("FAIL 7: string content neq") }
+    if s4 == s5 { passed++ } else { failed++; println("FAIL 8: empty string eq") }
+    if s1 != s4 { passed++ } else { failed++; println("FAIL 9: non-empty != empty") }
+    if s2 == s1 { passed++ } else { failed++; println("FAIL 10: string eq reverse") }
+    
+    // === 11-15: Struct deep comparisons ===
+    p1 := Point{1, 2}
+    p2 := Point{1, 2}
+    p3 := Point{1, 3}
+    var ip1 interface{} = p1
+    var ip2 interface{} = p2
+    var ip3 interface{} = p3
+    
+    if ip1 == ip2 { passed++ } else { failed++; println("FAIL 11: struct same content") }
+    if ip1 != ip3 { passed++ } else { failed++; println("FAIL 12: struct diff content") }
+    if ip2 == ip1 { passed++ } else { failed++; println("FAIL 13: struct eq reverse") }
+    if ip3 != ip1 { passed++ } else { failed++; println("FAIL 14: struct neq reverse") }
+    if !(ip1 != ip2) { passed++ } else { failed++; println("FAIL 15: !(struct neq same)") }
+    
+    // === 16-20: Different types comparisons ===
+    var ti interface{} = 42
+    var ts interface{} = "42"
+    var tb interface{} = true
+    var tf interface{} = 1.0
+    
+    if ti != ts { passed++ } else { failed++; println("FAIL 16: int != string") }
+    if ti != tb { passed++ } else { failed++; println("FAIL 17: int != bool") }
+    if ti != tf { passed++ } else { failed++; println("FAIL 18: int != float") }
+    if ts != tb { passed++ } else { failed++; println("FAIL 19: string != bool") }
+    if ts != tf { passed++ } else { failed++; println("FAIL 20: string != float") }
+    
+    // === 21-25: nil comparisons (interface variables) ===
+    var n1 interface{} = nil
+    var n2 interface{} = nil
+    var nv interface{} = 42
+    
+    if n1 == n2 { passed++ } else { failed++; println("FAIL 21: nil == nil") }
+    if n1 != nv { passed++ } else { failed++; println("FAIL 22: nil != value") }
+    if nv != n1 { passed++ } else { failed++; println("FAIL 23: value != nil") }
+    if !(n1 != n2) { passed++ } else { failed++; println("FAIL 24: !(nil != nil)") }
+    if !(nv == n1) { passed++ } else { failed++; println("FAIL 25: !(value == nil)") }
+    
+    // === 26-30: Bool comparisons ===
+    var bt interface{} = true
+    var bt2 interface{} = true
+    var bf interface{} = false
+    
+    if bt == bt2 { passed++ } else { failed++; println("FAIL 26: true == true") }
+    if bt != bf { passed++ } else { failed++; println("FAIL 27: true != false") }
+    if bf != bt { passed++ } else { failed++; println("FAIL 28: false != true") }
+    if !(bt != bt2) { passed++ } else { failed++; println("FAIL 29: !(true != true)") }
+    if !(bf == bt) { passed++ } else { failed++; println("FAIL 30: !(false == true)") }
+    
+    // === 31-35: Float comparisons ===
+    var f1 interface{} = 3.14
+    var f2 interface{} = 3.14
+    var f3 interface{} = 2.71
+    
+    if f1 == f2 { passed++ } else { failed++; println("FAIL 31: float eq") }
+    if f1 != f3 { passed++ } else { failed++; println("FAIL 32: float neq") }
+    if f2 == f1 { passed++ } else { failed++; println("FAIL 33: float eq reverse") }
+    if f3 != f1 { passed++ } else { failed++; println("FAIL 34: float neq reverse") }
+    if !(f1 != f2) { passed++ } else { failed++; println("FAIL 35: !(float neq same)") }
+    
+    // === 36-40: Struct with string field ===
+    n1s := Named{"alice"}
+    n2s := Named{"alice"}
+    n3s := Named{"bob"}
+    var in1 interface{} = n1s
+    var in2 interface{} = n2s
+    var in3 interface{} = n3s
+    
+    if in1 == in2 { passed++ } else { failed++; println("FAIL 36: struct+string same") }
+    if in1 != in3 { passed++ } else { failed++; println("FAIL 37: struct+string diff") }
+    if in2 == in1 { passed++ } else { failed++; println("FAIL 38: struct+string reverse") }
+    if in3 != in1 { passed++ } else { failed++; println("FAIL 39: struct+string neq reverse") }
+    if !(in1 != in2) { passed++ } else { failed++; println("FAIL 40: !(struct+string neq same)") }
+    
+    // === 41-45: Nested struct ===
+    ns1 := Nested{Point{1, 2}, "a"}
+    ns2 := Nested{Point{1, 2}, "a"}
+    ns3 := Nested{Point{1, 2}, "b"}
+    ns4 := Nested{Point{3, 4}, "a"}
+    var ins1 interface{} = ns1
+    var ins2 interface{} = ns2
+    var ins3 interface{} = ns3
+    var ins4 interface{} = ns4
+    
+    if ins1 == ins2 { passed++ } else { failed++; println("FAIL 41: nested same") }
+    if ins1 != ins3 { passed++ } else { failed++; println("FAIL 42: nested diff string") }
+    if ins1 != ins4 { passed++ } else { failed++; println("FAIL 43: nested diff point") }
+    if ins2 == ins1 { passed++ } else { failed++; println("FAIL 44: nested eq reverse") }
+    if !(ins1 != ins2) { passed++ } else { failed++; println("FAIL 45: !(nested neq same)") }
+    
+    // === 46-50: Pointer comparisons ===
+    ptr1 := &Point{1, 2}
+    ptr2 := &Point{1, 2}
+    ptr3 := ptr1
+    var iptr1 interface{} = ptr1
+    var iptr2 interface{} = ptr2
+    var iptr3 interface{} = ptr3
+    
+    if iptr1 != iptr2 { passed++ } else { failed++; println("FAIL 46: diff ptr neq") }
+    if iptr1 == iptr3 { passed++ } else { failed++; println("FAIL 47: same ptr eq") }
+    if iptr3 == iptr1 { passed++ } else { failed++; println("FAIL 48: same ptr eq reverse") }
+    if iptr2 != iptr1 { passed++ } else { failed++; println("FAIL 49: diff ptr neq reverse") }
+    if !(iptr1 != iptr3) { passed++ } else { failed++; println("FAIL 50: !(same ptr neq)") }
+    
+    // === 51-55: Different struct types ===
+    var idp interface{} = Point{1, 2}
+    var idp3 interface{} = Point3D{1, 2, 3}
+    
+    if idp != idp3 { passed++ } else { failed++; println("FAIL 51: diff struct types") }
+    if idp3 != idp { passed++ } else { failed++; println("FAIL 52: diff struct types reverse") }
+    if !(idp == idp3) { passed++ } else { failed++; println("FAIL 53: !(diff struct types eq)") }
+    if idp == idp { passed++ } else { failed++; println("FAIL 54: same var eq") }
+    if !(idp != idp) { passed++ } else { failed++; println("FAIL 55: !(same var neq)") }
+    
+    // === 56-60: Rune/byte comparisons ===
+    var r1 interface{} = 'a'
+    var r2 interface{} = 'a'
+    var r3 interface{} = 'b'
+    
+    if r1 == r2 { passed++ } else { failed++; println("FAIL 56: rune eq") }
+    if r1 != r3 { passed++ } else { failed++; println("FAIL 57: rune neq") }
+    if r2 == r1 { passed++ } else { failed++; println("FAIL 58: rune eq reverse") }
+    if r3 != r1 { passed++ } else { failed++; println("FAIL 59: rune neq reverse") }
+    if !(r1 != r2) { passed++ } else { failed++; println("FAIL 60: !(rune neq same)") }
+    
+    // Print results
+    println("Passed:", passed)
+    println("Failed:", failed)
+    assert(failed == 0, "iface_eq_comprehensive failed")
+    println("iface_eq_comprehensive: ok")
+}

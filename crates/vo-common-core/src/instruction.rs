@@ -236,19 +236,25 @@ pub enum Opcode {
     // === IFACE: Interface operations ===
     IfaceAssign,
     IfaceAssert,
+    /// Interface equality: a = (b == c) where b,c are 2-slot interfaces
+    IfaceEq,
 
     // === CONV: Type conversion ===
     ConvI2F,
     ConvF2I,
     ConvF64F32,
     ConvF32F64,
+    /// Truncate integer: a = truncate(b), flags = target width
+    /// flags: 0x81=i8, 0x82=i16, 0x84=i32, 0x01=u8, 0x02=u16, 0x04=u32
+    /// High bit (0x80) = signed (sign-extend), low bits = byte width
+    Trunc,
 
     // Sentinel for invalid/unknown opcodes
     Invalid = 255,
 }
 
 impl Opcode {
-    const MAX_VALID: u8 = Self::ConvF32F64 as u8;
+    const MAX_VALID: u8 = Self::Trunc as u8;
 
     #[inline]
     pub fn from_u8(v: u8) -> Self {
