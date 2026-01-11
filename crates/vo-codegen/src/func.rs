@@ -526,47 +526,8 @@ impl FuncBuilder {
         }
     }
 
-    /// Store value from src to storage (no barrier).
-    /// For HeapArray, this copies the GcRef. Use ArraySet for element access.
-    pub fn emit_storage_store(&mut self, storage: StorageKind, src: u16) {
-        match storage {
-            StorageKind::StackValue { slot, slots } => {
-                self.emit_copy(slot, src, slots);
-            }
-            StorageKind::StackArray { base_slot, elem_slots, len } => {
-                // Copy element by element using SlotSet
-                for i in 0..len {
-                    let idx_reg = self.alloc_temp(1);
-                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    let src_offset = src + i * elem_slots;
-                    if elem_slots == 1 {
-                        self.emit_op(Opcode::SlotSet, base_slot, idx_reg, src_offset);
-                    } else {
-                        self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base_slot, idx_reg, src_offset);
-                    }
-                }
-            }
-            StorageKind::HeapBoxed { gcref_slot, value_slots } => {
-                self.emit_ptr_set(gcref_slot, 0, src, value_slots);
-            }
-            StorageKind::HeapArray { gcref_slot, .. } => {
-                self.emit_op(Opcode::Copy, gcref_slot, src, 0);
-            }
-            StorageKind::Reference { slot } => {
-                self.emit_op(Opcode::Copy, slot, src, 0);
-            }
-            StorageKind::Global { index, slots } => {
-                if slots == 1 {
-                    self.emit_op(Opcode::GlobalSet, index, src, 0);
-                } else {
-                    self.emit_with_flags(Opcode::GlobalSetN, slots as u8, index, src, 0);
-                }
-            }
-        }
-    }
-    
     /// Store value from src to storage with proper write barriers based on slot types.
-    pub fn emit_storage_store_with_slot_types(&mut self, storage: StorageKind, src: u16, slot_types: &[vo_runtime::SlotType]) {
+    pub fn emit_storage_store(&mut self, storage: StorageKind, src: u16, slot_types: &[vo_runtime::SlotType]) {
         match storage {
             StorageKind::StackValue { slot, slots } => {
                 self.emit_copy(slot, src, slots);

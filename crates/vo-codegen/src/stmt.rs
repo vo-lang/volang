@@ -528,8 +528,9 @@ fn compile_stmt_with_label(
                     } else if let Some(local) = sc.func.lookup_local(name.symbol) {
                         let storage = local.storage;
                         if let Some(expr) = short_var.values.get(i) {
+                            let slot_types = sc.info.type_slot_types(type_key);
                             let src = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
-                            sc.func.emit_storage_store(storage, src);
+                            sc.func.emit_storage_store(storage, src, &slot_types);
                         }
                     }
                 }
@@ -720,7 +721,8 @@ fn compile_stmt_with_label(
                     // Get lhs location and copy from temp
                     let lhs_source = crate::expr::get_expr_source(lhs_expr, ctx, func, info);
                     if let ExprSource::Location(storage) = lhs_source {
-                        func.emit_storage_store(storage, tmp_base + offset);
+                        let slot_types = info.type_slot_types(elem_type);
+                        func.emit_storage_store(storage, tmp_base + offset, &slot_types);
                     }
                     offset += elem_slots;
                 }

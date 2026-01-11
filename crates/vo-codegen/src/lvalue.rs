@@ -332,7 +332,7 @@ pub fn emit_lvalue_store(
 ) {
     match lv {
         LValue::Variable(storage) => {
-            func.emit_storage_store_with_slot_types(*storage, src, slot_types);
+            func.emit_storage_store(*storage, src, slot_types);
         }
         
         LValue::Deref { ptr_reg, offset, elem_slots: _ } => {
