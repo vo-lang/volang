@@ -1,0 +1,45 @@
+package main
+
+var (
+	globalA = 10
+	globalB = 20
+	globalC int
+)
+
+const (
+	ConstA = 100
+	ConstB = 200
+	ConstC = ConstA + ConstB
+)
+
+func main() {
+	// Test grouped var declarations
+	assert(globalA == 10, "globalA should be 10")
+	assert(globalB == 20, "globalB should be 20")
+	assert(globalC == 0, "globalC should be zero value")
+
+	// Test grouped const declarations
+	assert(ConstA == 100, "ConstA should be 100")
+	assert(ConstB == 200, "ConstB should be 200")
+	assert(ConstC == 300, "ConstC should be 300")
+
+	// Test local grouped var declarations
+	var (
+		localX = 1
+		localY = 2
+		localZ int
+	)
+	assert(localX == 1, "localX should be 1")
+	assert(localY == 2, "localY should be 2")
+	assert(localZ == 0, "localZ should be 0")
+
+	// Test local grouped const declarations
+	const (
+		LocalConstA = 10
+		LocalConstB = LocalConstA * 2
+	)
+	assert(LocalConstA == 10, "LocalConstA should be 10")
+	assert(LocalConstB == 20, "LocalConstB should be 20")
+
+	println("grouped_decl: PASS")
+}

@@ -1,0 +1,28 @@
+package main
+
+func main() {
+	// Test assert with diagnostic messages (passing cases only)
+	x := 10
+	assert(x > 0, "x=", x, " should be positive")
+	assert(x == 10, "expected 10, got ", x)
+
+	name := "test"
+	count := 5
+	assert(count > 0, "count=", count, " name=", name)
+
+	// Test assert with multiple types
+	f := 3.14
+	b := true
+	assert(b, "bool=", b, " float=", f, " int=", x)
+
+	// Test assert with string concatenation style
+	arr := []int{1, 2, 3}
+	assert(len(arr) == 3, "array length=", len(arr))
+
+	// Test assert with no diagnostic args
+	assert(true)
+	assert(1 == 1)
+	assert(x > 5)
+
+	println("assert_diagnostic: PASS")
+}

@@ -1,0 +1,27 @@
+package main
+
+func main() {
+	// Test receiving from closed channel
+	ch := make(chan int, 2)
+	ch <- 10
+	ch <- 20
+	close(ch)
+	
+	// Should receive buffered values
+	v1 := <-ch
+	assert(v1 == 10, "first value should be 10, got ", v1)
+	
+	v2 := <-ch
+	assert(v2 == 20, "second value should be 20, got ", v2)
+	
+	// Receive from empty closed channel - should return zero value
+	v3 := <-ch
+	assert(v3 == 0, "recv from closed empty channel should return 0, got ", v3)
+	
+	// Receive with ok
+	v4, ok := <-ch
+	assert(v4 == 0, "v4 should be 0")
+	assert(ok == false, "ok should be false for closed channel")
+	
+	println("recv_on_closed_channel: PASS")
+}

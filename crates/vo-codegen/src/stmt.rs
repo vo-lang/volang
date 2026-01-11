@@ -394,6 +394,7 @@ impl IndexLoop {
 /// Define or lookup a range variable (key or value) using StmtCompiler.
 /// - If `define` is true: declare new variable with proper escape handling
 /// - If `define` is false: lookup existing variable
+/// - Blank identifier `_` always gets a temp slot (never defined or looked up)
 /// Gets type from identifier definition when available.
 fn range_var_slot(
     sc: &mut StmtCompiler,
@@ -404,6 +405,13 @@ fn range_var_slot(
     match var {
         Some(expr) => {
             if let vo_syntax::ast::ExprKind::Ident(ident) = &expr.kind {
+                // Blank identifier `_` - allocate temp slot, never define or lookup
+                let is_blank = sc.info.project.interner.resolve(ident.symbol) == Some("_");
+                if is_blank {
+                    let slot_types = sc.info.type_slot_types(fallback_type);
+                    return Ok(sc.func.alloc_temp_typed(&slot_types));
+                }
+                
                 if define {
                     let obj_key = sc.info.get_def(ident);
                     let type_key = sc.info.obj_type(obj_key, "range var must have type");
@@ -416,7 +424,6 @@ fn range_var_slot(
                         .storage.slot())
                 }
             } else if define {
-                let slots = sc.info.type_slot_count(fallback_type);
                 let slot_types = sc.info.type_slot_types(fallback_type);
                 Ok(sc.func.alloc_temp_typed(&slot_types))
             } else {
@@ -424,7 +431,6 @@ fn range_var_slot(
             }
         }
         None => {
-            let slots = sc.info.type_slot_count(fallback_type);
             let slot_types = sc.info.type_slot_types(fallback_type);
             Ok(sc.func.alloc_temp_typed(&slot_types))
         }
@@ -1219,8 +1225,9 @@ fn compile_stmt_with_label(
                         let begin_pc = sc.func.enter_loop(loop_start, label);
                         
                         // v, ok := <-ch
-                        // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot, flags=elem_slots|0x80 (with_ok)
-                        let recv_flags = (elem_slots as u8) | 0x80;
+                        // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
+                        // flags format: (elem_slots << 1) | has_ok
+                        let recv_flags = ((elem_slots as u8) << 1) | 1;
                         sc.func.emit_with_flags(Opcode::ChanRecv, recv_flags, val_slot, chan_reg, ok_slot);
                         
                         // if !ok { goto end }
@@ -1844,33 +1851,55 @@ fn compile_type_switch(
     
     // Generate type checks for each case using IfaceAssert
     for (case_idx, case) in type_switch.cases.iter().enumerate() {
-        if case.types.is_empty() || case.types.iter().all(|t| t.is_none()) {
-            // Default case
+        if case.types.is_empty() {
+            // Default case (no types specified)
             default_case_idx = Some(case_idx);
         } else {
-            // Type case - check each type
-            for type_opt in &case.types {
-                if let Some(type_expr) = type_opt {
-                    let type_key = info.type_expr_type(type_expr.id);
-                    
-                    let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
-                    
-                    // Allocate temp for IfaceAssert result (value + ok)
-                    let target_slots = info.type_slot_count(type_key) as u8;
-                    let result_slots: u16 = if assert_kind == 1 { 2 } else { target_slots as u16 };
-                    // result + ok bool
-                    let mut assert_result_types = info.type_slot_types(type_key);
-                    assert_result_types.push(SlotType::Value); // ok bool
-                    let result_reg = func.alloc_temp_typed(&assert_result_types); // +1 for ok bool
-                    let ok_slot = result_reg + result_slots;
-                    
-                    // IfaceAssert: a=dst, b=src_iface, c=target_id
-                    // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
-                    let flags = assert_kind | (1 << 2) | ((target_slots) << 3);
-                    func.emit_with_flags(Opcode::IfaceAssert, flags, result_reg, iface_slot, target_id as u16);
-                    
-                    // Jump to case body if ok is true
-                    case_jumps.push((case_idx, func.emit_jump(Opcode::JumpIf, ok_slot)));
+            // Check if this is a nil-only case (all types are None)
+            let is_nil_only_case = case.types.iter().all(|t| t.is_none());
+            
+            if is_nil_only_case {
+                // case nil: check if interface is nil (value_kind == Void)
+                // nil interface has slot0 with value_kind = 0 (Void) in low 8 bits
+                let ok_slot = func.alloc_temp_typed(&[SlotType::Value]);
+                let mask_slot = func.alloc_temp_typed(&[SlotType::Value]);
+                let vk_slot = func.alloc_temp_typed(&[SlotType::Value]);
+                
+                // Load mask 0xFF to extract value_kind
+                func.emit_op(Opcode::LoadInt, mask_slot, 0xFF, 0);
+                // Extract value_kind: vk = slot0 & 0xFF
+                func.emit_op(Opcode::And, vk_slot, iface_slot, mask_slot);
+                // Check if value_kind == 0 (Void means nil)
+                func.emit_op(Opcode::LoadInt, ok_slot, 0, 0);
+                func.emit_op(Opcode::EqI, ok_slot, vk_slot, ok_slot);
+                
+                // Jump to case body if ok is true (interface is nil)
+                case_jumps.push((case_idx, func.emit_jump(Opcode::JumpIf, ok_slot)));
+            } else {
+                // Type case - check each type
+                for type_opt in &case.types {
+                    if let Some(type_expr) = type_opt {
+                        let type_key = info.type_expr_type(type_expr.id);
+                        
+                        let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
+                        
+                        // Allocate temp for IfaceAssert result (value + ok)
+                        let target_slots = info.type_slot_count(type_key) as u8;
+                        let result_slots: u16 = if assert_kind == 1 { 2 } else { target_slots as u16 };
+                        // result + ok bool
+                        let mut assert_result_types = info.type_slot_types(type_key);
+                        assert_result_types.push(SlotType::Value); // ok bool
+                        let result_reg = func.alloc_temp_typed(&assert_result_types); // +1 for ok bool
+                        let ok_slot = result_reg + result_slots;
+                        
+                        // IfaceAssert: a=dst, b=src_iface, c=target_id
+                        // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
+                        let flags = assert_kind | (1 << 2) | ((target_slots) << 3);
+                        func.emit_with_flags(Opcode::IfaceAssert, flags, result_reg, iface_slot, target_id as u16);
+                        
+                        // Jump to case body if ok is true
+                        case_jumps.push((case_idx, func.emit_jump(Opcode::JumpIf, ok_slot)));
+                    }
                 }
             }
         }

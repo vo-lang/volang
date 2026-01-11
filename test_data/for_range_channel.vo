@@ -1,0 +1,26 @@
+package main
+
+func main() {
+	ch := make(chan int, 3)
+	ch <- 1
+	ch <- 2
+	ch <- 3
+	close(ch)
+
+	sum := 0
+	for v := range ch {
+		sum += v
+	}
+	assert(sum == 6, "sum should be 6, got ", sum)
+
+	// Test empty closed channel
+	ch2 := make(chan int)
+	close(ch2)
+	count := 0
+	for _ = range ch2 {
+		count += 1
+	}
+	assert(count == 0, "empty channel should iterate 0 times")
+
+	println("for_range_channel: PASS")
+}

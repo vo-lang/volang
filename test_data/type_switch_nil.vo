@@ -1,0 +1,47 @@
+package main
+
+func describe(i interface{}) string {
+	switch v := i.(type) {
+	case nil:
+		return "nil"
+	case int:
+		if v > 0 {
+			return "positive int"
+		}
+		return "non-positive int"
+	case string:
+		return "string: " + v
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return "unknown"
+	}
+}
+
+func main() {
+	// Test nil case in type switch
+	assert(describe(nil) == "nil", "nil should match nil case")
+	
+	// Test typed nil - should NOT match nil case (it's a typed nil)
+	var p *Point
+	result := describe(p)
+	// typed nil (*Point)(nil) is NOT a nil interface, it should go to default
+	assert(result == "unknown", "typed nil should match default, got: ", result)
+	
+	// Test other cases
+	assert(describe(42) == "positive int", "42 should be positive int")
+	assert(describe(-1) == "non-positive int", "-1 should be non-positive int")
+	assert(describe("hello") == "string: hello", "string test failed")
+	assert(describe(true) == "true", "true test failed")
+	assert(describe(false) == "false", "false test failed")
+	assert(describe(3.14) == "unknown", "float should be unknown")
+	
+	println("type_switch_nil: PASS")
+}
+
+type Point struct {
+	x, y int
+}
