@@ -1,5 +1,6 @@
 //! Composite literal and constant value compilation.
 
+use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
 use vo_vm::instruction::Opcode;
 
@@ -205,14 +206,14 @@ fn compile_slice_lit(
     let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
     
     // Load elem_meta into register
-    let meta_reg = func.alloc_temp(1);
+    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
     
     // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     // When flags=0 (dynamic), put len, cap, elem_bytes in consecutive registers
     let num_regs = if flags == 0 { 3 } else { 2 };
-    let len_cap_reg = func.alloc_temp(num_regs);
+    let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
     let (b, c) = encode_i32(len as i32);
     func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
     func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
@@ -226,13 +227,13 @@ fn compile_slice_lit(
     for (i, elem) in lit.elems.iter().enumerate() {
         // For interface element type, need to convert concrete value to interface
         let val_reg = if info.is_interface(elem_type) {
-            let iface_reg = func.alloc_temp(elem_slots);
+            let iface_reg = func.alloc_temp_typed(&elem_slot_types);
             crate::stmt::compile_iface_assign(iface_reg, &elem.value, elem_type, ctx, func, info)?;
             iface_reg
         } else {
             compile_expr(&elem.value, ctx, func, info)?
         };
-        let idx_reg = func.alloc_temp(1);
+        let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }
@@ -259,13 +260,13 @@ fn compile_map_lit(
     
     // MapNew: a=dst, b=packed_meta, c=(key_slots<<8)|val_slots
     // packed_meta = (key_meta << 32) | val_meta
-    let packed_reg = func.alloc_temp(1);
+    let packed_reg = func.alloc_temp_typed(&[SlotType::Value]);
     // Load key_meta, shift left 32, then OR with val_meta
     func.emit_op(Opcode::LoadConst, packed_reg, key_meta_idx, 0);
-    let shift_reg = func.alloc_temp(1);
+    let shift_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadInt, shift_reg, 32, 0);
     func.emit_op(Opcode::Shl, packed_reg, packed_reg, shift_reg);
-    let val_meta_reg = func.alloc_temp(1);
+    let val_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
     func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
     
@@ -277,7 +278,9 @@ fn compile_map_lit(
         if let Some(key) = &elem.key {
             // MapSet expects: a=map, b=meta_and_key, c=val
             // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
-            let meta_and_key_reg = func.alloc_temp(1 + key_slots as u16);
+            let mut map_set_slot_types = vec![SlotType::Value]; // meta
+            map_set_slot_types.extend(key_slot_types.iter().cloned()); // key
+            let meta_and_key_reg = func.alloc_temp_typed(&map_set_slot_types);
             let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
             let meta_idx = ctx.const_int(meta as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
@@ -302,7 +305,7 @@ fn compile_map_lit(
                             .ok_or_else(|| CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol)))?;
                         // Use emit_storage_load to handle all storage kinds properly
                         let value_slots = storage.value_slots();
-                        let tmp = func.alloc_temp(value_slots);
+                        let tmp = func.alloc_temp_typed(&vec![SlotType::Value; value_slots as usize]);
                         func.emit_storage_load(storage, tmp);
                         func.emit_copy(meta_and_key_reg + 1, tmp, value_slots);
                     }
@@ -374,7 +377,7 @@ pub fn compile_func_lit(
     for (sym, type_key, slots, slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots) {
             let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
-            let meta_reg = closure_builder.alloc_temp(1);
+            let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
             closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
             closure_builder.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
             closure_builder.emit_ptr_set(gcref_slot, 0, param_slot, slots);
@@ -420,7 +423,7 @@ pub fn compile_func_lit(
             } else if let Some(capture) = parent_func.lookup_capture(sym) {
                 // Variable is a capture in parent - get it via ClosureGet first
                 let capture_index = capture.index;
-                let temp = parent_func.alloc_temp(1);
+                let temp = parent_func.alloc_temp_typed(&[SlotType::GcRef]);
                 parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
                 parent_func.emit_ptr_set_with_barrier(dst, offset, temp, 1, true);
             }

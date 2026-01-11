@@ -977,7 +977,7 @@ fn compile_func_decl(
     for (sym, type_key, slots, slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots) {
             let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
-            let meta_reg = builder.alloc_temp(1);
+            let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
             builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
             builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
             builder.emit_ptr_set(gcref_slot, 0, param_slot, slots);
@@ -1029,7 +1029,7 @@ fn compile_func_decl(
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
         let meta_idx = ctx.get_or_create_value_meta(Some(er.result_type), er.slots, &er.slot_types);
-        let meta_reg = builder.alloc_temp(1);
+        let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
         builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
     }
@@ -1095,9 +1095,9 @@ fn compile_global_array_init(
     let elem_vk = info.type_value_kind(elem_type);
     
     // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
-    let gcref_slot = func.alloc_temp(1);
-    let meta_reg = func.alloc_temp(1);
-    let len_reg = func.alloc_temp(1);
+    let gcref_slot = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+    let meta_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
+    let len_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
     
     // Get elem_meta: (rttid << 8) | elem_vk
     let elem_rttid = ctx.intern_type_key(elem_type, info);
@@ -1123,7 +1123,7 @@ fn compile_global_array_init(
         let elem_slot_types = info.type_slot_types(elem_type);
         let tmp_elem = func.alloc_temp_typed(&elem_slot_types);
         // For dynamic elem_bytes (flags=0), need idx_reg and idx_reg+1 for elem_bytes
-        let idx_reg = func.alloc_temp(if flags == 0 { 2 } else { 1 });
+        let idx_reg = func.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; if flags == 0 { 2 } else { 1 }]);
         
         for (i, elem) in lit.elems.iter().enumerate() {
             // Compile element value to tmp_elem
@@ -1182,7 +1182,7 @@ fn compile_package_globals(
                         
                         // Special handling for interface: use compile_iface_assign for proper itab setup
                         if info.is_interface(tk) {
-                            let tmp = init_builder.alloc_temp(2);
+                            let tmp = init_builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
                             crate::stmt::compile_iface_assign(tmp, &initializer.rhs, tk, ctx, init_builder, info)?;
                             emit_global_set(init_builder, global_idx, tmp, 2);
                             continue;

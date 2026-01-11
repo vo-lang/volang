@@ -207,13 +207,16 @@ fn compile_dyn_op(
             // Protocol-first: check if base implements IndexObject via IfaceAssert
             let end_jump = if let Some(index_iface_meta_id) = ctx.builtin_protocols().index_object_meta_id {
                 // IfaceAssert with has_ok flag
-                let iface_reg = func.alloc_temp(3);
+                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, base_reg, index_iface_meta_id as u16);
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
                 // Protocol method call: DynIndex(key any) (any, error)
                 // Allocate max(args, returns) = max(2, 4) = 4 slots
-                let args_start = func.alloc_temp(4);
+                let args_start = func.alloc_temp_typed(&[
+                    SlotType::Interface0, SlotType::Interface1,
+                    SlotType::Interface0, SlotType::Interface1,
+                ]);
                 let any_type = info.any_type();
                 let key_type = info.expr_type(index_expr.id);
                 let key_slots = info.type_slot_count(key_type);
@@ -244,7 +247,10 @@ fn compile_dyn_op(
             let key_slots = info.type_slot_count(key_type);
             
             // Args: base[2] + key[2] = 4 slots
-            let args_start = func.alloc_temp(4);
+            let args_start = func.alloc_temp_typed(&[
+                SlotType::Interface0, SlotType::Interface1,
+                SlotType::Interface0, SlotType::Interface1,
+            ]);
             func.emit_op(Opcode::Copy, args_start, base_reg, 0);
             func.emit_op(Opcode::Copy, args_start + 1, base_reg + 1, 0);
             
@@ -257,7 +263,10 @@ fn compile_dyn_op(
             }
             
             // Call: 4 arg slots, 4 ret slots (data[2], error[2])
-            let result = func.alloc_temp(4);
+            let result = func.alloc_temp_typed(&[
+                SlotType::Interface0, SlotType::Interface1,
+                SlotType::Interface0, SlotType::Interface1,
+            ]);
             func.emit_with_flags(Opcode::CallExtern, 4, result, extern_id as u16, args_start);
             emit_unbox_with_type_check(ret_type, dst, result, error_slot, ctx, func, info);
             
@@ -441,7 +450,7 @@ fn compile_dyn_closure_call(
     // This is safe because GC scanning a non-GcRef value as GcRef just means scanning
     // an invalid pointer (which won't match any heap object).
     let buffer_size = arg_slots_total.max(max_dyn_ret_slots);
-    let ret_slots_slot = func.alloc_temp(1); // ret_slots count (Value)
+    let ret_slots_slot = func.alloc_temp_typed(&[SlotType::Value]); // ret_slots count (Value)
     let args_start = func.alloc_temp_typed(&vec![SlotType::GcRef; buffer_size as usize]);
     // Note: args_start should equal ret_slots_slot + 1 due to sequential allocation
     
@@ -632,7 +641,10 @@ fn emit_unbox_interface(
     let (assert_kind, target_id) = compute_assert_params(ret_type, ctx, info);
     
     let target_slots = if assert_kind == 1 { 2 } else { slots };
-    let assert_result = func.alloc_temp(target_slots + 1);
+    // result + ok bool
+    let mut assert_slot_types = info.type_slot_types(ret_type);
+    assert_slot_types.push(SlotType::Value); // ok bool
+    let assert_result = func.alloc_temp_typed(&assert_slot_types);
     let ok_slot = assert_result + target_slots;
     
     let flags = assert_kind | (1 << 2) | ((target_slots as u8) << 3);
@@ -680,7 +692,7 @@ fn emit_type_assert_error(
     func: &mut FuncBuilder,
 ) {
     let extern_id = ctx.get_or_register_extern("dyn_type_assert_error");
-    let args = func.alloc_temp(3);
+    let args = func.alloc_temp_typed(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     
     // Expected: (rttid, vk)
     let expected_rttid = if assert_kind == 1 { 0 } else { target_id };

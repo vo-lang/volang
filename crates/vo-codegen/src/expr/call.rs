@@ -19,7 +19,7 @@ use super::{compile_expr, compile_expr_to, get_gcref_slot};
 /// The remaining slots (for arguments) are typed as Value.
 fn alloc_call_buffer(func: &mut FuncBuilder, buffer_size: u16, ret_slots: u16, ret_slot_types: &[SlotType]) -> u16 {
     if ret_slots == 0 || buffer_size == 0 {
-        return func.alloc_temp(buffer_size.max(1));
+        return func.alloc_temp_typed(&vec![SlotType::Value; buffer_size.max(1) as usize]);
     }
     
     // Build combined slot types: ret_slot_types for return value, Value for the rest
@@ -97,7 +97,7 @@ pub fn compile_call(
                 dst
             } else {
                 // Need more space for args than ret, allocate separately
-                func.alloc_temp(need_slots)
+                func.alloc_temp_typed(&vec![SlotType::Value; need_slots as usize])
             };
             
             // Compile args with variadic packing support
@@ -121,7 +121,7 @@ pub fn compile_call(
             let closure_reg = compile_expr(&call.func, ctx, func, info)?;
             
             // Compile arguments - allocate max(arg_slots, ret_slots) for return values
-            let args_start = func.alloc_temp(total_arg_slots.max(ret_slots));
+            let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots) as usize]);
             compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
             
             // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
@@ -173,7 +173,7 @@ pub fn compile_closure_call_from_reg(
     let ret_slots = info.type_slot_count(info.expr_type(expr.id)) as u16;
     let total_arg_slots: u16 = call.args.iter().map(|a| info.expr_slots(a.id)).sum();
     
-    let args_start = func.alloc_temp(total_arg_slots.max(ret_slots).max(1));
+    let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots).max(1) as usize]);
     compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
     
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
@@ -232,7 +232,7 @@ pub fn emit_receiver(
             if recv_is_ptr {
                 // recv is *OuterStruct, need to read embedded *T from it, then dereference
                 // Step 1: Read the embedded *T pointer from OuterStruct
-                let temp_ptr = func.alloc_temp(1);
+                let temp_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
                 func.emit_with_flags(Opcode::PtrGetN, 1, temp_ptr, recv_reg, embed_offset);
                 // Step 2: Dereference the embedded *T to get the value
                 func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, temp_ptr, 0);
@@ -304,7 +304,7 @@ fn compile_method_call(
                 
                 // Compute total arg slots using PARAMETER types (handles interface conversion)
                 let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-                let args_start = func.alloc_temp(total_arg_slots.max(ret_slots).max(1));
+                let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots).max(1) as usize]);
                 
                 // Compile arguments with interface conversion
                 compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
@@ -509,7 +509,7 @@ pub fn compile_extern_call(
     
     // Use compile_method_args for proper type conversion (e.g., boxing to `any`)
     let total_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-    let args_start = func.alloc_temp(total_slots.max(1));
+    let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_slots.max(1) as usize]);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
     
     func.emit_with_flags(Opcode::CallExtern, total_slots as u8, dst, extern_id as u16, args_start);
@@ -658,14 +658,14 @@ fn pack_variadic_args(
     
     // Get element meta
     let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
-    let meta_reg = func.alloc_temp(1);
+    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
     
     // Create slice
-    let dst = func.alloc_temp(1);
+    let dst = func.alloc_temp_typed(&[SlotType::GcRef]);
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     let num_regs = if flags == 0 { 3 } else { 2 };
-    let len_cap_reg = func.alloc_temp(num_regs);
+    let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
     let (b, c) = crate::type_info::encode_i32(len as i32);
     func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
     func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
@@ -678,13 +678,13 @@ fn pack_variadic_args(
     // Set each element
     for (i, elem) in variadic_args.iter().enumerate() {
         let val_reg = if info.is_interface(elem_type) {
-            let iface_reg = func.alloc_temp(elem_slots);
+            let iface_reg = func.alloc_temp_typed(&elem_slot_types);
             crate::stmt::compile_iface_assign(iface_reg, elem, elem_type, ctx, func, info)?;
             iface_reg
         } else {
             compile_expr(elem, ctx, func, info)?
         };
-        let idx_reg = func.alloc_temp(1);
+        let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }

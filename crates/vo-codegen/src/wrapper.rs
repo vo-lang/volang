@@ -85,7 +85,7 @@ pub fn generate_iface_wrapper(
     let forwarded_param_slots: u16 = wrapper_param_slots.iter().map(|(_, s)| *s).sum();
     let total_arg_slots = recv_slots + forwarded_param_slots;
     let alloc_slots = total_arg_slots.max(ret_slots);
-    let args_start = builder.alloc_temp(alloc_slots);
+    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     if needs_unbox {
         // Struct/Array: dereference GcRef to get value
@@ -173,7 +173,7 @@ pub fn generate_promoted_wrapper(
     // Allocate args area for call (ensure enough space for return values)
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
     let alloc_slots = total_arg_slots.max(ret_slots);
-    let args_start = builder.alloc_temp(alloc_slots);
+    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver loading based on embedding type
     emit_promoted_receiver(
@@ -219,7 +219,7 @@ fn emit_promoted_receiver(
 ) {
     if has_pointer_embed {
         // Pointer embedding: read embedded pointer, then dereference if value receiver
-        let temp_ptr = builder.alloc_temp(1);
+        let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
         builder.emit_ptr_get(temp_ptr, outer_gcref, offset, 1);
         
         if is_pointer_receiver {
@@ -295,11 +295,11 @@ pub fn generate_embedded_iface_wrapper(
     let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
     // Load embedded interface (2 slots) from outer struct
-    let iface_slot = builder.alloc_temp(2);
+    let iface_slot = builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
     builder.emit_ptr_get(iface_slot, outer_gcref, offset, 2);
     
     // Allocate args for CallIface (params only, receiver is separate)
-    let args_start = builder.alloc_temp(param_slots.max(ret_slots).max(1));
+    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
     
     // Copy forwarded params
     if let Some(first_param) = first_param_slot {

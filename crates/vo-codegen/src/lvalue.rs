@@ -7,6 +7,7 @@
 //! - Container indexing (arr[i], slice[i], map[k])
 //! - Pointer dereference (*p)
 
+use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 use vo_vm::instruction::Opcode;
 
@@ -133,14 +134,18 @@ pub fn resolve_lvalue(
                         // maps[k].field - map returns by value, so we get a copy
                         let (_, val_type) = info.map_key_val_types(container_type);
                         let val_slots = info.type_slot_count(val_type);
-                        let tmp = func.alloc_temp(val_slots);
+                        let val_slot_types = info.type_slot_types(val_type);
+                        let tmp = func.alloc_temp_typed(&val_slot_types);
                         
                         // Compile map get to temp
                         let (key_slots, _) = info.map_key_val_slots(container_type);
                         let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
                         let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                         let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
-                        let meta_reg = func.alloc_temp(1 + key_slots);
+                        let (key_type, _) = info.map_key_val_types(container_type);
+                        let mut map_get_slot_types = vec![SlotType::Value]; // meta
+                        map_get_slot_types.extend(info.type_slot_types(key_type)); // key
+                        let meta_reg = func.alloc_temp_typed(&map_get_slot_types);
                         let meta_idx = ctx.const_int(meta as i64);
                         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                         func.emit_copy(meta_reg + 1, index_reg, key_slots);
@@ -296,10 +301,16 @@ pub fn emit_lvalue_load(
                 ContainerKind::Slice { elem_bytes, elem_vk } => {
                     func.emit_slice_get(dst, *container_reg, *index_reg, *elem_bytes as usize, *elem_vk, ctx);
                 }
-                ContainerKind::Map { key_slots, val_slots, .. } => {
+                ContainerKind::Map { key_slots, val_slots, key_may_gc, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
-                    let meta_reg = func.alloc_temp(1 + *key_slots);
+                    let mut map_get_slot_types = vec![SlotType::Value]; // meta
+                    // Use key_may_gc to determine slot types for key
+                    let key_slot_type = if *key_may_gc { SlotType::GcRef } else { SlotType::Value };
+                    for _ in 0..*key_slots {
+                        map_get_slot_types.push(key_slot_type);
+                    }
+                    let meta_reg = func.alloc_temp_typed(&map_get_slot_types);
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
@@ -313,7 +324,7 @@ pub fn emit_lvalue_load(
         
         LValue::Capture { capture_index, value_slots } => {
             // ClosureGet gets the GcRef, then PtrGet to read value
-            let gcref_slot = func.alloc_temp(1);
+            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, 0, *value_slots);
         }
@@ -375,7 +386,13 @@ pub fn emit_lvalue_store(
                     // MapSet: a=map, b=meta_and_key, c=val
                     // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
-                    let meta_and_key_reg = func.alloc_temp(1 + *key_slots);
+                    let mut map_set_slot_types = vec![SlotType::Value]; // meta
+                    // Use key_may_gc to determine slot types for key
+                    let key_slot_type = if *key_may_gc { SlotType::GcRef } else { SlotType::Value };
+                    for _ in 0..*key_slots {
+                        map_set_slot_types.push(key_slot_type);
+                    }
+                    let meta_and_key_reg = func.alloc_temp_typed(&map_set_slot_types);
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
@@ -391,7 +408,7 @@ pub fn emit_lvalue_store(
         
         LValue::Capture { capture_index, value_slots: _ } => {
             // ClosureGet gets the GcRef, then PtrSet to write value
-            let gcref_slot = func.alloc_temp(1);
+            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
         }
@@ -485,7 +502,7 @@ pub fn compile_index_addr_to_reg(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let addr_reg = func.alloc_temp(1);
+    let addr_reg = func.alloc_temp_typed(&[SlotType::GcRef]);
     compile_index_addr(container_expr, index_expr, addr_reg, ctx, func, info)?;
     Ok(addr_reg)
 }

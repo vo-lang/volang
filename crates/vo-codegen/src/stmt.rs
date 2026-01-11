@@ -2,6 +2,7 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
+use vo_runtime::SlotType;
 use vo_syntax::ast::{Block, Expr, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
@@ -26,10 +27,12 @@ fn emit_error_propagate_return(
 ) {
     let ret_types: Vec<_> = func.return_types().to_vec();
     let mut total_ret_slots = 0u16;
+    let mut ret_slot_types = Vec::new();
     for ret_type in &ret_types {
         total_ret_slots += info.type_slot_count(*ret_type);
+        ret_slot_types.extend(info.type_slot_types(*ret_type));
     }
-    let ret_start = func.alloc_temp(total_ret_slots);
+    let ret_start = func.alloc_temp_typed(&ret_slot_types);
     for i in 0..total_ret_slots {
         func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
     }
@@ -124,7 +127,8 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             // Compile init expression FIRST, before registering variable.
             // This ensures shadowing like `i := i` references the outer `i`.
             let slots = self.info.type_slot_count(type_key);
-            let tmp = self.func.alloc_temp(slots);
+            let slot_types = self.info.type_slot_types(type_key);
+            let tmp = self.func.alloc_temp_typed(&slot_types);
             self.compile_value(expr, tmp, type_key)?;
             
             // Now allocate storage and register the variable name
@@ -202,13 +206,13 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let elem_meta_idx = self.ctx.get_or_create_array_elem_meta(type_key, self.info);
 
         // emit ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_flags
-        let meta_reg = self.func.alloc_temp(1);
+        let meta_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
         self.func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         // When flags=0 (dynamic), put len and elem_bytes in consecutive registers
         let num_regs = if flags == 0 { 2 } else { 1 };
-        let len_reg = self.func.alloc_temp(num_regs);
+        let len_reg = self.func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
         let (b, c) = encode_i32(arr_len as i32);
         self.func.emit_op(Opcode::LoadInt, len_reg, b, c);
         if flags == 0 {
@@ -231,7 +235,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
 
         let meta_idx = self.ctx.get_or_create_value_meta(Some(type_key), slots, slot_types);
-        let meta_reg = self.func.alloc_temp(1);
+        let meta_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
         self.func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
 
@@ -301,7 +305,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             StorageKind::HeapArray { gcref_slot, elem_slots } => {
                 let arr_len = slot_types.len() as u16 / elem_slots;
                 for i in 0..arr_len {
-                    let idx_reg = self.func.alloc_temp(1);
+                    let idx_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
                     self.func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
                     let src_offset = src_slot + i * elem_slots;
                     self.func.emit_with_flags(Opcode::ArraySet, elem_slots as u8, gcref_slot, idx_reg, src_offset);
@@ -344,13 +348,13 @@ struct IndexLoop {
 impl IndexLoop {
     /// Begin: __idx := 0, HINT_LOOP_BEGIN, loop: if __idx >= __len { goto end }
     fn begin(func: &mut FuncBuilder, len_slot: u16, label: Option<vo_common::Symbol>) -> Self {
-        let idx_slot = func.alloc_temp(1);
+        let idx_slot = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
         
         let loop_start = func.current_pc();
         func.enter_loop(loop_start, label);
         
-        let cmp_slot = func.alloc_temp(1);
+        let cmp_slot = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::GeI, cmp_slot, idx_slot, len_slot);
         let end_jump = func.emit_jump(Opcode::JumpIf, cmp_slot);
         
@@ -367,7 +371,7 @@ impl IndexLoop {
     /// End: __idx++, HINT_LOOP_END, goto loop, patch breaks/continues, finalize HINT_LOOP_BEGIN
     fn end(self, func: &mut FuncBuilder) {
         let post_pc = func.current_pc();
-        let one = func.alloc_temp(1);
+        let one = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, one, 1, 0);
         func.emit_op(Opcode::AddI, self.idx_slot, self.idx_slot, one);
         
@@ -413,14 +417,16 @@ fn range_var_slot(
                 }
             } else if define {
                 let slots = sc.info.type_slot_count(fallback_type);
-                Ok(sc.func.alloc_temp(slots))
+                let slot_types = sc.info.type_slot_types(fallback_type);
+                Ok(sc.func.alloc_temp_typed(&slot_types))
             } else {
                 crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)
             }
         }
         None => {
             let slots = sc.info.type_slot_count(fallback_type);
-            Ok(sc.func.alloc_temp(slots))
+            let slot_types = sc.info.type_slot_types(fallback_type);
+            Ok(sc.func.alloc_temp_typed(&slot_types))
         }
     }
 }
@@ -478,7 +484,8 @@ fn compile_stmt_with_label(
                 // Multi-value: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(short_var.values[0].id);
                 let total_slots = info.type_slot_count(tuple_type);
-                let tmp_base = func.alloc_temp(total_slots);
+                let tuple_slot_types = info.type_slot_types(tuple_type);
+                let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
                 compile_expr_to(&short_var.values[0], tmp_base, ctx, func, info)?;
 
                 let mut sc = StmtCompiler::new(ctx, func, info);
@@ -517,7 +524,8 @@ fn compile_stmt_with_label(
                     } else {
                         let type_key = info.expr_type(expr.id);
                         let slots = info.type_slot_count(type_key);
-                        let tmp = func.alloc_temp(slots);
+                        let slot_types = info.type_slot_types(type_key);
+                        let tmp = func.alloc_temp_typed(&slot_types);
                         compile_expr_to(expr, tmp, ctx, func, info)?;
                         rhs_temps.push(Some((tmp, type_key)));
                     }
@@ -556,32 +564,40 @@ fn compile_stmt_with_label(
                             // - (any, error) tuple: compile and short-circuit on error
                             // - other types: box to any
                             let any_base_reg = if info.is_tuple_any_error(base_type) {
-                                let base_reg = func.alloc_temp(4);
+                                // (any, error) tuple: 4 slots with interface types
+                                let base_reg = func.alloc_temp_typed(&[
+                                    SlotType::Interface0, SlotType::Interface1,  // any
+                                    SlotType::Interface0, SlotType::Interface1,  // error
+                                ]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
                                 emit_dyn_assign_error_short_circuit(base_reg, func, info);
                                 base_reg  // first 2 slots are the any value
                             } else if info.is_interface(base_type) {
-                                let base_reg = func.alloc_temp(2);
+                                let base_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
                                 base_reg
                             } else {
-                                let any_reg = func.alloc_temp(2);
+                                let any_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                                 compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
                                 any_reg
                             };
 
-                            let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
+                            let field_name = info.project.interner.resolve(ident.symbol)
+                                .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
 
                             // Protocol-first: check if base implements SetAttrObject via IfaceAssert
                             // Use builtin protocol meta_id (no dependency on user imports)
                             let end_jump = if let Some(set_attr_iface_meta_id) = ctx.builtin_protocols().set_attr_object_meta_id {
                                 // IfaceAssert with has_ok flag to check interface implementation
-                                let iface_reg = func.alloc_temp(3);
+                                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, any_base_reg, set_attr_iface_meta_id as u16);
                                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
                                 // Protocol method call: DynSetAttr(name string, value any) error
-                                let args_start = func.alloc_temp(3);
+                                let args_start = func.alloc_temp_typed(&[
+                                    SlotType::GcRef,  // string
+                                    SlotType::Interface0, SlotType::Interface1,  // any value
+                                ]);
                                 let name_idx = ctx.const_string(field_name);
                                 func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
                                 compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
@@ -602,13 +618,17 @@ fn compile_stmt_with_label(
                             };
 
                             // Reflection path: extern dyn_set_attr for types not implementing SetAttrObject
-                            let args_start = func.alloc_temp(5);
+                            let args_start = func.alloc_temp_typed(&[
+                                SlotType::Interface0, SlotType::Interface1,  // base any
+                                SlotType::GcRef,  // name string
+                                SlotType::Interface0, SlotType::Interface1,  // value any
+                            ]);
                             func.emit_copy(args_start, any_base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
                             func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
                             compile_iface_assign(args_start + 3, &assign.rhs[0], any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_attr");
-                            let err_reg = func.alloc_temp(2);
+                            let err_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
@@ -629,16 +649,19 @@ fn compile_stmt_with_label(
                             // - interface/any: compile directly
                             // - other types: box to any
                             let any_base_reg = if info.is_tuple_any_error(base_type) {
-                                let base_reg = func.alloc_temp(4);
+                                let base_reg = func.alloc_temp_typed(&[
+                                    SlotType::Interface0, SlotType::Interface1,
+                                    SlotType::Interface0, SlotType::Interface1,
+                                ]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
                                 emit_dyn_assign_error_short_circuit(base_reg, func, info);
                                 base_reg
                             } else if info.is_interface(base_type) {
-                                let base_reg = func.alloc_temp(2);
+                                let base_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
                                 base_reg
                             } else {
-                                let any_reg = func.alloc_temp(2);
+                                let any_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                                 compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
                                 any_reg
                             };
@@ -647,12 +670,15 @@ fn compile_stmt_with_label(
                             // Use builtin protocol meta_id (no dependency on user imports)
                             let end_jump = if let Some(set_index_iface_meta_id) = ctx.builtin_protocols().set_index_object_meta_id {
                                 // IfaceAssert with has_ok flag to check interface implementation
-                                let iface_reg = func.alloc_temp(3);
+                                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, any_base_reg, set_index_iface_meta_id as u16);
                                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
                                 // Protocol method call: DynSetIndex(key any, value any) error
-                                let args_start = func.alloc_temp(4);
+                                let args_start = func.alloc_temp_typed(&[
+                                    SlotType::Interface0, SlotType::Interface1,
+                                    SlotType::Interface0, SlotType::Interface1,
+                                ]);
                                 compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
                                 compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
 
@@ -672,12 +698,16 @@ fn compile_stmt_with_label(
                             };
 
                             // Reflection path: extern dyn_set_index for types not implementing SetIndexObject
-                            let args_start = func.alloc_temp(6);
+                            let args_start = func.alloc_temp_typed(&[
+                                SlotType::Interface0, SlotType::Interface1,  // base
+                                SlotType::Interface0, SlotType::Interface1,  // key
+                                SlotType::Interface0, SlotType::Interface1,  // value
+                            ]);
                             func.emit_copy(args_start, any_base_reg, 2);
                             compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
                             compile_iface_assign(args_start + 4, &assign.rhs[0], any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_index");
-                            let err_reg = func.alloc_temp(2);
+                            let err_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
@@ -705,7 +735,8 @@ fn compile_stmt_with_label(
                 // Multi-value assignment: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(assign.rhs[0].id);
                 let total_slots = info.type_slot_count(tuple_type);
-                let tmp_base = func.alloc_temp(total_slots);
+                let tuple_slot_types = info.type_slot_types(tuple_type);
+                let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
                 compile_expr_to(&assign.rhs[0], tmp_base, ctx, func, info)?;
                 
                 let mut offset = 0u16;
@@ -737,10 +768,12 @@ fn compile_stmt_with_label(
                 // 1. Evaluate all RHS to temporaries
                 let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
                 for rhs in &assign.rhs {
+                    let rhs_type = info.expr_type(rhs.id);
                     let rhs_slots = info.expr_slots(rhs.id);
-                    let tmp = func.alloc_temp(rhs_slots);
+                    let rhs_slot_types = info.type_slot_types(rhs_type);
+                    let tmp = func.alloc_temp_typed(&rhs_slot_types);
                     compile_expr_to(rhs, tmp, ctx, func, info)?;
-                    rhs_temps.push((tmp, rhs_slots, info.expr_type(rhs.id)));
+                    rhs_temps.push((tmp, rhs_slots, rhs_type));
                 }
                 
                 // 2. Assign temporaries to LHS using LValue system
@@ -792,7 +825,14 @@ fn compile_stmt_with_label(
                     } else {
                         // Mixed or non-escaped: copy to return area as before
                         let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s, _)| *s).sum();
-                        let ret_start = func.alloc_temp(total_ret_slots);
+                        // Build slot types from named return variables
+                        let mut ret_slot_types = Vec::new();
+                        for (_, slots, _) in &named_return_slots {
+                            for _ in 0..*slots {
+                                ret_slot_types.push(SlotType::Value);  // Conservative: named returns are already properly typed at definition
+                            }
+                        }
+                        let ret_start = func.alloc_temp_typed(&ret_slot_types);
                         let mut offset = 0u16;
                         for &(slot, slots, escaped) in &named_return_slots {
                             if escaped {
@@ -829,7 +869,8 @@ fn compile_stmt_with_label(
                         let ret_type = ret_types.get(i).copied();
                         
                         // Compile value to temp, then store to heap
-                        let temp = func.alloc_temp(slots);
+                        let temp_slot_types = ret_type.map(|rt| info.type_slot_types(rt)).unwrap_or_else(|| vec![SlotType::Value; slots as usize]);
+                        let temp = func.alloc_temp_typed(&temp_slot_types);
                         if let Some(rt) = ret_type {
                             compile_value_to(result, temp, rt, ctx, func, info)?;
                         } else {
@@ -881,7 +922,11 @@ fn compile_stmt_with_label(
                     
                     if !optimized {
                         // Standard path: allocate space and compile return values
-                        let ret_start = func.alloc_temp(total_ret_slots);
+                        let mut ret_slot_types = Vec::new();
+                        for ret_type in &ret_types {
+                            ret_slot_types.extend(info.type_slot_types(*ret_type));
+                        }
+                        let ret_start = func.alloc_temp_typed(&ret_slot_types);
                         
                         // Check for multi-value case: return f() where f() returns a tuple
                         let is_multi_value = ret.values.len() == 1 
@@ -1068,7 +1113,7 @@ fn compile_stmt_with_label(
                         let evk = info.type_value_kind(et);
                         let (ks, vs) = (range_var_slot(&mut sc, key.as_ref(), et, *define)?,
                                         range_var_slot(&mut sc, value.as_ref(), et, *define)?);
-                        let ls = sc.func.alloc_temp(1);
+                        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
                         sc.func.emit_op(Opcode::LoadInt, ls, len as u16, (len >> 16) as u16);
                         let lp = IndexLoop::begin(sc.func, ls, label);
                         lp.emit_key(sc.func, key.as_ref().map(|_| ks));
@@ -1090,7 +1135,7 @@ fn compile_stmt_with_label(
                         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
                         let (ks, vs) = (range_var_slot(&mut sc, key.as_ref(), et, *define)?,
                                         range_var_slot(&mut sc, value.as_ref(), et, *define)?);
-                        let ls = sc.func.alloc_temp(1);
+                        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
                         sc.func.emit_op(Opcode::SliceLen, ls, reg, 0);
                         let lp = IndexLoop::begin(sc.func, ls, label);
                         lp.emit_key(sc.func, key.as_ref().map(|_| ks));
@@ -1105,9 +1150,9 @@ fn compile_stmt_with_label(
                         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
                         let (ks, vs) = (range_var_slot(&mut sc, key.as_ref(), range_type, *define)?,
                                         range_var_slot(&mut sc, value.as_ref(), range_type, *define)?);
-                        let (pos, len, cmp) = (sc.func.alloc_temp(1), sc.func.alloc_temp(1), sc.func.alloc_temp(1));
+                        let (pos, len, cmp) = (sc.func.alloc_temp_typed(&[SlotType::Value]), sc.func.alloc_temp_typed(&[SlotType::Value]), sc.func.alloc_temp_typed(&[SlotType::Value]));
                         // StrDecodeRune writes (rune, width) to consecutive slots
-                        let rune_width = sc.func.alloc_temp(2);
+                        let rune_width = sc.func.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
                         
                         sc.func.emit_op(Opcode::LoadInt, pos, 0, 0);
                         sc.func.emit_op(Opcode::StrLen, len, reg, 0);
@@ -1146,7 +1191,7 @@ fn compile_stmt_with_label(
                         let (kt, vt) = info.map_key_val_types(range_type);
                         let (ks, vs) = (range_var_slot(&mut sc, key.as_ref(), kt, *define)?,
                                         range_var_slot(&mut sc, value.as_ref(), vt, *define)?);
-                        let ls = sc.func.alloc_temp(1);
+                        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
                         sc.func.emit_op(Opcode::MapLen, ls, reg, 0);
                         let lp = IndexLoop::begin(sc.func, ls, label);
                         sc.func.emit_with_flags(Opcode::MapIterGet, (kn as u8) | ((vn as u8) << 4), ks, reg, lp.idx_slot);
@@ -1167,7 +1212,7 @@ fn compile_stmt_with_label(
                         let val_slot = range_var_slot(&mut sc, var_expr, elem_type, *define)?;
                         
                         // ok slot
-                        let ok_slot = sc.func.alloc_temp(1);
+                        let ok_slot = sc.func.alloc_temp_typed(&[SlotType::Value]);
                         
                         // loop:
                         let loop_start = sc.func.current_pc();
@@ -1276,10 +1321,10 @@ fn compile_stmt_with_label(
             use crate::lvalue::{emit_lvalue_load, emit_lvalue_store};
             
             let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
-            let tmp = func.alloc_temp(1);
+            let tmp = func.alloc_temp_typed(&[SlotType::Value]);
             emit_lvalue_load(&lv, tmp, ctx, func);
             
-            let one = func.alloc_temp(1);
+            let one = func.alloc_temp_typed(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, one, 1, 0);
             
             if inc_dec.is_inc {
@@ -1317,7 +1362,11 @@ fn compile_stmt_with_label(
             }
             
             // Allocate space for return values
-            let ret_start = func.alloc_temp(total_ret_slots);
+            let mut fail_ret_slot_types = Vec::new();
+            for ret_type in &ret_types {
+                fail_ret_slot_types.extend(info.type_slot_types(*ret_type));
+            }
+            let ret_start = func.alloc_temp_typed(&fail_ret_slot_types);
             
             // Initialize all slots to zero/nil first
             for i in 0..total_ret_slots {
@@ -1580,7 +1629,7 @@ fn compile_go(
             if let Some(func_idx) = ctx.get_function_index(ident.symbol) {
                 // Regular function - compile args
                 let args_start = if total_arg_slots > 0 {
-                    func.alloc_temp(total_arg_slots)
+                    func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots as usize])
                 } else {
                     0
                 };
@@ -1599,7 +1648,7 @@ fn compile_go(
                 let closure_reg = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
                 
                 let args_start = if total_arg_slots > 0 {
-                    func.alloc_temp(total_arg_slots)
+                    func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots as usize])
                 } else {
                     0
                 };
@@ -1616,7 +1665,7 @@ fn compile_go(
         let closure_reg = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
         
         let args_start = if total_arg_slots > 0 {
-            func.alloc_temp(total_arg_slots)
+            func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots as usize])
         } else {
             0
         };
@@ -1675,7 +1724,12 @@ fn compile_select(
                 // Allocate destination for received value
                 let has_ok = recv.lhs.len() > 1;
                 let dst_slots = if has_ok { elem_slots + 1 } else { elem_slots };
-                let dst_reg = func.alloc_temp(dst_slots);
+                // Channel elem + optional ok bool
+                let mut recv_slot_types = vec![SlotType::Value; elem_slots as usize];
+                if has_ok {
+                    recv_slot_types.push(SlotType::Value);
+                }
+                let dst_reg = func.alloc_temp_typed(&recv_slot_types);
                 
                 let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
                 func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, chan_reg, case_idx as u16);
@@ -1685,7 +1739,7 @@ fn compile_select(
     }
     
     // SelectExec: a=result_reg (chosen case index, -1 for default)
-    let result_reg = func.alloc_temp(1);
+    let result_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::SelectExec, result_reg, 0, 0);
     
     // Generate switch on result to jump to appropriate case body
@@ -1694,7 +1748,7 @@ fn compile_select(
     
     for (case_idx, _case) in select_stmt.cases.iter().enumerate() {
         // Compare result_reg with case_idx
-        let cmp_tmp = func.alloc_temp(1);
+        let cmp_tmp = func.alloc_temp_typed(&[SlotType::Value]);
         let idx_val = case_idx as i32;
         if _case.comm.is_none() {
             // Default case: check if result == -1
@@ -1779,7 +1833,7 @@ fn compile_type_switch(
     let expr_reg = crate::expr::compile_expr(inner_expr, ctx, func, info)?;
     
     // Store interface for case comparisons
-    let iface_slot = func.alloc_temp(2);
+    let iface_slot = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
     func.emit_op(Opcode::Copy, iface_slot, expr_reg, 0);
     func.emit_op(Opcode::Copy, iface_slot + 1, expr_reg + 1, 0);
     
@@ -1804,7 +1858,10 @@ fn compile_type_switch(
                     // Allocate temp for IfaceAssert result (value + ok)
                     let target_slots = info.type_slot_count(type_key) as u8;
                     let result_slots: u16 = if assert_kind == 1 { 2 } else { target_slots as u16 };
-                    let result_reg = func.alloc_temp(result_slots + 1); // +1 for ok bool
+                    // result + ok bool
+                    let mut assert_result_types = info.type_slot_types(type_key);
+                    assert_result_types.push(SlotType::Value); // ok bool
+                    let result_reg = func.alloc_temp_typed(&assert_result_types); // +1 for ok bool
                     let ok_slot = result_reg + result_slots;
                     
                     // IfaceAssert: a=dst, b=src_iface, c=target_id
@@ -1927,7 +1984,7 @@ fn compile_switch_with_label(
             // Regular case - compare with each expression
             for case_expr in &case.exprs {
                 let case_val = crate::expr::compile_expr(case_expr, ctx, func, info)?;
-                let cmp_result = func.alloc_temp(1);
+                let cmp_result = func.alloc_temp_typed(&[SlotType::Value]);
                 
                 if let Some(tag) = tag_reg {
                     // Compare tag with case value
@@ -2052,9 +2109,9 @@ fn compile_assign(
     }
     
     // Compile RHS to temp, then store to LValue
-    let tmp = func.alloc_temp(slots);
-    compile_expr_to(rhs, tmp, ctx, func, info)?;
     let slot_types = info.type_slot_types(lhs_type);
+    let tmp = func.alloc_temp_typed(&slot_types);
+    compile_expr_to(rhs, tmp, ctx, func, info)?;
     emit_lvalue_store(&lv, tmp, ctx, func, &slot_types);
     
     Ok(())
@@ -2072,7 +2129,7 @@ fn compile_assign_to_interface(
     use crate::lvalue::emit_lvalue_store;
     
     // Interface is always 2 slots
-    let tmp = func.alloc_temp(2);
+    let tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
     compile_iface_assign(tmp, rhs, iface_type, ctx, func, info)?;
     // Interface data slot may contain GcRef
     // Interface: slot0=header, slot1=data (may be GcRef)
@@ -2204,13 +2261,13 @@ pub fn compile_iface_assign(
                 let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
                 
                 // Read element data from array (skip ArrayHeader at offset 2)
-                let tmp_data = func.alloc_temp(src_slots);
+                let tmp_data = func.alloc_temp_typed(&src_slot_types);
                 const ARRAY_HEADER_SLOTS: u16 = 2;
                 func.emit_ptr_get(tmp_data, gcref_slot, ARRAY_HEADER_SLOTS, src_slots);
                 
                 // Create new boxed value and copy data
-                let new_gcref_slot = func.alloc_temp(1);
-                let meta_reg = func.alloc_temp(1);
+                let new_gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                 func.emit_with_flags(Opcode::PtrNew, src_slots as u8, new_gcref_slot, meta_reg, 0);
                 func.emit_ptr_set(new_gcref_slot, 0, tmp_data, src_slots);
@@ -2223,11 +2280,11 @@ pub fn compile_iface_assign(
                 let src_slot_types = info.type_slot_types(src_type);
                 let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
                 
-                let tmp_data = func.alloc_temp(src_slots);
+                let tmp_data = func.alloc_temp_typed(&src_slot_types);
                 compile_expr_to(rhs, tmp_data, ctx, func, info)?;
                 
-                let gcref_slot = func.alloc_temp(1);
-                let meta_reg = func.alloc_temp(1);
+                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                 func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
                 func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
