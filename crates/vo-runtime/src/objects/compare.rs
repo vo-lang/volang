@@ -7,6 +7,103 @@ use crate::objects::{array, string};
 use crate::{RuntimeType, SlotType, ValueKind};
 use vo_common_core::bytecode::Module;
 
+const HASH_K: u64 = 0xf1357aea2e62a9c5;
+const HASH_SEED: u64 = 0x517cc1b727220a95;
+
+/// Find the actual ValueKind for a slot, recursively descending into nested structs.
+/// Returns the ValueKind of the leaf field at the given slot offset.
+fn find_slot_value_kind(
+    struct_meta: &vo_common_core::bytecode::StructMeta,
+    slot_offset: u16,
+    module: &Module,
+) -> ValueKind {
+    for field in &struct_meta.fields {
+        let field_end = field.offset + field.slot_count;
+        if slot_offset >= field.offset && slot_offset < field_end {
+            let field_vk = field.type_info.value_kind();
+            if field_vk == ValueKind::Struct {
+                // Nested struct: recursively find the actual slot type
+                let inner_rttid = field.type_info.rttid();
+                let inner_meta_id = match module.runtime_types.get(inner_rttid as usize) {
+                    Some(RuntimeType::Named { struct_meta_id: Some(id), .. }) => *id,
+                    Some(RuntimeType::Struct { meta_id, .. }) => *meta_id,
+                    _ => return ValueKind::Void,
+                };
+                if let Some(inner_meta) = module.struct_metas.get(inner_meta_id as usize) {
+                    let inner_offset = slot_offset - field.offset;
+                    return find_slot_value_kind(inner_meta, inner_offset, module);
+                }
+            }
+            return field_vk;
+        }
+    }
+    ValueKind::Void
+}
+
+/// Deep hash of inline struct data (key slots), considering string fields by content.
+/// For map keys with struct type containing string fields.
+/// `key` is the struct field data laid out directly in the key slots.
+pub fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 {
+    let struct_meta = match get_struct_meta(rttid, module) {
+        Some(m) => m,
+        None => return shallow_hash_inline(key),
+    };
+    
+    let slot_types = &struct_meta.slot_types;
+    let mut h = HASH_SEED;
+    let mut i = 0;
+    
+    while i < slot_types.len() && i < key.len() {
+        let val = key[i];
+        
+        match slot_types[i] {
+            SlotType::Value => {
+                h = h.wrapping_add(val).wrapping_mul(HASH_K);
+            }
+            SlotType::GcRef => {
+                // Find actual slot type, recursively descending into nested structs
+                let slot_vk = find_slot_value_kind(struct_meta, i as u16, module);
+                
+                if slot_vk == ValueKind::String {
+                    // Hash string by content
+                    if val == 0 {
+                        h = h.wrapping_add(0).wrapping_mul(HASH_K);
+                    } else {
+                        let s = string::as_bytes(val as GcRef);
+                        for &b in s {
+                            h = h.wrapping_add(b as u64).wrapping_mul(HASH_K);
+                        }
+                    }
+                } else {
+                    // Other GcRef: hash by pointer (must be same object to be equal)
+                    h = h.wrapping_add(val).wrapping_mul(HASH_K);
+                }
+            }
+            SlotType::Interface0 => {
+                // Hash both slots of interface
+                h = h.wrapping_add(val).wrapping_mul(HASH_K);
+                if i + 1 < key.len() {
+                    let slot1 = key[i + 1];
+                    h = h.wrapping_add(slot1).wrapping_mul(HASH_K);
+                }
+                i += 1; // Skip Interface1
+            }
+            SlotType::Interface1 => {}
+        }
+        i += 1;
+    }
+    h.rotate_left(5)
+}
+
+/// Simple hash of inline key slots.
+fn shallow_hash_inline(key: &[u64]) -> u64 {
+    let mut h = HASH_SEED;
+    for &val in key {
+        h = h.wrapping_add(val).wrapping_mul(HASH_K);
+    }
+    h.rotate_left(5)
+}
+
 /// Compare two GcRef values with early-out for same pointer or null.
 /// Returns Some(result) if comparison is done, None if deep comparison needed.
 #[inline]
@@ -55,29 +152,21 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
     eq as u64
 }
 
-/// Find field by slot offset.
-fn find_field_at_offset(fields: &[vo_common_core::bytecode::FieldMeta], offset: u16) -> Option<&vo_common_core::bytecode::FieldMeta> {
-    fields.iter().find(|f| f.offset == offset)
-}
-
-/// Deep comparison of two struct values.
-fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
-    let struct_meta_id = match module.runtime_types.get(rttid as usize) {
-        Some(RuntimeType::Named { struct_meta_id: Some(id), .. }) => *id,
-        Some(RuntimeType::Struct { meta_id, .. }) => *meta_id,
-        _ => return a == b,
-    };
-    
-    let struct_meta = match module.struct_metas.get(struct_meta_id as usize) {
-        Some(m) => m,
-        None => return a == b,
-    };
-    
+/// Core struct comparison logic. Returns true if equal.
+/// `get_slot` returns (a_val, b_val, a_next, b_next) for the given index.
+fn deep_eq_struct_core<F>(
+    struct_meta: &vo_common_core::bytecode::StructMeta,
+    len: usize,
+    module: &Module,
+    mut get_slot: F,
+) -> bool
+where
+    F: FnMut(usize) -> (u64, u64, u64, u64),
+{
     let slot_types = &struct_meta.slot_types;
     let mut i = 0;
-    while i < slot_types.len() {
-        let a_val = unsafe { *a.add(i) };
-        let b_val = unsafe { *b.add(i) };
+    while i < slot_types.len() && i < len {
+        let (a_val, b_val, a_next, b_next) = get_slot(i);
         
         match slot_types[i] {
             SlotType::Value => {
@@ -87,12 +176,9 @@ fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
             }
             SlotType::GcRef => {
                 if a_val != b_val {
-                    // Find field by offset to get correct type info
-                    let field_vk = find_field_at_offset(&struct_meta.fields, i as u16)
-                        .map(|f| f.type_info.value_kind())
-                        .unwrap_or(ValueKind::Void);
+                    let slot_vk = find_slot_value_kind(struct_meta, i as u16, module);
                     
-                    if field_vk == ValueKind::String {
+                    if slot_vk == ValueKind::String {
                         if a_val == 0 || b_val == 0 {
                             return false;
                         }
@@ -107,15 +193,11 @@ fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
                 }
             }
             SlotType::Interface0 => {
-                let a_slot1 = unsafe { *a.add(i + 1) };
-                let b_slot1 = unsafe { *b.add(i + 1) };
-                
-                // Recursive interface comparison
-                let result = iface_eq(a_val, a_slot1, b_val, b_slot1, module);
+                let result = iface_eq(a_val, a_next, b_val, b_next, module);
                 if result != 1 {
                     return false;
                 }
-                i += 1; // Skip Interface1 slot
+                i += 1;
             }
             SlotType::Interface1 => {}
         }
@@ -124,8 +206,53 @@ fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     true
 }
 
+/// Resolve rttid to StructMeta, returning None if not found.
+fn get_struct_meta(rttid: u32, module: &Module) -> Option<&vo_common_core::bytecode::StructMeta> {
+    let struct_meta_id = match module.runtime_types.get(rttid as usize) {
+        Some(RuntimeType::Named { struct_meta_id: Some(id), .. }) => *id,
+        Some(RuntimeType::Struct { meta_id, .. }) => *meta_id,
+        _ => return None,
+    };
+    module.struct_metas.get(struct_meta_id as usize)
+}
+
+/// Deep comparison of two inline struct key data.
+pub fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    
+    let struct_meta = match get_struct_meta(rttid, module) {
+        Some(m) => m,
+        None => return a == b,
+    };
+    
+    deep_eq_struct_core(struct_meta, a.len(), module, |i| {
+        let a_next = if i + 1 < a.len() { a[i + 1] } else { 0 };
+        let b_next = if i + 1 < b.len() { b[i + 1] } else { 0 };
+        (a[i], b[i], a_next, b_next)
+    })
+}
+
+/// Deep comparison of two struct values on heap.
+pub fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+    let struct_meta = match get_struct_meta(rttid, module) {
+        Some(m) => m,
+        None => return a == b,
+    };
+    
+    let len = struct_meta.slot_types.len();
+    deep_eq_struct_core(struct_meta, len, module, |i| {
+        let a_val = unsafe { *a.add(i) };
+        let b_val = unsafe { *b.add(i) };
+        let a_next = unsafe { *a.add(i + 1) };
+        let b_next = unsafe { *b.add(i + 1) };
+        (a_val, b_val, a_next, b_next)
+    })
+}
+
 /// Deep comparison of two array values.
-fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     let a_len = array::len(a);
     let b_len = array::len(b);
     

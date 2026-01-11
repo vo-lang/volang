@@ -129,7 +129,7 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         let val_vk = val_meta.value_kind();
         let val_value_rttid = call.get_elem_value_rttid_from_base(rttid);
         
-        let found = map::get(base_ref, &key_data);
+        let found = map::get(base_ref, &key_data, None);
         
         // For map[string]any (val_vk == Interface), the value is already boxed
         // Just return it directly without re-boxing
@@ -435,7 +435,7 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             let val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
             
             let key_data = [key_slot1];
-            let found = crate::objects::map::get(base_ref, &key_data);
+            let found = crate::objects::map::get(base_ref, &key_data, None);
             
             // Get raw slots from map value (or zeros if not found)
             let raw_slots: Vec<u64> = if let Some(val_slice) = found {
@@ -554,7 +554,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             }
         }
         
-        map::set(base_ref, &key_buf, &val_buf);
+        map::set(base_ref, &key_buf, &val_buf, None);
         call.ret_nil(0);
         call.ret_nil(1);
         return ExternResult::Ok;
@@ -838,7 +838,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
                 }
             }
 
-            map::set(base_ref, &key_buf, &val_buf);
+            map::set(base_ref, &key_buf, &val_buf, None);
             call.ret_nil(0);
             call.ret_nil(1);
             ExternResult::Ok
@@ -955,7 +955,7 @@ const MAX_DYN_RET_SLOTS: usize = crate::jit_api::MAX_DYN_RET_SLOTS as usize;
 /// - For is_any=1: 2 slots (interface format)
 /// - For is_any=0: raw slots (1-2 for primitives, GcRef for large structs)
 fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
-    let ret_slots = call.arg_u64(0) as usize;
+    let _ret_slots = call.arg_u64(0) as usize;
     let arg_count = call.arg_count() as usize;
     
     // Derive ret_count from arg layout: 1 + 64 + N + N = arg_count => N = (arg_count - 65) / 2

@@ -287,5 +287,4 @@ tests:
   - file: bug_ptr_recv_named_slice.vo
     should_fail: true  # FIXED: now correctly reports compile error E2410
   - file: bug_map_struct_key_string.vo
-    skip: [vm, jit]
-    reason: "BUG: map with struct key containing string field causes panic"
+    # FIXED: map with struct key containing string field now works correctly

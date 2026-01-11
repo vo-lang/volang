@@ -453,7 +453,7 @@ pub extern "C" fn vo_map_get(m: u64, key_ptr: *const u64, key_slots: u32, val_pt
     if m == 0 { return 0; }
     
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    let (val_opt, ok) = map::get_with_ok(m as crate::gc::GcRef, key);
+    let (val_opt, ok) = map::get_with_ok(m as crate::gc::GcRef, key, None);
     
     if let Some(val) = val_opt {
         let copy_len = (val_slots as usize).min(val.len());
@@ -490,7 +490,7 @@ pub extern "C" fn vo_map_set(m: u64, key_ptr: *const u64, key_slots: u32, val_pt
         }
     }
     
-    map::set(m as crate::gc::GcRef, key, val);
+    map::set(m as crate::gc::GcRef, key, val, None);
     0
 }
 
@@ -501,7 +501,7 @@ pub extern "C" fn vo_map_delete(m: u64, key_ptr: *const u64, key_slots: u32) {
     if m == 0 { return; }
     
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    map::delete(m as crate::gc::GcRef, key);
+    map::delete(m as crate::gc::GcRef, key, None);
 }
 
 /// Get key-value by index for iteration.

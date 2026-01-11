@@ -135,16 +135,9 @@ pub fn compile_builtin_call(
                     func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
                 } else if info.is_map(type_key) {
                     // make(map[K]V)
-                    // MapNew: a=dst, b=packed_meta, c=slots
-                    let (key_slots, val_slots) = info.map_key_val_slots(type_key);
-                    let key_slot_types = info.map_key_slot_types(type_key);
-                    let val_slot_types = info.map_val_slot_types(type_key);
-                    let key_vk = info.map_key_value_kind(type_key);
-                    let val_vk = info.map_val_value_kind(type_key);
-                    let key_meta_idx = ctx.get_or_create_value_meta_with_kind(None, key_slots, &key_slot_types, Some(key_vk));
-                    let val_meta_idx = ctx.get_or_create_value_meta_with_kind(None, val_slots, &val_slot_types, Some(val_vk));
+                    let (key_meta_idx, val_meta_idx, key_slots, val_slots) = ctx.get_or_create_map_metas(type_key, info);
                     
-                    // Pack key_meta and val_meta into one register: (key_meta << 32) | val_meta
+                    // Pack key_meta and val_meta: (key_meta << 32) | val_meta
                     let key_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                     let val_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, key_meta_reg, key_meta_idx, 0);

@@ -833,6 +833,16 @@ impl CodegenContext {
         slot_types: &[vo_runtime::SlotType],
         value_kind: Option<vo_runtime::ValueKind>,
     ) -> u16 {
+        self.get_or_create_value_meta_with_rttid(0, slot_types, value_kind)
+    }
+    
+    /// Get or create ValueMeta with explicit rttid and ValueKind
+    pub fn get_or_create_value_meta_with_rttid(
+        &mut self,
+        rttid: u32,
+        slot_types: &[vo_runtime::SlotType],
+        value_kind: Option<vo_runtime::ValueKind>,
+    ) -> u16 {
         use vo_runtime::{SlotType, ValueKind};
         
         // Use explicit value_kind if provided, otherwise infer from slot_types
@@ -846,15 +856,6 @@ impl CodegenContext {
                 SlotType::Interface0 => ValueKind::Interface as u8,
                 SlotType::Interface1 => ValueKind::Interface as u8,
             }
-        };
-        
-        // Use rttid for all types (unified type system)
-        // This allows type assertions to work for basic types in slices
-        let rttid = if let Some(_tk) = type_key {
-            let rt = vo_runtime::RuntimeType::Basic(value_kind.unwrap_or(ValueKind::Int));
-            self.intern_rttid(rt)
-        } else {
-            0
         };
         
         // ValueMeta format: [rttid:24 | value_kind:8]
@@ -871,13 +872,38 @@ impl CodegenContext {
         array_type: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
-        // Get element type info with correct ValueKind
         let elem_type = info.array_elem_type(array_type);
         let elem_slots = info.array_elem_slots(array_type);
         let elem_slot_types = info.array_elem_slot_types(array_type);
         let elem_vk = info.type_value_kind(elem_type);
         
         self.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk))
+    }
+    
+    /// Get or create key and value ValueMeta for MapNew.
+    /// Returns (key_meta_const_idx, val_meta_const_idx, key_slots, val_slots).
+    pub fn get_or_create_map_metas(
+        &mut self,
+        map_type: TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> (u16, u16, u16, u16) {
+        let (key_slots, val_slots) = info.map_key_val_slots(map_type);
+        let (key_type, val_type) = info.map_key_val_types(map_type);
+        let key_slot_types = info.map_key_slot_types(map_type);
+        let val_slot_types = info.map_val_slot_types(map_type);
+        let key_vk = info.map_key_value_kind(map_type);
+        let val_vk = info.map_val_value_kind(map_type);
+        
+        // Properly intern rttid (needed for struct keys with deep hash/eq)
+        let key_rt = info.type_to_runtime_type(key_type, self);
+        let key_rttid = self.intern_rttid(key_rt);
+        let val_rt = info.type_to_runtime_type(val_type, self);
+        let val_rttid = self.intern_rttid(val_rt);
+        
+        let key_meta_idx = self.get_or_create_value_meta_with_rttid(key_rttid, &key_slot_types, Some(key_vk));
+        let val_meta_idx = self.get_or_create_value_meta_with_rttid(val_rttid, &val_slot_types, Some(val_vk));
+        
+        (key_meta_idx, val_meta_idx, key_slots, val_slots)
     }
 
     // === Closure ID ===

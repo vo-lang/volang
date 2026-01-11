@@ -1,0 +1,213 @@
+// Test all map key types
+package main
+
+// Basic types as keys
+func testIntKey() {
+    m := map[int]string{}
+    m[1] = "one"
+    m[2] = "two"
+    m[1] = "uno"
+    assert(m[1] == "uno", "int key: update failed")
+    assert(m[2] == "two", "int key: lookup failed")
+    assert(len(m) == 2, "int key: len failed")
+}
+
+func testStringKey() {
+    m := map[string]int{}
+    m["alice"] = 100
+    m["bob"] = 200
+    m["alice"] = 150
+    assert(m["alice"] == 150, "string key: update failed")
+    assert(m["bob"] == 200, "string key: lookup failed")
+    assert(len(m) == 2, "string key: len failed")
+}
+
+func testBoolKey() {
+    m := map[bool]string{}
+    m[true] = "yes"
+    m[false] = "no"
+    assert(m[true] == "yes", "bool key: true lookup failed")
+    assert(m[false] == "no", "bool key: false lookup failed")
+    assert(len(m) == 2, "bool key: len failed")
+}
+
+func testFloatKey() {
+    m := map[float64]string{}
+    m[1.5] = "one point five"
+    m[2.5] = "two point five"
+    assert(m[1.5] == "one point five", "float key: lookup failed")
+    assert(m[2.5] == "two point five", "float key: lookup failed")
+}
+
+// Struct keys with different field types
+type IntKey struct {
+    ID int
+}
+
+type StringKey struct {
+    Name string
+}
+
+type MultiFieldKey struct {
+    A int
+    B string
+}
+
+type NestedKey struct {
+    Inner StringKey
+}
+
+func testStructIntFieldKey() {
+    m := map[IntKey]string{}
+    m[IntKey{1}] = "one"
+    m[IntKey{2}] = "two"
+    m[IntKey{1}] = "uno"
+    assert(m[IntKey{1}] == "uno", "struct int key: update failed")
+    assert(m[IntKey{2}] == "two", "struct int key: lookup failed")
+    assert(len(m) == 2, "struct int key: len failed")
+}
+
+func testStructStringFieldKey() {
+    m := map[StringKey]int{}
+    m[StringKey{"alice"}] = 100
+    m[StringKey{"bob"}] = 200
+    m[StringKey{"alice"}] = 150
+    assert(m[StringKey{"alice"}] == 150, "struct string key: update failed")
+    assert(m[StringKey{"bob"}] == 200, "struct string key: lookup failed")
+    assert(len(m) == 2, "struct string key: len failed")
+}
+
+func testStructMultiFieldKey() {
+    m := map[MultiFieldKey]string{}
+    m[MultiFieldKey{1, "a"}] = "1a"
+    m[MultiFieldKey{1, "b"}] = "1b"
+    m[MultiFieldKey{2, "a"}] = "2a"
+    assert(m[MultiFieldKey{1, "a"}] == "1a", "multi field key: 1a failed")
+    assert(m[MultiFieldKey{1, "b"}] == "1b", "multi field key: 1b failed")
+    assert(m[MultiFieldKey{2, "a"}] == "2a", "multi field key: 2a failed")
+    assert(len(m) == 3, "multi field key: len failed")
+}
+
+func testStructNestedKey() {
+    m := map[NestedKey]int{}
+    m[NestedKey{StringKey{"alice"}}] = 100
+    m[NestedKey{StringKey{"bob"}}] = 200
+    assert(m[NestedKey{StringKey{"alice"}}] == 100, "nested key: alice failed")
+    assert(m[NestedKey{StringKey{"bob"}}] == 200, "nested key: bob failed")
+}
+
+// Pointer keys (compare by pointer value)
+type Point struct {
+    X, Y int
+}
+
+func testPointerKey() {
+    p1 := &Point{1, 2}
+    p2 := &Point{3, 4}
+    p3 := p1  // same pointer
+    
+    m := map[*Point]string{}
+    m[p1] = "p1"
+    m[p2] = "p2"
+    
+    assert(m[p1] == "p1", "pointer key: p1 failed")
+    assert(m[p2] == "p2", "pointer key: p2 failed")
+    assert(m[p3] == "p1", "pointer key: same pointer should match")
+    assert(len(m) == 2, "pointer key: len failed")
+}
+
+// Array keys
+func testArrayKey() {
+    m := map[[2]int]string{}
+    m[[2]int{1, 2}] = "12"
+    m[[2]int{3, 4}] = "34"
+    m[[2]int{1, 2}] = "onetwo"
+    assert(m[[2]int{1, 2}] == "onetwo", "array key: update failed")
+    assert(m[[2]int{3, 4}] == "34", "array key: lookup failed")
+    assert(len(m) == 2, "array key: len failed")
+}
+
+// Interface keys with int values (works with bitwise comparison)
+func testInterfaceKey() {
+    m := map[any]string{}
+    m[1] = "int one"
+    m[2] = "int two"
+    m[true] = "bool true"
+    
+    assert(m[1] == "int one", "interface key: int failed")
+    assert(m[2] == "int two", "interface key: int 2 failed")
+    assert(m[true] == "bool true", "interface key: bool failed")
+    assert(len(m) == 3, "interface key: len failed")
+    
+    // Same value update
+    m[1] = "int uno"
+    assert(m[1] == "int uno", "interface key: update failed")
+    assert(len(m) == 3, "interface key: len after update failed")
+    
+    // Note: interface keys with string values don't work yet (needs InterfaceKey mode)
+}
+
+// Map get with ok pattern
+func testMapGetOk() {
+    m := map[string]int{"a": 1}
+    
+    v1, ok1 := m["a"]
+    assert(ok1, "get ok: existing key should return true")
+    assert(v1 == 1, "get ok: value mismatch")
+    
+    v2, ok2 := m["b"]
+    assert(!ok2, "get ok: missing key should return false")
+    assert(v2 == 0, "get ok: missing key should return zero value")
+}
+
+// Delete operations
+func testMapDelete() {
+    m := map[StringKey]int{}
+    m[StringKey{"alice"}] = 100
+    m[StringKey{"bob"}] = 200
+    
+    delete(m, StringKey{"alice"})
+    _, ok := m[StringKey{"alice"}]
+    assert(!ok, "delete: key should be removed")
+    assert(len(m) == 1, "delete: len should decrease")
+    assert(m[StringKey{"bob"}] == 200, "delete: other key should remain")
+}
+
+// Range over map
+func testMapRange() {
+    m := map[int]string{1: "one", 2: "two", 3: "three"}
+    
+    sum := 0
+    for k, _ := range m {
+        sum += k
+    }
+    assert(sum == 6, "range: sum of keys failed")
+    
+    count := 0
+    for _, _ = range m {
+        count++
+    }
+    assert(count == 3, "range: count failed")
+}
+
+func main() {
+    testIntKey()
+    testStringKey()
+    testBoolKey()
+    testFloatKey()
+    
+    testStructIntFieldKey()
+    testStructStringFieldKey()
+    testStructMultiFieldKey()
+    testStructNestedKey()
+    
+    testPointerKey()
+    testArrayKey()
+    testInterfaceKey()
+    
+    testMapGetOk()
+    testMapDelete()
+    testMapRange()
+    
+    println("map_key_types: ok")
+}

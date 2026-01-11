@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use linkme::distributed_slice;
 
 use crate::gc::{Gc, GcRef};
-use crate::objects::{string, slice, array};
+use crate::objects::{string, slice};
 use vo_common_core::bytecode::{DynErrorCodes, InterfaceMeta, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};

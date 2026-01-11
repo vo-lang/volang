@@ -1,6 +1,5 @@
 //! Heap object operations.
 
-use crate::gc::GcRef;
 
 /// Macro to implement as_ref/as_mut for GC object header types.
 macro_rules! impl_gc_object {

@@ -14,7 +14,6 @@ use std::{boxed::Box, collections::VecDeque, vec::Vec};
 use crate::gc::{Gc, GcRef};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
-use super::impl_gc_object;
 
 #[repr(C)]
 pub struct ChannelData {

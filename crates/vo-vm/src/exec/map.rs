@@ -1,5 +1,6 @@
 //! Map instructions: MapNew, MapGet, MapSet, MapDelete, MapLen
 
+use vo_runtime::bytecode::Module;
 use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::map;
@@ -18,7 +19,7 @@ pub fn exec_map_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut G
 }
 
 #[inline]
-pub fn exec_map_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
+pub fn exec_map_get(stack: &mut [u64], bp: usize, inst: &Instruction, module: Option<&Module>) {
     let m = stack[bp + inst.b as usize] as GcRef;
     let meta = stack[bp + inst.c as usize];
     let key_slots = ((meta >> 16) & 0xFFFF) as usize;
@@ -41,7 +42,7 @@ pub fn exec_map_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
     let key_start = bp + inst.c as usize + 1;
     let key: &[u64] = &stack[key_start..key_start + key_slots];
 
-    let (val_opt, ok) = map::get_with_ok(m, key);
+    let (val_opt, ok) = map::get_with_ok(m, key, module);
     if let Some(val) = val_opt {
         for i in 0..val_slots.min(val.len()) {
             stack[dst_start + i] = val[i];
@@ -61,7 +62,7 @@ pub fn exec_map_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
 /// flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
 /// Returns true if successful, false if interface key has uncomparable type (should panic)
 #[inline]
-pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
+pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc, module: Option<&Module>) -> bool {
     let m = stack[bp + inst.a as usize] as GcRef;
     let meta = stack[bp + inst.b as usize];
     let key_slots = ((meta >> 8) & 0xFF) as usize;
@@ -92,7 +93,7 @@ pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc) -
         }
     }
 
-    map::set(m, key, val);
+    map::set(m, key, val, module);
     
     // Write barrier: if key or val may contain GcRef, barrier the map
     // For maps, we use backward barrier on the map itself
@@ -116,7 +117,7 @@ pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc) -
 }
 
 #[inline]
-pub fn exec_map_delete(stack: &[u64], bp: usize, inst: &Instruction) {
+pub fn exec_map_delete(stack: &[u64], bp: usize, inst: &Instruction, module: Option<&Module>) {
     let m = stack[bp + inst.a as usize] as GcRef;
     let meta = stack[bp + inst.b as usize];
     let key_slots = meta as usize;
@@ -125,7 +126,7 @@ pub fn exec_map_delete(stack: &[u64], bp: usize, inst: &Instruction) {
 
     let key: &[u64] = &stack[key_start..key_start + key_slots];
 
-    map::delete(m, key);
+    map::delete(m, key, module);
 }
 
 #[inline]

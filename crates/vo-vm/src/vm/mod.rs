@@ -922,7 +922,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::MapGet => {
-                    exec::exec_map_get(stack, bp, &inst);
+                    exec::exec_map_get(stack, bp, &inst, Some(module));
                     ExecResult::Continue
                 }
                 Opcode::MapSet => {
@@ -934,7 +934,7 @@ impl Vm {
                             "runtime error: assignment to entry in nil map".to_string()
                         )
                     } else {
-                        let ok = exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc);
+                        let ok = exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc, Some(module));
                         if !ok {
                             // Interface key has uncomparable underlying type
                             runtime_panic(
@@ -952,7 +952,7 @@ impl Vm {
                     if m.is_null() {
                         return ExecResult::Continue;
                     }
-                    exec::exec_map_delete(&stack, bp, &inst);
+                    exec::exec_map_delete(&stack, bp, &inst, Some(module));
                     ExecResult::Continue
                 }
                 Opcode::MapLen => {
