@@ -410,17 +410,21 @@ fn call_defer_entry(
     let args_start = stack.len();
     stack.resize(args_start + func.local_slots as usize, 0);
 
-    // Copy args from heap to stack
+    // For closure call, set closure ref as first slot (slot 0)
+    // Arguments start at slot 1 for closures, slot 0 for regular functions
+    let arg_offset = if entry.is_closure {
+        stack[args_start] = entry.closure as u64;
+        1
+    } else {
+        0
+    };
+
+    // Copy args from heap to stack (after closure ref if applicable)
     if !entry.args.is_null() {
         for i in 0..arg_slots {
             let val = unsafe { Gc::read_slot(entry.args, i) };
-            stack[args_start + i] = val;
+            stack[args_start + arg_offset + i] = val;
         }
-    }
-
-    // For closure call, set closure ref as first slot
-    if entry.is_closure {
-        stack[args_start] = entry.closure as u64;
     }
 
     // Push frame for defer function

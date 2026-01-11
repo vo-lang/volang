@@ -244,8 +244,6 @@ tests:
 
 # New tests - skipped due to Vo implementation bugs
   - file: defer_eval_timing.vo
-    skip: [vm, jit]
-    reason: "BUG: defer func(val int){...}(arg) passes wrong argument value (Test 5 fails)"
   - file: short_var_redecl.vo
   - file: method_value.vo
   - file: switch_nested_break.vo
