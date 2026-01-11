@@ -451,8 +451,11 @@ fn compile_stmt_with_label(
 
         // === Short variable declaration ===
         StmtKind::ShortVar(short_var) => {
+            let is_blank = |name: &vo_syntax::ast::Ident| {
+                info.project.interner.resolve(name.symbol) == Some("_")
+            };
+            
             // Check for multi-value case: v1, v2, ... := f() where f() returns a tuple
-            // This includes comma-ok (2 values) and multi-return functions (3+ values)
             let is_multi_value = short_var.values.len() == 1 
                 && short_var.names.len() >= 2
                 && info.is_tuple(info.expr_type(short_var.values[0].id));
@@ -470,13 +473,12 @@ fn compile_stmt_with_label(
                     let elem_type = info.tuple_elem_type(tuple_type, i);
                     let elem_slots = info.type_slot_count(elem_type);
 
-                    if info.project.interner.resolve(name.symbol) == Some("_") {
+                    if is_blank(name) {
                         offset += elem_slots;
                         continue;
                     }
 
-                    let is_def = info.is_def(name);
-                    if is_def {
+                    if info.is_def(name) {
                         let obj_key = info.get_def(name);
                         let escapes = info.is_escaped(obj_key);
                         sc.define_local_from_slot(name.symbol, elem_type, escapes, tmp_base + offset)?;
@@ -488,29 +490,37 @@ fn compile_stmt_with_label(
                 }
             } else {
                 // Normal case: N variables = N expressions
+                // Go spec: RHS evaluated first, then assigned (handles p, q := p+1, p+2)
+                
+                // Phase 1: Evaluate all RHS to temps
+                let mut rhs_temps: Vec<Option<(u16, vo_analysis::objects::TypeKey)>> = Vec::new();
+                for (i, name) in short_var.names.iter().enumerate() {
+                    let expr = &short_var.values[i];
+                    if is_blank(name) {
+                        // Evaluate for side effects only
+                        let _ = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        rhs_temps.push(None);
+                    } else {
+                        let type_key = info.expr_type(expr.id);
+                        let slots = info.type_slot_count(type_key);
+                        let tmp = func.alloc_temp(slots);
+                        compile_expr_to(expr, tmp, ctx, func, info)?;
+                        rhs_temps.push(Some((tmp, type_key)));
+                    }
+                }
+                
+                // Phase 2: Assign temps to LHS
                 let mut sc = StmtCompiler::new(ctx, func, info);
                 for (i, name) in short_var.names.iter().enumerate() {
-                    if info.project.interner.resolve(name.symbol) == Some("_") {
-                        continue;
-                    }
-
-                    let type_key = short_var.values.get(i)
-                        .map(|v| info.expr_type(v.id))
-                        .expect("short var must have value");
-
-                    let is_def = info.is_def(name);
-                    if is_def {
+                    let Some((tmp, type_key)) = rhs_temps[i] else { continue };
+                    
+                    if info.is_def(name) {
                         let obj_key = info.get_def(name);
                         let escapes = info.is_escaped(obj_key);
-                        let init = short_var.values.get(i);
-                        sc.define_local(name.symbol, type_key, escapes, init)?;
+                        sc.define_local_from_slot(name.symbol, type_key, escapes, tmp)?;
                     } else if let Some(local) = sc.func.lookup_local(name.symbol) {
-                        let storage = local.storage;
-                        if let Some(expr) = short_var.values.get(i) {
-                            let slot_types = sc.info.type_slot_types(type_key);
-                            let src = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
-                            sc.func.emit_storage_store(storage, src, &slot_types);
-                        }
+                        let slot_types = sc.info.type_slot_types(type_key);
+                        sc.func.emit_storage_store(local.storage, tmp, &slot_types);
                     }
                 }
             }

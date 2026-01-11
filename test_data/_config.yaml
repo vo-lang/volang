@@ -247,8 +247,6 @@ tests:
     skip: [vm, jit]
     reason: "BUG: defer closure captures variable value instead of reference"
   - file: short_var_redecl.vo
-    skip: [vm, jit]
-    reason: "BUG: inner scope := incorrectly affects outer scope variable"
   - file: method_value.vo
     skip: [vm, jit]
     reason: "BUG: compiler panic - struct field index not found"
