@@ -1,0 +1,110 @@
+// Test: blank identifier (_) in various complex scenarios
+// Go spec: blank identifier can be used to ignore values
+package main
+
+type Pair struct {
+    first, second int
+}
+
+func multiReturn() (int, string, bool) {
+    return 42, "hello", true
+}
+
+func fourReturn() (int, int, int, int) {
+    return 1, 2, 3, 4
+}
+
+func returnPair() Pair {
+    return Pair{10, 20}
+}
+
+func main() {
+    // Test 1: Ignore single return value
+    _, s, _ := multiReturn()
+    assert(s == "hello", "middle value captured")
+    
+    // Test 2: Ignore all but one
+    _, _, b := multiReturn()
+    assert(b == true, "last value captured")
+    
+    // Test 3: Ignore first value
+    _, second, third := multiReturn()
+    assert(second == "hello" && third == true, "ignore first")
+    
+    // Test 4: Multiple blanks in four-return
+    a, _, _, d := fourReturn()
+    assert(a == 1 && d == 4, "first and last captured")
+    
+    // Test 5: All blanks (just for side effects)
+    _, _, _ = multiReturn()
+    
+    // Test 6: Blank in for-range (ignore index)
+    sum := 0
+    for _, v := range []int{1, 2, 3, 4, 5} {
+        sum += v
+    }
+    assert(sum == 15, "sum with blank index")
+    
+    // Test 7: Blank in for-range (ignore value)
+    count := 0
+    for _, _ = range []int{1, 2, 3} {
+        count++
+    }
+    assert(count == 3, "count with blank value")
+    
+    // Test 8: Blank in map range
+    m := map[string]int{"a": 1, "b": 2, "c": 3}
+    total := 0
+    for _, v := range m {
+        total += v
+    }
+    assert(total == 6, "map range with blank key")
+    
+    // Test 9: Blank in map ok pattern
+    _, ok := m["a"]
+    assert(ok, "map ok with blank value")
+    _, ok2 := m["z"]
+    assert(!ok2, "map not ok with blank value")
+    
+    // Test 10: Blank in type assertion
+    var iface any = 42
+    _, ok3 := iface.(int)
+    assert(ok3, "type assertion ok with blank")
+    _, ok4 := iface.(string)
+    assert(!ok4, "type assertion not ok with blank")
+    
+    // Test 11: Blank in channel receive
+    ch := make(chan int, 1)
+    ch <- 100
+    _ = <-ch  // ignore received value
+    
+    // Test 12: Blank in short var decl with existing var
+    x := 10
+    x, _ = 20, 30  // x redeclared, second ignored
+    assert(x == 20, "redecl with blank")
+    
+    // Test 13: Blank in assignment from function
+    _ = returnPair()  // ignore struct return
+    
+    // Test 14: Nested blank usage
+    pairs := []Pair{{1, 2}, {3, 4}, {5, 6}}
+    firstSum := 0
+    for _, p := range pairs {
+        firstSum += p.first
+        _ = p.second  // explicitly ignore
+    }
+    assert(firstSum == 9, "first sum from pairs")
+    
+    // Test 15: Type switch with blank - check actual type
+    var v any = "test"
+    isString := false
+    switch v.(type) {
+    case string:
+        isString = true
+    default:
+        isString = false
+    }
+    assert(isString, "should be string")
+    
+    println("blank_identifier_complex: ok")
+}

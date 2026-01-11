@@ -1,0 +1,16 @@
+// BUG: Struct with both array field AND func field causes segfault
+// Minimal reproduction
+
+package main
+
+type Outer struct {
+    arr [3]int
+    fn  func() int
+}
+
+func main() {
+    var o Outer  // <- crashes here
+    assert(o.arr[0] == 0, "arr[0] should be 0")
+    assert(o.fn == nil, "fn should be nil")
+    println("ok")
+}

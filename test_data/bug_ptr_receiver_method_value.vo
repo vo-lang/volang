@@ -1,0 +1,21 @@
+// BUG: Pointer receiver method value crashes VM
+// Location: vo-vm/src/exec/closure.rs:20 - exec_closure_get index out of bounds
+// Minimal reproduction
+
+package main
+
+type Counter struct {
+    value int
+}
+
+func (c *Counter) Increment() {
+    c.value += 1
+}
+
+func main() {
+    c := Counter{value: 10}
+    incFunc := c.Increment  // <- crashes here
+    incFunc()
+    assert(c.value == 11, "should be 11")
+    println("ok")
+}

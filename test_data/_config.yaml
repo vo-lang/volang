@@ -287,3 +287,34 @@ tests:
   - file: multi_return_discard.vo
   - file: nil_pointer_method_panic.vo
     # FIXED: nil pointer dereference now triggers Vo panic (recoverable) in both VM and JIT
+
+# Coverage tests from analysis (2026-01-11 batch 4)
+  - file: slice_cap_boundary.vo
+  - file: nested_struct_zero.vo
+    # Some scenarios skipped due to VM bugs (partial init, array of struct, struct with arr+func)
+  - file: blank_identifier_complex.vo
+
+# Skipped due to Vo implementation bugs
+  - file: global_func_var.vo
+    skip: [vm, jit]
+    reason: "BUG: codegen VariableNotFound for global func vars"
+  - file: method_expression.vo
+    skip: [vm, jit]
+    reason: "BUG: pointer receiver method value crashes VM (exec_closure_get index out of bounds)"
+
+# Bug reproductions (2026-01-11 coverage analysis)
+  - file: bug_ptr_receiver_method_value.vo
+    skip: [vm, jit]
+    reason: "BUG #1: exec_closure_get index out of bounds with pointer receiver method value"
+  - file: bug_global_func_var.vo
+    skip: [vm, jit]
+    reason: "BUG #2: codegen VariableNotFound for global func var"
+  - file: bug_partial_struct_init.vo
+    skip: [vm, jit]
+    reason: "BUG #3: partial struct initialization causes segfault"
+  - file: bug_array_of_struct.vo
+    skip: [vm, jit]
+    reason: "BUG #4: var arr [3]Struct causes segfault"
+  - file: bug_struct_arr_and_func_field.vo
+    skip: [vm, jit]
+    reason: "BUG #5: struct with both array field and func field causes segfault"

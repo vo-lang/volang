@@ -1,0 +1,60 @@
+// Test: method values - bound method references
+// BUG: Pointer receiver method value crashes VM (exec_closure_get index out of bounds)
+// SKIP: Vo implementation bug - pointer receiver method value
+package main
+
+type Counter struct {
+    value int
+}
+
+func (c Counter) Get() int {
+    return c.value
+}
+
+func (c Counter) Add(n int) int {
+    return c.value + n
+}
+
+func main() {
+    // Test 1: Method value from value receiver
+    c := Counter{value: 10}
+    getFunc := c.Get  // bound method value
+    result := getFunc()
+    assert(result == 10, "method value c.Get failed")
+    
+    // Test 2: Method value with argument
+    addFunc := c.Add
+    result2 := addFunc(5)
+    assert(result2 == 15, "method value c.Add(5) failed")
+    
+    // Test 3: Method value stored and called later
+    c2 := Counter{value: 200}
+    fn := c2.Get
+    c2.value = 300  // change original
+    // Method value captures receiver at binding time for value receiver
+    val := fn()
+    assert(val == 200, "method value captures value at binding time")
+    
+    // Test 4: Method value passed as argument
+    apply := func(f func() int) int {
+        return f()
+    }
+    c4 := Counter{value: 42}
+    res := apply(c4.Get)
+    assert(res == 42, "method value as argument failed")
+    
+    // Test 5: Method value in slice
+    c5 := Counter{value: 10}
+    c6 := Counter{value: 20}
+    c7 := Counter{value: 30}
+    funcs := []func() int{c5.Get, c6.Get, c7.Get}
+    assert(funcs[0]() == 10, "funcs[0]")
+    assert(funcs[1]() == 20, "funcs[1]")
+    assert(funcs[2]() == 30, "funcs[2]")
+    
+    // NOTE: Pointer receiver method values are SKIPPED due to VM bug:
+    // func (c *Counter) Increment() { c.value += 1 }
+    // incFunc := c.Increment  // <- crashes VM
+    
+    println("method_value_bound: ok")
+}

@@ -1,0 +1,94 @@
+// Test: global (package-level) function variables
+// Go spec: function values can be assigned to package-level variables
+package main
+
+// Global function variable - simple
+var add = func(a, b int) int {
+    return a + b
+}
+
+// Global function variable - with closure over nothing (pure)
+var multiply = func(a, b int) int {
+    return a * b
+}
+
+// Global function variable - returns function
+var makeAdder = func(base int) func(int) int {
+    return func(n int) int {
+        return base + n
+    }
+}
+
+// Global function variable - no args, no return
+var counter = 0
+var increment = func() {
+    counter += 1
+}
+
+// Global function variable - multiple return values
+var divmod = func(a, b int) (int, int) {
+    return a / b, a % b
+}
+
+// Global function variable - variadic
+var sum = func(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+// Global function variable assigned from named function
+func namedFunc(x int) int {
+    return x * 2
+}
+var fromNamed = namedFunc
+
+// Global function variable - nil initially, assigned later
+var lazyInit func(int) int
+
+func main() {
+    // Test 1: Simple global function variable
+    assert(add(3, 5) == 8, "global add(3,5) should be 8")
+    assert(multiply(4, 6) == 24, "global multiply(4,6) should be 24")
+    
+    // Test 2: Global function returning function
+    add10 := makeAdder(10)
+    assert(add10(5) == 15, "makeAdder(10)(5) should be 15")
+    
+    // Test 3: Global function modifying global state
+    assert(counter == 0, "counter starts at 0")
+    increment()
+    increment()
+    assert(counter == 2, "counter should be 2 after two increments")
+    
+    // Test 4: Multiple return values
+    q, r := divmod(17, 5)
+    assert(q == 3, "17/5 quotient should be 3")
+    assert(r == 2, "17%5 remainder should be 2")
+    
+    // Test 5: Variadic global function
+    assert(sum(1, 2, 3, 4, 5) == 15, "sum(1..5) should be 15")
+    assert(sum() == 0, "sum() should be 0")
+    
+    // Test 6: Global function from named function
+    assert(fromNamed(7) == 14, "fromNamed(7) should be 14")
+    
+    // Test 7: Reassign global function variable
+    oldAdd := add
+    add = func(a, b int) int {
+        return a + b + 1  // different implementation
+    }
+    assert(add(3, 5) == 9, "reassigned add(3,5) should be 9")
+    assert(oldAdd(3, 5) == 8, "oldAdd still works")
+    
+    // Test 8: Lazy initialization
+    assert(lazyInit == nil, "lazyInit should be nil initially")
+    lazyInit = func(x int) int {
+        return x * 3
+    }
+    assert(lazyInit(4) == 12, "lazyInit(4) should be 12")
+    
+    println("global_func_var: ok")
+}

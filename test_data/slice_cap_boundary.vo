@@ -1,0 +1,81 @@
+// Test: slice capacity boundary operations
+// Go spec: cap(s) returns capacity, len(s) <= cap(s) always
+package main
+
+func main() {
+    // Test 1: make with length and capacity
+    s1 := make([]int, 3, 10)
+    assert(len(s1) == 3, "len should be 3")
+    assert(cap(s1) == 10, "cap should be 10")
+    
+    // Test 2: Append within capacity (no reallocation)
+    s1[0], s1[1], s1[2] = 1, 2, 3
+    s2 := append(s1, 4, 5)
+    assert(len(s2) == 5, "len after append should be 5")
+    assert(cap(s2) == 10, "cap should still be 10")
+    // s1 and s2 share underlying array
+    s2[0] = 100
+    assert(s1[0] == 100, "s1 and s2 share underlying array")
+    
+    // Test 3: Append beyond capacity (reallocation)
+    s3 := make([]int, 2, 2)
+    s3[0], s3[1] = 1, 2
+    s4 := append(s3, 3, 4, 5)
+    assert(len(s4) == 5, "len should be 5")
+    assert(cap(s4) >= 5, "cap should be at least 5")
+    // s3 and s4 should NOT share underlying array
+    s4[0] = 999
+    assert(s3[0] == 1, "s3 should be unchanged after reallocation")
+    
+    // Test 4: Slice expression preserving capacity
+    arr := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    sub := arr[2:5]  // [2, 3, 4]
+    assert(len(sub) == 3, "sub len should be 3")
+    assert(cap(sub) == 8, "sub cap should be 8 (10-2)")
+    
+    // Test 5: Three-index slice limiting capacity
+    limited := arr[2:5:6]  // [2, 3, 4] with cap 4
+    assert(len(limited) == 3, "limited len should be 3")
+    assert(cap(limited) == 4, "limited cap should be 4 (6-2)")
+    
+    // Test 6: Append to capacity-limited slice
+    limited2 := arr[0:2:4]  // [0, 1] with cap 4
+    limited2 = append(limited2, 10, 11)  // fills capacity exactly
+    assert(len(limited2) == 4, "len should be 4")
+    assert(cap(limited2) == 4, "cap should still be 4")
+    
+    // Another append should cause reallocation
+    limited3 := append(limited2, 12)
+    assert(len(limited3) == 5, "len should be 5")
+    assert(cap(limited3) > 4, "cap should have grown")
+    limited3[0] = 777
+    assert(limited2[0] != 777, "limited2 should not be affected")
+    
+    // Test 7: Empty slice with capacity
+    empty := make([]int, 0, 5)
+    assert(len(empty) == 0, "empty len should be 0")
+    assert(cap(empty) == 5, "empty cap should be 5")
+    empty = append(empty, 1, 2, 3)
+    assert(len(empty) == 3, "len after append should be 3")
+    assert(cap(empty) == 5, "cap should still be 5")
+    
+    // Test 8: Nil slice
+    var nilSlice []int
+    assert(len(nilSlice) == 0, "nil slice len is 0")
+    assert(cap(nilSlice) == 0, "nil slice cap is 0")
+    nilSlice = append(nilSlice, 42)
+    assert(len(nilSlice) == 1, "after append len is 1")
+    assert(nilSlice[0] == 42, "value is 42")
+    
+    // Test 9: cap of array (should equal len)
+    arr2 := [5]int{1, 2, 3, 4, 5}
+    assert(cap(arr2[:]) == 5, "array cap equals len")
+    
+    // Test 10: Slice of slice cap
+    base := make([]int, 10, 20)
+    s10 := base[5:]
+    assert(len(s10) == 5, "s10 len is 5")
+    assert(cap(s10) == 15, "s10 cap is 15 (20-5)")
+    
+    println("slice_cap_boundary: ok")
+}

@@ -1,0 +1,86 @@
+// Test: nested struct zero value initialization
+// BUG: Several scenarios cause VM crash:
+// - Partial struct initialization: Outer{ arr: [3]int{1,2,3} }
+// - Array of struct: var arr [3]Inner
+// - Struct with both array field AND func field
+package main
+
+type Inner struct {
+    x int
+    s string
+    b bool
+    f float64
+}
+
+type Middle struct {
+    inner Inner
+    slice []int
+    mp    map[string]int
+    ptr   *Inner
+}
+
+type WithPointer struct {
+    data *Inner
+    name string
+}
+
+type DeepNested struct {
+    level1 struct {
+        level2 struct {
+            level3 struct {
+                value int
+            }
+        }
+    }
+}
+
+func main() {
+    // Test 1: Inner struct zero value
+    var i Inner
+    assert(i.x == 0, "int zero is 0")
+    assert(i.s == "", "string zero is empty")
+    assert(i.b == false, "bool zero is false")
+    assert(i.f == 0.0, "float zero is 0.0")
+    
+    // Test 2: Middle struct with nested struct
+    var m Middle
+    assert(m.inner.x == 0, "nested int is 0")
+    assert(m.inner.s == "", "nested string is empty")
+    assert(m.slice == nil, "slice zero is nil")
+    assert(m.mp == nil, "map zero is nil")
+    assert(m.ptr == nil, "pointer zero is nil")
+    
+    // Test 3: WithPointer zero
+    var wp WithPointer
+    assert(wp.data == nil, "pointer in struct is nil")
+    assert(wp.name == "", "string is empty")
+    
+    // Test 4: Initialize pointer field
+    wp2 := WithPointer{
+        data: &Inner{x: 42, s: "hello"},
+    }
+    assert(wp2.data != nil, "pointer is not nil")
+    assert(wp2.data.x == 42, "pointer.x is 42")
+    assert(wp2.name == "", "name still empty")
+    
+    // Test 5: Anonymous nested struct
+    var dn DeepNested
+    assert(dn.level1.level2.level3.value == 0, "deep anonymous nested is 0")
+    dn.level1.level2.level3.value = 999
+    assert(dn.level1.level2.level3.value == 999, "can assign to deep nested")
+    
+    // Test 6: Slice of structs (after make)
+    slice := make([]Inner, 3)
+    assert(slice[0].x == 0 && slice[0].s == "", "make slice elements are zero")
+    slice[0].x = 55
+    assert(slice[0].x == 55, "can modify slice element")
+    
+    // Test 7: new() returns pointer to zero value
+    pinner := new(Inner)
+    assert(pinner.x == 0, "new returns zero value")
+    assert(pinner.s == "", "new string is empty")
+    pinner.x = 123
+    assert(pinner.x == 123, "can modify through new pointer")
+    
+    println("nested_struct_zero: ok")
+}

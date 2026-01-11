@@ -1,0 +1,22 @@
+// BUG: Partial struct initialization causes segfault
+// Minimal reproduction
+
+package main
+
+type Inner struct {
+    x int
+}
+
+type Outer struct {
+    inner Inner
+    arr   [3]int
+}
+
+func main() {
+    o := Outer{
+        arr: [3]int{1, 2, 3},  // <- partial init, inner not specified
+    }
+    assert(o.inner.x == 0, "uninitialized should be zero")
+    assert(o.arr[0] == 1, "arr[0] should be 1")
+    println("ok")
+}
