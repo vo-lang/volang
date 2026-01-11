@@ -523,8 +523,8 @@ impl Checker {
         }
 
         x.mode = OperandMode::Value;
-        x.typ = Some(self.new_t_pointer(arg0t));
-        true
+        x.typ = Some(self.new_t_pointer_checked(arg0t, call.args[0].span));
+        x.typ != Some(invalid_type)
     }
 
     /// panic(x)

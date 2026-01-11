@@ -494,7 +494,7 @@ impl Checker {
         
         // Final type is T or *T
         let recv_type = if r.is_pointer {
-            self.new_t_pointer(base_type)
+            self.new_t_pointer_checked(base_type, r.ty.span)
         } else {
             base_type
         };

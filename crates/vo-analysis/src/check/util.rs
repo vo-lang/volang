@@ -496,6 +496,28 @@ impl Checker {
         self.tc_objs.new_t_pointer(base)
     }
     
+    /// Create pointer type with validation that base is struct.
+    /// Returns invalid_type and reports error if base is not struct.
+    pub(crate) fn new_t_pointer_checked(&mut self, base: TypeKey, span: vo_common::span::Span) -> TypeKey {
+        let invalid_type = self.invalid_type();
+        if base == invalid_type {
+            return invalid_type;
+        }
+        let underlying = crate::typ::underlying_type(base, self.objs());
+        if self.otype(underlying).try_as_struct().is_none() {
+            self.error_code_msg(
+                super::errors::TypeError::PointerToNonStruct,
+                span,
+                format!(
+                    "invalid pointer type *{} (pointer base must be struct)",
+                    self.type_str(base)
+                ),
+            );
+            return invalid_type;
+        }
+        self.tc_objs.new_t_pointer(base)
+    }
+    
     #[inline]
     pub(crate) fn new_t_tuple(&mut self, vars: Vec<ObjKey>) -> TypeKey {
         self.tc_objs.new_t_tuple(vars)

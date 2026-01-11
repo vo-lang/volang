@@ -1,0 +1,156 @@
+// Test: Complex interface embedding and method set computation
+// Vo spec: Method sets are computed by union with duplicate checking
+package main
+
+type Reader interface {
+    Read(buf []byte) int
+}
+
+type Writer interface {
+    Write(buf []byte) int
+}
+
+type Closer interface {
+    Close()
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type ReadCloser interface {
+    Reader
+    Closer
+}
+
+type WriteCloser interface {
+    Writer
+    Closer
+}
+
+type ReadWriteCloser interface {
+    Reader
+    Writer
+    Closer
+}
+
+// Diamond embedding: both paths lead to Reader
+type DiamondTop interface {
+    ReadWriter
+    ReadCloser
+}
+
+type Buffer struct {
+    data   []byte
+    closed bool
+}
+
+func (b *Buffer) Read(buf []byte) int {
+    n := copy(buf, b.data)
+    b.data = b.data[n:]
+    return n
+}
+
+func (b *Buffer) Write(buf []byte) int {
+    b.data = append(b.data, buf...)
+    return len(buf)
+}
+
+func (b *Buffer) Close() {
+    b.closed = true
+}
+
+func useReader(r Reader) int {
+    buf := make([]byte, 10)
+    return r.Read(buf)
+}
+
+func useWriter(w Writer) int {
+    return w.Write([]byte("test"))
+}
+
+func useCloser(c Closer) {
+    c.Close()
+}
+
+func useReadWriter(rw ReadWriter) {
+    rw.Write([]byte("hello"))
+    buf := make([]byte, 5)
+    rw.Read(buf)
+}
+
+func useReadWriteCloser(rwc ReadWriteCloser) {
+    rwc.Write([]byte("data"))
+    buf := make([]byte, 4)
+    rwc.Read(buf)
+    rwc.Close()
+}
+
+func main() {
+    // Test 1: Concrete type implements all interfaces
+    b := &Buffer{data: []byte{}}
+    
+    // Assign to each interface level
+    var r Reader = b
+    var w Writer = b
+    var c Closer = b
+    var rw ReadWriter = b
+    var rc ReadCloser = b
+    var wc WriteCloser = b
+    var rwc ReadWriteCloser = b
+    
+    // Test 2: Use through interfaces
+    w.Write([]byte("hello"))
+    buf := make([]byte, 5)
+    n := r.Read(buf)
+    assert(n == 5, "read 5 bytes")
+    assert(string(buf) == "hello", "read correct data")
+    
+    // Test 3: Interface to interface assignment (superset to subset)
+    var r2 Reader = rw  // ReadWriter -> Reader (OK: subset)
+    var w2 Writer = rw  // ReadWriter -> Writer (OK: subset)
+    _ = r2
+    _ = w2
+    
+    var r3 Reader = rwc  // ReadWriteCloser -> Reader
+    var c2 Closer = rwc  // ReadWriteCloser -> Closer
+    _ = r3
+    _ = c2
+    
+    // Test 4: Diamond embedding works
+    var diamond DiamondTop = b
+    diamondBuf := make([]byte, 10)
+    diamond.Write([]byte("diamond"))
+    diamond.Read(diamondBuf)
+    diamond.Close()
+    
+    // Test 5: Function accepting interface
+    b2 := &Buffer{data: []byte("test data")}
+    n2 := useReader(b2)
+    assert(n2 > 0, "useReader should read")
+    
+    b3 := &Buffer{}
+    n3 := useWriter(b3)
+    assert(n3 == 4, "useWriter writes 4 bytes")
+    
+    // Test 6: Pass concrete to ReadWriteCloser function
+    b4 := &Buffer{}
+    useReadWriteCloser(b4)
+    assert(b4.closed == true, "should be closed")
+    
+    // Test 7: nil interface checks
+    var nilReader Reader = nil
+    assert(nilReader == nil, "nil interface is nil")
+    
+    var nilRWC ReadWriteCloser = nil
+    var nilR Reader = nilRWC  // nil interface to nil interface
+    assert(nilR == nil, "nil to nil assignment")
+    
+    // Suppress unused warnings
+    _ = rc
+    _ = wc
+    _ = c
+    
+    println("interface_embed_hierarchy: ok")
+}

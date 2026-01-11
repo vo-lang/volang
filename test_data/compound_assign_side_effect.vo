@@ -1,0 +1,37 @@
+// Test: Compound assignment operators
+package main
+
+func main() {
+    // Test 1: Basic compound operators
+    x := 100
+    x += 10  // 110
+    assert(x == 110, "+= works")
+    x -= 20  // 90
+    assert(x == 90, "-= works")
+    x *= 2   // 180
+    assert(x == 180, "*= works")
+    x /= 3   // 60
+    assert(x == 60, "/= works")
+    x %= 7   // 4
+    assert(x == 4, "%= works")
+    
+    // Test 6: Bitwise compound operators
+    y := 0xFF
+    y &= 0x0F  // 0x0F
+    assert(y == 0x0F, "&= works")
+    y |= 0xF0  // 0xFF
+    assert(y == 0xFF, "|= works")
+    y ^= 0x55  // 0xAA
+    assert(y == 0xAA, "^= works")
+    y &^= 0x0A // 0xA0
+    assert(y == 0xA0, "&^= works")
+    
+    // Test 7: Shift compound operators
+    z := 1
+    z <<= 4  // 16
+    assert(z == 16, "<<= works")
+    z >>= 2  // 4
+    assert(z == 4, ">>= works")
+    
+    println("compound_assign_side_effect: ok")
+}

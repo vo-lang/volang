@@ -1,0 +1,15 @@
+// BUG: Map with struct key containing string field causes panic
+// Per spec: struct keys should be valid if all fields are comparable
+// String is comparable, so this should work
+package main
+
+type Key struct {
+    Name string
+}
+
+func main() {
+    m := map[Key]int{}
+    m[Key{"alice"}] = 100
+    assert(m[Key{"alice"}] == 100, "lookup failed")
+    println("bug_map_struct_key_string: ok")
+}

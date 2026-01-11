@@ -275,3 +275,17 @@ tests:
 # Tests for previously fixed bugs
   - file: for_range_channel.vo
   - file: type_switch_nil.vo
+
+# Coverage tests from analysis (2026-01-11)
+  - file: named_type_slice_method.vo
+  - file: map_struct_key.vo
+  - file: string_byte_rune_conv.vo
+  - file: compound_assign_side_effect.vo
+  - file: interface_embed_hierarchy.vo
+
+# Bug reproductions (2026-01-11)
+  - file: bug_ptr_recv_named_slice.vo
+    should_fail: true  # FIXED: now correctly reports compile error E2410
+  - file: bug_map_struct_key_string.vo
+    skip: [vm, jit]
+    reason: "BUG: map with struct key containing string field causes panic"

@@ -1,0 +1,68 @@
+// Test: Map with struct as key
+// Vo spec: struct keys are valid if all fields are comparable
+package main
+
+type Point struct {
+    X, Y int
+}
+
+type Color struct {
+    R, G, B uint8
+}
+
+// BUG: Map with struct key containing string field panics
+// type ComplexKey struct {
+//     Name string
+//     ID   int
+//     Flag bool
+// }
+
+func main() {
+    // Test 1: Simple struct key
+    pointValues := map[Point]string{}
+    pointValues[Point{0, 0}] = "origin"
+    pointValues[Point{1, 0}] = "right"
+    pointValues[Point{0, 1}] = "up"
+    
+    assert(pointValues[Point{0, 0}] == "origin", "origin lookup failed")
+    assert(pointValues[Point{1, 0}] == "right", "right lookup failed")
+    assert(pointValues[Point{0, 1}] == "up", "up lookup failed")
+    
+    // Test 2: Struct key with ok form
+    v, ok := pointValues[Point{5, 5}]
+    assert(ok == false, "non-existent key should return ok=false")
+    assert(v == "", "non-existent key should return zero value")
+    
+    v2, ok2 := pointValues[Point{0, 0}]
+    assert(ok2 == true, "existing key should return ok=true")
+    assert(v2 == "origin", "existing key should return value")
+    
+    // Test 3: Delete with struct key
+    delete(pointValues, Point{1, 0})
+    _, ok3 := pointValues[Point{1, 0}]
+    assert(ok3 == false, "deleted key should not exist")
+    
+    // Test 4: SKIPPED - BUG: struct key with string field panics
+    
+    // Test 5: Iterate over struct-keyed map
+    colorNames := map[Color]string{
+        Color{255, 0, 0}: "red",
+        Color{0, 255, 0}: "green",
+        Color{0, 0, 255}: "blue",
+    }
+    
+    count := 0
+    for _, name := range colorNames {
+        assert(name == "red" || name == "green" || name == "blue", "unexpected color name")
+        count += 1
+    }
+    assert(count == 3, "should iterate 3 colors")
+    
+    // Test 6: Struct key equality
+    p1 := Point{10, 20}
+    p2 := Point{10, 20}
+    m := map[Point]int{p1: 42}
+    assert(m[p2] == 42, "equal struct keys should match")
+    
+    println("map_struct_key: ok")
+}

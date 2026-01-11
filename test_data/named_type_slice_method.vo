@@ -1,0 +1,68 @@
+// Test: Methods on named slice/map types
+// Vo spec: "Any named type can have methods"
+package main
+
+type IntSlice []int
+
+func (s IntSlice) Sum() int {
+    total := 0
+    for _, v := range s {
+        total += v
+    }
+    return total
+}
+
+func (s IntSlice) Len() int {
+    return len(s)
+}
+
+// NOTE: Pointer receiver on non-struct named type should be compile error per spec
+// func (s *IntSlice) Append(v int) { *s = append(*s, v) }
+// BUG: Currently causes segfault instead of compile error
+
+type StringMap map[string]int
+
+func (m StringMap) Get(key string) int {
+    v, ok := m[key]
+    if ok {
+        return v
+    }
+    return -1
+}
+
+func (m StringMap) Has(key string) bool {
+    _, ok := m[key]
+    return ok
+}
+
+func main() {
+    // Test 1: Value receiver on named slice
+    s := IntSlice{1, 2, 3, 4, 5}
+    assert(s.Sum() == 15, "Sum should be 15, got ", s.Sum())
+    assert(s.Len() == 5, "Len should be 5")
+    
+    // Test 2: Pointer receiver - SKIPPED (should be compile error per spec)
+    // s.Append(6)
+    
+    // Test 3: Named slice assigned from literal
+    s2 := IntSlice{10, 20, 30}
+    assert(s2.Sum() == 60, "s2.Sum should be 60")
+    
+    // Test 4: Named map methods
+    m := StringMap{"a": 1, "b": 2, "c": 3}
+    assert(m.Get("a") == 1, "m.Get(a) should be 1")
+    assert(m.Get("z") == -1, "m.Get(z) should be -1")
+    assert(m.Has("b") == true, "m.Has(b) should be true")
+    assert(m.Has("z") == false, "m.Has(z) should be false")
+    
+    // Test 5: Empty named slice
+    var empty IntSlice
+    assert(empty.Sum() == 0, "empty.Sum should be 0")
+    assert(empty.Len() == 0, "empty.Len should be 0")
+    
+    // Test 6: Method call on empty slice
+    var s3 IntSlice
+    assert(s3.Sum() == 0, "empty slice sum should be 0")
+    
+    println("named_type_slice_method: ok")
+}
