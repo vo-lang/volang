@@ -21,6 +21,17 @@ pub struct BuiltinProtocols {
     pub call_object_meta_id: Option<u32>,
 }
 
+/// Cache key for method value wrappers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MethodValueWrapperKey {
+    /// Value receiver: boxes receiver, unboxes in wrapper
+    Value { recv_type: TypeKey, func_id: u32 },
+    /// Pointer receiver: captures pointer directly
+    Pointer { recv_type: TypeKey, func_id: u32 },
+    /// Interface: captures interface (2 slots), uses CallIface
+    Interface { method_idx: u32 },
+}
+
 /// Get ret_slots for known builtin extern functions.
 /// This is critical for JIT to allocate correct buffer sizes.
 fn builtin_extern_ret_slots(name: &str) -> u16 {
@@ -121,6 +132,9 @@ pub struct CodegenContext {
     
     /// Builtin protocol interface meta IDs
     builtin_protocols: BuiltinProtocols,
+    
+    /// Method value wrappers cache
+    method_value_wrappers: HashMap<MethodValueWrapperKey, u32>,
 }
 
 impl CodegenContext {
@@ -170,6 +184,7 @@ impl CodegenContext {
             itab_cache: HashMap::new(),
             current_func_id: None,
             builtin_protocols: BuiltinProtocols::default(),
+            method_value_wrappers: HashMap::new(),
         }
     }
     
@@ -889,6 +904,255 @@ impl CodegenContext {
     /// Get interface func_id for itab building (wrapper for value receiver, original for pointer receiver)
     pub fn get_iface_func_by_objkey(&self, obj: ObjKey) -> Option<u32> {
         self.objkey_to_iface_func.get(&obj).copied()
+    }
+
+    // === Method value support ===
+    
+    /// Get or create wrapper function for value receiver method value.
+    /// The wrapper unboxes the captured receiver and calls the original method.
+    pub fn get_or_create_method_value_wrapper(
+        &mut self,
+        recv_type: TypeKey,
+        method_func_id: u32,
+        method_name: &str,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> Result<u32, crate::error::CodegenError> {
+        let cache_key = MethodValueWrapperKey::Value { recv_type, func_id: method_func_id };
+        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
+            return Ok(wrapper_id);
+        }
+        
+        // Get method signature info
+        let orig_func = &self.module.functions[method_func_id as usize];
+        let param_slots = orig_func.param_slots;
+        let ret_slots = orig_func.ret_slots;
+        let recv_slots = info.type_slot_count(recv_type);
+        
+        // Create wrapper function:
+        // slot 0: closure ref (boxed receiver in capture 0)
+        // slots 1..1+param_slots: params (excluding receiver since method value hides it)
+        //
+        // Wrapper body:
+        // 1. ClosureGet to get boxed receiver
+        // 2. PtrGet to unbox receiver value
+        // 3. Call original method with receiver + params
+        // 4. Return result
+        
+        use vo_vm::bytecode::FunctionDef;
+        use vo_vm::instruction::{Instruction, Opcode};
+        
+        // Wrapper params: closure ref + original params (minus receiver)
+        // Original method: recv_slots + other_params = param_slots
+        // Wrapper: closure_ref(1) + other_params = 1 + (param_slots - recv_slots)
+        let wrapper_param_slots = 1 + (param_slots.saturating_sub(recv_slots as u16));
+        
+        let mut code = Vec::new();
+        
+        // Allocate space for receiver
+        let recv_reg = wrapper_param_slots;  // Start after params
+        
+        // ClosureGet: get boxed receiver from capture 0
+        // dst=recv_reg (temp), capture_idx=0
+        let boxed_reg = recv_reg;
+        code.push(Instruction::new(Opcode::ClosureGet, boxed_reg, 0, 0));
+        
+        // PtrGet: unbox receiver value
+        // For multi-slot values, need PtrGetN
+        if recv_slots == 1 {
+            code.push(Instruction::new(Opcode::PtrGet, recv_reg, boxed_reg, 0));
+        } else {
+            code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, boxed_reg, 0));
+        }
+        
+        // Setup call: receiver + other params
+        // Call original method
+        let args_start = recv_reg;
+        // Copy params from slot 1 onwards to after receiver
+        let other_param_slots = param_slots.saturating_sub(recv_slots as u16);
+        if other_param_slots > 0 {
+            // Copy other params to after receiver
+            let src_start = 1u16; // skip closure ref
+            let dst_start = recv_reg + recv_slots as u16;
+            for i in 0..other_param_slots {
+                code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
+            }
+        }
+        
+        // Call: flags=func_id_high, a=func_id_low, b=args_start, c=encode_call_args
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
+        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
+        
+        // Return result (already in args_start..args_start+ret_slots)
+        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        
+        let wrapper_name = format!("__method_value_{}_{}", method_name, method_func_id);
+        let wrapper_func = FunctionDef {
+            name: wrapper_name,
+            param_count: wrapper_param_slots,
+            param_slots: wrapper_param_slots,
+            ret_slots,
+            local_slots: recv_slots as u16 + other_param_slots + ret_slots, // receiver + params copy + ret space
+            recv_slots: 0,
+            code,
+            slot_types: Vec::new(),
+        };
+        
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(wrapper_func);
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        
+        Ok(wrapper_id)
+    }
+    
+    /// Get or create wrapper function for pointer receiver method value.
+    /// The wrapper gets the pointer from capture and calls the original method.
+    pub fn get_or_create_method_value_wrapper_ptr(
+        &mut self,
+        recv_type: TypeKey,
+        method_func_id: u32,
+        method_name: &str,
+        _info: &crate::type_info::TypeInfoWrapper,
+    ) -> Result<u32, crate::error::CodegenError> {
+        let cache_key = MethodValueWrapperKey::Pointer { recv_type, func_id: method_func_id };
+        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
+            return Ok(wrapper_id);
+        }
+        
+        // Get method signature info
+        let orig_func = &self.module.functions[method_func_id as usize];
+        let param_slots = orig_func.param_slots;
+        let ret_slots = orig_func.ret_slots;
+        let recv_slots = 1u16; // pointer is 1 slot
+        
+        use vo_vm::bytecode::FunctionDef;
+        use vo_vm::instruction::{Instruction, Opcode};
+        
+        // Wrapper params: closure ref + original params (minus receiver)
+        // Original method: recv(1) + other_params
+        // Wrapper: closure_ref(1) + other_params
+        let other_param_slots = param_slots.saturating_sub(recv_slots);
+        let wrapper_param_slots = 1 + other_param_slots;
+        
+        let mut code = Vec::new();
+        
+        // ClosureGet: get pointer from capture 0
+        let ptr_reg = wrapper_param_slots;
+        code.push(Instruction::new(Opcode::ClosureGet, ptr_reg, 0, 0));
+        
+        // Copy other params after receiver
+        let args_start = ptr_reg;
+        if other_param_slots > 0 {
+            let src_start = 1u16;
+            let dst_start = ptr_reg + recv_slots;
+            for i in 0..other_param_slots {
+                code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
+            }
+        }
+        
+        // Call original method
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
+        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
+        
+        // Return
+        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        
+        let wrapper_name = format!("__method_value_ptr_{}_{}", method_name, method_func_id);
+        // local_slots must cover: params + temp registers used
+        // Layout: [closure_ref(1)][other_params][ptr_reg(1)][call_args_copy][ret_space]
+        let local_slots = wrapper_param_slots + recv_slots + other_param_slots + ret_slots;
+        let wrapper_func = FunctionDef {
+            name: wrapper_name,
+            param_count: wrapper_param_slots,
+            param_slots: wrapper_param_slots,
+            ret_slots,
+            local_slots,
+            recv_slots: 0,
+            code,
+            slot_types: Vec::new(),
+        };
+        
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(wrapper_func);
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        
+        Ok(wrapper_id)
+    }
+    
+    /// Get or create wrapper function for interface method value.
+    /// The wrapper gets interface from captures and calls via CallIface.
+    pub fn get_or_create_method_value_wrapper_iface(
+        &mut self,
+        method_idx: u32,
+        param_slots: u16,
+        ret_slots: u16,
+        method_name: &str,
+    ) -> Result<u32, crate::error::CodegenError> {
+        let cache_key = MethodValueWrapperKey::Interface { method_idx };
+        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
+            return Ok(wrapper_id);
+        }
+        
+        use vo_vm::bytecode::FunctionDef;
+        use vo_vm::instruction::{Instruction, Opcode};
+        
+        // Wrapper layout:
+        // Params: closure_ref(1) + method_params(param_slots)
+        // Wrapper body:
+        // 1. ClosureGet to get interface slot0 and data from captures
+        // 2. Copy params after interface
+        // 3. CallIface with method_idx
+        // 4. Return result
+        
+        let wrapper_param_slots = 1 + param_slots;
+        let iface_slots = 2u16; // interface is 2 slots
+        
+        let mut code = Vec::new();
+        
+        // ClosureGet: get interface slot0 from capture 0
+        let iface_reg = wrapper_param_slots;
+        code.push(Instruction::new(Opcode::ClosureGet, iface_reg, 0, 0));
+        // ClosureGet: get interface data from capture 1
+        code.push(Instruction::new(Opcode::ClosureGet, iface_reg + 1, 1, 0));
+        
+        // args_start is after interface (for params and return value)
+        let args_start = iface_reg + iface_slots;
+        
+        // Copy params to args_start
+        if param_slots > 0 {
+            let src_start = 1u16; // skip closure ref
+            for i in 0..param_slots {
+                code.push(Instruction::new(Opcode::Copy, args_start + i, src_start + i, 0));
+            }
+        }
+        
+        // CallIface: flags=method_idx, a=iface_reg, b=args_start, c=encode(param_slots, ret_slots)
+        // arg_slots for CallIface is just params (not including interface)
+        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
+        
+        // Return result (result is at args_start after call)
+        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        
+        let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
+        let local_slots = wrapper_param_slots + iface_slots + param_slots + ret_slots;
+        let wrapper_func = FunctionDef {
+            name: wrapper_name,
+            param_count: wrapper_param_slots,
+            param_slots: wrapper_param_slots,
+            ret_slots,
+            local_slots,
+            recv_slots: 0,
+            code,
+            slot_types: Vec::new(),
+        };
+        
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(wrapper_func);
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        
+        Ok(wrapper_id)
     }
 
     // === Init functions ===

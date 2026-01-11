@@ -248,6 +248,4 @@ tests:
     reason: "BUG: defer closure captures variable value instead of reference"
   - file: short_var_redecl.vo
   - file: method_value.vo
-    skip: [vm, jit]
-    reason: "BUG: compiler panic - struct field index not found"
   - file: switch_nested_break.vo

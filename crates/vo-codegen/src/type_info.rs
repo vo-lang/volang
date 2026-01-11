@@ -728,6 +728,46 @@ impl<'a> TypeInfoWrapper<'a> {
         }
         panic!("get_interface_method_signature: method {} not found", method_name)
     }
+    
+    /// Get interface method's param_slots and ret_slots for method value wrapper generation.
+    /// Returns (param_slots, ret_slots) where param_slots includes receiver (2 slots for interface).
+    pub fn get_interface_method_slots(&self, iface_type: TypeKey, method_name: &str) -> Option<(u16, u16)> {
+        let underlying = typ::underlying_type(iface_type, self.tc_objs());
+        if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
+            let all_methods = iface.all_methods();
+            let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+            for &method in methods {
+                if self.obj_name(method) == method_name {
+                    let method_type = self.tc_objs().lobjs[method].typ()
+                        .expect("interface method must have type");
+                    let sig = self.as_signature(method_type);
+                    
+                    // Calculate param slots (excluding receiver - interface methods don't have receiver in signature)
+                    let mut param_slots = 0u16;
+                    let params_key = sig.params();
+                    if let Type::Tuple(tuple) = &self.tc_objs().types[params_key] {
+                        for &p in tuple.vars() {
+                            let param_type = self.tc_objs().lobjs[p].typ().unwrap();
+                            param_slots += self.type_slot_count(param_type);
+                        }
+                    }
+                    
+                    // Calculate return slots
+                    let mut ret_slots = 0u16;
+                    let results_key = sig.results();
+                    if let Type::Tuple(tuple) = &self.tc_objs().types[results_key] {
+                        for &r in tuple.vars() {
+                            let ret_type = self.tc_objs().lobjs[r].typ().unwrap();
+                            ret_slots += self.type_slot_count(ret_type);
+                        }
+                    }
+                    
+                    return Some((param_slots, ret_slots));
+                }
+            }
+        }
+        None
+    }
 
     /// Get channel element slot count
     pub fn chan_elem_slots(&self, type_key: TypeKey) -> u16 {

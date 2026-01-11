@@ -56,6 +56,12 @@ pub fn get_expr_source(
             if is_pkg_qualified_name(sel, info) {
                 return ExprSource::NeedsCompile;
             }
+            // Check if this is a method value (t.M) - needs special handling
+            if let Some(selection) = info.get_selection(expr.id) {
+                if *selection.kind() == vo_analysis::selection::SelectionKind::MethodVal {
+                    return ExprSource::NeedsCompile;
+                }
+            }
             let expr_type = info.expr_type(expr.id);
             let field_slots = info.type_slot_count(expr_type);
             let recv_type = info.expr_type(sel.expr.id);
@@ -485,6 +491,13 @@ fn compile_selector(
         return compile_pkg_qualified_name(expr, sel, dst, ctx, func, info);
     }
 
+    // Check if this is a method value (t.M)
+    if let Some(selection) = info.get_selection(expr.id) {
+        if *selection.kind() == vo_analysis::selection::SelectionKind::MethodVal {
+            return compile_method_value(expr, sel, selection, dst, ctx, func, info);
+        }
+    }
+
     if let ExprSource::Location(storage) = get_expr_source(expr, ctx, func, info) {
         func.emit_storage_load(storage, dst);
         return Ok(());
@@ -515,6 +528,153 @@ fn compile_selector(
         .map(|sel_info| info.compute_field_offset_from_indices(recv_type, sel_info.indices()))
         .unwrap_or_else(|| info.struct_field_offset(recv_type, field_name));
     func.emit_copy(dst, base_reg + offset, slots);
+    Ok(())
+}
+
+/// Compile method value expression (t.M where M is a method).
+/// Creates a closure that captures the receiver and calls the method.
+fn compile_method_value(
+    _expr: &Expr,
+    sel: &vo_syntax::ast::SelectorExpr,
+    selection: &vo_analysis::selection::Selection,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let recv_type = info.expr_type(sel.expr.id);
+    let method_name = info.project.interner.resolve(sel.sel.symbol)
+        .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+    
+    // Interface method value: capture interface, use CallIface in wrapper
+    if info.is_interface(recv_type) {
+        return compile_interface_method_value(sel, recv_type, method_name, dst, ctx, func, info);
+    }
+    
+    // Use resolve_method_call - same as method call compilation
+    let call_info = crate::embed::resolve_method_call(
+        recv_type,
+        method_name,
+        sel.sel.symbol,
+        Some(selection),
+        false, // not interface
+        ctx,
+        &info.project.tc_objs,
+        &info.project.interner,
+    ).ok_or_else(|| CodegenError::Internal(format!("method {} not found on type {:?}", method_name, recv_type)))?;
+    
+    let (method_func_id, _expects_ptr_recv) = match call_info.dispatch {
+        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
+        _ => return Err(CodegenError::Internal("method value requires static dispatch".to_string())),
+    };
+    
+    // Check if receiver expression is pointer type
+    let is_ptr_recv = info.is_pointer(recv_type);
+    
+    // For method value, we need to create a closure that captures the receiver
+    // and calls the method with it.
+    //
+    // Pointer receiver (*T): capture the pointer directly
+    // Value receiver (T): need to box the value and create wrapper that unboxes
+    
+    if is_ptr_recv {
+        // Pointer receiver: capture the pointer, wrapper extracts it and calls method
+        let ptr_reg = compile_expr(&sel.expr, ctx, func, info)?;
+        
+        // Get or create wrapper for pointer receiver
+        let wrapper_id = ctx.get_or_create_method_value_wrapper_ptr(
+            recv_type,
+            method_func_id,
+            method_name,
+            info
+        )?;
+        
+        // Create closure with 1 capture (the pointer)
+        func.emit_op(Opcode::ClosureNew, dst, wrapper_id as u16, 1);
+        // Set capture at offset 1 (after ClosureHeader)
+        func.emit_ptr_set_with_barrier(dst, 1, ptr_reg, 1, true);
+    } else {
+        // Value receiver: need to box the value
+        // The method expects a value, but we need to capture it by reference
+        // so modifications to the original don't affect the captured copy.
+        //
+        // Actually for method value, Go spec says the receiver is evaluated
+        // and copied at the time of creating the method value.
+        // So we box the value and the wrapper needs to unbox it.
+        
+        let recv_slots = info.type_slot_count(recv_type);
+        let recv_reg = func.alloc_temp(recv_slots);
+        compile_expr_to(&sel.expr, recv_reg, ctx, func, info)?;
+        
+        // Box the receiver value
+        let slot_types = info.type_slot_types(recv_type);
+        let meta_idx = ctx.get_or_create_value_meta(Some(recv_type), recv_slots, &slot_types);
+        let meta_reg = func.alloc_temp(1);
+        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        
+        let boxed_reg = func.alloc_temp(1);
+        func.emit_with_flags(Opcode::PtrNew, recv_slots as u8, boxed_reg, meta_reg, 0);
+        func.emit_ptr_set(boxed_reg, 0, recv_reg, recv_slots);
+        
+        // Get or create wrapper function that takes boxed receiver
+        let wrapper_id = ctx.get_or_create_method_value_wrapper(
+            recv_type, 
+            method_func_id, 
+            &method_name,
+            info
+        )?;
+        
+        // Create closure with 1 capture (the boxed receiver)
+        func.emit_op(Opcode::ClosureNew, dst, wrapper_id as u16, 1);
+        // Set capture at offset 1 (after ClosureHeader)
+        func.emit_ptr_set_with_barrier(dst, 1, boxed_reg, 1, true);
+    }
+    
+    Ok(())
+}
+
+/// Compile interface method value: iface.Method
+/// Creates a closure that captures the interface value and calls via itab dispatch.
+fn compile_interface_method_value(
+    sel: &vo_syntax::ast::SelectorExpr,
+    recv_type: vo_analysis::objects::TypeKey,
+    method_name: &str,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    // Get method index for this interface type
+    let method_idx = ctx.get_interface_method_index(
+        recv_type, 
+        method_name, 
+        &info.project.tc_objs, 
+        &info.project.interner
+    );
+    
+    // Get method signature slots from interface type
+    let (param_slots, ret_slots) = info.get_interface_method_slots(recv_type, method_name)
+        .ok_or_else(|| CodegenError::Internal(format!(
+            "method {} not found on interface {:?}", method_name, recv_type
+        )))?;
+    
+    // Compile interface expression (2 slots: slot0 + data)
+    let iface_reg = func.alloc_temp(2);
+    compile_expr_to(&sel.expr, iface_reg, ctx, func, info)?;
+    
+    // Get or create wrapper function that uses CallIface
+    let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
+        method_idx,
+        param_slots,
+        ret_slots,
+        method_name,
+    )?;
+    
+    // Create closure with 2 captures (interface slot0 + data)
+    func.emit_op(Opcode::ClosureNew, dst, wrapper_id as u16, 2);
+    // Set captures at offset 1 (after ClosureHeader)
+    func.emit_ptr_set_with_barrier(dst, 1, iface_reg, 2, true);
+    
     Ok(())
 }
 
