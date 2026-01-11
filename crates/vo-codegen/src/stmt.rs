@@ -126,7 +126,6 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         if let Some(expr) = init {
             // Compile init expression FIRST, before registering variable.
             // This ensures shadowing like `i := i` references the outer `i`.
-            let slots = self.info.type_slot_count(type_key);
             let slot_types = self.info.type_slot_types(type_key);
             let tmp = self.func.alloc_temp_typed(&slot_types);
             self.compile_value(expr, tmp, type_key)?;
@@ -200,7 +199,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let elem_bytes = self.info.array_elem_bytes(type_key);
         let elem_type = self.info.array_elem_type(type_key);
         let elem_vk = self.info.type_value_kind(elem_type);
-        let gcref_slot = self.func.define_local_heap_array(sym, elem_slots);
+        let gcref_slot = self.func.define_local_heap_array(sym, elem_slots, elem_bytes as u16, elem_vk);
 
         let arr_len = self.info.array_len(type_key);
         let elem_meta_idx = self.ctx.get_or_create_array_elem_meta(type_key, self.info);
@@ -221,7 +220,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         }
         self.func.emit_with_flags(Opcode::ArrayNew, flags, gcref_slot, meta_reg, len_reg);
 
-        Ok(StorageKind::HeapArray { gcref_slot, elem_slots })
+        Ok(StorageKind::HeapArray { gcref_slot, elem_slots, elem_bytes: elem_bytes as u16, elem_vk })
     }
 
     /// Allocate escaped boxed value (struct/primitive/interface): [GcHeader][data]
@@ -234,7 +233,8 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     ) -> Result<StorageKind, CodegenError> {
         let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
 
-        let meta_idx = self.ctx.get_or_create_value_meta(Some(type_key), slots, slot_types);
+        let rttid = self.ctx.intern_type_key(type_key, self.info);
+        let meta_idx = self.ctx.get_or_create_value_meta_with_rttid(rttid, slot_types, None);
         let meta_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
         self.func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
@@ -302,13 +302,13 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn store_from_slot(&mut self, storage: StorageKind, src_slot: u16, slot_types: &[vo_runtime::SlotType]) {
         match storage {
             // HeapArray needs special handling: copy elements, not GcRef
-            StorageKind::HeapArray { gcref_slot, elem_slots } => {
+            StorageKind::HeapArray { gcref_slot, elem_slots, elem_bytes, elem_vk } => {
                 let arr_len = slot_types.len() as u16 / elem_slots;
                 for i in 0..arr_len {
                     let idx_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
                     self.func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
                     let src_offset = src_slot + i * elem_slots;
-                    self.func.emit_with_flags(Opcode::ArraySet, elem_slots as u8, gcref_slot, idx_reg, src_offset);
+                    self.func.emit_array_set(gcref_slot, idx_reg, src_offset, elem_bytes as usize, elem_vk, self.ctx);
                 }
             }
             // All other cases delegate to emit_storage_store
@@ -489,7 +489,6 @@ fn compile_stmt_with_label(
             if is_multi_value {
                 // Multi-value: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(short_var.values[0].id);
-                let total_slots = info.type_slot_count(tuple_type);
                 let tuple_slot_types = info.type_slot_types(tuple_type);
                 let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
                 compile_expr_to(&short_var.values[0], tmp_base, ctx, func, info)?;
@@ -529,7 +528,6 @@ fn compile_stmt_with_label(
                         rhs_temps.push(None);
                     } else {
                         let type_key = info.expr_type(expr.id);
-                        let slots = info.type_slot_count(type_key);
                         let slot_types = info.type_slot_types(type_key);
                         let tmp = func.alloc_temp_typed(&slot_types);
                         compile_expr_to(expr, tmp, ctx, func, info)?;
@@ -740,7 +738,6 @@ fn compile_stmt_with_label(
             if is_multi_value {
                 // Multi-value assignment: compile expr once, then distribute to variables
                 let tuple_type = info.expr_type(assign.rhs[0].id);
-                let total_slots = info.type_slot_count(tuple_type);
                 let tuple_slot_types = info.type_slot_types(tuple_type);
                 let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
                 compile_expr_to(&assign.rhs[0], tmp_base, ctx, func, info)?;
@@ -1730,7 +1727,6 @@ fn compile_select(
                 
                 // Allocate destination for received value
                 let has_ok = recv.lhs.len() > 1;
-                let dst_slots = if has_ok { elem_slots + 1 } else { elem_slots };
                 // Channel elem + optional ok bool
                 let mut recv_slot_types = vec![SlotType::Value; elem_slots as usize];
                 if has_ok {
@@ -2115,7 +2111,7 @@ fn compile_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{resolve_lvalue, emit_lvalue_store, lvalue_slots};
+    use crate::lvalue::{resolve_lvalue, emit_lvalue_store};
     
     // Handle blank identifier: compile RHS for side effects only
     if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
@@ -2127,7 +2123,6 @@ fn compile_assign(
     
     // Resolve LHS to an LValue
     let lv = resolve_lvalue(lhs, ctx, func, info)?;
-    let slots = lvalue_slots(&lv);
     
     // Get LHS type for interface check
     let lhs_type = info.expr_type(lhs.id);
@@ -2176,7 +2171,7 @@ fn compile_compound_assign(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::AssignOp;
-    use crate::lvalue::{resolve_lvalue, emit_lvalue_load, emit_lvalue_store, lvalue_slots, LValue};
+    use crate::lvalue::{resolve_lvalue, emit_lvalue_load, emit_lvalue_store, LValue};
     use crate::func::StorageKind;
     
     // Get the operation opcode based on AssignOp and type
@@ -2287,7 +2282,8 @@ pub fn compile_iface_assign(
                 // IfaceAssign expects a boxed value layout: [GcHeader][data...]
                 let src_slots = info.type_slot_count(src_type);
                 let src_slot_types = info.type_slot_types(src_type);
-                let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+                let rttid = ctx.intern_type_key(src_type, info);
+                let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
                 
                 // Read element data from array (skip ArrayHeader at offset 2)
                 let tmp_data = func.alloc_temp_typed(&src_slot_types);
@@ -2307,7 +2303,8 @@ pub fn compile_iface_assign(
                 // Stack value or expression: allocate box and copy data
                 let src_slots = info.type_slot_count(src_type);
                 let src_slot_types = info.type_slot_types(src_type);
-                let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+                let rttid = ctx.intern_type_key(src_type, info);
+                let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
                 
                 let tmp_data = func.alloc_temp_typed(&src_slot_types);
                 compile_expr_to(rhs, tmp_data, ctx, func, info)?;
@@ -2359,7 +2356,8 @@ pub fn emit_iface_assign_from_concrete(
         // Struct/Array: allocate box and copy data
         let src_slots = info.type_slot_count(src_type);
         let src_slot_types = info.type_slot_types(src_type);
-        let meta_idx = ctx.get_or_create_value_meta(Some(src_type), src_slots, &src_slot_types);
+        let rttid = ctx.intern_type_key(src_type, info);
+        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
         
         let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);

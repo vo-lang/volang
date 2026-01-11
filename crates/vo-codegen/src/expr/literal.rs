@@ -195,7 +195,6 @@ fn compile_slice_lit(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let elem_slots = info.slice_elem_slots(type_key);
     let elem_bytes = info.slice_elem_bytes(type_key);
     let len = lit.elems.len();
     
@@ -203,7 +202,8 @@ fn compile_slice_lit(
     let elem_type = info.slice_elem_type(type_key);
     let elem_slot_types = info.slice_elem_slot_types(type_key);
     let elem_vk = info.type_value_kind(elem_type);
-    let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
+    let elem_rttid = ctx.intern_type_key(elem_type, info);
+    let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
     
     // Load elem_meta into register
     let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
@@ -369,7 +369,8 @@ pub fn compile_func_lit(
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots) {
-            let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+            let rttid = ctx.intern_type_key(type_key, info);
+            let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
             let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
             closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
             closure_builder.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);

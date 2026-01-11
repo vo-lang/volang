@@ -288,3 +288,11 @@ tests:
     should_fail: true  # FIXED: now correctly reports compile error E2410
   - file: bug_map_struct_key_string.vo
     # FIXED: map with struct key containing string field now works correctly
+
+# Coverage tests from analysis (2026-01-11 batch 2)
+  - file: compound_assign_map.vo
+  - file: empty_struct_map_key.vo
+  - file: interface_nested_embed.vo
+  - file: closure_defer_interact.vo
+  - file: slice_three_index.vo
+    # FIXED: three-index slice s[a:b:c] now works correctly

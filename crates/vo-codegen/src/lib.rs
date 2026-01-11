@@ -976,7 +976,8 @@ fn compile_func_decl(
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots) {
-            let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+            let rttid = ctx.intern_type_key(type_key, info);
+            let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
             let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
             builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
             builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
@@ -1028,7 +1029,8 @@ fn compile_func_decl(
     
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
-        let meta_idx = ctx.get_or_create_value_meta(Some(er.result_type), er.slots, &er.slot_types);
+        let rttid = ctx.intern_type_key(er.result_type, info);
+        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &er.slot_types, None);
         let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
         builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
@@ -1122,24 +1124,12 @@ fn compile_global_array_init(
     if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
         let elem_slot_types = info.type_slot_types(elem_type);
         let tmp_elem = func.alloc_temp_typed(&elem_slot_types);
-        // For dynamic elem_bytes (flags=0), need idx_reg and idx_reg+1 for elem_bytes
-        let idx_reg = func.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; if flags == 0 { 2 } else { 1 }]);
+        let idx_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
         
         for (i, elem) in lit.elems.iter().enumerate() {
-            // Compile element value to tmp_elem
             crate::expr::compile_expr_to(&elem.value, tmp_elem, ctx, func, info)?;
-            
-            // Load index
             func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            
-            // For dynamic elem_bytes, load elem_bytes into idx_reg + 1
-            if flags == 0 {
-                let eb_idx = ctx.const_int(elem_bytes as i64);
-                func.emit_op(Opcode::LoadConst, idx_reg + 1, eb_idx, 0);
-            }
-            
-            // ArraySet: arr[idx] = tmp_elem
-            func.emit_with_flags(Opcode::ArraySet, flags, gcref_slot, idx_reg, tmp_elem);
+            func.emit_array_set(gcref_slot, idx_reg, tmp_elem, elem_bytes as usize, elem_vk, ctx);
         }
     }
     

@@ -815,28 +815,7 @@ impl CodegenContext {
 
     /// Get or create ValueMeta constant for PtrNew
     /// Returns the constant pool index
-    pub fn get_or_create_value_meta(
-        &mut self,
-        _type_key: Option<TypeKey>,
-        slots: u16,
-        slot_types: &[vo_runtime::SlotType],
-    ) -> u16 {
-        self.get_or_create_value_meta_with_kind(_type_key, slots, slot_types, None)
-    }
-
-    /// Get or create ValueMeta with explicit ValueKind
-    /// Uses rttid for all types (not just struct meta_id)
-    pub fn get_or_create_value_meta_with_kind(
-        &mut self,
-        type_key: Option<TypeKey>,
-        _slots: u16,
-        slot_types: &[vo_runtime::SlotType],
-        value_kind: Option<vo_runtime::ValueKind>,
-    ) -> u16 {
-        self.get_or_create_value_meta_with_rttid(0, slot_types, value_kind)
-    }
-    
-    /// Get or create ValueMeta with explicit rttid and ValueKind
+    /// Caller should compute rttid via `ctx.intern_type_key(type_key, info)` if type info is needed
     pub fn get_or_create_value_meta_with_rttid(
         &mut self,
         rttid: u32,
@@ -873,11 +852,11 @@ impl CodegenContext {
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
         let elem_type = info.array_elem_type(array_type);
-        let elem_slots = info.array_elem_slots(array_type);
         let elem_slot_types = info.array_elem_slot_types(array_type);
         let elem_vk = info.type_value_kind(elem_type);
+        let elem_rttid = self.intern_type_key(elem_type, info);
         
-        self.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk))
+        self.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk))
     }
     
     /// Get or create key and value ValueMeta for MapNew.

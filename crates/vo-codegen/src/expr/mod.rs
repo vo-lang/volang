@@ -633,7 +633,8 @@ fn compile_method_value(
         
         // Box the receiver value
         let slot_types = info.type_slot_types(recv_type);
-        let meta_idx = ctx.get_or_create_value_meta(Some(recv_type), recv_slots, &slot_types);
+        let rttid = ctx.intern_type_key(recv_type, info);
+        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         
@@ -991,7 +992,8 @@ fn compile_addr_of(
         let type_key = info.expr_type(operand.id);
         let slots = info.type_slot_count(type_key);
         let slot_types = info.type_slot_types(type_key);
-        let meta_idx = ctx.get_or_create_value_meta(Some(type_key), slots, &slot_types);
+        let rttid = ctx.intern_type_key(type_key, info);
+        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);

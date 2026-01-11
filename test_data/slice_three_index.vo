@@ -1,0 +1,63 @@
+// Test: Three-index slice expressions
+// Coverage: s[low:high:max] controlling capacity
+package main
+
+func main() {
+    // Test 1: Basic three-index slice
+    arr := [10]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    s := arr[2:5:7]  // elements 2,3,4 with cap 5 (7-2)
+    assert(len(s) == 3, "len should be 3")
+    assert(cap(s) == 5, "cap should be 5 (max - low)")
+    assert(s[0] == 2, "s[0] should be 2")
+    assert(s[2] == 4, "s[2] should be 4")
+    
+    // Test 2: Three-index prevents sharing beyond max
+    original := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    limited := original[2:5:5]  // cap exactly matches len
+    assert(cap(limited) == 3, "cap should be 3")
+    
+    // Append should allocate new backing array
+    extended := append(limited, 100)
+    assert(extended[3] == 100, "appended value")
+    assert(original[5] == 5, "original should be unchanged")
+    
+    // Test 3: Full slice with three-index
+    full := arr[0:10:10]
+    assert(len(full) == 10, "full len")
+    assert(cap(full) == 10, "full cap")
+    
+    // Test 4: Empty slice with capacity
+    empty := arr[5:5:8]
+    assert(len(empty) == 0, "empty len should be 0")
+    assert(cap(empty) == 3, "empty cap should be 3 (8-5)")
+    
+    // Test 5: Reslice within capacity
+    base := []int{10, 20, 30, 40, 50}
+    sub := base[1:3:4]  // [20, 30] with cap 3
+    assert(len(sub) == 2, "sub len")
+    assert(cap(sub) == 3, "sub cap")
+    
+    // Can extend within capacity
+    extended2 := sub[:3]  // [20, 30, 40]
+    assert(len(extended2) == 3, "extended2 len")
+    assert(extended2[2] == 40, "extended2[2] should be 40")
+    
+    // Test 6: Three-index on slice
+    s2 := []int{1, 2, 3, 4, 5, 6, 7, 8}
+    s3 := s2[2:5:6]
+    assert(len(s3) == 3, "s3 len")
+    assert(cap(s3) == 4, "s3 cap")
+    
+    // Test 7: low == high == max (empty with zero cap)
+    zero := arr[3:3:3]
+    assert(len(zero) == 0, "zero len")
+    assert(cap(zero) == 0, "zero cap")
+    
+    // Test 8: Modify through limited slice
+    data := []int{1, 2, 3, 4, 5}
+    view := data[1:3:3]
+    view[0] = 100
+    assert(data[1] == 100, "modification should affect original")
+    
+    println("slice_three_index: ok")
+}

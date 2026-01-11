@@ -98,12 +98,12 @@ pub fn compile_builtin_call(
             
             if info.is_slice(type_key) {
                     // make([]T, len) or make([]T, len, cap)
-                    let elem_slots = info.slice_elem_slots(type_key);
                     let elem_bytes = info.slice_elem_bytes(type_key);
                     let elem_type = info.slice_elem_type(type_key);
                     let elem_slot_types = info.slice_elem_slot_types(type_key);
                     let elem_vk = info.type_value_kind(elem_type);
-                    let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
+                    let elem_rttid = ctx.intern_type_key(elem_type, info);
+                    let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
                     
                     // Load elem_meta into register
                     let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
@@ -158,7 +158,8 @@ pub fn compile_builtin_call(
                     let elem_slots = info.type_slot_count(elem_type_key);
                     let elem_slot_types = info.type_slot_types(elem_type_key);
                     let elem_vk = info.type_value_kind(elem_type_key);
-                    let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(None, elem_slots, &elem_slot_types, Some(elem_vk));
+                    let elem_rttid = ctx.intern_type_key(elem_type_key, info);
+                    let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
                     
                     let elem_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
@@ -193,14 +194,14 @@ pub fn compile_builtin_call(
             let slice_reg = compile_expr(&call.args[0], ctx, func, info)?;
             
             let slice_type = info.expr_type(call.args[0].id);
-            let elem_slots = info.slice_elem_slots(slice_type);
             let elem_bytes = info.slice_elem_bytes(slice_type);
             let elem_type = info.slice_elem_type(slice_type);
             let elem_slot_types = info.type_slot_types(elem_type);
             let elem_vk = info.type_value_kind(elem_type);
             
             // Get elem_meta as raw u32 value
-            let elem_meta_idx = ctx.get_or_create_value_meta_with_kind(Some(elem_type), elem_slots, &elem_slot_types, Some(elem_vk));
+            let elem_rttid = ctx.intern_type_key(elem_type, info);
+            let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
             
             // Check for spread: append(a, b...)
             if call.spread && call.args.len() == 2 {

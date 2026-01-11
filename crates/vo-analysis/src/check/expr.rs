@@ -735,12 +735,34 @@ impl Checker {
     // =========================================================================
 
     /// Checks an index expression for validity.
-    /// max is the upper bound for index.
+    /// max is the upper bound for index (exclusive: index must be < max).
     /// Returns the value of the index when it's a constant, returns None if it's not.
     pub fn index(
         &mut self,
         index: &Expr,
         max: Option<u64>,
+    ) -> Result<Option<u64>, ()> {
+        self.check_int_index(index, max, false)
+    }
+
+    /// Checks a slice bound expression for validity.
+    /// max is the upper bound for the slice bound (inclusive: bound must be <= max).
+    /// Returns the value when it's a constant, returns None if it's not.
+    pub fn slice_bound(
+        &mut self,
+        bound: &Expr,
+        max: Option<u64>,
+    ) -> Result<Option<u64>, ()> {
+        self.check_int_index(bound, max, true)
+    }
+
+    /// Common implementation for index/slice_bound checking.
+    /// inclusive: if true, allows value == max (for slice bounds); if false, requires value < max (for array index).
+    fn check_int_index(
+        &mut self,
+        index: &Expr,
+        max: Option<u64>,
+        inclusive: bool,
     ) -> Result<Option<u64>, ()> {
         let x = &mut Operand::new();
         self.expr(x, index);
@@ -767,7 +789,12 @@ impl Checker {
                 return Err(());
             }
             let (i, valid) = v.to_int().int_as_u64();
-            if !valid || max.map_or(false, |m| i >= m) {
+            let out_of_bounds = if inclusive {
+                max.map_or(false, |m| i > m)  // slice bound: i <= max
+            } else {
+                max.map_or(false, |m| i >= m)  // array index: i < max
+            };
+            if !valid || out_of_bounds {
                 self.invalid_arg(Span::default(), "index out of bounds");
                 return Err(());
             }
@@ -1111,15 +1138,15 @@ impl Checker {
                 
                 x.mode = OperandMode::Value;
 
-                // Check slice indices: 0 <= low <= high <= max <= cap
+                // Check slice indices: 0 <= low <= high <= max <= cap (inclusive bounds)
                 if let Some(ref low) = sl.low {
-                    let _ = self.index(low, length);
+                    let _ = self.slice_bound(low, length);
                 }
                 if let Some(ref high) = sl.high {
-                    let _ = self.index(high, length);
+                    let _ = self.slice_bound(high, length);
                 }
                 if let Some(ref max) = sl.max {
-                    let _ = self.index(max, length);
+                    let _ = self.slice_bound(max, length);
                 }
             }
             ExprKind::Selector(sel) => {

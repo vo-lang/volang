@@ -1,0 +1,54 @@
+// Test: Empty struct as map key
+// Coverage: map[struct{}]V - useful for set semantics
+package main
+
+func main() {
+    // Test 1: Basic empty struct as key
+    type Empty struct{}
+    set := map[Empty]bool{}
+    
+    e := Empty{}
+    set[e] = true
+    assert(set[e] == true, "empty struct key should work")
+    
+    // Test 2: All empty structs are equal
+    e1 := Empty{}
+    e2 := Empty{}
+    set[e1] = true
+    _, ok := set[e2]
+    assert(ok == true, "all empty structs should be equal keys")
+    
+    // Test 3: Empty struct as value (set pattern)
+    type void struct{}
+    intSet := map[int]void{}
+    intSet[1] = void{}
+    intSet[2] = void{}
+    intSet[3] = void{}
+    
+    _, has1 := intSet[1]
+    _, has4 := intSet[4]
+    assert(has1 == true, "set should contain 1")
+    assert(has4 == false, "set should not contain 4")
+    
+    // Test 4: Delete from empty struct keyed map
+    delete(set, Empty{})
+    _, stillThere := set[Empty{}]
+    assert(stillThere == false, "delete should work with empty struct key")
+    
+    // Test 5: Len of empty struct keyed map
+    m := map[Empty]int{}
+    m[Empty{}] = 42
+    assert(len(m) == 1, "len should be 1")
+    m[Empty{}] = 100  // same key, update value
+    assert(len(m) == 1, "len should still be 1 after update")
+    assert(m[Empty{}] == 100, "value should be updated")
+    
+    // Test 6: Range over empty struct keyed map
+    count := 0
+    for range m {
+        count += 1
+    }
+    assert(count == 1, "range should iterate once")
+    
+    println("empty_struct_map_key: ok")
+}

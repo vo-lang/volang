@@ -70,7 +70,8 @@ pub fn total_slots(arr: GcRef) -> usize {
     HEADER_SLOTS + data_slots
 }
 
-/// Return byte pointer to data area (after header)
+/// Return byte pointer to data area (after ArrayHeader)
+/// Note: GcRef points to data after GcHeader, so we only skip ArrayHeader here.
 #[inline(always)]
 pub fn data_ptr_bytes(arr: GcRef) -> *mut u8 {
     unsafe { (arr as *mut u8).add(HEADER_SLOTS * 8) }

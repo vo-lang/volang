@@ -420,22 +420,6 @@ pub fn emit_lvalue_store(
     }
 }
 
-/// Get the number of slots this LValue refers to.
-pub fn lvalue_slots(lv: &LValue) -> u16 {
-    match lv {
-        LValue::Variable(storage) => storage.value_slots(),
-        LValue::Deref { elem_slots, .. } => *elem_slots,
-        LValue::Field { slots, .. } => *slots,
-        LValue::Index { kind, .. } => match kind {
-            ContainerKind::StackArray { elem_slots, .. } => *elem_slots,
-            ContainerKind::HeapArray { elem_bytes, .. } => ((*elem_bytes + 7) / 8) as u16, // ceil to slots
-            ContainerKind::Slice { elem_bytes, .. } => ((*elem_bytes + 7) / 8) as u16, // ceil to slots
-            ContainerKind::Map { val_slots, .. } => *val_slots,
-            ContainerKind::String => 1,
-        },
-        LValue::Capture { value_slots, .. } => *value_slots,
-    }
-}
 
 // === Internal helpers ===
 

@@ -31,7 +31,7 @@ pub enum StorageKind {
     
     /// Heap-allocated array (1 slot GcRef, ArrayGet/ArraySet access)
     /// Layout: [GcHeader][ArrayHeader][elems...]
-    HeapArray { gcref_slot: u16, elem_slots: u16 },
+    HeapArray { gcref_slot: u16, elem_slots: u16, elem_bytes: u16, elem_vk: vo_common_core::ValueKind },
     
     /// Reference type (1 slot GcRef IS the value itself, Copy access)
     Reference { slot: u16 },
@@ -284,9 +284,9 @@ impl FuncBuilder {
     }
 
     /// Heap allocation for array (1 slot GcRef, ArrayGet/ArraySet access).
-    pub fn define_local_heap_array(&mut self, sym: Symbol, elem_slots: u16) -> u16 {
+    pub fn define_local_heap_array(&mut self, sym: Symbol, elem_slots: u16, elem_bytes: u16, elem_vk: vo_common_core::ValueKind) -> u16 {
         let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
-        self.bind_local(sym, StorageKind::HeapArray { gcref_slot, elem_slots });
+        self.bind_local(sym, StorageKind::HeapArray { gcref_slot, elem_slots, elem_bytes, elem_vk });
         gcref_slot
     }
 
