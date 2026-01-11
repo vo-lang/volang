@@ -28,12 +28,8 @@ pub struct EmbedPathInfo {
 /// A single step in an embedding path.
 #[derive(Debug, Clone, Copy)]
 pub struct EmbedStep {
-    /// Byte offset of this field within its parent struct
-    pub field_offset: u16,
     /// True if this field is a pointer type (*T)
     pub is_pointer: bool,
-    /// True if this field is an interface type
-    pub is_interface: bool,
 }
 
 /// Info about an embedded interface at the end of the path.
@@ -103,11 +99,7 @@ fn analyze_embed_path_impl(
         let is_pointer = layout::is_pointer(field_type, tc_objs);
         let is_interface = layout::is_interface(field_type, tc_objs);
         
-        steps.push(EmbedStep {
-            field_offset,
-            is_pointer,
-            is_interface,
-        });
+        steps.push(EmbedStep { is_pointer });
         
         total_offset += field_offset;
         

@@ -5,7 +5,6 @@
 //! - `$promoted` wrappers: For promoted methods through embedding (navigate path, call original)
 
 use vo_analysis::objects::TypeKey;
-use vo_common::symbol::Symbol;
 use vo_runtime::SlotType;
 use vo_vm::instruction::Opcode;
 
@@ -77,7 +76,6 @@ pub fn generate_iface_wrapper(
     
     // Get receiver value slots
     let recv_slots = info.type_slot_count(recv_type);
-    let recv_slot_types = info.type_slot_types(recv_type);
     
     let ret_slots: u16 = func_decl.sig.results.iter()
         .map(|r| info.type_expr_layout(r.ty.id).0)

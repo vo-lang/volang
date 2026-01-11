@@ -329,7 +329,6 @@ fn compile_method_call(
     
     let method_name = info.project.interner.resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
-    let method_sym = sel.sel.symbol;
     
     // Check if this is a func field call (e.g., h.logic(args) where logic is a func field)
     let selection = info.get_selection(call.func.id);

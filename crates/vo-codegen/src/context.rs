@@ -321,7 +321,7 @@ impl CodegenContext {
     /// Should be called after all types are registered.
     pub fn fill_well_known_types(&mut self, project: &vo_analysis::Project) {
         use vo_runtime::RuntimeType;
-        use vo_analysis::obj::EntityType;
+        
         
         // Find errors.Error named_type_id
         let error_named_type_id = self.module.named_type_metas

@@ -69,10 +69,10 @@ fn register_types(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use vo_syntax::ast::{Decl, TypeExprKind};
-    use vo_vm::bytecode::{StructMeta, InterfaceMeta, NamedTypeMeta};
-    use vo_runtime::ValueMeta;
-    use std::collections::HashMap;
+    
+    use vo_vm::bytecode::InterfaceMeta;
+    
+    
 
     fn register_pkg_types(
         pkg_path: &str,
@@ -659,7 +659,7 @@ fn collect_promoted_methods(
 ) {
     use vo_analysis::typ::Type;
     use vo_analysis::lookup::{lookup_field_or_method, LookupResult};
-    use vo_analysis::check::type_info as layout;
+    
     
     let tc_objs = &info.project.tc_objs;
     let interner = &info.project.interner;
@@ -771,7 +771,7 @@ fn collect_embedded_method_names(
     tc_objs: &vo_analysis::objects::TCObjects,
     method_names: &mut std::collections::HashSet<String>,
 ) {
-    use vo_analysis::typ::Type;
+    
     
     let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
     let struct_detail = match tc_objs.types[underlying].try_as_struct() {
@@ -826,7 +826,7 @@ fn collect_embedded_method_names(
 fn generate_method_signature(
     func_decl: &vo_syntax::ast::FuncDecl,
     info: &TypeInfoWrapper,
-    interner: &vo_common::SymbolInterner,
+    _interner: &vo_common::SymbolInterner,
     ctx: &mut CodegenContext,
 ) -> vo_runtime::RuntimeType {
     use vo_runtime::RuntimeType;

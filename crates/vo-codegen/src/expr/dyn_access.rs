@@ -83,7 +83,6 @@ pub fn compile_dyn_access(
     
     // Compile base expression
     let base_type = info.expr_type(dyn_access.base.id);
-    let base_slots = info.type_slot_count(base_type);
     // Base is typically an interface (any), so use proper slot types for GC tracking
     let base_slot_types = info.type_slot_types(base_type);
     let base_reg = func.alloc_temp_typed(&base_slot_types);

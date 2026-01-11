@@ -143,7 +143,7 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Convert TypeKey to RuntimeType.
     /// This is the unified entry point for type conversion in codegen.
     pub fn type_to_runtime_type(&self, type_key: TypeKey, ctx: &mut crate::context::CodegenContext) -> vo_runtime::RuntimeType {
-        use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
+        use vo_runtime::{RuntimeType, ValueKind};
         
         // Check if it's a Named type - use ObjKey (the true identity) for lookup
         let tc_objs = self.tc_objs();

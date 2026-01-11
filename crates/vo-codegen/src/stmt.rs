@@ -708,7 +708,7 @@ fn compile_stmt_with_label(
             } else if assign.op == AssignOp::Assign && assign.lhs.len() > 1 {
                 // Parallel assignment: a, b = b, a
                 // Must evaluate all RHS first, then assign to LHS to avoid interference
-                use crate::lvalue::{resolve_lvalue, emit_lvalue_store, lvalue_slots};
+                use crate::lvalue::{resolve_lvalue, emit_lvalue_store};
                 
                 // 1. Evaluate all RHS to temporaries
                 let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
@@ -2097,7 +2097,6 @@ fn compile_compound_assign(
     }
     
     // General path: read current value, apply operation, write back
-    let slots = lvalue_slots(&lv);
     // Use proper slot type for strings (GcRef) vs numeric types (Value)
     let slot_type = if is_string { vo_runtime::SlotType::GcRef } else { vo_runtime::SlotType::Value };
     let tmp = func.alloc_temp_typed(&[slot_type]);

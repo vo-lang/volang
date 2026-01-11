@@ -164,7 +164,6 @@ pub fn resolve_lvalue(
             let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             
             if info.is_array(container_type) {
-                let elem_slots = info.array_elem_slots(container_type);
                 let elem_bytes = info.array_elem_bytes(container_type) as u16;
                 let elem_type = info.array_elem_type(container_type);
                 let elem_vk = info.type_value_kind(elem_type);
