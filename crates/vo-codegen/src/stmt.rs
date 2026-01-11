@@ -1246,7 +1246,7 @@ fn compile_stmt_with_label(
 
         // === Switch ===
         StmtKind::Switch(switch_stmt) => {
-            compile_switch(switch_stmt, ctx, func, info)?;
+            compile_switch_with_label(switch_stmt, label, ctx, func, info)?;
         }
 
         // === Labeled statement ===
@@ -1876,9 +1876,10 @@ fn compile_type_switch(
     Ok(())
 }
 
-/// Compile switch statement
-fn compile_switch(
+/// Compile switch statement with optional label (for break support).
+fn compile_switch_with_label(
     switch_stmt: &vo_syntax::ast::SwitchStmt,
+    label: Option<vo_common::symbol::Symbol>,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -1894,6 +1895,9 @@ fn compile_switch(
     } else {
         None
     };
+    
+    // Enter switch context for break support
+    func.enter_switch(label);
     
     // Collect case jumps and body positions
     let mut case_jumps: Vec<usize> = Vec::new();
@@ -1959,6 +1963,9 @@ fn compile_switch(
         }
     }
     
+    // Exit switch context and get break patches
+    let break_patches = func.exit_switch();
+    
     let end_pc = func.current_pc();
     
     // Patch jumps
@@ -1987,8 +1994,13 @@ fn compile_switch(
         func.patch_jump(jump_pc, end_pc);
     }
     
-    // Patch end jumps
+    // Patch end jumps (implicit break at end of case)
     for jump_pc in end_jumps {
+        func.patch_jump(jump_pc, end_pc);
+    }
+    
+    // Patch explicit break statements
+    for jump_pc in break_patches {
         func.patch_jump(jump_pc, end_pc);
     }
     

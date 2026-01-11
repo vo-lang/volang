@@ -251,5 +251,3 @@ tests:
     skip: [vm, jit]
     reason: "BUG: compiler panic - struct field index not found"
   - file: switch_nested_break.vo
-    skip: [vm, jit]
-    reason: "BUG: break in switch incorrectly exits enclosing for loop"

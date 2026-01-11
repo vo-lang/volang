@@ -95,10 +95,10 @@ pub struct CaptureVar {
     pub slots: u16,  // always 1 (GcRef to escaped var)
 }
 
-/// Loop context for break/continue and Hint generation.
+/// Loop/switch context for break/continue and Hint generation.
 struct LoopContext {
     depth: u8,                      // nesting depth (0 = outermost)
-    begin_pc: usize,                // PC of HINT_LOOP_BEGIN
+    begin_pc: usize,                // PC of HINT_LOOP_BEGIN (0 for switch)
     continue_pc: usize,
     continue_patches: Vec<usize>,   // for patching continue jumps later
     break_patches: Vec<usize>,
@@ -106,6 +106,7 @@ struct LoopContext {
     has_defer: bool,                // loop body contains defer
     has_labeled_break: bool,        // loop body has break to outer loop
     has_labeled_continue: bool,     // loop body has continue to outer loop
+    is_switch: bool,                // true if this is a switch statement
 }
 
 /// Loop exit info returned by exit_loop.
@@ -715,6 +716,7 @@ impl FuncBuilder {
             has_defer: false,
             has_labeled_break: false,
             has_labeled_continue: false,
+            is_switch: false,
         });
         
         begin_pc
@@ -746,21 +748,32 @@ impl FuncBuilder {
             ctx.has_defer = true;
         }
     }
+    
+    /// Enter switch statement (for break support).
+    pub fn enter_switch(&mut self, label: Option<Symbol>) {
+        self.loop_stack.push(LoopContext {
+            depth: self.loop_stack.len() as u8,
+            begin_pc: 0,  // not used for switch
+            continue_pc: 0,
+            continue_patches: Vec::new(),
+            break_patches: Vec::new(),
+            label,
+            has_defer: false,
+            has_labeled_break: false,
+            has_labeled_continue: false,
+            is_switch: true,
+        });
+    }
+    
+    /// Exit switch statement. Returns break patches to be patched to end of switch.
+    pub fn exit_switch(&mut self) -> Vec<usize> {
+        self.loop_stack.pop().expect("exit_switch without enter_switch").break_patches
+    }
 
     /// Exit loop: emit HINT_LOOP_END and patch HINT_LOOP_BEGIN flags.
     /// Returns LoopExitInfo for the caller to patch break/continue and finalize exit_pc.
     pub fn exit_loop(&mut self) -> LoopExitInfo {
-        let ctx = self.loop_stack.pop().unwrap_or_else(|| LoopContext {
-            depth: 0,
-            begin_pc: 0,
-            continue_pc: 0,
-            continue_patches: Vec::new(),
-            break_patches: Vec::new(),
-            label: None,
-            has_defer: false,
-            has_labeled_break: false,
-            has_labeled_continue: false,
-        });
+        let ctx = self.loop_stack.pop().expect("exit_loop without enter_loop");
         
         // Emit HINT_LOOP_END
         self.emit_hint_loop_end(ctx.depth);
@@ -813,31 +826,47 @@ impl FuncBuilder {
         self.loop_stack.get(idx).map(|ctx| ctx.begin_pc)
     }
 
-    /// Find loop index by label (from innermost to outermost)
-    fn find_loop_index(&self, label: Option<Symbol>) -> Option<usize> {
+    /// Find breakable context index by label (includes both loops and switches)
+    fn find_break_index(&self, label: Option<Symbol>) -> Option<usize> {
         match label {
             None => {
-                // No label: target innermost loop
+                // No label: target innermost breakable (loop or switch)
                 if self.loop_stack.is_empty() { None } else { Some(self.loop_stack.len() - 1) }
             }
             Some(sym) => {
-                // Find loop with matching label
+                // Find context with matching label
                 self.loop_stack.iter().rposition(|ctx| ctx.label == Some(sym))
+            }
+        }
+    }
+    
+    /// Find loop index by label, skipping switch contexts (for continue)
+    fn find_loop_index(&self, label: Option<Symbol>) -> Option<usize> {
+        match label {
+            None => {
+                // No label: target innermost loop (skip switches)
+                self.loop_stack.iter().rposition(|ctx| !ctx.is_switch)
+            }
+            Some(sym) => {
+                // Find loop with matching label
+                self.loop_stack.iter().rposition(|ctx| ctx.label == Some(sym) && !ctx.is_switch)
             }
         }
     }
 
     pub fn emit_break(&mut self, label: Option<Symbol>) {
         let pc = self.emit_jump(Opcode::Jump, 0);
-        if let Some(idx) = self.find_loop_index(label) {
+        if let Some(idx) = self.find_break_index(label) {
             self.loop_stack[idx].break_patches.push(pc);
             
-            // If breaking to an outer loop (labeled break), mark all inner loops
+            // If breaking to an outer context (labeled break), mark all inner loops
             let innermost = self.loop_stack.len() - 1;
             if label.is_some() && idx < innermost {
-                // Mark the target loop and all loops between as having labeled break
+                // Mark loops between as having labeled break (skip switches)
                 for i in idx..=innermost {
-                    self.loop_stack[i].has_labeled_break = true;
+                    if !self.loop_stack[i].is_switch {
+                        self.loop_stack[i].has_labeled_break = true;
+                    }
                 }
             }
         }
