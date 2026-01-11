@@ -91,22 +91,25 @@ pub fn exec_call_closure(
     // Extend stack for new frame
     stack.resize(new_bp + func.local_slots as usize, 0);
     
-    // For method closures (recv_slots > 0), receiver is in captures[0]
-    // For regular closures, slot 0 is closure ref
-    if recv_slots > 0 && closure::capture_count(closure_ref) > 0 {
-        // Method closure: copy receiver from captures to slot 0
+    let capture_count = closure::capture_count(closure_ref);
+    
+    // Determine slot 0 content and arg offset based on closure type
+    let arg_offset = if recv_slots > 0 && capture_count > 0 {
+        // Method closure: receiver from captures goes to slot 0
         stack[new_bp] = closure::get_capture(closure_ref, 0);
-        // Copy args after receiver
-        for i in 0..arg_slots {
-            stack[new_bp + recv_slots + i] = stack[caller_bp + arg_start + i];
-        }
-    } else {
-        // Regular closure: slot 0 is closure ref
+        recv_slots
+    } else if capture_count > 0 || func.param_slots > func.param_count {
+        // Closure with captures or anonymous closure: closure ref goes to slot 0
         stack[new_bp] = closure_ref as u64;
-        // Copy args directly
-        for i in 0..arg_slots {
-            stack[new_bp + 1 + i] = stack[caller_bp + arg_start + i];
-        }
+        1
+    } else {
+        // Named function wrapper (no captures): args start at slot 0
+        0
+    };
+    
+    // Copy args to new frame
+    for i in 0..arg_slots {
+        stack[new_bp + arg_offset + i] = stack[caller_bp + arg_start + i];
     }
     
     // Push frame

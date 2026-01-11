@@ -297,16 +297,14 @@ tests:
 # Skipped due to Vo implementation bugs
   - file: global_func_var.vo
     skip: [vm, jit]
-    reason: "BUG: codegen VariableNotFound for global func vars"
+    reason: "BUG: variadic global func var causes misaligned pointer (separate from global func var support)"
   - file: method_expression.vo
     skip: [vm, jit]
     reason: "BUG: pointer receiver method value crashes VM (exec_closure_get index out of bounds)"
 
 # Bug reproductions (2026-01-11 coverage analysis)
   # FIXED: bug_ptr_receiver_method_value.vo - escape analysis + codegen for pointer receiver method value
-  - file: bug_global_func_var.vo
-    skip: [vm, jit]
-    reason: "BUG #2: codegen VariableNotFound for global func var"
+  # FIXED: bug_global_func_var.vo - global func var support (codegen + VM CallClosure fix)
   - file: bug_partial_struct_init.vo
     skip: [vm, jit]
     reason: "BUG #3: partial struct initialization causes segfault"

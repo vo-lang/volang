@@ -516,8 +516,10 @@ fn collect_file_declarations(
                             (info.type_slot_count(type_key), info.type_slot_types(type_key))
                         };
                         let value_kind = info.type_value_kind(type_key) as u8;
+                        let obj_key = info.get_def(name);
                         ctx.register_global(
                             name.symbol,
+                            obj_key,
                             vo_vm::bytecode::GlobalDef {
                                 name: project.interner.resolve(name.symbol).unwrap_or("?").to_string(),
                                 slots,
@@ -1141,7 +1143,6 @@ fn compile_global_array_init(
 
 /// Compile global variable initialization for a single package.
 fn compile_package_globals(
-    project: &Project,
     ctx: &mut CodegenContext,
     init_builder: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -1153,64 +1154,56 @@ fn compile_package_globals(
         if initializer.lhs.len() == 1 {
             let obj_key = initializer.lhs[0];
             let obj = &info.project.tc_objs.lobjs[obj_key];
-            let var_name = obj.name();
-            let var_symbol = project.interner.get(var_name);
             
-            if let Some(symbol) = var_symbol {
-                if let Some(global_idx) = ctx.get_global_index(symbol) {
-                    let type_key = obj.typ();
-                    
-                    // Special handling for arrays: allocate on heap
-                    if let Some(tk) = type_key {
-                        if info.is_array(tk) {
-                            compile_global_array_init(
-                                &initializer.rhs, tk, global_idx,
-                                ctx, init_builder, info
-                            )?;
-                            continue;
-                        }
-                        
-                        // Special handling for interface: use compile_iface_assign for proper itab setup
-                        if info.is_interface(tk) {
-                            let tmp = init_builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
-                            crate::stmt::compile_iface_assign(tmp, &initializer.rhs, tk, ctx, init_builder, info)?;
-                            emit_global_set(init_builder, global_idx, tmp, 2);
-                            continue;
-                        }
+            if let Some(global_idx) = ctx.get_global_index_by_objkey(obj_key) {
+                let type_key = obj.typ();
+                
+                // Special handling for arrays: allocate on heap
+                if let Some(tk) = type_key {
+                    if info.is_array(tk) {
+                        compile_global_array_init(
+                            &initializer.rhs, tk, global_idx,
+                            ctx, init_builder, info
+                        )?;
+                        continue;
                     }
                     
-                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                    let slot_types = type_key
-                        .map(|t| info.type_slot_types(t))
-                        .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-                    
-                    let tmp = init_builder.alloc_temp_typed(&slot_types);
-                    crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
-                    emit_global_set(init_builder, global_idx, tmp, slots);
+                    // Special handling for interface: use compile_iface_assign for proper itab setup
+                    if info.is_interface(tk) {
+                        let tmp = init_builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
+                        crate::stmt::compile_iface_assign(tmp, &initializer.rhs, tk, ctx, init_builder, info)?;
+                        emit_global_set(init_builder, global_idx, tmp, 2);
+                        continue;
+                    }
                 }
+                
+                let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                let slot_types = type_key
+                    .map(|t| info.type_slot_types(t))
+                    .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
+                
+                let tmp = init_builder.alloc_temp_typed(&slot_types);
+                crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
+                emit_global_set(init_builder, global_idx, tmp, slots);
             }
         } else {
             // Multi-variable assignment: var a, b = expr
             // TODO: handle tuple unpacking if needed
             for (i, &obj_key) in initializer.lhs.iter().enumerate() {
                 let obj = &info.project.tc_objs.lobjs[obj_key];
-                let var_name = obj.name();
-                let var_symbol = project.interner.get(var_name);
                 
-                if let Some(symbol) = var_symbol {
-                    if let Some(global_idx) = ctx.get_global_index(symbol) {
-                        let type_key = obj.typ();
-                        let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                        let slot_types = type_key
-                            .map(|t| info.type_slot_types(t))
-                            .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-                        
-                        // For multi-var, compile rhs once and extract values
-                        // For now, just compile rhs for each (inefficient but correct)
-                        let tmp = init_builder.alloc_temp_typed(&slot_types);
-                        crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
-                        emit_global_set(init_builder, global_idx, tmp, slots);
-                    }
+                if let Some(global_idx) = ctx.get_global_index_by_objkey(obj_key) {
+                    let type_key = obj.typ();
+                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
+                    let slot_types = type_key
+                        .map(|t| info.type_slot_types(t))
+                        .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
+                    
+                    // For multi-var, compile rhs once and extract values
+                    // For now, just compile rhs for each (inefficient but correct)
+                    let tmp = init_builder.alloc_temp_typed(&slot_types);
+                    crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
+                    emit_global_set(init_builder, global_idx, tmp, slots);
                 }
                 let _ = i; // suppress unused warning
             }
@@ -1231,11 +1224,11 @@ fn compile_init_and_entry(
     // (dependencies are initialized before dependents)
     for (_, pkg_type_info) in project.imported_packages_in_order() {
         let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
-        compile_package_globals(project, ctx, &mut init_builder, &pkg_info)?;
+        compile_package_globals(ctx, &mut init_builder, &pkg_info)?;
     }
     
     // Then, initialize main package's global variables
-    compile_package_globals(project, ctx, &mut init_builder, info)?;
+    compile_package_globals(ctx, &mut init_builder, info)?;
     
     // Add return
     init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);

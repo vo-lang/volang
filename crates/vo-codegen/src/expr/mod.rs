@@ -256,6 +256,9 @@ pub fn compile_expr_to(
                             let value_slots = info.type_slot_count(type_key);
                             func.emit_ptr_get(dst, dst, 0, value_slots);
                         }
+                    } else if let Some(func_idx) = ctx.get_function_index(ident.symbol) {
+                        // Function reference: create closure with no captures
+                        func.emit_op(Opcode::ClosureNew, dst, func_idx as u16, 0);
                     } else {
                         return Err(CodegenError::VariableNotFound(format!("{:?}", ident.symbol)));
                     }

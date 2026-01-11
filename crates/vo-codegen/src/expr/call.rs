@@ -136,6 +136,27 @@ pub fn compile_call(
             return Ok(());
         }
         
+        // Check if it's a global variable (could be a closure stored in global)
+        if ctx.get_global_index(ident.symbol).is_some() {
+            // Global closure call - compile closure expression first (uses GlobalGet)
+            let closure_reg = compile_expr(&call.func, ctx, func, info)?;
+            
+            // Compile arguments - allocate max(arg_slots, ret_slots) for return values
+            let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots) as usize]);
+            compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
+            
+            // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
+            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
+            func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
+            
+            // Copy result to dst if needed
+            if ret_slots > 0 && dst != args_start {
+                func.emit_copy(dst, args_start, ret_slots);
+            }
+            
+            return Ok(());
+        }
+        
         // Extern function (no body, e.g., bytes.Index called from bytes.Contains)
         if !ctx.is_vo_function(ident.symbol) {
             let func_name = info.project.interner.resolve(ident.symbol)

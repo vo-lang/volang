@@ -87,8 +87,11 @@ pub struct CodegenContext {
     /// Extern function by string name (for builtins)
     extern_names: HashMap<String, u32>,
 
-    /// Global variable slot offset: name -> slot_offset
+    /// Global variable slot offset: symbol -> slot_offset
     global_indices: HashMap<Symbol, u32>,
+
+    /// Global variable slot offset: ObjKey -> slot_offset (for init_order lookup)
+    global_indices_by_objkey: HashMap<vo_analysis::objects::ObjKey, u32>,
 
     /// Next global slot offset (accumulated from all globals)
     global_slot_offset: u32,
@@ -173,6 +176,7 @@ impl CodegenContext {
             extern_indices: HashMap::new(),
             extern_names: HashMap::new(),
             global_indices: HashMap::new(),
+            global_indices_by_objkey: HashMap::new(),
             global_slot_offset: 0,
             const_int: HashMap::new(),
             const_float: HashMap::new(),
@@ -765,16 +769,21 @@ impl CodegenContext {
 
     // === Global registration ===
 
-    pub fn register_global(&mut self, name: Symbol, def: GlobalDef) -> u32 {
+    pub fn register_global(&mut self, name: Symbol, obj_key: vo_analysis::objects::ObjKey, def: GlobalDef) -> u32 {
         let slot_offset = self.global_slot_offset;
         self.global_slot_offset += def.slots as u32;
         self.module.globals.push(def);
         self.global_indices.insert(name, slot_offset);
+        self.global_indices_by_objkey.insert(obj_key, slot_offset);
         slot_offset
     }
 
     pub fn get_global_index(&self, name: Symbol) -> Option<u32> {
         self.global_indices.get(&name).copied()
+    }
+
+    pub fn get_global_index_by_objkey(&self, obj_key: vo_analysis::objects::ObjKey) -> Option<u32> {
+        self.global_indices_by_objkey.get(&obj_key).copied()
     }
 
     // === Constant pool ===
