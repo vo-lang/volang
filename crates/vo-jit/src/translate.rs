@@ -342,8 +342,40 @@ fn global_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
+/// Emit conditional panic: if `condition` is true, return panic; otherwise continue.
+/// Optionally calls vo_panic to set panic_flag for defer/recover support.
+fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value, call_vo_panic: bool) {
+    let panic_block = e.builder().create_block();
+    let ok_block = e.builder().create_block();
+    e.builder().ins().brif(condition, panic_block, &[], ok_block, &[]);
+    
+    e.builder().switch_to_block(panic_block);
+    e.builder().seal_block(panic_block);
+    if call_vo_panic {
+        if let Some(panic_func) = e.helpers().panic {
+            let ctx = e.ctx_param();
+            let msg = e.builder().ins().iconst(types::I64, 0);
+            e.builder().ins().call(panic_func, &[ctx, msg]);
+        }
+    }
+    let panic_ret_val = e.panic_return_value();
+    let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    e.builder().ins().return_(&[panic_ret]);
+    
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+}
+
+/// Emit nil check for pointer. Panics if ptr is nil.
+fn emit_nil_ptr_check<'a>(e: &mut impl IrEmitter<'a>, ptr: Value) {
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let is_nil = e.builder().ins().icmp(IntCC::Equal, ptr, zero);
+    emit_panic_if(e, is_nil, true); // call vo_panic for defer/recover
+}
+
 fn ptr_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.b);
+    emit_nil_ptr_check(e, ptr);
     let offset = (inst.c as i32) * 8;
     let v = e.builder().ins().load(types::I64, MemFlags::trusted(), ptr, offset);
     e.write_var(inst.a, v);
@@ -351,6 +383,7 @@ fn ptr_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.a);
+    emit_nil_ptr_check(e, ptr);
     let v = e.read_var(inst.c);
     let offset = (inst.b as i32) * 8;
     e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
@@ -367,6 +400,7 @@ fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.b);
+    emit_nil_ptr_check(e, ptr);
     for i in 0..inst.flags as usize {
         let offset = ((inst.c as usize + i) * 8) as i32;
         let v = e.builder().ins().load(types::I64, MemFlags::trusted(), ptr, offset);
@@ -376,6 +410,7 @@ fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.a);
+    emit_nil_ptr_check(e, ptr);
     for i in 0..inst.flags as usize {
         let v = e.read_var(inst.c + i as u16);
         let offset = ((inst.b as usize + i) * 8) as i32;
@@ -590,18 +625,7 @@ fn emit_slice_bounds_check<'a>(e: &mut impl IrEmitter<'a>, s: Value, idx: Value)
     
     // Check idx >= len
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    let panic_block = e.builder().create_block();
-    let ok_block = e.builder().create_block();
-    e.builder().ins().brif(out_of_bounds, panic_block, &[], ok_block, &[]);
-    
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    let panic_ret_val = e.panic_return_value();
-    let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    e.builder().ins().return_(&[panic_ret]);
-    
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    emit_panic_if(e, out_of_bounds, false);
     
     e.builder().ins().load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_DATA_PTR)
 }
@@ -1035,18 +1059,7 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // nil map write panics (Go semantics)
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
-    let panic_block = e.builder().create_block();
-    let ok_block = e.builder().create_block();
-    e.builder().ins().brif(is_nil, panic_block, &[], ok_block, &[]);
-    
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    let panic_ret_val = e.panic_return_value();
-    let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    e.builder().ins().return_(&[panic_ret]);
-    
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    emit_panic_if(e, is_nil, false);
     
     let key = e.read_var(inst.b);
     let val = e.read_var(inst.c);
@@ -1057,16 +1070,7 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     
     // Check if vo_map_set returned panic (unhashable interface key)
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
-    let panic_block2 = e.builder().create_block();
-    let cont_block = e.builder().create_block();
-    e.builder().ins().brif(is_panic, panic_block2, &[], cont_block, &[]);
-    
-    e.builder().switch_to_block(panic_block2);
-    e.builder().seal_block(panic_block2);
-    e.builder().ins().return_(&[panic_ret]);
-    
-    e.builder().switch_to_block(cont_block);
-    e.builder().seal_block(cont_block);
+    emit_panic_if(e, is_panic, false);
 }
 
 fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -1275,18 +1279,9 @@ fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let call = e.builder().ins().call(func, &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr]);
     let result = e.builder().inst_results(call)[0];
     if !has_ok {
-        let panic_ret = e.panic_return_value();
         let zero = e.builder().ins().iconst(types::I64, 0);
         let is_panic = e.builder().ins().icmp(IntCC::Equal, result, zero);
-        let panic_block = e.builder().create_block();
-        let continue_block = e.builder().create_block();
-        e.builder().ins().brif(is_panic, panic_block, &[], continue_block, &[]);
-        e.builder().switch_to_block(panic_block);
-        e.builder().seal_block(panic_block);
-        let panic_val = e.builder().ins().iconst(types::I32, panic_ret as i64);
-        e.builder().ins().return_(&[panic_val]);
-        e.builder().switch_to_block(continue_block);
-        e.builder().seal_block(continue_block);
+        emit_panic_if(e, is_panic, false);
     }
     let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
     for i in 0..dst_slots {
@@ -1316,18 +1311,7 @@ fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check if result == 2 (panic for uncomparable type)
     let two = e.builder().ins().iconst(types::I64, 2);
     let is_panic = e.builder().ins().icmp(IntCC::Equal, result, two);
-    let panic_block = e.builder().create_block();
-    let ok_block = e.builder().create_block();
-    e.builder().ins().brif(is_panic, panic_block, &[], ok_block, &[]);
-    
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    let panic_ret_val = e.panic_return_value();
-    let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    e.builder().ins().return_(&[panic_ret]);
-    
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    emit_panic_if(e, is_panic, false);
     
     // Mask result to 0 or 1 (already know it's not 2)
     let one = e.builder().ins().iconst(types::I64, 1);

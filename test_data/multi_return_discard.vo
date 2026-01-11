@@ -1,0 +1,82 @@
+// Test: multi-return value assignment with discard
+// Go spec: _ can be used to discard unwanted return values
+package main
+
+import "errors"
+
+func twoVals() (int, string) {
+    return 42, "hello"
+}
+
+func threeVals() (int, bool, string) {
+    return 100, true, "world"
+}
+
+func withError() (int, error) {
+    return 200, nil
+}
+
+func withErrorFail() (int, error) {
+    return 0, errors.New("intentional error")
+}
+
+func main() {
+    // Test 1: Discard second value
+    a, _ := twoVals()
+    assert(a == 42, "got first value")
+    
+    // Test 2: Discard first value
+    _, b := twoVals()
+    assert(b == "hello", "got second value")
+    
+    // Test 3: Discard multiple
+    c, _, _ := threeVals()
+    assert(c == 100, "got first of three")
+    
+    _, d, _ := threeVals()
+    assert(d == true, "got second of three")
+    
+    _, _, e := threeVals()
+    assert(e == "world", "got third of three")
+    
+    // Test 4: Discard error (common pattern)
+    val, _ := withError()
+    assert(val == 200, "got value, ignored error")
+    
+    // Test 5: Discard value, keep error
+    _, err := withErrorFail()
+    assert(err != nil, "got error")
+    
+    // Test 6: Discard all (unusual but valid)
+    _, _ = twoVals()
+    
+    // Test 7: Mixed with existing variables
+    var x int
+    x, _ = twoVals()
+    assert(x == 42, "assign to existing var")
+    
+    // Test 8: Discard in range
+    arr := []int{10, 20, 30}
+    sum := 0
+    for _, v := range arr {
+        sum += v
+    }
+    assert(sum == 60, "sum with discarded index")
+    
+    // Test 9: Discard value in range
+    count := 0
+    for i, _ := range arr {
+        count += i
+    }
+    assert(count == 3, "count indices") // 0+1+2
+    
+    // Test 10: Map range with discard
+    m := map[string]int{"a": 1, "b": 2, "c": 3}
+    total := 0
+    for _, v := range m {
+        total += v
+    }
+    assert(total == 6, "map value sum")
+    
+    println("multi_return_discard: ok")
+}

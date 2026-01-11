@@ -1,0 +1,49 @@
+// Test: copy builtin function
+// Go spec: copy(dst, src) copies elements from src to dst, returns min(len(dst), len(src))
+package main
+
+func main() {
+    // Test 1: Basic copy - same length
+    src := []int{1, 2, 3, 4, 5}
+    dst := make([]int, 5)
+    n := copy(dst, src)
+    assert(n == 5, "copied 5 elements")
+    assert(dst[0] == 1 && dst[4] == 5, "values copied correctly")
+    
+    // Test 2: dst shorter than src
+    src2 := []int{10, 20, 30, 40, 50}
+    dst2 := make([]int, 3)
+    n2 := copy(dst2, src2)
+    assert(n2 == 3, "copied 3 elements (dst shorter)")
+    assert(dst2[0] == 10 && dst2[2] == 30, "first 3 copied")
+    
+    // Test 3: src shorter than dst
+    src3 := []int{100, 200}
+    dst3 := make([]int, 5)
+    n3 := copy(dst3, src3)
+    assert(n3 == 2, "copied 2 elements (src shorter)")
+    assert(dst3[0] == 100 && dst3[1] == 200, "values copied")
+    assert(dst3[2] == 0, "rest unchanged (zero)")
+    
+    // Test 4: Copy to itself (overlapping - forward)
+    arr := []int{1, 2, 3, 4, 5}
+    n4 := copy(arr[1:], arr[:4])
+    assert(n4 == 4, "copied 4 elements")
+    assert(arr[0] == 1 && arr[1] == 1 && arr[2] == 2, "overlapping forward")
+    
+    // Test 5: Copy empty slice
+    empty := []int{}
+    dst5 := []int{1, 2, 3}
+    n5 := copy(dst5, empty)
+    assert(n5 == 0, "copy empty returns 0")
+    assert(dst5[0] == 1, "dst unchanged")
+    
+    // Test 6: Copy string to []byte
+    s := "hello"
+    b := make([]byte, 10)
+    n6 := copy(b, s)
+    assert(n6 == 5, "copied 5 bytes from string")
+    assert(b[0] == 'h' && b[4] == 'o', "string bytes copied")
+    
+    println("copy_builtin: ok")
+}

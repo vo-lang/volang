@@ -296,3 +296,12 @@ tests:
   - file: closure_defer_interact.vo
   - file: slice_three_index.vo
     # FIXED: three-index slice s[a:b:c] now works correctly
+
+# Coverage tests from analysis (2026-01-11 batch 3)
+  - file: array_as_map_key.vo
+  - file: recursive_closure.vo
+  - file: copy_builtin.vo
+    # FIXED: copy([]byte, string) now works correctly
+  - file: multi_return_discard.vo
+  - file: nil_pointer_method_panic.vo
+    # FIXED: nil pointer dereference now triggers Vo panic (recoverable) in both VM and JIT

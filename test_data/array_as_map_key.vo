@@ -1,0 +1,55 @@
+// Test: array as map key
+// Go spec: arrays are comparable and can be used as map keys
+package main
+
+func main() {
+    // Test 1: Basic array as map key
+    type Key [3]int
+    m := make(map[Key]string)
+    
+    k1 := Key{1, 2, 3}
+    k2 := Key{4, 5, 6}
+    k3 := Key{1, 2, 3}  // same as k1
+    
+    m[k1] = "first"
+    m[k2] = "second"
+    
+    assert(m[k1] == "first", "k1 lookup")
+    assert(m[k2] == "second", "k2 lookup")
+    assert(m[k3] == "first", "k3 should match k1")
+    
+    // Test 2: Overwrite with equal key
+    m[k3] = "overwritten"
+    assert(m[k1] == "overwritten", "k1 should see overwritten value")
+    assert(len(m) == 2, "should have 2 entries")
+    
+    // Test 3: Array of different size is different type
+    type Key2 [2]int
+    m2 := make(map[Key2]int)
+    m2[Key2{1, 2}] = 100
+    m2[Key2{2, 1}] = 200
+    assert(m2[Key2{1, 2}] == 100, "Key2 lookup 1")
+    assert(m2[Key2{2, 1}] == 200, "Key2 lookup 2")
+    
+    // Test 4: Nested array key
+    type Matrix [2][2]int
+    m3 := make(map[Matrix]string)
+    mat1 := Matrix{{1, 2}, {3, 4}}
+    mat2 := Matrix{{1, 2}, {3, 5}}  // different
+    mat3 := Matrix{{1, 2}, {3, 4}}  // same as mat1
+    
+    m3[mat1] = "identity"
+    m3[mat2] = "other"
+    
+    assert(m3[mat1] == "identity", "mat1 lookup")
+    assert(m3[mat2] == "other", "mat2 lookup")
+    assert(m3[mat3] == "identity", "mat3 should match mat1")
+    
+    // Test 5: Delete with array key
+    delete(m, k1)
+    _, ok := m[k1]
+    assert(!ok, "k1 should be deleted")
+    assert(len(m) == 1, "should have 1 entry after delete")
+    
+    println("array_as_map_key: ok")
+}

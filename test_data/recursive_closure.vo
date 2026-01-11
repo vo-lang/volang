@@ -1,0 +1,90 @@
+// Test: recursive closure (closure that calls itself)
+// Go spec: closure can reference itself if the variable is declared first
+package main
+
+func main() {
+    // Test 1: Basic recursive closure - factorial
+    var factorial func(int) int
+    factorial = func(n int) int {
+        if n <= 1 {
+            return 1
+        }
+        return n * factorial(n-1)
+    }
+    
+    assert(factorial(0) == 1, "factorial(0)")
+    assert(factorial(1) == 1, "factorial(1)")
+    assert(factorial(5) == 120, "factorial(5)")
+    assert(factorial(10) == 3628800, "factorial(10)")
+    
+    // Test 2: Recursive closure - fibonacci
+    var fib func(int) int
+    fib = func(n int) int {
+        if n <= 1 {
+            return n
+        }
+        return fib(n-1) + fib(n-2)
+    }
+    
+    assert(fib(0) == 0, "fib(0)")
+    assert(fib(1) == 1, "fib(1)")
+    assert(fib(10) == 55, "fib(10)")
+    
+    // Test 3: Mutual recursion
+    var isEven func(int) bool
+    var isOdd func(int) bool
+    
+    isEven = func(n int) bool {
+        if n == 0 {
+            return true
+        }
+        return isOdd(n - 1)
+    }
+    
+    isOdd = func(n int) bool {
+        if n == 0 {
+            return false
+        }
+        return isEven(n - 1)
+    }
+    
+    assert(isEven(0), "isEven(0)")
+    assert(!isOdd(0), "!isOdd(0)")
+    assert(isEven(10), "isEven(10)")
+    assert(isOdd(11), "isOdd(11)")
+    assert(!isEven(7), "!isEven(7)")
+    
+    // Test 4: Recursive closure with captured variable
+    sum := 0
+    var accumulate func(int)
+    accumulate = func(n int) {
+        if n <= 0 {
+            return
+        }
+        sum += n
+        accumulate(n - 1)
+    }
+    
+    accumulate(5)  // 5+4+3+2+1 = 15
+    assert(sum == 15, "accumulate(5) sum")
+    
+    // Test 5: Recursive closure returned from function
+    makeCounter := func() func() int {
+        count := 0
+        var counter func() int
+        counter = func() int {
+            count += 1
+            return count
+        }
+        return counter
+    }
+    
+    c1 := makeCounter()
+    c2 := makeCounter()
+    assert(c1() == 1, "c1() first")
+    assert(c1() == 2, "c1() second")
+    assert(c2() == 1, "c2() first (independent)")
+    assert(c1() == 3, "c1() third")
+    
+    println("recursive_closure: ok")
+}

@@ -6,9 +6,23 @@ use vo_jit::JitFunc;
 
 use crate::bytecode::Module;
 use crate::fiber::Fiber;
-use crate::scheduler::is_trampoline_fiber;
 
 use super::{Vm, VmState, ExecResult};
+
+// =============================================================================
+// JIT Panic Handling
+// =============================================================================
+
+/// Set recoverable panic state on fiber when JIT triggers a runtime panic.
+/// This allows defer/recover to work correctly.
+#[inline]
+fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
+    let msg = vo_runtime::objects::string::new_from_string(
+        gc,
+        "runtime error: nil pointer dereference".to_string()
+    );
+    fiber.set_recoverable_panic(msg);
+}
 
 // =============================================================================
 // JIT Trampolines
@@ -132,33 +146,21 @@ pub fn build_jit_ctx(
 
 impl JitCallContext for Vm {
     fn read_args(&self, fiber_id: u32, arg_start: u16, arg_count: usize) -> Vec<u64> {
-        let fiber = if is_trampoline_fiber(fiber_id) {
-            self.scheduler.trampoline_fiber(fiber_id)
-        } else {
-            &self.scheduler.fibers[fiber_id as usize]
-        };
+        let fiber = self.scheduler.get_fiber_by_id(fiber_id);
         (0..arg_count)
             .map(|i| fiber.read_reg(arg_start + i as u16))
             .collect()
     }
     
     fn write_returns(&mut self, fiber_id: u32, ret_start: u16, values: &[u64]) {
-        let fiber = if is_trampoline_fiber(fiber_id) {
-            self.scheduler.trampoline_fiber_mut(fiber_id)
-        } else {
-            &mut self.scheduler.fibers[fiber_id as usize]
-        };
+        let fiber = self.scheduler.get_fiber_mut_by_id(fiber_id);
         for (i, val) in values.iter().enumerate() {
             fiber.write_reg(ret_start + i as u16, *val);
         }
     }
     
     fn read_locals(&self, fiber_id: u32, bp: usize, local_count: usize) -> Vec<u64> {
-        let fiber = if is_trampoline_fiber(fiber_id) {
-            self.scheduler.trampoline_fiber(fiber_id)
-        } else {
-            &self.scheduler.fibers[fiber_id as usize]
-        };
+        let fiber = self.scheduler.get_fiber_by_id(fiber_id);
         fiber.stack[bp..bp + local_count].to_vec()
     }
     
@@ -171,11 +173,7 @@ impl JitCallContext for Vm {
         let jit_mgr = self.jit_mgr.as_ref().unwrap();
         let func_table_ptr = jit_mgr.func_table_ptr();
         let func_table_len = jit_mgr.func_table_len() as u32;
-        let fiber_ptr = if is_trampoline_fiber(fiber_id) {
-            self.scheduler.trampoline_fiber_mut(fiber_id) as *mut Fiber as *mut std::ffi::c_void
-        } else {
-            &mut self.scheduler.fibers[fiber_id as usize] as *mut Fiber as *mut std::ffi::c_void
-        };
+        let fiber_ptr = self.scheduler.get_fiber_mut_by_id(fiber_id) as *mut Fiber as *mut std::ffi::c_void;
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref().map(|m| m as *const _).unwrap_or(std::ptr::null());
         
@@ -215,7 +213,14 @@ impl Vm {
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
         );
-        jit_func(&mut ctx, args, ret)
+        let result = jit_func(&mut ctx, args, ret);
+        
+        // Set recoverable panic state if JIT triggered panic (e.g., nil pointer)
+        if result == JitResult::Panic && panic_flag {
+            let fiber = unsafe { &mut *(fiber_ptr as *mut Fiber) };
+            set_jit_runtime_panic(&mut self.state.gc, fiber);
+        }
+        result
     }
 
     /// Execute a JIT->VM call. This is the core logic for vm_call_trampoline.
@@ -340,7 +345,14 @@ impl Vm {
         
         match result {
             JitResult::Ok => ExecResult::Continue,
-            JitResult::Panic => ExecResult::Panic,
+            JitResult::Panic => {
+                // Set recoverable panic state so defer/recover can work
+                if panic_flag {
+                    let fiber = self.scheduler.get_fiber_mut_by_id(fiber_id);
+                    set_jit_runtime_panic(&mut self.state.gc, fiber);
+                }
+                ExecResult::Panic
+            }
         }
     }
 
@@ -419,11 +431,7 @@ impl Vm {
             .unwrap_or(std::ptr::null());
         
         // Get fiber pointer for JIT context
-        let fiber = if is_trampoline_fiber(fiber_id) {
-            self.scheduler.trampoline_fiber_mut(fiber_id)
-        } else {
-            &mut self.scheduler.fibers[fiber_id as usize]
-        };
+        let fiber = self.scheduler.get_fiber_mut_by_id(fiber_id);
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let locals_ptr = fiber.stack[bp..].as_mut_ptr();
         

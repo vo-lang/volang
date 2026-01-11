@@ -1,0 +1,67 @@
+// Test: nil pointer method call should panic
+// Go spec: calling a method on a nil pointer panics when dereferencing
+package main
+
+type Counter struct {
+    value int
+}
+
+func (c *Counter) Get() int {
+    return c.value  // dereferences c
+}
+
+func (c *Counter) Set(v int) {
+    c.value = v  // dereferences c
+}
+
+// Value receiver on nil pointer is tricky - depends on dereference
+func (c Counter) Double() int {
+    return c.value * 2
+}
+
+var recovered bool
+var panicMsg any
+
+func testNilPointerGetPanics() {
+    defer func() {
+        panicMsg = recover()
+        if panicMsg != nil {
+            recovered = true
+        }
+    }()
+    
+    var c *Counter = nil
+    _ = c.Get()  // should panic
+}
+
+func testNilPointerSetPanics() {
+    defer func() {
+        panicMsg = recover()
+        if panicMsg != nil {
+            recovered = true
+        }
+    }()
+    
+    var c *Counter = nil
+    c.Set(10)  // should panic
+}
+
+func main() {
+    // Test 1: nil pointer Get() should panic
+    recovered = false
+    testNilPointerGetPanics()
+    assert(recovered, "nil pointer Get() should panic")
+    
+    // Test 2: nil pointer Set() should panic
+    recovered = false
+    testNilPointerSetPanics()
+    assert(recovered, "nil pointer Set() should panic")
+    
+    // Test 3: non-nil pointer should work
+    c := &Counter{value: 42}
+    assert(c.Get() == 42, "non-nil Get works")
+    c.Set(100)
+    assert(c.Get() == 100, "non-nil Set works")
+    
+    println("nil_pointer_method_panic: ok")
+}

@@ -116,15 +116,37 @@ impl Scheduler {
     }
 
     /// Get fiber by id (O(1) index access).
+    /// Note: Does NOT handle trampoline fibers. Use `get_fiber_by_id` for unified access.
     #[inline]
     pub fn fiber(&self, id: u32) -> &Fiber {
         &self.fibers[id as usize]
     }
 
     /// Get mutable fiber by id (O(1) index access).
+    /// Note: Does NOT handle trampoline fibers. Use `get_fiber_mut_by_id` for unified access.
     #[inline]
     pub fn fiber_mut(&mut self, id: u32) -> &mut Fiber {
         &mut self.fibers[id as usize]
+    }
+    
+    /// Get fiber by id, handling both regular and trampoline fibers.
+    #[inline]
+    pub fn get_fiber_by_id(&self, id: u32) -> &Fiber {
+        if is_trampoline_fiber(id) {
+            self.trampoline_fiber(id)
+        } else {
+            &self.fibers[id as usize]
+        }
+    }
+    
+    /// Get mutable fiber by id, handling both regular and trampoline fibers.
+    #[inline]
+    pub fn get_fiber_mut_by_id(&mut self, id: u32) -> &mut Fiber {
+        if is_trampoline_fiber(id) {
+            self.trampoline_fiber_mut(id)
+        } else {
+            &mut self.fibers[id as usize]
+        }
     }
 
     /// Get current fiber reference.

@@ -119,7 +119,9 @@ static __VO_BUILTIN_ASSERT: ExternEntryWithContext = ExternEntryWithContext {
 };
 
 fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{slice, array};
+    use crate::objects::{slice, array, string};
+    use crate::gc::Gc;
+    use vo_common_core::types::ValueKind;
     
     let dst = call.arg_ref(0);
     let src = call.arg_ref(1);
@@ -130,7 +132,17 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     }
     
     let dst_len = slice::len(dst);
-    let src_len = slice::len(src);
+    
+    // Check if src is a string (copy([]byte, string) case)
+    let src_kind = Gc::header(src).value_meta.value_kind();
+    let (src_len, src_ptr) = if src_kind == ValueKind::String {
+        let len = string::len(src);
+        let bytes = string::as_bytes(src);
+        (len, bytes.as_ptr() as *mut u8)
+    } else {
+        (slice::len(src), slice::data_ptr(src))
+    };
+    
     let copy_len = dst_len.min(src_len);
     
     if copy_len == 0 {
@@ -141,7 +153,6 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     let dst_arr = slice::array_ref(dst);
     let elem_bytes = array::elem_bytes(dst_arr);
     let dst_ptr = slice::data_ptr(dst);
-    let src_ptr = slice::data_ptr(src);
     
     // Use copy (not copy_nonoverlapping) to support overlapping regions (Go semantics)
     unsafe { core::ptr::copy(src_ptr, dst_ptr, copy_len * elem_bytes) };

@@ -12,7 +12,8 @@ mod types;
 pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE};
 
-use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, panic_unwind, user_panic};
+use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, panic_unwind, user_panic,
+    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE};
 
 use crate::bytecode::Module;
 use crate::exec;
@@ -321,20 +322,32 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::PtrGet => {
-                    exec::exec_ptr_get(stack, bp, &inst);
-                    ExecResult::Continue
+                    if exec::exec_ptr_get(stack, bp, &inst) {
+                        ExecResult::Continue
+                    } else {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                    }
                 }
                 Opcode::PtrSet => {
-                    exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    if exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc) {
+                        ExecResult::Continue
+                    } else {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                    }
                 }
                 Opcode::PtrGetN => {
-                    exec::exec_ptr_get_n(stack, bp, &inst);
-                    ExecResult::Continue
+                    if exec::exec_ptr_get_n(stack, bp, &inst) {
+                        ExecResult::Continue
+                    } else {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                    }
                 }
                 Opcode::PtrSetN => {
-                    exec::exec_ptr_set_n(&stack, bp, &inst);
-                    ExecResult::Continue
+                    if exec::exec_ptr_set_n(&stack, bp, &inst) {
+                        ExecResult::Continue
+                    } else {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                    }
                 }
 
                 // Integer arithmetic - inline for hot path
@@ -929,18 +942,11 @@ impl Vm {
                     // nil map write panics (Go semantics)
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
-                        runtime_panic(
-                            &mut self.state.gc, fiber, stack, module,
-                            "runtime error: assignment to entry in nil map".to_string()
-                        )
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_MAP_WRITE.to_string())
                     } else {
                         let ok = exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc, Some(module));
                         if !ok {
-                            // Interface key has uncomparable underlying type
-                            runtime_panic(
-                                &mut self.state.gc, fiber, stack, module,
-                                "runtime error: hash of unhashable type".to_string()
-                            )
+                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_UNHASHABLE_TYPE.to_string())
                         } else {
                             ExecResult::Continue
                         }
@@ -1086,8 +1092,7 @@ impl Vm {
                     let result = exec::exec_iface_eq(stack, bp, &inst, module);
                     if matches!(result, ExecResult::Panic) {
                         runtime_panic(
-                            &mut self.state.gc, fiber, stack, module,
-                            "runtime error: comparing uncomparable type in interface value".to_string()
+                            &mut self.state.gc, fiber, stack, module, ERR_UNCOMPARABLE_TYPE.to_string()
                         )
                     } else {
                         result
