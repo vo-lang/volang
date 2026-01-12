@@ -52,7 +52,7 @@ pub fn compile_builtin_call(
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
             let arg_type = info.expr_type(call.args[0].id);
             
-            // Check type: string, array, slice, map
+            // Check type: string, array, slice, map, channel
             if info.is_array(arg_type) {
                 // Array: len is known at compile time
                 let len = info.array_len(arg_type);
@@ -62,6 +62,8 @@ pub fn compile_builtin_call(
                 func.emit_op(Opcode::StrLen, dst, arg_reg, 0);
             } else if info.is_map(arg_type) {
                 func.emit_op(Opcode::MapLen, dst, arg_reg, 0);
+            } else if info.is_chan(arg_type) {
+                func.emit_op(Opcode::ChanLen, dst, arg_reg, 0);
             } else if info.is_slice(arg_type) {
                 func.emit_op(Opcode::SliceLen, dst, arg_reg, 0);
             } else {
@@ -74,7 +76,13 @@ pub fn compile_builtin_call(
                 return Err(CodegenError::Internal("cap expects 1 argument".to_string()));
             }
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
-            func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
+            let arg_type = info.expr_type(call.args[0].id);
+            
+            if info.is_chan(arg_type) {
+                func.emit_op(Opcode::ChanCap, dst, arg_reg, 0);
+            } else {
+                func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
+            }
         }
         "print" | "println" => {
             let extern_name = if name == "println" { "vo_println" } else { "vo_print" };

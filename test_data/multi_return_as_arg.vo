@@ -1,0 +1,79 @@
+// Test: Multi-return function results used as arguments
+// Tests using multi-return function calls directly as function arguments
+package main
+
+func main() {
+    testMultiReturnAsArgs()
+    testMultiReturnAsVariadic()
+    testMultiReturnChained()
+    testMultiReturnWithDiscard()
+    testMultiReturnInExpression()
+    println("multi_return_as_arg: ok")
+}
+
+// Helper functions
+func pair() (int, int) {
+    return 10, 20
+}
+
+func triple() (int, int, int) {
+    return 1, 2, 3
+}
+
+func sumTwo(a, b int) int {
+    return a + b
+}
+
+func sumThree(a, b, c int) int {
+    return a + b + c
+}
+
+func takePair(a, b int) (int, int) {
+    return a * 2, b * 2
+}
+
+func testMultiReturnAsArgs() {
+    // Multi-return directly as function arguments
+    result := sumTwo(pair())
+    assert(result == 30, "sumTwo(pair()) should be 30")
+    
+    result2 := sumThree(triple())
+    assert(result2 == 6, "sumThree(triple()) should be 6")
+}
+
+func testMultiReturnAsVariadic() {
+    // Using multi-return with variadic function (println)
+    // This just tests it compiles and runs
+    a, b := pair()
+    println("pair:", a, b)
+}
+
+func testMultiReturnChained() {
+    // Chain multi-return functions
+    a, b := takePair(pair())  // pair() -> (10, 20) -> takePair -> (20, 40)
+    assert(a == 20, "first should be 20")
+    assert(b == 40, "second should be 40")
+}
+
+func testMultiReturnWithDiscard() {
+    // Discard some return values
+    first, _ := pair()
+    assert(first == 10, "first should be 10")
+    
+    _, second := pair()
+    assert(second == 20, "second should be 20")
+    
+    a, _, c := triple()
+    assert(a == 1, "a should be 1")
+    assert(c == 3, "c should be 3")
+}
+
+func testMultiReturnInExpression() {
+    // Multi-return in expression context
+    sum := sumTwo(pair()) + sumThree(triple())
+    assert(sum == 36, "sum should be 36 (30 + 6)")
+    
+    // Nested
+    nested := sumTwo(takePair(pair()))
+    assert(nested == 60, "nested should be 60 (20 + 40)")
+}

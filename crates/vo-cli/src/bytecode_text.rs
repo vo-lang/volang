@@ -323,6 +323,8 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::ChanSend => format!("ChanSend      r{}, r{}, slots={}", a, b, flags),
         Opcode::ChanRecv => format!("ChanRecv      r{}, r{}, slots={}", a, b, (flags >> 1) & 0x7F),
         Opcode::ChanClose => format!("ChanClose     r{}", a),
+        Opcode::ChanLen => format!("ChanLen       r{}, r{}", a, b),
+        Opcode::ChanCap => format!("ChanCap       r{}, r{}", a, b),
 
         // SELECT
         Opcode::SelectBegin => format!("SelectBegin   r{}, cases={}", a, b),

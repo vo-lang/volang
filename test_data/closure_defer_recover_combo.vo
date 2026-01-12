@@ -1,0 +1,118 @@
+// Test: Complex closure + defer + panic/recover combinations
+// Tests multi-layer interactions between closures, defer, and recovery
+package main
+
+func main() {
+    testClosureInDefer()
+    testDeferModifiesClosureVar()
+    testNestedRecoverInClosure()
+    testRecoverReturnsValueWrapper()
+    testPanicInClosureRecoveredOutside()
+    testMultiDeferWithClosure()
+    println("closure_defer_recover_combo: ok")
+}
+
+func testClosureInDefer() {
+    result := 0
+    
+    func() {
+        x := 10
+        defer func() {
+            result = x * 2  // closure captures x
+        }()
+        x = 20  // modify before defer runs
+    }()
+    
+    assert(result == 40, "deferred closure should see x=20")
+}
+
+func testDeferModifiesClosureVar() {
+    // Closure modifies outer var in defer
+    counter := 0
+    increment := func() {
+        counter++
+    }
+    
+    func() {
+        defer increment()
+        defer increment()
+        defer increment()
+        counter = 10  // set base
+    }()
+    
+    // 3 increments after counter=10: 10 -> 11 -> 12 -> 13
+    assert(counter == 13, "counter should be 13")
+}
+
+func testNestedRecoverInClosure() {
+    result := ""
+    
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result = "recovered"
+            }
+        }()
+        
+        // Panic inside a closure
+        f := func() {
+            panic("inner panic")
+        }
+        f()
+    }()
+    
+    assert(result == "recovered", "should recover from panic in closure")
+}
+
+func testRecoverReturnsValue() (ret string) {
+    defer func() {
+        if r := recover(); r != nil {
+            // r should be the panic value
+            ret = r.(string)
+        }
+    }()
+    
+    panic("test value")
+    return  // unreachable, but needed for type checker
+}
+
+func testPanicInClosureRecoveredOutside() {
+    var panicVal interface{}
+    
+    outer := func(f func()) {
+        defer func() {
+            panicVal = recover()
+        }()
+        f()  // call the closure that will panic
+    }
+    
+    inner := func() {
+        panic("from closure")
+    }
+    
+    outer(inner)
+    
+    assert(panicVal != nil, "should have recovered")
+    assert(panicVal.(string) == "from closure", "panic value should match")
+}
+
+func testMultiDeferWithClosure() {
+    order := ""
+    
+    func() {
+        for i := 0; i < 3; i++ {
+            i := i  // capture loop var
+            defer func() {
+                order = order + string('0'+byte(i))
+            }()
+        }
+    }()
+    
+    // Defers run LIFO: 2, 1, 0
+    assert(order == "210", "defers should run in LIFO order")
+}
+
+func testRecoverReturnsValueWrapper() {
+    ret := testRecoverReturnsValue()
+    assert(ret == "test value", "testRecoverReturnsValue should return panic value")
+}

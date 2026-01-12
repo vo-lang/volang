@@ -1,0 +1,86 @@
+// Test: map delete operations and iteration edge cases
+// Tests delete on non-existent keys, delete during iteration, etc.
+package main
+
+func main() {
+    testDeleteNonExistent()
+    testDeleteDuringIteration()
+    testDeleteAllKeys()
+    testDeleteThenAdd()
+    testNilMapDelete()
+    println("map_delete_iterate: ok")
+}
+
+func testDeleteNonExistent() {
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    
+    // Delete non-existent key should be no-op
+    delete(m, "nonexistent")
+    assert(len(m) == 2, "len should still be 2")
+    assert(m["a"] == 1, "a should be 1")
+    assert(m["b"] == 2, "b should be 2")
+    
+    // Delete same key twice
+    delete(m, "a")
+    assert(len(m) == 1, "len should be 1 after delete")
+    delete(m, "a")  // delete already-deleted key
+    assert(len(m) == 1, "len should still be 1")
+}
+
+func testDeleteDuringIteration() {
+    // Go allows delete during range iteration for the current key
+    m := make(map[int]string)
+    for i := 0; i < 10; i++ {
+        m[i] = "val"
+    }
+    
+    // Delete keys during iteration
+    count := 0
+    for k := range m {
+        if k%2 == 0 {
+            delete(m, k)  // delete current key
+        }
+        count++
+    }
+    
+    // Should have iterated some keys
+    assert(count > 0, "should have iterated")
+    
+    // Only odd keys should remain
+    for k := range m {
+        assert(k%2 == 1, "only odd keys should remain")
+    }
+}
+
+func testDeleteAllKeys() {
+    m := map[string]int{"a": 1, "b": 2, "c": 3}
+    
+    // Delete all keys
+    for k := range m {
+        delete(m, k)
+    }
+    
+    assert(len(m) == 0, "map should be empty")
+    
+    // Map should still be usable
+    m["new"] = 42
+    assert(m["new"] == 42, "map should work after clearing")
+}
+
+func testDeleteThenAdd() {
+    m := map[int]int{1: 10, 2: 20}
+    
+    delete(m, 1)
+    m[1] = 100  // re-add deleted key
+    
+    assert(m[1] == 100, "re-added key should have new value")
+    assert(len(m) == 2, "len should be 2")
+}
+
+func testNilMapDelete() {
+    // Delete on nil map should be no-op (not panic) per Go spec
+    var m map[string]int
+    delete(m, "key")  // should not panic
+}

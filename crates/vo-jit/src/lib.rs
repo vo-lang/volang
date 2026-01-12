@@ -140,6 +140,8 @@ struct HelperFuncIds {
     ptr_clone: cranelift_module::FuncId,
     closure_new: cranelift_module::FuncId,
     chan_new: cranelift_module::FuncId,
+    chan_len: cranelift_module::FuncId,
+    chan_cap: cranelift_module::FuncId,
     array_new: cranelift_module::FuncId,
     array_len: cranelift_module::FuncId,
     slice_new: cranelift_module::FuncId,
@@ -226,6 +228,8 @@ impl JitCompiler {
         builder.symbol("vo_call_extern", vo_runtime::jit_api::vo_call_extern as *const u8);
         builder.symbol("vo_closure_new", vo_runtime::jit_api::vo_closure_new as *const u8);
         builder.symbol("vo_chan_new", vo_runtime::jit_api::vo_chan_new as *const u8);
+        builder.symbol("vo_chan_len", vo_runtime::jit_api::vo_chan_len as *const u8);
+        builder.symbol("vo_chan_cap", vo_runtime::jit_api::vo_chan_cap as *const u8);
         builder.symbol("vo_array_new", vo_runtime::jit_api::vo_array_new as *const u8);
         builder.symbol("vo_array_len", vo_runtime::jit_api::vo_array_len as *const u8);
         builder.symbol("vo_slice_new", vo_runtime::jit_api::vo_slice_new as *const u8);
@@ -421,6 +425,20 @@ impl JitCompiler {
             sig
         })?;
         
+        let chan_len = module.declare_function("vo_chan_len", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
+        let chan_cap = module.declare_function("vo_chan_cap", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
         let array_new = module.declare_function("vo_array_new", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
             sig.params.push(AbiParam::new(ptr));
@@ -611,7 +629,7 @@ impl JitCompiler {
         Ok(HelperFuncIds {
             safepoint, call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
-            ptr_clone, closure_new, chan_new, array_new, array_len,
+            ptr_clone, closure_new, chan_new, chan_len, chan_cap, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
             slice_from_array, slice_from_array3,
             map_new, map_len, map_get, map_set, map_delete, map_iter_get, iface_assert, iface_to_iface, iface_eq,
@@ -651,6 +669,8 @@ impl JitCompiler {
             ptr_clone: Some(self.module.declare_func_in_func(self.helper_funcs.ptr_clone, &mut self.ctx.func)),
             closure_new: Some(self.module.declare_func_in_func(self.helper_funcs.closure_new, &mut self.ctx.func)),
             chan_new: Some(self.module.declare_func_in_func(self.helper_funcs.chan_new, &mut self.ctx.func)),
+            chan_len: Some(self.module.declare_func_in_func(self.helper_funcs.chan_len, &mut self.ctx.func)),
+            chan_cap: Some(self.module.declare_func_in_func(self.helper_funcs.chan_cap, &mut self.ctx.func)),
             array_new: Some(self.module.declare_func_in_func(self.helper_funcs.array_new, &mut self.ctx.func)),
             array_len: Some(self.module.declare_func_in_func(self.helper_funcs.array_len, &mut self.ctx.func)),
             slice_new: Some(self.module.declare_func_in_func(self.helper_funcs.slice_new, &mut self.ctx.func)),

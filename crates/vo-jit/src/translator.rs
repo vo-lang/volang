@@ -37,6 +37,8 @@ pub struct HelperFuncs {
     pub ptr_clone: Option<FuncRef>,
     pub closure_new: Option<FuncRef>,
     pub chan_new: Option<FuncRef>,
+    pub chan_len: Option<FuncRef>,
+    pub chan_cap: Option<FuncRef>,
     pub array_new: Option<FuncRef>,
     pub array_len: Option<FuncRef>,
     pub slice_new: Option<FuncRef>,

@@ -109,6 +109,8 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         // Allocation
         PtrNew => { ptr_new(e, inst); Ok(Completed) }
         ChanNew => { chan_new(e, inst); Ok(Completed) }
+        ChanLen => { chan_len(e, inst); Ok(Completed) }
+        ChanCap => { chan_cap(e, inst); Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1178,6 +1180,22 @@ fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
     let cap = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn chan_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().chan_len { Some(f) => f, None => return };
+    let ch = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[ch]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().chan_cap { Some(f) => f, None => return };
+    let ch = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[ch]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }

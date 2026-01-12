@@ -208,6 +208,8 @@ pub enum Opcode {
     ChanSend,
     ChanRecv,
     ChanClose,
+    ChanLen,
+    ChanCap,
 
     // === SELECT: Select statement ===
     SelectBegin,

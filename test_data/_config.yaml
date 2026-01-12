@@ -304,3 +304,14 @@ tests:
   # FIXED: bug_partial_struct_init.vo - lvalue StackArray handling + JIT write_var stack sync
   # FIXED: bug_array_of_struct.vo - LValue::StackArrayField for stack array element field access
   # FIXED: bug_struct_arr_and_func_field.vo - struct with array + func field now works
+
+# Coverage tests from analysis (2026-01-12)
+  - file: make_boundary_panic.vo
+  - file: map_delete_iterate.vo
+    skip: [vm, jit]
+    reason: "Vo bug: map iteration during delete has issues"
+  - file: closure_defer_recover_combo.vo
+    skip: [vm, jit]
+    reason: "Vo bug: named return + defer + panic/recover not working"
+  - file: multi_return_as_arg.vo
+  - file: range_modify_container.vo

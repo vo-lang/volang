@@ -1,0 +1,89 @@
+// Test: make() boundary conditions
+// Tests various make() scenarios for slices, maps, and channels
+package main
+
+func main() {
+    testMakeSliceNormal()
+    testMakeSliceZeroCap()
+    testMakeSliceLenEqCap()
+    testMakeMapNormal()
+    testMakeChanNormal()
+    testMakeSliceLargeSize()
+    println("make_boundary_panic: ok")
+}
+
+func testMakeSliceNormal() {
+    // Normal case: len < cap
+    s := make([]int, 5, 10)
+    assert(len(s) == 5, "len should be 5")
+    assert(cap(s) == 10, "cap should be 10")
+    
+    // All elements should be zero
+    for i := 0; i < len(s); i++ {
+        assert(s[i] == 0, "element should be 0")
+    }
+}
+
+func testMakeSliceZeroCap() {
+    // Zero length and capacity
+    s := make([]int, 0, 0)
+    assert(len(s) == 0, "len should be 0")
+    assert(cap(s) == 0, "cap should be 0")
+    
+    // Zero length with some capacity
+    s2 := make([]int, 0, 10)
+    assert(len(s2) == 0, "len should be 0")
+    assert(cap(s2) == 10, "cap should be 10")
+}
+
+func testMakeSliceLenEqCap() {
+    // len == cap (common case)
+    s := make([]int, 10, 10)
+    assert(len(s) == 10, "len should be 10")
+    assert(cap(s) == 10, "cap should be 10")
+    
+    // Single arg form (cap defaults to len)
+    s2 := make([]int, 5)
+    assert(len(s2) == 5, "len should be 5")
+    assert(cap(s2) == 5, "cap should be 5")
+}
+
+func testMakeSliceLargeSize() {
+    // Test making larger slices
+    s := make([]int, 100, 200)
+    assert(len(s) == 100, "len should be 100")
+    assert(cap(s) == 200, "cap should be 200")
+    
+    // Fill and verify
+    for i := 0; i < 100; i++ {
+        s[i] = i
+    }
+    for i := 0; i < 100; i++ {
+        assert(s[i] == i, "s[i] should equal i")
+    }
+    
+    // Append within capacity
+    for i := 100; i < 150; i++ {
+        s = append(s, i)
+    }
+    assert(len(s) == 150, "len should be 150 after append")
+    assert(cap(s) == 200, "cap should still be 200")
+}
+
+func testMakeMapNormal() {
+    // Map with hint
+    m := make(map[string]int, 100)
+    assert(len(m) == 0, "new map should be empty")
+    m["key"] = 42
+    assert(m["key"] == 42, "map should work")
+}
+
+func testMakeChanNormal() {
+    // Buffered channel
+    ch := make(chan int, 5)
+    assert(cap(ch) == 5, "channel cap should be 5")
+    
+    // Unbuffered channel
+    ch2 := make(chan int)
+    assert(cap(ch2) == 0, "unbuffered channel cap should be 0")
+}

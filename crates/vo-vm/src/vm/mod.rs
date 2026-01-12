@@ -1042,6 +1042,14 @@ impl Vm {
                     }
                     ExecResult::Continue
                 }
+                Opcode::ChanLen => {
+                    exec::exec_chan_len(stack, bp, &inst);
+                    ExecResult::Continue
+                }
+                Opcode::ChanCap => {
+                    exec::exec_chan_cap(stack, bp, &inst);
+                    ExecResult::Continue
+                }
 
                 // Select operations - allowed on trampoline, if it yields execute_jit_call handles it
                 Opcode::SelectBegin => {

@@ -1,0 +1,109 @@
+// Test: Modifying containers during for-range iteration
+// Tests edge cases of modifying slice/map during iteration
+package main
+
+func main() {
+    testSliceModifyElement()
+    testSliceAppendDuring()
+    testMapAddDuring()
+    testRangeOverNil()
+    testRangeEmptyContainers()
+    println("range_modify_container: ok")
+}
+
+func testSliceModifyElement() {
+    // Modifying slice elements during range is allowed
+    s := []int{1, 2, 3, 4, 5}
+    
+    for i := range s {
+        s[i] *= 2  // double each element
+    }
+    
+    assert(s[0] == 2, "s[0] should be 2")
+    assert(s[1] == 4, "s[1] should be 4")
+    assert(s[2] == 6, "s[2] should be 6")
+    assert(s[3] == 8, "s[3] should be 8")
+    assert(s[4] == 10, "s[4] should be 10")
+}
+
+func testSliceAppendDuring() {
+    // Appending during range: original slice header is used
+    s := []int{1, 2, 3}
+    original := s
+    
+    count := 0
+    for range original {
+        if count < 2 {
+            s = append(s, 99)  // append to s (but iterate over original)
+        }
+        count++
+    }
+    
+    // Should only iterate 3 times (original length)
+    assert(count == 3, "should iterate 3 times")
+    // s should have 5 elements now
+    assert(len(s) == 5, "s should have 5 elements after append")
+}
+
+func testMapAddDuring() {
+    // Adding keys during map iteration: may or may not see new keys
+    // But should not crash
+    m := map[int]int{1: 1, 2: 2, 3: 3}
+    
+    count := 0
+    for k := range m {
+        if k == 1 {
+            m[100] = 100  // add new key during iteration
+        }
+        count++
+    }
+    
+    // Should iterate at least 3 times
+    assert(count >= 3, "should iterate at least 3 times")
+    // New key should exist
+    assert(m[100] == 100, "m[100] should be 100")
+}
+
+func testRangeOverNil() {
+    // Range over nil slice should iterate zero times
+    var nilSlice []int
+    count := 0
+    for range nilSlice {
+        count++
+    }
+    assert(count == 0, "nil slice should iterate 0 times")
+    
+    // Range over nil map should iterate zero times
+    var nilMap map[string]int
+    count = 0
+    for range nilMap {
+        count++
+    }
+    assert(count == 0, "nil map should iterate 0 times")
+}
+
+func testRangeEmptyContainers() {
+    // Empty slice
+    emptySlice := []int{}
+    count := 0
+    for range emptySlice {
+        count++
+    }
+    assert(count == 0, "empty slice should iterate 0 times")
+    
+    // Empty map
+    emptyMap := make(map[string]int)
+    count = 0
+    for range emptyMap {
+        count++
+    }
+    assert(count == 0, "empty map should iterate 0 times")
+    
+    // Empty string
+    emptyStr := ""
+    count = 0
+    for range emptyStr {
+        count++
+    }
+    assert(count == 0, "empty string should iterate 0 times")
+}
