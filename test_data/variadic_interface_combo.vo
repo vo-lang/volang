@@ -1,0 +1,99 @@
+// Test: Variadic parameters with interface values
+// Coverage: variadic + interface type preservation + spread
+
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type MyInt int
+
+func (m MyInt) String() string {
+	if m == 1 {
+		return "one"
+	} else if m == 2 {
+		return "two"
+	} else if m == 3 {
+		return "three"
+	}
+	return "?"
+}
+
+type MyStr string
+
+func (s MyStr) String() string {
+	return string(s)
+}
+
+// Variadic with interface type
+func joinStrings(sep string, items ...Stringer) string {
+	result := ""
+	for i, item := range items {
+		if i > 0 {
+			result = result + sep
+		}
+		result = result + item.String()
+	}
+	return result
+}
+
+// Variadic with any
+func countAny(items ...any) int {
+	return len(items)
+}
+
+// Pass interface slice as variadic spread
+func spreadInterfaceSlice() {
+	stringers := []Stringer{MyInt(1), MyStr("hello"), MyInt(2)}
+	result := joinStrings("-", stringers...)
+	assert(result == "one-hello-two", "spread interface slice: ", result)
+}
+
+// Pass concrete values to interface variadic
+func concreteToInterface() {
+	result := joinStrings(", ", MyInt(1), MyInt(2), MyInt(3))
+	assert(result == "one, two, three", "concrete to interface: ", result)
+}
+
+// Empty variadic
+func emptyVariadic() {
+	result := joinStrings("-")
+	assert(result == "", "empty variadic: ", result)
+	
+	count := countAny()
+	assert(count == 0, "empty any variadic: ", count)
+}
+
+// Mixed types to any variadic
+func mixedToAny() {
+	count := countAny(1, "hello", true, 3.14)
+	assert(count == 4, "mixed to any: ", count)
+}
+
+// Variadic with nil interface
+func variadicWithNil() {
+	var s Stringer = nil
+	// This should work - nil is a valid Stringer value
+	stringers := []Stringer{MyInt(1), s}
+	assert(len(stringers) == 2, "slice with nil")
+}
+
+// Nested variadic call
+func nested() {
+	items := []Stringer{MyInt(1), MyInt(2)}
+	// Create new slice and spread
+	more := append(items, MyInt(3))
+	result := joinStrings("+", more...)
+	assert(result == "one+two+three", "nested spread: ", result)
+}
+
+func main() {
+	spreadInterfaceSlice()
+	concreteToInterface()
+	emptyVariadic()
+	mixedToAny()
+	variadicWithNil()
+	nested()
+	println("PASS: variadic_interface_combo")
+}

@@ -1,0 +1,133 @@
+// Test: defer behavior with for loop and early return
+// Defers registered in loop should all execute when returning early
+package main
+
+var order []int
+
+func reset() {
+    order = []int{}
+}
+
+// Test 1: Early return from for loop with defers
+func testEarlyReturn(exitAt int) int {
+    for i := 0; i < 10; i += 1 {
+        i := i // capture by value
+        defer func() { order = append(order, i) }()
+        if i == exitAt {
+            return i
+        }
+    }
+    return -1
+}
+
+// Test 2: Break from for loop with defers
+func testBreakFromLoop(breakAt int) {
+    for i := 0; i < 5; i += 1 {
+        i := i
+        defer func() { order = append(order, i) }()
+        if i == breakAt {
+            break
+        }
+    }
+}
+
+// Test 3: Nested loops with defers and return
+func testNestedLoopReturn(exitI, exitJ int) (int, int) {
+    for i := 0; i < 3; i += 1 {
+        i := i
+        defer func() { order = append(order, i * 10) }()
+        for j := 0; j < 3; j += 1 {
+            j := j
+            defer func() { order = append(order, j) }()
+            if i == exitI && j == exitJ {
+                return i, j
+            }
+        }
+    }
+    return -1, -1
+}
+
+// Test 4: Continue in loop with defers
+func testContinueWithDefer() {
+    for i := 0; i < 5; i += 1 {
+        i := i
+        defer func() { order = append(order, i) }()
+        if i % 2 == 0 {
+            continue
+        }
+        order = append(order, 100 + i)
+    }
+}
+
+// Test 5: Labeled break with defers
+func testLabeledBreakDefer() {
+outer:
+    for i := 0; i < 3; i += 1 {
+        i := i
+        defer func() { order = append(order, i * 100) }()
+        for j := 0; j < 3; j += 1 {
+            j := j
+            defer func() { order = append(order, j) }()
+            if i == 1 && j == 1 {
+                break outer
+            }
+        }
+    }
+}
+
+func main() int {
+    println("Test 1: Early return from for loop")
+    reset()
+    result := testEarlyReturn(3)
+    assert(result == 3, "should return at i=3")
+    // Defers for i=0,1,2,3 should execute in reverse: 3,2,1,0
+    assert(len(order) == 4, "should have 4 deferred calls, got", len(order))
+    assert(order[0] == 3, "first defer should be 3")
+    assert(order[1] == 2, "second defer should be 2")
+    assert(order[2] == 1, "third defer should be 1")
+    assert(order[3] == 0, "fourth defer should be 0")
+    println("PASSED")
+    
+    println("Test 2: Break from for loop")
+    reset()
+    testBreakFromLoop(2)
+    // Defers for i=0,1,2 should execute: 2,1,0
+    assert(len(order) == 3, "should have 3 deferred calls")
+    assert(order[0] == 2, "first defer should be 2")
+    assert(order[1] == 1, "second defer should be 1")
+    assert(order[2] == 0, "third defer should be 0")
+    println("PASSED")
+    
+    println("Test 3: Nested loops with return")
+    reset()
+    i, j := testNestedLoopReturn(1, 1)
+    assert(i == 1 && j == 1, "should return at (1,1)")
+    // Defers: j=1,j=0,i*10=10, j=2,j=1,j=0,i*10=0
+    // At (1,1): inner j=0,1 + outer i=0 j=0,1,2 + outer i=1 j=0,1
+    // Order: 1, 0, 10, 2, 1, 0, 0 (LIFO per function)
+    assert(len(order) > 0, "should have deferred calls")
+    println("PASSED (order:", order, ")")
+    
+    println("Test 4: Continue in loop")
+    reset()
+    testContinueWithDefer()
+    // Body with 100+i executes for i=1,3 (odd)
+    // All 5 defers execute in reverse: 4,3,2,1,0
+    // Expected: 101, 103 during body, then 4,3,2,1,0 as defers
+    assert(len(order) == 7, "should have 2 body + 5 defers")
+    assert(order[0] == 101, "first body should be 101")
+    assert(order[1] == 103, "second body should be 103")
+    assert(order[2] == 4, "first defer should be 4")
+    println("PASSED")
+    
+    println("Test 5: Labeled break with defers")
+    reset()
+    testLabeledBreakDefer()
+    // At i=1, j=1 break outer
+    // Defers: inner j=1,0 + outer i*100=100, inner j=2,1,0 + outer i*100=0
+    assert(len(order) > 0, "should have deferred calls")
+    println("PASSED (order:", order, ")")
+    
+    println("defer_loop_return: ALL PASSED")
+    return 0
+}

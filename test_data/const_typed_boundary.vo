@@ -1,0 +1,141 @@
+// Test: Const to typed variable boundary cases
+// Coverage: untyped const promotion, precision, range checks
+
+package main
+
+// Large untyped const that fits in int64
+const BigNum = 1 << 62
+
+// Const that fits in different sizes
+const SmallNum = 100
+const NegNum = -50
+
+// Float precision
+const PiApprox = 3.14159265358979323846264338327950288419716939937510
+const TinyFloat = 0.000000001
+
+// Test int boundaries
+func testIntBoundary() {
+	// SmallNum should work for all int types
+	var i8 int8 = SmallNum
+	var i16 int16 = SmallNum
+	var i32 int32 = SmallNum
+	var i64 int64 = SmallNum
+	
+	assert(i8 == 100, "int8: ", i8)
+	assert(i16 == 100, "int16: ", i16)
+	assert(i32 == 100, "int32: ", i32)
+	assert(i64 == 100, "int64: ", i64)
+	
+	// Negative
+	var neg8 int8 = NegNum
+	assert(neg8 == -50, "neg int8: ", neg8)
+}
+
+// Test uint boundaries
+func testUintBoundary() {
+	var u8 uint8 = SmallNum
+	var u16 uint16 = SmallNum
+	var u32 uint32 = SmallNum
+	var u64 uint64 = SmallNum
+	
+	assert(u8 == 100, "uint8: ", u8)
+	assert(u16 == 100, "uint16: ", u16)
+	assert(u32 == 100, "uint32: ", u32)
+	assert(u64 == 100, "uint64: ", u64)
+}
+
+// Test float precision
+func testFloatPrecision() {
+	var f32 float32 = PiApprox
+	var f64 float64 = PiApprox
+	
+	// Float32 has ~7 significant digits
+	assert(f32 > 3.14159 && f32 < 3.14160, "float32 pi: ", f32)
+	
+	// Float64 has ~15 significant digits
+	assert(f64 > 3.14159265358979 && f64 < 3.14159265358980, "float64 pi: ", f64)
+}
+
+// Test const expression evaluation
+func testConstExpr() {
+	const a = 10
+	const b = 3
+	const div = a / b      // integer division = 3
+	const mod = a % b      // = 1
+	const floatDiv = 10.0 / 3.0  // float division
+	
+	var d int = div
+	var m int = mod
+	var fd float64 = floatDiv
+	
+	assert(d == 3, "int div: ", d)
+	assert(m == 1, "int mod: ", m)
+	assert(fd > 3.33 && fd < 3.34, "float div: ", fd)
+}
+
+// Test shift operations with consts
+func testConstShift() {
+	const shifted = 1 << 10  // 1024
+	const big = 1 << 60
+	
+	var s int = shifted
+	var b int64 = big
+	
+	assert(s == 1024, "shift: ", s)
+	assert(b == 1152921504606846976, "big shift: ", b)
+}
+
+// Test const comparison
+// NOTE: Local const comparison bug is tested separately in bug_local_const_compare.vo
+func testConstCompare() {
+	const x = 10
+	const y = 10.0
+	
+	// Can assign untyped int to float var
+	var f float64 = x
+	assert(f == 10.0, "int to float: ", f)
+}
+
+// Test byte and rune
+func testByteRune() {
+	const ch = 'A'        // untyped rune
+	const num = 65        // untyped int
+	
+	var r rune = ch
+	var b byte = num
+	
+	assert(r == 65, "rune A: ", r)
+	assert(b == 65, "byte 65: ", b)
+	
+	// Rune to int
+	var i int = ch
+	assert(i == 65, "rune to int: ", i)
+}
+
+// Test named type with const
+type MyInt int
+type MyFloat float64
+
+func testNamedType() {
+	const val = 42
+	const fval = 3.14
+	
+	var mi MyInt = val
+	var mf MyFloat = fval
+	
+	assert(mi == 42, "MyInt: ", int(mi))
+	assert(mf > 3.13 && mf < 3.15, "MyFloat: ", float64(mf))
+}
+
+func main() {
+	testIntBoundary()
+	testUintBoundary()
+	testFloatPrecision()
+	testConstExpr()
+	testConstShift()
+	testConstCompare()
+	testByteRune()
+	testNamedType()
+	println("PASS: const_typed_boundary")
+}

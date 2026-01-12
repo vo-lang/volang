@@ -1,0 +1,190 @@
+// Test: Multi-return function as single argument (f(g()) pattern)
+// Go allows passing multi-return function result directly as arguments
+package main
+
+// Helper functions with multiple returns
+func pair() (int, int) {
+    return 10, 20
+}
+
+func triple() (int, int, int) {
+    return 1, 2, 3
+}
+
+func pairWithError() (int, error) {
+    return 42, nil
+}
+
+func stringPair() (string, string) {
+    return "hello", "world"
+}
+
+// Receiver functions
+func addTwo(a, b int) int {
+    return a + b
+}
+
+func addThree(a, b, c int) int {
+    return a + b + c
+}
+
+func concat(a, b string) string {
+    return a + " " + b
+}
+
+func checkValue(v int, err error) int {
+    if err != nil {
+        return -1
+    }
+    return v
+}
+
+// Test 1: Basic two-value return as two arguments
+func testBasicPair() {
+    result := addTwo(pair())
+    assert(result == 30, "addTwo(pair()) should be 30")
+}
+
+// Test 2: Three-value return as three arguments
+func testTriple() {
+    result := addThree(triple())
+    assert(result == 6, "addThree(triple()) should be 6")
+}
+
+// Test 3: String pair
+func testStringPair() {
+    result := concat(stringPair())
+    assert(result == "hello world", "concat(stringPair()) should be 'hello world'")
+}
+
+// Test 4: With error return
+func testWithError() {
+    result := checkValue(pairWithError())
+    assert(result == 42, "checkValue(pairWithError()) should be 42")
+}
+
+// Test 5: Nested multi-return calls
+func wrapPair() (int, int) {
+    return pair()  // forward the pair
+}
+
+func testNestedMultiReturn() {
+    result := addTwo(wrapPair())
+    assert(result == 30, "addTwo(wrapPair()) should be 30")
+}
+
+// Test 6: Multi-return in println (variadic)
+// Note: Go only allows multi-return as the ONLY argument, not mixed with other args
+func testPrintlnMultiReturn() {
+    // println(pair()) is valid - expands to println(10, 20)
+    println(pair())  // Should print: 10 20
+}
+
+// Test 7: Multi-return in append
+func returnSliceAndElem() ([]int, int) {
+    return []int{1, 2}, 3
+}
+
+func doAppend(s []int, elem int) []int {
+    return append(s, elem)
+}
+
+func testAppendMultiReturn() {
+    result := doAppend(returnSliceAndElem())
+    assert(len(result) == 3, "should have 3 elements")
+    assert(result[2] == 3, "third element should be 3")
+}
+
+// Test 8: Multi-return with interface conversion
+func returnIntPair() (int, int) {
+    return 100, 200
+}
+
+func takeAny(a, b any) string {
+    return "ok"
+}
+
+func testMultiReturnToAny() {
+    result := takeAny(returnIntPair())
+    assert(result == "ok", "takeAny should work with multi-return")
+}
+
+// Test 9: Multi-return as map key lookup args
+func returnKey() (string, bool) {
+    return "key", true
+}
+
+func lookupWithFlag(k string, check bool) string {
+    if check {
+        return k + "_checked"
+    }
+    return k
+}
+
+func testMultiReturnMapHelper() {
+    result := lookupWithFlag(returnKey())
+    assert(result == "key_checked", "should return key_checked")
+}
+
+// Test 10: Chained multi-return
+func step1() (int, int) {
+    return 5, 10
+}
+
+func step2(a, b int) (int, int) {
+    return a * 2, b * 2
+}
+
+func step3(a, b int) int {
+    return a + b
+}
+
+func testChainedMultiReturn() {
+    result := step3(step2(step1()))
+    assert(result == 30, "chained should be (5*2) + (10*2) = 30")
+}
+
+func main() int {
+    println("Test 1: Basic pair as args")
+    testBasicPair()
+    println("PASSED")
+    
+    println("Test 2: Triple as args")
+    testTriple()
+    println("PASSED")
+    
+    println("Test 3: String pair")
+    testStringPair()
+    println("PASSED")
+    
+    println("Test 4: With error return")
+    testWithError()
+    println("PASSED")
+    
+    println("Test 5: Nested multi-return")
+    testNestedMultiReturn()
+    println("PASSED")
+    
+    println("Test 6: Multi-return in println")
+    testPrintlnMultiReturn()
+    println("PASSED")
+    
+    println("Test 7: Multi-return in append wrapper")
+    testAppendMultiReturn()
+    println("PASSED")
+    
+    println("Test 8: Multi-return to any")
+    testMultiReturnToAny()
+    println("PASSED")
+    
+    println("Test 9: Multi-return as helper args")
+    testMultiReturnMapHelper()
+    println("PASSED")
+    
+    println("Test 10: Chained multi-return")
+    testChainedMultiReturn()
+    println("PASSED")
+    
+    println("bug_multi_return_expand: ALL PASSED")
+    return 0
+}

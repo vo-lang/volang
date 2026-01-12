@@ -1,0 +1,157 @@
+// Test: Constant expression evaluation with overflow and edge cases
+// Tests compile-time constant folding and representability checks
+package main
+
+// Test 1: Large constant operations that fold to representable values
+const (
+    Huge = 1 << 62
+    Half = Huge >> 1
+    Back = Half << 1
+)
+
+// Test 2: Floating-point constant precision
+const (
+    Pi       = 3.14159265358979323846264338327950288419716939937510
+    TwoPi    = Pi * 2
+    HalfPi   = Pi / 2
+    PiSquare = Pi * Pi
+)
+
+// Test 3: Mixed integer/float constant operations
+const (
+    IntVal   = 100
+    FloatVal = IntVal / 4.0  // Should be 25.0
+    BackInt  = int(FloatVal) // Should be 25
+)
+
+// Test 4: Untyped constant with different target types
+const Big = 1000000
+
+// Test 5: iota with expressions
+const (
+    _  = iota             // 0
+    KB = 1 << (10 * iota) // 1 << 10 = 1024
+    MB                    // 1 << 20
+    GB                    // 1 << 30
+)
+
+// Test 6: Negative constant operations
+const (
+    NegOne   = -1
+    NegShift = NegOne << 3  // -8
+    NegDiv   = -100 / 3     // -33 (truncated toward zero)
+    NegMod   = -100 % 3     // -1
+)
+
+// Test 7: Bitwise operations on constants
+const (
+    AllOnes = ^0           // All bits set
+    BitMask = 0xFF
+    Masked  = AllOnes & BitMask  // 0xFF
+    Cleared = AllOnes &^ BitMask // All bits except lower 8
+)
+
+// Test 8: Boolean constant expressions
+const (
+    T = true
+    F = false
+    And = T && F
+    Or  = T || F
+    Not = !T
+)
+
+// Test 9: Comparison constants
+const (
+    IsLess    = 1 < 2
+    IsEqual   = 1 == 1
+    IsGreater = 2 > 1
+)
+
+// Test 10: String constant concatenation
+const (
+    Hello = "Hello"
+    World = "World"
+    Greeting = Hello + ", " + World + "!"
+)
+
+func main() int {
+    println("Test 1: Large shift constants")
+    assert(Huge == 1 << 62, "Huge should be 1<<62")
+    assert(Half == 1 << 61, "Half should be 1<<61")
+    assert(Back == 1 << 62, "Back should be 1<<62")
+    println("PASSED")
+    
+    println("Test 2: Floating-point precision")
+    assert(TwoPi > 6.28 && TwoPi < 6.29, "TwoPi should be ~6.28")
+    assert(HalfPi > 1.57 && HalfPi < 1.58, "HalfPi should be ~1.57")
+    assert(PiSquare > 9.86 && PiSquare < 9.88, "PiSquare should be ~9.87")
+    println("PASSED")
+    
+    println("Test 3: Mixed int/float constants")
+    assert(FloatVal == 25.0, "FloatVal should be 25.0")
+    assert(BackInt == 25, "BackInt should be 25")
+    println("PASSED")
+    
+    println("Test 4: Untyped constant to different types")
+    var i8 int8 = 100  // Big doesn't fit in int8, but 100 does
+    var i64 int64 = Big
+    var f64 float64 = Big
+    assert(i8 == 100, "int8 should be 100")
+    assert(i64 == 1000000, "int64 should be 1000000")
+    assert(f64 == 1000000.0, "float64 should be 1000000.0")
+    println("PASSED")
+    
+    println("Test 5: iota with expressions")
+    assert(KB == 1024, "KB should be 1024")
+    assert(MB == 1024*1024, "MB should be 1048576")
+    assert(GB == 1024*1024*1024, "GB should be 1073741824")
+    println("PASSED")
+    
+    println("Test 6: Negative constant operations")
+    assert(NegShift == -8, "NegShift should be -8")
+    assert(NegDiv == -33, "NegDiv should be -33")
+    assert(NegMod == -1, "NegMod should be -1")
+    println("PASSED")
+    
+    println("Test 7: Bitwise operations")
+    assert(Masked == 0xFF, "Masked should be 0xFF")
+    // Cleared should have all bits except lower 8
+    assert(Cleared & 0xFF == 0, "Lower 8 bits should be cleared")
+    println("PASSED")
+    
+    println("Test 8: Boolean constants")
+    assert(And == false, "T && F should be false")
+    assert(Or == true, "T || F should be true")
+    assert(Not == false, "!T should be false")
+    println("PASSED")
+    
+    println("Test 9: Comparison constants")
+    assert(IsLess == true, "1 < 2 should be true")
+    assert(IsEqual == true, "1 == 1 should be true")
+    assert(IsGreater == true, "2 > 1 should be true")
+    println("PASSED")
+    
+    println("Test 10: String concatenation")
+    assert(Greeting == "Hello, World!", "Greeting should be 'Hello, World!'")
+    println("PASSED")
+    
+    // Test 11: Runtime verification of constants
+    println("Test 11: Runtime constant verification")
+    x := Huge
+    y := x >> 62
+    assert(y == 1, "Huge >> 62 should be 1")
+    println("PASSED")
+    
+    // Test 12: Constant used in array size
+    println("Test 12: Constant as array size")
+    const Size = 5
+    var arr [Size]int
+    for i := 0; i < Size; i += 1 {
+        arr[i] = i * i
+    }
+    assert(arr[4] == 16, "arr[4] should be 16")
+    println("PASSED")
+    
+    println("const_expr_overflow: ALL PASSED")
+    return 0
+}

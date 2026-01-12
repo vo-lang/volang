@@ -19,6 +19,7 @@ use crate::typ::{self, BasicInfo, BasicType, Type};
 
 use super::checker::Checker;
 use super::errors::TypeError;
+use super::util::{UnpackResult, UnpackedResultLeftovers};
 
 impl Checker {
     /// Type-checks a call to the built-in function specified by id.
@@ -52,10 +53,11 @@ impl Checker {
         };
         self.octx.has_call_or_recv = false;
 
-        let nargs = call.args.len();
+        let mut nargs = call.args.len();
 
-        // Check argument count for special cases
-        match id {
+        // Determine actual arguments via unpack (handles multi-value returns)
+        let unpack_result = match id {
+            // Make/New require special handling (type argument first)
             Builtin::Make | Builtin::New => {
                 let ord = nargs.cmp(&binfo.arg_count);
                 let ord = if binfo.variadic && ord == Ordering::Greater {
@@ -67,27 +69,36 @@ impl Checker {
                     self.report_arg_mismatch(call_span, binfo.name, binfo.arg_count, nargs);
                     return false;
                 }
+                None
             }
             _ => {
-                // For other builtins, unpack evaluates first argument
-                if nargs > 0 {
-                    self.multi_expr(x, &call.args[0]);
-                    if x.invalid() {
-                        return false;
+                // Use unpack to handle multi-value returns (like goscript)
+                let result = self.unpack(&call.args, binfo.arg_count, false, binfo.variadic);
+                if matches!(result, UnpackResult::Error) {
+                    return false;
+                }
+                let (count, ord) = result.rhs_count();
+                nargs = count;
+                if ord != Ordering::Equal {
+                    self.report_arg_mismatch(call_span, binfo.name, binfo.arg_count, count);
+                    return false;
+                }
+                // Evaluate first argument into x
+                match &result {
+                    UnpackResult::Tuple(_, _, _)
+                    | UnpackResult::Multiple(_, _)
+                    | UnpackResult::Single(_, _) => {
+                        result.get(self, x, 0);
+                        if x.invalid() {
+                            return false;
+                        }
                     }
+                    UnpackResult::Nothing(_) => {} // no arguments
+                    _ => {}
                 }
-                // Check arg count
-                let expected = binfo.arg_count;
-                if !binfo.variadic && nargs != expected {
-                    self.report_arg_mismatch(call_span, binfo.name, expected, nargs);
-                    return false;
-                }
-                if binfo.variadic && nargs < expected {
-                    self.report_arg_mismatch(call_span, binfo.name, expected, nargs);
-                    return false;
-                }
+                Some(result)
             }
-        }
+        };
 
         // Record builtin type signature helper
         let record_sig = |checker: &mut Checker, res: Option<TypeKey>, args: &[TypeKey], variadic: bool| {
@@ -186,7 +197,8 @@ impl Checker {
                 ok
             }
             Builtin::Print | Builtin::Println => {
-                let (ok, params) = self.builtin_print(x, call, call_span, id);
+                let re = UnpackedResultLeftovers::new(unpack_result.as_ref().unwrap(), None);
+                let (ok, params) = self.builtin_print(x, &re, nargs, id);
                 if ok {
                     // print(x, y, ...) / println(x, y, ...)
                     // note: not variadic
@@ -204,7 +216,8 @@ impl Checker {
             }
             Builtin::Assert => {
                 // assert(pred, msg...) - Vo extension
-                let (ok, params) = self.builtin_assert(x, call, call_span);
+                let re = UnpackedResultLeftovers::new(unpack_result.as_ref().unwrap(), None);
+                let (ok, params) = self.builtin_assert(x, &re, nargs, call_span);
                 if ok && !params.is_empty() {
                     record_sig(self, None, &params, false);
                 }
@@ -559,20 +572,21 @@ impl Checker {
 
     /// print(x...) / println(x...)
     /// Returns (ok, arg_types) where arg_types are the converted argument types.
+    /// Uses UnpackResult to handle multi-value function calls (consistent with goscript).
     fn builtin_print(
         &mut self,
         x: &mut Operand,
-        call: &CallExpr,
-        _call_span: Span,
+        re: &UnpackedResultLeftovers,
+        nargs: usize,
         id: Builtin,
     ) -> (bool, Vec<TypeKey>) {
         let name = if id == Builtin::Print { "print" } else { "println" };
-        let nargs = call.args.len();
         let mut params = Vec::with_capacity(nargs);
 
         for i in 0..nargs {
             if i > 0 {
-                self.multi_expr(x, &call.args[i]);
+                // Get argument from unpack result (handles multi-value expansion)
+                re.get(self, x, i);
             }
             let msg = format!("argument to {}", name);
             self.assignment(x, None, &msg);
@@ -598,13 +612,14 @@ impl Checker {
 
     /// assert(pred bool, msg...) - Vo extension
     /// Returns (ok, arg_types) where arg_types are the converted argument types.
+    /// Uses UnpackResult to handle multi-value function calls (consistent with goscript).
     fn builtin_assert(
         &mut self,
         x: &mut Operand,
-        call: &CallExpr,
+        re: &UnpackedResultLeftovers,
+        nargs: usize,
         call_span: Span,
     ) -> (bool, Vec<TypeKey>) {
-        let nargs = call.args.len();
         let mut params = Vec::with_capacity(nargs);
         
         // First argument: condition (already in x)
@@ -632,9 +647,9 @@ impl Checker {
             // Safe to continue - compile-time assertion failure
         }
         
-        // Process message arguments (args[1..])
+        // Process message arguments using unpack result
         for i in 1..nargs {
-            self.multi_expr(x, &call.args[i]);
+            re.get(self, x, i);
             self.assignment(x, None, "argument to assert");
             if x.invalid() {
                 return (false, vec![]);

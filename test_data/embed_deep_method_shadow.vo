@@ -1,0 +1,199 @@
+// Test: Deep embedding with method shadowing and promotion
+// Coverage: method resolution depth, shadowing rules, ambiguity
+
+package main
+
+// Base types with methods
+type A struct {
+	val int
+}
+
+func (a A) Name() string {
+	return "A"
+}
+
+func (a A) Value() int {
+	return a.val
+}
+
+type B struct {
+	val int
+}
+
+func (b B) Name() string {
+	return "B"
+}
+
+func (b B) Other() string {
+	return "B.Other"
+}
+
+// Level 1 embedding
+type L1A struct {
+	A
+}
+
+type L1B struct {
+	B
+}
+
+// Override method at L1
+func (l L1A) Name() string {
+	return "L1A"
+}
+
+// Level 2 embedding - single path
+type L2Single struct {
+	L1A
+}
+
+// Level 2 embedding - two paths, same depth
+type L2Double struct {
+	L1A
+	L1B
+}
+
+// Level 2 with direct override
+type L2Override struct {
+	L1A
+	L1B
+}
+
+func (l L2Override) Name() string {
+	return "L2Override"
+}
+
+// Level 3 - deeper nesting
+type L3Deep struct {
+	L2Single
+}
+
+// Test single path promotion
+func testSinglePath() {
+	l1 := L1A{A: A{val: 10}}
+	
+	// L1A.Name shadows A.Name
+	assert(l1.Name() == "L1A", "L1A.Name: ", l1.Name())
+	
+	// Value is promoted from A
+	assert(l1.Value() == 10, "L1A.Value: ", l1.Value())
+}
+
+// Test Level 2 single path
+func testL2Single() {
+	l2 := L2Single{L1A: L1A{A: A{val: 20}}}
+	
+	// Name from L1A (which shadows A)
+	assert(l2.Name() == "L1A", "L2Single.Name: ", l2.Name())
+	
+	// Value promoted through chain
+	assert(l2.Value() == 20, "L2Single.Value: ", l2.Value())
+}
+
+// Test Level 2 with direct override
+func testL2Override() {
+	l2 := L2Override{
+		L1A: L1A{A: A{val: 30}},
+		L1B: L1B{B: B{val: 40}},
+	}
+	
+	// Direct override wins
+	assert(l2.Name() == "L2Override", "L2Override.Name: ", l2.Name())
+	
+	// Can still access embedded methods explicitly
+	assert(l2.L1A.Name() == "L1A", "explicit L1A.Name: ", l2.L1A.Name())
+	assert(l2.L1B.Name() == "B", "explicit L1B.Name: ", l2.L1B.Name())
+	
+	// Other is unique to B path
+	assert(l2.Other() == "B.Other", "L2Override.Other: ", l2.Other())
+}
+
+// Test Level 3 deep nesting
+func testL3Deep() {
+	l3 := L3Deep{L2Single: L2Single{L1A: L1A{A: A{val: 50}}}}
+	
+	// Name promoted from L1A
+	assert(l3.Name() == "L1A", "L3Deep.Name: ", l3.Name())
+	
+	// Value promoted through chain
+	assert(l3.Value() == 50, "L3Deep.Value: ", l3.Value())
+}
+
+// Test field access through embedding
+func testFieldAccess() {
+	l2 := L2Single{L1A: L1A{A: A{val: 60}}}
+	
+	// Direct access to embedded field
+	assert(l2.L1A.A.val == 60, "direct field: ", l2.L1A.A.val)
+	
+	// Field promotion not standard in Go, but test Vo behavior
+	// In Go, l2.val would be ambiguous if multiple embeddings have val
+}
+
+// Interface satisfaction through embedding
+type Namer interface {
+	Name() string
+}
+
+type Valuer interface {
+	Value() int
+}
+
+func testInterfaceSatisfaction() {
+	var n Namer
+	var v Valuer
+	
+	l1 := L1A{A: A{val: 70}}
+	n = l1
+	v = l1
+	
+	assert(n.Name() == "L1A", "interface Namer: ", n.Name())
+	assert(v.Value() == 70, "interface Valuer: ", v.Value())
+	
+	// L2Single also satisfies both
+	l2 := L2Single{L1A: L1A{A: A{val: 80}}}
+	n = l2
+	v = l2
+	
+	assert(n.Name() == "L1A", "L2 interface Namer: ", n.Name())
+	assert(v.Value() == 80, "L2 interface Valuer: ", v.Value())
+}
+
+// Pointer embedding
+type PtrEmbed struct {
+	*A
+}
+
+func testPtrEmbed() {
+	a := &A{val: 90}
+	p := PtrEmbed{A: a}
+	
+	assert(p.Name() == "A", "ptr embed Name: ", p.Name())
+	assert(p.Value() == 90, "ptr embed Value: ", p.Value())
+	
+	// Modify through original pointer
+	a.val = 95
+	assert(p.Value() == 95, "ptr embed modified: ", p.Value())
+}
+
+// Nil pointer embedding
+func testNilPtrEmbed() {
+	// This tests that we handle nil embedded pointers
+	// Accessing methods on nil embedded pointer should panic
+	// But we can still create the struct
+	p := PtrEmbed{A: nil}
+	_ = p
+	// Don't call p.Name() - it would panic
+}
+
+func main() {
+	testSinglePath()
+	testL2Single()
+	testL2Override()
+	testL3Deep()
+	testFieldAccess()
+	testInterfaceSatisfaction()
+	testPtrEmbed()
+	testNilPtrEmbed()
+	println("PASS: embed_deep_method_shadow")
+}

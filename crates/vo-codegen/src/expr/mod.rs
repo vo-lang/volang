@@ -20,6 +20,47 @@ pub use call::{emit_receiver};
 pub use literal::{compile_const_value, get_const_value};
 
 // =============================================================================
+// Tuple Expansion Helper
+// =============================================================================
+
+/// Represents a compiled tuple with its elements ready for iteration.
+pub struct CompiledTuple {
+    /// Base register where tuple is stored
+    pub base: u16,
+    /// Type of the tuple
+    pub tuple_type: vo_analysis::objects::TypeKey,
+}
+
+impl CompiledTuple {
+    /// Compile a tuple expression and return handle for iterating elements.
+    pub fn compile(
+        expr: &Expr,
+        ctx: &mut CodegenContext,
+        func: &mut FuncBuilder,
+        info: &TypeInfoWrapper,
+    ) -> Result<Self, CodegenError> {
+        let tuple_type = info.expr_type(expr.id);
+        let slot_types = info.type_slot_types(tuple_type);
+        let base = func.alloc_temp_typed(&slot_types);
+        compile_expr_to(expr, base, ctx, func, info)?;
+        Ok(Self { base, tuple_type })
+    }
+
+    /// Iterate over tuple elements, calling f for each (elem_slot, elem_type).
+    pub fn for_each_element<F>(&self, info: &TypeInfoWrapper, mut f: F)
+    where
+        F: FnMut(u16, vo_analysis::objects::TypeKey),
+    {
+        let mut offset = 0u16;
+        for i in 0..info.tuple_len(self.tuple_type) {
+            let elem_type = info.tuple_elem_type(self.tuple_type, i);
+            f(self.base + offset, elem_type);
+            offset += info.type_slot_count(elem_type);
+        }
+    }
+}
+
+// =============================================================================
 // Helper Functions
 // =============================================================================
 

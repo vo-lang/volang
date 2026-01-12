@@ -414,3 +414,22 @@ tests:
   - file: embed_ptr_method_promote.vo
   - file: multi_return_chain.vo
 
+# Coverage tests from analysis (2026-01-12 batch 11) - New tests
+  - file: variadic_interface_combo.vo
+  - file: method_chain_receiver.vo
+  - file: const_typed_boundary.vo
+  - file: closure_range_capture.vo
+  - file: embed_deep_method_shadow.vo
+
+# Coverage tests from analysis (2026-01-12 batch 12) - New tests
+  - file: defer_loop_return.vo
+  - file: anon_struct_iface_impl.vo
+  - file: defer_panic_chain.vo
+  - file: slice_spread_variadic.vo
+  - file: const_expr_overflow.vo
+
+# Bug reproduction - nested recover call breaks outer defer recover
+  - file: bug_recover_nested_call.vo
+    skip: [vm, jit]
+    reason: "BUG: nested recover() call in defer prevents outer defer from catching panic"
+

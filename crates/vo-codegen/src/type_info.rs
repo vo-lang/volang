@@ -11,6 +11,16 @@ use vo_syntax::ast::Ident;
 use vo_syntax::ast::ExprId;
 use vo_runtime::SlotType;
 
+/// Describes how call arguments should be compiled.
+/// If `tuple_expand` is Some, the single argument is a tuple that needs expansion.
+pub struct CallArgInfo {
+    /// Expanded argument types (after tuple expansion if applicable)
+    pub arg_types: Vec<TypeKey>,
+    /// If Some, the single AST argument is a tuple and should be expanded.
+    /// The value is the tuple type to expand.
+    pub tuple_expand: Option<TypeKey>,
+}
+
 /// Wrapper around Project for codegen queries.
 /// 
 /// Each package has its own TypeInfo (because ExprId/IdentId are local to each package).
@@ -858,6 +868,28 @@ impl<'a> TypeInfoWrapper<'a> {
             sig.variadic()
         } else {
             false
+        }
+    }
+
+    /// Get call argument info for a function call.
+    /// Handles the `f(g())` pattern where g() returns multiple values.
+    pub fn get_call_arg_info(&self, args: &[vo_syntax::ast::Expr], param_types: &[TypeKey]) -> CallArgInfo {
+        // Check for multi-value expansion: single arg that is a tuple matching multiple params
+        if args.len() == 1 && param_types.len() > 1 {
+            let arg_type = self.expr_type(args[0].id);
+            if self.is_tuple(arg_type) && self.tuple_len(arg_type) == param_types.len() {
+                return CallArgInfo {
+                    arg_types: (0..param_types.len())
+                        .map(|i| self.tuple_elem_type(arg_type, i))
+                        .collect(),
+                    tuple_expand: Some(arg_type),
+                };
+            }
+        }
+        // Normal case: arg types from expressions
+        CallArgInfo {
+            arg_types: args.iter().map(|a| self.expr_type(a.id)).collect(),
+            tuple_expand: None,
         }
     }
 

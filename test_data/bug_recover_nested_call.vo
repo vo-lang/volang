@@ -1,0 +1,56 @@
+// Test: BUG - recover() in nested function call affects panic handling
+// According to Go semantics, recover() only works when called directly in defer,
+// not when called from a nested function. But the outer defer should still catch it.
+package main
+
+func innerRecover() any {
+    return recover()  // This should NOT catch the panic
+}
+
+var result string
+
+func testCase1() {
+    result = ""
+    defer func() {
+        if r := recover(); r != nil {
+            result = "caught"
+        }
+    }()
+    
+    panic("test")
+}
+
+func testCase2() {
+    result = ""
+    defer func() {
+        if r := recover(); r != nil {
+            result = "outer-caught"
+        }
+    }()
+    
+    defer func() {
+        // This calls recover() but it's nested, so it won't catch
+        r := innerRecover()
+        if r != nil {
+            result = "inner-caught"
+        }
+    }()
+    
+    panic("test")
+}
+
+func main() int {
+    println("Test 1: Single defer with recover")
+    testCase1()
+    assert(result == "caught", "should catch panic, got: " + result)
+    println("PASSED")
+    
+    println("Test 2: Two defers, inner calls nested recover")
+    testCase2()
+    // The outer defer should catch since innerRecover() doesn't consume the panic
+    assert(result == "outer-caught", "outer should catch, got: " + result)
+    println("PASSED")
+    
+    println("bug_recover_nested_call: ALL PASSED")
+    return 0
+}

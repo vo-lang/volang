@@ -491,15 +491,12 @@ fn compile_stmt_with_label(
 
             if is_multi_value {
                 // Multi-value: compile expr once, then distribute to variables
-                let tuple_type = info.expr_type(short_var.values[0].id);
-                let tuple_slot_types = info.type_slot_types(tuple_type);
-                let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
-                compile_expr_to(&short_var.values[0], tmp_base, ctx, func, info)?;
+                let tuple = crate::expr::CompiledTuple::compile(&short_var.values[0], ctx, func, info)?;
 
                 let mut sc = StmtCompiler::new(ctx, func, info);
                 let mut offset = 0u16;
                 for (i, name) in short_var.names.iter().enumerate() {
-                    let elem_type = info.tuple_elem_type(tuple_type, i);
+                    let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
                     let elem_slots = info.type_slot_count(elem_type);
 
                     if is_blank(name) {
@@ -508,15 +505,15 @@ fn compile_stmt_with_label(
                     }
 
                     // Apply truncation for narrow integer types (Go semantics)
-                    emit_int_trunc(tmp_base + offset, elem_type, sc.func, info);
+                    emit_int_trunc(tuple.base + offset, elem_type, sc.func, info);
 
                     if info.is_def(name) {
                         let obj_key = info.get_def(name);
                         let escapes = info.is_escaped(obj_key);
-                        sc.define_local_from_slot(name.symbol, elem_type, escapes, tmp_base + offset, Some(obj_key))?;
+                        sc.define_local_from_slot(name.symbol, elem_type, escapes, tuple.base + offset, Some(obj_key))?;
                     } else if let Some(local) = sc.func.lookup_local(name.symbol) {
                         let elem_slot_types = info.type_slot_types(elem_type);
-                        sc.store_from_slot(local.storage, tmp_base + offset, &elem_slot_types);
+                        sc.store_from_slot(local.storage, tuple.base + offset, &elem_slot_types);
                     }
                     offset += elem_slots;
                 }
@@ -745,14 +742,11 @@ fn compile_stmt_with_label(
             
             if is_multi_value {
                 // Multi-value assignment: compile expr once, then distribute to variables
-                let tuple_type = info.expr_type(assign.rhs[0].id);
-                let tuple_slot_types = info.type_slot_types(tuple_type);
-                let tmp_base = func.alloc_temp_typed(&tuple_slot_types);
-                compile_expr_to(&assign.rhs[0], tmp_base, ctx, func, info)?;
+                let tuple = crate::expr::CompiledTuple::compile(&assign.rhs[0], ctx, func, info)?;
                 
                 let mut offset = 0u16;
                 for (i, lhs_expr) in assign.lhs.iter().enumerate() {
-                    let elem_type = info.tuple_elem_type(tuple_type, i);
+                    let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
                     let elem_slots = info.type_slot_count(elem_type);
                     
                     // Skip blank identifier
@@ -764,13 +758,13 @@ fn compile_stmt_with_label(
                     }
                     
                     // Apply truncation for narrow integer types (Go semantics)
-                    emit_int_trunc(tmp_base + offset, elem_type, func, info);
+                    emit_int_trunc(tuple.base + offset, elem_type, func, info);
                     
                     // Get lhs location and copy from temp
                     let lhs_source = crate::expr::get_expr_source(lhs_expr, ctx, func, info);
                     if let ExprSource::Location(storage) = lhs_source {
                         let slot_types = info.type_slot_types(elem_type);
-                        func.emit_storage_store(storage, tmp_base + offset, &slot_types);
+                        func.emit_storage_store(storage, tuple.base + offset, &slot_types);
                     }
                     offset += elem_slots;
                 }
@@ -2423,6 +2417,49 @@ pub fn compile_iface_assign(
         func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
     }
     Ok(())
+}
+
+/// Convert value from src_reg to dst with automatic interface conversion.
+/// Handles: concrete->interface, interface->interface, and non-interface copy.
+pub fn emit_value_convert(
+    dst: u16,
+    src_reg: u16,
+    src_type: vo_analysis::objects::TypeKey,
+    target_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if info.is_interface(target_type) {
+        if info.is_interface(src_type) {
+            // Interface -> interface
+            if info.is_empty_interface(target_type) {
+                // To any: just copy
+                let src_slots = info.type_slot_count(src_type);
+                func.emit_copy(dst, src_reg, src_slots);
+            } else {
+                // Non-empty interface target: rebuild itab
+                let iface_meta_id = info.get_or_create_interface_meta_id(target_type, ctx);
+                let const_idx = ctx.register_iface_assign_const_interface(iface_meta_id);
+                func.emit_with_flags(
+                    Opcode::IfaceAssign,
+                    vo_runtime::ValueKind::Interface as u8,
+                    dst,
+                    src_reg,
+                    const_idx
+                );
+            }
+            Ok(())
+        } else {
+            // Concrete -> interface
+            emit_iface_assign_from_concrete(dst, src_reg, src_type, target_type, ctx, func, info)
+        }
+    } else {
+        // Non-interface: just copy
+        let slots = info.type_slot_count(src_type);
+        func.emit_copy(dst, src_reg, slots);
+        Ok(())
+    }
 }
 
 /// Emit IfaceAssign from concrete type value already in a register.

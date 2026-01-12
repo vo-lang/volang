@@ -568,6 +568,7 @@ pub fn compile_args_simple(
 
 /// Compile arguments with parameter types for automatic interface conversion.
 /// Used by method calls and defer with known param types.
+/// Handles multi-value function calls: f(g()) where g() returns multiple values.
 pub fn compile_args_with_types(
     args: &[vo_syntax::ast::Expr],
     param_types: &[TypeKey],
@@ -576,18 +577,45 @@ pub fn compile_args_with_types(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let mut offset = 0u16;
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(&pt) = param_types.get(i) {
-            crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
-            offset += info.type_slot_count(pt);
-        } else {
-            let slots = info.expr_slots(arg.id);
-            compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-            offset += slots;
+    let arg_info = info.get_call_arg_info(args, param_types);
+    
+    if let Some(_) = arg_info.tuple_expand {
+        // Multi-value expansion: compile tuple once, then convert each element
+        let tuple = super::CompiledTuple::compile(&args[0], ctx, func, info)?;
+        
+        let mut offset = 0u16;
+        let mut elem_idx = 0usize;
+        tuple.for_each_element(info, |elem_slot, elem_type| {
+            let pt = param_types[elem_idx];
+            let pt_slots = info.type_slot_count(pt);
+            // Note: emit_value_convert is fallible, but for_each_element uses FnMut
+            // In practice this won't fail for valid code that passed type checking
+            let _ = crate::stmt::emit_value_convert(
+                args_start + offset,
+                elem_slot,
+                elem_type,
+                pt,
+                ctx, func, info
+            );
+            offset += pt_slots;
+            elem_idx += 1;
+        });
+        Ok(offset)
+    } else {
+        // Normal case: one arg per param
+        let mut offset = 0u16;
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(&pt) = param_types.get(i) {
+                crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
+                offset += info.type_slot_count(pt);
+            } else {
+                let slots = info.expr_slots(arg.id);
+                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
+                offset += slots;
+            }
         }
+        Ok(offset)
     }
-    Ok(offset)
 }
 
 /// Get extern name for a package function call

@@ -1,0 +1,114 @@
+// Test: Method call chains with mixed value/pointer receivers
+// Coverage: auto address-of, auto dereference in chains
+
+package main
+
+type Builder struct {
+	value int
+	name  string
+}
+
+// Value receiver - returns copy
+func (b Builder) WithValue(v int) Builder {
+	b.value = v
+	return b
+}
+
+// Pointer receiver - modifies in place, returns pointer
+func (b *Builder) SetValue(v int) *Builder {
+	b.value = v
+	return b
+}
+
+// Value receiver on pointer chain
+func (b Builder) GetValue() int {
+	return b.value
+}
+
+// Pointer receiver returns value
+func (b *Builder) Build() Builder {
+	return *b
+}
+
+// Chain: value -> value -> value
+func testValueChain() {
+	b := Builder{value: 0}
+	result := b.WithValue(1).WithValue(2).WithValue(3)
+	assert(result.value == 3, "value chain result: ", result.value)
+	assert(b.value == 0, "original unchanged: ", b.value) // original should be 0
+}
+
+// Chain: pointer -> pointer -> value
+func testPointerChain() {
+	b := Builder{value: 0}
+	result := b.SetValue(1).SetValue(2).Build()
+	assert(result.value == 2, "pointer chain result: ", result.value)
+	assert(b.value == 2, "original modified: ", b.value)
+}
+
+// Mixed chain: value -> pointer (via addressable)
+func testMixedChain() {
+	b := Builder{value: 0}
+	// b.WithValue(1) returns a value, stored in temp
+	// Then .SetValue(2) needs pointer - this requires addressable temp
+	// This might not work if temp is not addressable
+	result := b.WithValue(1).GetValue()
+	assert(result == 1, "mixed chain: ", result)
+}
+
+// Pointer to value to pointer
+func testPtrValuePtr() {
+	b := &Builder{value: 10}
+	// *b gives value, GetValue is value receiver
+	v := (*b).GetValue()
+	assert(v == 10, "ptr deref value: ", v)
+	
+	// b.GetValue() should auto-deref
+	v2 := b.GetValue()
+	assert(v2 == 10, "auto deref: ", v2)
+}
+
+// Struct in slice - addressable
+func testSliceElement() {
+	builders := []Builder{{value: 1}, {value: 2}}
+	// builders[0] is addressable
+	builders[0].SetValue(100)
+	assert(builders[0].value == 100, "slice element: ", builders[0].value)
+}
+
+// Struct field - addressable
+type Container struct {
+	inner Builder
+}
+
+func testFieldAddressable() {
+	c := Container{inner: Builder{value: 5}}
+	c.inner.SetValue(50)
+	assert(c.inner.value == 50, "field addressable: ", c.inner.value)
+}
+
+// Pointer in struct
+type PtrContainer struct {
+	inner *Builder
+}
+
+func testPtrField() {
+	c := PtrContainer{inner: &Builder{value: 7}}
+	c.inner.SetValue(70)
+	assert(c.inner.value == 70, "ptr field: ", c.inner.value)
+	
+	// Also test value receiver through pointer
+	v := c.inner.GetValue()
+	assert(v == 70, "ptr field value recv: ", v)
+}
+
+func main() {
+	testValueChain()
+	testPointerChain()
+	testMixedChain()
+	testPtrValuePtr()
+	testSliceElement()
+	testFieldAddressable()
+	testPtrField()
+	println("PASS: method_chain_receiver")
+}

@@ -1,0 +1,207 @@
+// Test: Slice spread (...) with variadic functions
+// Tests various edge cases of spreading slices into variadic parameters
+package main
+
+// Basic variadic sum
+func sum(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+// Variadic with leading params
+func prefixSum(prefix string, nums ...int) string {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return prefix + ":" + itoa(total)
+}
+
+// Variadic returning slice
+func collect(items ...string) []string {
+    return items
+}
+
+// Variadic with any type
+func countAny(items ...any) int {
+    return len(items)
+}
+
+func itoa(n int) string {
+    if n == 0 {
+        return "0"
+    }
+    neg := false
+    if n < 0 {
+        neg = true
+        n = -n
+    }
+    s := ""
+    for n > 0 {
+        s = string('0' + rune(n % 10)) + s
+        n = n / 10
+    }
+    if neg {
+        s = "-" + s
+    }
+    return s
+}
+
+// Test 1: Basic slice spread
+func testBasicSpread() {
+    nums := []int{1, 2, 3, 4, 5}
+    result := sum(nums...)
+    assert(result == 15, "sum of 1-5 should be 15")
+}
+
+// Test 2: Empty slice spread
+func testEmptySpread() {
+    nums := []int{}
+    result := sum(nums...)
+    assert(result == 0, "sum of empty should be 0")
+}
+
+// Test 3: Nil slice spread
+func testNilSpread() {
+    var nums []int
+    result := sum(nums...)
+    assert(result == 0, "sum of nil slice should be 0")
+}
+
+// Test 4: Mixed args and spread
+func testMixedArgsSpread() {
+    nums := []int{3, 4, 5}
+    result := sum(1, 2)
+    assert(result == 3, "sum(1,2) should be 3")
+    
+    result = sum(nums...)
+    assert(result == 12, "sum(3,4,5...) should be 12")
+}
+
+// Test 5: Spread with leading params
+func testSpreadWithPrefix() {
+    nums := []int{10, 20, 30}
+    result := prefixSum("total", nums...)
+    assert(result == "total:60", "should be 'total:60'")
+}
+
+// Test 6: String slice spread
+func testStringSpread() {
+    items := []string{"a", "b", "c"}
+    result := collect(items...)
+    assert(len(result) == 3, "should collect 3 items")
+    assert(result[0] == "a" && result[1] == "b" && result[2] == "c", "items should match")
+}
+
+// Test 7: append with spread
+func testAppendSpread() {
+    a := []int{1, 2}
+    b := []int{3, 4, 5}
+    c := append(a, b...)
+    assert(len(c) == 5, "should have 5 elements")
+    assert(c[0] == 1 && c[4] == 5, "elements should be correct")
+}
+
+// Test 8: Spread in closure
+func testSpreadInClosure() {
+    nums := []int{1, 2, 3}
+    f := func() int {
+        return sum(nums...)
+    }
+    result := f()
+    assert(result == 6, "closure spread should work")
+}
+
+// Test 9: Variadic any with spread
+func testAnySpread() {
+    items := []any{1, "two", 3.0}
+    result := countAny(items...)
+    assert(result == 3, "should count 3 items")
+}
+
+// Test 10: Double spread (pass through)
+func passThrough(nums ...int) int {
+    return sum(nums...)  // Re-spread the variadic parameter
+}
+
+func testDoubleSpread() {
+    result := passThrough(1, 2, 3, 4)
+    assert(result == 10, "passThrough should sum to 10")
+    
+    nums := []int{5, 5, 5}
+    result = passThrough(nums...)
+    assert(result == 15, "passThrough with spread should sum to 15")
+}
+
+// Test 11: Variadic with single element
+func testSingleElementSpread() {
+    nums := []int{42}
+    result := sum(nums...)
+    assert(result == 42, "single element spread should work")
+}
+
+// Test 12: Large slice spread
+func testLargeSpread() {
+    nums := make([]int, 100)
+    for i := 0; i < 100; i += 1 {
+        nums[i] = 1
+    }
+    result := sum(nums...)
+    assert(result == 100, "100 ones should sum to 100")
+}
+
+func main() int {
+    println("Test 1: Basic slice spread")
+    testBasicSpread()
+    println("PASSED")
+    
+    println("Test 2: Empty slice spread")
+    testEmptySpread()
+    println("PASSED")
+    
+    println("Test 3: Nil slice spread")
+    testNilSpread()
+    println("PASSED")
+    
+    println("Test 4: Mixed args and spread")
+    testMixedArgsSpread()
+    println("PASSED")
+    
+    println("Test 5: Spread with leading params")
+    testSpreadWithPrefix()
+    println("PASSED")
+    
+    println("Test 6: String slice spread")
+    testStringSpread()
+    println("PASSED")
+    
+    println("Test 7: append with spread")
+    testAppendSpread()
+    println("PASSED")
+    
+    println("Test 8: Spread in closure")
+    testSpreadInClosure()
+    println("PASSED")
+    
+    println("Test 9: Variadic any with spread")
+    testAnySpread()
+    println("PASSED")
+    
+    println("Test 10: Double spread")
+    testDoubleSpread()
+    println("PASSED")
+    
+    println("Test 11: Single element spread")
+    testSingleElementSpread()
+    println("PASSED")
+    
+    println("Test 12: Large slice spread")
+    testLargeSpread()
+    println("PASSED")
+    
+    println("slice_spread_variadic: ALL PASSED")
+    return 0
+}

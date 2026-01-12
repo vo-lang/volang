@@ -334,7 +334,7 @@ impl Checker {
         if info.is_lhs {
             // If x is the lhs of a shift, its final type must be integer.
             if !typ::is_integer(t, self.objs()) {
-                self.invalid_op(Span::default(), "shifted operand must be integer");
+                self.invalid_op(info.expr.span, "shifted operand must be integer");
                 return;
             }
         }
@@ -462,7 +462,7 @@ impl Checker {
                 self.update_expr_type(expr_id, t, true);
             }
         } else {
-            self.error_code(TypeError::TypeMismatch, Span::default());
+            self.error_code(TypeError::TypeMismatch, x.pos());
             x.mode = OperandMode::Invalid;
         }
     }
@@ -508,7 +508,7 @@ impl Checker {
         };
 
         if let Some(m) = emsg {
-            self.error_code_msg(TypeError::InvalidOp, Span::default(), format!("cannot compare: {}", m));
+            self.error_code_msg(TypeError::InvalidOp, x.pos(), format!("cannot compare: {}", m));
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -555,7 +555,7 @@ impl Checker {
         // The lhs is of integer type or an untyped constant representable as an integer
         let lhs_ok = xt_integer || (xt_untyped && x_const.is_some() && x_const.as_ref().unwrap().is_int());
         if !lhs_ok {
-            self.invalid_op(Span::default(), "shifted operand must be integer");
+            self.invalid_op(x.pos(), "shifted operand must be integer");
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -572,7 +572,7 @@ impl Checker {
                 return;
             }
         } else {
-            self.error_code(TypeError::ShiftCountNotInteger, Span::default());
+            self.error_code(TypeError::ShiftCountNotInteger, y.pos());
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -582,7 +582,7 @@ impl Checker {
                 // rhs must be an integer value
                 let yval = yv.to_int();
                 if !yval.is_int() {
-                    self.invalid_op(Span::default(), "shift count must be integer");
+                    self.invalid_op(y.pos(), "shift count must be integer");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -590,7 +590,7 @@ impl Checker {
                 let shift_bound: u64 = 1023 - 1 + 52; // so we can express smallestFloat64
                 let (s, ok) = yval.int_as_u64();
                 if !ok || s > shift_bound {
-                    self.invalid_op(Span::default(), "invalid shift count");
+                    self.invalid_op(y.pos(), "invalid shift count");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -625,12 +625,12 @@ impl Checker {
         // Constant rhs must be >= 0
         if let OperandMode::Constant(v) = &y.mode {
             if v.sign() < 0 {
-                self.invalid_op(Span::default(), "shift count must not be negative");
+                self.invalid_op(y.pos(), "shift count must not be negative");
             }
         }
 
         if !typ::is_integer(x.typ.unwrap(), self.objs()) {
-            self.invalid_op(Span::default(), "shifted operand must be integer");
+            self.invalid_op(x.pos(), "shifted operand must be integer");
             x.mode = OperandMode::Invalid;
             return;
         }
@@ -688,7 +688,7 @@ impl Checker {
         if !typ::identical_o(x.typ, y.typ, self.objs()) {
             let invalid = Some(self.invalid_type());
             if x.typ != invalid && y.typ != invalid {
-                self.invalid_op(Span::default(), "mismatched types");
+                self.invalid_op(e.map(|e| e.span).unwrap_or_else(|| x.pos()), "mismatched types");
             }
             x.mode = OperandMode::Invalid;
             return;
@@ -704,7 +704,7 @@ impl Checker {
             if x.mode.constant_val().is_some() || typ::is_integer(x.typ.unwrap(), self.objs()) {
                 if let Some(v) = y.mode.constant_val() {
                     if v.sign() == 0 {
-                        self.invalid_op(Span::default(), "division by zero");
+                        self.invalid_op(y.pos(), "division by zero");
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -778,14 +778,14 @@ impl Checker {
 
         // The index must be of integer type
         if !typ::is_integer(x.typ.unwrap(), self.objs()) {
-            self.invalid_arg(Span::default(), "index must be integer");
+            self.invalid_arg(index.span, "index must be integer");
             return Err(());
         }
 
         // A constant index i must be in bounds
         if let OperandMode::Constant(v) = &x.mode {
             if v.sign() < 0 {
-                self.invalid_arg(Span::default(), "index must not be negative");
+                self.invalid_arg(index.span, "index must not be negative");
                 return Err(());
             }
             let (i, valid) = v.to_int().int_as_u64();
@@ -795,7 +795,7 @@ impl Checker {
                 max.map_or(false, |m| i >= m)  // array index: i < max
             };
             if !valid || out_of_bounds {
-                self.invalid_arg(Span::default(), "index out of bounds");
+                self.invalid_arg(index.span, "index out of bounds");
                 return Err(());
             }
             return Ok(Some(i));
@@ -827,7 +827,7 @@ impl Checker {
                         if let Ok(Some(idx)) = i {
                             Some(idx)
                         } else if i.is_ok() {
-                            self.error_code_msg(TypeError::InvalidOp, Span::default(), "index must be integer constant");
+                            self.error_code_msg(TypeError::InvalidOp, key_expr.span, "index must be integer constant");
                             None
                         } else {
                             None
@@ -842,7 +842,7 @@ impl Checker {
             } else if length.is_some() && index >= length.unwrap() {
                 self.error_code_msg(
                     TypeError::InvalidOp,
-                    Span::default(),
+                    elem.value.span,
                     format!("index {} is out of bounds (>= {})", index, length.unwrap()),
                 );
                 (None, &elem.value)
@@ -854,7 +854,7 @@ impl Checker {
                 if visited.contains(&i) {
                     self.error_code_msg(
                         TypeError::DuplicateCase,
-                        Span::default(),
+                        elem.value.span,
                         format!("duplicate index {} in array or slice literal", i),
                     );
                 }
@@ -1044,7 +1044,7 @@ impl Checker {
                 };
 
                 if !valid {
-                    self.invalid_op(Span::default(), "cannot index expression");
+                    self.invalid_op(e.span, "cannot index expression");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -1107,7 +1107,7 @@ impl Checker {
                     }
                     SliceInfo::Array { elem, len, addressable } => {
                         if !addressable {
-                            self.invalid_op(Span::default(), "cannot slice array (value not addressable)");
+                            self.invalid_op(sl.expr.span, "cannot slice array (value not addressable)");
                             x.mode = OperandMode::Invalid;
                             return;
                         }
@@ -1124,7 +1124,7 @@ impl Checker {
                 };
 
                 if !valid {
-                    self.invalid_op(Span::default(), "cannot slice expression");
+                    self.invalid_op(e.span, "cannot slice expression");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -1161,14 +1161,14 @@ impl Checker {
                 // Check that x is an interface type
                 let xtype = typ::underlying_type(x.typ.unwrap(), self.objs());
                 if self.otype(xtype).try_as_interface().is_none() {
-                    self.invalid_op(Span::default(), "type assertion requires interface type");
+                    self.invalid_op(ta.expr.span, "type assertion requires interface type");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
                 
                 // x.(type) expressions are handled in type switches
                 if ta.ty.is_none() {
-                    self.invalid_op(Span::default(), "use of .(type) outside type switch");
+                    self.invalid_op(e.span, "use of .(type) outside type switch");
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -1290,7 +1290,7 @@ impl Checker {
                         }
                     }
                     _ => {
-                        self.invalid_op(Span::default(), "invalid composite literal type");
+                        self.invalid_op(e.span, "invalid composite literal type");
                         x.mode = OperandMode::Invalid;
                         return;
                     }
@@ -1730,7 +1730,7 @@ impl Checker {
             _ => None,
         };
         if let Some(m) = msg {
-            self.error_code_msg(TypeError::InvalidOp, Span::default(), format!("expression {}", m));
+            self.error_code_msg(TypeError::InvalidOp, x.pos(), format!("expression {}", m));
             // Don't set x.mode to Invalid here - caller handles it
         }
     }
@@ -1743,7 +1743,7 @@ impl Checker {
                 if len != 1 {
                     self.error_code_msg(
                         TypeError::InvalidOp,
-                        Span::default(),
+                        x.pos(),
                         format!("{}-valued expression where single value is expected", len),
                     );
                     // Don't set x.mode to Invalid here
@@ -1779,7 +1779,7 @@ impl Checker {
         self.raw_expr(x, e, None);
         self.single_value(x);
         if x.mode == OperandMode::NoValue {
-            self.error_code_msg(TypeError::InvalidOp, Span::default(), "expression used as value or type");
+            self.error_code_msg(TypeError::InvalidOp, x.pos(), "expression used as value or type");
             x.mode = OperandMode::Invalid;
         }
     }

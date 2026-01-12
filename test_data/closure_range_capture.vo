@@ -1,0 +1,180 @@
+// Test: Closure capturing range variables
+// Coverage: range variable semantics, closure capture timing
+
+package main
+
+// Classic loop variable capture problem
+func testLoopCapture() {
+	funcs := make([]func() int, 3)
+	
+	for i := 0; i < 3; i += 1 {
+		// Capture i by creating a new variable
+		j := i
+		funcs[i] = func() int {
+			return j
+		}
+	}
+	
+	// Each closure should capture different value
+	assert(funcs[0]() == 0, "func[0]: ", funcs[0]())
+	assert(funcs[1]() == 1, "func[1]: ", funcs[1]())
+	assert(funcs[2]() == 2, "func[2]: ", funcs[2]())
+}
+
+// Range over slice capture
+func testRangeSliceCapture() {
+	nums := []int{10, 20, 30}
+	funcs := make([]func() int, 3)
+	
+	for i, v := range nums {
+		idx := i
+		val := v
+		funcs[i] = func() int {
+			return idx*100 + val
+		}
+	}
+	
+	assert(funcs[0]() == 10, "range[0]: ", funcs[0]())
+	assert(funcs[1]() == 120, "range[1]: ", funcs[1]())
+	assert(funcs[2]() == 230, "range[2]: ", funcs[2]())
+}
+
+// Range over map capture
+func testRangeMapCapture() {
+	m := map[string]int{"a": 1, "b": 2}
+	results := make([]int, 0)
+	funcs := make([]func() int, 0)
+	
+	for k, v := range m {
+		key := k
+		val := v
+		funcs = append(funcs, func() int {
+			if key == "a" {
+				return val * 10
+			}
+			return val * 100
+		})
+	}
+	
+	for _, f := range funcs {
+		results = append(results, f())
+	}
+	
+	// Map iteration order is not guaranteed, so check sum
+	sum := 0
+	for _, r := range results {
+		sum = sum + r
+	}
+	// Either 10+200=210 or 200+10=210
+	assert(sum == 210, "map capture sum: ", sum)
+}
+
+// Closure modifying captured variable
+func testCaptureModify() {
+	count := 0
+	
+	inc := func() {
+		count = count + 1
+	}
+	
+	get := func() int {
+		return count
+	}
+	
+	inc()
+	inc()
+	inc()
+	
+	assert(get() == 3, "modified capture: ", get())
+}
+
+// Nested closure capture
+func testNestedCapture() {
+	x := 10
+	
+	outer := func() func() int {
+		y := 20
+		return func() int {
+			return x + y
+		}
+	}
+	
+	inner := outer()
+	assert(inner() == 30, "nested capture: ", inner())
+}
+
+// Capture in goroutine (not testing concurrency, just capture)
+func testGoroutineCapture() {
+	ch := make(chan int, 3)
+	
+	for i := 0; i < 3; i += 1 {
+		j := i
+		go func() {
+			ch <- j
+		}()
+	}
+	
+	results := make([]int, 0)
+	for i := 0; i < 3; i += 1 {
+		results = append(results, <-ch)
+	}
+	
+	// Check all values received (order may vary)
+	sum := 0
+	for _, v := range results {
+		sum = sum + v
+	}
+	assert(sum == 3, "goroutine capture sum: ", sum) // 0+1+2=3
+}
+
+// Capture struct field
+type Counter struct {
+	val int
+}
+
+func testStructCapture() {
+	c := Counter{val: 5}
+	
+	inc := func() {
+		c.val = c.val + 1
+	}
+	
+	inc()
+	inc()
+	
+	assert(c.val == 7, "struct capture: ", c.val)
+}
+
+// Capture in defer
+func testDeferCapture() int {
+	x := 0
+	
+	defer func() {
+		// This captures x by reference
+		x = x + 100
+	}()
+	
+	x = 10
+	return x
+}
+
+func checkDeferCapture() {
+	// Note: defer modifies x but return value was already determined
+	// This tests that defer closure captures work
+	result := testDeferCapture()
+	// In Go, the return value is 10 (captured before defer modifies)
+	// But if using named return, it would be different
+	assert(result == 10, "defer capture return: ", result)
+}
+
+func main() {
+	testLoopCapture()
+	testRangeSliceCapture()
+	testRangeMapCapture()
+	testCaptureModify()
+	testNestedCapture()
+	testGoroutineCapture()
+	testStructCapture()
+	checkDeferCapture()
+	println("PASS: closure_range_capture")
+}

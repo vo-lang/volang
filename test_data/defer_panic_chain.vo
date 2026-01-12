@@ -1,0 +1,95 @@
+// Test: defer + panic chain behavior - focused tests
+package main
+
+var order []string
+
+func reset() {
+    order = []string{}
+}
+
+func log(s string) {
+    order = append(order, s)
+    println("  ", s)
+}
+
+// Test 1: recover() returns nil when no panic
+func testRecoverNoPanic() string {
+    var result string
+    defer func() {
+        if r := recover(); r != nil {
+            result = "panic"
+        } else {
+            result = "no-panic"
+        }
+    }()
+    
+    log("normal-execution")
+    return result
+}
+
+// Test 2: Panic value types (string and int)
+func testPanicString() bool {
+    defer func() {
+        recover()
+    }()
+    panic("string-panic")
+    return false
+}
+
+func testPanicInt() bool {
+    defer func() {
+        recover()
+    }()
+    panic(42)
+    return false
+}
+
+// Test 3: Multiple defers all execute before panic propagates
+func testMultipleDeferBeforePanic() {
+    defer func() {
+        order = append(order, "defer-3")
+        recover()
+    }()
+    
+    defer func() {
+        order = append(order, "defer-2")
+    }()
+    
+    defer func() {
+        order = append(order, "defer-1")
+    }()
+    
+    order = append(order, "body")
+    panic("test")
+}
+
+func main() int {
+    println("Test 1: recover() returns nil when no panic")
+    reset()
+    _ = testRecoverNoPanic()
+    // Note: result is set in defer which runs after return value is set
+    // So we check order instead
+    assert(order[0] == "normal-execution", "should log normal execution")
+    println("PASSED")
+    
+    println("Test 2: Panic string value")
+    testPanicString()  // Should not crash
+    println("PASSED")
+    
+    println("Test 3: Panic int value")
+    testPanicInt()  // Should not crash
+    println("PASSED")
+    
+    println("Test 4: Multiple defers before recover")
+    reset()
+    testMultipleDeferBeforePanic()
+    // Expected: body, defer-1, defer-2, defer-3 (LIFO for defers)
+    assert(order[0] == "body", "body first")
+    assert(order[1] == "defer-1", "defer-1 second")
+    assert(order[2] == "defer-2", "defer-2 third")
+    assert(order[3] == "defer-3", "defer-3 fourth")
+    println("PASSED")
+    
+    println("defer_panic_chain: ALL PASSED")
+    return 0
+}

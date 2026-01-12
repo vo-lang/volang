@@ -10,25 +10,59 @@ use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 use super::{compile_expr, compile_expr_to, compile_expr_to_type};
 
+/// Emit a single value as (value, value_kind) pair at the given slot.
+/// Returns the number of interface slots used (always 2).
+fn emit_value_kind_pair(
+    dst_slot: u16,
+    src_slot: u16,
+    src_type: vo_analysis::objects::TypeKey,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    let slots = info.type_slot_count(src_type);
+    func.emit_copy(dst_slot, src_slot, slots);
+    let vk = info.type_value_kind(src_type) as u8 as i32;
+    let (b, c) = encode_i32(vk);
+    func.emit_op(Opcode::LoadInt, dst_slot + 1, b, c);
+}
+
 /// Compile arguments as (value, value_kind) pairs for print/println/assert.
-/// Returns args_start register.
+/// Returns (args_start, actual_arg_count) - count may differ from args.len() due to tuple expansion.
 fn compile_args_with_value_kind(
     args: &[vo_syntax::ast::Expr],
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<u16, CodegenError> {
-    // Print args are always boxed to interface (2 slots each)
-    let args_start = func.alloc_temp_typed(&vec![SlotType::Interface0, SlotType::Interface1].repeat(args.len()));
-    for (i, arg) in args.iter().enumerate() {
-        let slot = args_start + (i * 2) as u16;
-        compile_expr_to(arg, slot, ctx, func, info)?;
+) -> Result<(u16, usize), CodegenError> {
+    // Count actual args (expand tuples)
+    let total_args: usize = args.iter()
+        .map(|arg| {
+            let t = info.expr_type(arg.id);
+            if info.is_tuple(t) { info.tuple_len(t) } else { 1 }
+        })
+        .sum();
+    
+    // Print args are (value, value_kind) pairs = 2 slots each
+    let args_start = func.alloc_temp_typed(&vec![SlotType::Interface0, SlotType::Interface1].repeat(total_args));
+    let mut slot_offset = 0u16;
+    
+    for arg in args.iter() {
         let arg_type = info.expr_type(arg.id);
-        let vk = info.type_value_kind(arg_type) as u8 as i32;
-        let (b, c) = encode_i32(vk);
-        func.emit_op(Opcode::LoadInt, slot + 1, b, c);
+        
+        if info.is_tuple(arg_type) {
+            let tuple = super::CompiledTuple::compile(arg, ctx, func, info)?;
+            tuple.for_each_element(info, |elem_slot, elem_type| {
+                emit_value_kind_pair(args_start + slot_offset, elem_slot, elem_type, func, info);
+                slot_offset += 2;
+            });
+        } else {
+            let tmp = func.alloc_temp_typed(&info.type_slot_types(arg_type));
+            compile_expr_to(arg, tmp, ctx, func, info)?;
+            emit_value_kind_pair(args_start + slot_offset, tmp, arg_type, func, info);
+            slot_offset += 2;
+        }
     }
-    Ok(args_start)
+    Ok((args_start, total_args))
 }
 
 pub fn is_builtin(name: &str) -> bool {
@@ -87,8 +121,8 @@ pub fn compile_builtin_call(
         "print" | "println" => {
             let extern_name = if name == "println" { "vo_println" } else { "vo_print" };
             let extern_id = ctx.get_or_register_extern(extern_name);
-            let args_start = compile_args_with_value_kind(&call.args, ctx, func, info)?;
-            func.emit_with_flags(Opcode::CallExtern, (call.args.len() * 2) as u8, dst, extern_id as u16, args_start);
+            let (args_start, actual_count) = compile_args_with_value_kind(&call.args, ctx, func, info)?;
+            func.emit_with_flags(Opcode::CallExtern, (actual_count * 2) as u8, dst, extern_id as u16, args_start);
         }
         "panic" => {
             // panic(x interface{}) - argument must be converted to interface{}
@@ -303,13 +337,13 @@ pub fn compile_builtin_call(
                 return Err(CodegenError::Internal("assert requires at least 1 argument".to_string()));
             }
             let extern_id = ctx.get_or_register_extern("vo_assert");
-            let args_start = compile_args_with_value_kind(&call.args, ctx, func, info)?;
+            let (args_start, actual_count) = compile_args_with_value_kind(&call.args, ctx, func, info)?;
             
             // Record debug info for assert (may cause panic)
             let pc = func.current_pc() as u32;
             ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
             
-            func.emit_with_flags(Opcode::CallExtern, (call.args.len() * 2) as u8, dst, extern_id as u16, args_start);
+            func.emit_with_flags(Opcode::CallExtern, (actual_count * 2) as u8, dst, extern_id as u16, args_start);
         }
         _ => {
             return Err(CodegenError::UnsupportedExpr(format!("builtin {}", name)));
