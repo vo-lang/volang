@@ -1,0 +1,51 @@
+// Test: nil map read/write behavior
+// Coverage: nil map semantics (read returns zero, write panics)
+package main
+
+func main() {
+    // Test 1: nil map read returns zero value
+    var m map[string]int
+    val := m["nonexistent"]
+    assert(val == 0, "nil map read should return zero value")
+    
+    // Test 2: nil map read with ok returns false
+    val2, ok := m["key"]
+    assert(val2 == 0 && !ok, "nil map read with ok should return 0, false")
+    
+    // Test 3: nil map len is 0
+    assert(len(m) == 0, "nil map len should be 0")
+    
+    // Test 4: nil map write should panic
+    recovered := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered = true
+            }
+        }()
+        m["key"] = 42 // should panic
+    }()
+    assert(recovered, "nil map write should panic")
+    
+    // Test 5: nil map delete is no-op (Go semantics)
+    // This should NOT panic in Go
+    recovered2 := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered2 = true
+            }
+        }()
+        delete(m, "key")
+    }()
+    assert(!recovered2, "nil map delete should not panic")
+    
+    // Test 6: nil map range is empty
+    count := 0
+    for range m {
+        count++
+    }
+    assert(count == 0, "nil map range should be empty")
+    
+    println("nil_map_behavior: ok")
+}

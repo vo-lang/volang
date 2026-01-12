@@ -1,0 +1,55 @@
+// Test: directional channel runtime behavior
+// Coverage: chan<- T and <-chan T at runtime
+package main
+
+func sendOnly(ch chan<- int, val int) {
+    ch <- val
+}
+
+func recvOnly(ch <-chan int) int {
+    return <-ch
+}
+
+func producer(out chan<- int, count int) {
+    for i := 0; i < count; i++ {
+        out <- i * 10
+    }
+    close(out)
+}
+
+func consumer(in <-chan int) int {
+    total := 0
+    for v := range in {
+        total += v
+    }
+    return total
+}
+
+func main() {
+    // Test 1: basic directional channel usage
+    ch := make(chan int, 1)
+    sendOnly(ch, 42)
+    result := recvOnly(ch)
+    assert(result == 42, "sendOnly/recvOnly should work, got ", result)
+    
+    // Test 2: producer-consumer pattern
+    ch2 := make(chan int, 5)
+    go producer(ch2, 5)
+    total := consumer(ch2)
+    // 0 + 10 + 20 + 30 + 40 = 100
+    assert(total == 100, "producer-consumer total should be 100, got ", total)
+    
+    // Test 3: bidirectional assigned to directional
+    bidir := make(chan int, 2)
+    var sendCh chan<- int = bidir
+    var recvCh <-chan int = bidir
+    
+    sendCh <- 100
+    sendCh <- 200
+    
+    v1 := <-recvCh
+    v2 := <-recvCh
+    assert(v1 == 100 && v2 == 200, "directional channel assignment")
+    
+    println("directional_chan_runtime: ok")
+}

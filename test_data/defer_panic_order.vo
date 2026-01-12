@@ -1,0 +1,54 @@
+// Test: defer execution order with panic
+// Coverage: LIFO order of defers during panic unwinding
+package main
+
+var order []int
+
+func appendOrder(n int) {
+    order = append(order, n)
+}
+
+func panicFunc() {
+    defer appendOrder(1)
+    defer appendOrder(2)
+    defer appendOrder(3)
+    panic("test panic")
+}
+
+func main() {
+    order = []int{}
+    
+    // Test 1: defers execute in LIFO during panic
+    func() {
+        defer func() {
+            recover()
+        }()
+        panicFunc()
+    }()
+    
+    // Order should be 3, 2, 1 (LIFO)
+    assert(len(order) == 3, "should have 3 defers executed")
+    assert(order[0] == 3, "first should be 3 (last defer)")
+    assert(order[1] == 2, "second should be 2")
+    assert(order[2] == 1, "third should be 1 (first defer)")
+    
+    // Test 2: nested defers with panic
+    order = []int{}
+    func() {
+        defer func() {
+            recover()
+            appendOrder(100)
+        }()
+        defer appendOrder(10)
+        defer appendOrder(20)
+        panic("nested")
+    }()
+    
+    // Order: 20, 10, then recover runs and appends 100
+    assert(len(order) == 3, "should have 3 entries")
+    assert(order[0] == 20, "first 20")
+    assert(order[1] == 10, "then 10")
+    assert(order[2] == 100, "finally 100 from recover defer")
+    
+    println("defer_panic_order: ok")
+}

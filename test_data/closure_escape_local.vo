@@ -1,0 +1,78 @@
+// Test: closure captures local variable that escapes
+// Coverage: closure escape analysis edge cases
+package main
+
+func makeCounter() func() int {
+    count := 0
+    return func() int {
+        count++
+        return count
+    }
+}
+
+func makeAccumulator(initial int) func(int) int {
+    sum := initial
+    return func(delta int) int {
+        sum += delta
+        return sum
+    }
+}
+
+func makeMultiple() (func() int, func() int, func(int)) {
+    shared := 0
+    getter := func() int { return shared }
+    incrementer := func() int { shared++; return shared }
+    setter := func(v int) { shared = v }
+    return getter, incrementer, setter
+}
+
+func captureLargeStruct() func() int {
+    type Big struct {
+        a, b, c, d, e, f, g, h int
+    }
+    big := Big{1, 2, 3, 4, 5, 6, 7, 8}
+    return func() int {
+        return big.a + big.h
+    }
+}
+
+func main() {
+    // Test 1: basic counter
+    c1 := makeCounter()
+    c2 := makeCounter()
+    assert(c1() == 1, "c1 first call")
+    assert(c1() == 2, "c1 second call")
+    assert(c2() == 1, "c2 should be independent")
+    assert(c1() == 3, "c1 third call")
+    
+    // Test 2: accumulator with initial value
+    acc := makeAccumulator(100)
+    assert(acc(5) == 105, "100 + 5")
+    assert(acc(10) == 115, "105 + 10")
+    assert(acc(-15) == 100, "115 - 15")
+    
+    // Test 3: multiple closures sharing same variable
+    get, inc, set := makeMultiple()
+    assert(get() == 0, "initial value")
+    assert(inc() == 1, "after inc")
+    assert(inc() == 2, "after inc again")
+    set(100)
+    assert(get() == 100, "after set")
+    assert(inc() == 101, "inc after set")
+    
+    // Test 4: capturing large struct
+    bigFn := captureLargeStruct()
+    assert(bigFn() == 9, "1 + 8 = 9")
+    
+    // Test 5: closure in loop (each iteration gets fresh capture)
+    funcs := make([]func() int, 3)
+    for i := 0; i < 3; i++ {
+        val := i * 10
+        funcs[i] = func() int { return val }
+    }
+    assert(funcs[0]() == 0, "funcs[0] should be 0")
+    assert(funcs[1]() == 10, "funcs[1] should be 10")
+    assert(funcs[2]() == 20, "funcs[2] should be 20")
+    
+    println("closure_escape_local: ok")
+}

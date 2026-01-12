@@ -1,0 +1,45 @@
+// Test: append to nil slice
+// Coverage: nil slice append semantics
+package main
+
+func main() {
+    // Test 1: append to nil slice creates new slice
+    var s []int
+    assert(s == nil, "initial slice should be nil")
+    assert(len(s) == 0, "nil slice len should be 0")
+    assert(cap(s) == 0, "nil slice cap should be 0")
+    
+    s = append(s, 1)
+    assert(s != nil, "after append, slice should not be nil")
+    assert(len(s) == 1, "len should be 1")
+    assert(s[0] == 1, "first element should be 1")
+    
+    // Test 2: multiple appends to nil
+    var s2 []string
+    s2 = append(s2, "a", "b", "c")
+    assert(len(s2) == 3, "len should be 3")
+    assert(s2[0] == "a" && s2[1] == "b" && s2[2] == "c", "elements should match")
+    
+    // Test 3: append nil slice to nil slice
+    var s3 []int
+    var s4 []int
+    s3 = append(s3, s4...)
+    assert(len(s3) == 0, "append nil to nil should give empty slice")
+    
+    // Test 4: append non-nil to nil
+    s5 := []int{10, 20, 30}
+    var s6 []int
+    s6 = append(s6, s5...)
+    assert(len(s6) == 3, "append to nil should work")
+    assert(s6[0] == 10 && s6[1] == 20 && s6[2] == 30, "elements should match")
+    
+    // Test 5: nil slice can be ranged (empty)
+    var s7 []int
+    count := 0
+    for range s7 {
+        count++
+    }
+    assert(count == 0, "range over nil slice should be empty")
+    
+    println("slice_nil_append: ok")
+}

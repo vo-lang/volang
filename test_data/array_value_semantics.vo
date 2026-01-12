@@ -1,0 +1,59 @@
+// Test: array value semantics (copy on assignment)
+// Coverage: arrays are value types, assignment copies
+package main
+
+func modifyArray(arr [3]int) {
+    arr[0] = 999 // modifies copy, not original
+}
+
+func modifySlice(s []int) {
+    s[0] = 999 // modifies original (reference semantics)
+}
+
+func returnArray() [3]int {
+    return [3]int{10, 20, 30}
+}
+
+func main() {
+    // Test 1: array assignment copies
+    a := [3]int{1, 2, 3}
+    b := a
+    b[0] = 100
+    assert(a[0] == 1, "a should be unchanged after modifying b")
+    assert(b[0] == 100, "b should be 100")
+    
+    // Test 2: function receives copy
+    c := [3]int{5, 6, 7}
+    modifyArray(c)
+    assert(c[0] == 5, "c should be unchanged after function call")
+    
+    // Test 3: slice has reference semantics (contrast)
+    s := []int{5, 6, 7}
+    modifySlice(s)
+    assert(s[0] == 999, "slice should be modified")
+    
+    // Test 4: array in struct is also copied
+    type Container struct {
+        arr [3]int
+    }
+    c1 := Container{arr: [3]int{1, 2, 3}}
+    c2 := c1
+    c2.arr[0] = 100
+    assert(c1.arr[0] == 1, "c1.arr should be unchanged")
+    assert(c2.arr[0] == 100, "c2.arr should be 100")
+    
+    // Test 5: return value is copy
+    arr := returnArray()
+    arr[0] = 999
+    arr2 := returnArray()
+    assert(arr2[0] == 10, "return value should be fresh copy")
+    
+    // Test 6: array comparison
+    x := [2]int{1, 2}
+    y := [2]int{1, 2}
+    z := [2]int{1, 3}
+    assert(x == y, "equal arrays")
+    assert(x != z, "unequal arrays")
+    
+    println("array_value_semantics: ok")
+}

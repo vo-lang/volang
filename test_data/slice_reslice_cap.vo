@@ -1,0 +1,45 @@
+// Test: slice reslicing and capacity behavior
+// Coverage: slice capacity after various reslice operations
+package main
+
+func main() {
+    // Test 1: basic reslice preserves capacity
+    arr := [5]int{1, 2, 3, 4, 5}
+    s := arr[1:3] // [2, 3], len=2, cap=4
+    assert(len(s) == 2, "len should be 2")
+    assert(cap(s) == 4, "cap should be 4")
+    assert(s[0] == 2 && s[1] == 3, "values")
+    
+    // Test 2: can extend within capacity
+    s2 := s[:4] // [2, 3, 4, 5]
+    assert(len(s2) == 4, "extended len")
+    assert(s2[2] == 4 && s2[3] == 5, "extended values")
+    
+    // Test 3: three-index slice limits capacity
+    s3 := arr[1:3:3] // len=2, cap=2
+    assert(len(s3) == 2, "three-index len")
+    assert(cap(s3) == 2, "three-index cap limited")
+    
+    // Test 4: append when at capacity causes realloc
+    s4 := arr[0:5:5] // len=5, cap=5
+    original := s4
+    s4 = append(s4, 6) // should reallocate
+    assert(len(s4) == 6, "appended len")
+    assert(cap(s4) >= 6, "appended cap")
+    
+    // Modifying s4 should not affect original (reallocated)
+    s4[0] = 999
+    assert(original[0] == 1, "original unchanged after realloc")
+    
+    // Test 5: nil slice has len=0, cap=0
+    var nilSlice []int
+    assert(len(nilSlice) == 0, "nil len")
+    assert(cap(nilSlice) == 0, "nil cap")
+    
+    // Test 6: make with length and capacity
+    m := make([]int, 3, 10)
+    assert(len(m) == 3, "make len")
+    assert(cap(m) == 10, "make cap")
+    
+    println("slice_reslice_cap: ok")
+}

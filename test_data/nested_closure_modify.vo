@@ -1,0 +1,64 @@
+// Test: nested closures modifying shared variables
+// Coverage: multiple closure layers accessing same variable
+package main
+
+func main() {
+    // Test 1: three-level nested closure
+    x := 0
+    level1 := func() func() func() int {
+        return func() func() int {
+            return func() int {
+                x++
+                return x
+            }
+        }
+    }
+    
+    f := level1()()
+    assert(f() == 1, "first call")
+    assert(f() == 2, "second call")
+    assert(x == 2, "x should be 2")
+    
+    // Test 2: sibling closures sharing variable
+    y := 100
+    inc := func() { y++ }
+    dec := func() { y-- }
+    get := func() int { return y }
+    
+    inc()
+    inc()
+    assert(get() == 102, "after two inc")
+    dec()
+    assert(get() == 101, "after dec")
+    
+    // Test 3: closure captures pointer-like behavior for struct
+    type Counter struct {
+        n int
+    }
+    c := Counter{n: 0}
+    incCounter := func() { c.n++ }
+    getCounter := func() int { return c.n }
+    
+    incCounter()
+    incCounter()
+    incCounter()
+    assert(getCounter() == 3, "counter should be 3")
+    
+    // Test 4: closure in closure factory
+    makeAdder := func(base int) func(int) int {
+        return func(delta int) int {
+            base += delta
+            return base
+        }
+    }
+    
+    add5 := makeAdder(5)
+    assert(add5(10) == 15, "5 + 10")
+    assert(add5(5) == 20, "15 + 5")
+    
+    add100 := makeAdder(100)
+    assert(add100(1) == 101, "100 + 1")
+    assert(add5(0) == 20, "add5 unchanged")
+    
+    println("nested_closure_modify: ok")
+}

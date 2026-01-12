@@ -324,3 +324,37 @@ tests:
   - file: large_shift_amount.vo
   - file: integer_overflow_wrap.vo
   - file: index_bounds_panic.vo
+
+# Coverage tests from analysis (2026-01-12 batch 4) - New coverage tests
+  - file: nested_type_switch.vo
+  - file: directional_chan_runtime.vo
+  - file: nil_map_behavior.vo
+
+# Skipped due to Vo implementation bugs (2026-01-12)
+  - file: nil_func_call_panic.vo
+    skip: [vm, jit]
+    reason: "nil function call causes Rust panic instead of Vo panic (not recoverable)"
+  - file: defer_panic_order.vo
+    skip: [vm, jit]
+    reason: "defer funcCall() during panic unwinding does not execute correctly"
+  - file: array_value_semantics.vo
+    skip: [vm, jit]
+    reason: "array assignment does not copy (value semantics broken)"
+  - file: interface_embed_diamond.vo
+    skip: [vm, jit]
+    reason: "type assertion to diamond-inherited interface fails"
+  - file: slice_reslice_cap.vo
+    skip: [vm, jit]
+    reason: "slice reslice/capacity operations cause panic"
+
+# Passing tests (2026-01-12)
+  - file: interface_method_nil_recv.vo
+  - file: slice_nil_append.vo
+  - file: closure_escape_local.vo
+  - file: struct_embed_method_shadow.vo
+  - file: for_range_map_delete.vo
+  - file: string_index_rune.vo
+  - file: const_iota_complex.vo
+  - file: nested_closure_modify.vo
+  - file: map_concurrent_safe.vo
+

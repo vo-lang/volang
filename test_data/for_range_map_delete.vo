@@ -1,0 +1,59 @@
+// Test: deleting from map during range iteration
+// Coverage: map modification during iteration (Go allows delete during range)
+package main
+
+func main() {
+    // Test 1: delete current key during range (Go allows this)
+    m := map[string]int{
+        "a": 1,
+        "b": 2,
+        "c": 3,
+        "d": 4,
+    }
+    
+    keysVisited := 0
+    for k := range m {
+        keysVisited++
+        delete(m, k) // delete current key
+    }
+    // After range, map should be empty
+    assert(len(m) == 0, "map should be empty after deleting all")
+    // We should have visited at least some keys
+    assert(keysVisited > 0, "should have visited some keys")
+    
+    // Test 2: conditional delete
+    m2 := map[int]int{
+        1: 10,
+        2: 20,
+        3: 30,
+        4: 40,
+        5: 50,
+    }
+    for k, v := range m2 {
+        if v > 25 {
+            delete(m2, k)
+        }
+    }
+    // Only keys with values <= 25 should remain
+    assert(m2[1] == 10, "1 should remain")
+    assert(m2[2] == 20, "2 should remain")
+    _, ok3 := m2[3]
+    _, ok4 := m2[4]
+    _, ok5 := m2[5]
+    assert(!ok3 && !ok4 && !ok5, "3, 4, 5 should be deleted")
+    
+    // Test 3: add during range (new keys may or may not be visited)
+    m3 := map[int]bool{1: true}
+    visited := make([]int, 0)
+    for k := range m3 {
+        visited = append(visited, k)
+        if k < 5 {
+            m3[k+1] = true // add new key
+        }
+    }
+    // The iteration may or may not see newly added keys
+    // Just verify it doesn't crash and we see at least the initial key
+    assert(len(visited) >= 1, "should visit at least initial key")
+    
+    println("for_range_map_delete: ok")
+}

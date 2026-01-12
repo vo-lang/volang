@@ -1,0 +1,35 @@
+// Test: calling nil function should panic
+// Coverage: nil function variable behavior
+package main
+
+func main() {
+    var f func()
+    
+    recovered := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered = true
+            }
+        }()
+        f() // should panic: nil function call
+    }()
+    
+    assert(recovered, "calling nil func should panic")
+    
+    // Test with func returning value
+    var g func() int
+    recovered2 := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered2 = true
+            }
+        }()
+        _ = g()
+    }()
+    
+    assert(recovered2, "calling nil func returning value should panic")
+    
+    println("nil_func_call_panic: ok")
+}

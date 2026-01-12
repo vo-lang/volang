@@ -1,0 +1,61 @@
+// Test: interface method call with nil concrete value
+// Coverage: calling method on interface holding typed nil
+package main
+
+type Counter struct {
+    count int
+}
+
+func (c *Counter) Inc() {
+    c.count++ // should panic if c is nil
+}
+
+func (c *Counter) Get() int {
+    return c.count // should panic if c is nil
+}
+
+type Incrementer interface {
+    Inc()
+}
+
+type Getter interface {
+    Get() int
+}
+
+func main() {
+    // Test 1: interface holding typed nil pointer
+    var ptr *Counter = nil
+    var iface Incrementer = ptr // typed nil, not nil interface
+    
+    // The interface itself is NOT nil
+    assert(iface != nil, "interface holding typed nil should not be nil")
+    
+    // But calling method should panic
+    recovered := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered = true
+            }
+        }()
+        iface.Inc() // should panic: nil pointer dereference
+    }()
+    assert(recovered, "method call on nil receiver should panic")
+    
+    // Test 2: same with Getter interface
+    var g Getter = ptr
+    assert(g != nil, "Getter interface holding typed nil should not be nil")
+    
+    recovered2 := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recovered2 = true
+            }
+        }()
+        _ = g.Get()
+    }()
+    assert(recovered2, "Get() on nil receiver should panic")
+    
+    println("interface_method_nil_recv: ok")
+}

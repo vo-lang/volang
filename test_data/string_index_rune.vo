@@ -1,0 +1,50 @@
+// Test: string indexing vs range rune behavior
+// Coverage: string[i] returns byte, range returns rune
+package main
+
+func main() {
+    // Test 1: ASCII string - index returns byte
+    s := "hello"
+    assert(s[0] == 'h', "s[0] should be 'h'")
+    assert(s[0] == 104, "s[0] should be 104 (byte value)")
+    
+    // Test 2: len() returns byte count
+    assert(len(s) == 5, "len('hello') should be 5")
+    
+    // Test 3: UTF-8 string - index returns byte, not rune
+    utf8 := "世界"
+    // "世" is 3 bytes in UTF-8: E4 B8 96
+    // "界" is 3 bytes in UTF-8: E7 95 8C
+    assert(len(utf8) == 6, "len('世界') should be 6 bytes")
+    assert(utf8[0] == 0xE4, "first byte of '世'")
+    assert(utf8[1] == 0xB8, "second byte of '世'")
+    assert(utf8[2] == 0x96, "third byte of '世'")
+    
+    // Test 4: range over string yields (byte_index, rune)
+    runes := make([]rune, 0)
+    indices := make([]int, 0)
+    for i, r := range utf8 {
+        indices = append(indices, i)
+        runes = append(runes, r)
+    }
+    assert(len(runes) == 2, "should yield 2 runes")
+    assert(runes[0] == '世', "first rune")
+    assert(runes[1] == '界', "second rune")
+    assert(indices[0] == 0, "first index is 0")
+    assert(indices[1] == 3, "second index is 3 (after 3-byte rune)")
+    
+    // Test 5: mixed ASCII and UTF-8
+    mixed := "a世b"
+    assert(len(mixed) == 5, "1 + 3 + 1 = 5 bytes")
+    
+    mixedRunes := make([]rune, 0)
+    for _, r := range mixed {
+        mixedRunes = append(mixedRunes, r)
+    }
+    assert(len(mixedRunes) == 3, "3 runes")
+    assert(mixedRunes[0] == 'a', "first rune 'a'")
+    assert(mixedRunes[1] == '世', "second rune '世'")
+    assert(mixedRunes[2] == 'b', "third rune 'b'")
+    
+    println("string_index_rune: ok")
+}

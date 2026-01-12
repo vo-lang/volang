@@ -1,0 +1,47 @@
+// Test: map operations in goroutines (not concurrent access, just goroutine context)
+// Coverage: map used in goroutine context
+package main
+
+func main() {
+    // Test 1: map created in main, used in goroutine
+    m := make(map[string]int)
+    m["a"] = 1
+    
+    done := make(chan bool)
+    go func() {
+        m["b"] = 2
+        m["c"] = 3
+        done <- true
+    }()
+    <-done
+    
+    assert(m["a"] == 1, "a should be 1")
+    assert(m["b"] == 2, "b should be 2")
+    assert(m["c"] == 3, "c should be 3")
+    
+    // Test 2: map created in goroutine, returned via channel
+    ch := make(chan map[int]string)
+    go func() {
+        result := make(map[int]string)
+        result[1] = "one"
+        result[2] = "two"
+        ch <- result
+    }()
+    
+    received := <-ch
+    assert(received[1] == "one", "received 1")
+    assert(received[2] == "two", "received 2")
+    
+    // Test 3: multiple goroutines reading same map (safe if no writes)
+    readMap := map[string]int{"x": 100, "y": 200}
+    results := make(chan int, 2)
+    
+    go func() { results <- readMap["x"] }()
+    go func() { results <- readMap["y"] }()
+    
+    r1 := <-results
+    r2 := <-results
+    assert(r1+r2 == 300, "sum should be 300")
+    
+    println("map_concurrent_safe: ok")
+}

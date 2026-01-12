@@ -1,0 +1,66 @@
+// Test: embedded struct method shadowing
+// Coverage: method set with shadowing in embedding
+package main
+
+type Inner struct {
+    val int
+}
+
+func (i Inner) Get() int {
+    return i.val
+}
+
+func (i Inner) Name() string {
+    return "Inner"
+}
+
+type Outer struct {
+    Inner
+    name string
+}
+
+// Outer defines its own Name(), shadowing Inner.Name()
+func (o Outer) Name() string {
+    return o.name
+}
+
+type DeepOuter struct {
+    Outer
+}
+
+// DeepOuter defines its own Get(), shadowing Inner.Get()
+func (d DeepOuter) Get() int {
+    return d.Inner.val * 100
+}
+
+func main() {
+    // Test 1: basic embedding - promoted method
+    o := Outer{Inner: Inner{val: 42}, name: "MyOuter"}
+    assert(o.Get() == 42, "Get() should be promoted from Inner")
+    
+    // Test 2: shadowed method - Outer.Name shadows Inner.Name
+    assert(o.Name() == "MyOuter", "Name() should use Outer's method")
+    
+    // Test 3: can still access inner method explicitly
+    assert(o.Inner.Name() == "Inner", "Inner.Name() still accessible")
+    
+    // Test 4: deep embedding with shadowing
+    d := DeepOuter{Outer: Outer{Inner: Inner{val: 5}, name: "Deep"}}
+    assert(d.Get() == 500, "DeepOuter.Get() should shadow, return 500")
+    assert(d.Name() == "Deep", "Name() should come from Outer")
+    
+    // Test 5: access through interface
+    type Namer interface {
+        Name() string
+    }
+    var n Namer = o
+    assert(n.Name() == "MyOuter", "interface should use Outer.Name()")
+    
+    type Getter interface {
+        Get() int
+    }
+    var g Getter = d
+    assert(g.Get() == 500, "interface should use DeepOuter.Get()")
+    
+    println("struct_embed_method_shadow: ok")
+}

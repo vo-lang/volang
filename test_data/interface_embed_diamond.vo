@@ -1,0 +1,67 @@
+// Test: diamond interface embedding
+// Coverage: interface embedding with same method from multiple paths
+package main
+
+type A interface {
+    Foo() int
+}
+
+type B interface {
+    A
+    Bar() int
+}
+
+type C interface {
+    A
+    Baz() int
+}
+
+// D embeds both B and C, both of which embed A
+// The Foo() method should appear only once in D's method set
+type D interface {
+    B
+    C
+}
+
+type Impl struct {
+    val int
+}
+
+func (i Impl) Foo() int { return i.val }
+func (i Impl) Bar() int { return i.val * 2 }
+func (i Impl) Baz() int { return i.val * 3 }
+
+func main() {
+    impl := Impl{val: 10}
+    
+    // Test 1: Impl satisfies all interfaces
+    var a A = impl
+    var b B = impl
+    var c C = impl
+    var d D = impl
+    
+    assert(a.Foo() == 10, "A.Foo()")
+    assert(b.Foo() == 10, "B.Foo()")
+    assert(b.Bar() == 20, "B.Bar()")
+    assert(c.Foo() == 10, "C.Foo()")
+    assert(c.Baz() == 30, "C.Baz()")
+    assert(d.Foo() == 10, "D.Foo()")
+    assert(d.Bar() == 20, "D.Bar()")
+    assert(d.Baz() == 30, "D.Baz()")
+    
+    // Test 2: interface conversion
+    var d2 D = impl
+    var b2 B = d2 // D to B
+    var a2 A = b2 // B to A
+    assert(a2.Foo() == 10, "conversion chain")
+    
+    // Test 3: type assertion through diamond
+    var anyVal any = impl
+    if v, ok := anyVal.(D); ok {
+        assert(v.Foo() == 10 && v.Bar() == 20 && v.Baz() == 30, "type assertion to D")
+    } else {
+        assert(false, "should be assertable to D")
+    }
+    
+    println("interface_embed_diamond: ok")
+}
