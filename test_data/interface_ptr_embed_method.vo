@@ -1,0 +1,78 @@
+// Test: Interface implementation with pointer receiver and embedding
+package main
+
+type Reader interface {
+    Read() int
+}
+
+type Writer interface {
+    Write(int)
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type Buffer struct {
+    data int
+}
+
+// Value receiver
+func (b Buffer) Read() int {
+    return b.data
+}
+
+// Pointer receiver
+func (b *Buffer) Write(v int) {
+    b.data = v
+}
+
+func useReader(r Reader) int {
+    return r.Read()
+}
+
+func useWriter(w Writer, v int) {
+    w.Write(v)
+}
+
+func useReadWriter(rw ReadWriter, v int) int {
+    rw.Write(v)
+    return rw.Read()
+}
+
+func main() {
+    // Test 1: Value type implements Reader (value receiver)
+    var b1 Buffer
+    var r Reader = b1
+    assert(r.Read() == 0, "Reader should return 0")
+    
+    // Test 2: Pointer type implements both (value + pointer receiver)
+    b2 := Buffer{data: 10}
+    var rw ReadWriter = &b2
+    rw.Write(20)
+    assert(rw.Read() == 20, "ReadWriter should read 20")
+    assert(b2.data == 20, "original should be modified")
+    
+    // Test 3: Pass pointer to ReadWriter function
+    b3 := Buffer{data: 0}
+    result := useReadWriter(&b3, 42)
+    assert(result == 42, "useReadWriter should return 42")
+    assert(b3.data == 42, "b3.data should be 42")
+    
+    // Test 4: Value to Reader, pointer to Writer
+    b4 := Buffer{data: 5}
+    v := useReader(b4)
+    assert(v == 5, "useReader should return 5")
+    
+    useWriter(&b4, 100)
+    assert(b4.data == 100, "b4.data should be 100 after useWriter")
+    
+    // Test 5: Interface to interface assignment
+    b5 := Buffer{data: 77}
+    var rw2 ReadWriter = &b5
+    var r2 Reader = rw2  // ReadWriter -> Reader
+    assert(r2.Read() == 77, "Reader from ReadWriter should read 77")
+    
+    println("interface_ptr_embed_method: PASSED")
+}

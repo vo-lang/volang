@@ -1,0 +1,16 @@
+// Bug reproduction: if init variable shadowing corrupts outer variable
+package main
+
+func main() {
+    x := 999
+    println("before if, x =", x)
+    
+    if x := 1; x == 1 {
+        println("inside if, x =", x)
+    } else {
+        println("else branch, x =", x)
+    }
+    
+    println("after if, x =", x)
+    assert(x == 999, "BUG: outer x should be 999, but got corrupted by if init shadow")
+}

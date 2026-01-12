@@ -1,0 +1,70 @@
+// Test: String <-> []byte <-> []rune conversion edge cases
+package main
+
+func main() {
+    // Test 1: Empty string conversions
+    s1 := ""
+    b1 := []byte(s1)
+    r1 := []rune(s1)
+    assert(len(b1) == 0, "empty string to []byte should have len 0")
+    assert(len(r1) == 0, "empty string to []rune should have len 0")
+    assert(string(b1) == "", "empty []byte to string should be empty")
+    assert(string(r1) == "", "empty []rune to string should be empty")
+    
+    // Test 2: ASCII string
+    s2 := "hello"
+    b2 := []byte(s2)
+    r2 := []rune(s2)
+    assert(len(b2) == 5, "ASCII string len([]byte) should be 5")
+    assert(len(r2) == 5, "ASCII string len([]rune) should be 5")
+    assert(string(b2) == "hello", "[]byte back to string")
+    assert(string(r2) == "hello", "[]rune back to string")
+    
+    // Test 3: UTF-8 multi-byte characters
+    s3 := "世界"  // 2 Chinese characters, 6 bytes
+    b3 := []byte(s3)
+    r3 := []rune(s3)
+    assert(len(b3) == 6, "UTF-8 string len([]byte) should be 6, got ", len(b3))
+    assert(len(r3) == 2, "UTF-8 string len([]rune) should be 2, got ", len(r3))
+    assert(r3[0] == '世', "first rune should be '世'")
+    assert(r3[1] == '界', "second rune should be '界'")
+    assert(string(r3) == "世界", "[]rune back to string")
+    
+    // Test 4: Mixed ASCII and UTF-8
+    s4 := "a中b"
+    b4 := []byte(s4)
+    r4 := []rune(s4)
+    assert(len(b4) == 5, "mixed string len([]byte) should be 5")  // 1 + 3 + 1
+    assert(len(r4) == 3, "mixed string len([]rune) should be 3")
+    assert(r4[0] == 'a', "r4[0] should be 'a'")
+    assert(r4[1] == '中', "r4[1] should be '中'")
+    assert(r4[2] == 'b', "r4[2] should be 'b'")
+    
+    // Test 5: Single rune to string
+    r := '世'
+    s5 := string(r)
+    assert(s5 == "世", "single rune to string")
+    assert(len(s5) == 3, "single 3-byte rune string len should be 3")
+    
+    // Test 6: Single byte to string
+    b := byte(65)  // 'A'
+    s6 := string([]byte{b})
+    assert(s6 == "A", "single byte to string via slice")
+    
+    // Test 7: Modify []byte doesn't affect original string
+    s7 := "test"
+    b7 := []byte(s7)
+    b7[0] = 'T'
+    assert(s7 == "test", "original string should be unchanged")
+    assert(string(b7) == "Test", "modified []byte should be 'Test'")
+    
+    // Test 8: Emoji (4-byte UTF-8)
+    s8 := "😀"
+    b8 := []byte(s8)
+    r8 := []rune(s8)
+    assert(len(b8) == 4, "emoji len([]byte) should be 4, got ", len(b8))
+    assert(len(r8) == 1, "emoji len([]rune) should be 1, got ", len(r8))
+    assert(string(r8) == "😀", "emoji roundtrip")
+    
+    println("string_byte_rune_convert: PASSED")
+}

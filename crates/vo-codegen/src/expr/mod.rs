@@ -1075,7 +1075,17 @@ pub(crate) fn compile_expr_to_ptr(
         }
     }
     
-    // Case 4: Addressable on heap (variable, field at offset 0)
+    // Case 4: Captured variable in closure → get GcRef via ClosureGet
+    if let ExprKind::Ident(ident) = &expr.kind {
+        if let Some(capture) = func.lookup_capture(ident.symbol) {
+            // Captured variables are stored as GcRef in closure environment
+            // ClosureGet retrieves the GcRef which IS the pointer we need
+            func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
+            return Ok(());
+        }
+    }
+    
+    // Case 5: Addressable on heap (variable, field at offset 0)
     if let Some((gcref_slot, offset)) = get_addressable_gcref(expr, func, info) {
         if offset == 0 {
             func.emit_copy(dst, gcref_slot, 1);

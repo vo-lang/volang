@@ -374,8 +374,24 @@ tests:
   - file: immediate_func_literal.vo
   - file: type_alias_method_chain.vo
 
-# Bug reproductions (2026-01-12) - Vo implementation bugs
+# Bug reproductions (2026-01-12) - Previously bugs, now FIXED
   - file: bug_map_any_string_key.vo
+    # FIXED: map[any] with string key now works correctly
   - file: bug_switch_init_shadow.vo
+    # FIXED: switch init variable shadowing now works correctly
   - file: bug_for_init_shadow.vo
+    # FIXED: for init variable shadowing now works correctly
+
+# Coverage tests from analysis (2026-01-12 batch 8) - New tests
+  - file: bug_if_init_shadow.vo
+    # NOT a bug - if init shadow works correctly
+  - file: compound_assign_eval_order.vo
+  - file: string_byte_rune_convert.vo
+  - file: closure_capture_pointer.vo
+  - file: nested_label_break_continue.vo
+  - file: interface_ptr_embed_method.vo
+
+# Bug reproduction (2026-01-12) - FIXED: cannot take address of captured variable in closure
+  - file: bug_closure_ptr_compare.vo
+    # FIXED: added Case 4 in compile_expr_to_ptr to handle captured variables via ClosureGet
 

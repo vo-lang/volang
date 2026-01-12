@@ -1,0 +1,75 @@
+// Test: Closure capturing pointer variables
+package main
+
+func main() {
+    // Test 1: Closure captures pointer to struct
+    type Counter struct {
+        value int
+    }
+    c := Counter{value: 10}
+    p := &c
+    
+    increment := func() {
+        p.value += 1
+    }
+    
+    increment()
+    increment()
+    assert(c.value == 12, "c.value should be 12 after 2 increments, got ", c.value)
+    assert(p.value == 12, "p.value should be 12")
+    
+    // Test 2: Closure modifies through pointer, original reflects change
+    type Box struct {
+        data int
+    }
+    box := Box{data: 100}
+    boxPtr := &box
+    
+    modifier := func(newVal int) {
+        boxPtr.data = newVal
+    }
+    
+    modifier(200)
+    assert(box.data == 200, "box.data should be 200")
+    
+    // Test 3: Multiple closures share same pointer
+    type Shared struct {
+        x int
+        y int
+    }
+    shared := Shared{x: 1, y: 2}
+    sharedPtr := &shared
+    
+    setX := func(v int) { sharedPtr.x = v }
+    setY := func(v int) { sharedPtr.y = v }
+    getSum := func() int { return sharedPtr.x + sharedPtr.y }
+    
+    setX(10)
+    setY(20)
+    assert(getSum() == 30, "sum should be 30")
+    assert(shared.x == 10, "shared.x should be 10")
+    assert(shared.y == 20, "shared.y should be 20")
+    
+    // Test 4: Nested closure with pointer
+    type Wrapper struct {
+        inner int
+    }
+    w := Wrapper{inner: 5}
+    wPtr := &w
+    
+    outer := func() func() int {
+        return func() int {
+            wPtr.inner *= 2
+            return wPtr.inner
+        }
+    }
+    
+    doubler := outer()
+    r1 := doubler()
+    assert(r1 == 10, "first double should be 10")
+    r2 := doubler()
+    assert(r2 == 20, "second double should be 20")
+    assert(w.inner == 20, "w.inner should be 20")
+    
+    println("closure_capture_pointer: PASSED")
+}

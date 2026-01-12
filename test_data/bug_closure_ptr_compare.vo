@@ -1,0 +1,18 @@
+// Bug reproduction: Comparing pointer captured in closure with &variable fails
+package main
+
+func main() {
+    type Node struct {
+        val int
+    }
+    n1 := Node{val: 1}
+    current := &n1
+    
+    // BUG: This comparison causes "cannot get pointer to expression"
+    check := func() bool {
+        return current == &n1
+    }
+    
+    result := check()
+    assert(result == true, "current should equal &n1")
+}

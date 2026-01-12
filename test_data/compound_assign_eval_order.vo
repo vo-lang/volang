@@ -1,0 +1,45 @@
+// Test: Compound assignment evaluation order
+// The index expression should only be evaluated once
+package main
+
+var callCount int
+
+func getIndex() int {
+    callCount += 1
+    return 0
+}
+
+func main() {
+    // Test 1: Slice compound assignment - index should be evaluated once
+    callCount = 0
+    arr := []int{10, 20, 30}
+    arr[getIndex()] += 5
+    assert(callCount == 1, "getIndex should be called once for +=, got ", callCount)
+    assert(arr[0] == 15, "arr[0] should be 15")
+    
+    // Test 2: Multiple compound operations
+    callCount = 0
+    arr2 := []int{100}
+    arr2[getIndex()] *= 2
+    assert(callCount == 1, "getIndex should be called once for *=")
+    assert(arr2[0] == 200, "arr2[0] should be 200")
+    
+    // Test 3: Map compound assignment
+    callCount = 0
+    m := map[int]int{0: 50}
+    m[getIndex()] -= 10
+    assert(callCount == 1, "getIndex should be called once for map -=")
+    assert(m[0] == 40, "m[0] should be 40")
+    
+    // Test 4: Nested access compound assignment
+    type Wrapper struct {
+        values []int
+    }
+    callCount = 0
+    w := Wrapper{values: []int{5, 10, 15}}
+    w.values[getIndex()] += 100
+    assert(callCount == 1, "getIndex should be called once for nested +=")
+    assert(w.values[0] == 105, "w.values[0] should be 105")
+    
+    println("compound_assign_eval_order: PASSED")
+}

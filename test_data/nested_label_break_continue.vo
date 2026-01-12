@@ -1,0 +1,80 @@
+// Test: Nested loops with labeled break and continue
+package main
+
+func main() {
+    // Test 1: Labeled break from inner loop
+    sum := 0
+outer1:
+    for i := 0; i < 5; i++ {
+        for j := 0; j < 5; j++ {
+            if i == 2 && j == 3 {
+                break outer1
+            }
+            sum += 1
+        }
+    }
+    // 0*5 + 1*5 + 2*3 = 13 iterations before break
+    assert(sum == 13, "labeled break: sum should be 13, got ", sum)
+    
+    // Test 2: Labeled continue to outer loop
+    count := 0
+outer2:
+    for i := 0; i < 3; i++ {
+        for j := 0; j < 3; j++ {
+            if j == 1 {
+                continue outer2
+            }
+            count += 1
+        }
+    }
+    // Each outer iteration only counts j=0 before continue
+    assert(count == 3, "labeled continue: count should be 3, got ", count)
+    
+    // Test 3: Three-level nesting with middle label
+    result := 0
+    for i := 0; i < 2; i++ {
+middle:
+        for j := 0; j < 3; j++ {
+            for k := 0; k < 4; k++ {
+                if k == 2 {
+                    continue middle
+                }
+                result += 1
+            }
+        }
+    }
+    // 2 outer * 3 middle * 2 inner (k=0,1 before continue) = 12
+    assert(result == 12, "three-level: result should be 12, got ", result)
+    
+    // Test 4: Break in switch inside for
+    found := -1
+outer4:
+    for i := 0; i < 5; i++ {
+        switch i {
+        case 3:
+            found = i
+            break outer4
+        }
+    }
+    assert(found == 3, "break in switch: found should be 3, got ", found)
+    
+    // Test 5: Continue with label after inner for completes
+    total := 0
+outer5:
+    for i := 0; i < 3; i++ {
+        for j := 0; j < 2; j++ {
+            total += 1
+        }
+        if i == 1 {
+            continue outer5
+        }
+        total += 10  // skipped when i==1
+    }
+    // i=0: 2 + 10 = 12
+    // i=1: 2 (skip +10)
+    // i=2: 2 + 10 = 12
+    // total = 26
+    assert(total == 26, "continue after inner: total should be 26, got ", total)
+    
+    println("nested_label_break_continue: PASSED")
+}
