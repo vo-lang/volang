@@ -395,3 +395,14 @@ tests:
   - file: bug_closure_ptr_compare.vo
     # FIXED: added Case 4 in compile_expr_to_ptr to handle captured variables via ClosureGet
 
+# Coverage tests from analysis (2026-01-12 batch 9) - New tests
+  - file: select_nil_channel.vo
+  - file: closure_mutual_recursion.vo
+  - file: switch_expr_eval_order.vo
+  - file: multi_assign_map_lhs.vo
+  - file: func_literal_immediate_call.vo
+
+  - file: bug_type_switch_interface_case.vo
+
+  - file: bug_iife_crash.vo
+

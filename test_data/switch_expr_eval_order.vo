@@ -1,0 +1,122 @@
+// Test: switch expression and case evaluation order
+// Coverage: evaluation order of switch tag, case expressions, side effects
+package main
+
+var evalLog []string
+
+func logAndReturn(name string, val int) int {
+	evalLog = append(evalLog, name)
+	return val
+}
+
+func logAndReturnStr(name string, val string) string {
+	evalLog = append(evalLog, name)
+	return val
+}
+
+func main() {
+	// Test 1: switch tag evaluated once before cases
+	evalLog = make([]string, 0)
+	x := 2
+	switch logAndReturn("tag", x) {
+	case logAndReturn("case1", 1):
+		evalLog = append(evalLog, "body1")
+	case logAndReturn("case2", 2):
+		evalLog = append(evalLog, "body2")
+	case logAndReturn("case3", 3):
+		evalLog = append(evalLog, "body3")
+	}
+	// Go spec: tag evaluated first, then cases in order until match
+	assert(len(evalLog) >= 2, "should have at least 2 evals")
+	assert(evalLog[0] == "tag", "tag should be first, got ", evalLog[0])
+	// case1 evaluated, doesn't match, case2 evaluated, matches
+	assert(evalLog[1] == "case1", "case1 should be second")
+	assert(evalLog[2] == "case2", "case2 should be third")
+	assert(evalLog[3] == "body2", "body2 should execute")
+	// case3 should NOT be evaluated since case2 matched
+	for _, v := range evalLog {
+		assert(v != "case3", "case3 should not be evaluated after match")
+	}
+
+	// Test 2: switch with init statement evaluation order
+	evalLog = make([]string, 0)
+	switch y := logAndReturn("init", 5); logAndReturn("tag2", y) {
+	case logAndReturn("c1", 4):
+		evalLog = append(evalLog, "b1")
+	case logAndReturn("c2", 5):
+		evalLog = append(evalLog, "b2")
+	}
+	assert(evalLog[0] == "init", "init should be first")
+	assert(evalLog[1] == "tag2", "tag2 should be second")
+	assert(evalLog[2] == "c1", "c1 should be third")
+	assert(evalLog[3] == "c2", "c2 should be fourth")
+	assert(evalLog[4] == "b2", "b2 should execute")
+
+	// Test 3: default case doesn't evaluate after match
+	evalLog = make([]string, 0)
+	switch logAndReturn("t3", 1) {
+	case logAndReturn("c3_1", 1):
+		evalLog = append(evalLog, "matched")
+	case logAndReturn("c3_2", 2):
+		evalLog = append(evalLog, "not_matched")
+	default:
+		evalLog = append(evalLog, "default")
+	}
+	assert(evalLog[0] == "t3", "t3 first")
+	assert(evalLog[1] == "c3_1", "c3_1 second")
+	assert(evalLog[2] == "matched", "matched body")
+	assert(len(evalLog) == 3, "should only have 3 entries, got ", len(evalLog))
+
+	// Test 4: all cases evaluated before default
+	evalLog = make([]string, 0)
+	switch logAndReturn("t4", 99) {
+	case logAndReturn("c4_1", 1):
+		evalLog = append(evalLog, "b4_1")
+	case logAndReturn("c4_2", 2):
+		evalLog = append(evalLog, "b4_2")
+	default:
+		evalLog = append(evalLog, "default4")
+	}
+	assert(evalLog[0] == "t4", "t4 first")
+	assert(evalLog[1] == "c4_1", "c4_1")
+	assert(evalLog[2] == "c4_2", "c4_2")
+	assert(evalLog[3] == "default4", "default4 body")
+
+	// Test 5: tagless switch - cases evaluated as booleans
+	evalLog = make([]string, 0)
+	a := 5
+	switch {
+	case logAndReturn("cond1", a) < 3:
+		evalLog = append(evalLog, "less3")
+	case logAndReturn("cond2", a) < 10:
+		evalLog = append(evalLog, "less10")
+	case logAndReturn("cond3", a) < 20:
+		evalLog = append(evalLog, "less20")
+	}
+	assert(evalLog[0] == "cond1", "cond1 first")
+	assert(evalLog[1] == "cond2", "cond2 second")
+	assert(evalLog[2] == "less10", "less10 matches")
+	// cond3 should not be evaluated
+	for _, v := range evalLog {
+		assert(v != "cond3", "cond3 should not be evaluated")
+	}
+
+	// Test 6: multiple expressions in case
+	evalLog = make([]string, 0)
+	switch logAndReturn("t6", 5) {
+	case logAndReturn("m1", 1), logAndReturn("m2", 2), logAndReturn("m3", 3):
+		evalLog = append(evalLog, "123")
+	case logAndReturn("m4", 4), logAndReturn("m5", 5):
+		evalLog = append(evalLog, "45")
+	}
+	// All expressions in first case evaluated (no match), then second case until match
+	assert(evalLog[0] == "t6", "t6")
+	assert(evalLog[1] == "m1", "m1")
+	assert(evalLog[2] == "m2", "m2")
+	assert(evalLog[3] == "m3", "m3")
+	assert(evalLog[4] == "m4", "m4")
+	assert(evalLog[5] == "m5", "m5")
+	assert(evalLog[6] == "45", "45 body")
+
+	println("switch_expr_eval_order: PASSED")
+}

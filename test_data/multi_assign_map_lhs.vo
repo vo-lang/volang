@@ -1,0 +1,104 @@
+// Test: map index expression as LHS in multi-assignment
+// Coverage: a, m[k] = x, y and evaluation order
+package main
+
+var evalLog []string
+
+func logKey(name string, k string) string {
+	evalLog = append(evalLog, "key:"+name)
+	return k
+}
+
+func logVal(name string, v int) int {
+	evalLog = append(evalLog, "val:"+name)
+	return v
+}
+
+func main() {
+	// Test 1: Basic multi-assign with map LHS
+	m := make(map[string]int)
+	a := 0
+	a, m["x"] = 1, 2
+	assert(a == 1, "a should be 1")
+	assert(m["x"] == 2, "m[x] should be 2")
+
+	// Test 2: Multiple map assignments
+	m2 := make(map[string]int)
+	m2["a"], m2["b"] = 10, 20
+	assert(m2["a"] == 10, "m2[a] should be 10")
+	assert(m2["b"] == 20, "m2[b] should be 20")
+
+	// Test 3: Swap via multi-assign with map
+	m3 := make(map[string]int)
+	m3["x"] = 100
+	m3["y"] = 200
+	m3["x"], m3["y"] = m3["y"], m3["x"]
+	assert(m3["x"] == 200, "m3[x] should be 200 after swap, got ", m3["x"])
+	assert(m3["y"] == 100, "m3[y] should be 100 after swap, got ", m3["y"])
+
+	// Test 4: Evaluation order - RHS evaluated before LHS assignment
+	evalLog = make([]string, 0)
+	m4 := make(map[string]int)
+	m4[logKey("lhs1", "a")], m4[logKey("lhs2", "b")] = logVal("rhs1", 1), logVal("rhs2", 2)
+	// Go spec: all RHS evaluated first, then all LHS
+	assert(len(evalLog) == 4, "should have 4 evals, got ", len(evalLog))
+	// RHS first
+	assert(evalLog[0] == "val:rhs1", "rhs1 first, got ", evalLog[0])
+	assert(evalLog[1] == "val:rhs2", "rhs2 second, got ", evalLog[1])
+	// Then LHS keys
+	assert(evalLog[2] == "key:lhs1", "lhs1 third, got ", evalLog[2])
+	assert(evalLog[3] == "key:lhs2", "lhs2 fourth, got ", evalLog[3])
+
+	// Test 5: Map with computed key from RHS value
+	m5 := make(map[int]int)
+	idx := 0
+	idx, m5[idx] = 5, 10
+	// idx becomes 5, but m5[idx] uses OLD idx value (0)? 
+	// Actually: RHS evaluated first (5, 10), then LHS assigned
+	// So idx=5 first, then m5[5]=10 (uses new idx? no, key is evaluated during LHS assignment)
+	// Go spec: "index expressions... are evaluated in the usual order"
+	// The key is idx, and when we assign m5[idx]=10, idx has already been set to 5
+	assert(idx == 5, "idx should be 5")
+	// This is tricky: the map key evaluation happens after RHS
+	// But in Go, the LHS index is evaluated after all RHS
+	_, ok := m5[5]
+	assert(ok == true, "m5[5] should exist")
+	assert(m5[5] == 10, "m5[5] should be 10")
+
+	// Test 6: Mix of var and map in multi-assign
+	m6 := make(map[string]int)
+	var x, y, z int
+	x, m6["a"], y, m6["b"], z = 1, 2, 3, 4, 5
+	assert(x == 1, "x")
+	assert(m6["a"] == 2, "m6[a]")
+	assert(y == 3, "y")
+	assert(m6["b"] == 4, "m6[b]")
+	assert(z == 5, "z")
+
+	// Test 7: Map LHS with function call for key
+	m7 := make(map[string]int)
+	getKey := func() string {
+		evalLog = append(evalLog, "getKey")
+		return "computed"
+	}
+	evalLog = make([]string, 0)
+	m7[getKey()] = logVal("v7", 777)
+	// Go spec: "usual order" is left-to-right, so key is evaluated before value
+	assert(evalLog[0] == "getKey", "key evaluated first (left-to-right), got ", evalLog[0])
+	assert(evalLog[1] == "val:v7", "value evaluated second, got ", evalLog[1])
+	assert(m7["computed"] == 777, "m7[computed]")
+
+	// Test 8: Nested map assignment
+	m8 := make(map[string]map[string]int)
+	m8["outer"] = make(map[string]int)
+	m8["outer"]["inner"] = 999
+	assert(m8["outer"]["inner"] == 999, "nested map")
+
+	// Test 9: Assign to map and read from same map
+	m9 := make(map[string]int)
+	m9["src"] = 50
+	m9["dst"], _ = m9["src"], 0
+	assert(m9["dst"] == 50, "m9[dst] should be 50")
+
+	println("multi_assign_map_lhs: PASSED")
+}

@@ -1,0 +1,29 @@
+// BUG: type switch with interface type as case
+// Go supports this but Vo does not
+// Error: "invalid operation: type assertion requires interface type"
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type MyString struct {
+	val string
+}
+
+func (m MyString) String() string {
+	return m.val
+}
+
+func main() {
+	var a any = MyString{val: "hello"}
+	result := ""
+	switch v := a.(type) {
+	case Stringer:  // interface type as case - Go supports this
+		result = v.String()
+	case int:
+		result = "int"
+	}
+	assert(result == "hello", "should match Stringer interface")
+	println("bug_type_switch_interface_case: PASSED")
+}

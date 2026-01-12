@@ -1,0 +1,56 @@
+// BUG: IIFE in complex scenarios causes "misaligned pointer dereference"
+// Simple IIFE works, but some complex patterns crash the VM
+package main
+
+func main() {
+	// These work:
+	// - Basic IIFE
+	// - IIFE with params
+	// - IIFE capturing variable
+	// - Nested IIFE
+	
+	// Test: IIFE with closure modifying captured var (triggers crash)
+	val := 10
+	func() {
+		val = val + 5
+		func() {
+			val = val * 2
+		}()
+	}()
+	assert(val == 30, "Nested IIFE closure should result in 30, got ", val)
+
+	// Test: IIFE as map value
+	m := map[string]int{
+		"computed": func() int { return 7 * 8 }(),
+	}
+	assert(m["computed"] == 56, "IIFE as map value")
+
+	// Test: Chain of IIFE calls
+	chain := func() func() int {
+		return func() int {
+			return 999
+		}
+	}()()
+	assert(chain == 999, "Chain of IIFE")
+
+	// Test: IIFE with variadic
+	varSum := func(nums ...int) int {
+		s := 0
+		for _, n := range nums {
+			s = s + n
+		}
+		return s
+	}(1, 2, 3, 4, 5)
+	assert(varSum == 15, "IIFE variadic sum")
+
+	// Test: IIFE in slice literal
+	computed := []int{
+		func() int { return 1 }(),
+		func() int { return 2 }(),
+		func() int { return 3 }(),
+	}
+	assert(len(computed) == 3, "computed slice len")
+	assert(computed[0]+computed[1]+computed[2] == 6, "computed slice sum")
+
+	println("bug_iife_crash: PASSED")
+}

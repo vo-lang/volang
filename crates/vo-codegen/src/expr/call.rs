@@ -181,7 +181,7 @@ pub fn compile_call(
 }
 
 /// Compile closure call when closure is already in a register.
-/// Used for func field calls like h.logic(args).
+/// Used for func field calls like h.logic(args) and IIFE calls.
 pub fn compile_closure_call_from_reg(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
@@ -192,10 +192,17 @@ pub fn compile_closure_call_from_reg(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let ret_slots = info.type_slot_count(info.expr_type(expr.id)) as u16;
-    let total_arg_slots: u16 = call.args.iter().map(|a| info.expr_slots(a.id)).sum();
+    
+    // Get function type from the closure expression to handle variadic properly
+    let func_type = info.expr_type(call.func.id);
+    let param_types = info.func_param_types(func_type);
+    let is_variadic = info.is_variadic(func_type);
+    
+    // Calculate arg slots with variadic packing
+    let total_arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
     
     let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots).max(1) as usize]);
-    compile_args_with_types(&call.args, &[], args_start, ctx, func, info)?;
+    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
     
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
     func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);

@@ -1,0 +1,90 @@
+// Test: nil channel behavior in select
+// Coverage: nil channels should never be selected (block forever)
+// Go spec: A nil channel is never ready for communication
+package main
+
+func main() {
+	// Test 1: nil recv channel with default
+	var nilCh chan int
+	selected := ""
+	select {
+	case <-nilCh:
+		selected = "nil"
+	default:
+		selected = "default"
+	}
+	assert(selected == "default", "nil recv channel should not be selected, got ", selected)
+
+	// Test 2: nil send channel with default
+	var nilSendCh chan int
+	selected2 := ""
+	select {
+	case nilSendCh <- 1:
+		selected2 = "nil"
+	default:
+		selected2 = "default"
+	}
+	assert(selected2 == "default", "nil send channel should not be selected")
+
+	// Test 3: nil channel among non-nil channels
+	ch1 := make(chan int, 1)
+	var ch2 chan int // nil
+	ch1 <- 42
+	
+	val := 0
+	selected3 := ""
+	select {
+	case val = <-ch1:
+		selected3 = "ch1"
+	case <-ch2:
+		selected3 = "ch2"
+	}
+	assert(selected3 == "ch1", "should select ch1, not nil ch2")
+	assert(val == 42, "should receive 42")
+
+	// Test 4: all nil channels with default
+	var n1 chan int
+	var n2 chan string
+	selected4 := ""
+	select {
+	case <-n1:
+		selected4 = "n1"
+	case <-n2:
+		selected4 = "n2"
+	default:
+		selected4 = "default"
+	}
+	assert(selected4 == "default", "all nil channels should go to default")
+
+	// Test 5: nil channel for send with ready recv channel
+	sendCh := make(chan int, 1)
+	var nilOut chan int
+	sendCh <- 100
+	
+	result := 0
+	selected5 := ""
+	select {
+	case nilOut <- 1:
+		selected5 = "nilOut"
+	case result = <-sendCh:
+		selected5 = "sendCh"
+	}
+	assert(selected5 == "sendCh", "should select ready channel over nil")
+	assert(result == 100, "should receive 100")
+
+	// Test 6: assign to nil channel variable, then use
+	var ch3 chan int
+	ch3 = make(chan int, 1)
+	ch3 <- 55
+	selected6 := ""
+	select {
+	case v := <-ch3:
+		assert(v == 55, "should receive 55")
+		selected6 = "ch3"
+	default:
+		selected6 = "default"
+	}
+	assert(selected6 == "ch3", "non-nil channel should be selectable")
+
+	println("select_nil_channel: PASSED")
+}

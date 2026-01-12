@@ -1,0 +1,141 @@
+// Test: mutual recursion between closures
+// Coverage: two closures calling each other, testing variable binding and recursion
+package main
+
+func main() {
+	// Test 1: Basic mutual recursion (even/odd)
+	var isEven func(int) bool
+	var isOdd func(int) bool
+	
+	isEven = func(n int) bool {
+		if n == 0 {
+			return true
+		}
+		return isOdd(n - 1)
+	}
+	
+	isOdd = func(n int) bool {
+		if n == 0 {
+			return false
+		}
+		return isEven(n - 1)
+	}
+	
+	assert(isEven(0) == true, "0 is even")
+	assert(isEven(1) == false, "1 is not even")
+	assert(isEven(2) == true, "2 is even")
+	assert(isEven(10) == true, "10 is even")
+	assert(isOdd(0) == false, "0 is not odd")
+	assert(isOdd(1) == true, "1 is odd")
+	assert(isOdd(7) == true, "7 is odd")
+
+	// Test 2: Mutual recursion with accumulator
+	var ping func(int, int) int
+	var pong func(int, int) int
+	
+	ping = func(n, acc int) int {
+		if n <= 0 {
+			return acc
+		}
+		return pong(n-1, acc+1)
+	}
+	
+	pong = func(n, acc int) int {
+		if n <= 0 {
+			return acc
+		}
+		return ping(n-1, acc+2)
+	}
+	
+	result := ping(6, 0)
+	// ping(6,0) -> pong(5,1) -> ping(4,3) -> pong(3,4) -> ping(2,6) -> pong(1,7) -> ping(0,9) = 9
+	assert(result == 9, "ping(6,0) should be 9, got ", result)
+
+	// Test 3: Three-way mutual recursion
+	var fa func(int) int
+	var fb func(int) int
+	var fc func(int) int
+	
+	fa = func(n int) int {
+		if n <= 0 {
+			return 1
+		}
+		return fb(n - 1)
+	}
+	
+	fb = func(n int) int {
+		if n <= 0 {
+			return 2
+		}
+		return fc(n - 1)
+	}
+	
+	fc = func(n int) int {
+		if n <= 0 {
+			return 3
+		}
+		return fa(n - 1)
+	}
+	
+	// fa(0) = 1, fb(0) = 2, fc(0) = 3
+	// fa(1) = fb(0) = 2
+	// fa(2) = fb(1) = fc(0) = 3
+	// fa(3) = fb(2) = fc(1) = fa(0) = 1
+	assert(fa(0) == 1, "fa(0)")
+	assert(fa(1) == 2, "fa(1)")
+	assert(fa(2) == 3, "fa(2)")
+	assert(fa(3) == 1, "fa(3)")
+	assert(fa(6) == 1, "fa(6) should cycle back to 1")
+
+	// Test 4: Mutual recursion with captured outer variable
+	counter := 0
+	var incA func(int)
+	var incB func(int)
+	
+	incA = func(n int) {
+		if n <= 0 {
+			return
+		}
+		counter += 1
+		incB(n - 1)
+	}
+	
+	incB = func(n int) {
+		if n <= 0 {
+			return
+		}
+		counter += 10
+		incA(n - 1)
+	}
+	
+	incA(4)
+	// incA(4) -> counter=1, incB(3) -> counter=11, incA(2) -> counter=12, incB(1) -> counter=22, incA(0) done
+	assert(counter == 22, "counter should be 22, got ", counter)
+
+	// Test 5: Mutual recursion returning closures
+	var makeA func() func() int
+	var makeB func() func() int
+	callCount := 0
+	
+	makeA = func() func() int {
+		callCount += 1
+		if callCount > 5 {
+			return func() int { return callCount }
+		}
+		return makeB()
+	}
+	
+	makeB = func() func() int {
+		callCount += 1
+		if callCount > 5 {
+			return func() int { return callCount }
+		}
+		return makeA()
+	}
+	
+	fn := makeA()
+	result5 := fn()
+	assert(result5 == 6, "should reach 6 calls, got ", result5)
+
+	println("closure_mutual_recursion: PASSED")
+}
