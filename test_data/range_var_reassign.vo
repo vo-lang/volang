@@ -1,0 +1,70 @@
+// Test: reassigning range iteration variables within loop body
+// Coverage: for-range variable behavior when modified inside loop
+package main
+
+func main() {
+    // Test 1: modifying index variable has no effect on iteration
+    arr := [5]int{10, 20, 30, 40, 50}
+    sum := 0
+    for i, v := range arr {
+        sum += v
+        i = 999  // this should not affect next iteration
+        _ = i
+    }
+    assert(sum == 150, "sum should be 150")
+    
+    // Test 2: modifying value variable doesn't affect original
+    arr2 := [3]int{1, 2, 3}
+    for i, v := range arr2 {
+        v = v * 10  // modifying v doesn't affect arr2
+        _ = v
+        _ = i
+    }
+    assert(arr2[0] == 1 && arr2[1] == 2 && arr2[2] == 3, "original unchanged")
+    
+    // Test 3: range over slice with index modification
+    slice := []int{100, 200, 300}
+    indices := []int{}
+    for i := range slice {
+        indices = append(indices, i)
+        i = -1  // doesn't affect iteration
+    }
+    assert(len(indices) == 3, "should iterate 3 times")
+    assert(indices[0] == 0 && indices[1] == 1 && indices[2] == 2, "indices correct")
+    
+    // Test 4: range over map, value modification
+    m := map[string]int{"a": 1, "b": 2, "c": 3}
+    total := 0
+    for k, v := range m {
+        total += v
+        k = "modified"  // doesn't affect iteration
+        v = 0           // doesn't affect map
+        _ = k
+        _ = v
+    }
+    assert(total == 6, "map total should be 6")
+    assert(m["a"] == 1, "map value unchanged")
+    
+    // Test 5: range over string, rune modification
+    s := "abc"
+    runes := []rune{}
+    for i, r := range s {
+        runes = append(runes, r)
+        r = 'X'  // doesn't affect string
+        i = 100  // doesn't affect iteration
+        _ = i
+        _ = r
+    }
+    assert(len(runes) == 3, "3 runes")
+    assert(runes[0] == 'a' && runes[1] == 'b' && runes[2] == 'c', "runes correct")
+    
+    // Test 6: range variable is a copy (verify by modification)
+    arr3 := [3]int{5, 6, 7}
+    for _, v := range arr3 {
+        v = 0  // modifies copy only
+        _ = v
+    }
+    assert(arr3[0] == 5 && arr3[1] == 6 && arr3[2] == 7, "original array unchanged")
+    
+    println("range_var_reassign: ok")
+}

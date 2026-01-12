@@ -1,0 +1,76 @@
+// Test: constant expressions with bitwise operations edge cases
+// Coverage: compile-time evaluation of complex bitwise operations
+package main
+
+const (
+    // Basic shifts
+    One = 1
+    Shifted = One << 10  // 1024
+    
+    // Shift with large constant
+    Big = 1 << 30  // 1073741824
+    
+    // Bit clear operation
+    AllOnes = 0xFF
+    Cleared = AllOnes &^ 0x0F  // 0xF0 = 240
+    
+    // XOR operations
+    XorResult = 0xAA ^ 0x55  // 0xFF = 255
+    
+    // Combined operations
+    Combined = ((1 << 8) | (1 << 4) | (1 << 0))  // 0x111 = 273
+    
+    // Negative shift base
+    NegBase int = -1
+    NegShift = NegBase << 2  // -4
+    
+    // Right shift preserves sign for signed
+    NegRight = NegBase >> 1  // -1 (arithmetic shift)
+    
+    // Unsigned shift
+    UnsignedVal uint = 0xFFFFFFFF
+    UnsignedShift = UnsignedVal >> 16  // 0xFFFF = 65535
+    
+    // Multiple operations chained
+    Chain = ((0xFF & 0x0F) | 0xF0) ^ 0xAA  // (0x0F | 0xF0) ^ 0xAA = 0xFF ^ 0xAA = 0x55 = 85
+)
+
+func main() {
+    // Verify compile-time constants
+    assert(Shifted == 1024, "1 << 10 == 1024")
+    assert(Big == 1073741824, "1 << 30")
+    assert(Cleared == 240, "0xFF &^ 0x0F == 0xF0")
+    assert(XorResult == 255, "0xAA ^ 0x55 == 0xFF")
+    assert(Combined == 273, "combined bit pattern")
+    assert(NegShift == -4, "negative left shift")
+    assert(NegRight == -1, "negative right shift (arithmetic)")
+    assert(UnsignedShift == 65535, "unsigned right shift")
+    assert(Chain == 85, "chained operations")
+    
+    // Test runtime equivalence
+    var a int = 1
+    assert(a << 10 == Shifted, "runtime matches const")
+    
+    var b int = 0xFF
+    var c int = 0x0F
+    assert((b &^ c) == int(Cleared), "runtime bit clear")
+    
+    // Test with variables that have const values
+    x := 0xAA
+    y := 0x55
+    assert((x ^ y) == XorResult, "runtime XOR")
+    
+    // Edge: shift by 0
+    const ZeroShift = 42 << 0
+    assert(ZeroShift == 42, "shift by 0")
+    
+    // Edge: and with all ones
+    const AndAllOnes = 0x12345678 & 0xFFFFFFFF
+    assert(AndAllOnes == 0x12345678, "and with all ones")
+    
+    // Edge: or with zero
+    const OrZero = 0x12345678 | 0
+    assert(OrZero == 0x12345678, "or with zero")
+    
+    println("const_bitwise_edge: ok")
+}

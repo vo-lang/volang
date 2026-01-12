@@ -1,0 +1,68 @@
+// Test: type assertion to anonymous interface type
+// Coverage: using anonymous interface{} type as assertion target
+package main
+
+type Greeter struct {
+    name string
+}
+
+func (g Greeter) Greet() string {
+    return "Hello, " + g.name
+}
+
+func (g Greeter) Wave() string {
+    return "Waving at " + g.name
+}
+
+type Counter struct {
+    val int
+}
+
+func (c Counter) Greet() string {
+    return "Count is " + string(c.val + '0')
+}
+
+func main() {
+    // Test 1: assert to anonymous interface with single method
+    var a any = Greeter{name: "Alice"}
+    
+    if v, ok := a.(interface{ Greet() string }); ok {
+        result := v.Greet()
+        assert(result == "Hello, Alice", "anon interface assertion 1")
+    } else {
+        panic("should match anonymous interface")
+    }
+    
+    // Test 2: type that doesn't match anonymous interface
+    var b any = 42
+    _, ok := b.(interface{ Greet() string })
+    assert(!ok, "int should not match interface{Greet() string}")
+    
+    // Test 3: anonymous interface with multiple methods
+    var c any = Greeter{name: "Bob"}
+    if v, ok := c.(interface{ Greet() string; Wave() string }); ok {
+        assert(v.Greet() == "Hello, Bob", "multi-method anon iface Greet")
+        assert(v.Wave() == "Waving at Bob", "multi-method anon iface Wave")
+    } else {
+        panic("Greeter should match multi-method anonymous interface")
+    }
+    
+    // Test 4: Counter only has Greet, not Wave
+    var d any = Counter{val: 5}
+    _, ok2 := d.(interface{ Greet() string; Wave() string })
+    assert(!ok2, "Counter should not match interface with Wave")
+    
+    // Test 5: Counter matches single-method interface
+    if v, ok := d.(interface{ Greet() string }); ok {
+        assert(v.Greet() == "Count is 5", "Counter matches single method")
+    } else {
+        panic("Counter should match interface{Greet() string}")
+    }
+    
+    // Test 6: nil value assertion
+    var nilVal any = nil
+    _, ok3 := nilVal.(interface{ Greet() string })
+    assert(!ok3, "nil should not match any interface")
+    
+    println("anon_interface_assertion: ok")
+}

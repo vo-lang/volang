@@ -164,6 +164,30 @@ pub struct MethodCallInfo {
     pub recv_is_pointer: bool,
 }
 
+impl MethodCallInfo {
+    /// Number of pointer dereferences needed in the embedding path
+    pub fn pointer_steps(&self) -> usize {
+        self.embed_path.steps.iter().filter(|s| s.is_pointer).count()
+    }
+    
+    /// Whether method expects pointer receiver
+    pub fn expects_ptr_recv(&self) -> bool {
+        match &self.dispatch {
+            MethodDispatch::Static { expects_ptr_recv, .. } => *expects_ptr_recv,
+            _ => false,
+        }
+    }
+    
+    /// Get actual receiver type (after following embedding path)
+    pub fn actual_recv_type(&self, base_type: TypeKey) -> TypeKey {
+        if self.embed_path.steps.is_empty() {
+            base_type
+        } else {
+            self.embed_path.final_type
+        }
+    }
+}
+
 /// Resolve a method call from Selection info.
 /// 
 /// This is the unified entry point for method call resolution.

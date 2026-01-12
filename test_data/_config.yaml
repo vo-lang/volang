@@ -406,3 +406,11 @@ tests:
 
   - file: bug_iife_crash.vo
 
+# Coverage tests from analysis (2026-01-12 batch 10) - New tests
+  - file: anon_interface_assertion.vo
+  - file: range_var_reassign.vo
+  - file: const_bitwise_edge.vo
+  - file: closure_type_switch.vo
+  - file: embed_ptr_method_promote.vo
+  - file: multi_return_chain.vo
+

@@ -1634,7 +1634,7 @@ fn compile_defer_method_call(
     };
     
     let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
-    let actual_recv_type = if call_info.embed_path.steps.is_empty() { base_type } else { call_info.embed_path.final_type };
+    let actual_recv_type = call_info.actual_recv_type(base_type);
     let recv_storage = match &sel.expr.kind {
         ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|l| l.storage),
         _ => None,
@@ -1645,12 +1645,9 @@ fn compile_defer_method_call(
     let total_arg_slots = recv_slots + other_arg_slots;
     let args_start = func.alloc_args(total_arg_slots);
     
-    let embed_offset = call_info.embed_path.total_offset;
-    let embed_is_pointer = call_info.embed_path.steps.iter().any(|s| s.is_pointer);
     crate::expr::emit_receiver(
         &sel.expr, args_start, recv_type, recv_storage,
-        expects_ptr_recv, actual_recv_type, embed_offset, embed_is_pointer,
-        ctx, func, info
+        &call_info, actual_recv_type, ctx, func, info
     )?;
     
     let mut offset = recv_slots;

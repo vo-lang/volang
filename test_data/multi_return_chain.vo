@@ -1,0 +1,101 @@
+// Test: chaining multi-return functions as arguments
+// Coverage: using multi-return function as single argument to another function
+package main
+
+func pair() (int, string) {
+    return 42, "answer"
+}
+
+func triple() (int, int, int) {
+    return 1, 2, 3
+}
+
+func consume2(a int, b string) string {
+    return b + ":" + string(a + '0')
+}
+
+func consume3(a, b, c int) int {
+    return a + b + c
+}
+
+func sumPair(a, b int) int {
+    return a + b
+}
+
+func divmod(a, b int) (int, int) {
+    return a / b, a % b
+}
+
+func main() {
+    // Test 1: multi-return directly as args
+    // 42 + '0' = 42 + 48 = 90 = 'Z'
+    result := consume2(pair())
+    assert(result == "answer:Z", "multi-return as args")
+    
+    // Test 2: triple return as 3 args
+    sum := consume3(triple())
+    assert(sum == 6, "triple return as 3 args")
+    
+    // Test 3: nested multi-return
+    q, r := divmod(17, 5)
+    assert(q == 3, "divmod quotient")
+    assert(r == 2, "divmod remainder")
+    
+    // Test 4: multi-return to sumPair
+    twoNums := func() (int, int) {
+        return 10, 20
+    }
+    
+    total := sumPair(twoNums())
+    assert(total == 30, "func returning pair as args")
+    
+    // Test 5: chained function calls with multi-return
+    doubleReturn := func() (int, int) {
+        return 5, 7
+    }
+    
+    addThem := func(a, b int) int {
+        return a + b
+    }
+    
+    chained := addThem(doubleReturn())
+    assert(chained == 12, "chained double return")
+    
+    // Test 6: multi-return in conditional expression
+    getVals := func(flag bool) (int, int) {
+        if flag {
+            return 100, 200
+        }
+        return 1, 2
+    }
+    
+    s1 := sumPair(getVals(true))
+    s2 := sumPair(getVals(false))
+    assert(s1 == 300, "conditional multi-return true")
+    assert(s2 == 3, "conditional multi-return false")
+    
+    // Test 7: multi-return from method
+    type Calculator struct {
+        base int
+    }
+    
+    calc := Calculator{base: 10}
+    
+    // Method returning multiple values (defined inline via closure)
+    addSub := func(c Calculator, n int) (int, int) {
+        return c.base + n, c.base - n
+    }
+    
+    add, sub := addSub(calc, 3)
+    assert(add == 13, "method-like multi-return add")
+    assert(sub == 7, "method-like multi-return sub")
+    
+    // Test 8: discarding some return values
+    first, _ := divmod(20, 6)
+    assert(first == 3, "discard second return")
+    
+    _, second := divmod(20, 6)
+    assert(second == 2, "discard first return")
+    
+    println("multi_return_chain: ok")
+}

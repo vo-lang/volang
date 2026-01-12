@@ -1,0 +1,101 @@
+// Test: method promotion through embedded pointer
+// Coverage: embedded *T promoting both value and pointer receiver methods
+package main
+
+type Inner struct {
+    value int
+}
+
+func (i Inner) Get() int {
+    return i.value
+}
+
+func (i *Inner) Set(v int) {
+    i.value = v
+}
+
+func (i *Inner) Double() {
+    i.value *= 2
+}
+
+type Outer struct {
+    *Inner  // embedded pointer
+    name string
+}
+
+type OuterValue struct {
+    Inner  // embedded value (for comparison)
+    name string
+}
+
+func main() {
+    // Test 1: embedded pointer - value receiver method
+    inner := &Inner{value: 10}
+    outer := Outer{Inner: inner, name: "test"}
+    
+    result := outer.Get()  // promoted from *Inner
+    assert(result == 10, "embedded ptr value receiver Get")
+    
+    // Test 2: embedded pointer - pointer receiver method
+    outer.Set(20)  // promoted from *Inner
+    assert(inner.value == 20, "embedded ptr pointer receiver Set")
+    assert(outer.Get() == 20, "Get after Set")
+    
+    // Test 3: embedded pointer - chained mutation
+    outer.Double()
+    assert(outer.Get() == 40, "Double() through embedded ptr")
+    
+    // Test 4: nil embedded pointer access should panic
+    nilOuter := Outer{Inner: nil, name: "nil"}
+    panicked := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        _ = nilOuter.Get()  // should panic: nil pointer
+    }()
+    assert(panicked, "nil embedded pointer should panic")
+    
+    // Test 5: embedded value for comparison
+    ov := OuterValue{Inner: Inner{value: 100}, name: "value"}
+    assert(ov.Get() == 100, "embedded value Get")
+    
+    // embedded value can call pointer receiver if addressable
+    ov.Set(200)
+    assert(ov.Get() == 200, "embedded value Set")
+    
+    // Test 6: interface satisfaction through embedded pointer
+    type Getter interface {
+        Get() int
+    }
+    
+    var g Getter = outer
+    assert(g.Get() == 40, "interface through embedded ptr")
+    
+    type Setter interface {
+        Set(int)
+    }
+    
+    var s Setter = &outer
+    s.Set(50)
+    assert(outer.Get() == 50, "Setter interface through embedded ptr")
+    
+    // Test 7: multiple levels of embedding
+    type Deep struct {
+        *Outer
+        extra int
+    }
+    
+    deepInner := &Inner{value: 1000}
+    deepOuter := &Outer{Inner: deepInner, name: "deep"}
+    deep := Deep{Outer: deepOuter, extra: 99}
+    
+    assert(deep.Get() == 1000, "deep embedded Get")
+    deep.Set(2000)
+    assert(deep.Get() == 2000, "deep embedded Set")
+    assert(deepInner.value == 2000, "deep mutation affects original")
+    
+    println("embed_ptr_method_promote: ok")
+}

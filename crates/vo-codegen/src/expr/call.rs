@@ -219,75 +219,84 @@ pub fn compile_closure_call_from_reg(
 // =============================================================================
 
 /// Emit code to pass receiver to method.
-/// 
-/// Cases:
-/// - `expects_ptr_recv=true`: pass GcRef (variable must be heap-allocated)
-/// - `expects_ptr_recv=false`: pass value (copy from stack or dereference from heap)
-/// - `embed_is_pointer=true`: embedded field is a pointer, need extra dereference
 pub fn emit_receiver(
     sel_expr: &Expr,
     args_start: u16,
     recv_type: TypeKey,
     recv_storage: Option<StorageKind>,
-    expects_ptr_recv: bool,
+    call_info: &crate::embed::MethodCallInfo,
     actual_recv_type: TypeKey,
-    embed_offset: u16,
-    embed_is_pointer: bool,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    if expects_ptr_recv {
-        // Method expects *T: pass pointer
-        if embed_is_pointer && embed_offset == 0 {
-            // Pointer embedding: the embedded field IS the pointer we need
-            let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-            func.emit_copy(args_start, recv_reg, 1);
-        } else {
-            // Unified pointer acquisition
+    let recv_is_ptr = info.is_pointer(recv_type);
+    let value_slots = info.type_slot_count(actual_recv_type);
+    let expects_ptr_recv = call_info.expects_ptr_recv();
+    let embed_offset = call_info.embed_path.total_offset;
+    let pointer_steps = call_info.pointer_steps();
+    
+    if pointer_steps == 0 {
+        // No pointer embedding - simple case
+        if expects_ptr_recv {
             super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info)?;
-        }
-    } else {
-        // Method expects T: pass value
-        let recv_is_ptr = info.is_pointer(recv_type);
-        let value_slots = info.type_slot_count(actual_recv_type);
-        
-        if embed_is_pointer {
-            // Pointer embedding: first get the embedded pointer, then dereference it
-            let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-            if recv_is_ptr {
-                // recv is *OuterStruct, need to read embedded *T from it, then dereference
-                // Step 1: Read the embedded *T pointer from OuterStruct
-                let temp_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_with_flags(Opcode::PtrGetN, 1, temp_ptr, recv_reg, embed_offset);
-                // Step 2: Dereference the embedded *T to get the value
-                func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, temp_ptr, 0);
-            } else {
-                // recv is OuterStruct on stack, embedded *T is at recv_reg + embed_offset
-                let ptr_reg = recv_reg + embed_offset;  // Slot containing the embedded *T pointer
-                func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, ptr_reg, 0);
-            }
         } else {
             match recv_storage {
                 Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                    // Heap boxed: directly read from GcRef slot
                     func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, embed_offset);
                 }
                 Some(StorageKind::HeapArray { gcref_slot, .. }) => {
-                    // Heap array: directly read from GcRef slot
                     func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, embed_offset);
                 }
+                Some(StorageKind::StackValue { slot, .. }) => {
+                    func.emit_copy(args_start, slot + embed_offset, value_slots);
+                }
                 _ if recv_is_ptr => {
-                    // Pointer receiver: compile_expr gives us the pointer, then dereference
                     let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
                     func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, recv_reg, embed_offset);
                 }
                 _ => {
-                    // Stack variable or other: compile_expr gives us the value, just copy
                     let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
                     func.emit_copy(args_start, recv_reg + embed_offset, value_slots);
                 }
             }
+        }
+    } else {
+        // Pointer embedding: need to traverse pointer chain
+        // First, get the initial pointer from the receiver
+        let mut current_ptr = match recv_storage {
+            Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
+                let temp = func.alloc_temp_typed(&[SlotType::GcRef]);
+                func.emit_ptr_get(temp, gcref_slot, embed_offset, 1);
+                temp
+            }
+            Some(StorageKind::StackValue { slot, .. }) => {
+                // The embedded pointer is directly at slot + embed_offset
+                slot + embed_offset
+            }
+            _ => {
+                let recv_gcref = compile_expr(sel_expr, ctx, func, info)?;
+                let temp = func.alloc_temp_typed(&[SlotType::GcRef]);
+                func.emit_ptr_get(temp, recv_gcref, embed_offset, 1);
+                temp
+            }
+        };
+        
+        // Follow the pointer chain for remaining steps
+        // Each step: dereference current pointer and read next pointer at offset 0
+        for _ in 1..pointer_steps {
+            let next_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+            func.emit_ptr_get(next_ptr, current_ptr, 0, 1);
+            current_ptr = next_ptr;
+        }
+        
+        // Now current_ptr points to the final embedded type
+        if expects_ptr_recv {
+            // Method expects *T: current_ptr IS the pointer we need
+            func.emit_copy(args_start, current_ptr, 1);
+        } else {
+            // Method expects T: dereference to get value
+            func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, current_ptr, 0);
         }
     }
     Ok(())
@@ -456,19 +465,14 @@ fn compile_method_call_dispatch(
             Ok(())
         }
         MethodDispatch::Static { func_id, expects_ptr_recv } => {
-            // Static call - use call_info directly
+            // Static call
             let base_type = if call_info.recv_is_pointer {
                 info.pointer_base(recv_type)
             } else {
                 recv_type
             };
+            let actual_recv_type = call_info.actual_recv_type(base_type);
             
-            // Determine actual receiver type from embed path
-            let actual_recv_type = if call_info.embed_path.steps.is_empty() {
-                base_type
-            } else {
-                call_info.embed_path.final_type
-            };
             // Get method signature
             let method_type = info.expr_type(call.func.id);
             let is_variadic = info.is_variadic(method_type);
@@ -491,12 +495,9 @@ fn compile_method_call_dispatch(
             } else {
                 None
             };
-            let embed_offset = call_info.embed_path.total_offset;
-            let embed_is_pointer = call_info.embed_path.steps.iter().any(|s| s.is_pointer);
             emit_receiver(
                 &sel.expr, args_start, recv_type, recv_storage,
-                *expects_ptr_recv, actual_recv_type, embed_offset, embed_is_pointer,
-                ctx, func, info
+                call_info, actual_recv_type, ctx, func, info
             )?;
             
             // Compile arguments
