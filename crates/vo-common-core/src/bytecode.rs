@@ -32,6 +32,10 @@ pub struct FunctionDef {
     /// Receiver slots for methods (0 for functions, >0 for methods)
     /// Used by CallIface to know how many slots to copy from interface data
     pub recv_slots: u16,
+    /// Number of GcRefs for heap-allocated named returns (0 = no heap returns).
+    /// When non-zero, slots 0..heap_ret_gcref_count contain GcRefs to heap storage.
+    /// Used by panic recovery to return named return values after recover().
+    pub heap_ret_gcref_count: u16,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
 }

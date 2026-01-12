@@ -6,6 +6,17 @@ use crate::bytecode::{FunctionDef, GlobalDef};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::vm::Vm;
 
+/// Scan a slice of raw GcRefs.
+#[inline]
+fn scan_gcrefs(gc: &mut Gc, gcrefs: &[u64]) {
+    for &raw in gcrefs {
+        let gcref = raw as GcRef;
+        if !gcref.is_null() {
+            gc.mark_gray(gcref);
+        }
+    }
+}
+
 /// Scan DeferEntry for GC refs.
 #[inline]
 fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry) {
@@ -59,30 +70,31 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Fiber], functions: &[FunctionDef]) {
             for entry in &state.pending {
                 scan_defer_entry(gc, entry);
             }
-            // Scan return values if this is a Return unwinding
-            if let crate::fiber::UnwindingKind::Return { return_kind, .. } = &state.kind {
-                match return_kind {
-                    crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
-                        scan_slots_by_types(gc, vals, slot_types);
-                    }
-                    crate::fiber::PendingReturnKind::Heap { gcrefs, .. } => {
-                        // These are GcRefs to escaped named return variables.
-                        // The original frame was popped, so we must mark them here.
-                        for &gcref_raw in gcrefs {
-                            let gcref = gcref_raw as GcRef;
-                            if !gcref.is_null() {
-                                gc.mark_gray(gcref);
-                            }
+            // Scan return values based on unwinding kind
+            match &state.kind {
+                crate::fiber::UnwindingKind::Return { return_kind, .. } => {
+                    match return_kind {
+                        crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
+                            scan_slots_by_types(gc, vals, slot_types);
                         }
+                        crate::fiber::PendingReturnKind::Heap { gcrefs, .. } => {
+                            scan_gcrefs(gc, gcrefs);
+                        }
+                    }
+                }
+                crate::fiber::UnwindingKind::Panic { heap_gcrefs, .. } => {
+                    if let Some(gcrefs) = heap_gcrefs {
+                        scan_gcrefs(gc, gcrefs);
                     }
                 }
             }
         }
 
-        // Scan panic value (only Recoverable has GcRef)
-        if let Some(PanicState::Recoverable(panic_val)) = fiber.panic_state {
-            if !panic_val.is_null() {
-                gc.mark_gray(panic_val);
+        // Scan panic value (only Recoverable has interface{})
+        // slot0 = packed metadata, slot1 = data (may be GcRef)
+        if let Some(PanicState::Recoverable(slot0, slot1)) = fiber.panic_state {
+            if vo_runtime::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
+                gc.mark_gray(slot1 as GcRef);
             }
         }
     }

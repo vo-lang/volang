@@ -699,6 +699,7 @@ impl CodegenContext {
             local_slots: 0,
             ret_slots: 0,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
             code: Vec::new(),
             slot_types: Vec::new(),
         });
@@ -1014,6 +1015,7 @@ impl CodegenContext {
             // ret goes in recv position, so no extra space needed
             local_slots: wrapper_param_slots + recv_slots as u16 + other_param_slots,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
             code,
             slot_types: Vec::new(),
         };
@@ -1089,6 +1091,7 @@ impl CodegenContext {
             ret_slots,
             local_slots,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
             code,
             slot_types: Vec::new(),
         };
@@ -1164,6 +1167,7 @@ impl CodegenContext {
             ret_slots,
             local_slots,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
             code,
             slot_types: Vec::new(),
         };

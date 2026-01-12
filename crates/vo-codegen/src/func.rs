@@ -980,6 +980,14 @@ impl FuncBuilder {
         // Ensure local_slots is at least ret_slots (for return value)
         let local_slots = self.next_slot.max(self.ret_slots);
         
+        // Count heap-allocated named returns (escaped = true)
+        // Used by panic recovery to return named return values after recover()
+        let heap_ret_gcref_count = if self.named_return_slots.iter().all(|(_, _, escaped)| *escaped) {
+            self.named_return_slots.len() as u16
+        } else {
+            0 // Mixed or non-escaped: not supported for panic recovery
+        };
+        
         FunctionDef {
             name: self.name,
             param_count: self.param_count,
@@ -987,6 +995,7 @@ impl FuncBuilder {
             local_slots,
             ret_slots: self.ret_slots,
             recv_slots: self.recv_slots,
+            heap_ret_gcref_count,
             code: self.code,
             slot_types: self.slot_types,
         }

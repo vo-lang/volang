@@ -661,7 +661,7 @@ impl Vm {
                     // Check if we're in panic unwinding mode
                     let is_panic_unwinding = matches!(
                         &fiber.unwinding,
-                        Some(crate::fiber::UnwindingState { kind: crate::fiber::UnwindingKind::Panic, .. })
+                        Some(crate::fiber::UnwindingState { kind: crate::fiber::UnwindingKind::Panic { .. }, .. })
                     );
                     if is_panic_unwinding {
                         panic_unwind(fiber, stack, module)

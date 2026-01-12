@@ -309,7 +309,5 @@ tests:
   - file: make_boundary_panic.vo
   - file: map_delete_iterate.vo
   - file: closure_defer_recover_combo.vo
-    skip: [vm, jit]
-    reason: "Vo bug: named return + defer + panic/recover not working"
   - file: multi_return_as_arg.vo
   - file: range_modify_container.vo

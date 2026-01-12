@@ -8,7 +8,7 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
-use super::{compile_expr, compile_expr_to};
+use super::{compile_expr, compile_expr_to, compile_expr_to_type};
 
 /// Compile arguments as (value, value_kind) pairs for print/println/assert.
 /// Returns args_start register.
@@ -91,9 +91,10 @@ pub fn compile_builtin_call(
             func.emit_with_flags(Opcode::CallExtern, (call.args.len() * 2) as u8, dst, extern_id as u16, args_start);
         }
         "panic" => {
-            // Compile panic message
+            // panic(x interface{}) - argument must be converted to interface{}
             if !call.args.is_empty() {
-                let msg_reg = compile_expr(&call.args[0], ctx, func, info)?;
+                let any_type = info.any_type();
+                let msg_reg = compile_expr_to_type(&call.args[0], any_type, ctx, func, info)?;
                 func.emit_op(Opcode::Panic, msg_reg, 0, 0);
             } else {
                 func.emit_op(Opcode::Panic, 0, 0, 0);

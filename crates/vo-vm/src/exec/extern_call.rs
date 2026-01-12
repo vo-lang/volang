@@ -13,8 +13,6 @@ pub use vo_runtime::ffi::ExternRegistry;
 use vo_runtime::ffi::ExternResult;
 use vo_runtime::gc::Gc;
 
-use crate::fiber::Fiber;
-
 pub fn exec_call_extern(
     stack: &mut Vec<u64>,
     bp: usize,

@@ -256,7 +256,7 @@ pub fn exec_return(
                         };
                         (vals, *caller_ret_reg, *caller_ret_count)
                     }
-                    UnwindingKind::Panic => unreachable!(),
+                    UnwindingKind::Panic { .. } => unreachable!(),
                 };
                 *unwinding = None;
                 
@@ -480,14 +480,20 @@ pub fn exec_panic_unwind(
 
     // Check if we're continuing after a defer finished
     if let Some(ref mut state) = unwinding {
-        if let UnwindingKind::Panic = &state.kind {
+        if let UnwindingKind::Panic { ref heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count } = state.kind.clone() {
             // Only handle when the defer function itself returns (not nested calls)
             if current_frame_depth == state.target_depth + 1 {
                 pop_frame(stack, frames);
                 
                 // Check if recover() was called (panic_state was consumed)
                 if panic_state.is_none() {
-                    // Recovered! Clear unwinding state and resume normal execution
+                    // Recovered! Return named return values to caller if available
+                    if let Some(ref gcrefs) = heap_gcrefs {
+                        let ret_vals = read_heap_gcrefs(gcrefs, slots_per_ref);
+                        *unwinding = None;
+                        return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
+                    }
+                    // No return info - just resume normal execution
                     *unwinding = None;
                     return ExecResult::Return;
                 }
@@ -519,6 +525,10 @@ pub fn exec_panic_unwind(
         let pending = collect_defers(defer_stack, frame_depth, true);
         
         if !pending.is_empty() {
+            // Save return info for potential recovery (named returns)
+            let (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count) = 
+                extract_panic_return_info(stack, frames, module);
+            
             // Found defers - pop frame and start executing them
             pop_frame(stack, frames);
             
@@ -528,7 +538,7 @@ pub fn exec_panic_unwind(
             *unwinding = Some(UnwindingState {
                 pending,
                 target_depth: frames.len(),
-                kind: UnwindingKind::Panic,
+                kind: UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count },
             });
             
             return call_defer_entry(stack, frames, &first_defer, module);
@@ -537,4 +547,35 @@ pub fn exec_panic_unwind(
         // No defers in this frame - pop and continue to parent
         pop_frame(stack, frames);
     }
+}
+
+/// Extract return info from the current frame for panic recovery.
+/// Returns (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count).
+fn extract_panic_return_info(
+    stack: &[u64],
+    frames: &[CallFrame],
+    module: &Module,
+) -> (Option<Vec<u64>>, usize, u16, usize) {
+    let Some(frame) = frames.last() else {
+        return (None, 0, 0, 0);
+    };
+    let Some(func) = module.functions.get(frame.func_id as usize) else {
+        return (None, 0, frame.ret_reg, frame.ret_count as usize);
+    };
+    
+    // Only handle functions with heap-allocated named returns
+    if func.heap_ret_gcref_count == 0 {
+        return (None, 0, frame.ret_reg, frame.ret_count as usize);
+    }
+    
+    // Heap returns: slots 0..heap_ret_gcref_count contain GcRefs to heap storage
+    let gcref_count = func.heap_ret_gcref_count as usize;
+    let gcrefs: Vec<u64> = (0..gcref_count)
+        .map(|i| stack[frame.bp + i])
+        .collect();
+    
+    // slots_per_ref: total ret_slots / gcref_count
+    let slots_per_ref = func.ret_slots as usize / gcref_count;
+    
+    (Some(gcrefs), slots_per_ref, frame.ret_reg, frame.ret_count as usize)
 }

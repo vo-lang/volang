@@ -85,7 +85,9 @@ pub fn runtime_panic(
     msg: String,
 ) -> ExecResult {
     let panic_str = string::new_from_string(gc, msg);
-    fiber.set_recoverable_panic(panic_str);
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    let slot1 = panic_str as u64;
+    fiber.set_recoverable_panic(slot0, slot1);
     panic_unwind(fiber, stack, module)
 }
 
@@ -104,6 +106,7 @@ pub fn panic_unwind(fiber: &mut Fiber, stack: &mut Vec<u64>, module: &Module) ->
 }
 
 /// User code panic() - set value and start unwinding in one call.
+/// val_reg points to interface{} (2 slots).
 #[inline]
 pub fn user_panic(
     fiber: &mut Fiber,
@@ -112,7 +115,8 @@ pub fn user_panic(
     val_reg: u16,
     module: &Module,
 ) -> ExecResult {
-    let val = stack[bp + val_reg as usize] as GcRef;
-    fiber.set_recoverable_panic(val);
+    let slot0 = stack[bp + val_reg as usize];
+    let slot1 = stack[bp + val_reg as usize + 1];
+    fiber.set_recoverable_panic(slot0, slot1);
     panic_unwind(fiber, stack, module)
 }

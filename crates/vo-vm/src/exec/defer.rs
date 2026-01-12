@@ -83,9 +83,11 @@ fn push_defer_entry(
 }
 
 /// recover() - only catches recoverable panics.
-/// Uses Fiber::take_recoverable_panic() internally.
+/// Returns interface{} (2 slots): slot0 = packed metadata, slot1 = data.
+/// If no panic, returns nil interface (both slots = 0).
 #[inline]
 pub fn exec_recover(stack: &mut [u64], bp: usize, fiber: &mut crate::fiber::Fiber, inst: &Instruction) {
-    let val = fiber.take_recoverable_panic().map(|v| v as u64).unwrap_or(0);
-    stack[bp + inst.a as usize] = val;
+    let (slot0, slot1) = fiber.take_recoverable_panic().unwrap_or((0, 0));
+    stack[bp + inst.a as usize] = slot0;
+    stack[bp + inst.a as usize + 1] = slot1;
 }

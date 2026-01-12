@@ -53,7 +53,15 @@ pub enum UnwindingKind {
         caller_ret_count: usize,
     },
     /// Panic unwinding - execute defers, check for recover().
-    Panic,
+    /// If function has heap-allocated named returns, stores info to return them after recovery.
+    Panic {
+        /// Heap return info for recovery (reuses PendingReturnKind::Heap format).
+        /// None if no heap returns or ret_slots is 0.
+        heap_gcrefs: Option<Vec<u64>>,
+        slots_per_ref: usize,
+        caller_ret_reg: u16,
+        caller_ret_count: usize,
+    },
 }
 
 /// Unified state for defer execution during return or panic unwinding.
@@ -111,8 +119,8 @@ pub enum FiberStatus {
 pub enum PanicState {
     /// Recoverable panic (user code panic, runtime errors like bounds check).
     /// Can be caught by recover() in a defer.
-    /// The GcRef points to the panic value (usually a string).
-    Recoverable(GcRef),
+    /// Stores full interface{} value: (slot0, slot1) where slot0 is packed metadata.
+    Recoverable(u64, u64),
     /// Fatal panic (internal VM/JIT errors that cannot be recovered).
     /// Examples: blocking operation in JIT, unsupported operation.
     Fatal(String),
@@ -155,11 +163,12 @@ impl Fiber {
         self.panic_state = None;
     }
     
-    /// Check if current panic is recoverable and return the value if so.
+    /// Check if current panic is recoverable and return the interface{} value if so.
     /// Used by recover() to consume the panic value.
-    pub fn take_recoverable_panic(&mut self) -> Option<GcRef> {
+    /// Returns (slot0, slot1) representing the full interface{}.
+    pub fn take_recoverable_panic(&mut self) -> Option<(u64, u64)> {
         match self.panic_state.take() {
-            Some(PanicState::Recoverable(val)) => Some(val),
+            Some(PanicState::Recoverable(slot0, slot1)) => Some((slot0, slot1)),
             other => {
                 self.panic_state = other; // Put it back if not recoverable
                 None
@@ -172,9 +181,9 @@ impl Fiber {
         self.panic_state = Some(PanicState::Fatal(msg));
     }
     
-    /// Set a recoverable panic with a GcRef value.
-    pub fn set_recoverable_panic(&mut self, val: GcRef) {
-        self.panic_state = Some(PanicState::Recoverable(val));
+    /// Set a recoverable panic with full interface{} value (2 slots).
+    pub fn set_recoverable_panic(&mut self, slot0: u64, slot1: u64) {
+        self.panic_state = Some(PanicState::Recoverable(slot0, slot1));
     }
     
     /// Get panic message for error reporting.

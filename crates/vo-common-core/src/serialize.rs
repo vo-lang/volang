@@ -501,6 +501,7 @@ impl Module {
             w.write_u16(f.local_slots);
             w.write_u16(f.ret_slots);
             w.write_u16(f.recv_slots);
+            w.write_u16(f.heap_ret_gcref_count);
             w.write_vec(&f.slot_types, |w, st| w.write_u8(*st as u8));
             w.write_u32(f.code.len() as u32);
             for inst in &f.code {
@@ -664,6 +665,7 @@ impl Module {
             let local_slots = r.read_u16()?;
             let ret_slots = r.read_u16()?;
             let recv_slots = r.read_u16()?;
+            let heap_ret_gcref_count = r.read_u16()?;
             let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             let code_len = r.read_u32()? as usize;
             let mut code = Vec::with_capacity(code_len);
@@ -682,6 +684,7 @@ impl Module {
                 local_slots,
                 ret_slots,
                 recv_slots,
+                heap_ret_gcref_count,
                 slot_types,
                 code,
             })
@@ -783,6 +786,7 @@ mod tests {
             local_slots: 2,
             ret_slots: 0,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
             slot_types: vec![SlotType::Value, SlotType::Value],
             code: vec![
                 Instruction::new(Opcode::LoadInt, 0, 0x0001, 0x0000),

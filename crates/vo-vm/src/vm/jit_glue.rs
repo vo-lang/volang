@@ -21,7 +21,9 @@ fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
         gc,
         "runtime error: nil pointer dereference".to_string()
     );
-    fiber.set_recoverable_panic(msg);
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    let slot1 = msg as u64;
+    fiber.set_recoverable_panic(slot0, slot1);
 }
 
 // =============================================================================
@@ -87,10 +89,13 @@ pub extern "C" fn call_extern_trampoline(
         }
         ExternResult::Panic(msg) => {
             // Extern panics are recoverable - convert to Recoverable panic
+            // Pack as interface{} with string value
             let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
             let gc = unsafe { &mut *ctx.gc };
             let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
-            fiber.set_recoverable_panic(panic_str);
+            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+            let slot1 = panic_str as u64;
+            fiber.set_recoverable_panic(slot0, slot1);
             JitResult::Panic
         }
     }
