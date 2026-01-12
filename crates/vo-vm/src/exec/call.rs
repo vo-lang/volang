@@ -249,6 +249,7 @@ pub fn exec_return(
                 let (ret_vals, caller_ret_reg, caller_ret_count) = match &mut state.kind {
                     UnwindingKind::Return { return_kind, caller_ret_reg, caller_ret_count } => {
                         let vals = match return_kind {
+                            PendingReturnKind::None => vec![],
                             PendingReturnKind::Stack { vals, .. } => core::mem::take(vals),
                             PendingReturnKind::Heap { gcrefs, slots_per_ref } => {
                                 read_heap_gcrefs(gcrefs, *slots_per_ref)
@@ -356,6 +357,7 @@ pub fn exec_return(
 
     // No defers - complete return immediately
     let ret_vals = match return_kind {
+        PendingReturnKind::None => vec![],
         PendingReturnKind::Stack { vals, .. } => vals,
         PendingReturnKind::Heap { gcrefs, slots_per_ref } => read_heap_gcrefs(&gcrefs, slots_per_ref),
     };
@@ -476,60 +478,107 @@ pub fn exec_panic_unwind(
         return ExecResult::Panic;
     }
     
-    let current_frame_depth = frames.len();
-
-    // Check if we're continuing after a defer finished
-    if let Some(ref mut state) = unwinding {
-        if let UnwindingKind::Panic { ref heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count } = state.kind.clone() {
-            // Only handle when the defer function itself returns (not nested calls)
-            if current_frame_depth == state.target_depth + 1 {
-                pop_frame(stack, frames);
-                
-                // Check if recover() was called (panic_state was consumed)
-                if panic_state.is_none() {
-                    // Recovered! Return named return values to caller if available
-                    if let Some(ref gcrefs) = heap_gcrefs {
-                        let ret_vals = read_heap_gcrefs(gcrefs, slots_per_ref);
-                        *unwinding = None;
-                        return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
-                    }
-                    // No return info - just resume normal execution
-                    *unwinding = None;
-                    return ExecResult::Return;
-                }
-                
-                // Still panicking - run next defer or continue to parent frame
-                if !state.pending.is_empty() {
-                    let next_defer = state.pending.remove(0);
-                    return call_defer_entry(stack, frames, &next_defer, module);
-                }
-                
-                // No more defers in this frame - continue to parent
-                // Fall through to start unwinding parent frame
-            }
-        }
+    // Check if we're continuing after a defer finished (not starting fresh)
+    if let Some(result) = continue_panic_unwind(stack, frames, unwinding, panic_state, module) {
+        return result;
     }
     
-    // Clear any previous unwinding state
+    // Start fresh unwinding - clear any stale state
     *unwinding = None;
+    start_panic_unwind(stack, frames, defer_stack, unwinding, module)
+}
+
+/// Continue panic unwinding after a defer function returns.
+/// Returns None if not in panic unwinding mode or defer is a nested call.
+fn continue_panic_unwind(
+    stack: &mut Vec<u64>,
+    frames: &mut Vec<CallFrame>,
+    unwinding: &mut Option<UnwindingState>,
+    panic_state: &Option<PanicState>,
+    module: &Module,
+) -> Option<ExecResult> {
+    let state = unwinding.as_mut()?;
     
-    // Unwind frames until we find one with defers or run out
+    // Only handle Panic mode
+    let UnwindingKind::Panic { .. } = &state.kind else {
+        return None;
+    };
+    
+    // Only handle when the defer function itself returns (not nested calls)
+    if frames.len() != state.target_depth + 1 {
+        return None;
+    }
+    
+    pop_frame(stack, frames);
+    
+    // Take ownership of panic data to avoid clone
+    let dummy = UnwindingKind::Panic {
+        heap_gcrefs: None,
+        slots_per_ref: 0,
+        caller_ret_reg: 0,
+        caller_ret_count: 0,
+    };
+    let UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count } 
+        = core::mem::replace(&mut state.kind, dummy) else { unreachable!() };
+    
+    // Check if recover() was called
+    if panic_state.is_none() {
+        // Recovered! Execute remaining defers as normal (not panic mode)
+        if !state.pending.is_empty() {
+            let return_kind = match heap_gcrefs {
+                Some(gcrefs) => PendingReturnKind::Heap { gcrefs, slots_per_ref },
+                None => PendingReturnKind::None,
+            };
+            state.kind = UnwindingKind::Return {
+                return_kind,
+                caller_ret_reg,
+                caller_ret_count,
+            };
+            let next_defer = state.pending.remove(0);
+            return Some(call_defer_entry(stack, frames, &next_defer, module));
+        }
+        
+        // No more defers - return to caller
+        *unwinding = None;
+        if let Some(gcrefs) = heap_gcrefs {
+            let ret_vals = read_heap_gcrefs(&gcrefs, slots_per_ref);
+            return Some(write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count));
+        }
+        return Some(ExecResult::Return);
+    }
+    
+    // Still panicking - run next defer
+    if !state.pending.is_empty() {
+        // Restore panic state for next defer
+        state.kind = UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count };
+        let next_defer = state.pending.remove(0);
+        return Some(call_defer_entry(stack, frames, &next_defer, module));
+    }
+    
+    // No more defers - continue to parent frame
+    None
+}
+
+/// Start unwinding frames until we find defers or run out of frames.
+fn start_panic_unwind(
+    stack: &mut Vec<u64>,
+    frames: &mut Vec<CallFrame>,
+    defer_stack: &mut Vec<DeferEntry>,
+    unwinding: &mut Option<UnwindingState>,
+    module: &Module,
+) -> ExecResult {
     loop {
         if frames.is_empty() {
-            // No more frames - panic propagates out
             return ExecResult::Panic;
         }
         
         let frame_depth = frames.len();
-        // Panic includes all defers (including errdefers)
         let pending = collect_defers(defer_stack, frame_depth, true);
         
         if !pending.is_empty() {
-            // Save return info for potential recovery (named returns)
             let (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count) = 
                 extract_panic_return_info(stack, frames, module);
             
-            // Found defers - pop frame and start executing them
             pop_frame(stack, frames);
             
             let mut pending = pending;
@@ -544,7 +593,6 @@ pub fn exec_panic_unwind(
             return call_defer_entry(stack, frames, &first_defer, module);
         }
         
-        // No defers in this frame - pop and continue to parent
         pop_frame(stack, frames);
     }
 }

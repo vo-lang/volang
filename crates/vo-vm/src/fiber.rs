@@ -26,9 +26,10 @@ pub struct DeferEntry {
 }
 
 /// How return values are stored while defers execute.
-/// Stack and Heap are mutually exclusive - a function uses one or the other.
 #[derive(Debug, Clone)]
 pub enum PendingReturnKind {
+    /// No return values (void function or recovered panic without named returns).
+    None,
     /// Return values copied from stack before frame was popped.
     Stack {
         vals: Vec<u64>,

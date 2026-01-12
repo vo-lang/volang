@@ -318,3 +318,17 @@ tests:
   - file: recursive_struct.vo
   - file: iface_uncomparable_panic.vo
   - file: closure_multilayer_capture.vo
+
+# Coverage tests from analysis (2026-01-12 batch 3) - Bug discovery tests
+  - file: integer_div_mod_edge.vo
+    skip: [vm, jit]
+    reason: "BUG: integer division/modulo by zero triggers Rust panic instead of Vo panic (not recoverable)"
+  - file: large_shift_amount.vo
+    skip: [vm, jit]
+    reason: "BUG: shift amount >= type width triggers panic instead of returning 0 (Go semantics)"
+  - file: integer_overflow_wrap.vo
+    skip: [vm, jit]
+    reason: "BUG: integer overflow triggers Rust panic instead of wrap-around (Go semantics)"
+  - file: index_bounds_panic.vo
+    skip: [vm, jit]
+    reason: "BUG: array/slice index out of bounds triggers Rust panic instead of Vo panic (not recoverable)"

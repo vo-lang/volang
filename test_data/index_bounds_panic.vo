@@ -1,0 +1,137 @@
+// Test: array/slice/string index out of bounds should panic
+package main
+
+func main() {
+    println("Test 1: Array index out of bounds (positive)")
+    panicked := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        arr := [3]int{1, 2, 3}
+        idx := 3  // runtime variable to avoid compile-time check
+        _ = arr[idx]  // out of bounds
+    }()
+    assert(panicked, "array index >= len should panic")
+    
+    println("Test 2: Array index negative")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        arr := [3]int{1, 2, 3}
+        idx := -1
+        _ = arr[idx]
+    }()
+    assert(panicked, "array negative index should panic")
+    
+    println("Test 3: Slice index out of bounds")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        s := []int{1, 2, 3}
+        idx := 3
+        _ = s[idx]
+    }()
+    assert(panicked, "slice index >= len should panic")
+    
+    println("Test 4: String index out of bounds")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        str := "abc"
+        idx := 3
+        _ = str[idx]
+    }()
+    assert(panicked, "string index >= len should panic")
+    
+    println("Test 5: Empty slice access")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        s := []int{}
+        idx := 0
+        _ = s[idx]
+    }()
+    assert(panicked, "empty slice access should panic")
+    
+    println("Test 6: Slice range out of bounds (high)")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        s := []int{1, 2, 3}
+        high := 4
+        _ = s[0:high]  // high > len
+    }()
+    assert(panicked, "slice range high > len should panic")
+    
+    println("Test 7: Slice range out of bounds (low > high)")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        s := []int{1, 2, 3}
+        low := 2
+        high := 1
+        _ = s[low:high]  // low > high
+    }()
+    assert(panicked, "slice range low > high should panic")
+    
+    println("Test 8: Three-index slice cap out of bounds")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        s := []int{1, 2, 3}
+        c := 4
+        _ = s[0:2:c]  // cap > underlying cap
+    }()
+    assert(panicked, "three-index slice cap > cap should panic")
+    
+    println("Test 9: Valid boundary access (no panic)")
+    arr := [3]int{1, 2, 3}
+    assert(arr[0] == 1, "arr[0] should work")
+    assert(arr[2] == 3, "arr[len-1] should work")
+    
+    s := []int{1, 2, 3}
+    assert(s[0] == 1, "s[0] should work")
+    assert(s[2] == 3, "s[len-1] should work")
+    
+    str := "abc"
+    assert(str[0] == 'a', "str[0] should work")
+    assert(str[2] == 'c', "str[len-1] should work")
+    
+    println("Test 10: Slice to end boundary")
+    sub := s[2:3]
+    assert(len(sub) == 1, "s[2:3] should have len 1")
+    assert(sub[0] == 3, "s[2:3][0] should be 3")
+    
+    println("index_bounds_panic: ALL PASSED")
+}

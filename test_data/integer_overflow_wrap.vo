@@ -1,0 +1,84 @@
+// Test: integer overflow wraps around (Go/Vo semantics)
+package main
+
+func main() {
+    println("Test 1: uint8 overflow")
+    var u8 uint8 = 255
+    u8 += 1
+    assert(u8 == 0, "uint8: 255 + 1 should wrap to 0")
+    
+    u8 = 0
+    u8 -= 1
+    assert(u8 == 255, "uint8: 0 - 1 should wrap to 255")
+    
+    println("Test 2: uint64 overflow")
+    var u64 uint64 = 0xFFFFFFFFFFFFFFFF
+    u64 += 1
+    assert(u64 == 0, "uint64 max + 1 should wrap to 0")
+    
+    println("Test 3: int8 overflow")
+    var i8 int8 = 127
+    i8 += 1
+    assert(i8 == -128, "int8: 127 + 1 should wrap to -128")
+    
+    i8 = -128
+    i8 -= 1
+    assert(i8 == 127, "int8: -128 - 1 should wrap to 127")
+    
+    println("Test 4: int64 overflow")
+    var i64 int64 = 9223372036854775807  // max int64
+    i64 += 1
+    assert(i64 == -9223372036854775808, "int64 max + 1 should wrap to min")
+    
+    println("Test 5: Multiplication overflow")
+    var x uint8 = 16
+    var y uint8 = 16
+    var z uint8 = x * y  // 256 -> 0
+    assert(z == 0, "uint8: 16 * 16 = 256 wraps to 0")
+    
+    x = 17
+    z = x * y  // 272 -> 16
+    assert(z == 16, "uint8: 17 * 16 = 272 wraps to 16")
+    
+    println("Test 6: Signed multiplication overflow")
+    var a int8 = 64
+    var b int8 = 2
+    var c int8 = a * b  // 128 -> -128
+    assert(c == -128, "int8: 64 * 2 = 128 wraps to -128")
+    
+    println("Test 7: Increment/decrement in loop")
+    var counter uint8 = 250
+    for i := 0; i < 10; i += 1 {
+        counter += 1
+    }
+    assert(counter == 4, "uint8: 250 + 10 wraps to 4")
+    
+    println("Test 8: Addition with max values")
+    var max32 uint32 = 0xFFFFFFFF
+    result := max32 + max32
+    assert(result == 0xFFFFFFFE, "uint32 max + max = max*2 (wrapped)")
+    
+    println("Test 9: Compound assignment overflow")
+    var v uint8 = 200
+    v += 100
+    assert(v == 44, "uint8: 200 += 100 wraps to 44")
+    
+    v = 50
+    v -= 100
+    assert(v == 206, "uint8: 50 -= 100 wraps to 206")
+    
+    v = 20
+    v *= 15
+    assert(v == 44, "uint8: 20 *= 15 = 300 wraps to 44")
+    
+    println("Test 10: Negation of min value")
+    var minI8 int8 = -128
+    negated := -minI8
+    assert(negated == -128, "int8: -(-128) overflows to -128")
+    
+    var minI64 int64 = -9223372036854775808
+    negated64 := -minI64
+    assert(negated64 == -9223372036854775808, "int64: -min overflows to min")
+    
+    println("integer_overflow_wrap: ALL PASSED")
+}

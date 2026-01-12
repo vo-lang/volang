@@ -74,6 +74,7 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Fiber], functions: &[FunctionDef]) {
             match &state.kind {
                 crate::fiber::UnwindingKind::Return { return_kind, .. } => {
                     match return_kind {
+                        crate::fiber::PendingReturnKind::None => {}
                         crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
                             scan_slots_by_types(gc, vals, slot_types);
                         }

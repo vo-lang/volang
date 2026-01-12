@@ -1,0 +1,116 @@
+// Test: deep defer stack and LIFO execution order
+package main
+
+var order []int
+
+func main() {
+    println("Test 1: Basic LIFO order")
+    order = []int{}
+    testBasicOrder()
+    assert(len(order) == 5, "should have 5 deferred calls")
+    assert(order[0] == 5, "first executed should be 5")
+    assert(order[1] == 4, "second executed should be 4")
+    assert(order[2] == 3, "third executed should be 3")
+    assert(order[3] == 2, "fourth executed should be 2")
+    assert(order[4] == 1, "fifth executed should be 1")
+    
+    println("Test 2: Defer in loop")
+    order = []int{}
+    testDeferInLoop()
+    assert(len(order) == 10, "should have 10 deferred calls")
+    for i := 0; i < 10; i += 1 {
+        assert(order[i] == 9-i, "defers should execute in reverse order")
+    }
+    
+    println("Test 3: Defer with captured variables (by value)")
+    order = []int{}
+    testDeferCapturedValue()
+    assert(order[0] == 3, "first defer captured 3")
+    assert(order[1] == 2, "second defer captured 2")
+    assert(order[2] == 1, "third defer captured 1")
+    
+    println("Test 4: Defer with panic and recover")
+    order = []int{}
+    testDeferWithPanic()
+    assert(len(order) == 4, "all 4 defers should execute")
+    assert(order[0] == 4, "first defer (innermost)")
+    assert(order[1] == 3, "second defer")
+    assert(order[2] == 2, "third defer (has recover)")
+    assert(order[3] == 1, "fourth defer (outermost)")
+    
+    println("Test 5: Nested function defer stacks")
+    order = []int{}
+    testNestedFunctionDefers()
+    assert(len(order) == 6, "should have 6 deferred calls total")
+    assert(order[0] == 102, "inner1 defer 2")
+    assert(order[1] == 101, "inner1 defer 1")
+    assert(order[2] == 202, "inner2 defer 2")
+    assert(order[3] == 201, "inner2 defer 1")
+    assert(order[4] == 2, "outer defer 2")
+    assert(order[5] == 1, "outer defer 1")
+    
+    println("Test 6: Deep defer stack (100 defers)")
+    order = []int{}
+    testDeepDeferStack()
+    assert(len(order) == 100, "should have 100 deferred calls")
+    for i := 0; i < 100; i += 1 {
+        assert(order[i] == 99-i, "deep defers should be in reverse order")
+    }
+    
+    println("deep_defer_stack: ALL PASSED")
+}
+
+func testBasicOrder() {
+    defer func() { order = append(order, 1) }()
+    defer func() { order = append(order, 2) }()
+    defer func() { order = append(order, 3) }()
+    defer func() { order = append(order, 4) }()
+    defer func() { order = append(order, 5) }()
+}
+
+func testDeferInLoop() {
+    for i := 0; i < 10; i += 1 {
+        i := i  // capture by value
+        defer func() { order = append(order, i) }()
+    }
+}
+
+func testDeferCapturedValue() {
+    for i := 1; i <= 3; i += 1 {
+        i := i
+        defer func() { order = append(order, i) }()
+    }
+}
+
+func testDeferWithPanic() {
+    defer func() { order = append(order, 1) }()
+    defer func() {
+        order = append(order, 2)
+        recover()
+    }()
+    defer func() { order = append(order, 3) }()
+    defer func() { order = append(order, 4) }()
+    panic("test")
+}
+
+func testNestedFunctionDefers() {
+    defer func() { order = append(order, 1) }()
+    defer func() { order = append(order, 2) }()
+    
+    func() {
+        defer func() { order = append(order, 101) }()
+        defer func() { order = append(order, 102) }()
+    }()
+    
+    func() {
+        defer func() { order = append(order, 201) }()
+        defer func() { order = append(order, 202) }()
+    }()
+}
+
+func testDeepDeferStack() {
+    for i := 0; i < 100; i += 1 {
+        i := i
+        defer func() { order = append(order, i) }()
+    }
+}

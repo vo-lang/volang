@@ -1,0 +1,68 @@
+// Test: integer division and modulo edge cases
+package main
+
+func main() {
+    println("Test 1: Basic division")
+    assert(10 / 3 == 3, "10 / 3 should be 3")
+    assert(-10 / 3 == -3, "Go: -10 / 3 should be -3 (truncate toward zero)")
+    assert(10 / -3 == -3, "Go: 10 / -3 should be -3")
+    assert(-10 / -3 == 3, "Go: -10 / -3 should be 3")
+    
+    println("Test 2: Modulo with negative operands")
+    assert(10 % 3 == 1, "10 % 3 should be 1")
+    assert(-10 % 3 == -1, "Go: -10 % 3 should be -1 (sign follows dividend)")
+    assert(10 % -3 == 1, "Go: 10 % -3 should be 1")
+    assert(-10 % -3 == -1, "Go: -10 % -3 should be -1")
+    
+    println("Test 3: Division resulting in zero")
+    assert(1 / 2 == 0, "1 / 2 should be 0")
+    assert(-1 / 2 == 0, "-1 / 2 should be 0")
+    
+    println("Test 4: Modulo edge cases")
+    assert(0 % 5 == 0, "0 % 5 should be 0")
+    assert(5 % 5 == 0, "5 % 5 should be 0")
+    assert(-5 % 5 == 0, "-5 % 5 should be 0")
+    
+    println("Test 5: Division by zero should panic")
+    panicked := false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        x := 1
+        y := 0
+        _ = x / y
+    }()
+    assert(panicked, "integer division by zero should panic")
+    
+    println("Test 6: Modulo by zero should panic")
+    panicked = false
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                panicked = true
+            }
+        }()
+        x := 1
+        y := 0
+        _ = x % y
+    }()
+    assert(panicked, "integer modulo by zero should panic")
+    
+    println("Test 7: Different integer types")
+    var i8 int8 = -10
+    assert(i8 / 3 == -3, "int8: -10 / 3 = -3")
+    assert(i8 % 3 == -1, "int8: -10 % 3 = -1")
+    
+    var i64 int64 = -100
+    assert(i64 / 7 == -14, "int64: -100 / 7 = -14")
+    assert(i64 % 7 == -2, "int64: -100 % 7 = -2")
+    
+    println("Test 8: Min int division edge case")
+    var minInt8 int8 = -128
+    assert(minInt8 / -1 == -128, "int8: -128 / -1 overflows to -128")
+    
+    println("integer_div_mod_edge: ALL PASSED")
+}
