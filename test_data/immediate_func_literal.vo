@@ -1,0 +1,90 @@
+// Test: immediately invoked function literals (IIFE pattern)
+// Coverage: func literal definition and immediate call in various contexts
+package main
+
+func main() {
+    // Test 1: Basic IIFE
+    result := func() int {
+        return 42
+    }()
+    assert(result == 42, "basic IIFE")
+    
+    // Test 2: IIFE with arguments
+    sum := func(a, b int) int {
+        return a + b
+    }(10, 20)
+    assert(sum == 30, "IIFE with args")
+    
+    // Test 3: IIFE capturing outer variable
+    x := 100
+    captured := func() int {
+        return x * 2
+    }()
+    assert(captured == 200, "IIFE capture")
+    
+    // Test 4: IIFE modifying outer variable
+    counter := 0
+    func() {
+        counter = 50
+    }()
+    assert(counter == 50, "IIFE modify outer")
+    
+    // Test 5: Nested IIFE
+    nested := func() int {
+        return func() int {
+            return func() int {
+                return 999
+            }()
+        }()
+    }()
+    assert(nested == 999, "nested IIFE")
+    
+    // Test 6: IIFE returning multiple values
+    a, b := func() (int, string) {
+        return 1, "hello"
+    }()
+    assert(a == 1, "multi return a")
+    assert(b == "hello", "multi return b")
+    
+    // Test 7: IIFE in expression context
+    arr := []int{
+        func() int { return 1 }(),
+        func() int { return 2 }(),
+        func() int { return 3 }(),
+    }
+    assert(arr[0] == 1, "arr[0]")
+    assert(arr[1] == 2, "arr[1]")
+    assert(arr[2] == 3, "arr[2]")
+    
+    // Test 8: IIFE with defer inside
+    deferRan := false
+    func() {
+        defer func() {
+            deferRan = true
+        }()
+    }()
+    assert(deferRan, "defer in IIFE should run")
+    
+    // Test 9: IIFE as condition
+    condResult := false
+    if func() bool { return true }() {
+        condResult = true
+    }
+    assert(condResult, "IIFE condition failed")
+    
+    // Test 10: IIFE in for init
+    for i := func() int { return 0 }(); i < 3; i += 1 {
+        // just iterate
+    }
+    
+    // Test 11: IIFE returning closure
+    adder := func() func(int) int {
+        base := 10
+        return func(n int) int {
+            return base + n
+        }
+    }()
+    assert(adder(5) == 15, "IIFE returning closure")
+    
+    println("immediate_func_literal: ok")
+}

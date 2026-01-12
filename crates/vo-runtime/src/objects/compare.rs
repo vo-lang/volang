@@ -7,8 +7,8 @@ use crate::objects::{array, string};
 use crate::{RuntimeType, SlotType, ValueKind};
 use vo_common_core::bytecode::Module;
 
-const HASH_K: u64 = 0xf1357aea2e62a9c5;
-const HASH_SEED: u64 = 0x517cc1b727220a95;
+pub const HASH_K: u64 = 0xf1357aea2e62a9c5;
+pub const HASH_SEED: u64 = 0x517cc1b727220a95;
 
 /// Find the actual ValueKind for a slot, recursively descending into nested structs.
 /// Returns the ValueKind of the leaf field at the given slot offset.
@@ -252,6 +252,60 @@ pub fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
 }
 
 /// Deep comparison of two array values.
+/// Hash an interface value for use as map key.
+/// Uses content-based hashing for comparable types (string, struct, array, primitives).
+pub fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
+    let vk = ValueKind::from_u8((slot0 & 0xFF) as u8);
+    let rttid = ((slot0 >> 8) & 0xFFFFFF) as u32;
+    
+    let mut h = HASH_SEED;
+    // Include type info in hash
+    h = h.wrapping_add(slot0 & 0xFFFFFFFF).wrapping_mul(HASH_K);
+    
+    match vk {
+        ValueKind::String => {
+            if slot1 != 0 {
+                let s = string::as_bytes(slot1 as GcRef);
+                for &b in s {
+                    h = h.wrapping_add(b as u64).wrapping_mul(HASH_K);
+                }
+            }
+        }
+        ValueKind::Struct => {
+            if slot1 != 0 {
+                if let Some(struct_meta) = get_struct_meta(rttid, module) {
+                    let ptr = slot1 as GcRef;
+                    for i in 0..struct_meta.slot_types.len() {
+                        let val = unsafe { *ptr.add(i) };
+                        h = h.wrapping_add(val).wrapping_mul(HASH_K);
+                    }
+                } else {
+                    h = h.wrapping_add(slot1).wrapping_mul(HASH_K);
+                }
+            }
+        }
+        ValueKind::Array => {
+            if slot1 != 0 {
+                let arr = slot1 as GcRef;
+                let len = array::len(arr);
+                let elem_bytes = array::elem_bytes(arr);
+                let elem_slots = (elem_bytes / 8).max(1);
+                let data = unsafe { arr.add(array::HEADER_SLOTS) };
+                for i in 0..(len * elem_slots) {
+                    let val = unsafe { *data.add(i) };
+                    h = h.wrapping_add(val).wrapping_mul(HASH_K);
+                }
+            }
+        }
+        _ => {
+            // Primitives: hash the value directly
+            h = h.wrapping_add(slot1).wrapping_mul(HASH_K);
+        }
+    }
+    
+    h.rotate_left(5)
+}
+
 pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     let a_len = array::len(a);
     let b_len = array::len(b);

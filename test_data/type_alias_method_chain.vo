@@ -1,0 +1,116 @@
+// Test: type alias chains with method calls
+// Coverage: methods on named types, type conversion chains, method set inheritance
+package main
+
+type Int int
+
+func (i Int) Double() Int {
+    return i * 2
+}
+
+func (i Int) Add(n Int) Int {
+    return i + n
+}
+
+type MyInt Int
+
+func (m MyInt) Triple() MyInt {
+    return m * 3
+}
+
+type Counter struct {
+    value int
+}
+
+func (c Counter) Get() int {
+    return c.value
+}
+
+func (c *Counter) Inc() {
+    c.value += 1
+}
+
+type MyCounter Counter
+
+func (m MyCounter) GetDouble() int {
+    return m.value * 2
+}
+
+type Slice []int
+
+func (s Slice) Sum() int {
+    total := 0
+    for _, v := range s {
+        total += v
+    }
+    return total
+}
+
+func (s Slice) First() int {
+    if len(s) == 0 {
+        return 0
+    }
+    return s[0]
+}
+
+type MySlice Slice
+
+func (m MySlice) Len() int {
+    return len(m)
+}
+
+func main() {
+    // Test 1: Method on named int type
+    var i Int = 5
+    assert(i.Double() == 10, "Int.Double")
+    assert(i.Add(3) == 8, "Int.Add")
+    
+    // Test 2: Chained method calls
+    var j Int = 2
+    assert(j.Double().Double() == 8, "chained Double")
+    assert(j.Add(1).Double() == 6, "Add then Double")
+    
+    // Test 3: Type conversion and method call
+    x := 10
+    assert(Int(x).Double() == 20, "conversion then method")
+    
+    // Test 4: Second-level type alias
+    var m MyInt = 4
+    assert(m.Triple() == 12, "MyInt.Triple")
+    // MyInt does NOT inherit Int's methods (Go semantics)
+    // m.Double() would be compile error
+    
+    // Test 5: Struct type alias
+    c := Counter{value: 10}
+    assert(c.Get() == 10, "Counter.Get")
+    c.Inc()
+    assert(c.Get() == 11, "Counter.Inc")
+    
+    // Test 6: Named struct type
+    mc := MyCounter{value: 20}
+    assert(mc.GetDouble() == 40, "MyCounter.GetDouble")
+    // MyCounter does NOT have Counter's methods
+    
+    // Test 7: Named slice type with methods
+    s := Slice{1, 2, 3, 4, 5}
+    assert(s.Sum() == 15, "Slice.Sum")
+    assert(s.First() == 1, "Slice.First")
+    
+    // Test 8: Chained slice method (if returns same type)
+    // Note: Sum returns int, not Slice, so can't chain
+    
+    // Test 9: Type conversion to named type
+    rawSlice := []int{10, 20, 30}
+    assert(Slice(rawSlice).Sum() == 60, "conversion to Slice")
+    
+    // Test 10: Second-level slice alias
+    ms := MySlice{1, 2, 3}
+    assert(ms.Len() == 3, "MySlice.Len")
+    
+    // Test 11: Empty slice method
+    empty := Slice{}
+    assert(empty.Sum() == 0, "empty sum")
+    assert(empty.First() == 0, "empty first")
+    
+    println("type_alias_method_chain: ok")
+}

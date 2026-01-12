@@ -1,0 +1,15 @@
+// Bug reproduction: switch init variable shadowing corrupts outer variable
+package main
+
+func main() {
+    y := 999
+    println("before switch, y =", y)
+    
+    switch y := 1; y {
+    case 1:
+        println("inside switch, y =", y)
+    }
+    
+    println("after switch, y =", y)
+    assert(y == 999, "BUG: outer y should be 999, but got corrupted by switch init shadow")
+}

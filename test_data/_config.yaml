@@ -369,3 +369,14 @@ tests:
   - file: bug_composite_ptr_method_minimal.vo
   - file: composite_ptr_method.vo
 
+# Coverage tests from analysis (2026-01-12 batch 7) - New tests
+  - file: iota_skip_complex.vo
+  - file: immediate_func_literal.vo
+  - file: type_alias_method_chain.vo
+
+# Bug reproductions (2026-01-12) - Vo implementation bugs
+  - file: bug_map_any_string_key.vo
+  - file: bug_switch_init_shadow.vo
+    skip: [vm, jit]
+    reason: "BUG: switch init variable shadowing corrupts outer variable instead of creating new scope"
+

@@ -1,0 +1,85 @@
+// Test: iota with skipped values and complex expressions
+// Coverage: iota continuation, blank identifier skipping, bit operations
+package main
+
+const (
+    _  = iota // 0, skipped
+    A1        // 1
+    A2        // 2
+    _         // 3, skipped
+    A4        // 4
+)
+
+const (
+    B0 = iota * 10     // 0
+    B1                 // 10
+    B2                 // 20
+    _                  // 30, skipped
+    B4                 // 40
+)
+
+const (
+    FlagNone  = 0
+    FlagRead  = 1 << iota // 1 << 1 = 2
+    FlagWrite             // 1 << 2 = 4
+    FlagExec              // 1 << 3 = 8
+    _
+    FlagAll = FlagRead | FlagWrite | FlagExec // 14
+)
+
+const (
+    KB = 1 << (10 * (iota + 1)) // 1 << 10 = 1024
+    MB                          // 1 << 20
+    GB                          // 1 << 30
+)
+
+const (
+    C0, C1 = iota, iota + 10 // 0, 10
+    C2, C3                   // 1, 11
+    C4, C5                   // 2, 12
+)
+
+const (
+    D0 = iota + iota // 0 + 0 = 0
+    D1               // 1 + 1 = 2
+    D2               // 2 + 2 = 4
+)
+
+func main() {
+    // Test basic skip
+    assert(A1 == 1, "A1 should be 1")
+    assert(A2 == 2, "A2 should be 2")
+    assert(A4 == 4, "A4 should be 4")
+    
+    // Test multiplication
+    assert(B0 == 0, "B0 should be 0")
+    assert(B1 == 10, "B1 should be 10")
+    assert(B2 == 20, "B2 should be 20")
+    assert(B4 == 40, "B4 should be 40")
+    
+    // Test bit flags
+    assert(FlagRead == 2, "FlagRead should be 2")
+    assert(FlagWrite == 4, "FlagWrite should be 4")
+    assert(FlagExec == 8, "FlagExec should be 8")
+    assert(FlagAll == 14, "FlagAll should be 14")
+    
+    // Test size constants
+    assert(KB == 1024, "KB should be 1024")
+    assert(MB == 1048576, "MB should be 1048576")
+    assert(GB == 1073741824, "GB should be 1073741824")
+    
+    // Test parallel iota
+    assert(C0 == 0, "C0")
+    assert(C1 == 10, "C1")
+    assert(C2 == 1, "C2")
+    assert(C3 == 11, "C3")
+    assert(C4 == 2, "C4")
+    assert(C5 == 12, "C5")
+    
+    // Test iota + iota
+    assert(D0 == 0, "D0")
+    assert(D1 == 2, "D1")
+    assert(D2 == 4, "D2")
+    
+    println("iota_skip_complex: ok")
+}
