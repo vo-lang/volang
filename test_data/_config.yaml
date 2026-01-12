@@ -359,3 +359,17 @@ tests:
   - file: bug_select_recv_assign.vo
     # FIXED: codegen now handles recv.define=false case by copying to existing variable
 
+# Coverage tests from analysis (2026-01-12 batch 6) - New tests
+  - file: append_self_slice.vo
+  - file: interface_method_value.vo
+  - file: chained_type_assertion.vo
+  - file: zero_embed_method.vo
+
+# Bug reproduction (2026-01-12) - pointer receiver method on array element / embedded field
+  - file: bug_composite_ptr_method_minimal.vo
+    skip: [vm, jit]
+    reason: "BUG: calling pointer receiver method on array element or explicit embedded field causes GC misaligned pointer panic"
+  - file: composite_ptr_method.vo
+    skip: [vm, jit]
+    reason: "BUG: same as bug_composite_ptr_method_minimal - ptr receiver on array elem"
+

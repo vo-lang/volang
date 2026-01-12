@@ -1,0 +1,35 @@
+// Minimal test for zero-value embedded field method
+package main
+
+type Inner struct {
+    value int
+}
+
+func (i Inner) GetValue() int {
+    return i.value
+}
+
+func (i *Inner) SetValue(v int) {
+    i.value = v
+}
+
+type Outer struct {
+    Inner
+    name string
+}
+
+func main() {
+    // Test 1: Zero value Outer, call embedded method
+    var o1 Outer
+    v := o1.GetValue()  // value receiver on zero Inner
+    assert(v == 0, "zero Inner.GetValue should be 0")
+    println("test 1 ok")
+    
+    // Test 2: Set via embedded pointer receiver
+    var o2 Outer
+    o2.SetValue(42)
+    assert(o2.GetValue() == 42, "after SetValue")
+    println("test 2 ok")
+    
+    println("done")
+}

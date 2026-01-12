@@ -1,0 +1,82 @@
+// Test: pointer receiver method on composite literal
+// Go allows calling pointer receiver methods on addressable composite literals
+package main
+
+type Point struct {
+    X, Y int
+}
+
+func (p *Point) SetX(x int) {
+    p.X = x
+}
+
+func (p *Point) SetY(y int) {
+    p.Y = y
+}
+
+func (p *Point) Sum() int {
+    return p.X + p.Y
+}
+
+func (p *Point) Scale(factor int) {
+    p.X *= factor
+    p.Y *= factor
+}
+
+type Container struct {
+    pt Point
+}
+
+func main() {
+    // Test 1: Pointer to composite literal - should work
+    p1 := &Point{X: 10, Y: 20}
+    p1.SetX(100)
+    assert(p1.X == 100, "SetX on pointer literal")
+    assert(p1.Sum() == 120, "Sum after SetX")
+    
+    // Test 2: Method on variable (auto address-of)
+    p2 := Point{X: 5, Y: 10}
+    p2.SetX(50)  // Should auto-take address
+    assert(p2.X == 50, "SetX on variable")
+    
+    // Test 3: Chained method calls
+    p3 := &Point{X: 1, Y: 2}
+    p3.Scale(10)
+    assert(p3.X == 10, "Scale X")
+    assert(p3.Y == 20, "Scale Y")
+    
+    // Test 4: Nested struct field method call
+    c := Container{pt: Point{X: 100, Y: 200}}
+    c.pt.SetX(150)
+    assert(c.pt.X == 150, "nested struct method call")
+    
+    // Test 5: Pointer to nested struct field
+    c2 := &Container{pt: Point{X: 10, Y: 20}}
+    c2.pt.Scale(5)
+    assert(c2.pt.X == 50, "pointer to nested Scale X")
+    assert(c2.pt.Y == 100, "pointer to nested Scale Y")
+    
+    // Test 6: Return value of function - NOT addressable
+    // This should NOT compile if we try to call ptr method on it directly
+    // But we can assign to variable first
+    pt := getPoint()
+    pt.SetX(999)
+    assert(pt.X == 999, "method on returned value assigned to var")
+    
+    // Test 7: Array element method call
+    arr := [2]Point{{X: 1, Y: 2}, {X: 3, Y: 4}}
+    arr[0].SetX(100)
+    assert(arr[0].X == 100, "array element method")
+    
+    // Test 8: Slice element method call
+    slice := []Point{{X: 10, Y: 20}, {X: 30, Y: 40}}
+    slice[1].Scale(2)
+    assert(slice[1].X == 60, "slice element Scale X")
+    assert(slice[1].Y == 80, "slice element Scale Y")
+    
+    println("composite_ptr_method: ok")
+}
+
+func getPoint() Point {
+    return Point{X: 5, Y: 10}
+}

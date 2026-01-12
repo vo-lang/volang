@@ -991,6 +991,42 @@ fn compile_addressable_to_ptr(
     Ok(dst)
 }
 
+/// Get the GcRef and offset for an addressable expression.
+/// 
+/// Returns (gcref_slot, total_offset) if the expression is addressable and on heap.
+/// Used for:
+/// - Taking address of variables: &x
+/// - Taking address of struct fields: &outer.field
+/// - Passing pointer receiver to methods: x.Method() where Method has *T receiver
+/// 
+/// Handles: Ident, Selector (nested field access)
+pub(crate) fn get_addressable_gcref(
+    expr: &Expr,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Option<(u16, u16)> {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            let local = func.lookup_local(ident.symbol)?;
+            let gcref = get_gcref_slot(&local.storage)?;
+            Some((gcref, 0))
+        }
+        ExprKind::Selector(sel) => {
+            let recv_type = info.expr_type(sel.expr.id);
+            // Pointer type: need to compile and dereference, not addressable this way
+            if info.is_pointer(recv_type) {
+                return None;
+            }
+            let (gcref_slot, base_offset) = get_addressable_gcref(&sel.expr, func, info)?;
+            let field_name = info.project.interner.resolve(sel.sel.symbol)?;
+            let (field_offset, _) = info.struct_field_offset(recv_type, field_name);
+            Some((gcref_slot, base_offset + field_offset))
+        }
+        ExprKind::Paren(inner) => get_addressable_gcref(inner, func, info),
+        _ => None,
+    }
+}
+
 /// Compile address-of operator (&x).
 /// Spec: only struct types can have their address taken.
 fn compile_addr_of(
@@ -1000,17 +1036,20 @@ fn compile_addr_of(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Case 1: &ident - variable on heap
-    if let ExprKind::Ident(ident) = &operand.kind {
-        if let Some(local) = func.lookup_local(ident.symbol) {
-            if local.storage.is_heap() {
-                func.emit_op(Opcode::Copy, dst, local.storage.slot(), 0);
-                return Ok(());
-            }
+    // Case 1: Addressable expression on heap (variable, field access)
+    if let Some((gcref_slot, offset)) = get_addressable_gcref(operand, func, info) {
+        if offset == 0 {
+            func.emit_op(Opcode::Copy, dst, gcref_slot, 0);
+            return Ok(());
+        } else {
+            // Vo doesn't support interior pointers
+            return Err(CodegenError::UnsupportedExpr(
+                "cannot take address of field not at offset 0".to_string()
+            ));
         }
     }
     
-    // Case 2: &slice[i] or &array[i] - get element address (element must be struct, validated by checker)
+    // Case 2: &slice[i] or &array[i] - get element address
     if let ExprKind::Index(index_expr) = &operand.kind {
         let container_type = info.expr_type(index_expr.expr.id);
         if info.is_slice(container_type) || info.is_array(container_type) {

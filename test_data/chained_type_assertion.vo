@@ -1,0 +1,83 @@
+// Test: chained type assertions through multiple interface layers
+package main
+
+type Reader interface {
+    Read() int
+}
+
+type Writer interface {
+    Write(int)
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type Buffer struct {
+    data int
+}
+
+func (b *Buffer) Read() int { return b.data }
+func (b *Buffer) Write(v int) { b.data = v }
+
+// OnlyReader implements Reader but not Writer
+type OnlyReader struct{ v int }
+func (o OnlyReader) Read() int { return o.v }
+
+func main() {
+    // Test 1: any -> ReadWriter -> Reader
+    buf := &Buffer{data: 42}
+    var a any = buf
+    
+    // First assertion: any -> ReadWriter
+    rw := a.(ReadWriter)
+    assert(rw.Read() == 42, "ReadWriter.Read should work")
+    
+    // Second assertion: ReadWriter -> Reader
+    r := rw.(Reader)
+    assert(r.Read() == 42, "Reader.Read should work")
+    
+    // Test 2: Chained in single expression (if allowed)
+    var a2 any = &Buffer{data: 100}
+    // a2.(ReadWriter).(Reader) - chain of assertions
+    rw2 := a2.(ReadWriter)
+    r2 := rw2.(Reader)
+    assert(r2.Read() == 100, "chained assertion result")
+    
+    // Test 3: any -> concrete -> interface
+    var a3 any = &Buffer{data: 200}
+    concrete := a3.(*Buffer)
+    var r3 Reader = concrete
+    assert(r3.Read() == 200, "concrete to interface")
+    
+    // Test 4: Interface -> any -> different interface
+    var rw4 ReadWriter = &Buffer{data: 300}
+    var a4 any = rw4
+    w4 := a4.(Writer)
+    w4.Write(350)
+    assert(rw4.Read() == 350, "write through extracted Writer")
+    
+    // Test 5: ok-form chained assertions
+    var a5 any = &Buffer{data: 400}
+    if rw5, ok := a5.(ReadWriter); ok {
+        if r5, ok := rw5.(Reader); ok {
+            assert(r5.Read() == 400, "ok-form chained")
+        } else {
+            panic("ReadWriter should be Reader")
+        }
+    } else {
+        panic("should be ReadWriter")
+    }
+    
+    // Test 6: Failed middle assertion
+    var a6 any = OnlyReader{v: 500}
+    r6, ok := a6.(Reader)
+    assert(ok, "OnlyReader implements Reader")
+    assert(r6.Read() == 500, "OnlyReader.Read")
+    
+    _, ok2 := a6.(ReadWriter)
+    assert(!ok2, "OnlyReader does not implement ReadWriter")
+    
+    println("chained_type_assertion: ok")
+}

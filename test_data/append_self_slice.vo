@@ -1,0 +1,57 @@
+// Test: append slice to itself (s = append(s, s...))
+// This tests correct behavior when source and destination overlap
+package main
+
+func main() {
+    // Test 1: Basic self-append
+    s1 := []int{1, 2, 3}
+    s1 = append(s1, s1...)
+    assert(len(s1) == 6, "len should be 6")
+    assert(s1[0] == 1, "s1[0] should be 1")
+    assert(s1[1] == 2, "s1[1] should be 2")
+    assert(s1[2] == 3, "s1[2] should be 3")
+    assert(s1[3] == 1, "s1[3] should be 1")
+    assert(s1[4] == 2, "s1[4] should be 2")
+    assert(s1[5] == 3, "s1[5] should be 3")
+    
+    // Test 2: Self-append with enough capacity (no realloc)
+    s2 := make([]int, 2, 10)
+    s2[0] = 10
+    s2[1] = 20
+    s2 = append(s2, s2...)
+    assert(len(s2) == 4, "len should be 4")
+    assert(s2[0] == 10, "s2[0] should be 10")
+    assert(s2[1] == 20, "s2[1] should be 20")
+    assert(s2[2] == 10, "s2[2] should be 10")
+    assert(s2[3] == 20, "s2[3] should be 20")
+    
+    // Test 3: Self-append strings
+    s3 := []string{"a", "b"}
+    s3 = append(s3, s3...)
+    assert(len(s3) == 4, "string slice len should be 4")
+    assert(s3[0] == "a", "s3[0]")
+    assert(s3[1] == "b", "s3[1]")
+    assert(s3[2] == "a", "s3[2]")
+    assert(s3[3] == "b", "s3[3]")
+    
+    // Test 4: Empty slice self-append (no-op)
+    s4 := []int{}
+    s4 = append(s4, s4...)
+    assert(len(s4) == 0, "empty self-append should stay empty")
+    
+    // Test 5: Single element self-append
+    s5 := []int{42}
+    s5 = append(s5, s5...)
+    assert(len(s5) == 2, "single elem self-append len")
+    assert(s5[0] == 42, "s5[0]")
+    assert(s5[1] == 42, "s5[1]")
+    
+    // Test 6: Append partial self (sub-slice)
+    s6 := []int{1, 2, 3, 4, 5}
+    s6 = append(s6, s6[2:4]...)
+    assert(len(s6) == 7, "partial self-append len")
+    assert(s6[5] == 3, "s6[5] should be 3")
+    assert(s6[6] == 4, "s6[6] should be 4")
+    
+    println("append_self_slice: ok")
+}

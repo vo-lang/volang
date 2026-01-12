@@ -1,0 +1,61 @@
+// Test: method value obtained from interface value
+// Getting a method value from an interface should work correctly
+package main
+
+type Adder interface {
+    Add(int) int
+}
+
+type Counter struct {
+    value int
+}
+
+func (c *Counter) Add(n int) int {
+    c.value += n
+    return c.value
+}
+
+func main() {
+    // Test 1: Method value from interface
+    c := &Counter{value: 10}
+    var a Adder = c
+    
+    addFn := a.Add  // Method value from interface
+    result := addFn(5)
+    assert(result == 15, "method value should work: expected 15, got ", result)
+    assert(c.value == 15, "original should be modified")
+    
+    // Test 2: Multiple calls through method value
+    result2 := addFn(3)
+    assert(result2 == 18, "second call should return 18")
+    
+    // Test 3: Method value stored and called later
+    c2 := &Counter{value: 100}
+    var a2 Adder = c2
+    fn := a2.Add
+    
+    c2.value = 200  // Modify underlying
+    result3 := fn(10)
+    // Method value captures the receiver, so it operates on the interface's value
+    assert(result3 == 210, "method value with modified receiver: expected 210, got ", result3)
+    
+    // Test 4: Method value from type assertion result
+    var any1 any = &Counter{value: 50}
+    adder := any1.(Adder)
+    fn2 := adder.Add
+    assert(fn2(25) == 75, "method value from type asserted interface")
+    
+    // Test 5: Method value as function argument
+    c3 := &Counter{value: 0}
+    var a3 Adder = c3
+    result4 := applyTwice(a3.Add, 10)
+    assert(result4 == 20, "method value as argument: expected 20, got ", result4)
+    assert(c3.value == 20, "counter should be 20")
+    
+    println("interface_method_value: ok")
+}
+
+func applyTwice(fn func(int) int, n int) int {
+    fn(n)
+    return fn(n)
+}
