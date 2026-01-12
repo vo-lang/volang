@@ -332,8 +332,6 @@ tests:
 
 # Skipped due to Vo implementation bugs (2026-01-12)
   - file: nil_func_call_panic.vo
-    skip: [vm, jit]
-    reason: "nil function call causes Rust panic instead of Vo panic (not recoverable)"
   - file: defer_panic_order.vo
     skip: [vm, jit]
     reason: "defer funcCall() during panic unwinding does not execute correctly"

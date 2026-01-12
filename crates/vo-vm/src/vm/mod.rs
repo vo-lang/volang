@@ -13,7 +13,7 @@ pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE};
 
 use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, panic_unwind, user_panic,
-    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT};
+    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT, ERR_NIL_FUNC_CALL};
 
 use crate::bytecode::Module;
 use crate::exec;
@@ -666,7 +666,12 @@ impl Vm {
                     }
                 }
                 Opcode::CallClosure => {
-                    exec::exec_call_closure(stack, &mut fiber.frames, &inst, module)
+                    let closure_ref = stack[bp + inst.a as usize] as vo_runtime::gc::GcRef;
+                    if closure_ref.is_null() {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_FUNC_CALL.to_string())
+                    } else {
+                        exec::exec_call_closure(stack, &mut fiber.frames, &inst, module)
+                    }
                 }
                 Opcode::CallIface => {
                     exec::exec_call_iface(stack, &mut fiber.frames, &inst, module, &self.state.itab_cache)

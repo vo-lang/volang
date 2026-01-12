@@ -73,6 +73,7 @@ pub const ERR_NIL_MAP_WRITE: &str = "runtime error: assignment to entry in nil m
 pub const ERR_UNHASHABLE_TYPE: &str = "runtime error: hash of unhashable type";
 pub const ERR_UNCOMPARABLE_TYPE: &str = "runtime error: comparing uncomparable type in interface value";
 pub const ERR_NEGATIVE_SHIFT: &str = "runtime error: negative shift amount";
+pub const ERR_NIL_FUNC_CALL: &str = "runtime error: call of nil function";
 
 /// Trigger a recoverable runtime panic with proper unwind mechanism.
 /// Use this for all user-triggerable runtime errors (bounds check, nil access, etc.)
