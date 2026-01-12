@@ -142,14 +142,13 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         if meta_id < struct_metas.len() { Some(&struct_metas[meta_id].slot_types) } else { None }
     } else { None };
     
-    for i in 0..map::len(obj) {
-        if let Some((k, v)) = map::iter_at(obj, i) {
-            if scan_key {
-                scan_slots_with_types(gc, k, key_slot_types);
-            }
-            if scan_val {
-                scan_slots_with_types(gc, v, val_slot_types);
-            }
+    let mut iter = map::iter_init(obj);
+    while let Some((k, v)) = map::iter_next(&mut iter) {
+        if scan_key {
+            scan_slots_with_types(gc, k, key_slot_types);
+        }
+        if scan_val {
+            scan_slots_with_types(gc, v, val_slot_types);
         }
     }
 }

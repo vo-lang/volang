@@ -510,23 +510,40 @@ pub extern "C" fn vo_map_delete(m: u64, key_ptr: *const u64, key_slots: u32) {
     map::delete(m as crate::gc::GcRef, key, None);
 }
 
-/// Get key-value by index for iteration.
-/// Returns 1 if valid entry exists, 0 if end of map.
+/// Initialize a map iterator. Writes MAP_ITER_SLOTS * 8 bytes to iter_ptr.
 #[no_mangle]
-pub extern "C" fn vo_map_iter_get(m: u64, idx: u64, key_ptr: *mut u64, key_slots: u32, val_ptr: *mut u64, val_slots: u32) -> u64 {
+pub extern "C" fn vo_map_iter_init(m: u64, iter_ptr: *mut u64) {
     use crate::objects::map;
-    if m == 0 { return 0; }
+    const SLOTS: usize = map::MAP_ITER_SLOTS;
+    let iter = map::iter_init(m as crate::gc::GcRef);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &iter as *const map::MapIterator as *const u64,
+            iter_ptr,
+            SLOTS,
+        );
+    }
+    core::mem::forget(iter);
+}
+
+/// Advance map iterator and get next key-value pair.
+/// Returns 1 if valid entry exists, 0 if exhausted.
+#[no_mangle]
+pub extern "C" fn vo_map_iter_next(iter_ptr: *mut u64, key_ptr: *mut u64, key_slots: u32, val_ptr: *mut u64, val_slots: u32) -> u64 {
+    use crate::objects::map;
+    let iter = unsafe { &mut *(iter_ptr as *mut map::MapIterator) };
     
-    if let Some((key, val)) = map::iter_at(m as crate::gc::GcRef, idx as usize) {
-        let key_copy = (key_slots as usize).min(key.len());
-        let val_copy = (val_slots as usize).min(val.len());
-        unsafe {
-            core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_copy);
-            core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_copy);
+    match map::iter_next(iter) {
+        Some((key, val)) => {
+            let key_copy = (key_slots as usize).min(key.len());
+            let val_copy = (val_slots as usize).min(val.len());
+            unsafe {
+                core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_copy);
+                core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_copy);
+            }
+            1
         }
-        1
-    } else {
-        0
+        None => 0,
     }
 }
 
@@ -1131,7 +1148,8 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_get", vo_map_get as *const u8),
         ("vo_map_set", vo_map_set as *const u8),
         ("vo_map_delete", vo_map_delete as *const u8),
-        ("vo_map_iter_get", vo_map_iter_get as *const u8),
+        ("vo_map_iter_init", vo_map_iter_init as *const u8),
+        ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_copy", vo_copy as *const u8),
     ]
 }

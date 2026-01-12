@@ -28,3 +28,4 @@ pub mod map;
 pub mod slice;
 pub mod string;
 pub mod struct_ops;
+pub mod vo_map;

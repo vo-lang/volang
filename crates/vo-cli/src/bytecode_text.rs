@@ -312,10 +312,11 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::MapSet => format!("MapSet        r{}[r{}], r{}", a, b, c),
         Opcode::MapDelete => format!("MapDelete     r{}[r{}]", a, b),
         Opcode::MapLen => format!("MapLen        r{}, r{}", a, b),
-        Opcode::MapIterGet => {
+        Opcode::MapIterInit => format!("MapIterInit   r{}, r{}", a, b),
+        Opcode::MapIterNext => {
             let key_slots = flags & 0x0F;
             let val_slots = (flags >> 4) & 0x0F;
-            format!("MapIterGet    r{}, r{}[r{}], key_slots={}, val_slots={}", a, b, c, key_slots, val_slots)
+            format!("MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}", a, b, c, key_slots, val_slots)
         }
 
         // CHAN

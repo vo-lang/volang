@@ -136,26 +136,54 @@ pub fn exec_map_len(stack: &mut [u64], bp: usize, inst: &Instruction) {
     stack[bp + inst.a as usize] = len as u64;
 }
 
-/// MapIterGet: Get key-value by index (for range expansion)
-/// a=key_slot, b=map_reg, c=cursor_slot
-/// flags = key_slots | (val_slots << 4)
-/// Writes key at key_slot, value at key_slot + key_slots
+/// MapIterInit: Initialize map iterator
+/// a=iter_slot (7 slots), b=map_reg
 #[inline]
-pub fn exec_map_iter_get(stack: &mut [u64], bp: usize, inst: &Instruction) {
+pub fn exec_map_iter_init(stack: &mut [u64], bp: usize, inst: &Instruction) {
     let m = stack[bp + inst.b as usize] as GcRef;
-    let idx = stack[bp + inst.c as usize] as usize;
+    let iter = map::iter_init(m);
+    
+    let iter_slot = bp + inst.a as usize;
+    const SLOTS: usize = map::MAP_ITER_SLOTS;
+    const _: () = assert!(SLOTS == 7); // Verify assumption matches codegen
+    unsafe {
+        let src = &iter as *const map::MapIterator as *const u64;
+        let dst = stack.as_mut_ptr().add(iter_slot);
+        core::ptr::copy_nonoverlapping(src, dst, SLOTS);
+    }
+    core::mem::forget(iter);
+}
+
+/// MapIterNext: Advance iterator and get next key-value
+/// a=key_slot, b=iter_slot, c=ok_slot, flags=key_slots|(val_slots<<4)
+/// Writes 1 to ok_slot if got next element, 0 if exhausted
+#[inline]
+pub fn exec_map_iter_next(stack: &mut [u64], bp: usize, inst: &Instruction) {
+    let iter_slot = bp + inst.b as usize;
+    let ok_slot = bp + inst.c as usize;
     let key_slots = (inst.flags & 0x0F) as usize;
     let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
-
-    let key_dst = bp + inst.a as usize;
-    let val_dst = key_dst + key_slots;
-
-    if let Some((key, val)) = map::iter_at(m, idx) {
-        for i in 0..key_slots.min(key.len()) {
-            stack[key_dst + i] = key[i];
+    
+    // Get mutable reference to iterator on stack
+    let iter = unsafe {
+        &mut *(stack.as_mut_ptr().add(iter_slot) as *mut map::MapIterator)
+    };
+    
+    match map::iter_next(iter) {
+        Some((key, val)) => {
+            let key_dst = bp + inst.a as usize;
+            let val_dst = key_dst + key_slots;
+            
+            for i in 0..key_slots.min(key.len()) {
+                stack[key_dst + i] = key[i];
+            }
+            for i in 0..val_slots.min(val.len()) {
+                stack[val_dst + i] = val[i];
+            }
+            stack[ok_slot] = 1;
         }
-        for i in 0..val_slots.min(val.len()) {
-            stack[val_dst + i] = val[i];
+        None => {
+            stack[ok_slot] = 0;
         }
     }
 }

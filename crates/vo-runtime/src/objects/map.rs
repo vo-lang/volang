@@ -1,23 +1,19 @@
 //! Map object operations.
 //!
 //! Layout: GcHeader + MapData
-//! Uses hashbrown HashMap (no_std compatible, unordered - matches Go map semantics).
+//! Uses VoMap (custom hash map with iteration-safe semantics).
 //!
-//! Supports modes:
-//! - SingleKey: key is 1 slot primitive (common case, optimized)
-//! - MultiKey: key is multiple slots without GcRef fields
-//! - StringKey: key is a single string
-//! - StructKey: key is a struct that may contain string/interface fields (needs deep comparison)
-//!
-//! Value always supports multiple slots.
+//! Iteration safety:
+//! - Delete during iteration: tombstones ensure safe traversal
+//! - Insert during iteration: if resize happens, generation changes, iteration continues
+//!   (may skip or repeat elements, matching Go semantics)
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use std::boxed::Box;
 
-use hashbrown::hash_table::HashTable;
-use hashbrown::HashMap;
+use super::vo_map::VoMap;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::string;
@@ -27,24 +23,22 @@ use vo_common_core::types::{ValueKind, ValueMeta};
 use super::compare::{deep_eq_struct_inline, deep_hash_struct_inline};
 use super::impl_gc_object;
 
-type SingleKeyMap = HashMap<u64, Box<[u64]>>;
-type MultiKeyMap = HashMap<Box<[u64]>, Box<[u64]>>;
-type StringKeyMap = HashMap<Box<[u8]>, (GcRef, Box<[u64]>)>;  // key=string content, val=(original GcRef, value)
+type SingleKeyMap = VoMap<u64, Box<[u64]>>;
+type MultiKeyMap = VoMap<Box<[u64]>, Box<[u64]>>;
+type StringKeyMap = VoMap<Box<[u8]>, (GcRef, Box<[u64]>)>;
 
-/// Entry for struct key map: stores key slots and value slots
-struct StructKeyEntry {
-    key: Box<[u64]>,
-    val: Box<[u64]>,
-    hash: u64,  // Cached hash for the key
+pub struct StructKeyEntry {
+    pub key: Box<[u64]>,
+    pub val: Box<[u64]>,
 }
 
-type StructKeyMap = HashTable<StructKeyEntry>;
+type StructKeyMap = VoMap<u64, StructKeyEntry>;
 
 pub enum MapInner {
     SingleKey(SingleKeyMap),
     MultiKey(MultiKeyMap),
-    StringKey(StringKeyMap),  // For string keys: compare by content
-    StructKey(StructKeyMap),  // For struct keys: deep comparison
+    StringKey(StringKeyMap),
+    StructKey(StructKeyMap),
 }
 
 #[repr(C)]
@@ -65,10 +59,8 @@ pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: 
     let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);
     let key_vk = key_meta.value_kind();
     let inner = if key_vk == ValueKind::String {
-        // String keys: use content-based comparison
         MapInner::StringKey(StringKeyMap::new())
     } else if key_vk == ValueKind::Struct {
-        // Struct keys: use deep comparison (handles string fields, etc.)
         MapInner::StructKey(StructKeyMap::new())
     } else if key_slots == 1 {
         MapInner::SingleKey(SingleKeyMap::new())
@@ -102,12 +94,20 @@ fn get_inner(m: GcRef) -> &'static mut MapInner {
     unsafe { &mut *MapData::as_ref(m).inner }
 }
 
-/// Helper for StructKey operations: get rttid and compute hash.
 #[inline]
-fn struct_key_hash(m: GcRef, key: &[u64], module: &Module) -> (u32, u64) {
+pub fn generation(m: GcRef) -> u32 {
+    match get_inner(m) {
+        MapInner::SingleKey(map) => map.generation(),
+        MapInner::MultiKey(map) => map.generation(),
+        MapInner::StringKey(map) => map.generation(),
+        MapInner::StructKey(map) => map.generation(),
+    }
+}
+
+#[inline]
+fn struct_key_hash(m: GcRef, key: &[u64], module: &Module) -> u64 {
     let rttid = key_meta(m).meta_id();
-    let hash = deep_hash_struct_inline(key, rttid, module);
-    (rttid, hash)
+    deep_hash_struct_inline(key, rttid, module)
 }
 
 pub fn len(m: GcRef) -> usize {
@@ -121,22 +121,25 @@ pub fn len(m: GcRef) -> usize {
 
 pub fn get(m: GcRef, key: &[u64], module: Option<&Module>) -> Option<&'static [u64]> {
     match get_inner(m) {
-        MapInner::SingleKey(map) => {
-            map.get(&key[0]).map(|v| v.as_ref())
-        }
+        MapInner::SingleKey(map) => map.get(&key[0]).map(|v| v.as_ref()),
         MapInner::MultiKey(map) => {
-            map.get(key).map(|v| v.as_ref())
+            let key_box: Box<[u64]> = key.into();
+            map.get(&key_box).map(|v| v.as_ref())
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
-            let str_bytes = string::as_bytes(str_ref);
-            map.get(str_bytes).map(|(_, v)| v.as_ref())
+            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            map.get(&str_bytes).map(|(_, v)| v.as_ref())
         }
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
-            let (rttid, hash) = struct_key_hash(m, key, module);
-            map.find(hash, |e| deep_eq_struct_inline(key, &e.key, rttid, module))
-                .map(|e| e.val.as_ref())
+            let rttid = key_meta(m).meta_id();
+            for (_, entry) in map.iter() {
+                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
+                    return Some(entry.val.as_ref());
+                }
+            }
+            None
         }
     }
 }
@@ -151,12 +154,9 @@ pub fn get_with_ok(m: GcRef, key: &[u64], module: Option<&Module>) -> (Option<&'
 pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
     let val_box: Box<[u64]> = val.into();
     match get_inner(m) {
-        MapInner::SingleKey(map) => {
-            map.insert(key[0], val_box);
-        }
+        MapInner::SingleKey(map) => { map.insert(key[0], val_box); }
         MapInner::MultiKey(map) => {
-            let key_box: Box<[u64]> = key.into();
-            map.insert(key_box, val_box);
+            map.insert(key.into(), val_box);
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
@@ -165,14 +165,17 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
         }
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
-            let (rttid, hash) = struct_key_hash(m, key, module);
-            match map.find_mut(hash, |e| deep_eq_struct_inline(key, &e.key, rttid, module)) {
-                Some(e) => e.val = val_box,
-                None => {
-                    let key_box: Box<[u64]> = key.into();
-                    map.insert_unique(hash, StructKeyEntry { key: key_box, val: val_box, hash }, |e| e.hash);
+            let hash = struct_key_hash(m, key, module);
+            let rttid = key_meta(m).meta_id();
+            // Check if key exists and update
+            for (_, entry) in map.iter_mut() {
+                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
+                    entry.val = val_box;
+                    return;
                 }
             }
+            // Key not found, insert new
+            map.insert(hash, StructKeyEntry { key: key.into(), val: val_box });
         }
     }
 }
@@ -180,17 +183,28 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
 pub fn delete(m: GcRef, key: &[u64], module: Option<&Module>) {
     match get_inner(m) {
         MapInner::SingleKey(map) => { map.remove(&key[0]); }
-        MapInner::MultiKey(map) => { map.remove(key); }
+        MapInner::MultiKey(map) => {
+            let key_box: Box<[u64]> = key.into();
+            map.remove(&key_box);
+        }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
-            let str_bytes = string::as_bytes(str_ref);
-            map.remove(str_bytes);
+            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            map.remove(&str_bytes);
         }
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
-            let (rttid, hash) = struct_key_hash(m, key, module);
-            let _ = map.find_entry(hash, |e| deep_eq_struct_inline(key, &e.key, rttid, module))
-                .map(|e| e.remove());
+            let rttid = key_meta(m).meta_id();
+            let mut to_remove = None;
+            for (h, entry) in map.iter() {
+                if deep_eq_struct_inline(key, &entry.key, rttid, module) {
+                    to_remove = Some(*h);
+                    break;
+                }
+            }
+            if let Some(h) = to_remove {
+                map.remove(&h);
+            }
         }
     }
 }
@@ -199,37 +213,122 @@ pub fn contains(m: GcRef, key: &[u64], module: Option<&Module>) -> bool {
     get(m, key, module).is_some()
 }
 
-pub fn iter_at(m: GcRef, idx: usize) -> Option<(&'static [u64], &'static [u64])> {
+// =============================================================================
+// Index-based Map Iterator
+// =============================================================================
+
+#[repr(C)]
+pub struct MapIterator {
+    pub tag: u8,
+    pub _pad: [u8; 3],
+    pub init_generation: u32,
+    pub current_index: u64,
+    pub _reserved: [u64; 4],
+    pub map_ref: u64,
+}
+
+pub const MAP_ITER_SLOTS: usize = core::mem::size_of::<MapIterator>() / 8;
+const _: () = assert!(core::mem::size_of::<MapIterator>() == MAP_ITER_SLOTS * 8);
+const _: () = assert!(MAP_ITER_SLOTS == 7);
+
+const TAG_SINGLE_KEY: u8 = 0;
+const TAG_MULTI_KEY: u8 = 1;
+const TAG_STRING_KEY: u8 = 2;
+const TAG_STRUCT_KEY: u8 = 3;
+const TAG_EXHAUSTED: u8 = 255;
+
+pub fn iter_init(m: GcRef) -> MapIterator {
+    if m.is_null() {
+        return MapIterator {
+            tag: TAG_EXHAUSTED,
+            _pad: [0; 3],
+            init_generation: 0,
+            current_index: 0,
+            _reserved: [0; 4],
+            map_ref: 0,
+        };
+    }
+    
+    let tag = match get_inner(m) {
+        MapInner::SingleKey(_) => TAG_SINGLE_KEY,
+        MapInner::MultiKey(_) => TAG_MULTI_KEY,
+        MapInner::StringKey(_) => TAG_STRING_KEY,
+        MapInner::StructKey(_) => TAG_STRUCT_KEY,
+    };
+    
+    MapIterator {
+        tag,
+        _pad: [0; 3],
+        init_generation: generation(m),
+        current_index: 0,
+        _reserved: [0; 4],
+        map_ref: m as u64,
+    }
+}
+
+pub fn iter_next(iter: &mut MapIterator) -> Option<(&'static [u64], &'static [u64])> {
+    if iter.tag == TAG_EXHAUSTED {
+        return None;
+    }
+    
+    let m = iter.map_ref as GcRef;
+    if m.is_null() {
+        iter.tag = TAG_EXHAUSTED;
+        return None;
+    }
+    
+    // If rehash happened, update generation and continue from current index
+    // This matches Go semantics: may or may not see new elements, but won't crash
+    let current_gen = generation(m);
+    if current_gen != iter.init_generation {
+        iter.init_generation = current_gen;
+        // Continue from current index - may skip or repeat elements, which is Go-like behavior
+    }
+    
+    let idx = iter.current_index as usize;
+    
     match get_inner(m) {
         MapInner::SingleKey(map) => {
-            map.iter().nth(idx).map(|(k, v)| {
-                let k_slice: &'static [u64] = unsafe {
-                    core::slice::from_raw_parts(k as *const u64, 1)
-                };
-                (k_slice, v.as_ref())
-            })
+            if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
+                iter.current_index = (new_idx + 1) as u64;
+                let k_slice = unsafe { core::slice::from_raw_parts(k, 1) };
+                Some((k_slice, v.as_ref()))
+            } else {
+                iter.tag = TAG_EXHAUSTED;
+                None
+            }
         }
         MapInner::MultiKey(map) => {
-            map.iter().nth(idx).map(|(k, v)| (k.as_ref(), v.as_ref()))
+            if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
+                iter.current_index = (new_idx + 1) as u64;
+                Some((k.as_ref(), v.as_ref()))
+            } else {
+                iter.tag = TAG_EXHAUSTED;
+                None
+            }
         }
         MapInner::StringKey(map) => {
-            map.iter().nth(idx).map(|(_, (str_ref, v))| {
-                let k_slice: &'static [u64] = unsafe {
-                    core::slice::from_raw_parts(str_ref as *const GcRef as *const u64, 1)
-                };
-                (k_slice, v.as_ref())
-            })
+            if let Some((new_idx, _, (str_ref, v))) = map.iter_from_index(idx) {
+                iter.current_index = (new_idx + 1) as u64;
+                let k_slice = unsafe { core::slice::from_raw_parts(str_ref as *const GcRef as *const u64, 1) };
+                Some((k_slice, v.as_ref()))
+            } else {
+                iter.tag = TAG_EXHAUSTED;
+                None
+            }
         }
         MapInner::StructKey(map) => {
-            map.iter().nth(idx).map(|entry| {
-                (entry.key.as_ref(), entry.val.as_ref())
-            })
+            if let Some((new_idx, _, entry)) = map.iter_from_index(idx) {
+                iter.current_index = (new_idx + 1) as u64;
+                Some((entry.key.as_ref(), entry.val.as_ref()))
+            } else {
+                iter.tag = TAG_EXHAUSTED;
+                None
+            }
         }
     }
 }
 
-/// # Safety
-/// m must be a valid Map GcRef.
 pub unsafe fn drop_inner(m: GcRef) {
     let data = MapData::as_mut(m);
     if !data.inner.is_null() {

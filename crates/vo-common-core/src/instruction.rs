@@ -201,7 +201,13 @@ pub enum Opcode {
     MapSet,
     MapDelete,
     MapLen,
-    MapIterGet,  // Get key-value by index (for range expansion)
+    /// MapIterInit: Initialize map iterator
+    /// a=iter_slot (7 slots), b=map_reg
+    MapIterInit,
+    /// MapIterNext: Advance iterator and get next key-value
+    /// a=key_slot, b=iter_slot, flags=key_slots|(val_slots<<4)
+    /// Sets zero flag if iterator exhausted
+    MapIterNext,
 
     // === CHAN: Channel operations ===
     ChanNew,

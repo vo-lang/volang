@@ -985,8 +985,12 @@ impl Vm {
                     exec::exec_map_len(stack, bp, &inst);
                     ExecResult::Continue
                 }
-                Opcode::MapIterGet => {
-                    exec::exec_map_iter_get(stack, bp, &inst);
+                Opcode::MapIterInit => {
+                    exec::exec_map_iter_init(stack, bp, &inst);
+                    ExecResult::Continue
+                }
+                Opcode::MapIterNext => {
+                    exec::exec_map_iter_next(stack, bp, &inst);
                     ExecResult::Continue
                 }
 

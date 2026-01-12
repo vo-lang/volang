@@ -157,7 +157,8 @@ struct HelperFuncIds {
     map_get: cranelift_module::FuncId,
     map_set: cranelift_module::FuncId,
     map_delete: cranelift_module::FuncId,
-    map_iter_get: cranelift_module::FuncId,
+    map_iter_init: cranelift_module::FuncId,
+    map_iter_next: cranelift_module::FuncId,
     iface_assert: cranelift_module::FuncId,
     iface_to_iface: cranelift_module::FuncId,
     iface_eq: cranelift_module::FuncId,
@@ -240,7 +241,8 @@ impl JitCompiler {
         builder.symbol("vo_slice_slice3", vo_runtime::jit_api::vo_slice_slice3 as *const u8);
         builder.symbol("vo_slice_from_array", vo_runtime::jit_api::vo_slice_from_array as *const u8);
         builder.symbol("vo_slice_from_array3", vo_runtime::jit_api::vo_slice_from_array3 as *const u8);
-        builder.symbol("vo_map_iter_get", vo_runtime::jit_api::vo_map_iter_get as *const u8);
+        builder.symbol("vo_map_iter_init", vo_runtime::jit_api::vo_map_iter_init as *const u8);
+        builder.symbol("vo_map_iter_next", vo_runtime::jit_api::vo_map_iter_next as *const u8);
         builder.symbol("vo_iface_assert", vo_runtime::jit_api::vo_iface_assert as *const u8);
         builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
         builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
@@ -582,15 +584,21 @@ impl JitCompiler {
             sig
         })?;
         
-        let map_iter_get = module.declare_function("vo_map_iter_get", Import, &{
+        let map_iter_init = module.declare_function("vo_map_iter_init", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64)); // map
+            sig.params.push(AbiParam::new(ptr));        // iter_ptr
+            sig
+        })?;
+        
+        let map_iter_next = module.declare_function("vo_map_iter_next", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));        // iter_ptr
+            sig.params.push(AbiParam::new(ptr));        // key_ptr
+            sig.params.push(AbiParam::new(types::I32)); // key_slots
+            sig.params.push(AbiParam::new(ptr));        // val_ptr
+            sig.params.push(AbiParam::new(types::I32)); // val_slots
+            sig.returns.push(AbiParam::new(types::I64)); // ok
             sig
         })?;
         
@@ -632,7 +640,7 @@ impl JitCompiler {
             ptr_clone, closure_new, chan_new, chan_len, chan_cap, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
             slice_from_array, slice_from_array3,
-            map_new, map_len, map_get, map_set, map_delete, map_iter_get, iface_assert, iface_to_iface, iface_eq,
+            map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next, iface_assert, iface_to_iface, iface_eq,
         })
     }
 
@@ -686,7 +694,8 @@ impl JitCompiler {
             map_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_get, &mut self.ctx.func)),
             map_set: Some(self.module.declare_func_in_func(self.helper_funcs.map_set, &mut self.ctx.func)),
             map_delete: Some(self.module.declare_func_in_func(self.helper_funcs.map_delete, &mut self.ctx.func)),
-            map_iter_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_get, &mut self.ctx.func)),
+            map_iter_init: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_init, &mut self.ctx.func)),
+            map_iter_next: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_next, &mut self.ctx.func)),
             iface_assert: Some(self.module.declare_func_in_func(self.helper_funcs.iface_assert, &mut self.ctx.func)),
             iface_to_iface: Some(self.module.declare_func_in_func(self.helper_funcs.iface_to_iface, &mut self.ctx.func)),
             iface_eq: Some(self.module.declare_func_in_func(self.helper_funcs.iface_eq, &mut self.ctx.func)),

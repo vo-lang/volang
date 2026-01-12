@@ -308,8 +308,6 @@ tests:
 # Coverage tests from analysis (2026-01-12)
   - file: make_boundary_panic.vo
   - file: map_delete_iterate.vo
-    skip: [vm, jit]
-    reason: "Vo bug: map iteration during delete has issues"
   - file: closure_defer_recover_combo.vo
     skip: [vm, jit]
     reason: "Vo bug: named return + defer + panic/recover not working"

@@ -1189,21 +1189,52 @@ fn compile_stmt_with_label(
                         for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
                         
                     } else if info.is_map(range_type) {
-                        let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
+                        // Map iteration using stateful iterator
+                        const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
+                        
+                        let map_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
                         let (kn, vn) = info.map_key_val_slots(range_type);
                         let (kt, vt) = info.map_key_val_types(range_type);
                         let (ks, vs) = (range_var_slot(&mut sc, key.as_ref(), kt, *define)?,
                                         range_var_slot(&mut sc, value.as_ref(), vt, *define)?);
-                        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
-                        sc.func.emit_op(Opcode::MapLen, ls, reg, 0);
-                        let lp = IndexLoop::begin(sc.func, ls, label);
-                        sc.func.emit_with_flags(Opcode::MapIterGet, (kn as u8) | ((vn as u8) << 4), ks, reg, lp.idx_slot);
+                        
+                        let iter_slot = sc.func.alloc_temp_typed(&[SlotType::Value; MAP_ITER_SLOTS]);
+                        let ok_slot = sc.func.alloc_temp_typed(&[SlotType::Value]);
+                        
+                        // MapIterInit: a=iter_slot, b=map_reg
+                        sc.func.emit_op(Opcode::MapIterInit, iter_slot, map_reg, 0);
+                        
+                        // loop:
+                        let loop_start = sc.func.current_pc();
+                        let begin_pc = sc.func.enter_loop(loop_start, label);
+                        
+                        // MapIterNext: a=key_slot, b=iter_slot, c=ok_slot, flags=kn|(vn<<4)
+                        sc.func.emit_with_flags(Opcode::MapIterNext, (kn as u8) | ((vn as u8) << 4), ks, iter_slot, ok_slot);
+                        
+                        // if !ok { goto end }
+                        let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);
+                        
+                        // Copy value to vs if needed (value is written at ks + kn)
                         if value.is_some() && vs != ks + kn {
                             if vn == 1 { sc.func.emit_op(Opcode::Copy, vs, ks + kn, 0); }
                             else { sc.func.emit_with_flags(Opcode::CopyN, vn as u8, vs, ks + kn, 0); }
                         }
+                        
                         compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
-                        lp.end(sc.func);
+                        
+                        let post_pc = sc.func.current_pc();
+                        sc.func.emit_jump(Opcode::Jump, 0);
+                        let loop_jump_pc = sc.func.current_pc() - 1;
+                        sc.func.patch_jump(loop_jump_pc, loop_start);
+                        
+                        let exit_pc = sc.func.current_pc();
+                        sc.func.patch_jump(end_jump, exit_pc);
+                        
+                        let exit_info = sc.func.exit_loop();
+                        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+                        
+                        for pc in exit_info.break_patches { sc.func.patch_jump(pc, exit_pc); }
+                        for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
                         
                     } else if info.is_chan(range_type) {
                         let chan_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;

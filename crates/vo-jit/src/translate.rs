@@ -102,7 +102,8 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         MapGet => { map_get(e, inst); Ok(Completed) }
         MapSet => { map_set(e, inst); Ok(Completed) }
         MapDelete => { map_delete(e, inst); Ok(Completed) }
-        MapIterGet => { map_iter_get(e, inst); Ok(Completed) }
+        MapIterInit => { map_iter_init(e, inst); Ok(Completed) }
+        MapIterNext => { map_iter_next(e, inst); Ok(Completed) }
         // Closure operations
         ClosureNew => { closure_new(e, inst); Ok(Completed) }
         ClosureGet => { closure_get(e, inst); Ok(Completed) }
@@ -1105,31 +1106,65 @@ fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.builder().ins().call(func, &[m, key, key_bytes]);
 }
 
-fn map_iter_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_iter_get { Some(f) => f, None => return };
+const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
+const MAP_ITER_BYTES: u32 = (MAP_ITER_SLOTS * 8) as u32;
+
+fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_iter_init { Some(f) => f, None => return };
     let m = e.read_var(inst.b);
-    let idx = e.read_var(inst.c);
-    let key_slots = (inst.flags >> 4) as usize;
-    let val_slots = (inst.flags & 0xF) as usize;
+    let iter_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, MAP_ITER_BYTES, 8));
+    let iter_ptr = e.builder().ins().stack_addr(types::I64, iter_slot, 0);
+    e.builder().ins().call(func, &[m, iter_ptr]);
+    for i in 0..MAP_ITER_SLOTS {
+        let val = e.builder().ins().stack_load(types::I64, iter_slot, (i * 8) as i32);
+        e.write_var(inst.a + i as u16, val);
+    }
+}
+
+fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = match e.helpers().map_iter_next { Some(f) => f, None => return };
+    let key_slots = (inst.flags & 0x0F) as usize;
+    let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
+    
+    let iter_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, MAP_ITER_BYTES, 8));
     let key_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (key_slots.max(1) * 8) as u32, 8));
     let val_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (val_slots.max(1) * 8) as u32, 8));
+    
+    for i in 0..MAP_ITER_SLOTS {
+        let val = e.read_var(inst.b + i as u16);
+        e.builder().ins().stack_store(val, iter_slot, (i * 8) as i32);
+    }
+    
+    let iter_ptr = e.builder().ins().stack_addr(types::I64, iter_slot, 0);
     let key_ptr = e.builder().ins().stack_addr(types::I64, key_slot, 0);
     let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
     let key_slots_i32 = e.builder().ins().iconst(types::I32, key_slots as i64);
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
-    let call = e.builder().ins().call(func, &[m, idx, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
-    let done = e.builder().inst_results(call)[0];
+    
+    let call = e.builder().ins().call(func, &[iter_ptr, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let ok = e.builder().inst_results(call)[0];
+    
+    for i in 0..MAP_ITER_SLOTS {
+        let val = e.builder().ins().stack_load(types::I64, iter_slot, (i * 8) as i32);
+        e.write_var(inst.b + i as u16, val);
+    }
+    
+    // Copy key to VM stack
     for i in 0..key_slots {
         let val = e.builder().ins().stack_load(types::I64, key_slot, (i * 8) as i32);
         e.write_var(inst.a + i as u16, val);
     }
+    // Copy val to VM stack (at key_slot + key_slots)
     for i in 0..val_slots {
         let val = e.builder().ins().stack_load(types::I64, val_slot, (i * 8) as i32);
         e.write_var(inst.a + key_slots as u16 + i as u16, val);
     }
-    e.write_var(inst.a + (key_slots + val_slots) as u16, done);
+    // Write ok flag to inst.c
+    e.write_var(inst.c, ok);
 }
 
 // =============================================================================
