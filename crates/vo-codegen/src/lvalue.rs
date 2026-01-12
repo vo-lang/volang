@@ -66,6 +66,57 @@ pub enum LValue {
     },
 }
 
+/// Result of trying to resolve a heap struct base for inline array access.
+enum HeapStructBase {
+    /// Base is a captured variable - need ClosureGet
+    Capture { capture_index: u16, offset: u16 },
+    /// Base is a HeapBoxed local - gcref_slot already holds the ptr
+    HeapBoxed { gcref_slot: u16, offset: u16 },
+}
+
+impl HeapStructBase {
+    fn with_added_offset(self, extra: u16) -> Self {
+        match self {
+            Self::Capture { capture_index, offset } => 
+                Self::Capture { capture_index, offset: offset + extra },
+            Self::HeapBoxed { gcref_slot, offset } => 
+                Self::HeapBoxed { gcref_slot, offset: offset + extra },
+        }
+    }
+}
+
+/// Recursively try to find the heap struct base and accumulated offset for an expression.
+/// Returns Some if the expression ultimately resolves to a field path on a heap struct.
+fn try_get_heap_struct_base(
+    expr: &Expr,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Option<HeapStructBase> {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            // Check capture first
+            if let Some(cap) = func.lookup_capture(ident.symbol) {
+                return Some(HeapStructBase::Capture { capture_index: cap.index, offset: 0 });
+            }
+            // Check HeapBoxed local
+            if let Some(local) = func.lookup_local(ident.symbol) {
+                if let StorageKind::HeapBoxed { gcref_slot, .. } = local.storage {
+                    return Some(HeapStructBase::HeapBoxed { gcref_slot, offset: 0 });
+                }
+            }
+            None
+        }
+        ExprKind::Selector(sel) => {
+            let base = try_get_heap_struct_base(&sel.expr, func, info)?;
+            let struct_type = info.expr_type(sel.expr.id);
+            let field_name = info.project.interner.resolve(sel.sel.symbol)?;
+            let (field_offset, _) = info.struct_field_offset(struct_type, field_name);
+            Some(base.with_added_offset(field_offset))
+        }
+        _ => None,
+    }
+}
+
 /// Resolve an expression to an LValue (if it's assignable).
 pub fn resolve_lvalue(
     expr: &Expr,
@@ -248,7 +299,86 @@ pub fn resolve_lvalue(
                         })
                     }
                     crate::func::ExprSource::NeedsCompile => {
-                        // Compile container expression (temporary or complex expression)
+                        // Check if this is a captured array - need to get GcRef directly
+                        if let ExprKind::Ident(ident) = &idx.expr.kind {
+                            if let Some(cap_idx) = func.lookup_capture(ident.symbol).map(|c| c.index) {
+                                // Captured array: ClosureGet returns GcRef to the array
+                                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                                func.emit_op(Opcode::ClosureGet, gcref_slot, cap_idx, 0);
+                                return Ok(LValue::Index {
+                                    kind: ContainerKind::HeapArray { elem_bytes, elem_vk },
+                                    container_reg: gcref_slot,
+                                    index_reg,
+                                });
+                            }
+                        }
+                        // Check if this is an inline array field of a heap struct
+                        // Handles arbitrary nesting: o.arr[i], o.inner.arr[i], etc.
+                        if let Some(base) = try_get_heap_struct_base(&idx.expr, func, info) {
+                            let elem_slots = info.type_slot_count(elem_type);
+                            
+                            // Get the struct GcRef
+                            let struct_ptr = match base {
+                                HeapStructBase::Capture { capture_index, offset: _ } => {
+                                    let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                                    func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
+                                    gcref_slot
+                                }
+                                HeapStructBase::HeapBoxed { gcref_slot, offset: _ } => gcref_slot,
+                            };
+                            let base_offset = match base {
+                                HeapStructBase::Capture { offset, .. } => offset,
+                                HeapStructBase::HeapBoxed { offset, .. } => offset,
+                            };
+                            
+                            // Constant index: compute static offset
+                            if let Some(const_idx) = info.try_const_int(&idx.index) {
+                                let total_offset = base_offset + (const_idx as u16) * elem_slots;
+                                return Ok(LValue::Deref {
+                                    ptr_reg: struct_ptr,
+                                    offset: total_offset,
+                                    elem_slots,
+                                });
+                            }
+                            
+                            // Dynamic index: use PtrAdd to compute element address
+                            // elem_addr = struct_ptr + base_offset + index * elem_slots
+                            let offset_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                            if elem_slots == 1 {
+                                // offset = base_offset + index
+                                if base_offset == 0 {
+                                    func.emit_copy(offset_reg, index_reg, 1);
+                                } else {
+                                    let base_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                                    func.emit_op(Opcode::LoadInt, base_reg, base_offset, 0);
+                                    func.emit_op(Opcode::AddI, offset_reg, base_reg, index_reg);
+                                }
+                            } else {
+                                // offset = base_offset + index * elem_slots
+                                let elem_slots_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                                func.emit_op(Opcode::LoadInt, elem_slots_reg, elem_slots, 0);
+                                let scaled_idx = func.alloc_temp_typed(&[SlotType::Value]);
+                                func.emit_op(Opcode::MulI, scaled_idx, index_reg, elem_slots_reg);
+                                if base_offset == 0 {
+                                    func.emit_copy(offset_reg, scaled_idx, 1);
+                                } else {
+                                    let base_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                                    func.emit_op(Opcode::LoadInt, base_reg, base_offset, 0);
+                                    func.emit_op(Opcode::AddI, offset_reg, base_reg, scaled_idx);
+                                }
+                            }
+                            
+                            // elem_ptr = struct_ptr + offset * 8
+                            let elem_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+                            func.emit_ptr_add(elem_ptr, struct_ptr, offset_reg);
+                            
+                            return Ok(LValue::Deref {
+                                ptr_reg: elem_ptr,
+                                offset: 0,
+                                elem_slots,
+                            });
+                        }
+                        // Other cases: compile container expression
                         let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
                         Ok(LValue::Index {
                             kind: ContainerKind::HeapArray { elem_bytes, elem_vk },
@@ -332,6 +462,12 @@ pub fn emit_lvalue_load(
                     // GlobalGetN with offset
                     func.emit_with_flags(Opcode::GlobalGetN, *slots as u8, dst, index + total_offset + offset, 0);
                 }
+                FlattenedField::Capture { capture_index, total_offset } => {
+                    // ClosureGet to get GcRef, then PtrGet with accumulated offset
+                    let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                    func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
+                    func.emit_ptr_get(dst, gcref_slot, total_offset + offset, *slots);
+                }
             }
         }
         
@@ -410,6 +546,12 @@ pub fn emit_lvalue_store(
                     // GlobalSetN with offset
                     func.emit_with_flags(Opcode::GlobalSetN, *slots as u8, index + total_offset + offset, src, 0);
                 }
+                FlattenedField::Capture { capture_index, total_offset } => {
+                    // ClosureGet to get GcRef, then PtrSet with accumulated offset
+                    let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                    func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
+                    func.emit_ptr_set_with_slot_types(gcref_slot, total_offset + offset, src, slot_types);
+                }
             }
         }
         
@@ -476,6 +618,19 @@ enum FlattenedField {
     HeapBoxed { gcref_slot: u16, total_offset: u16 },
     Deref { ptr_reg: u16, total_offset: u16 },
     Global { index: u16, total_offset: u16 },
+    Capture { capture_index: u16, total_offset: u16 },
+}
+
+impl FlattenedField {
+    fn add_offset(&mut self, extra: u16) {
+        match self {
+            Self::Stack { total_offset, .. } 
+            | Self::HeapBoxed { total_offset, .. }
+            | Self::Deref { total_offset, .. }
+            | Self::Global { total_offset, .. }
+            | Self::Capture { total_offset, .. } => *total_offset += extra,
+        }
+    }
 }
 
 /// Walk Field chain to find root and accumulate offset.
@@ -492,16 +647,11 @@ fn flatten_field(lv: &LValue) -> FlattenedField {
         LValue::Deref { ptr_reg, offset, .. } => FlattenedField::Deref { ptr_reg: *ptr_reg, total_offset: *offset },
         LValue::Field { base, offset, .. } => {
             let mut result = flatten_field(base);
-            match &mut result {
-                FlattenedField::Stack { total_offset, .. } => *total_offset += offset,
-                FlattenedField::HeapBoxed { total_offset, .. } => *total_offset += offset,
-                FlattenedField::Deref { total_offset, .. } => *total_offset += offset,
-                FlattenedField::Global { total_offset, .. } => *total_offset += offset,
-            }
+            result.add_offset(*offset);
             result
         }
+        LValue::Capture { capture_index, .. } => FlattenedField::Capture { capture_index: *capture_index, total_offset: 0 },
         LValue::Index { .. } => panic!("Index cannot be base of Field"),
-        LValue::Capture { .. } => panic!("Capture cannot be base of Field"),
         LValue::StackArrayField { .. } => panic!("StackArrayField cannot be base of Field"),
     }
 }

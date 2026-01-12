@@ -60,6 +60,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         PtrSet => { ptr_set(e, inst); Ok(Completed) }
         PtrGetN => { ptr_get_n(e, inst); Ok(Completed) }
         PtrSetN => { ptr_set_n(e, inst); Ok(Completed) }
+        PtrAdd => { ptr_add(e, inst); Ok(Completed) }
         SlotGet => { slot_get(e, inst); Ok(Completed) }
         SlotSet => { slot_set(e, inst); Ok(Completed) }
         SlotGetN => { slot_get_n(e, inst); Ok(Completed) }
@@ -428,6 +429,15 @@ fn ptr_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let offset = ((inst.b as usize + i) * 8) as i32;
         e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
     }
+}
+
+fn ptr_add<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    // a=dst, b=ptr, c=offset_slots: dst = ptr + offset * 8
+    let ptr = e.read_var(inst.b);
+    let offset_slots = e.read_var(inst.c);
+    let offset_bytes = e.builder().ins().imul_imm(offset_slots, 8);
+    let result = e.builder().ins().iadd(ptr, offset_bytes);
+    e.write_var(inst.a, result);
 }
 
 fn slot_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {

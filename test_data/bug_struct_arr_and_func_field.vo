@@ -1,16 +1,71 @@
-// BUG: Struct with both array field AND func field causes segfault
-// Minimal reproduction
-
+// Test: Captured struct with inline array field - arbitrary nesting depth
 package main
 
-type Outer struct {
+type Inner struct {
     arr [3]int
-    fn  func() int
+}
+
+type Middle struct {
+    inner Inner
+    value int
+}
+
+type Outer struct {
+    middle Middle
+    arr    [2]int
+    fn     func() int
 }
 
 func main() {
-    var o Outer  // <- crashes here
-    assert(o.arr[0] == 0, "arr[0] should be 0")
-    assert(o.fn == nil, "fn should be nil")
+    // Test 1: Simple case - o.arr[0]
+    var o Outer
+    assert(o.arr[0] == 0, "o.arr[0] should be 0")
+    o.fn = func() int { o.arr[0] = 10; return 1 }
+    assert(o.fn() == 1, "fn() should return 1")
+    assert(o.arr[0] == 10, "o.arr[0] should be 10")
+
+    // Test 2: One level nesting - o.middle.value
+    o.fn = func() int { o.middle.value = 20; return 2 }
+    assert(o.fn() == 2, "fn() should return 2")
+    assert(o.middle.value == 20, "o.middle.value should be 20")
+
+    // Test 3: Two level nesting - o.middle.inner.arr[0]
+    o.fn = func() int { o.middle.inner.arr[0] = 30; return 3 }
+    assert(o.fn() == 3, "fn() should return 3")
+    assert(o.middle.inner.arr[0] == 30, "o.middle.inner.arr[0] should be 30")
+
+    // Test 4: Multiple array indices
+    o.fn = func() int { 
+        o.arr[1] = 40
+        o.middle.inner.arr[1] = 41
+        o.middle.inner.arr[2] = 42
+        return 4 
+    }
+    assert(o.fn() == 4, "fn() should return 4")
+    assert(o.arr[1] == 40, "o.arr[1] should be 40")
+    assert(o.middle.inner.arr[1] == 41, "o.middle.inner.arr[1] should be 41")
+    assert(o.middle.inner.arr[2] == 42, "o.middle.inner.arr[2] should be 42")
+
+    // Test 5: HeapBoxed local (not capture) - access in main after closure returns
+    assert(o.arr[0] == 10, "o.arr[0] should still be 10")
+    assert(o.middle.inner.arr[0] == 30, "o.middle.inner.arr[0] should still be 30")
+
+    // Test 6: Dynamic index using PtrAdd
+    o.fn = func() int {
+        for i := 0; i < 2; i++ {
+            o.arr[i] = i * 100
+        }
+        for i := 0; i < 3; i++ {
+            o.middle.inner.arr[i] = i * 200
+        }
+        return 6
+    }
+    assert(o.fn() == 6, "fn() should return 6")
+    assert(o.arr[0] == 0, "o.arr[0] should be 0")
+    assert(o.arr[1] == 100, "o.arr[1] should be 100")
+    assert(o.middle.inner.arr[0] == 0, "o.middle.inner.arr[0] should be 0")
+    assert(o.middle.inner.arr[1] == 200, "o.middle.inner.arr[1] should be 200")
+    assert(o.middle.inner.arr[2] == 400, "o.middle.inner.arr[2] should be 400")
+
     println("ok")
 }

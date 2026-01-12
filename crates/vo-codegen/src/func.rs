@@ -418,6 +418,11 @@ impl FuncBuilder {
             self.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, ptr, offset);
         }
     }
+    
+    /// Emit PtrAdd: dst = ptr + offset_reg * 8 (pointer arithmetic)
+    pub fn emit_ptr_add(&mut self, dst: u16, ptr: u16, offset_reg: u16) {
+        self.emit_op(Opcode::PtrAdd, dst, ptr, offset_reg);
+    }
 
     /// Emit PtrSet or PtrSetN based on slot count.
     /// WARNING: This does NOT emit write barriers. Use emit_ptr_set_with_slot_types for assignment

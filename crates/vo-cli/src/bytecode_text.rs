@@ -177,6 +177,7 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::PtrSet => format!("PtrSet        r{}[{}], r{}", a, b, c),
         Opcode::PtrGetN => format!("PtrGetN       r{}, r{}[{}], n={}", a, b, c, flags),
         Opcode::PtrSetN => format!("PtrSetN       r{}[{}], r{}, n={}", a, b, c, flags),
+        Opcode::PtrAdd => format!("PtrAdd        r{}, r{}, r{}", a, b, c),
 
         // ARITH Integer
         Opcode::AddI => format!("AddI          r{}, r{}, r{}", a, b, c),

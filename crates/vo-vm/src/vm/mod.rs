@@ -349,6 +349,14 @@ impl Vm {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
                     }
                 }
+                Opcode::PtrAdd => {
+                    // a=dst, b=ptr, c=offset_slots: dst = ptr + offset * 8
+                    let ptr = stack_get(stack, bp + inst.b as usize);
+                    let offset = stack_get(stack, bp + inst.c as usize) as usize;
+                    let addr = ptr + (offset * 8) as u64;
+                    stack_set(stack, bp + inst.a as usize, addr);
+                    ExecResult::Continue
+                }
 
                 // Integer arithmetic - inline for hot path
                 Opcode::AddI => {

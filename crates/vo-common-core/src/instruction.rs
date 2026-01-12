@@ -105,6 +105,7 @@ pub enum Opcode {
     PtrSet,
     PtrGetN,
     PtrSetN,
+    PtrAdd,  // a=dst, b=ptr, c=offset_slots (ptr arithmetic: dst = ptr + offset * 8)
 
     // === ARITH: Integer arithmetic ===
     AddI,

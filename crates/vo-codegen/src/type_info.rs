@@ -276,6 +276,15 @@ impl<'a> TypeInfoWrapper<'a> {
             None
         }
     }
+    
+    /// Try to get constant integer value from an expression
+    pub fn try_const_int(&self, expr: &vo_syntax::ast::Expr) -> Option<i64> {
+        let val = self.const_value(expr.id)?;
+        match val {
+            vo_analysis::ConstValue::Int64(i) => Some(*i),
+            _ => None,
+        }
+    }
 
     // === Definition/Use queries ===
 
