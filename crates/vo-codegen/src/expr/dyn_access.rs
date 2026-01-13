@@ -318,8 +318,7 @@ fn compile_dyn_op(
                 let elem_vk = ValueKind::Interface;
                 
                 // Get element meta for any
-                let elem_rttid = ctx.intern_type_key(any_type, info);
-                let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
+                let elem_meta_idx = ctx.get_or_create_value_meta(any_type, info);
                 let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
                 

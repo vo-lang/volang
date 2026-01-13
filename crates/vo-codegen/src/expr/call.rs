@@ -715,8 +715,7 @@ fn pack_variadic_args(
     let elem_vk = info.type_value_kind(elem_type);
     
     // Get element meta
-    let elem_rttid = ctx.intern_type_key(elem_type, info);
-    let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
+    let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
     let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
     

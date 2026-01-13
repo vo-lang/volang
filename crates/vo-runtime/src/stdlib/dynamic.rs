@@ -544,7 +544,9 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
         
         let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
         if map_val_vk == ValueKind::Interface {
-            let iface_meta_id = val_meta.meta_id();
+            // Get iface_meta_id from ValueRttid (which stores rttid for type resolution)
+            let iface_meta_id = call.get_interface_meta_id_from_rttid(map_val_value_rttid.rttid())
+                .unwrap_or(0);  // 0 for empty interface (any)
             let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
                 Ok(v) => v,
                 Err(e) => return dyn_error_only(call, call.dyn_err().type_mismatch, e),
@@ -828,7 +830,9 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
 
             let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
             if map_val_vk == ValueKind::Interface {
-                let iface_meta_id = val_meta.meta_id();
+                // Get iface_meta_id from ValueRttid (which stores rttid for type resolution)
+                let iface_meta_id = call.get_interface_meta_id_from_rttid(map_val_value_rttid.rttid())
+                    .unwrap_or(0);  // 0 for empty interface (any)
                 let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
                     Ok(v) => v,
                     Err(e) => return dyn_error_only(call, call.dyn_err().type_mismatch, e),

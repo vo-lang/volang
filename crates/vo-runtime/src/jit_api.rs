@@ -427,12 +427,12 @@ pub extern "C" fn vo_call_iface(
 
 /// Create a new map.
 #[no_mangle]
-pub extern "C" fn vo_map_new(gc: *mut Gc, key_meta: u32, val_meta: u32, key_slots: u32, val_slots: u32) -> u64 {
+pub extern "C" fn vo_map_new(gc: *mut Gc, key_meta: u32, val_meta: u32, key_slots: u32, val_slots: u32, key_rttid: u32) -> u64 {
     use crate::objects::map;
     use crate::ValueMeta;
     unsafe {
         let gc = &mut *gc;
-        map::create(gc, ValueMeta::from_raw(key_meta), ValueMeta::from_raw(val_meta), key_slots as u16, val_slots as u16) as u64
+        map::create(gc, ValueMeta::from_raw(key_meta), ValueMeta::from_raw(val_meta), key_slots as u16, val_slots as u16, key_rttid) as u64
     }
 }
 

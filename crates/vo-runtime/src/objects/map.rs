@@ -56,6 +56,9 @@ pub struct MapData {
     pub val_meta: ValueMeta,
     pub key_slots: u16,
     pub val_slots: u16,
+    /// Runtime type ID for struct keys, used for deep hash/eq.
+    /// For non-struct keys, this is 0 (unused).
+    pub key_rttid: u32,
 }
 
 pub const DATA_SLOTS: u16 = 3;
@@ -63,7 +66,7 @@ const _: () = assert!(core::mem::size_of::<MapData>() == DATA_SLOTS as usize * 8
 
 impl_gc_object!(MapData);
 
-pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: u16, val_slots: u16) -> GcRef {
+pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: u16, val_slots: u16, key_rttid: u32) -> GcRef {
     let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);
     let key_vk = key_meta.value_kind();
     let inner = if key_vk == ValueKind::String {
@@ -83,6 +86,7 @@ pub fn create(gc: &mut Gc, key_meta: ValueMeta, val_meta: ValueMeta, key_slots: 
     data.val_meta = val_meta;
     data.key_slots = key_slots;
     data.val_slots = val_slots;
+    data.key_rttid = key_rttid;
     m
 }
 
@@ -94,6 +98,8 @@ pub fn val_meta(m: GcRef) -> ValueMeta { MapData::as_ref(m).val_meta }
 pub fn key_kind(m: GcRef) -> ValueKind { key_meta(m).value_kind() }
 #[inline]
 pub fn val_kind(m: GcRef) -> ValueKind { val_meta(m).value_kind() }
+#[inline]
+pub fn key_rttid(m: GcRef) -> u32 { MapData::as_ref(m).key_rttid }
 #[inline]
 pub fn key_slots(m: GcRef) -> u16 { MapData::as_ref(m).key_slots }
 #[inline]
@@ -117,7 +123,7 @@ pub fn generation(m: GcRef) -> u32 {
 
 #[inline]
 fn struct_key_hash(m: GcRef, key: &[u64], module: &Module) -> u64 {
-    let rttid = key_meta(m).meta_id();
+    let rttid = key_rttid(m);
     deep_hash_struct_inline(key, rttid, module)
 }
 
@@ -145,7 +151,7 @@ pub fn get(m: GcRef, key: &[u64], module: Option<&Module>) -> Option<&'static [u
         }
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
-            let rttid = key_meta(m).meta_id();
+            let rttid = key_rttid(m);
             for (_, entry) in map.iter() {
                 if deep_eq_struct_inline(key, &entry.key, rttid, module) {
                     return Some(entry.val.as_ref());
@@ -188,7 +194,7 @@ pub fn set(m: GcRef, key: &[u64], val: &[u64], module: Option<&Module>) {
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
             let hash = struct_key_hash(m, key, module);
-            let rttid = key_meta(m).meta_id();
+            let rttid = key_rttid(m);
             // Check if key exists and update
             for (_, entry) in map.iter_mut() {
                 if deep_eq_struct_inline(key, &entry.key, rttid, module) {
@@ -230,7 +236,7 @@ pub fn delete(m: GcRef, key: &[u64], module: Option<&Module>) {
         }
         MapInner::StructKey(map) => {
             let module = module.expect("StructKey requires Module");
-            let rttid = key_meta(m).meta_id();
+            let rttid = key_rttid(m);
             let mut to_remove = None;
             for (h, entry) in map.iter() {
                 if deep_eq_struct_inline(key, &entry.key, rttid, module) {

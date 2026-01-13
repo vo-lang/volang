@@ -9,12 +9,14 @@ use crate::instruction::Instruction;
 
 #[inline]
 pub fn exec_map_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
+    // b = packed_meta register, b+1 = key_rttid register
     let packed = stack[bp + inst.b as usize];
+    let key_rttid = stack[bp + inst.b as usize + 1] as u32;
     let key_meta = ValueMeta::from_raw((packed >> 32) as u32);
     let val_meta = ValueMeta::from_raw(packed as u32);
     let key_slots = (inst.c >> 8) as u16;
     let val_slots = (inst.c & 0xFF) as u16;
-    let m = map::create(gc, key_meta, val_meta, key_slots, val_slots);
+    let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     stack[bp + inst.a as usize] = m as u64;
 }
 

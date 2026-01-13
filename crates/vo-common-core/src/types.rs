@@ -21,6 +21,13 @@ pub const META_ID_MASK: MetaId = 0xFF_FFFF;    // 24-bit mask
 
 /// Value metadata - packed 32-bit representation.
 /// Layout: [meta_id:24 | value_kind:8]
+/// 
+/// The meaning of `meta_id` depends on `value_kind`:
+/// - Struct/Pointer: `struct_meta_id` - index into `struct_metas[]` (for GC scan)
+/// - Interface: `iface_meta_id` - index into `interface_metas[]` (for itab lookup)
+/// - Other types: 0 (unused, never store rttid here to avoid confusion)
+/// 
+/// Note: For runtime type identification, use `ValueRttid` which stores `rttid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueMeta(u32);
 

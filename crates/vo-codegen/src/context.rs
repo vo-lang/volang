@@ -829,32 +829,40 @@ impl CodegenContext {
         idx
     }
 
-    /// Get or create ValueMeta constant for PtrNew
-    /// Returns the constant pool index
-    /// Caller should compute rttid via `ctx.intern_type_key(type_key, info)` if type info is needed
-    pub fn get_or_create_value_meta_with_rttid(
+    /// Get or create ValueMeta constant for element/field types.
+    /// 
+    /// ValueMeta format: [meta_id:24 | value_kind:8]
+    /// - Struct/Pointer: meta_id = struct_meta_id (index into struct_metas[])
+    /// - Interface: meta_id = iface_meta_id (index into interface_metas[])
+    /// - Others: meta_id = 0 (not used, never confuse with rttid)
+    pub fn get_or_create_value_meta(
         &mut self,
-        rttid: u32,
-        slot_types: &[vo_runtime::SlotType],
-        value_kind: Option<vo_runtime::ValueKind>,
+        type_key: TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
-        use vo_runtime::{SlotType, ValueKind};
+        use vo_runtime::ValueKind;
         
-        // Use explicit value_kind if provided, otherwise infer from slot_types
-        let kind_byte = if let Some(vk) = value_kind {
-            vk as u8
-        } else {
-            let kind = slot_types.first().copied().unwrap_or(SlotType::Value);
-            match kind {
-                SlotType::Value => ValueKind::Int as u8,
-                SlotType::GcRef => ValueKind::Pointer as u8,
-                SlotType::Interface0 => ValueKind::Interface as u8,
-                SlotType::Interface1 => ValueKind::Interface as u8,
+        let vk = info.type_value_kind(type_key);
+        
+        // Get the correct meta_id based on value_kind
+        let meta_id: u32 = match vk {
+            ValueKind::Struct | ValueKind::Pointer => {
+                // For struct/pointer, use struct_meta_id
+                self.get_struct_meta_id(type_key).unwrap_or(0)
+            }
+            ValueKind::Interface => {
+                // For interface, use iface_meta_id
+                self.get_interface_meta_id(type_key).unwrap_or(0)
+            }
+            _ => {
+                // For other types (basic types, slice, map, etc.), meta_id = 0
+                // Never store rttid here to avoid confusion
+                0
             }
         };
         
-        // ValueMeta format: [rttid:24 | value_kind:8]
-        let value_meta = ((rttid as u64) << 8) | (kind_byte as u64);
+        // ValueMeta format: [meta_id:24 | value_kind:8]
+        let value_meta = ((meta_id as u64) << 8) | (vk as u64);
         
         // Add as Int constant (VM will interpret as ValueMeta)
         self.add_const(Constant::Int(value_meta as i64))
@@ -868,37 +876,27 @@ impl CodegenContext {
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
         let elem_type = info.array_elem_type(array_type);
-        let elem_slot_types = info.array_elem_slot_types(array_type);
-        let elem_vk = info.type_value_kind(elem_type);
-        let elem_rttid = self.intern_type_key(elem_type, info);
-        
-        self.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk))
+        self.get_or_create_value_meta(elem_type, info)
     }
     
     /// Get or create key and value ValueMeta for MapNew.
-    /// Returns (key_meta_const_idx, val_meta_const_idx, key_slots, val_slots).
+    /// Returns (key_meta_const_idx, val_meta_const_idx, key_slots, val_slots, key_rttid).
+    /// key_rttid is used for struct key deep hash/eq operations.
     pub fn get_or_create_map_metas(
         &mut self,
         map_type: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
-    ) -> (u16, u16, u16, u16) {
+    ) -> (u16, u16, u16, u16, u32) {
         let (key_slots, val_slots) = info.map_key_val_slots(map_type);
         let (key_type, val_type) = info.map_key_val_types(map_type);
-        let key_slot_types = info.map_key_slot_types(map_type);
-        let val_slot_types = info.map_val_slot_types(map_type);
-        let key_vk = info.map_key_value_kind(map_type);
-        let val_vk = info.map_val_value_kind(map_type);
         
-        // Properly intern rttid (needed for struct keys with deep hash/eq)
-        let key_rt = info.type_to_runtime_type(key_type, self);
-        let key_rttid = self.intern_rttid(key_rt);
-        let val_rt = info.type_to_runtime_type(val_type, self);
-        let val_rttid = self.intern_rttid(val_rt);
+        let key_meta_idx = self.get_or_create_value_meta(key_type, info);
+        let val_meta_idx = self.get_or_create_value_meta(val_type, info);
         
-        let key_meta_idx = self.get_or_create_value_meta_with_rttid(key_rttid, &key_slot_types, Some(key_vk));
-        let val_meta_idx = self.get_or_create_value_meta_with_rttid(val_rttid, &val_slot_types, Some(val_vk));
+        // Get key_rttid for struct key deep hash/eq
+        let key_rttid = self.intern_type_key(key_type, info);
         
-        (key_meta_idx, val_meta_idx, key_slots, val_slots)
+        (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid)
     }
 
     // === Closure ID ===

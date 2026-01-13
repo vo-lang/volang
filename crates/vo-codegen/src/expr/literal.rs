@@ -202,8 +202,7 @@ fn compile_slice_lit(
     let elem_type = info.slice_elem_type(type_key);
     let elem_slot_types = info.slice_elem_slot_types(type_key);
     let elem_vk = info.type_value_kind(elem_type);
-    let elem_rttid = ctx.intern_type_key(elem_type, info);
-    let elem_meta_idx = ctx.get_or_create_value_meta_with_rttid(elem_rttid, &elem_slot_types, Some(elem_vk));
+    let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
     
     // Load elem_meta into register
     let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
@@ -248,13 +247,14 @@ fn compile_map_lit(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let (key_meta_idx, val_meta_idx, key_slots, val_slots) = ctx.get_or_create_map_metas(type_key, info);
+    let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) = ctx.get_or_create_map_metas(type_key, info);
     let key_slot_types = info.map_key_slot_types(type_key);
     let val_slot_types = info.map_val_slot_types(type_key);
     
-    // MapNew: a=dst, b=packed_meta, c=(key_slots<<8)|val_slots
-    // packed_meta = (key_meta << 32) | val_meta
-    let packed_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    // MapNew: a=dst, b=packed_and_rttid, c=(key_slots<<8)|val_slots
+    // packed_and_rttid[0] = (key_meta << 32) | val_meta
+    // packed_and_rttid[1] = key_rttid (for struct key deep hash/eq)
+    let packed_reg = func.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
     func.emit_op(Opcode::LoadConst, packed_reg, key_meta_idx, 0);
     let shift_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadInt, shift_reg, 32, 0);
@@ -262,6 +262,9 @@ fn compile_map_lit(
     let val_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
     func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
+    // Load key_rttid into packed_reg+1
+    let key_rttid_idx = ctx.const_int(key_rttid as i64);
+    func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
     
     let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
     func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
@@ -369,10 +372,9 @@ pub fn compile_func_lit(
     }
     
     // Box escaped parameters: allocate heap storage and copy param values
-    for (sym, type_key, slots, slot_types) in escaped_params {
+    for (sym, type_key, slots, _slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots) {
-            let rttid = ctx.intern_type_key(type_key, info);
-            let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
+            let meta_idx = ctx.get_or_create_value_meta(type_key, info);
             let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
             closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
             closure_builder.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);

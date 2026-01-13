@@ -538,11 +538,12 @@ impl JitCompiler {
         
         let map_new = module.declare_function("vo_map_new", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));       // gc
+            sig.params.push(AbiParam::new(types::I32)); // key_meta
+            sig.params.push(AbiParam::new(types::I32)); // val_meta
+            sig.params.push(AbiParam::new(types::I32)); // key_slots
+            sig.params.push(AbiParam::new(types::I32)); // val_slots
+            sig.params.push(AbiParam::new(types::I32)); // key_rttid
             sig.returns.push(AbiParam::new(types::I64));
             sig
         })?;

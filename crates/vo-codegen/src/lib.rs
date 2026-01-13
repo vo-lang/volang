@@ -966,10 +966,9 @@ fn compile_func_decl(
     }
     
     // Box escaped parameters: allocate heap storage and copy param values
-    for (sym, type_key, slots, slot_types) in escaped_params {
+    for (sym, type_key, slots, _slot_types) in escaped_params {
         if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots) {
-            let rttid = ctx.intern_type_key(type_key, info);
-            let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &slot_types, None);
+            let meta_idx = ctx.get_or_create_value_meta(type_key, info);
             let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
             builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
             builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
@@ -996,7 +995,6 @@ fn compile_func_decl(
         gcref_slot: u16,
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
-        slot_types: Vec<vo_runtime::SlotType>,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
     
@@ -1010,7 +1008,7 @@ fn compile_func_decl(
             let slot = if escapes {
                 // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
                 let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots);
-                escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type, slot_types: slot_types.clone() });
+                escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {
                 builder.define_local_stack(name.symbol, slots, &slot_types)
@@ -1021,8 +1019,7 @@ fn compile_func_decl(
     
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
-        let rttid = ctx.intern_type_key(er.result_type, info);
-        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &er.slot_types, None);
+        let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
         let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
         builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);

@@ -229,12 +229,11 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         sym: Symbol,
         type_key: TypeKey,
         slots: u16,
-        slot_types: &[vo_runtime::SlotType],
+        _slot_types: &[vo_runtime::SlotType],
     ) -> Result<StorageKind, CodegenError> {
         let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
 
-        let rttid = self.ctx.intern_type_key(type_key, self.info);
-        let meta_idx = self.ctx.get_or_create_value_meta_with_rttid(rttid, slot_types, None);
+        let meta_idx = self.ctx.get_or_create_value_meta(type_key, self.info);
         let meta_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
         self.func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         self.func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
@@ -2386,8 +2385,7 @@ pub fn compile_iface_assign(
                 // Stack value or expression: allocate box and copy data
                 let src_slots = info.type_slot_count(src_type);
                 let src_slot_types = info.type_slot_types(src_type);
-                let rttid = ctx.intern_type_key(src_type, info);
-                let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
+                let meta_idx = ctx.get_or_create_value_meta(src_type, info);
                 
                 let tmp_data = func.alloc_temp_typed(&src_slot_types);
                 compile_expr_to(rhs, tmp_data, ctx, func, info)?;
@@ -2469,9 +2467,7 @@ pub fn emit_iface_assign_from_concrete(
     if src_vk.needs_boxing() {
         // Struct/Array: allocate box and copy data
         let src_slots = info.type_slot_count(src_type);
-        let src_slot_types = info.type_slot_types(src_type);
-        let rttid = ctx.intern_type_key(src_type, info);
-        let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
+        let meta_idx = ctx.get_or_create_value_meta(src_type, info);
         
         let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);

@@ -450,11 +450,10 @@ tests:
 # Fix: max_converted_arg_slots = (arg_count * 2).max(1)
   - file: dyn/dyn_variadic_call.vo
 
-# Bug #5: Deep chained assignment panic
-# Silent panic on deep map write: obj~>[a]~>[b]~>[c] = x
+# Bug #5: Deep chained assignment - FIXED
+# Fixed: val_meta.meta_id() was returning rttid instead of iface_meta_id
+# Solution: Use get_interface_meta_id_from_rttid() to get correct iface_meta_id
   - file: dyn/dyn_deep_chained_assign.vo
-    skip: [vm, jit]
-    reason: "BUG: Deep chained assignment panics on map write"
 
 # Error types test - partially works but fails on signature mismatch test
   - file: dyn/dyn_error_types.vo

@@ -1088,13 +1088,16 @@ fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = match e.helpers().map_new { Some(f) => f, None => return };
     let gc_ptr = e.gc_ptr();
+    // b = packed_meta, b+1 = key_rttid
     let packed_meta = e.read_var(inst.b);
+    let key_rttid = e.read_var(inst.b + 1);
     let key_meta = e.builder().ins().ushr_imm(packed_meta, 32);
     let key_meta_i32 = e.builder().ins().ireduce(types::I32, key_meta);
     let val_meta_i32 = e.builder().ins().ireduce(types::I32, packed_meta);
     let key_slots = e.builder().ins().iconst(types::I32, (inst.c >> 8) as i64);
     let val_slots = e.builder().ins().iconst(types::I32, (inst.c & 0xFF) as i64);
-    let call = e.builder().ins().call(func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots, val_slots]);
+    let key_rttid_i32 = e.builder().ins().ireduce(types::I32, key_rttid);
+    let call = e.builder().ins().call(func, &[gc_ptr, key_meta_i32, val_meta_i32, key_slots, val_slots, key_rttid_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }
