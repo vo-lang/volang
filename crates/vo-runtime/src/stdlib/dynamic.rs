@@ -331,19 +331,6 @@ fn dyn_error_only(call: &mut ExternCallContext, code: isize, msg: &str) -> Exter
     ExternResult::Ok
 }
 
-/// Return error for dynamic call with too many return slots.
-/// Args: () -> error[2]
-fn dyn_ret_slots_overflow_error(call: &mut ExternCallContext) -> ExternResult {
-    write_error_to(call, 0, call.dyn_err().sig_mismatch, "dynamic call: return value exceeds maximum slots (64)");
-    ExternResult::Ok
-}
-
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_RET_SLOTS_OVERFLOW: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_ret_slots_overflow_error",
-    func: dyn_ret_slots_overflow_error,
-};
-
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_get_attr",
@@ -898,7 +885,7 @@ static __VO_DYN_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     func: dyn_set_index,
 };
 
-/// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check.
+/// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check + variadic info.
 ///
 /// # Design: LHS determines expected signature
 ///
@@ -910,21 +897,26 @@ static __VO_DYN_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
 ///
 /// This design avoids runtime ambiguity about how many values to return.
 ///
-/// Args: (callee: any[2], expected_sig_rttid: int[1], max_ret_slots: int[1], expected_ret_count: int[1])
-/// Returns: (ret_slots: int[1], ret_meta_0..N: int[N], error: error[2])
+/// Args: (callee: any[2], expected_sig_rttid: int[1], expected_ret_count: int[1])
+/// Returns: (ret_slots: int[1], ret_meta_0..N: int[N], variadic_info: int[1], closure_sig_rttid: int[1], error: error[2])
 ///
-/// Return layout is fixed at compile time: [ret_slots, metas[N], error[2]] = 1 + N + 2 slots
-/// - ret_slots = 0 indicates error
+/// Return layout: [ret_slots, metas[N], variadic_info, closure_sig_rttid, error[2]] = 1 + N + 1 + 1 + 2 slots
+/// - ret_slots = 0 indicates error (variadic_info and metas are undefined)
 /// - ret_slots > 0 indicates success, error = nil
+/// - variadic_info encoding:
+///   - 0: non-variadic
+///   - non-zero: (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
+///     where variadic_elem_meta = (rttid << 8) | value_kind
 fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
     let callee_slot0 = call.arg_u64(0);
     let _callee_slot1 = call.arg_u64(1);
     let expected_sig_rttid = call.arg_u64(2) as u32;
-    let max_ret_slots = call.arg_u64(3) as u16;
-    let expected_ret_count = call.arg_u64(4) as u16;
+    let expected_ret_count = call.arg_u64(3) as u16;
     
-    // Result layout: [ret_slots, ret_meta_0..N, error[2]]
-    let error_slot = 1 + expected_ret_count;
+    // Result layout: [ret_slots, ret_meta_0..N, variadic_info, closure_sig_rttid, error[2]]
+    let variadic_info_slot = 1 + expected_ret_count;
+    let sig_rttid_slot = variadic_info_slot + 1;
+    let error_slot = sig_rttid_slot + 1;
     
     // Helper macro to return error (ret_slots=0 indicates error)
     macro_rules! return_error {
@@ -933,6 +925,8 @@ fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
             for i in 0..expected_ret_count {
                 call.ret_u64(1 + i, 0);
             }
+            call.ret_u64(variadic_info_slot, 0);
+            call.ret_u64(sig_rttid_slot, 0);
             write_error_to(call, error_slot, $code, $msg);
             return ExternResult::Ok;
         }};
@@ -955,22 +949,38 @@ fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
         return_error!(call.dyn_err().sig_mismatch, &msg);
     }
     
-    // 4. Get return metadata
-    let ret_value_rttids = call.get_func_results(closure_sig_rttid);
+    // 4. Get function signature info (including variadic)
+    let (closure_params, ret_value_rttids, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
+        Some((p, r, v)) => (p, r.clone(), v),
+        None => return_error!(call.dyn_err().sig_mismatch, "closure is not a function type"),
+    };
+    
     let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
         call.get_type_slot_count(vr.rttid())
     }).sum();
     
-    // 5. Check ret_slots limit
-    if ret_slots > max_ret_slots {
-        return_error!(call.dyn_err().sig_mismatch, "dynamic call: return value exceeds maximum slots (64)");
-    }
+    // 5. Build variadic_info
+    let variadic_info: u64 = if is_variadic && !closure_params.is_empty() {
+        let non_variadic_count = (closure_params.len() - 1) as u64;
+        // Get variadic element meta from the last param (which is a slice type)
+        let variadic_slice_rttid = closure_params.last().unwrap().rttid();
+        let variadic_elem_meta = match call.get_slice_elem(variadic_slice_rttid) {
+            Some(elem_rttid) => elem_rttid.to_raw() as u64,
+            None => return_error!(call.dyn_err().sig_mismatch, "variadic parameter is not a slice type"),
+        };
+        // Encode: (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
+        (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
+    } else {
+        0
+    };
     
-    // Success: return ret_slots directly (error is indicated by error slot, not ret_slots value)
+    // Success: return ret_slots, metas, variadic_info, closure_sig_rttid, nil error
     call.ret_u64(0, ret_slots as u64);
     for (i, vr) in ret_value_rttids.iter().enumerate().take(expected_ret_count as usize) {
         call.ret_u64(1 + i as u16, vr.to_raw() as u64);
     }
+    call.ret_u64(variadic_info_slot, variadic_info);
+    call.ret_u64(sig_rttid_slot, closure_sig_rttid as u64);
     call.ret_nil(error_slot);
     call.ret_nil(error_slot + 1);
     
@@ -983,32 +993,217 @@ static __VO_DYN_CALL_PREPARE: ExternEntryWithContext = ExternEntryWithContext {
     func: dyn_call_prepare,
 };
 
-/// Maximum return slots for dynamic calls.
-const MAX_DYN_RET_SLOTS: usize = crate::jit_api::MAX_DYN_RET_SLOTS as usize;
-
-/// dyn_unpack_all_returns: Process all return values in one call.
+/// dyn_repack_args: Unified argument repacking for dynamic calls.
 ///
-/// Args: (ret_slots[1], raw_values[64], metas[N], is_any[N]) where N = ret_count
-/// - ret_slots: actual number of return value slots
-/// - raw_values[0..ret_slots]: raw return values from closure call
+/// Converts interface-format arguments to the format expected by the closure.
+/// Handles both non-variadic and variadic functions in a single path.
+///
+/// Args: (closure_sig_rttid: int[1], variadic_info: int[1], arg_count: int[1], args[N*2]...)
+/// - closure_sig_rttid: the closure's signature rttid (from dyn_call_prepare)
+/// - variadic_info: 0 for non-variadic, or encoded variadic info from dyn_call_prepare
+/// - arg_count: number of arguments passed (each as interface = 2 slots)
+/// - args: all arguments in interface format (2 slots each)
+///
+/// Returns: (arg_slots: int[1], converted_args[...]...)
+/// - arg_slots: number of slots in converted args
+/// - converted_args: arguments in the format expected by closure
+fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
+    use vo_common_core::types::ValueMeta;
+    
+    let closure_sig_rttid = call.arg_u64(0) as u32;
+    let variadic_info = call.arg_u64(1);
+    let arg_count = call.arg_u64(2) as usize;
+    let args_start = 3u16;
+    
+    // Get closure signature (clone to avoid borrow issues)
+    let (params, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
+        Some((p, _, v)) => (p.clone(), v),
+        None => {
+            // Should not happen if dyn_call_prepare succeeded
+            call.ret_u64(0, 0);
+            return ExternResult::Ok;
+        }
+    };
+    
+    if is_variadic && variadic_info != 0 {
+        // === Variadic path ===
+        // Decode variadic_info: (elem_meta << 16) | (non_variadic_count << 1) | 1
+        let elem_meta_raw = (variadic_info >> 16) as u32;
+        let non_variadic_count = ((variadic_info >> 1) & 0x7FFF) as usize;
+        
+        // Parse element meta
+        let elem_rttid = elem_meta_raw >> 8;
+        let elem_vk = ValueKind::from_u8((elem_meta_raw & 0xFF) as u8);
+        let elem_slots = call.get_type_slot_count(elem_rttid);
+        let elem_bytes = elem_slots as usize * 8;
+        
+        let variadic_arg_count = arg_count.saturating_sub(non_variadic_count);
+        
+        // Create slice for variadic args
+        let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
+        let slice_ref = slice::create(call.gc(), elem_meta, elem_bytes, variadic_arg_count, variadic_arg_count);
+        
+        // Fill variadic slice
+        for i in 0..variadic_arg_count {
+            let arg_idx = non_variadic_count + i;
+            let arg_slot1 = call.arg_u64(args_start + (arg_idx * 2) as u16 + 1);
+            
+            if elem_vk == ValueKind::Interface {
+                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
+                slice::set_n(slice_ref, i, &[arg_slot0, arg_slot1], elem_bytes);
+            } else if elem_slots == 1 {
+                slice::set(slice_ref, i, arg_slot1, elem_bytes);
+            } else if elem_slots == 2 {
+                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
+                slice::set_n(slice_ref, i, &[arg_slot0, arg_slot1], elem_bytes);
+            } else {
+                let src_ref = arg_slot1 as crate::gc::GcRef;
+                if !src_ref.is_null() {
+                    let mut vals = vec![0u64; elem_slots as usize];
+                    for j in 0..elem_slots as usize {
+                        vals[j] = unsafe { crate::gc::Gc::read_slot(src_ref, j) };
+                    }
+                    slice::set_n(slice_ref, i, &vals, elem_bytes);
+                }
+            }
+        }
+        
+        // Calculate total arg_slots: sum of non-variadic param slots + 1 (slice ref)
+        let mut total_arg_slots = 1u16;  // slice ref
+        let mut ret_offset = 1u16;
+        
+        // Unbox non-variadic args based on param types
+        for i in 0..non_variadic_count {
+            let param_rttid = params[i].rttid();
+            let param_slots = call.get_type_slot_count(param_rttid);
+            let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
+            
+            if param_slots == 1 {
+                call.ret_u64(ret_offset, arg_slot1);
+            } else {
+                // For multi-slot params, interface slot1 is GcRef to boxed data
+                // Copy all slots from boxed data
+                let src_ref = arg_slot1 as crate::gc::GcRef;
+                for j in 0..param_slots {
+                    let val = if !src_ref.is_null() {
+                        unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
+                    } else { 0 };
+                    call.ret_u64(ret_offset + j, val);
+                }
+            }
+            ret_offset += param_slots;
+            total_arg_slots += param_slots;
+        }
+        
+        // Append slice ref
+        call.ret_ref(ret_offset, slice_ref);
+        call.ret_u64(0, total_arg_slots as u64);
+    } else {
+        // === Non-variadic path ===
+        // Unbox each interface arg to its expected type based on closure signature
+        let mut total_arg_slots = 0u16;
+        let mut ret_offset = 1u16;
+        
+        for (i, param) in params.iter().enumerate() {
+            if i >= arg_count { break; }
+            
+            let param_rttid = param.rttid();
+            let param_slots = call.get_type_slot_count(param_rttid);
+            let param_vk = param.value_kind();
+            let arg_slot0 = call.arg_u64(args_start + (i * 2) as u16);
+            let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
+            
+            if param_vk == ValueKind::Interface {
+                // Param expects interface - copy both slots
+                call.ret_u64(ret_offset, arg_slot0);
+                call.ret_u64(ret_offset + 1, arg_slot1);
+            } else if param_slots == 1 {
+                // Single-slot param - extract from interface data slot
+                call.ret_u64(ret_offset, arg_slot1);
+            } else {
+                // Multi-slot param - interface slot1 is GcRef to boxed data
+                let src_ref = arg_slot1 as crate::gc::GcRef;
+                for j in 0..param_slots {
+                    let val = if !src_ref.is_null() {
+                        unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
+                    } else { 0 };
+                    call.ret_u64(ret_offset + j, val);
+                }
+            }
+            ret_offset += param_slots;
+            total_arg_slots += param_slots;
+        }
+        
+        call.ret_u64(0, total_arg_slots as u64);
+    }
+    
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_DYN_REPACK_ARGS: ExternEntryWithContext = ExternEntryWithContext {
+    name: "dyn_repack_args",
+    func: dyn_repack_args,
+};
+
+/// dyn_call_closure: Call a closure and unpack returns in one step.
+///
+/// Dynamically allocates buffer based on actual closure return slots at runtime.
+///
+/// Args: (closure_ref[1], arg_slots[1], max_arg_slots[1], args[N], ret_count[1], metas[M], is_any[M])
+/// - closure_ref: GcRef to closure
+/// - arg_slots: actual number of argument slots to pass
+/// - max_arg_slots: compile-time buffer size for args (used for layout calculation)
+/// - args[0..max_arg_slots]: converted arguments for closure (only first arg_slots are used)
+/// - ret_count: number of return values expected
 /// - metas[i]: (rttid << 8 | vk) for return value i
 /// - is_any[i]: 1 if LHS is any (needs boxing), 0 if typed
 ///
-/// Returns: (result_slots...) - layout determined at compile time
-/// - For is_any=1: 2 slots (interface format)
-/// - For is_any=0: raw slots (1-2 for primitives, GcRef for large structs)
-fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
-    let _ret_slots = call.arg_u64(0) as usize;
-    let arg_count = call.arg_count() as usize;
+/// Returns: (result_slots...) - layout determined at compile time based on LHS types
+fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
+    use crate::gc::GcRef;
+    use crate::objects::closure;
     
-    // Derive ret_count from arg layout: 1 + 64 + N + N = arg_count => N = (arg_count - 65) / 2
-    let ret_count = (arg_count - 1 - MAX_DYN_RET_SLOTS) / 2;
+    // Check if closure calling is available
+    if !call.can_call_closure() {
+        return ExternResult::Panic("dyn_call_closure: closure calling not available".to_string());
+    }
     
-    // Offsets into args
-    let raw_values_start = 1usize;
-    let metas_start = 1 + MAX_DYN_RET_SLOTS;
+    let closure_ref = call.arg_u64(0) as GcRef;
+    if closure_ref.is_null() {
+        return ExternResult::Panic("dyn_call_closure: closure_ref is null".to_string());
+    }
+    let arg_slots = call.arg_u64(1) as usize;
+    let max_arg_slots = call.arg_u64(2) as usize;
+    
+    // Read arguments (only actual arg_slots, starting after max_arg_slots header)
+    let args: Vec<u64> = (0..arg_slots)
+        .map(|i| call.arg_u64((3 + i) as u16))
+        .collect();
+    
+    // Layout uses max_arg_slots for offset calculation (matches codegen)
+    let ret_count_offset = 3 + max_arg_slots;
+    let ret_count = call.arg_u64(ret_count_offset as u16) as usize;
+    let metas_start = ret_count_offset + 1;
     let is_any_start = metas_start + ret_count;
     
+    // Get actual ret_slots from closure's function definition
+    let func_id = closure::func_id(closure_ref);
+    let func_def = match call.get_func_def(func_id) {
+        Some(fd) => fd,
+        None => return ExternResult::Panic("dyn_call_closure: function not found".to_string()),
+    };
+    let actual_ret_slots = func_def.ret_slots as usize;
+    
+    // Dynamically allocate buffer for closure return values
+    let mut ret_buffer = vec![0u64; actual_ret_slots];
+    
+    // Call the closure
+    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
+        return ExternResult::Panic(format!("dyn_call_closure: call failed: {}", msg));
+    }
+    
+    // Unpack return values to LHS format
     let mut src_off = 0usize;
     let mut ret_off: u16 = 0;
     
@@ -1020,15 +1215,12 @@ fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
         let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
         let width = call.get_type_slot_count(rttid) as usize;
         
-        // Read raw slots from args (not from stack position)
-        let raw_slots: Vec<u64> = (0..width)
-            .map(|j| call.arg_u64((raw_values_start + src_off + j) as u16))
-            .collect();
-        
+        // Read raw slots from ret_buffer
+        let raw_slots: Vec<u64> = ret_buffer[src_off..src_off + width].to_vec();
         src_off += width;
         
         if is_any {
-            // Box into interface format using unified boxing logic
+            // Box into interface format
             let (result0, result1) = call.box_to_interface(rttid, vk, &raw_slots);
             call.ret_u64(ret_off, result0);
             call.ret_u64(ret_off + 1, result1);
@@ -1037,7 +1229,7 @@ fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
             // Return raw slots for typed LHS
             let is_large = (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2;
             if is_large {
-                // Large struct/array: allocate GcRef for caller to use PtrGet
+                // Large struct/array: allocate GcRef
                 let new_ref = call.alloc_and_copy_slots(&raw_slots);
                 call.ret_u64(ret_off, 0);
                 call.ret_u64(ret_off + 1, new_ref as u64);
@@ -1057,9 +1249,9 @@ fn dyn_unpack_all_returns(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_UNPACK_ALL_RETURNS: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_unpack_all_returns",
-    func: dyn_unpack_all_returns,
+static __VO_DYN_CALL_CLOSURE: ExternEntryWithContext = ExternEntryWithContext {
+    name: "dyn_call_closure",
+    func: dyn_call_closure,
 };
 
 /// dyn_type_assert_error: Create a type assertion error for dynamic access.

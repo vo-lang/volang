@@ -238,15 +238,11 @@ fn format_instruction(instr: &Instruction) -> String {
         }
         // CallExtern: a=result_start, b=extern_id, c=arg_start, flags=arg_count
         Opcode::CallExtern => format!("CallExtern    r{}, extern_{}, args={}, count={}", a, b, c, flags),
-        // CallClosure: a=closure_reg, b=args_start, c=(arg_slots<<8|ret_slots), flags=ret_slots_reg (if != 0)
+        // CallClosure: a=closure_reg, b=args_start, c=(arg_slots<<8|ret_slots)
         Opcode::CallClosure => {
             let arg_slots = c >> 8;
-            if flags != 0 {
-                format!("CallClosure   r{}, r{}, arg_slots={}, ret_slots=r{}", a, b, arg_slots, flags)
-            } else {
-                let ret_slots = c & 0xFF;
-                format!("CallClosure   r{}, r{}, arg_slots={}, ret_slots={}", a, b, arg_slots, ret_slots)
-            }
+            let ret_slots = c & 0xFF;
+            format!("CallClosure   r{}, r{}, arg_slots={}, ret_slots={}", a, b, arg_slots, ret_slots)
         }
         // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
         Opcode::CallIface => {

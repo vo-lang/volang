@@ -26,6 +26,10 @@ pub fn exec_call_extern(
     runtime_types: &[vo_runtime::RuntimeType],
     well_known: &vo_common_core::bytecode::WellKnownTypes,
     itab_cache: &mut vo_runtime::itab::ItabCache,
+    func_defs: &[vo_common_core::bytecode::FunctionDef],
+    vm: *mut std::ffi::c_void,
+    fiber: *mut std::ffi::c_void,
+    call_closure_fn: Option<vo_runtime::ffi::ClosureCallFn>,
     fiber_panic_msg: &mut Option<String>,
 ) -> ExecResult {
     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
@@ -55,6 +59,10 @@ pub fn exec_call_extern(
         runtime_types,
         well_known,
         itab_cache,
+        func_defs,
+        vm,
+        fiber,
+        call_closure_fn,
     );
 
     match result {

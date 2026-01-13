@@ -33,22 +33,16 @@ enum MethodValueWrapperKey {
 }
 
 /// Get ret_slots for known builtin extern functions.
-/// This is critical for JIT to allocate correct buffer sizes.
+/// For variable-size externs (dyn_call_prepare, dyn_repack_args, dyn_call_closure),
+/// use get_or_register_extern_with_ret_slots with explicit size at each call site.
 fn builtin_extern_ret_slots(name: &str) -> u16 {
     match name {
         // Dynamic access: (data[2], error[2]) = 4 slots
-        // Internal names (used by ~> operator) and public API names (dyn package)
         "dyn_get_attr" | "dyn_get_index" | "dyn_GetAttr" | "dyn_GetIndex" => 4,
         // Dynamic set: error[2] = 2 slots
         "dyn_set_attr" | "dyn_set_index" | "dyn_SetAttr" | "dyn_SetIndex" => 2,
-        // Dynamic call prepare: (ret_slots[1], metas[N], error[2]) - use max
-        "dyn_call_prepare" => 67, // 1 + 64 + 2
-        // Dynamic unpack: variable, use max
-        "dyn_unpack_all_returns" => 64,
         // Type assertion error: error[2]
         "dyn_type_assert_error" => 2,
-        // Return slots overflow error: error[2]
-        "dyn_ret_slots_overflow_error" => 2,
         // Print functions: no return
         "vo_print" | "vo_println" => 0,
         // Copy: returns int
@@ -749,19 +743,27 @@ impl CodegenContext {
         self.extern_indices.get(&name).copied()
     }
 
-    /// Get or register an extern function by string name (for builtins)
+    /// Get or register an extern function by string name.
+    /// Uses builtin_extern_ret_slots for known externs, 0 for unknown.
     pub fn get_or_register_extern(&mut self, name: &str) -> u32 {
-        // Check if already registered in extern_names
+        self.get_or_register_extern_with_ret_slots(name, builtin_extern_ret_slots(name))
+    }
+
+    /// Get or register an extern function with explicit ret_slots.
+    /// If the extern already exists, updates ret_slots to the maximum of old and new.
+    pub fn get_or_register_extern_with_ret_slots(&mut self, name: &str, ret_slots: u16) -> u32 {
         if let Some(&id) = self.extern_names.get(name) {
+            // Update ret_slots to max if needed
+            let existing = &mut self.module.externs[id as usize];
+            if ret_slots > existing.ret_slots {
+                existing.ret_slots = ret_slots;
+            }
             return id;
         }
-        // Get ret_slots for known builtins
-        let ret_slots = builtin_extern_ret_slots(name);
-        // Register new extern
         let id = self.module.externs.len() as u32;
         self.module.externs.push(vo_vm::bytecode::ExternDef {
             name: name.to_string(),
-            param_slots: 0,  // variadic
+            param_slots: 0,
             ret_slots,
         });
         self.extern_names.insert(name.to_string(), id);

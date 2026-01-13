@@ -677,6 +677,9 @@ impl Vm {
                 }
                 Opcode::CallExtern => {
                     let mut extern_panic_msg: Option<String> = None;
+                    // Get pointers for closure calling capability
+                    let vm_ptr = self as *mut Vm as *mut std::ffi::c_void;
+                    let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut std::ffi::c_void;
                     let result = exec::exec_call_extern(
                         stack,
                         bp,
@@ -690,6 +693,10 @@ impl Vm {
                         &module.runtime_types,
                         &module.well_known,
                         &mut self.state.itab_cache,
+                        &module.functions,
+                        vm_ptr,
+                        fiber_ptr,
+                        Some(jit_glue::closure_call_trampoline),
                         &mut extern_panic_msg,
                     );
                     // Convert extern panic to recoverable runtime panic

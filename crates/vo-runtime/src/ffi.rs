@@ -47,6 +47,26 @@ pub type ExternFn = fn(&mut ExternCall) -> ExternResult;
 /// Extern function with full context (GC + type metadata).
 pub type ExternFnWithContext = fn(&mut ExternCallContext) -> ExternResult;
 
+/// Result of calling a closure from within an extern function.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosureCallResult {
+    Ok = 0,
+    Panic = 1,
+}
+
+/// Callback type for calling closures from extern functions.
+/// This allows extern functions to call back into the VM to execute closures.
+pub type ClosureCallFn = extern "C" fn(
+    vm: *mut std::ffi::c_void,
+    fiber: *mut std::ffi::c_void,
+    closure_ref: u64,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_count: u32,
+) -> ClosureCallResult;
+
 // ==================== Auto-registration via linkme ====================
 
 /// Entry for auto-registered extern functions.
@@ -231,6 +251,14 @@ pub struct ExternCallContext<'a> {
     /// Pre-computed IDs for well-known types.
     well_known: &'a WellKnownTypes,
     itab_cache: &'a mut ItabCache,
+    /// Function definitions for closure calls.
+    func_defs: &'a [vo_common_core::bytecode::FunctionDef],
+    /// Opaque pointer to VM instance (for closure calls).
+    vm: *mut std::ffi::c_void,
+    /// Opaque pointer to current Fiber (for closure calls).
+    fiber: *mut std::ffi::c_void,
+    /// Callback to execute closures.
+    call_closure_fn: Option<ClosureCallFn>,
 }
 
 impl<'a> ExternCallContext<'a> {
@@ -249,6 +277,10 @@ impl<'a> ExternCallContext<'a> {
         runtime_types: &'a [RuntimeType],
         well_known: &'a WellKnownTypes,
         itab_cache: &'a mut ItabCache,
+        func_defs: &'a [vo_common_core::bytecode::FunctionDef],
+        vm: *mut std::ffi::c_void,
+        fiber: *mut std::ffi::c_void,
+        call_closure_fn: Option<ClosureCallFn>,
     ) -> Self {
         Self {
             call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
@@ -259,6 +291,10 @@ impl<'a> ExternCallContext<'a> {
             runtime_types,
             well_known,
             itab_cache,
+            func_defs,
+            vm,
+            fiber,
+            call_closure_fn,
         }
     }
 
@@ -584,6 +620,28 @@ impl<'a> ExternCallContext<'a> {
         Vec::new()
     }
     
+    /// Get full function signature info for dynamic calls.
+    /// Returns (params, results, is_variadic).
+    pub fn get_func_signature(&self, func_rttid: u32) -> Option<(&Vec<ValueRttid>, &Vec<ValueRttid>, bool)> {
+        use crate::RuntimeType;
+        
+        match self.runtime_types.get(func_rttid as usize)? {
+            RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
+            _ => None,
+        }
+    }
+    
+    /// Get variadic element type from a slice type.
+    /// Returns the element's ValueRttid.
+    pub fn get_slice_elem(&self, slice_rttid: u32) -> Option<ValueRttid> {
+        use crate::RuntimeType;
+        
+        match self.runtime_types.get(slice_rttid as usize)? {
+            RuntimeType::Slice(elem) => Some(*elem),
+            _ => None,
+        }
+    }
+    
     /// Check if two function signatures are compatible for dynamic call.
     /// Returns Ok(()) if compatible, Err(message) if not.
     ///
@@ -604,32 +662,67 @@ impl<'a> ExternCallContext<'a> {
     ) -> Result<(), String> {
         use crate::RuntimeType;
         
-        let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>)> {
+        let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
             match self.runtime_types.get(rttid as usize)? {
-                RuntimeType::Func { params, results, .. } => Some((params, results)),
+                RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
                 _ => None,
             }
         };
         
-        let (closure_params, closure_results) = get_func_sig(closure_sig_rttid)
+        let (closure_params, closure_results, closure_variadic) = get_func_sig(closure_sig_rttid)
             .ok_or("closure is not a function type")?;
-        let (expected_params, expected_results) = get_func_sig(expected_sig_rttid)
+        let (expected_params, expected_results, _) = get_func_sig(expected_sig_rttid)
             .ok_or("expected signature is not a function type")?;
         
-        if closure_params.len() != expected_params.len() {
-            return Err(format!("parameter count mismatch: expected {}, got {}", 
-                expected_params.len(), closure_params.len()));
+        // Check parameter compatibility
+        if closure_variadic {
+            // Variadic function: closure has N params where last is []T
+            // Expected can have >= N-1 params (variadic part can be empty or have multiple args)
+            let non_variadic_count = closure_params.len().saturating_sub(1);
+            if expected_params.len() < non_variadic_count {
+                return Err(format!("parameter count mismatch: expected at least {}, got {}", 
+                    non_variadic_count, expected_params.len()));
+            }
+            
+            // Check non-variadic parameters
+            for (i, (expected, closure)) in expected_params.iter().take(non_variadic_count).zip(closure_params).enumerate() {
+                if !self.value_rttids_compatible(*expected, *closure) {
+                    return Err(format!("parameter {} type mismatch", i + 1));
+                }
+            }
+            
+            // Check variadic parameters: each must be compatible with slice element type
+            if let Some(variadic_param) = closure_params.last() {
+                // Get element type from the slice type
+                let variadic_rttid = variadic_param.rttid();
+                if let Some(RuntimeType::Slice(elem_rttid)) = self.runtime_types.get(variadic_rttid as usize) {
+                    for (i, expected) in expected_params.iter().skip(non_variadic_count).enumerate() {
+                        if !self.value_rttids_compatible(*expected, *elem_rttid) {
+                            return Err(format!("variadic parameter {} type mismatch", i + 1));
+                        }
+                    }
+                } else {
+                    return Err("variadic parameter is not a slice type".to_string());
+                }
+            }
+        } else {
+            // Non-variadic: exact parameter count match
+            if closure_params.len() != expected_params.len() {
+                return Err(format!("parameter count mismatch: expected {}, got {}", 
+                    expected_params.len(), closure_params.len()));
+            }
+            
+            for (i, (expected, closure)) in expected_params.iter().zip(closure_params).enumerate() {
+                if !self.value_rttids_compatible(*expected, *closure) {
+                    return Err(format!("parameter {} type mismatch", i + 1));
+                }
+            }
         }
         
+        // Check return compatibility
         if closure_results.len() != expected_results.len() {
             return Err(format!("return count mismatch: expected {}, got {}", 
                 expected_results.len(), closure_results.len()));
-        }
-        
-        for (i, (expected, closure)) in expected_params.iter().zip(closure_params).enumerate() {
-            if !self.value_rttids_compatible(*expected, *closure) {
-                return Err(format!("parameter {} type mismatch", i + 1));
-            }
         }
         
         for (i, (closure, expected)) in closure_results.iter().zip(expected_results).enumerate() {
@@ -803,6 +896,57 @@ impl<'a> ExternCallContext<'a> {
         s
     }
 
+    // ==================== Closure Calling ====================
+
+    /// Get function definition by func_id.
+    #[inline]
+    pub fn get_func_def(&self, func_id: u32) -> Option<&vo_common_core::bytecode::FunctionDef> {
+        self.func_defs.get(func_id as usize)
+    }
+
+    /// Check if closure calling capability is available.
+    #[inline]
+    pub fn can_call_closure(&self) -> bool {
+        self.call_closure_fn.is_some()
+    }
+
+    /// Call a closure from within an extern function.
+    /// 
+    /// This allows dynamic call implementations to execute closures and get results
+    /// without needing a fixed-size buffer allocated at compile time.
+    ///
+    /// # Arguments
+    /// - `closure_ref`: GcRef to the closure object
+    /// - `args`: Argument slots to pass to the closure
+    /// - `ret_buffer`: Buffer to receive return values (must be large enough for ret_slots)
+    ///
+    /// # Returns
+    /// - `Ok(ret_slots)`: Number of return slots written to ret_buffer
+    /// - `Err(msg)`: Error message if call failed
+    pub fn call_closure(
+        &mut self,
+        closure_ref: GcRef,
+        args: &[u64],
+        ret_buffer: &mut [u64],
+    ) -> Result<usize, String> {
+        let call_fn = self.call_closure_fn.ok_or("Closure calling not available")?;
+        
+        let result = call_fn(
+            self.vm,
+            self.fiber,
+            closure_ref as u64,
+            args.as_ptr(),
+            args.len() as u32,
+            ret_buffer.as_mut_ptr(),
+            ret_buffer.len() as u32,
+        );
+        
+        match result {
+            ClosureCallResult::Ok => Ok(ret_buffer.len()),
+            ClosureCallResult::Panic => Err("Closure panicked".to_string()),
+        }
+    }
+
 }
 
 // ==================== Extern Registry ====================
@@ -858,6 +1002,10 @@ impl ExternRegistry {
         runtime_types: &[RuntimeType],
         well_known: &WellKnownTypes,
         itab_cache: &mut ItabCache,
+        func_defs: &[vo_common_core::bytecode::FunctionDef],
+        vm: *mut std::ffi::c_void,
+        fiber: *mut std::ffi::c_void,
+        call_closure_fn: Option<ClosureCallFn>,
     ) -> ExternResult {
         match self.funcs.get(id as usize) {
             Some(Some(ExternFnEntry::Simple(f))) => {
@@ -878,6 +1026,10 @@ impl ExternRegistry {
                     runtime_types,
                     well_known,
                     itab_cache,
+                    func_defs,
+                    vm,
+                    fiber,
+                    call_closure_fn,
                 );
                 f(&mut call)
             }
