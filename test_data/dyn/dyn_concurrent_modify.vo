@@ -1,0 +1,167 @@
+// Test concurrent dynamic access and modification
+// Multiple goroutines accessing/modifying same object dynamically.
+package main
+
+type Counter struct {
+    value int
+    name  string
+}
+
+func (c *Counter) Get() int {
+    return c.value
+}
+
+func (c *Counter) Add(n int) {
+    c.value += n
+}
+
+type SharedData struct {
+    counters map[string]*Counter
+    results  []int
+}
+
+func NewSharedData() *SharedData {
+    return &SharedData{
+        counters: make(map[string]*Counter),
+        results:  make([]int, 0),
+    }
+}
+
+// Reader goroutine - dynamically reads counter value
+func dynReader(obj any, key string, ch chan int) {
+    counters := obj~>counters?
+    m := counters.(map[string]*Counter)
+    
+    counter := m[key]
+    if counter == nil {
+        ch <- -1
+        return
+    }
+    
+    var cObj any = counter
+    val := cObj~>Get()?
+    ch <- val.(int)
+}
+
+// Writer goroutine - dynamically modifies counter
+func dynWriter(obj any, key string, delta int, done chan bool) {
+    counters := obj~>counters?
+    m := counters.(map[string]*Counter)
+    
+    counter := m[key]
+    if counter == nil {
+        done <- false
+        return
+    }
+    
+    var cObj any = counter
+    err := cObj~>Add(delta)
+    if err != nil {
+        done <- false
+        return
+    }
+    done <- true
+}
+
+// Accumulator - reads multiple counters dynamically
+func dynAccumulate(obj any, keys []string) int {
+    counters := obj~>counters?
+    m := counters.(map[string]*Counter)
+    
+    total := 0
+    for _, key := range keys {
+        counter := m[key]
+        if counter != nil {
+            var cObj any = counter
+            val := cObj~>Get()?
+            total += val.(int)
+        }
+    }
+    return total
+}
+
+func main() error {
+    data := NewSharedData()
+    data.counters["a"] = &Counter{value: 10, name: "A"}
+    data.counters["b"] = &Counter{value: 20, name: "B"}
+    data.counters["c"] = &Counter{value: 30, name: "C"}
+    
+    var obj any = data
+    
+    // Test 1: Sequential dynamic reads
+    readCh := make(chan int, 3)
+    
+    go dynReader(obj, "a", readCh)
+    go dynReader(obj, "b", readCh)
+    go dynReader(obj, "c", readCh)
+    
+    sum := 0
+    for i := 0; i < 3; i++ {
+        sum += <-readCh
+    }
+    assert(sum == 60, "initial sum should be 60, got ", sum)
+    
+    // Test 2: Sequential dynamic writes then read
+    doneCh := make(chan bool, 3)
+    
+    go dynWriter(obj, "a", 5, doneCh)
+    go dynWriter(obj, "b", 10, doneCh)
+    go dynWriter(obj, "c", 15, doneCh)
+    
+    for i := 0; i < 3; i++ {
+        ok := <-doneCh
+        assert(ok, "write should succeed")
+    }
+    
+    // Read after writes
+    go dynReader(obj, "a", readCh)
+    go dynReader(obj, "b", readCh)
+    go dynReader(obj, "c", readCh)
+    
+    sum = 0
+    for i := 0; i < 3; i++ {
+        sum += <-readCh
+    }
+    // 15 + 30 + 45 = 90
+    assert(sum == 90, "sum after writes should be 90, got ", sum)
+    
+    // Test 3: Accumulate via dynamic access
+    keys := []string{"a", "b", "c"}
+    total := dynAccumulate(obj, keys)
+    assert(total == 90, "accumulated total should be 90, got ", total)
+    
+    // Test 4: Dynamic access to non-existent key
+    go dynReader(obj, "nonexistent", readCh)
+    val := <-readCh
+    assert(val == -1, "non-existent should return -1")
+    
+    // Test 5: Field access in goroutine
+    nameCh := make(chan string, 1)
+    go func() {
+        counters := obj~>counters?
+        m := counters.(map[string]*Counter)
+        counter := m["a"]
+        var cObj any = counter
+        name := cObj~>name?
+        nameCh <- name.(string)
+    }()
+    
+    name := <-nameCh
+    assert(name == "A", "counter name should be A, got ", name)
+    
+    // Test 6: Multiple reads in parallel (stress test)
+    parallelCh := make(chan int, 10)
+    for i := 0; i < 10; i++ {
+        go dynReader(obj, "b", parallelCh)
+    }
+    
+    parallelSum := 0
+    for i := 0; i < 10; i++ {
+        parallelSum += <-parallelCh
+    }
+    // 30 * 10 = 300
+    assert(parallelSum == 300, "parallel sum should be 300, got ", parallelSum)
+    
+    println("dyn_concurrent_modify: ok")
+    return nil
+}

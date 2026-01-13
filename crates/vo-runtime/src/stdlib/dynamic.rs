@@ -1061,15 +1061,75 @@ static __VO_DYN_CALL_PREPARE: ExternEntryWithContext = ExternEntryWithContext {
     func: dyn_call_prepare,
 };
 
+/// Unbox an interface-format argument to the expected parameter format.
+/// Returns the number of slots written.
+fn unbox_interface_arg(
+    call: &mut ExternCallContext,
+    arg_slot0: u64,
+    arg_slot1: u64,
+    param_vk: ValueKind,
+    param_slots: u16,
+    ret_offset: u16,
+) -> u16 {
+    if param_vk == ValueKind::Interface {
+        // Param expects interface - copy both slots
+        call.ret_u64(ret_offset, arg_slot0);
+        call.ret_u64(ret_offset + 1, arg_slot1);
+    } else if param_slots == 1 {
+        // Single-slot param - extract from interface data slot
+        call.ret_u64(ret_offset, arg_slot1);
+    } else {
+        // Multi-slot param - interface slot1 is GcRef to boxed data
+        let src_ref = arg_slot1 as crate::gc::GcRef;
+        for j in 0..param_slots {
+            let val = if !src_ref.is_null() {
+                unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
+            } else { 0 };
+            call.ret_u64(ret_offset + j, val);
+        }
+    }
+    param_slots
+}
+
+/// Set a slice element from interface-format data.
+fn set_slice_elem_from_interface(
+    slice_ref: crate::gc::GcRef,
+    idx: usize,
+    arg_slot0: u64,
+    arg_slot1: u64,
+    elem_vk: ValueKind,
+    elem_slots: u16,
+    elem_bytes: usize,
+) {
+    if elem_vk == ValueKind::Interface || elem_slots == 2 {
+        // Interface or 2-slot types: copy both slots
+        slice::set_n(slice_ref, idx, &[arg_slot0, arg_slot1], elem_bytes);
+    } else if elem_slots == 1 {
+        // Single-slot: use data slot directly
+        slice::set(slice_ref, idx, arg_slot1, elem_bytes);
+    } else {
+        // Multi-slot (>2): unbox from GcRef
+        let src_ref = arg_slot1 as crate::gc::GcRef;
+        if !src_ref.is_null() {
+            let mut vals = vec![0u64; elem_slots as usize];
+            for j in 0..elem_slots as usize {
+                vals[j] = unsafe { crate::gc::Gc::read_slot(src_ref, j) };
+            }
+            slice::set_n(slice_ref, idx, &vals, elem_bytes);
+        }
+    }
+}
+
 /// dyn_repack_args: Unified argument repacking for dynamic calls.
 ///
 /// Converts interface-format arguments to the format expected by the closure.
 /// Handles both non-variadic and variadic functions in a single path.
 ///
-/// Args: (closure_sig_rttid: int[1], variadic_info: int[1], arg_count: int[1], args[N*2]...)
+/// Args: (closure_sig_rttid: int[1], variadic_info: int[1], arg_count: int[1], spread_flag: int[1], args[N*2]...)
 /// - closure_sig_rttid: the closure's signature rttid (from dyn_call_prepare)
 /// - variadic_info: 0 for non-variadic, or encoded variadic info from dyn_call_prepare
 /// - arg_count: number of arguments passed (each as interface = 2 slots)
+/// - spread_flag: 1 if the last argument is a slice to spread, 0 otherwise
 /// - args: all arguments in interface format (2 slots each)
 ///
 /// Returns: (arg_slots: int[1], converted_args[...]...)
@@ -1081,7 +1141,8 @@ fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
     let closure_sig_rttid = call.arg_u64(0) as u32;
     let variadic_info = call.arg_u64(1);
     let arg_count = call.arg_u64(2) as usize;
-    let args_start = 3u16;
+    let spread_flag = call.arg_u64(3) != 0;
+    let args_start = 4u16;
     
     // Get closure signature (clone to avoid borrow issues)
     let (params, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
@@ -1095,109 +1156,64 @@ fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
     
     if is_variadic && variadic_info != 0 {
         // === Variadic path ===
-        // Decode variadic_info: (elem_meta << 16) | (non_variadic_count << 1) | 1
-        let elem_meta_raw = (variadic_info >> 16) as u32;
         let non_variadic_count = ((variadic_info >> 1) & 0x7FFF) as usize;
         
-        // Parse element meta
-        let elem_rttid = elem_meta_raw >> 8;
-        let elem_vk = ValueKind::from_u8((elem_meta_raw & 0xFF) as u8);
-        let elem_slots = call.get_type_slot_count(elem_rttid);
-        let elem_bytes = elem_slots as usize * 8;
-        
-        let variadic_arg_count = arg_count.saturating_sub(non_variadic_count);
-        
-        // Create slice for variadic args
-        let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
-        let slice_ref = slice::create(call.gc(), elem_meta, elem_bytes, variadic_arg_count, variadic_arg_count);
-        
-        // Fill variadic slice
-        for i in 0..variadic_arg_count {
-            let arg_idx = non_variadic_count + i;
-            let arg_slot1 = call.arg_u64(args_start + (arg_idx * 2) as u16 + 1);
-            
-            if elem_vk == ValueKind::Interface {
-                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
-                slice::set_n(slice_ref, i, &[arg_slot0, arg_slot1], elem_bytes);
-            } else if elem_slots == 1 {
-                slice::set(slice_ref, i, arg_slot1, elem_bytes);
-            } else if elem_slots == 2 {
-                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
-                slice::set_n(slice_ref, i, &[arg_slot0, arg_slot1], elem_bytes);
-            } else {
-                let src_ref = arg_slot1 as crate::gc::GcRef;
-                if !src_ref.is_null() {
-                    let mut vals = vec![0u64; elem_slots as usize];
-                    for j in 0..elem_slots as usize {
-                        vals[j] = unsafe { crate::gc::Gc::read_slot(src_ref, j) };
-                    }
-                    slice::set_n(slice_ref, i, &vals, elem_bytes);
-                }
-            }
-        }
-        
-        // Calculate total arg_slots: sum of non-variadic param slots + 1 (slice ref)
-        let mut total_arg_slots = 1u16;  // slice ref
+        // Unbox non-variadic args, then append variadic slice
+        let mut total_arg_slots = 1u16;  // +1 for slice ref
         let mut ret_offset = 1u16;
         
-        // Unbox non-variadic args based on param types
         for i in 0..non_variadic_count {
-            let param_rttid = params[i].rttid();
-            let param_slots = call.get_type_slot_count(param_rttid);
+            let param = &params[i];
+            let param_slots = call.get_type_slot_count(param.rttid());
+            let arg_slot0 = call.arg_u64(args_start + (i * 2) as u16);
             let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
             
-            if param_slots == 1 {
-                call.ret_u64(ret_offset, arg_slot1);
-            } else {
-                // For multi-slot params, interface slot1 is GcRef to boxed data
-                // Copy all slots from boxed data
-                let src_ref = arg_slot1 as crate::gc::GcRef;
-                for j in 0..param_slots {
-                    let val = if !src_ref.is_null() {
-                        unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
-                    } else { 0 };
-                    call.ret_u64(ret_offset + j, val);
-                }
-            }
+            unbox_interface_arg(call, arg_slot0, arg_slot1, param.value_kind(), param_slots, ret_offset);
             ret_offset += param_slots;
             total_arg_slots += param_slots;
         }
         
-        // Append slice ref
+        // Handle variadic portion
+        let slice_ref = if spread_flag && arg_count > non_variadic_count {
+            // Spread: last argument is already a slice
+            let last_arg_idx = arg_count - 1;
+            call.arg_u64(args_start + (last_arg_idx * 2) as u16 + 1) as crate::gc::GcRef
+        } else {
+            // Non-spread: create slice from individual args
+            let elem_meta_raw = (variadic_info >> 16) as u32;
+            let elem_rttid = elem_meta_raw >> 8;
+            let elem_vk = ValueKind::from_u8((elem_meta_raw & 0xFF) as u8);
+            let elem_slots = call.get_type_slot_count(elem_rttid);
+            let elem_bytes = elem_slots as usize * 8;
+            let variadic_arg_count = arg_count.saturating_sub(non_variadic_count);
+            
+            let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
+            let new_slice = slice::create(call.gc(), elem_meta, elem_bytes, variadic_arg_count, variadic_arg_count);
+            
+            for i in 0..variadic_arg_count {
+                let arg_idx = non_variadic_count + i;
+                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
+                let arg_slot1 = call.arg_u64(args_start + (arg_idx * 2) as u16 + 1);
+                set_slice_elem_from_interface(new_slice, i, arg_slot0, arg_slot1, elem_vk, elem_slots, elem_bytes);
+            }
+            new_slice
+        };
+        
         call.ret_ref(ret_offset, slice_ref);
         call.ret_u64(0, total_arg_slots as u64);
     } else {
         // === Non-variadic path ===
-        // Unbox each interface arg to its expected type based on closure signature
         let mut total_arg_slots = 0u16;
         let mut ret_offset = 1u16;
         
         for (i, param) in params.iter().enumerate() {
             if i >= arg_count { break; }
             
-            let param_rttid = param.rttid();
-            let param_slots = call.get_type_slot_count(param_rttid);
-            let param_vk = param.value_kind();
+            let param_slots = call.get_type_slot_count(param.rttid());
             let arg_slot0 = call.arg_u64(args_start + (i * 2) as u16);
             let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
             
-            if param_vk == ValueKind::Interface {
-                // Param expects interface - copy both slots
-                call.ret_u64(ret_offset, arg_slot0);
-                call.ret_u64(ret_offset + 1, arg_slot1);
-            } else if param_slots == 1 {
-                // Single-slot param - extract from interface data slot
-                call.ret_u64(ret_offset, arg_slot1);
-            } else {
-                // Multi-slot param - interface slot1 is GcRef to boxed data
-                let src_ref = arg_slot1 as crate::gc::GcRef;
-                for j in 0..param_slots {
-                    let val = if !src_ref.is_null() {
-                        unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
-                    } else { 0 };
-                    call.ret_u64(ret_offset + j, val);
-                }
-            }
+            unbox_interface_arg(call, arg_slot0, arg_slot1, param.value_kind(), param_slots, ret_offset);
             ret_offset += param_slots;
             total_arg_slots += param_slots;
         }

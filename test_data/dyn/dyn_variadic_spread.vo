@@ -1,0 +1,130 @@
+// Test variadic spread in dynamic call
+// Call variadic methods dynamically with slice spread.
+package main
+
+type Calculator struct {
+    base int
+}
+
+func (c *Calculator) Sum(vals ...int) int {
+    total := c.base
+    for _, v := range vals {
+        total += v
+    }
+    return total
+}
+
+func (c *Calculator) Max(vals ...int) int {
+    if len(vals) == 0 {
+        return c.base
+    }
+    max := vals[0]
+    for _, v := range vals[1:] {
+        if v > max {
+            max = v
+        }
+    }
+    return max
+}
+
+func (c *Calculator) Join(sep string, strs ...string) string {
+    if len(strs) == 0 {
+        return ""
+    }
+    result := strs[0]
+    for _, s := range strs[1:] {
+        result = result + sep + s
+    }
+    return result
+}
+
+func (c *Calculator) MixedVariadic(prefix string, nums ...int) string {
+    sum := 0
+    for _, n := range nums {
+        sum += n
+    }
+    return prefix + ":" + itoa(sum)
+}
+
+func itoa(n int) string {
+    if n == 0 {
+        return "0"
+    }
+    neg := false
+    if n < 0 {
+        neg = true
+        n = -n
+    }
+    s := ""
+    for n > 0 {
+        s = string('0'+byte(n%10)) + s
+        n = n / 10
+    }
+    if neg {
+        s = "-" + s
+    }
+    return s
+}
+
+func main() error {
+    calc := &Calculator{base: 100}
+    var obj any = calc
+    
+    // Test 1: Variadic call with no args
+    sum0, err := obj~>Sum()
+    assert(err == nil, "Sum() error: ", err)
+    assert(sum0.(int) == 100, "Sum() should be 100")
+    
+    // Test 2: Variadic call with individual args
+    sum1, err := obj~>Sum(1, 2, 3)
+    assert(err == nil, "Sum(1,2,3) error: ", err)
+    assert(sum1.(int) == 106, "Sum(1,2,3) should be 106, got ", sum1.(int))
+    
+    // Test 3: Variadic spread with slice
+    nums := []int{10, 20, 30}
+    sum2, err := obj~>Sum(nums...)
+    assert(err == nil, "Sum(nums...) error: ", err)
+    assert(sum2.(int) == 160, "Sum(nums...) should be 160, got ", sum2.(int))
+    
+    // Test 4: Variadic spread with empty slice
+    empty := []int{}
+    sum3, err := obj~>Sum(empty...)
+    assert(err == nil, "Sum(empty...) error: ", err)
+    assert(sum3.(int) == 100, "Sum(empty...) should be 100")
+    
+    // Test 5: Max with spread
+    vals := []int{5, 99, 3, 42}
+    max1, err := obj~>Max(vals...)
+    assert(err == nil, "Max(vals...) error: ", err)
+    assert(max1.(int) == 99, "Max should be 99, got ", max1.(int))
+    
+    // Test 6: String variadic with spread
+    words := []string{"hello", "world", "test"}
+    joined, err := obj~>Join("-", words...)
+    assert(err == nil, "Join error: ", err)
+    assert(joined.(string) == "hello-world-test", "Join mismatch: ", joined.(string))
+    
+    // Test 7: Mixed variadic (fixed + variadic)
+    mixedNums := []int{1, 2, 3, 4}
+    mixed, err := obj~>MixedVariadic("total", mixedNums...)
+    assert(err == nil, "MixedVariadic error: ", err)
+    assert(mixed.(string) == "total:10", "MixedVariadic should be 'total:10', got ", mixed.(string))
+    
+    // Test 8: Variadic spread from dynamic slice
+    sliceAny := obj~>base  // This doesn't return slice, just testing concept
+    // Actually get a slice dynamically
+    type DataHolder struct {
+        values []int
+    }
+    dh := &DataHolder{values: []int{7, 8, 9}}
+    var dhObj any = dh
+    dynVals := dhObj~>values?
+    dynSlice := dynVals.([]int)
+    
+    sumDyn, err := obj~>Sum(dynSlice...)
+    assert(err == nil, "Sum(dynSlice...) error: ", err)
+    assert(sumDyn.(int) == 124, "Sum(dynSlice...) should be 124, got ", sumDyn.(int))
+    
+    println("dyn_variadic_spread: ok")
+    return nil
+}

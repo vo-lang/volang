@@ -532,3 +532,22 @@ tests:
 # Fixed: Dynamic call returning closure - receiver escape boxing was missing
   - file: dyn/dyn_return_func_call.vo
 
+# ============================================================
+# Dyn coverage tests (2026-01-13 batch 6) - New coverage tests
+# ============================================================
+
+# Test: for-range over dynamically accessed collection
+  - file: dyn/dyn_range_iteration.vo
+
+# Test: dynamic multi-return used as function arguments
+  - file: dyn/dyn_multi_ret_func_arg.vo
+
+# Test: concurrent dynamic access and modification
+  - file: dyn/dyn_concurrent_modify.vo
+
+# Test: slice operations on dynamically accessed slices
+  - file: dyn/dyn_slice_operations.vo
+
+# Fixed: variadic spread in dynamic call - obj~>Method(args...)
+  - file: dyn/dyn_variadic_spread.vo
+

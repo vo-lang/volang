@@ -1,0 +1,156 @@
+// Test for-range over dynamically accessed collection
+// Iterate over slice/map obtained via ~> operator.
+package main
+
+type DataStore struct {
+    items  []int
+    lookup map[string]int
+    names  []string
+}
+
+func NewDataStore() *DataStore {
+    return &DataStore{
+        items:  []int{10, 20, 30, 40, 50},
+        lookup: map[string]int{"a": 1, "b": 2, "c": 3},
+        names:  []string{"Alice", "Bob", "Charlie"},
+    }
+}
+
+// Sum items by iterating over dynamically accessed slice
+func sumDynSlice(obj any) int {
+    items := obj~>items?
+    slice := items.([]int)
+    
+    sum := 0
+    for _, v := range slice {
+        sum += v
+    }
+    return sum
+}
+
+// Collect keys by iterating over dynamically accessed map
+func collectDynMapKeys(obj any) []string {
+    lookup := obj~>lookup?
+    m := lookup.(map[string]int)
+    
+    var keys []string
+    for k := range m {
+        keys = append(keys, k)
+    }
+    return keys
+}
+
+// Count items with condition
+func countAbove(obj any, threshold int) int {
+    items := obj~>items?
+    slice := items.([]int)
+    
+    count := 0
+    for _, v := range slice {
+        if v > threshold {
+            count++
+        }
+    }
+    return count
+}
+
+// Range with index
+func indexedSum(obj any) int {
+    items := obj~>items?
+    slice := items.([]int)
+    
+    sum := 0
+    for i, v := range slice {
+        sum += i * v  // weighted sum
+    }
+    return sum
+}
+
+// Nested range: iterate names, then lookup each
+func nestedRange(obj any) int {
+    names := obj~>names?
+    lookup := obj~>lookup?
+    
+    nameSlice := names.([]string)
+    lookupMap := lookup.(map[string]int)
+    
+    total := 0
+    for _, name := range nameSlice {
+        // Use first char as key
+        key := string(name[0])
+        if key == "A" {
+            key = "a"
+        } else if key == "B" {
+            key = "b"
+        } else if key == "C" {
+            key = "c"
+        }
+        if v, ok := lookupMap[key]; ok {
+            total += v
+        }
+    }
+    return total
+}
+
+// Range over slice obtained from chained dyn access
+type Container struct {
+    store *DataStore
+}
+
+func chainedRange(obj any) int {
+    store := obj~>store?
+    items := store~>items?
+    slice := items.([]int)
+    
+    sum := 0
+    for _, v := range slice {
+        sum += v
+    }
+    return sum
+}
+
+func main() error {
+    ds := NewDataStore()
+    var obj any = ds
+    
+    // Test 1: Sum via dynamic slice iteration
+    sum := sumDynSlice(obj)
+    assert(sum == 150, "sum should be 150, got ", sum)
+    
+    // Test 2: Collect map keys
+    keys := collectDynMapKeys(obj)
+    assert(len(keys) == 3, "should have 3 keys")
+    
+    // Test 3: Count with threshold
+    count := countAbove(obj, 25)
+    assert(count == 3, "should have 3 items above 25, got ", count)
+    
+    // Test 4: Indexed sum
+    // 0*10 + 1*20 + 2*30 + 3*40 + 4*50 = 0 + 20 + 60 + 120 + 200 = 400
+    isum := indexedSum(obj)
+    assert(isum == 400, "indexed sum should be 400, got ", isum)
+    
+    // Test 5: Nested range
+    // a->1, b->2, c->3 = 1+2+3 = 6
+    nested := nestedRange(obj)
+    assert(nested == 6, "nested range sum should be 6, got ", nested)
+    
+    // Test 6: Chained access then range
+    container := &Container{store: ds}
+    var cobj any = container
+    csum := chainedRange(cobj)
+    assert(csum == 150, "chained range sum should be 150, got ", csum)
+    
+    // Test 7: Range over dynamically indexed slice element
+    // Get items, then range over subset
+    items := obj~>items?
+    slice := items.([]int)
+    partial := 0
+    for i := 1; i < 4; i++ {
+        partial += slice[i]
+    }
+    assert(partial == 90, "partial sum (20+30+40) should be 90, got ", partial)
+    
+    println("dyn_range_iteration: ok")
+    return nil
+}

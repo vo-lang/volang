@@ -1,0 +1,151 @@
+// Test dynamic multi-return used as function arguments
+// Call a function with results from dynamic call.
+package main
+
+type Pair struct {
+    first  int
+    second int
+}
+
+func (p *Pair) Both() (int, int) {
+    return p.first, p.second
+}
+
+func (p *Pair) Triple() (int, int, int) {
+    return p.first, p.second, p.first + p.second
+}
+
+func (p *Pair) WithString() (int, string) {
+    return p.first, "hello"
+}
+
+// Functions that accept multiple args
+func add(a, b int) int {
+    return a + b
+}
+
+func multiply(a, b int) int {
+    return a * b
+}
+
+func addThree(a, b, c int) int {
+    return a + b + c
+}
+
+func format(n int, s string) string {
+    return s + ":" + itoa(n)
+}
+
+func itoa(n int) string {
+    if n == 0 {
+        return "0"
+    }
+    neg := false
+    if n < 0 {
+        neg = true
+        n = -n
+    }
+    s := ""
+    for n > 0 {
+        s = string('0'+byte(n%10)) + s
+        n = n / 10
+    }
+    if neg {
+        s = "-" + s
+    }
+    return s
+}
+
+// Wrapper that uses dynamic multi-return
+func dynAdd(obj any) (int, error) {
+    a, b, err := obj~>Both()
+    if err != nil {
+        return 0, err
+    }
+    return add(a.(int), b.(int)), nil
+}
+
+func dynMultiply(obj any) (int, error) {
+    a, b, err := obj~>Both()
+    if err != nil {
+        return 0, err
+    }
+    return multiply(a.(int), b.(int)), nil
+}
+
+func dynTripleSum(obj any) (int, error) {
+    a, b, c, err := obj~>Triple()
+    if err != nil {
+        return 0, err
+    }
+    return addThree(a.(int), b.(int), c.(int)), nil
+}
+
+// Chain multiple dynamic calls
+func chainedDynOps(obj any) (int, error) {
+    // Get first pair result, use in second call
+    a, b, err := obj~>Both()
+    if err != nil {
+        return 0, err
+    }
+    
+    sum := add(a.(int), b.(int))
+    prod := multiply(a.(int), b.(int))
+    
+    return sum + prod, nil
+}
+
+func main() error {
+    pair := &Pair{first: 3, second: 4}
+    var obj any = pair
+    
+    // Test 1: Dynamic multi-return to add()
+    sum, err := dynAdd(obj)
+    assert(err == nil, "dynAdd error: ", err)
+    assert(sum == 7, "3+4 should be 7, got ", sum)
+    
+    // Test 2: Dynamic multi-return to multiply()
+    prod, err := dynMultiply(obj)
+    assert(err == nil, "dynMultiply error: ", err)
+    assert(prod == 12, "3*4 should be 12, got ", prod)
+    
+    // Test 3: Triple return
+    tripleSum, err := dynTripleSum(obj)
+    assert(err == nil, "dynTripleSum error: ", err)
+    // 3 + 4 + 7 = 14
+    assert(tripleSum == 14, "triple sum should be 14, got ", tripleSum)
+    
+    // Test 4: Chained operations
+    chained, err := chainedDynOps(obj)
+    assert(err == nil, "chainedDynOps error: ", err)
+    // sum=7, prod=12, total=19
+    assert(chained == 19, "chained should be 19, got ", chained)
+    
+    // Test 5: Mixed types multi-return
+    n, s, err := obj~>WithString()
+    assert(err == nil, "WithString error: ", err)
+    formatted := format(n.(int), s.(string))
+    assert(formatted == "hello:3", "format should be 'hello:3', got ", formatted)
+    
+    // Test 6: Direct use of typed LHS with function
+    var a int
+    var b int
+    a, b, err = obj~>Both()
+    assert(err == nil, "typed Both error: ", err)
+    directSum := add(a, b)
+    assert(directSum == 7, "direct add should be 7, got ", directSum)
+    
+    // Test 7: Multi-return in expression context
+    pair2 := &Pair{first: 10, second: 20}
+    var obj2 any = pair2
+    
+    x1, y1, _ := obj~>Both()
+    x2, y2, _ := obj2~>Both()
+    
+    combined := add(x1.(int), x2.(int)) + add(y1.(int), y2.(int))
+    // (3+10) + (4+20) = 13 + 24 = 37
+    assert(combined == 37, "combined should be 37, got ", combined)
+    
+    println("dyn_multi_ret_func_arg: ok")
+    return nil
+}

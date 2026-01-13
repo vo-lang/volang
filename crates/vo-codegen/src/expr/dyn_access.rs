@@ -19,6 +19,32 @@ const IFACE_ASSERT_WITH_OK: u8 = 1 | (1 << 2) | (2 << 3);
 /// All protocol interfaces have exactly one method at index 0
 const PROTOCOL_METHOD_IDX: u8 = 0;
 
+/// Emit dyn_get_attr extern call: (base, name) -> (any, error)
+/// Returns the result register (4 slots: any[2], error[2])
+fn emit_dyn_get_attr(
+    base_reg: u16,
+    name: &str,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+) -> u16 {
+    let extern_id = ctx.get_or_register_extern("dyn_get_attr");
+    let attr_args = func.alloc_temp_typed(&[
+        SlotType::Interface0, SlotType::Interface1,  // base
+        SlotType::GcRef,  // name string
+    ]);
+    func.emit_op(Opcode::Copy, attr_args, base_reg, 0);
+    func.emit_op(Opcode::Copy, attr_args + 1, base_reg + 1, 0);
+    let name_idx = ctx.const_string(name);
+    func.emit_op(Opcode::StrNew, attr_args + 2, name_idx, 0);
+    
+    let result = func.alloc_temp_typed(&[
+        SlotType::Interface0, SlotType::Interface1,  // data any
+        SlotType::Interface0, SlotType::Interface1,  // error
+    ]);
+    func.emit_with_flags(Opcode::CallExtern, 3, result, extern_id as u16, attr_args);
+    result
+}
+
 /// Calculate the total result slots for dyn_call_closure based on LHS types.
 /// Returns (result_slots, error_offset) where error_offset is where error[2] starts.
 fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrapper) -> (u16, u16) {
@@ -199,23 +225,7 @@ fn compile_dyn_op(
             };
             
             // Reflection path: extern dyn_get_attr for types not implementing AttrObject
-            let extern_id = ctx.get_or_register_extern("dyn_get_attr");
-            // args: (base interface[2], name string[1])
-            let args_start = func.alloc_temp_typed(&[
-                SlotType::Interface0, SlotType::Interface1,  // base
-                SlotType::GcRef,  // name string
-            ]);
-            func.emit_op(Opcode::Copy, args_start, base_reg, 0);
-            func.emit_op(Opcode::Copy, args_start + 1, base_reg + 1, 0);
-            let name_idx = ctx.const_string(field_name);
-            func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
-            
-            // result: (data any[2], error[2])
-            let result = func.alloc_temp_typed(&[
-                SlotType::Interface0, SlotType::Interface1,  // data
-                SlotType::Interface0, SlotType::Interface1,  // error
-            ]);
-            func.emit_with_flags(Opcode::CallExtern, 3, result, extern_id as u16, args_start);
+            let result = emit_dyn_get_attr(base_reg, field_name, ctx, func);
             emit_unbox_with_type_check(ret_type, dst, result, error_slot, ctx, func, info);
             
             if let Some(end_jump) = end_jump {
@@ -297,7 +307,7 @@ fn compile_dyn_op(
                 func.patch_jump(end_jump, func.current_pc());
             }
         }
-        DynAccessOp::Call { args, spread: _ } => {
+        DynAccessOp::Call { args, spread } => {
             // Protocol-first: check if base implements CallObject via IfaceAssert
             let end_jump = if let Some(call_iface_meta_id) = ctx.builtin_protocols().call_object_meta_id {
                 let ret_type = ret_types.first().copied().unwrap_or_else(|| info.any_type());
@@ -376,13 +386,13 @@ fn compile_dyn_op(
             };
             
             // Closure call path (when not implementing CallObject)
-            compile_dyn_closure_call(base_reg, args, dst, ret_types, ctx, func, info)?;
+            compile_dyn_closure_call(base_reg, args, *spread, dst, ret_types, ctx, func, info)?;
             
             if let Some(end_jump) = end_jump {
                 func.patch_jump(end_jump, func.current_pc());
             }
         }
-        DynAccessOp::MethodCall { method, args, spread: _ } => {
+        DynAccessOp::MethodCall { method, args, spread } => {
             // a~>method(args) = dyn_get_attr(a, "method") then call closure
             let method_name = info.project.interner.resolve(method.symbol).unwrap_or("");
             let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
@@ -413,51 +423,17 @@ fn compile_dyn_op(
                 func.patch_jump(skip_protocol_error, func.current_pc());
                 
                 // Call closure with protocol result (closure is at protocol_args + 1)
-                compile_dyn_closure_call(protocol_args + 1, args, dst, ret_types, ctx, func, info)?;
+                compile_dyn_closure_call(protocol_args + 1, args, *spread, dst, ret_types, ctx, func, info)?;
                 func.patch_jump(protocol_error_done, func.current_pc());
                 let protocol_done = func.emit_jump(Opcode::Jump, 0);
                 
                 func.patch_jump(fallback_jump, func.current_pc());
                 
-                // Reflection path needs its own get_result
-                let extern_id = ctx.get_or_register_extern("dyn_get_attr");
-                // attr_args: (base interface[2], name string[1])
-                let attr_args = func.alloc_temp_typed(&[
-                    SlotType::Interface0, SlotType::Interface1,  // base
-                    SlotType::GcRef,  // name string
-                ]);
-                func.emit_op(Opcode::Copy, attr_args, base_reg, 0);
-                func.emit_op(Opcode::Copy, attr_args + 1, base_reg + 1, 0);
-                let name_idx = ctx.const_string(method_name);
-                func.emit_op(Opcode::StrNew, attr_args + 2, name_idx, 0);
-                
-                // get_result: (data any[2], error[2])
-                let get_result = func.alloc_temp_typed(&[
-                    SlotType::Interface0, SlotType::Interface1,  // data
-                    SlotType::Interface0, SlotType::Interface1,  // error
-                ]);
-                func.emit_with_flags(Opcode::CallExtern, 3, get_result, extern_id as u16, attr_args);
-                
+                // Reflection path
+                let get_result = emit_dyn_get_attr(base_reg, method_name, ctx, func);
                 (get_result, Some(protocol_done))
             } else {
-                let extern_id = ctx.get_or_register_extern("dyn_get_attr");
-                // attr_args: (base interface[2], name string[1])
-                let attr_args = func.alloc_temp_typed(&[
-                    SlotType::Interface0, SlotType::Interface1,  // base
-                    SlotType::GcRef,  // name string
-                ]);
-                func.emit_op(Opcode::Copy, attr_args, base_reg, 0);
-                func.emit_op(Opcode::Copy, attr_args + 1, base_reg + 1, 0);
-                let name_idx = ctx.const_string(method_name);
-                func.emit_op(Opcode::StrNew, attr_args + 2, name_idx, 0);
-                
-                // get_result: (data any[2], error[2])
-                let get_result = func.alloc_temp_typed(&[
-                    SlotType::Interface0, SlotType::Interface1,  // data
-                    SlotType::Interface0, SlotType::Interface1,  // error
-                ]);
-                func.emit_with_flags(Opcode::CallExtern, 3, get_result, extern_id as u16, attr_args);
-                
+                let get_result = emit_dyn_get_attr(base_reg, method_name, ctx, func);
                 (get_result, None)
             };
             
@@ -467,7 +443,7 @@ fn compile_dyn_op(
             func.patch_jump(skip_error, func.current_pc());
             
             // Use closure from get_result (slots 0,1) - already in any format
-            compile_dyn_closure_call(get_result, args, dst, ret_types, ctx, func, info)?;
+            compile_dyn_closure_call(get_result, args, *spread, dst, ret_types, ctx, func, info)?;
             
             func.patch_jump(done_jump, func.current_pc());
             
@@ -481,9 +457,11 @@ fn compile_dyn_op(
 
 /// Compile dynamic closure call: signature check + call + handle return values.
 /// ret_types: LHS types for return values (excluding error)
+/// spread: if true, the last argument is a slice to be spread as variadic args
 fn compile_dyn_closure_call(
     callee_reg: u16,  // any[2] containing closure
     args: &[Expr],
+    spread: bool,
     dst: u16,
     ret_types: &[vo_analysis::TypeKey],
     ctx: &mut CodegenContext,
@@ -493,7 +471,12 @@ fn compile_dyn_closure_call(
     let expected_ret_count = ret_types.len() as u16;
     
     // Build expected function signature rttid using LHS types
-    let expected_sig_rttid = build_expected_sig_rttid(args, ret_types, ctx, info);
+    // When spread=true, use 0 to skip parameter signature check (only check returns)
+    let expected_sig_rttid = if spread {
+        0  // Special value: skip param check, caller handles variadic spread
+    } else {
+        build_expected_sig_rttid(args, ret_types, ctx, info)
+    };
     
     // 1. dyn_call_prepare: sig check + get metadata
     // Args: (callee[2], sig_rttid[1], expected_ret_count[1]) = 4 slots
@@ -549,10 +532,10 @@ fn compile_dyn_closure_call(
     // Minimum 1 slot to handle variadic functions with 0 args (still need slice ref).
     let max_converted_arg_slots = (arg_count * 2).max(1);
     
-    // Build repack_args: (closure_sig_rttid, variadic_info, arg_count, interface_args[N*2])
+    // Build repack_args: (closure_sig_rttid, variadic_info, arg_count, spread_flag, interface_args[N*2])
     let repack_ret_slots = 1 + max_converted_arg_slots;  // arg_slots + converted_args
     let repack_extern_id = ctx.get_or_register_extern_with_ret_slots("dyn_repack_args", repack_ret_slots);
-    let mut repack_arg_types = vec![SlotType::Value, SlotType::Value, SlotType::Value];
+    let mut repack_arg_types = vec![SlotType::Value, SlotType::Value, SlotType::Value, SlotType::Value];
     for _ in 0..arg_count {
         repack_arg_types.push(SlotType::Interface0);
         repack_arg_types.push(SlotType::Interface1);
@@ -564,10 +547,12 @@ fn compile_dyn_closure_call(
     func.emit_op(Opcode::Copy, repack_args + 1, variadic_info_reg, 0);
     let arg_count_const = ctx.const_int(arg_count as i64);
     func.emit_op(Opcode::LoadConst, repack_args + 2, arg_count_const, 0);
+    // spread_flag: 1 if spread, 0 otherwise
+    func.emit_op(Opcode::LoadInt, repack_args + 3, if spread { 1 } else { 0 }, 0);
     
     // Compile args as interface ONCE (no second compilation!)
     for (i, arg) in args.iter().enumerate() {
-        let arg_dst = repack_args + 3 + (i as u16 * 2);
+        let arg_dst = repack_args + 4 + (i as u16 * 2);
         crate::stmt::compile_iface_assign(arg_dst, arg, any_type, ctx, func, info)?;
     }
     
@@ -577,7 +562,7 @@ fn compile_dyn_closure_call(
         repack_result_types.push(SlotType::GcRef);
     }
     let repack_result = func.alloc_temp_typed(&repack_result_types);
-    let repack_arg_count = (3 + arg_count * 2) as u8;
+    let repack_arg_count = (4 + arg_count * 2) as u8;  // 4 = sig_rttid + variadic_info + arg_count + spread_flag
     func.emit_with_flags(Opcode::CallExtern, repack_arg_count, repack_result, repack_extern_id as u16, repack_args);
     
     // 5. Call dyn_call_closure: combines closure call + return unpacking in one step

@@ -672,6 +672,11 @@ impl<'a> ExternCallContext<'a> {
     ) -> Result<(), String> {
         use crate::RuntimeType;
         
+        // Special case: expected_sig_rttid == 0 means skip parameter check (used for spread calls)
+        if expected_sig_rttid == 0 {
+            return Ok(());
+        }
+        
         let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
             match self.runtime_types.get(rttid as usize)? {
                 RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),

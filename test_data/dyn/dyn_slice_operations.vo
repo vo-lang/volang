@@ -1,0 +1,172 @@
+// Test slice operations on dynamically accessed slices
+// append, copy, len, cap, reslice on ~> results.
+package main
+
+type SliceHolder struct {
+    ints    []int
+    strings []string
+    nested  [][]int
+}
+
+func NewSliceHolder() *SliceHolder {
+    return &SliceHolder{
+        ints:    []int{1, 2, 3, 4, 5},
+        strings: []string{"a", "b", "c"},
+        nested:  [][]int{{1, 2}, {3, 4, 5}, {6}},
+    }
+}
+
+// Append to dynamically accessed slice
+func dynAppend(obj any, val int) []int {
+    ints := obj~>ints?
+    slice := ints.([]int)
+    return append(slice, val)
+}
+
+// Copy from dynamically accessed slice
+func dynCopy(obj any) []int {
+    ints := obj~>ints?
+    src := ints.([]int)
+    
+    dst := make([]int, len(src))
+    copy(dst, src)
+    return dst
+}
+
+// Get len of dynamically accessed slice
+func dynLen(obj any) int {
+    ints := obj~>ints?
+    slice := ints.([]int)
+    return len(slice)
+}
+
+// Get cap of dynamically accessed slice
+func dynCap(obj any) int {
+    ints := obj~>ints?
+    slice := ints.([]int)
+    return cap(slice)
+}
+
+// Reslice dynamically accessed slice
+func dynReslice(obj any, start, end int) []int {
+    ints := obj~>ints?
+    slice := ints.([]int)
+    return slice[start:end]
+}
+
+// Append multiple values
+func dynAppendMultiple(obj any, vals ...int) []int {
+    ints := obj~>ints?
+    slice := ints.([]int)
+    return append(slice, vals...)
+}
+
+// Work with nested slice
+func dynNestedSum(obj any) int {
+    nested := obj~>nested?
+    outer := nested.([][]int)
+    
+    sum := 0
+    for _, inner := range outer {
+        for _, v := range inner {
+            sum += v
+        }
+    }
+    return sum
+}
+
+// Append to nested slice element
+func dynNestedAppend(obj any, outerIdx int, val int) [][]int {
+    nested := obj~>nested?
+    outer := nested.([][]int)
+    
+    // Make a copy of outer slice
+    result := make([][]int, len(outer))
+    copy(result, outer)
+    
+    // Append to specific inner slice
+    result[outerIdx] = append(result[outerIdx], val)
+    return result
+}
+
+// String slice operations
+func dynStrings(obj any) string {
+    strings := obj~>strings?
+    slice := strings.([]string)
+    
+    result := ""
+    for _, s := range slice {
+        result += s
+    }
+    return result
+}
+
+func main() error {
+    holder := NewSliceHolder()
+    var obj any = holder
+    
+    // Test 1: len on dynamic slice
+    length := dynLen(obj)
+    assert(length == 5, "len should be 5, got ", length)
+    
+    // Test 2: cap on dynamic slice (cap >= len)
+    capacity := dynCap(obj)
+    assert(capacity >= 5, "cap should be >= 5, got ", capacity)
+    
+    // Test 3: append single value
+    appended := dynAppend(obj, 6)
+    assert(len(appended) == 6, "appended len should be 6")
+    assert(appended[5] == 6, "appended[5] should be 6")
+    
+    // Test 4: copy from dynamic slice
+    copied := dynCopy(obj)
+    assert(len(copied) == 5, "copied len should be 5")
+    assert(copied[0] == 1 && copied[4] == 5, "copied content mismatch")
+    
+    // Modify copy, original should be unchanged
+    copied[0] = 100
+    origInts := obj~>ints?
+    origSlice := origInts.([]int)
+    assert(origSlice[0] == 1, "original should be unchanged")
+    
+    // Test 5: reslice
+    resliced := dynReslice(obj, 1, 4)
+    assert(len(resliced) == 3, "resliced len should be 3")
+    assert(resliced[0] == 2 && resliced[2] == 4, "resliced content mismatch")
+    
+    // Test 6: append multiple values
+    multiAppended := dynAppendMultiple(obj, 10, 20, 30)
+    assert(len(multiAppended) == 8, "multi-appended len should be 8")
+    assert(multiAppended[5] == 10 && multiAppended[7] == 30, "multi-append content")
+    
+    // Test 7: nested slice sum
+    nestedSum := dynNestedSum(obj)
+    // 1+2 + 3+4+5 + 6 = 21
+    assert(nestedSum == 21, "nested sum should be 21, got ", nestedSum)
+    
+    // Test 8: append to nested slice element
+    nestedAppended := dynNestedAppend(obj, 1, 100)
+    assert(len(nestedAppended[1]) == 4, "nested[1] should have 4 elements")
+    assert(nestedAppended[1][3] == 100, "nested[1][3] should be 100")
+    
+    // Test 9: string slice operations
+    strResult := dynStrings(obj)
+    assert(strResult == "abc", "string concat should be 'abc', got ", strResult)
+    
+    // Test 10: chained dynamic access then slice ops
+    type Wrapper struct {
+        data *SliceHolder
+    }
+    wrapped := &Wrapper{data: holder}
+    var wObj any = wrapped
+    
+    data := wObj~>data?
+    dataInts := data~>ints?
+    chainedSlice := dataInts.([]int)
+    chainedAppended := append(chainedSlice, 99)
+    assert(len(chainedAppended) == 6, "chained append len should be 6")
+    assert(chainedAppended[5] == 99, "chained append[5] should be 99")
+    
+    println("dyn_slice_operations: ok")
+    return nil
+}
