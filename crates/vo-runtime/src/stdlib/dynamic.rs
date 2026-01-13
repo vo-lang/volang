@@ -1163,48 +1163,77 @@ static __VO_DYN_REPACK_ARGS: ExternEntryWithContext = ExternEntryWithContext {
 /// - metas[i]: (rttid << 8 | vk) for return value i
 /// - is_any[i]: 1 if LHS is any (needs boxing), 0 if typed
 ///
-/// Returns: (result_slots...) - layout determined at compile time based on LHS types
+/// Returns: (result_slots..., error[2]) - layout determined at compile time based on LHS types
+/// - result_slots: return values in LHS format
+/// - error[2]: nil on success, error on panic/failure
 fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
     use crate::gc::GcRef;
     use crate::objects::closure;
     
-    // Check if closure calling is available
-    if !call.can_call_closure() {
-        return ExternResult::Panic("dyn_call_closure: closure calling not available".to_string());
+    // Calculate output slot count for a return value
+    #[inline]
+    fn output_slots(is_any: bool, vk: ValueKind, width: usize) -> u16 {
+        if is_any {
+            2
+        } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
+            2  // Large struct/array: (0, GcRef)
+        } else {
+            width.min(2) as u16
+        }
     }
     
+    // Parse args layout
     let closure_ref = call.arg_u64(0) as GcRef;
-    if closure_ref.is_null() {
-        return ExternResult::Panic("dyn_call_closure: closure_ref is null".to_string());
-    }
     let arg_slots = call.arg_u64(1) as usize;
     let max_arg_slots = call.arg_u64(2) as usize;
-    
-    // Read arguments (only actual arg_slots, starting after max_arg_slots header)
-    let args: Vec<u64> = (0..arg_slots)
-        .map(|i| call.arg_u64((3 + i) as u16))
-        .collect();
-    
-    // Layout uses max_arg_slots for offset calculation (matches codegen)
     let ret_count_offset = 3 + max_arg_slots;
     let ret_count = call.arg_u64(ret_count_offset as u16) as usize;
     let metas_start = ret_count_offset + 1;
     let is_any_start = metas_start + ret_count;
     
-    // Get actual ret_slots from closure's function definition
+    // Calculate total output slots (for error position)
+    let mut error_slot_offset: u16 = 0;
+    for i in 0..ret_count {
+        let meta_raw = call.arg_u64((metas_start + i) as u16) as u32;
+        let is_any = call.arg_u64((is_any_start + i) as u16) != 0;
+        let rttid = meta_raw >> 8;
+        let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
+        let width = call.get_type_slot_count(rttid) as usize;
+        error_slot_offset += output_slots(is_any, vk, width);
+    }
+    
+    // Helper macro to return error
+    macro_rules! return_error {
+        ($code:expr, $msg:expr) => {{
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            write_error_to(call, error_slot_offset, $code, $msg);
+            return ExternResult::Ok;
+        }};
+    }
+    
+    if !call.can_call_closure() {
+        return_error!(call.dyn_err().bad_call, "closure calling not available");
+    }
+    if closure_ref.is_null() {
+        return_error!(call.dyn_err().nil_base, "closure is null");
+    }
+    
+    // Get function definition
     let func_id = closure::func_id(closure_ref);
     let func_def = match call.get_func_def(func_id) {
         Some(fd) => fd,
-        None => return ExternResult::Panic("dyn_call_closure: function not found".to_string()),
+        None => return_error!(call.dyn_err().bad_call, "function not found"),
     };
     let actual_ret_slots = func_def.ret_slots as usize;
     
-    // Dynamically allocate buffer for closure return values
+    // Read arguments and call closure
+    let args: Vec<u64> = (0..arg_slots).map(|i| call.arg_u64((3 + i) as u16)).collect();
     let mut ret_buffer = vec![0u64; actual_ret_slots];
     
-    // Call the closure
     if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
-        return ExternResult::Panic(format!("dyn_call_closure: call failed: {}", msg));
+        return_error!(call.dyn_err().unknown, &msg);
     }
     
     // Unpack return values to LHS format
@@ -1214,41 +1243,34 @@ fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
     for i in 0..ret_count {
         let meta_raw = call.arg_u64((metas_start + i) as u16) as u32;
         let is_any = call.arg_u64((is_any_start + i) as u16) != 0;
-        
         let rttid = meta_raw >> 8;
         let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
         let width = call.get_type_slot_count(rttid) as usize;
         
-        // Read raw slots from ret_buffer
-        let raw_slots: Vec<u64> = ret_buffer[src_off..src_off + width].to_vec();
+        let raw_slots = &ret_buffer[src_off..src_off + width];
         src_off += width;
         
         if is_any {
-            // Box into interface format
-            let (result0, result1) = call.box_to_interface(rttid, vk, &raw_slots);
+            let (result0, result1) = call.box_to_interface(rttid, vk, raw_slots);
             call.ret_u64(ret_off, result0);
             call.ret_u64(ret_off + 1, result1);
             ret_off += 2;
+        } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
+            let new_ref = call.alloc_and_copy_slots(raw_slots);
+            call.ret_u64(ret_off, 0);
+            call.ret_u64(ret_off + 1, new_ref as u64);
+            ret_off += 2;
         } else {
-            // Return raw slots for typed LHS
-            let is_large = (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2;
-            if is_large {
-                // Large struct/array: allocate GcRef
-                let new_ref = call.alloc_and_copy_slots(&raw_slots);
-                call.ret_u64(ret_off, 0);
-                call.ret_u64(ret_off + 1, new_ref as u64);
-                ret_off += 2;
-            } else {
-                // Small value: return raw slots directly
-                call.ret_u64(ret_off, raw_slots.get(0).copied().unwrap_or(0));
-                if width > 1 {
-                    call.ret_u64(ret_off + 1, raw_slots.get(1).copied().unwrap_or(0));
-                }
-                ret_off += width.min(2) as u16;
+            call.ret_u64(ret_off, raw_slots.get(0).copied().unwrap_or(0));
+            if width > 1 {
+                call.ret_u64(ret_off + 1, raw_slots.get(1).copied().unwrap_or(0));
             }
+            ret_off += width.min(2) as u16;
         }
     }
     
+    call.ret_nil(error_slot_offset);
+    call.ret_nil(error_slot_offset + 1);
     ExternResult::Ok
 }
 

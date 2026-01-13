@@ -20,7 +20,8 @@ const IFACE_ASSERT_WITH_OK: u8 = 1 | (1 << 2) | (2 << 3);
 const PROTOCOL_METHOD_IDX: u8 = 0;
 
 /// Calculate the total result slots for dyn_call_closure based on LHS types.
-fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrapper) -> u16 {
+/// Returns (result_slots, error_offset) where error_offset is where error[2] starts.
+fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrapper) -> (u16, u16) {
     let mut total = 0u16;
     for &ret_type in ret_types {
         let is_any = info.is_any_type(ret_type);
@@ -37,7 +38,8 @@ fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrap
             total += 2;
         }
     }
-    total
+    let error_offset = total;
+    (total + 2, error_offset)  // +2 for error[2]
 }
 
 /// Build expected function signature rttid from arguments and LHS return types.
@@ -580,8 +582,8 @@ fn compile_dyn_closure_call(
     
     // 5. Call dyn_call_closure: combines closure call + return unpacking in one step
     // Args: (closure_ref[1], arg_slots[1], max_arg_slots[1], args[N], ret_count[1], metas[M], is_any[M])
-    // Returns: LHS-shaped results (calculated below)
-    let call_closure_ret_slots = call_result_types_len(ret_types, info);
+    // Returns: (result_slots..., error[2])
+    let (call_closure_ret_slots, call_error_offset) = call_result_types_len(ret_types, info);
     let call_closure_extern_id = ctx.get_or_register_extern_with_ret_slots("dyn_call_closure", call_closure_ret_slots);
     
     // Build args layout
@@ -623,7 +625,7 @@ fn compile_dyn_closure_call(
         func.emit_op(Opcode::LoadInt, call_args + is_any_offset + i as u16, if is_any { 1 } else { 0 }, 0);
     }
     
-    // Build result types based on LHS
+    // Build result types based on LHS (including error[2] at the end)
     let mut call_result_types = Vec::new();
     for &ret_type in ret_types.iter() {
         let is_any = info.is_any_type(ret_type);
@@ -648,8 +650,12 @@ fn compile_dyn_closure_call(
             call_result_types.push(SlotType::Value);
         }
     }
+    // Add error[2] slots
+    call_result_types.push(SlotType::Interface0);
+    call_result_types.push(SlotType::Interface1);
     
     let call_result = func.alloc_temp_typed(&call_result_types);
+    let call_error_slot = call_result + call_error_offset;
     // Args: closure_ref[1] + arg_slots[1] + max_arg_slots[1] + args[N] + ret_count[1] + metas[M] + is_any[M]
     let total_call_arg_count = (3 + max_converted_arg_slots + 1 + 2 * expected_ret_count) as u8;
     func.emit_with_flags(
@@ -691,9 +697,9 @@ fn compile_dyn_closure_call(
         }
     }
     
-    // Write nil error after return values
-    func.emit_op(Opcode::LoadInt, dst + dst_off, 0, 0);
-    func.emit_op(Opcode::LoadInt, dst + dst_off + 1, 0, 0);
+    // Copy error from dyn_call_closure result to dst error slot
+    func.emit_op(Opcode::Copy, dst + dst_off, call_error_slot, 0);
+    func.emit_op(Opcode::Copy, dst + dst_off + 1, call_error_slot + 1, 0);
     
     func.patch_jump(done_jump, func.current_pc());
     

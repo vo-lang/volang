@@ -475,11 +475,6 @@ tests:
 # Test 5: Type coercion in dynamic write
   - file: dyn/dyn_type_coercion_write.vo
 
-# Bug #6: nil receiver method call - dyn_call_closure does not catch panic
-# Issue: Calling method on nil pointer (e.g. nil~>GetValue()) where method
-# dereferences nil causes panic that is not caught by dyn_call_closure.
-# Expected: Should return error instead of crashing the program.
+# Test 6: nil receiver method call - dyn_call_closure catches panic and returns error
   - file: dyn/dyn_nil_receiver_method.vo
-    skip: [vm, jit]
-    reason: "BUG: dyn_call_closure does not catch nil receiver method panic"
 
