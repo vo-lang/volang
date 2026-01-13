@@ -628,9 +628,6 @@ tests:
 # Test: composite literal address as function argument
   - file: composite_literal_addr.vo
 
-# BUG: go statement with method value - method not executed correctly
-# The receiver or method call is not properly captured in go statement
+# Test: go statement with method value
   - file: go_method_value.vo
-    skip: [vm, jit]
-    reason: "BUG: go obj.Method(args) does not execute correctly - result is 0"
 

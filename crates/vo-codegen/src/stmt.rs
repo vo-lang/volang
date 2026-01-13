@@ -1694,7 +1694,7 @@ fn compile_go(
                     0
                 };
                 
-                crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)?;
+                crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
                 
                 // GoStart: a=closure_reg, b=args_start, c=arg_slots, flags=1 (is_closure)
                 func.emit_with_flags(Opcode::GoStart, 1, closure_reg, args_start, total_arg_slots);
@@ -1702,7 +1702,7 @@ fn compile_go(
             }
         }
         
-        // Generic case: expression returning a closure
+        // Generic case: expression returning a closure (e.g., method value: go w.Process(10))
         let closure_reg = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
         
         let args_start = if total_arg_slots > 0 {
@@ -1711,7 +1711,7 @@ fn compile_go(
             0
         };
         
-        crate::expr::call::compile_args_simple(&call_expr.args, ctx, func, info)?;
+        crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
         
         func.emit_with_flags(Opcode::GoStart, 1, closure_reg, args_start, total_arg_slots);
         return Ok(());
