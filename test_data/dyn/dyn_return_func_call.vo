@@ -1,0 +1,79 @@
+// Test dynamic call that returns a function, then call that function
+// Coverage: dyn call returning closure/func, then invoking it dynamically or statically
+package main
+
+type Factory struct {
+	multiplier int
+}
+
+func (f *Factory) GetAdder() func(int) int {
+	return func(x int) int {
+		return x + f.multiplier
+	}
+}
+
+func (f *Factory) GetMultiplier() func(int) int {
+	m := f.multiplier
+	return func(x int) int {
+		return x * m
+	}
+}
+
+func (f *Factory) GetBinaryOp() func(int, int) int {
+	return func(a, b int) int {
+		return a + b + f.multiplier
+	}
+}
+
+func (f *Factory) GetNoArgFunc() func() int {
+	return func() int {
+		return f.multiplier * 100
+	}
+}
+
+func main() {
+	f := &Factory{multiplier: 10}
+	var obj any = f
+
+	// Test 1: Get function via dyn call, then invoke statically
+	adderAny, err := obj~>GetAdder()
+	assert(err == nil, "GetAdder error")
+	adder := adderAny.(func(int) int)
+	result := adder(5)
+	assert(result == 15, "adder(5) should be 15")
+	println("Test 1: adder(5) =", result)
+
+	// Test 2: Get multiplier function
+	mulAny, err := obj~>GetMultiplier()
+	assert(err == nil, "GetMultiplier error")
+	mul := mulAny.(func(int) int)
+	result2 := mul(7)
+	assert(result2 == 70, "mul(7) should be 70")
+	println("Test 2: mul(7) =", result2)
+
+	// Test 3: Binary op function
+	binOpAny, err := obj~>GetBinaryOp()
+	assert(err == nil, "GetBinaryOp error")
+	binOp := binOpAny.(func(int, int) int)
+	result3 := binOp(3, 4)
+	assert(result3 == 17, "binOp(3,4) should be 17")
+	println("Test 3: binOp(3,4) =", result3)
+
+	// Test 4: No arg function
+	noArgAny, err := obj~>GetNoArgFunc()
+	assert(err == nil, "GetNoArgFunc error")
+	noArg := noArgAny.(func() int)
+	result4 := noArg()
+	assert(result4 == 1000, "noArg() should be 1000")
+	println("Test 4: noArg() =", result4)
+
+	// Test 5: Chain - get and immediately type assert and call
+	fnAny, err := obj~>GetAdder()
+	assert(err == nil, "GetAdder chain error")
+	fn := fnAny.(func(int) int)
+	result5 := fn(100)
+	assert(result5 == 110, "chained adder(100) should be 110")
+	println("Test 5: chained =", result5)
+
+	println("dyn_return_func_call: ok")
+}

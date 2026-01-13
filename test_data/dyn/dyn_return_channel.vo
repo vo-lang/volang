@@ -1,0 +1,69 @@
+// Test dynamic call that returns a channel type
+// Coverage: dyn call returning channel, operating on it
+package main
+
+type Producer struct {
+	bufSize int
+}
+
+func (p *Producer) MakeChan() chan int {
+	return make(chan int, p.bufSize)
+}
+
+func (p *Producer) MakeStringChan() chan string {
+	return make(chan string, p.bufSize)
+}
+
+func (p *Producer) GetFilledChan() chan int {
+	ch := make(chan int, 3)
+	ch <- 10
+	ch <- 20
+	ch <- 30
+	return ch
+}
+
+func main() {
+	p := &Producer{bufSize: 5}
+	var obj any = p
+
+	// Test 1: Get channel via dyn call
+	chAny, err := obj~>MakeChan()
+	assert(err == nil, "MakeChan error")
+	ch := chAny.(chan int)
+	
+	// Send and receive
+	ch <- 42
+	val := <-ch
+	assert(val == 42, "channel round-trip failed")
+	println("Test 1: channel round-trip =", val)
+
+	// Test 2: String channel
+	schAny, err := obj~>MakeStringChan()
+	assert(err == nil, "MakeStringChan error")
+	sch := schAny.(chan string)
+	sch <- "hello"
+	sval := <-sch
+	assert(sval == "hello", "string channel failed")
+	println("Test 2: string channel =", sval)
+
+	// Test 3: Get pre-filled channel
+	filledAny, err := obj~>GetFilledChan()
+	assert(err == nil, "GetFilledChan error")
+	filled := filledAny.(chan int)
+	
+	v1 := <-filled
+	v2 := <-filled
+	v3 := <-filled
+	assert(v1 == 10 && v2 == 20 && v3 == 30, "filled channel values")
+	println("Test 3: filled channel values =", v1, v2, v3)
+
+	// Test 4: LHS typed channel
+	var typedCh chan int
+	typedCh, err = obj~>MakeChan()
+	assert(err == nil, "typed chan error")
+	typedCh <- 99
+	assert(<-typedCh == 99, "typed chan round-trip")
+	println("Test 4: typed channel ok")
+
+	println("dyn_return_channel: ok")
+}

@@ -943,28 +943,31 @@ fn compile_func_decl(
     
     let mut builder = FuncBuilder::new(name);
     
+    // Define parameters and collect escaped ones for boxing
+    let mut escaped_params = Vec::new();
+    
     // Define receiver as first parameter (if method)
     if let Some(recv) = &func_decl.receiver {
-        // For pointer receiver (*T), it's 1 slot (GcRef)
-        // For value receiver (T), it's the struct's slot count
         let (slots, slot_types) = if recv.is_pointer {
             (1, vec![vo_runtime::SlotType::GcRef])
         } else {
             let type_key = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
-            let slots = info.type_slot_count(type_key);
-            let slot_types = info.type_slot_types(type_key);
-            (slots, slot_types)
+            (info.type_slot_count(type_key), info.type_slot_types(type_key))
         };
         
-        // Set recv_slots for interface method calls
         builder.set_recv_slots(slots);
-        
-        // Define receiver parameter (anonymous receivers pass None)
         builder.define_param(recv.name.as_ref().map(|n| n.symbol), slots, &slot_types);
+        
+        // Check if receiver escapes (e.g., captured by closure)
+        if let Some(name) = &recv.name {
+            let obj_key = info.get_def(name);
+            let type_key = info.obj_type(obj_key, "receiver must have type");
+            if info.needs_boxing(obj_key, type_key) {
+                escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
+            }
+        }
     }
     
-    // Define parameters and collect escaped ones for boxing
-    let mut escaped_params = Vec::new();
     let params = &func_decl.sig.params;
     for (i, param) in params.iter().enumerate() {
         let variadic_last = func_decl.sig.variadic && i == params.len() - 1;

@@ -510,8 +510,25 @@ tests:
 # Test: Named type dynamic access (method call on named map/slice types)
   - file: dyn/dyn_named_type_access.vo
 
-# BUG #3: Nested empty struct field access fails  
+# Test: Empty struct dynamic access
   - file: dyn/dyn_empty_struct.vo
-    skip: [vm, jit]
-    reason: "BUG: nested empty struct field access (neObj~>count where NestedEmpty embeds Empty) fails"
+
+# ============================================================
+# Dyn coverage tests (2026-01-13 batch 5) - New coverage tests
+# ============================================================
+
+# Test: Dynamic call returning channel type
+  - file: dyn/dyn_return_channel.vo
+
+# Test: Dynamic method call on interface receiver
+  - file: dyn/dyn_interface_receiver.vo
+
+# Test: Dynamic write to slice/map elements
+  - file: dyn/dyn_array_write.vo
+
+# Test: Nested interface dynamic access
+  - file: dyn/dyn_nested_interface.vo
+
+# Fixed: Dynamic call returning closure - receiver escape boxing was missing
+  - file: dyn/dyn_return_func_call.vo
 
