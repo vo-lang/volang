@@ -1,6 +1,5 @@
 // Test dynamic access on struct with function field
 // Get func field dynamically and call it
-// BUG: nil func field dynamic access returns error and non-nil interface
 package main
 
 type Handler struct {
@@ -46,7 +45,8 @@ func main() {
     }
     var obj2 any = h2
     
-    procNil := obj2~>process?
+    procNilAny := obj2~>process?
+    procNil := procNilAny.(func(int) int)
     assert(procNil == nil, "nil func field should be nil")
     
     // Test 5: Function field that captures external state

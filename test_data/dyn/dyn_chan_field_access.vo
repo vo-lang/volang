@@ -1,6 +1,5 @@
 // Test dynamic access on struct with channel field
 // Get channel field dynamically
-// BUG: nil channel field dynamic access returns non-nil interface (same as nil func bug)
 package main
 
 type Worker struct {
@@ -39,8 +38,9 @@ func main() {
     }
     var obj2 any = w2
     
-    nilCh, err := obj2~>taskCh
+    nilChAny, err := obj2~>taskCh
     assert(err == nil, "nil channel access should not error")
+    nilCh := nilChAny.(chan int)
     assert(nilCh == nil, "nil channel should be nil")
     
     println("dyn_chan_field_access: ok")

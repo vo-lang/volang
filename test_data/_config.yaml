@@ -588,13 +588,9 @@ tests:
 # Test: dynamic access on array of interfaces
   - file: dyn/dyn_interface_array_elem.vo
 
-# BUG: nil func field dynamic access returns error and non-nil interface
+# Test: dynamic access on struct with function field
   - file: dyn/dyn_func_field_call.vo
-    skip: [vm, jit]
-    reason: "BUG: nil func field returns error and non-nil interface"
 
-# BUG: nil channel field dynamic access returns non-nil interface (same root cause as nil func)
+# Test: dynamic access on struct with channel field
   - file: dyn/dyn_chan_field_access.vo
-    skip: [vm, jit]
-    reason: "BUG: nil reference type field returns non-nil interface"
 
