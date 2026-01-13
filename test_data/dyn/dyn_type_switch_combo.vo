@@ -1,0 +1,100 @@
+// Test dynamic access after type switch
+// Verifies that ~> operator works on values obtained from type switch.
+package main
+
+type Dog struct {
+    Name string
+    Age  int
+}
+
+type Cat struct {
+    Name  string
+    Lives int
+}
+
+func getAnimal(kind int) any {
+    if kind == 0 {
+        return &Dog{Name: "Buddy", Age: 5}
+    }
+    return &Cat{Name: "Whiskers", Lives: 9}
+}
+
+func processDynamic(a any) (string, int) {
+    // Type switch, then use dynamic access on the result
+    switch v := a.(type) {
+    case *Dog:
+        // v is *Dog, cast to any for dynamic access
+        var d any = v
+        name, err := d~>Name
+        assert(err == nil, "dog name error")
+        age, err := d~>Age
+        assert(err == nil, "dog age error")
+        return name.(string), age.(int)
+    case *Cat:
+        var c any = v
+        name, err := c~>Name
+        assert(err == nil, "cat name error")
+        lives, err := c~>Lives
+        assert(err == nil, "cat lives error")
+        return name.(string), lives.(int)
+    default:
+        return "", 0
+    }
+}
+
+func dynamicInTypeSwitch(a any) string {
+    // Use dynamic access inside type switch case
+    switch a.(type) {
+    case *Dog:
+        // Direct dynamic access on a
+        name, err := a~>Name
+        assert(err == nil, "direct dog name error")
+        return "Dog: " + name.(string)
+    case *Cat:
+        name, err := a~>Name
+        assert(err == nil, "direct cat name error")
+        return "Cat: " + name.(string)
+    default:
+        return "Unknown"
+    }
+}
+
+func main() {
+    // Test 1: Type switch then dynamic access
+    dog := getAnimal(0)
+    name1, val1 := processDynamic(dog)
+    assert(name1 == "Buddy", "dog name mismatch")
+    assert(val1 == 5, "dog age mismatch")
+
+    cat := getAnimal(1)
+    name2, val2 := processDynamic(cat)
+    assert(name2 == "Whiskers", "cat name mismatch")
+    assert(val2 == 9, "cat lives mismatch")
+
+    // Test 2: Dynamic access inside type switch
+    r1 := dynamicInTypeSwitch(dog)
+    assert(r1 == "Dog: Buddy", "dog result mismatch: ", r1)
+
+    r2 := dynamicInTypeSwitch(cat)
+    assert(r2 == "Cat: Whiskers", "cat result mismatch: ", r2)
+
+    // Test 3: Type switch on dynamic result
+    d := &Dog{Name: "Rex", Age: 3}
+    var a any = d
+    nameVal, err := a~>Name
+    assert(err == nil, "name access error")
+    
+    isString := false
+    switch nameVal.(type) {
+    case string:
+        isString = true
+    default:
+        isString = false
+    }
+    assert(isString, "name should be string")
+
+    println("PASS")
+}
+
+// Expected output:
+// PASS

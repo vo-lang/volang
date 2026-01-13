@@ -1,0 +1,87 @@
+// Test dynamic access in defer statements
+// Verifies that ~> operator works correctly in defer context.
+package main
+
+type Counter struct {
+    count int
+}
+
+func (c *Counter) Inc() {
+    c.count++
+}
+
+var globalResult int
+
+func testDeferRead() {
+    c := &Counter{count: 10}
+    var a any = c
+
+    defer func() {
+        // Dynamic read in defer
+        v, err := a~>count
+        assert(err == nil, "defer read error")
+        globalResult = v.(int)
+    }()
+
+    c.count = 20
+}
+
+func testDeferWrite() int {
+    c := &Counter{count: 0}
+    var a any = c
+
+    defer func() {
+        // Dynamic write in defer
+        a~>count = 99
+    }()
+
+    c.count = 50
+    return c.count
+}
+
+func testDeferMethodCall() int {
+    c := &Counter{count: 0}
+    var a any = c
+
+    defer func() {
+        // Dynamic method call in defer (Inc has no return value)
+        err := a~>Inc()
+        assert(err == nil, "defer method call error")
+    }()
+
+    c.count = 10
+    return c.count
+}
+
+func main() {
+    // Test 1: defer reads value at defer execution time
+    testDeferRead()
+    assert(globalResult == 20, "defer should read modified value 20, got: ", globalResult)
+
+    // Test 2: defer write modifies the struct
+    c := &Counter{count: 0}
+    func() {
+        var a any = c
+        defer func() {
+            a~>count = 77
+        }()
+        c.count = 33
+    }()
+    assert(c.count == 77, "defer write should set count to 77, got: ", c.count)
+
+    // Test 3: defer method call (Inc has no return value)
+    c2 := &Counter{count: 5}
+    func() {
+        var a any = c2
+        defer func() {
+            err := a~>Inc()
+            assert(err == nil, "defer Inc error")
+        }()
+    }()
+    assert(c2.count == 6, "defer Inc should increment to 6, got: ", c2.count)
+
+    println("PASS")
+}
+
+// Expected output:
+// PASS

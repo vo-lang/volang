@@ -1,0 +1,56 @@
+// Test dynamic access in goroutine context
+// Verifies that ~> operator works correctly when called from goroutines.
+package main
+
+type Data struct {
+    Value int
+    Name  string
+}
+
+func main() {
+    d := &Data{Value: 42, Name: "test"}
+    var a any = d
+
+    // Channel to collect results
+    ch := make(chan int, 2)
+
+    // Test 1: Dynamic read in goroutine
+    go func() {
+        v, err := a~>Value
+        assert(err == nil, "goroutine read error")
+        n := v.(int)
+        ch <- n
+    }()
+
+    // Test 2: Dynamic method-like access in goroutine
+    go func() {
+        v, err := a~>Name
+        assert(err == nil, "goroutine name error")
+        s := v.(string)
+        assert(s == "test", "name mismatch")
+        ch <- 100
+    }()
+
+    // Wait for both goroutines
+    r1 := <-ch
+    r2 := <-ch
+    
+    // Verify results (order may vary)
+    sum := r1 + r2
+    assert(sum == 142, "sum should be 142, got: ", sum)
+
+    // Test 3: Dynamic write from goroutine
+    done := make(chan bool)
+    go func() {
+        a~>Value = 99
+        done <- true
+    }()
+    <-done
+    
+    assert(d.Value == 99, "dynamic write from goroutine failed")
+
+    println("PASS")
+}
+
+// Expected output:
+// PASS

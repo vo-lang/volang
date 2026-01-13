@@ -279,7 +279,8 @@ impl CodegenContext {
         let mut ctx = crate::type_interner::InternContext {
             named_type_ids: &mut self.named_type_ids,
             named_type_metas: &mut self.module.named_type_metas,
-            struct_meta_ids: &self.struct_meta_ids,
+            struct_meta_ids: &mut self.struct_meta_ids,
+            struct_metas: &mut self.module.struct_metas,
             interface_meta_ids: &self.interface_meta_ids,
         };
         let value_rttid = crate::type_interner::intern_type_key(
@@ -548,7 +549,8 @@ impl CodegenContext {
                     let mut ctx = crate::type_interner::InternContext {
                         named_type_ids: &mut self.named_type_ids,
                         named_type_metas: &mut self.module.named_type_metas,
-                        struct_meta_ids: &self.struct_meta_ids,
+                        struct_meta_ids: &mut self.struct_meta_ids,
+                        struct_metas: &mut self.module.struct_metas,
                         interface_meta_ids: &self.interface_meta_ids,
                     };
                     let signature_rttid = crate::type_interner::intern_type_key(

@@ -1,0 +1,95 @@
+// Test dynamic access on map[any]any with complex keys
+// Verifies that ~> operator handles any-keyed maps correctly.
+package main
+
+type Key struct {
+    ID int
+}
+
+func main() {
+    // Test 1: map[any]any with various key types
+    m := make(map[any]any)
+    m["string_key"] = "string_value"
+    m[42] = "int_value"
+    m[true] = "bool_value"
+
+    var a any = m
+
+    // Access with string key
+    v1, err := a~>["string_key"]
+    assert(err == nil, "string key error")
+    assert(v1.(string) == "string_value", "string value mismatch")
+
+    // Access with int key
+    v2, err := a~>[42]
+    assert(err == nil, "int key error")
+    assert(v2.(string) == "int_value", "int value mismatch")
+
+    // Access with bool key
+    v3, err := a~>[true]
+    assert(err == nil, "bool key error")
+    assert(v3.(string) == "bool_value", "bool value mismatch")
+
+    // Test 2: Write with different key types
+    a~>["new_string"] = 100
+    a~>[99] = "ninety-nine"
+
+    v4, err := a~>["new_string"]
+    assert(err == nil, "new string key error")
+    assert(v4.(int) == 100, "new string value mismatch")
+
+    v5, err := a~>[99]
+    assert(err == nil, "99 key error")
+    assert(v5.(string) == "ninety-nine", "99 value mismatch")
+
+    // Test 3: Nested map[any]any
+    inner := make(map[any]any)
+    inner["x"] = 10
+    inner["y"] = 20
+    m["nested"] = inner
+
+    nested, err := a~>["nested"]
+    assert(err == nil, "nested error")
+
+    x, err := nested~>["x"]
+    assert(err == nil, "x error")
+    assert(x.(int) == 10, "x mismatch")
+
+    // Test 4: Chained access on nested map[any]any
+    y, err := a~>["nested"]~>["y"]
+    assert(err == nil, "chained y error")
+    assert(y.(int) == 20, "chained y mismatch")
+
+    // Test 5: Non-existent key returns error
+    _, err = a~>["nonexistent"]
+    assert(err != nil, "nonexistent key should return error")
+
+    // Test 6: map[any]any with struct value
+    m["struct"] = struct{ Val int }{Val: 42}
+    sVal, err := a~>["struct"]
+    assert(err == nil, "struct value error")
+
+    val, err := sVal~>Val
+    assert(err == nil, "Val error")
+    assert(val.(int) == 42, "Val mismatch")
+
+    // Test 7: Dynamic field access shorthand on map[any]any with string keys
+    // a~>fieldname is equivalent to a~>["fieldname"] for maps
+    m2 := make(map[any]any)
+    m2["name"] = "Alice"
+    m2["age"] = 30
+
+    var b any = m2
+    name, err := b~>name
+    assert(err == nil, "name field error")
+    assert(name.(string) == "Alice", "name mismatch")
+
+    age, err := b~>age
+    assert(err == nil, "age field error")
+    assert(age.(int) == 30, "age mismatch")
+
+    println("PASS")
+}
+
+// Expected output:
+// PASS

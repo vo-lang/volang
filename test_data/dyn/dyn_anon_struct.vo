@@ -1,0 +1,91 @@
+// Test dynamic access on anonymous structs
+// Verifies that ~> operator works on struct{...} types.
+package main
+
+func main() {
+    // Test 1: Anonymous struct as any
+    anon := struct {
+        X int
+        Y string
+        Z bool
+    }{X: 10, Y: "hello", Z: true}
+
+    var a any = &anon
+
+    x, err := a~>X
+    assert(err == nil, "X access error")
+    assert(x.(int) == 10, "X mismatch")
+
+    y, err := a~>Y
+    assert(err == nil, "Y access error")
+    assert(y.(string) == "hello", "Y mismatch")
+
+    z, err := a~>Z
+    assert(err == nil, "Z access error")
+    assert(z.(bool) == true, "Z mismatch")
+
+    // Test 2: Write to anonymous struct field
+    a~>X = 99
+    assert(anon.X == 99, "write X failed")
+
+    a~>Y = "world"
+    assert(anon.Y == "world", "write Y failed")
+
+    // Test 3: Nested anonymous struct
+    nested := struct {
+        Inner struct {
+            Value int
+        }
+    }{Inner: struct{ Value int }{Value: 42}}
+
+    var b any = &nested
+    inner, err := b~>Inner
+    assert(err == nil, "Inner access error")
+
+    // inner is now any containing the inner struct
+    val, err := inner~>Value
+    assert(err == nil, "Value access error")
+    assert(val.(int) == 42, "nested value mismatch")
+
+    // Test 4: Anonymous struct in slice
+    items := []struct {
+        ID   int
+        Name string
+    }{
+        {ID: 1, Name: "first"},
+        {ID: 2, Name: "second"},
+    }
+
+    var c any = items
+    elem, err := c~>[0]
+    assert(err == nil, "index 0 error")
+
+    id, err := elem~>ID
+    assert(err == nil, "ID access error")
+    assert(id.(int) == 1, "ID mismatch")
+
+    name, err := elem~>Name
+    assert(err == nil, "Name access error")
+    assert(name.(string) == "first", "Name mismatch")
+
+    // Test 5: Map with anonymous struct value
+    m := map[string]struct {
+        Count int
+    }{
+        "a": {Count: 100},
+        "b": {Count: 200},
+    }
+
+    var d any = m
+    aVal, err := d~>["a"]
+    assert(err == nil, "map a error")
+
+    count, err := aVal~>Count
+    assert(err == nil, "Count access error")
+    assert(count.(int) == 100, "Count mismatch")
+
+    println("PASS")
+}
+
+// Expected output:
+// PASS

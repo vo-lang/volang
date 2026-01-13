@@ -88,11 +88,12 @@ impl Default for TypeInterner {
 }
 
 /// Additional metadata for type interning.
-/// Uses mutable references to allow dynamic registration of named types.
+/// Uses mutable references to allow dynamic registration of named types and anonymous structs.
 pub struct InternContext<'a> {
     pub named_type_ids: &'a mut std::collections::HashMap<ObjKey, u32>,
     pub named_type_metas: &'a mut Vec<vo_common_core::bytecode::NamedTypeMeta>,
-    pub struct_meta_ids: &'a std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
+    pub struct_meta_ids: &'a mut std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
+    pub struct_metas: &'a mut Vec<vo_common_core::bytecode::StructMeta>,
     pub interface_meta_ids: &'a std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
 }
 
@@ -227,31 +228,74 @@ fn type_key_to_runtime_type(
             (RuntimeType::Func { params, results, variadic: sig.variadic() }, ValueKind::Closure)
         }
         Type::Struct(s) => {
-            let fields: Vec<StructField> = s.fields().iter()
-                .map(|&f| {
-                    let obj = &tc_objs.lobjs[f];
-                    let name = obj.name().to_string();
-                    let typ_value_rttid = obj.typ()
-                        .map(|t| {
-                            let (rt, vk) = type_key_to_runtime_type(interner, t, tc_objs, str_interner, ctx);
-                            let rttid = interner.intern(rt);
-                            ValueRttid::new(rttid, vk)
-                        })
-                        .unwrap_or(ValueRttid::new(ValueKind::Void as u32, ValueKind::Void));
-                    let tag = String::new(); // TODO: parse struct tags if needed
-                    let embedded = obj.entity_type().var_property().embedded;
-                    let pkg = if obj.exported() { String::new() } else {
-                        obj.pkg()
-                            .and_then(|p| tc_objs.pkgs.get(p))
-                            .map(|pkg| pkg.path().to_string())
-                            .unwrap_or_default()
-                    };
-                    StructField::new(name, typ_value_rttid, tag, embedded, pkg)
-                })
-                .collect();
-            // Get meta_id from struct_meta_ids mapping
-            let meta_id = ctx.struct_meta_ids.get(&type_key).copied().unwrap_or(0);
-            (RuntimeType::Struct { fields, meta_id }, ValueKind::Struct)
+            // Check if already registered (named struct)
+            let existing_meta_id = ctx.struct_meta_ids.get(&type_key).copied();
+            let needs_registration = existing_meta_id.is_none();
+            
+            // Single pass: build RuntimeType fields and StructMeta simultaneously
+            let mut rt_fields = Vec::with_capacity(s.fields().len());
+            let mut field_metas = if needs_registration { Vec::with_capacity(s.fields().len()) } else { Vec::new() };
+            let mut slot_types = if needs_registration { Vec::new() } else { Vec::new() };
+            let mut offset = 0u16;
+            
+            for &f in s.fields() {
+                let obj = &tc_objs.lobjs[f];
+                let name = obj.name().to_string();
+                let embedded = obj.entity_type().var_property().embedded;
+                let pkg = if obj.exported() { String::new() } else {
+                    obj.pkg()
+                        .and_then(|p| tc_objs.pkgs.get(p))
+                        .map(|pkg| pkg.path().to_string())
+                        .unwrap_or_default()
+                };
+                
+                let (typ_value_rttid, field_slot_count) = if let Some(field_type) = obj.typ() {
+                    let (rt, vk) = type_key_to_runtime_type(interner, field_type, tc_objs, str_interner, ctx);
+                    let rttid = interner.intern(rt);
+                    let slot_count = vo_analysis::check::type_info::type_slot_count(field_type, tc_objs);
+                    
+                    if needs_registration {
+                        let field_slot_types = vo_analysis::check::type_info::type_slot_types(field_type, tc_objs);
+                        slot_types.extend(field_slot_types);
+                    }
+                    
+                    (ValueRttid::new(rttid, vk), slot_count)
+                } else {
+                    (ValueRttid::new(ValueKind::Void as u32, ValueKind::Void), 1)
+                };
+                
+                rt_fields.push(StructField::new(name.clone(), typ_value_rttid, String::new(), embedded, pkg));
+                
+                if needs_registration {
+                    field_metas.push(vo_common_core::bytecode::FieldMeta {
+                        name,
+                        offset,
+                        slot_count: field_slot_count,
+                        type_info: typ_value_rttid,
+                    });
+                    offset += field_slot_count;
+                }
+            }
+            
+            let meta_id = if let Some(id) = existing_meta_id {
+                id
+            } else {
+                // Register anonymous struct
+                if slot_types.is_empty() {
+                    slot_types.push(vo_runtime::SlotType::Value);
+                }
+                let field_index: HashMap<String, usize> = field_metas.iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.name.clone(), i))
+                    .collect();
+                let meta = vo_common_core::bytecode::StructMeta { slot_types, fields: field_metas, field_index };
+                let id = ctx.struct_metas.len() as u32;
+                ctx.struct_metas.push(meta);
+                ctx.struct_meta_ids.insert(type_key, id);
+                id
+            };
+            
+            (RuntimeType::Struct { fields: rt_fields, meta_id }, ValueKind::Struct)
         }
         Type::Interface(iface) => {
             let all_methods = iface.all_methods();

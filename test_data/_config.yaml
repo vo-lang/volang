@@ -478,3 +478,24 @@ tests:
 # Test 6: nil receiver method call - dyn_call_closure catches panic and returns error
   - file: dyn/dyn_nil_receiver_method.vo
 
+# ============================================================
+# Dyn coverage tests (2026-01-13 batch 3) - New tests
+# ============================================================
+
+# Test: goroutine with dynamic access
+  - file: dyn/dyn_goroutine_access.vo
+
+# Test: defer with dynamic access
+  - file: dyn/dyn_defer_access.vo
+
+# Test: type switch combined with dynamic access
+  - file: dyn/dyn_type_switch_combo.vo
+
+# Test: Anonymous struct dynamic access
+  - file: dyn/dyn_anon_struct.vo
+
+# Bug #2: map[any]any dynamic index key type check too strict
+  - file: dyn/dyn_map_any_key.vo
+    skip: [vm, jit]
+    reason: "Bug: map[any]any index with string key fails - expects Interface, got String"
+
