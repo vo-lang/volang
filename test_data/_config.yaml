@@ -657,10 +657,8 @@ tests:
 # Bug reproductions (2026-01-14) - Vo implementation bugs
 # ============================================================
 
-# Bug #1: Sparse array literals ignore index keys
+# Bug #1: Sparse array literals ignore index keys (FIXED)
   - file: bug_sparse_array_keyed.vo
-    skip: [vm, jit]
-    reason: "Vo ignores index keys in array literals, places elements sequentially"
 
 # Bug #2: switch with default as first case matches all to default
   - file: bug_switch_default_first.vo

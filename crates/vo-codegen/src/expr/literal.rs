@@ -241,8 +241,30 @@ fn compile_struct_lit(
             positional_offset = offset + field_slots;
         }
     }
-    let _ = positional_offset; // suppress unused warning
     Ok(())
+}
+
+/// Resolve element index from CompositeLitElem key.
+/// Updates current_index for next unkeyed element.
+fn resolve_elem_index(
+    elem: &vo_syntax::ast::CompositeLitElem,
+    current_index: &mut u64,
+    info: &TypeInfoWrapper,
+) -> u64 {
+    let index = if let Some(ref key) = elem.key {
+        match key {
+            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
+                info.try_const_int(key_expr)
+                    .map(|i| i as u64)
+                    .unwrap_or(*current_index)
+            }
+            vo_syntax::ast::CompositeLitKey::Ident(_) => *current_index,
+        }
+    } else {
+        *current_index
+    };
+    *current_index = index + 1;
+    index
 }
 
 fn compile_array_lit(
@@ -254,9 +276,19 @@ fn compile_array_lit(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let elem_slots = info.array_elem_slots(type_key);
+    let array_len = info.array_len(type_key) as u16;
+    let total_slots = array_len * elem_slots;
     
-    for (i, elem) in lit.elems.iter().enumerate() {
-        let offset = (i as u16) * elem_slots;
+    // Zero-initialize all slots first (sparse arrays may have gaps)
+    for i in 0..total_slots {
+        func.emit_op(Opcode::LoadInt, dst + i, 0, 0);
+    }
+    
+    // Initialize specified elements with keyed index support
+    let mut current_index: u64 = 0;
+    for elem in lit.elems.iter() {
+        let index = resolve_elem_index(elem, &mut current_index, info);
+        let offset = (index as u16) * elem_slots;
         super::compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
     }
     Ok(())
@@ -297,8 +329,10 @@ fn compile_slice_lit(
     }
     func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
     
-    // Set each element
-    for (i, elem) in lit.elems.iter().enumerate() {
+    // Set each element with keyed index support
+    let mut current_index: u64 = 0;
+    for elem in lit.elems.iter() {
+        let index = resolve_elem_index(elem, &mut current_index, info);
         // For interface element type, need to convert concrete value to interface
         let val_reg = if info.is_interface(elem_type) {
             let iface_reg = func.alloc_temp_typed(&elem_slot_types);
@@ -308,7 +342,7 @@ fn compile_slice_lit(
             compile_expr(&elem.value, ctx, func, info)?
         };
         let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+        func.emit_op(Opcode::LoadInt, idx_reg, index as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }
     Ok(())
