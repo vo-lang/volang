@@ -110,8 +110,16 @@ pub extern "C" fn vm_call_trampoline(
     ret: *mut u64,
     ret_count: u32,
 ) -> JitResult {
-    let vm = unsafe { &mut *(vm as *mut Vm) };
-    vm.execute_jit_call(func_id, args, arg_count, ret, ret_count)
+    // Catch any panics to prevent unwinding through extern "C" boundary
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let vm = unsafe { &mut *(vm as *mut Vm) };
+        vm.execute_jit_call(func_id, args, arg_count, ret, ret_count)
+    }));
+    
+    match result {
+        Ok(r) => r,
+        Err(_) => JitResult::Panic,
+    }
 }
 
 // =============================================================================
@@ -285,7 +293,7 @@ impl Vm {
         }
         
         let result = loop {
-            let exec_result = self.run_fiber(trampoline_id);
+            let exec_result = self.run_fiber(crate::scheduler::FiberId::from_raw(trampoline_id));
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
@@ -297,11 +305,18 @@ impl Vm {
                     // OSR is now handled at HINT_LOOP_BEGIN, continue VM execution
                 }
                 ExecResult::Yield | ExecResult::Block => {
-                    // Channel/select operations require scheduler coordination.
-                    // JIT calls are synchronous and cannot handle blocking operations.
-                    let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                    fiber.set_fatal_panic("blocking operation (channel/select) not supported in JIT call path".to_string());
-                    break JitResult::Panic;
+                    // Trampoline blocked on channel - need to run other fibers first.
+                    // Run scheduler to execute ready fibers (e.g., goroutines that will send/recv).
+                    if !self.scheduler.ready_queue.is_empty() {
+                        // Run one scheduling round to let other fibers make progress
+                        self.run_scheduler_round();
+                        // Continue trampoline execution after other fibers ran
+                    } else {
+                        // No other fibers to run - true deadlock
+                        let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                        fiber.set_fatal_panic("deadlock: channel blocked with no other runnable fibers".to_string());
+                        break JitResult::Panic;
+                    }
                 }
             }
         };
@@ -326,26 +341,27 @@ impl Vm {
     /// - `call_ret_slots`: Number of slots the caller expects (from call instruction)
     pub(super) fn call_jit_inline(
         &mut self,
-        fiber_id: u32,
+        fiber_id: crate::scheduler::FiberId,
         jit_func: JitFunc,
         arg_start: u16,
         arg_slots: usize,
         func_ret_slots: usize,
         call_ret_slots: usize,
     ) -> ExecResult {
-        let mut args = JitCallContext::read_args(self, fiber_id, arg_start, arg_slots);
+        let raw_id = fiber_id.to_raw();
+        let mut args = JitCallContext::read_args(self, raw_id, arg_start, arg_slots);
         // Allocate buffer for func_ret_slots (what JIT will write), but at least 1 to avoid null ptr
         let mut ret_buf = vec![0u64; func_ret_slots.max(1)];
         
         let safepoint_flag = false;
         let mut panic_flag = false;
-        let mut jit_ctx = JitCallContext::build_context(self, fiber_id, &safepoint_flag, &mut panic_flag);
+        let mut jit_ctx = JitCallContext::build_context(self, raw_id, &safepoint_flag, &mut panic_flag);
         let result = jit_func(&mut jit_ctx, args.as_mut_ptr(), ret_buf.as_mut_ptr());
         
         if result == JitResult::Ok {
             // Only copy back call_ret_slots to caller's stack
             ret_buf.truncate(call_ret_slots);
-            JitCallContext::write_returns(self, fiber_id, arg_start, &ret_buf);
+            JitCallContext::write_returns(self, raw_id, arg_start, &ret_buf);
         }
         
         match result {
@@ -353,7 +369,7 @@ impl Vm {
             JitResult::Panic => {
                 // Set recoverable panic state so defer/recover can work
                 if panic_flag {
-                    let fiber = self.scheduler.get_fiber_mut_by_id(fiber_id);
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
                     set_jit_runtime_panic(&mut self.state.gc, fiber);
                 }
                 ExecResult::Panic
@@ -367,7 +383,7 @@ impl Vm {
     /// If the loop is hot and compiled, executes it via JIT and returns the new PC.
     pub(super) fn try_osr(
         &mut self,
-        fiber_id: u32,
+        fiber_id: crate::scheduler::FiberId,
         func_id: u32,
         loop_begin_pc: usize,
         bp: usize,
@@ -419,7 +435,7 @@ impl Vm {
     /// Returns the new PC to resume at, or None on panic.
     fn execute_loop_osr(
         &mut self,
-        fiber_id: u32,
+        fiber_id: crate::scheduler::FiberId,
         loop_func: vo_jit::LoopFunc,
         bp: usize,
     ) -> Option<usize> {
@@ -436,7 +452,7 @@ impl Vm {
             .unwrap_or(std::ptr::null());
         
         // Get fiber pointer for JIT context
-        let fiber = self.scheduler.get_fiber_mut_by_id(fiber_id);
+        let fiber = self.scheduler.get_fiber_mut(fiber_id);
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let locals_ptr = fiber.stack[bp..].as_mut_ptr();
         

@@ -1054,13 +1054,28 @@ unsafe fn write_iface_assert_success(
         let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
         *dst = new_slot0;
         *dst.add(1) = slot1;
-    } else if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
-        // Copy value from GcRef
+    } else if src_vk == ValueKind::Struct {
+        // Copy value from GcRef (struct layout: [GcHeader][data...])
         let gc_ref = slot1 as GcRef;
         let slots = target_slots.max(1);
         if slot1 != 0 {
             for i in 0..slots {
                 *dst.add(i) = *gc_ref.add(i);
+            }
+        } else {
+            for i in 0..slots {
+                *dst.add(i) = 0;
+            }
+        }
+    } else if src_vk == ValueKind::Array {
+        // Copy elements from array (layout: [GcHeader][ArrayHeader][elements...])
+        use crate::objects::array;
+        let gc_ref = slot1 as GcRef;
+        let slots = target_slots.max(1);
+        if slot1 != 0 {
+            let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
+            for i in 0..slots {
+                *dst.add(i) = *data_ptr.add(i);
             }
         } else {
             for i in 0..slots {

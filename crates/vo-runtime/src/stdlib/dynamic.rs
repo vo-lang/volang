@@ -395,6 +395,38 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(2);
             call.ret_nil(3);
         }
+        ValueKind::Array => {
+            // Check for nil array
+            if base_ref.is_null() {
+                return dyn_error(call, call.dyn_err().nil_base, "cannot index nil array");
+            }
+            
+            // Boxed array preserves ArrayHeader: [GcHeader][ArrayHeader][elems...]
+            // Use array:: API to access elements correctly (handles packed storage).
+            let len = crate::objects::array::len(base_ref);
+            let idx = match check_int_index(key_slot0, key_slot1, len) {
+                Ok(i) => i,
+                Err(IndexError::BadType) => return dyn_error(call, call.dyn_err().bad_index, "index must be integer"),
+                Err(IndexError::OutOfBounds) => return dyn_error(call, call.dyn_err().out_of_bounds, "array"),
+            };
+            
+            let elem_meta = crate::objects::array::elem_meta(base_ref);
+            let elem_vk = elem_meta.value_kind();
+            let elem_bytes = crate::objects::array::elem_bytes(base_ref);
+            let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
+            let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
+            
+            // Read element using array API (handles packed storage correctly)
+            let mut raw_slots: Vec<u64> = vec![0u64; elem_slots];
+            crate::objects::array::get_n(base_ref, idx as usize, &mut raw_slots, elem_bytes);
+            
+            // Box to interface format
+            let (data0, data1) = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
+            call.ret_u64(0, data0);
+            call.ret_u64(1, data1);
+            call.ret_nil(2);
+            call.ret_nil(3);
+        }
         ValueKind::String => {
             let s = string::as_str(base_ref);
             let bytes = s.as_bytes();

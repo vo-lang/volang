@@ -156,7 +156,7 @@ impl Vm {
 
         while self.scheduler.has_runnable() {
             let fiber_id = match self.scheduler.schedule_next() {
-                Some(id) => id,
+                Some(id) => crate::scheduler::FiberId::Regular(id),
                 None => break,
             };
 
@@ -192,28 +192,66 @@ impl Vm {
 
         Ok(())
     }
+    
+    /// Run one round of scheduler to let other fibers make progress.
+    /// Used when trampoline fiber blocks on channel operations.
+    fn run_scheduler_round(&mut self) {
+        // Temporarily disable JIT to prevent nested trampoline calls
+        #[cfg(feature = "jit")]
+        let jit_mgr = self.jit_mgr.take();
+        
+        // Run all ready fibers once (or until they block/yield)
+        let mut iterations = 0;
+        let max_iterations = 1000; // Prevent infinite loops
+        
+        while let Some(id) = self.scheduler.schedule_next() {
+            iterations += 1;
+            if iterations > max_iterations {
+                break;
+            }
+            
+            let result = self.run_fiber(crate::scheduler::FiberId::Regular(id));
+            
+            match result {
+                ExecResult::Continue => {
+                    self.scheduler.suspend_current();
+                }
+                ExecResult::Return | ExecResult::Done => {
+                    let _ = self.scheduler.kill_current();
+                }
+                ExecResult::Yield => {
+                    self.scheduler.suspend_current();
+                }
+                ExecResult::Block => {
+                    self.scheduler.block_current();
+                }
+                ExecResult::Panic => {
+                    let _ = self.scheduler.kill_current();
+                }
+                ExecResult::Osr(_, _, _) => {
+                    self.scheduler.suspend_current();
+                }
+            }
+        }
+        
+        // Restore JIT manager
+        #[cfg(feature = "jit")]
+        { self.jit_mgr = jit_mgr; }
+    }
 
     /// Run a fiber for up to TIME_SLICE instructions.
-    /// Supports both regular fibers and trampoline fibers (distinguished by high bit).
-    fn run_fiber(&mut self, fiber_id: u32) -> ExecResult {
-        use crate::scheduler::is_trampoline_fiber;
-        
+    /// Uses FiberId for type-safe fiber access.
+    fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
         let module_ptr = match &self.module {
             Some(m) => m as *const Module,
             None => return ExecResult::Done,
         };
         // SAFETY: module_ptr is valid for the duration of run_fiber.
         let module = unsafe { &*module_ptr };
-        
-        let is_trampoline = is_trampoline_fiber(fiber_id);
 
         // Cache fiber pointer outside the loop
         // SAFETY: fiber_ptr is valid as long as we don't reallocate fibers vec (only GoStart does)
-        let mut fiber_ptr = if is_trampoline {
-            self.scheduler.trampoline_fiber_mut(fiber_id) as *mut Fiber
-        } else {
-            &mut self.scheduler.fibers[fiber_id as usize] as *mut Fiber
-        };
+        let mut fiber_ptr = self.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
         let mut fiber = unsafe { &mut *fiber_ptr };
 
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
@@ -1049,7 +1087,7 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::ChanSend => {
-                    match exec::exec_chan_send(&stack, bp, fiber_id, &inst) {
+                    match exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst) {
                         exec::ChanResult::Continue => ExecResult::Continue,
                         exec::ChanResult::Yield => {
                             fiber.current_frame_mut().unwrap().pc -= 1;
@@ -1057,18 +1095,18 @@ impl Vm {
                         }
                         exec::ChanResult::Panic => ExecResult::Panic,
                         exec::ChanResult::Wake(id) => {
-                            self.scheduler.wake(id);
+                            self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                             ExecResult::Continue
                         }
                         exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake(id); }
+                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
                             ExecResult::Continue
                         }
                     }
                 }
                 Opcode::ChanRecv => {
                     // Allow ChanRecv on trampoline - if it blocks, execute_jit_call will handle it
-                    match exec::exec_chan_recv(stack, bp, fiber_id, &inst) {
+                    match exec::exec_chan_recv(stack, bp, fiber_id.to_raw(), &inst) {
                         exec::ChanResult::Continue => ExecResult::Continue,
                         exec::ChanResult::Yield => {
                             fiber.current_frame_mut().unwrap().pc -= 1;
@@ -1076,11 +1114,11 @@ impl Vm {
                         }
                         exec::ChanResult::Panic => ExecResult::Panic,
                         exec::ChanResult::Wake(id) => {
-                            self.scheduler.wake(id);
+                            self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                             ExecResult::Continue
                         }
                         exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake(id); }
+                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
                             ExecResult::Continue
                         }
                     }
@@ -1089,7 +1127,7 @@ impl Vm {
                     // Allow ChanClose on trampoline - it doesn't block
                     match exec::exec_chan_close(&stack, bp, &inst) {
                         exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake(id); }
+                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
                         }
                         _ => {}
                     }
@@ -1138,8 +1176,11 @@ impl Vm {
                     let go_result = exec::exec_go_start(&stack, bp, &inst, &module.functions, next_id);
                     self.scheduler.spawn(go_result.new_fiber);
                     // Reload fiber pointer after potential reallocation
-                    fiber_ptr = &mut self.scheduler.fibers[fiber_id as usize] as *mut Fiber;
-                    fiber = unsafe { &mut *fiber_ptr };
+                    // Trampoline fibers are in separate array, don't need reload
+                    if let crate::scheduler::FiberId::Regular(idx) = fiber_id {
+                        fiber_ptr = &mut self.scheduler.fibers[idx as usize] as *mut Fiber;
+                        fiber = unsafe { &mut *fiber_ptr };
+                    }
                     // Return Yield to restart loop with fresh stack/frames pointers
                     return ExecResult::Continue;
                 }
@@ -1238,11 +1279,7 @@ impl Vm {
             match result {
                 ExecResult::Continue => continue,
                 ExecResult::Return => {
-                    let frames_empty = if is_trampoline {
-                        self.scheduler.trampoline_fiber(fiber_id).frames.is_empty()
-                    } else {
-                        self.scheduler.fibers[fiber_id as usize].frames.is_empty()
-                    };
+                    let frames_empty = self.scheduler.get_fiber(fiber_id).frames.is_empty();
                     if frames_empty {
                         return ExecResult::Done;
                     }

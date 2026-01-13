@@ -195,13 +195,31 @@ pub fn exec_iface_assert(
             let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
             stack[bp + inst.a as usize] = new_slot0;
             stack[bp + inst.a as usize + 1] = slot1;
-        } else if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
-            // Concrete type assertion for struct/array: copy value from GcRef
+        } else if src_vk == ValueKind::Struct {
+            // Concrete type assertion for struct: copy value from GcRef
             let gc_ref = slot1 as GcRef;
             let slots = target_slots.max(1);
             if slot1 != 0 {
                 for i in 0..slots {
                     let val = unsafe { *gc_ref.add(i as usize) };
+                    stack[bp + inst.a as usize + i as usize] = val;
+                }
+            } else {
+                for i in 0..slots {
+                    stack[bp + inst.a as usize + i as usize] = 0;
+                }
+            }
+        } else if src_vk == ValueKind::Array {
+            // Concrete type assertion for array: copy elements from GcRef
+            // Array layout: [ArrayHeader(2 slots)][elements...]
+            use vo_runtime::objects::array;
+            let gc_ref = slot1 as GcRef;
+            let slots = target_slots.max(1);
+            if slot1 != 0 {
+                // Copy data from after ArrayHeader (data_ptr_bytes skips ArrayHeader)
+                let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
+                for i in 0..slots {
+                    let val = unsafe { *data_ptr.add(i as usize) };
                     stack[bp + inst.a as usize + i as usize] = val;
                 }
             } else {

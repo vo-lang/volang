@@ -2371,27 +2371,10 @@ pub fn compile_iface_assign(
                 func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
             }
             crate::func::ExprSource::Location(crate::func::StorageKind::HeapArray { gcref_slot, .. }) => {
-                // HeapArray has different layout: [GcHeader][ArrayHeader(2 slots)][elems...]
-                // We need to create a boxed value with just the element data.
-                // IfaceAssign expects a boxed value layout: [GcHeader][data...]
-                let src_slots = info.type_slot_count(src_type);
-                let src_slot_types = info.type_slot_types(src_type);
-                let rttid = ctx.intern_type_key(src_type, info);
-                let meta_idx = ctx.get_or_create_value_meta_with_rttid(rttid, &src_slot_types, None);
-                
-                // Read element data from array (skip ArrayHeader at offset 2)
-                let tmp_data = func.alloc_temp_typed(&src_slot_types);
-                const ARRAY_HEADER_SLOTS: u16 = 2;
-                func.emit_ptr_get(tmp_data, gcref_slot, ARRAY_HEADER_SLOTS, src_slots);
-                
-                // Create new boxed value and copy data
-                let new_gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                func.emit_with_flags(Opcode::PtrNew, src_slots as u8, new_gcref_slot, meta_reg, 0);
-                func.emit_ptr_set(new_gcref_slot, 0, tmp_data, src_slots);
-                
-                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, new_gcref_slot, const_idx);
+                // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
+                // Pass GcRef directly - IfaceAssign will ptr_clone the entire object
+                // including ArrayHeader, preserving len/elem_meta/elem_bytes for GC and dynamic access.
+                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
             }
             _ => {
                 // Stack value or expression: allocate box and copy data

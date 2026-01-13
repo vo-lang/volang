@@ -438,12 +438,8 @@ tests:
 # Bug #1: DynCall protocol method - FIXED
   - file: dyn/dyn_call_direct.vo
 
-# Bug #2: Array dynamic index not supported
-# Error: "cannot index type Array"
-# Fixed-size arrays boxed to any cannot be indexed dynamically
+# Bug #2: Array dynamic index - FIXED
   - file: dyn/dyn_array_index.vo
-    skip: [vm, jit]
-    reason: "BUG: Fixed-size array dynamic indexing not implemented"
 
 # Bug #3: Named type dynamic method call fails
 # Error: "cannot access field on type Int"

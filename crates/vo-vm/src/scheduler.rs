@@ -7,6 +7,44 @@ use std::collections::VecDeque;
 
 use crate::fiber::{Fiber, FiberStatus};
 
+/// Type-safe fiber ID that distinguishes regular fibers from trampoline fibers.
+/// This prevents accidental indexing of the wrong fiber array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FiberId {
+    /// Regular fiber - index into scheduler.fibers
+    Regular(u32),
+    /// Trampoline fiber for JIT->VM calls - index into scheduler.trampoline_fibers
+    Trampoline(u32),
+}
+
+impl FiberId {
+    /// Convert to raw u32 for storage (e.g., in channel wait queues).
+    /// Regular: index, Trampoline: 0x80000000 | index
+    #[inline]
+    pub fn to_raw(self) -> u32 {
+        match self {
+            FiberId::Regular(id) => id,
+            FiberId::Trampoline(id) => TRAMPOLINE_FIBER_FLAG | id,
+        }
+    }
+    
+    /// Create from raw u32.
+    #[inline]
+    pub fn from_raw(raw: u32) -> Self {
+        if raw & TRAMPOLINE_FIBER_FLAG != 0 {
+            FiberId::Trampoline(raw & !TRAMPOLINE_FIBER_FLAG)
+        } else {
+            FiberId::Regular(raw)
+        }
+    }
+    
+    /// Check if this is a trampoline fiber.
+    #[inline]
+    pub fn is_trampoline(self) -> bool {
+        matches!(self, FiberId::Trampoline(_))
+    }
+}
+
 /// High bit flag to distinguish trampoline fibers from regular fibers.
 pub const TRAMPOLINE_FIBER_FLAG: u32 = 0x8000_0000;
 
@@ -148,6 +186,44 @@ impl Scheduler {
             &mut self.fibers[id as usize]
         }
     }
+    
+    /// Get fiber by FiberId (type-safe version).
+    #[inline]
+    pub fn get_fiber(&self, id: FiberId) -> &Fiber {
+        match id {
+            FiberId::Regular(idx) => &self.fibers[idx as usize],
+            FiberId::Trampoline(idx) => &self.trampoline_fibers[idx as usize],
+        }
+    }
+    
+    /// Get mutable fiber by FiberId (type-safe version).
+    #[inline]
+    pub fn get_fiber_mut(&mut self, id: FiberId) -> &mut Fiber {
+        match id {
+            FiberId::Regular(idx) => &mut self.fibers[idx as usize],
+            FiberId::Trampoline(idx) => &mut self.trampoline_fibers[idx as usize],
+        }
+    }
+    
+    /// Wake a fiber by FiberId (type-safe version).
+    pub fn wake_fiber(&mut self, id: FiberId) {
+        match id {
+            FiberId::Regular(idx) => {
+                let fiber = &mut self.fibers[idx as usize];
+                if fiber.status == FiberStatus::Suspended {
+                    if !self.ready_queue.contains(&idx) {
+                        self.ready_queue.push_back(idx);
+                    }
+                }
+            }
+            FiberId::Trampoline(idx) => {
+                let fiber = &mut self.trampoline_fibers[idx as usize];
+                if fiber.status == FiberStatus::Suspended {
+                    fiber.status = FiberStatus::Running;
+                }
+            }
+        }
+    }
 
     /// Get current fiber reference.
     #[inline]
@@ -162,6 +238,16 @@ impl Scheduler {
     }
 
     pub fn wake(&mut self, id: u32) {
+        // Handle trampoline fibers separately
+        if is_trampoline_fiber(id) {
+            let index = (id & !TRAMPOLINE_FIBER_FLAG) as usize;
+            let fiber = &mut self.trampoline_fibers[index];
+            if fiber.status == FiberStatus::Suspended {
+                fiber.status = FiberStatus::Running;
+            }
+            return;
+        }
+        
         let fiber = &mut self.fibers[id as usize];
         if fiber.status == FiberStatus::Suspended {
             if !self.ready_queue.contains(&id) {

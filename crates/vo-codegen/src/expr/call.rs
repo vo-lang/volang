@@ -246,7 +246,10 @@ pub fn emit_receiver(
                     func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, embed_offset);
                 }
                 Some(StorageKind::HeapArray { gcref_slot, .. }) => {
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, embed_offset);
+                    // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
+                    // Skip ArrayHeader to get actual array data
+                    const ARRAY_HEADER_SLOTS: u16 = 2;
+                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, ARRAY_HEADER_SLOTS + embed_offset);
                 }
                 Some(StorageKind::StackValue { slot, .. }) => {
                     func.emit_copy(args_start, slot + embed_offset, value_slots);

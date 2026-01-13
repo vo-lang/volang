@@ -511,15 +511,44 @@ impl<'a> ExternCallContext<'a> {
     /// `(slot0, slot1)` in interface format
     ///
     /// # Boxing Rules
-    /// - **Struct/Array**: Allocate GcRef, copy all slots, return `(pack_slot0(rttid, vk), GcRef)`
+    /// - **Struct**: Allocate GcRef, copy all slots, return `(pack_slot0(rttid, vk), GcRef)`
+    /// - **Array**: Allocate array with ArrayHeader, copy elements, return `(pack_slot0(rttid, vk), GcRef)`
     /// - **Interface**: Return as-is to preserve itab_id
     /// - **Others**: Return `(pack_slot0(rttid, vk), raw_slots[0])`
     pub fn box_to_interface(&mut self, rttid: u32, vk: ValueKind, raw_slots: &[u64]) -> (u64, u64) {
-        use crate::objects::interface;
+        use crate::objects::{array, interface};
 
         match vk {
-            ValueKind::Struct | ValueKind::Array => {
+            ValueKind::Struct => {
                 let new_ref = self.alloc_and_copy_slots(raw_slots);
+                let slot0 = interface::pack_slot0(0, rttid, vk);
+                (slot0, new_ref as u64)
+            }
+            ValueKind::Array => {
+                // Array needs proper layout: [GcHeader][ArrayHeader][elements...]
+                // Get elem info from RuntimeType::Array
+                let elem_value_rttid = self.get_elem_value_rttid_from_base(rttid);
+                let elem_vk = elem_value_rttid.value_kind();
+                let elem_slots = self.get_type_slot_count(elem_value_rttid.rttid()) as usize;
+                let array_len = self.get_array_len_from_rttid(rttid);
+                
+                // Calculate elem_bytes (slot-based for non-packed, actual bytes for packed)
+                let elem_bytes = match elem_vk {
+                    ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => 1,
+                    ValueKind::Int16 | ValueKind::Uint16 => 2,
+                    ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
+                    _ => elem_slots * 8,
+                };
+                
+                let elem_meta = crate::ValueMeta::new(elem_value_rttid.rttid(), elem_vk);
+                let new_ref = array::create(&mut self.gc, elem_meta, elem_bytes, array_len);
+                
+                // Copy raw_slots to array data area
+                let data_ptr = array::data_ptr_bytes(new_ref) as *mut u64;
+                for (i, &val) in raw_slots.iter().enumerate() {
+                    unsafe { *data_ptr.add(i) = val };
+                }
+                
                 let slot0 = interface::pack_slot0(0, rttid, vk);
                 (slot0, new_ref as u64)
             }
@@ -642,7 +671,9 @@ impl<'a> ExternCallContext<'a> {
             .expect("dyn_get_index: base_rttid not found in runtime_types");
         
         match rt {
-            RuntimeType::Slice(elem_rttid) | RuntimeType::Chan { elem: elem_rttid, .. } => {
+            RuntimeType::Slice(elem_rttid) 
+            | RuntimeType::Chan { elem: elem_rttid, .. }
+            | RuntimeType::Array { elem: elem_rttid, .. } => {
                 *elem_rttid
             }
             RuntimeType::Pointer(elem_rttid) => {
@@ -662,6 +693,25 @@ impl<'a> ExternCallContext<'a> {
                 self.get_elem_value_rttid_from_base(underlying_rttid)
             }
             _ => panic!("get_elem_value_rttid_from_base: unexpected type {:?}", rt),
+        }
+    }
+
+    /// Get array length from RuntimeType::Array.
+    /// Panics if rttid is not an array type.
+    pub fn get_array_len_from_rttid(&self, rttid: u32) -> usize {
+        use crate::RuntimeType;
+        
+        let rt = self.runtime_types.get(rttid as usize)
+            .expect("get_array_len_from_rttid: rttid not found in runtime_types");
+        
+        match rt {
+            RuntimeType::Array { len, .. } => *len as usize,
+            RuntimeType::Named { id, .. } => {
+                let meta = &self.named_type_metas[*id as usize];
+                let underlying_rttid = meta.underlying_meta.meta_id();
+                self.get_array_len_from_rttid(underlying_rttid)
+            }
+            _ => panic!("get_array_len_from_rttid: expected Array type, got {:?}", rt),
         }
     }
 
