@@ -54,17 +54,27 @@ func testSetSlice() error {
     return nil
 }
 
-func testSetStringShouldFail() error {
+func testSetStringShouldFail() (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     var a any = "abc"
     a~>[0] = byte(1)
-    return nil
+    return false
 }
 
-func testSetArrayShouldFail() error {
+func testSetArrayShouldFail() (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     arr := [3]int{1, 2, 3}
     var a any = arr
     a~>[0] = 9
-    return nil
+    return false
 }
 
 func main() int {
@@ -77,11 +87,11 @@ func main() int {
     err = testSetSlice()
     assert(err == nil, "slice set should succeed")
 
-    err = testSetStringShouldFail()
-    assert(err != nil, "string index set should fail")
+    panicked := testSetStringShouldFail()
+    assert(panicked, "string index set should panic")
 
-    err = testSetArrayShouldFail()
-    assert(err != nil, "array index set should fail")
+    panicked = testSetArrayShouldFail()
+    assert(panicked, "array index set should panic")
 
     println("done")
     return 0

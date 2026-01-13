@@ -1,7 +1,6 @@
 //! JIT trampolines, context building, and JIT call implementations.
 
 use vo_runtime::jit_api::{JitResult, JitContext, JitCallContext};
-use vo_runtime::itab::ItabCache;
 use vo_jit::JitFunc;
 
 use crate::bytecode::Module;

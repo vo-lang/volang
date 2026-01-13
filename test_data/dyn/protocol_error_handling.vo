@@ -41,39 +41,48 @@ func (v *ValidatedStore) DynSetAttr(name string, value any) error {
     return nil
 }
 
-func writeKey1(store *ValidatedStore) error {
+func writeKey1(store *ValidatedStore) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     var obj any = store
     obj~>key1 = "value1"
-    return nil
+    return false
 }
 
-func writeKey2(store *ValidatedStore) error {
+func writeKey2(store *ValidatedStore) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     var obj any = store
     obj~>key2 = "value2"
-    return nil
+    return false
 }
 
 func main() {
     store := NewValidatedStore()
     var obj any = store
     
-    // Successful write
-    err := writeKey1(store)
-    assert(err == nil, "write should succeed")
+    // Successful write (should not panic)
+    panicked := writeKey1(store)
+    assert(!panicked, "write should succeed")
     
     v := obj~>key1?
     assert(v.(string) == "value1", "should read back value1")
     
     // Read non-existent key
-    _, err = obj~>nonexistent
+    _, err := obj~>nonexistent
     assert(err != nil, "read nonexistent should error")
     assert(errors.Is(err, dyn.ErrBadField), "should be ErrBadField")
     
-    // Make read-only and try to write
+    // Make read-only and try to write (should panic)
     store.SetReadOnly()
-    err = writeKey2(store)
-    assert(err != nil, "write to readonly should error")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "should be ErrTypeMismatch")
+    panicked = writeKey2(store)
+    assert(panicked, "write to readonly should panic")
     
     // Verify original value unchanged
     v = obj~>key1?

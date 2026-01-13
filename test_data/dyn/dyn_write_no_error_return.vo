@@ -1,3 +1,5 @@
+// Test dynamic write in function without error return value.
+// Dynamic write now allowed - panics on error, succeeds otherwise.
 package main
 
 type S struct {
@@ -7,6 +9,8 @@ type S struct {
 func main() int {
     s := &S{x: 1}
     var a any = s
-    a~>x = 2
+    a~>x = 2  // should succeed (correct type)
+    assert(s.x == 2, "x should be 2")
+    println("dyn_write_no_error_return: ok")
     return 0
 }

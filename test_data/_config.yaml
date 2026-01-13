@@ -23,8 +23,6 @@ tests:
   - file: debug_sequence.vo
   - file: defer_stmt.vo
   - file: dyn/dyn_write_no_error_return.vo
-    should_fail: true
-    reason: "dynamic write requires function with error return value"
   - file: dyn/dyn_write_fast_path.vo
   - file: embed_iface_simple.vo
   - file: embed_interface.vo
@@ -471,19 +469,11 @@ tests:
 # Test 3: Method returns error interaction with dyn error
   - file: dyn/dyn_method_returns_error.vo
 
-# Bug #7: Dynamic write should NOT require error return value (only ? should)
-# These tests use ~> write in main(), which should be allowed but currently
-# fails with E2521: "dynamic write requires function with error return value"
-
 # Test 4: Interface field dynamic write
   - file: dyn/dyn_interface_field_write.vo
-    skip: [vm, jit]
-    reason: "BUG #7: dynamic write incorrectly requires error return value"
 
 # Test 5: Type coercion in dynamic write
   - file: dyn/dyn_type_coercion_write.vo
-    skip: [vm, jit]
-    reason: "BUG #7: dynamic write incorrectly requires error return value"
 
 # Bug #6: nil receiver method call - dyn_call_closure does not catch panic
 # Issue: Calling method on nil pointer (e.g. nil~>GetValue()) where method

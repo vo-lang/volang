@@ -24,24 +24,28 @@ func (w *MyWriter) Write(s string) {
 
 // MyWriter implements Writer but NOT Reader
 
-func testSetMismatch() error {
+func testSetMismatch() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
 	c := &Container{}
 	var obj any = c
 	
 	w := &MyWriter{}
 	
-	// Try to assign Writer to Reader field - should fail
+	// Try to assign Writer to Reader field - should panic
 	// MyWriter doesn't implement Reader (no Read method)
 	obj~>R = w
 	
-	// If we reach here without error, the bug exists
-	return nil
+	return false
 }
 
 func main() {
-	err := testSetMismatch()
-	assert(err != nil, "should have returned error for interface mismatch")
-	println("Got expected error:", err.Error())
+	panicked := testSetMismatch()
+	assert(panicked, "should have panicked for interface mismatch")
+	println("Got expected panic")
 	println("PASS")
 }
 

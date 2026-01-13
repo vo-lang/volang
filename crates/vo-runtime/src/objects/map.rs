@@ -21,7 +21,6 @@ use vo_common_core::bytecode::Module;
 use vo_common_core::types::{ValueKind, ValueMeta};
 
 use super::compare::{deep_eq_struct_inline, deep_hash_struct_inline, iface_eq, iface_hash};
-use super::impl_gc_object;
 
 type SingleKeyMap = VoMap<u64, Box<[u64]>>;
 type MultiKeyMap = VoMap<Box<[u64]>, Box<[u64]>>;

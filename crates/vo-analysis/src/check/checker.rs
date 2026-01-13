@@ -18,7 +18,6 @@ use super::errors::TypeError;
 use super::type_info::TypeInfo;
 use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
-use crate::typ;
 use crate::operand::OperandMode;
 use crate::universe::Universe;
 use crate::importer::{Importer};

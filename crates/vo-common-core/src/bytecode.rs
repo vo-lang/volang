@@ -8,7 +8,7 @@ use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
-use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
+use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
 use crate::instruction::Instruction;
 use crate::debug_info::DebugInfo;
@@ -33,9 +33,11 @@ pub struct FunctionDef {
     /// Used by CallIface to know how many slots to copy from interface data
     pub recv_slots: u16,
     /// Number of GcRefs for heap-allocated named returns (0 = no heap returns).
-    /// When non-zero, slots 0..heap_ret_gcref_count contain GcRefs to heap storage.
     /// Used by panic recovery to return named return values after recover().
     pub heap_ret_gcref_count: u16,
+    /// Starting slot for heap-allocated named return GcRefs.
+    /// GcRefs are in slots heap_ret_gcref_start..heap_ret_gcref_start+heap_ret_gcref_count.
+    pub heap_ret_gcref_start: u16,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
 }

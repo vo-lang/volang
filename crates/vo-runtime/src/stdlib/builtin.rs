@@ -395,3 +395,29 @@ static __VO_CONV_STR_RUNES: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_str_runes",
     func: conv_str_runes,
 };
+
+/// Panic with an error value.
+/// Used by dynamic write in functions without error return value.
+/// Args: error interface (2 slots: slot0=meta, slot1=data)
+fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
+    let error_slot0 = call.arg_u64(0);
+    let error_data = call.arg_u64(1);
+    let value_kind = ValueKind::from_u8((error_slot0 & 0xFF) as u8);
+    
+    let msg = if value_kind == ValueKind::Void {
+        "panic: nil error".to_string()
+    } else if value_kind == ValueKind::String {
+        let s = string::as_str(error_data as crate::gc::GcRef);
+        format!("panic: {}", s)
+    } else {
+        "panic: dynamic write failed".to_string()
+    };
+    
+    ExternResult::Panic(msg)
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_PANIC_WITH_ERROR: ExternEntryWithContext = ExternEntryWithContext {
+    name: "panic_with_error",
+    func: panic_with_error,
+};

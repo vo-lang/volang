@@ -18,42 +18,26 @@ const IFACE_ASSERT_WITH_OK: u8 = 1 | (1 << 2) | (2 << 3);
 /// All protocol interfaces have exactly one method at index 0
 const PROTOCOL_METHOD_IDX: u8 = 0;
 
-/// Emit error propagation and return: fill return slots with nil, copy error, and return.
-/// `error_src` is the register containing the error (2 slots).
-fn emit_error_propagate_return(
+/// Emit panic with error: call panic_with_error extern.
+/// Dynamic write always panics on error (does not propagate).
+fn emit_dyn_write_panic(
     error_src: u16,
+    ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
 ) {
-    let ret_types: Vec<_> = func.return_types().to_vec();
-    let mut total_ret_slots = 0u16;
-    let mut ret_slot_types = Vec::new();
-    for ret_type in &ret_types {
-        total_ret_slots += info.type_slot_count(*ret_type);
-        ret_slot_types.extend(info.type_slot_types(*ret_type));
-    }
-    let ret_start = func.alloc_temp_typed(&ret_slot_types);
-    for i in 0..total_ret_slots {
-        func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-    }
-    if !ret_types.is_empty() {
-        let error_type = *ret_types.last().unwrap();
-        let error_slots = info.type_slot_count(error_type);
-        let error_start = ret_start + total_ret_slots - error_slots;
-        func.emit_copy(error_start, error_src, error_slots);
-    }
-    func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+    let extern_id = ctx.get_or_register_extern("panic_with_error");
+    func.emit_with_flags(Opcode::CallExtern, 2, error_src, extern_id as u16, error_src);
 }
 
 /// Emit error short-circuit for (any, error) tuple base in dynamic assignment.
-/// If base has an error (slot+2 != nil), fills return slots with nil and propagates error.
+/// If base has an error (slot+2 != nil), panic.
 fn emit_dyn_assign_error_short_circuit(
     base_reg: u16,
+    ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
 ) {
     let ok_jump = func.emit_jump(Opcode::JumpIfNot, base_reg + 2);
-    emit_error_propagate_return(base_reg + 2, func, info);
+    emit_dyn_write_panic(base_reg + 2, ctx, func);
     func.patch_jump(ok_jump, func.current_pc());
 }
 
@@ -578,7 +562,7 @@ fn compile_stmt_with_label(
                                     SlotType::Interface0, SlotType::Interface1,  // error
                                 ]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
-                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
+                                emit_dyn_assign_error_short_circuit(base_reg, ctx, func);
                                 base_reg  // first 2 slots are the any value
                             } else if info.is_interface(base_type) {
                                 let base_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
@@ -615,7 +599,7 @@ fn compile_stmt_with_label(
 
                                 // Check error from protocol method
                                 let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
-                                emit_error_propagate_return(args_start, func, info);
+                                emit_dyn_write_panic(args_start, ctx, func);
                                 func.patch_jump(ok_err_jump, func.current_pc());
                                 let end_jump = func.emit_jump(Opcode::Jump, 0);
 
@@ -640,7 +624,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
-                            emit_error_propagate_return(err_reg, func, info);
+                            emit_dyn_write_panic(err_reg, ctx, func);
                             func.patch_jump(done_jump, func.current_pc());
                             
                             if let Some(end_jump) = end_jump {
@@ -662,7 +646,7 @@ fn compile_stmt_with_label(
                                     SlotType::Interface0, SlotType::Interface1,
                                 ]);
                                 compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
-                                emit_dyn_assign_error_short_circuit(base_reg, func, info);
+                                emit_dyn_assign_error_short_circuit(base_reg, ctx, func);
                                 base_reg
                             } else if info.is_interface(base_type) {
                                 let base_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
@@ -695,7 +679,7 @@ fn compile_stmt_with_label(
 
                                 // Check error from protocol method
                                 let ok_err_jump = func.emit_jump(Opcode::JumpIfNot, args_start);
-                                emit_error_propagate_return(args_start, func, info);
+                                emit_dyn_write_panic(args_start, ctx, func);
                                 func.patch_jump(ok_err_jump, func.current_pc());
                                 let end_jump = func.emit_jump(Opcode::Jump, 0);
 
@@ -719,7 +703,7 @@ fn compile_stmt_with_label(
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
 
                             let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
-                            emit_error_propagate_return(err_reg, func, info);
+                            emit_dyn_write_panic(err_reg, ctx, func);
                             func.patch_jump(done_jump, func.current_pc());
                             
                             if let Some(end_jump) = end_jump {

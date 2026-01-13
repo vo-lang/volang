@@ -520,27 +520,10 @@ impl Checker {
 
                                 let is_write = matches!(dyn_access.op, DynAccessOp::Field(_) | DynAccessOp::Index(_));
                                 if is_write {
-                                    if let Some(sig_key) = self.octx.sig {
-                                        let sig = self.otype(sig_key).try_as_signature().unwrap();
-                                        let results = self.otype(sig.results()).try_as_tuple().unwrap();
-                                        let vars = results.vars();
-                                        let error_type = self.universe().error_type();
-                                        let has_error_return = if let Some(last_var) = vars.last() {
-                                            let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
-                                            crate::typ::identical(last_type, error_type, self.objs())
-                                                || crate::lookup::missing_method(last_type, error_type, true, self).is_none()
-                                        } else {
-                                            false
-                                        };
-                                        if !has_error_return {
-                                            self.error_code_msg(
-                                                TypeError::DynWriteNoErrorReturn,
-                                                stmt.span,
-                                                "dynamic write requires function with error return value".to_string(),
-                                            );
-                                            return;
-                                        }
-                                    }
+                                    // Dynamic write is allowed in any function:
+                                    // - With error return: fail-on-error (propagate error)
+                                    // - Without error return: panic-on-error
+                                    // The codegen handles both cases.
 
                                     let mut base_x = Operand::new();
                                     self.multi_expr(&mut base_x, &dyn_access.base);

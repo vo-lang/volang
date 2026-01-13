@@ -40,19 +40,29 @@ func (m *MutableArray) Get(idx int) any {
     return m.data[idx]
 }
 
-func testOutOfBounds(arr *MutableArray) error {
+func testOutOfBounds(arr *MutableArray) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     var obj any = arr
     obj~>[10] = "overflow"
-    return nil
+    return false
 }
 
-func testBadKeyType(arr *MutableArray) error {
+func testBadKeyType(arr *MutableArray) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     var obj any = arr
     obj~>["bad"] = "value"
-    return nil
+    return false
 }
 
-func main() error {
+func main() {
     arr := NewMutableArray(5)
     var obj any = arr
     
@@ -72,14 +82,13 @@ func main() error {
     v0 := obj~>[0]?
     assert(v0.(string) == "first", "read index 0 should be 'first'")
     
-    // Test out of bounds write - use helper function to catch error
-    err := testOutOfBounds(arr)
-    assert(err != nil, "out of bounds write should error")
+    // Test out of bounds write - should panic
+    panicked := testOutOfBounds(arr)
+    assert(panicked, "out of bounds write should panic")
     
-    // Test wrong key type write
-    err = testBadKeyType(arr)
-    assert(err != nil, "string key write should error")
+    // Test wrong key type write - should panic
+    panicked = testBadKeyType(arr)
+    assert(panicked, "string key write should panic")
     
     println("custom_dyn_set_index: ok")
-    return nil
 }

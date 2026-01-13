@@ -37,10 +37,10 @@ func main() {
     assert(h.StringVal == "hello", "StringVal should be 'hello'")
     println("Test 4: StringVal =", h.StringVal)
     
-    // Test 5: Type mismatch - write string to int field - should error
-    err := testTypeMismatch(obj)
-    assert(err != nil, "type mismatch should error")
-    println("Test 5: type mismatch returned error (expected)")
+    // Test 5: Type mismatch - write string to int field - should panic
+    panicked := testTypeMismatch(obj)
+    assert(panicked, "type mismatch should panic")
+    println("Test 5: type mismatch panicked (expected)")
     
     // Test 6: Write to map[string]any - accepts any type
     m := &MixedContainer{Data: make(map[string]any)}
@@ -64,10 +64,10 @@ func main() {
     assert(s[1] == 200, "slice[1] should be 200")
     println("Test 7: slice[1] =", s[1])
     
-    // Test 8: Write wrong type to slice - should error
-    err = testSliceTypeMismatch(sliceObj)
-    assert(err != nil, "slice type mismatch should error")
-    println("Test 8: slice type mismatch returned error (expected)")
+    // Test 8: Write wrong type to slice - should panic
+    panicked = testSliceTypeMismatch(sliceObj)
+    assert(panicked, "slice type mismatch should panic")
+    println("Test 8: slice type mismatch panicked (expected)")
     
     // Test 9: Write to map with specific key type
     intKeyMap := map[int]string{1: "one", 2: "two"}
@@ -77,10 +77,10 @@ func main() {
     assert(intKeyMap[3] == "three", "map[3] should be 'three'")
     println("Test 9: map[3] =", intKeyMap[3])
     
-    // Test 10: Write wrong key type to map - should error
-    err = testMapKeyMismatch(mapObj)
-    assert(err != nil, "map key mismatch should error")
-    println("Test 10: map key mismatch returned error (expected)")
+    // Test 10: Write wrong key type to map - should panic
+    panicked = testMapKeyMismatch(mapObj)
+    assert(panicked, "map key mismatch should panic")
+    println("Test 10: map key mismatch panicked (expected)")
     
     // Test 11: Overwrite existing map value with different type
     anyMap := map[string]any{"key": 100}
@@ -90,36 +90,53 @@ func main() {
     assert(anyMap["key"].(string) == "now a string", "map value changed type")
     println("Test 11: map value type changed successfully")
     
-    // Test 12: Write nil to non-nillable field - should error or set zero
+    // Test 12: Write nil to non-nillable field - should panic
     h2 := &NumericHolder{IntVal: 100}
     var h2Obj any = h2
     
-    err = testWriteNilToInt(h2Obj)
-    if err != nil {
-        println("Test 12: write nil to int returned error (expected)")
-    } else {
-        println("Test 12: write nil to int succeeded (set to zero?)")
-    }
+    panicked = testWriteNilToInt(h2Obj)
+    assert(panicked, "write nil to int should panic")
+    println("Test 12: write nil to int panicked (expected)")
     
     println("dyn_type_coercion_write: ok")
 }
 
-func testTypeMismatch(obj any) error {
+func testTypeMismatch(obj any) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     obj~>IntVal = "not an int"
-    return nil
+    return false
 }
 
-func testSliceTypeMismatch(obj any) error {
+func testSliceTypeMismatch(obj any) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     obj~>[0] = "not an int"
-    return nil
+    return false
 }
 
-func testMapKeyMismatch(obj any) error {
+func testMapKeyMismatch(obj any) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     obj~>["string key"] = "value"  // map expects int key
-    return nil
+    return false
 }
 
-func testWriteNilToInt(obj any) error {
+func testWriteNilToInt(obj any) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
     obj~>IntVal = nil
-    return nil
+    return false
 }

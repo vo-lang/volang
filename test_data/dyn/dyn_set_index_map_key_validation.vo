@@ -30,21 +30,26 @@ func testMapKeyTypeMatch() error {
 	return nil
 }
 
-func testMapKeyTypeMismatch() error {
-	// Test 4: String key on int map - should fail
+func testMapKeyTypeMismatch() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	// Test 4: String key on int map - should panic
 	m := map[int]int{}
 	var box interface{} = m
-	box~>["wrong"] = 1  // This should fail
-	return nil
+	box~>["wrong"] = 1  // This should panic
+	return false
 }
 
 func main() {
 	err := testMapKeyTypeMatch()
 	assert(err == nil, "testMapKeyTypeMatch should succeed")
 	
-	err = testMapKeyTypeMismatch()
-	assert(err != nil, "testMapKeyTypeMismatch should fail")
-	println("Test 4 (wrong key type): error caught")
+	panicked := testMapKeyTypeMismatch()
+	assert(panicked, "testMapKeyTypeMismatch should panic")
+	println("Test 4 (wrong key type): panic caught")
 	
 	println("done")
 }

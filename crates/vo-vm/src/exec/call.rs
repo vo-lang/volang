@@ -607,10 +607,11 @@ fn extract_panic_return_info(
         return (None, 0, frame.ret_reg, frame.ret_count as usize);
     }
     
-    // Heap returns: slots 0..heap_ret_gcref_count contain GcRefs to heap storage
+    // Heap returns: GcRefs are in slots heap_ret_gcref_start..heap_ret_gcref_start+heap_ret_gcref_count
     let gcref_count = func.heap_ret_gcref_count as usize;
+    let gcref_start = func.heap_ret_gcref_start as usize;
     let gcrefs: Vec<u64> = (0..gcref_count)
-        .map(|i| stack[frame.bp + i])
+        .map(|i| stack[frame.bp + gcref_start + i])
         .collect();
     
     // slots_per_ref: total ret_slots / gcref_count

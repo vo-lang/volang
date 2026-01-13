@@ -38,7 +38,7 @@ a~>b~>c             // → (any, error) (implicit short-circuiting)
 a~>b~>c?            // → any
 
 // Field assignment
-a~>field = value   // statement form: fail-on-error
+a~>field = value   // statement form: panic-on-error
 a~>b~>c = value    // chained assignment target
 
 // Indexing
@@ -46,7 +46,7 @@ a~>[key]           // → (any, error)
 a~>[key]?          // → any (propagate error)
 
 // Index assignment
-a~>[key] = value   // statement form: fail-on-error
+a~>[key] = value   // statement form: panic-on-error
 
 // Call
 a~>(args...)       // → (any, error)
@@ -70,9 +70,9 @@ v, ok := a.(T)     // → (T, bool) (ok=false on failure, no panic)
 Dynamic access does not participate in normal static member lookup or overload resolution. Only a small whitelist of operations is supported when using `~>`:
 
 - Field access: `a~>field` (returns `(any, error)`)
-- Field assignment: `a~>field = x` (statement; fail-on-error)
+- Field assignment: `a~>field = x` (statement; panic-on-error)
 - Indexing: `a~>[key]` (returns `(any, error)`)
-- Index assignment: `a~>[key] = x` (statement; fail-on-error)
+- Index assignment: `a~>[key] = x` (statement; panic-on-error)
 - Call: `a~>(args...)` (returns `(any, error)`)
 - Method call (syntax sugar): `a~>method(args...)` (returns `(any, error)`)
 - Error propagation: apply postfix `?` to unwrap and propagate the `error`
@@ -317,10 +317,10 @@ if base_type.is_tuple_any_error() {
 // Postfix `?` is regular Vo error-propagation sugar.
 a~>field           → dyn_get_attr(a, "field")                 // (any, error)
 a~>field?          → dyn_get_attr(a, "field")?                // any
-a~>field = x       → dyn_set_attr(a, "field", x)?              // statement (fail-on-error)
+a~>field = x       → dyn_set_attr(a, "field", x)               // statement (panic-on-error)
 a~>[key]           → dyn_get_index(a, any(key))                // (any, error)
 a~>[key]?          → dyn_get_index(a, any(key))?               // any
-a~>[key] = x       → dyn_set_index(a, any(key), x)?             // statement (fail-on-error)
+a~>[key] = x       → dyn_set_index(a, any(key), x)              // statement (panic-on-error)
 a~>(args...)       → dyn_call(a, any(args...))                 // (any, error)
 a~>(args...)?      → dyn_call(a, any(args...))?                // any
 
@@ -453,7 +453,7 @@ func processJSON(data any) (string, error) {
     userAge := (a~>response~>data~>user~>age?).(int)
     greeting := (a~>config~>greeting?).(string)
 
-    // Dynamic set (single-step). Statement form is fail-on-error.
+    // Dynamic set (single-step). Statement form is panic-on-error.
     a~>last_user = userName
     a~>["last_age"] = userAge
     
