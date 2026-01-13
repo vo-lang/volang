@@ -667,8 +667,6 @@ tests:
     skip: [vm, jit]
     reason: "Vo incorrectly handles switch when default is first case"
 
-# Bug #3: defer inside defer function doesn't execute
+# Bug #3: defer inside defer function doesn't execute (FIXED)
   - file: bug_nested_defer_not_run.vo
-    skip: [vm, jit]
-    reason: "Inner defer in nested defer function never executes"
 

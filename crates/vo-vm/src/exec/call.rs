@@ -194,6 +194,24 @@ fn collect_defers(
     pending
 }
 
+/// Collect nested defers (pushed during defer execution) and prepend to pending list.
+/// Returns true if any nested defers were found.
+#[inline]
+fn collect_and_prepend_nested_defers(
+    defer_stack: &mut Vec<DeferEntry>,
+    pending: &mut Vec<DeferEntry>,
+    frame_depth: usize,
+    include_errdefers: bool,
+) {
+    let nested = collect_defers(defer_stack, frame_depth, include_errdefers);
+    if !nested.is_empty() {
+        // Prepend nested defers (LIFO: they run before existing pending)
+        let mut new_pending = nested;
+        new_pending.append(pending);
+        *pending = new_pending;
+    }
+}
+
 /// Read values from heap GcRefs (for escaped named returns).
 #[inline]
 fn read_heap_gcrefs(heap_gcrefs: &[u64], value_slots_per_ref: usize) -> Vec<u64> {
@@ -228,6 +246,7 @@ pub fn exec_return(
         if let UnwindingKind::Return { .. } = &state.kind {
             // Only handle when the defer function itself returns (not nested calls)
             if current_frame_depth == state.target_depth + 1 {
+                collect_and_prepend_nested_defers(defer_stack, &mut state.pending, current_frame_depth, is_error_return);
                 pop_frame(stack, frames);
                 
                 if !state.pending.is_empty() {
@@ -470,7 +489,7 @@ pub fn exec_panic_unwind(
     }
     
     // Check if we're continuing after a defer finished (not starting fresh)
-    if let Some(result) = continue_panic_unwind(stack, frames, unwinding, panic_state, module) {
+    if let Some(result) = continue_panic_unwind(stack, frames, defer_stack, unwinding, panic_state, module) {
         return result;
     }
     
@@ -484,6 +503,7 @@ pub fn exec_panic_unwind(
 fn continue_panic_unwind(
     stack: &mut Vec<u64>,
     frames: &mut Vec<CallFrame>,
+    defer_stack: &mut Vec<DeferEntry>,
     unwinding: &mut Option<UnwindingState>,
     panic_state: &Option<PanicState>,
     module: &Module,
@@ -496,10 +516,12 @@ fn continue_panic_unwind(
     };
     
     // Only handle when the defer function itself returns (not nested calls)
-    if frames.len() != state.target_depth + 1 {
+    let current_frame_depth = frames.len();
+    if current_frame_depth != state.target_depth + 1 {
         return None;
     }
     
+    collect_and_prepend_nested_defers(defer_stack, &mut state.pending, current_frame_depth, true);
     pop_frame(stack, frames);
     
     // Take ownership of panic data to avoid clone
