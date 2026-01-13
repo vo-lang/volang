@@ -660,10 +660,8 @@ tests:
 # Bug #1: Sparse array literals ignore index keys (FIXED)
   - file: bug_sparse_array_keyed.vo
 
-# Bug #2: switch with default as first case matches all to default
+# Bug #2: switch with default as first case matches all to default (FIXED)
   - file: bug_switch_default_first.vo
-    skip: [vm, jit]
-    reason: "Vo incorrectly handles switch when default is first case"
 
 # Bug #3: defer inside defer function doesn't execute (FIXED)
   - file: bug_nested_defer_not_run.vo

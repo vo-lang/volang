@@ -2057,47 +2057,44 @@ fn compile_switch_with_label(
     func.enter_switch(label);
     
     // Collect case jumps and body positions
-    let mut case_jumps: Vec<usize> = Vec::new();
+    // case_jumps[i] -> case_body_idx[i]: maps each conditional jump to its target case
+    let mut case_jumps: Vec<(usize, usize)> = Vec::new();  // (jump_pc, case_idx)
     let mut end_jumps: Vec<usize> = Vec::new();
-    let mut default_jump: Option<usize> = None;
+    let mut default_case_idx: Option<usize> = None;
+    
+    // Precompute tag comparison type (hoist out of loop)
+    let is_string_tag = switch_stmt.tag.as_ref()
+        .map(|t| info.is_string(info.expr_type(t.id)))
+        .unwrap_or(false);
     
     // Generate comparison and conditional jumps for each case
-    for case in &switch_stmt.cases {
+    // NOTE: Default case jump is emitted AFTER all other cases are checked,
+    // regardless of its position in the source code.
+    for (case_idx, case) in switch_stmt.cases.iter().enumerate() {
         if case.exprs.is_empty() {
-            // Default case - will jump here if no other case matches
-            default_jump = Some(func.emit_jump(Opcode::Jump, 0));
+            default_case_idx = Some(case_idx);
         } else {
-            // Regular case - compare with each expression
             for case_expr in &case.exprs {
                 let case_val = crate::expr::compile_expr(case_expr, ctx, func, info)?;
                 let cmp_result = func.alloc_temp_typed(&[SlotType::Value]);
                 
                 if let Some(tag) = tag_reg {
-                    // Compare tag with case value
-                    let tag_type = switch_stmt.tag.as_ref().map(|t| info.expr_type(t.id));
-                    let is_string = tag_type.map(|t| info.is_string(t)).unwrap_or(false);
-                    
-                    if is_string {
+                    if is_string_tag {
                         func.emit_op(Opcode::StrEq, cmp_result, tag, case_val);
                     } else {
                         func.emit_op(Opcode::EqI, cmp_result, tag, case_val);
                     }
                 } else {
-                    // No tag - case_expr should be boolean
                     func.emit_op(Opcode::Copy, cmp_result, case_val, 0);
                 }
                 
-                case_jumps.push(func.emit_jump(Opcode::JumpIf, cmp_result));
+                case_jumps.push((func.emit_jump(Opcode::JumpIf, cmp_result), case_idx));
             }
         }
     }
     
-    // Jump to default or end if no case matched
-    let no_match_jump = if default_jump.is_some() {
-        None
-    } else {
-        Some(func.emit_jump(Opcode::Jump, 0))
-    };
+    // After all case conditions checked: jump to default or end
+    let fallthrough_jump = func.emit_jump(Opcode::Jump, 0);
     
     // Compile case bodies
     let mut case_body_starts: Vec<usize> = Vec::new();
@@ -2131,39 +2128,19 @@ fn compile_switch_with_label(
     
     let end_pc = func.current_pc();
     
-    // Patch jumps
-    let mut case_idx = 0;
-    let mut jump_idx = 0;
-    for case in &switch_stmt.cases {
-        if case.exprs.is_empty() {
-            // Default case
-            if let Some(jump_pc) = default_jump {
-                func.patch_jump(jump_pc, case_body_starts[case_idx]);
-            }
-        } else {
-            // Regular case - patch all expression jumps
-            for _ in &case.exprs {
-                if jump_idx < case_jumps.len() {
-                    func.patch_jump(case_jumps[jump_idx], case_body_starts[case_idx]);
-                    jump_idx += 1;
-                }
-            }
-        }
-        case_idx += 1;
+    // Patch case condition jumps
+    for (jump_pc, case_idx) in case_jumps {
+        func.patch_jump(jump_pc, case_body_starts[case_idx]);
     }
     
-    // Patch no match jump
-    if let Some(jump_pc) = no_match_jump {
-        func.patch_jump(jump_pc, end_pc);
-    }
+    // Patch fallthrough jump: to default case if exists, otherwise to end
+    let fallthrough_target = default_case_idx
+        .map(|idx| case_body_starts[idx])
+        .unwrap_or(end_pc);
+    func.patch_jump(fallthrough_jump, fallthrough_target);
     
-    // Patch end jumps (implicit break at end of case)
-    for jump_pc in end_jumps {
-        func.patch_jump(jump_pc, end_pc);
-    }
-    
-    // Patch explicit break statements
-    for jump_pc in break_patches {
+    // Patch end jumps (implicit break at end of case) and explicit breaks
+    for jump_pc in end_jumps.into_iter().chain(break_patches) {
         func.patch_jump(jump_pc, end_pc);
     }
     
