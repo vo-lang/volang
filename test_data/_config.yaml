@@ -579,10 +579,8 @@ tests:
 # Test: dynamic method call on nil field value
   - file: dyn/dyn_method_on_nil_field.vo
 
-# BUG: named type embedding protocol type - struct field index 0 not found
+# Test: named type embedding protocol type
   - file: dyn/dyn_named_embed_protocol.vo
-    skip: [vm, jit]
-    reason: "BUG: struct field index 0 not found in type_info.rs:529"
 
 # BUG: map[any]any dynamic index access returns error even when key exists
   - file: dyn/dyn_map_delete_get.vo

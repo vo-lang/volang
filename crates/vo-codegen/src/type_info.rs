@@ -508,6 +508,19 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::compute_field_offset_from_indices(base_type, indices, self.tc_objs())
     }
 
+    /// Get field offset for a selector expression.
+    /// Uses selection indices if available (handles promoted fields), otherwise falls back to field name.
+    pub fn selector_field_offset(
+        &self,
+        expr_id: vo_syntax::ast::ExprId,
+        base_type: TypeKey,
+        field_name: &str,
+    ) -> (u16, u16) {
+        self.get_selection(expr_id)
+            .map(|sel_info| self.compute_field_offset_from_indices(base_type, sel_info.indices()))
+            .unwrap_or_else(|| self.struct_field_offset(base_type, field_name))
+    }
+
     // === Type queries (delegates to vo_analysis::check::type_info) ===
 
     pub fn is_interface(&self, type_key: TypeKey) -> bool {

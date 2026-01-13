@@ -103,6 +103,10 @@ pub fn get_expr_source(
                 if *selection.kind() == vo_analysis::selection::SelectionKind::MethodVal {
                     return ExprSource::NeedsCompile;
                 }
+                // Indirect selection (embedded pointer fields) requires runtime deref
+                if selection.indirect() {
+                    return ExprSource::NeedsCompile;
+                }
             }
             let expr_type = info.expr_type(expr.id);
             let field_slots = info.type_slot_count(expr_type);
@@ -114,9 +118,7 @@ pub fn get_expr_source(
                 get_expr_source(&sel.expr, ctx, func, info) 
             {
                 if let Some(field_name) = info.project.interner.resolve(sel.sel.symbol) {
-                    let (offset, _) = info.get_selection(expr.id)
-                        .map(|sel_info| info.compute_field_offset_from_indices(recv_type, sel_info.indices()))
-                        .unwrap_or_else(|| info.struct_field_offset(recv_type, field_name));
+                    let (offset, _) = info.selector_field_offset(expr.id, recv_type, field_name);
                     return ExprSource::Location(StorageKind::StackValue { 
                         slot: base_slot + offset, 
                         slots: field_slots 
@@ -586,24 +588,127 @@ fn compile_selector(
         .resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
 
+    // Check for indirect selection (embedded pointer fields require runtime deref)
+    if let Some(selection) = info.get_selection(expr.id) {
+        if selection.indirect() {
+            return compile_indirect_selector(sel, selection.indices(), dst, ctx, func, info);
+        }
+    }
+
     let is_ptr = info.is_pointer(recv_type);
     if is_ptr {
         let ptr_reg = compile_expr(&sel.expr, ctx, func, info)?;
         let base_type = info.pointer_base(recv_type);
-        let (offset, slots) = info
-            .get_selection(expr.id)
-            .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-            .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
+        let (offset, slots) = info.selector_field_offset(expr.id, base_type, field_name);
         func.emit_ptr_get(dst, ptr_reg, offset, slots);
         return Ok(());
     }
 
     let base_reg = compile_expr(&sel.expr, ctx, func, info)?;
-    let (offset, slots) = info
-        .get_selection(expr.id)
-        .map(|sel_info| info.compute_field_offset_from_indices(recv_type, sel_info.indices()))
-        .unwrap_or_else(|| info.struct_field_offset(recv_type, field_name));
+    let (offset, slots) = info.selector_field_offset(expr.id, recv_type, field_name);
     func.emit_copy(dst, base_reg + offset, slots);
+    Ok(())
+}
+
+/// Result of traversing an indirect field path.
+/// Contains the final location info needed to read or write the target field.
+pub struct IndirectFieldResult {
+    /// Register containing the base (pointer if is_ptr, value otherwise)
+    pub base_reg: u16,
+    /// Whether base_reg contains a pointer
+    pub is_ptr: bool,
+    /// Offset to the final field
+    pub offset: u16,
+    /// Slot count of the final field
+    pub slots: u16,
+}
+
+/// Traverse an indirect field path (embedded pointer fields), generating runtime
+/// pointer dereference instructions at each pointer step.
+/// Returns the final location info for the target field.
+pub fn traverse_indirect_field(
+    sel: &vo_syntax::ast::SelectorExpr,
+    indices: &[usize],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<IndirectFieldResult, CodegenError> {
+    let recv_type = info.expr_type(sel.expr.id);
+    
+    let mut current_type = if info.is_pointer(recv_type) {
+        info.pointer_base(recv_type)
+    } else {
+        recv_type
+    };
+    
+    let base_reg = compile_expr(&sel.expr, ctx, func, info)?;
+    let mut is_ptr = info.is_pointer(recv_type);
+    let mut current_reg = base_reg;
+    
+    for (i, &idx) in indices.iter().enumerate() {
+        let is_last = i == indices.len() - 1;
+        let (field_offset, field_slots, field_type) = info.struct_field_offset_by_index_with_type(current_type, idx);
+        
+        if is_last {
+            return Ok(IndirectFieldResult {
+                base_reg: current_reg,
+                is_ptr,
+                offset: field_offset,
+                slots: field_slots,
+            });
+        }
+        
+        let field_is_ptr = info.is_pointer(field_type);
+        
+        if is_ptr {
+            if field_is_ptr {
+                let tmp = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+                func.emit_ptr_get(tmp, current_reg, field_offset, 1);
+                current_reg = tmp;
+                current_type = info.pointer_base(field_type);
+                is_ptr = true;
+            } else {
+                let tmp = func.alloc_temp_typed(&info.type_slot_types(field_type));
+                func.emit_ptr_get(tmp, current_reg, field_offset, field_slots);
+                current_reg = tmp;
+                current_type = field_type;
+                is_ptr = false;
+            }
+        } else {
+            if field_is_ptr {
+                let tmp = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+                func.emit_copy(tmp, current_reg + field_offset, 1);
+                current_reg = tmp;
+                current_type = info.pointer_base(field_type);
+                is_ptr = true;
+            } else {
+                current_reg = current_reg + field_offset;
+                current_type = field_type;
+                is_ptr = false;
+            }
+        }
+    }
+    
+    Err(CodegenError::Internal("traverse_indirect_field: empty indices".to_string()))
+}
+
+/// Compile selector with indirect access (embedded pointer fields).
+fn compile_indirect_selector(
+    sel: &vo_syntax::ast::SelectorExpr,
+    indices: &[usize],
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let result = traverse_indirect_field(sel, indices, ctx, func, info)?;
+    
+    if result.is_ptr {
+        func.emit_ptr_get(dst, result.base_reg, result.offset, result.slots);
+    } else {
+        func.emit_copy(dst, result.base_reg + result.offset, result.slots);
+    }
+    
     Ok(())
 }
 

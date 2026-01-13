@@ -163,25 +163,25 @@ pub fn resolve_lvalue(
             let field_name = info.project.interner.resolve(sel.sel.symbol)
                 .ok_or_else(|| CodegenError::Internal("cannot resolve field".to_string()))?;
             
+            // Check for indirect selection (embedded pointer fields require runtime deref)
+            if let Some(selection) = info.get_selection(expr.id) {
+                if selection.indirect() {
+                    return resolve_indirect_lvalue(sel, selection.indices(), ctx, func, info);
+                }
+            }
+            
             let is_ptr = info.is_pointer(recv_type);
             
             if is_ptr {
                 // Pointer receiver: compile to get ptr, then Deref with offset
                 let ptr_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
                 let base_type = info.pointer_base(recv_type);
-                
-                // Get field offset using selection indices (handles promoted fields)
-                let (offset, slots) = info.get_selection(expr.id)
-                    .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-                    .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
+                let (offset, slots) = info.selector_field_offset(expr.id, base_type, field_name);
                 
                 Ok(LValue::Deref { ptr_reg, offset, elem_slots: slots })
             } else {
                 // Value receiver: resolve base then add offset
-                let base_type = recv_type;
-                let (offset, slots) = info.get_selection(expr.id)
-                    .map(|sel_info| info.compute_field_offset_from_indices(base_type, sel_info.indices()))
-                    .unwrap_or_else(|| info.struct_field_offset(base_type, field_name));
+                let (offset, slots) = info.selector_field_offset(expr.id, recv_type, field_name);
                 
                 // Special case: Index expression base (slice/array/map element field access)
                 if let ExprKind::Index(idx) = &sel.expr.kind {
@@ -701,4 +701,25 @@ pub fn compile_index_addr_to_reg(
     let addr_reg = func.alloc_temp_typed(&[SlotType::GcRef]);
     compile_index_addr(container_expr, index_expr, addr_reg, ctx, func, info)?;
     Ok(addr_reg)
+}
+
+/// Resolve LValue for indirect selection (embedded pointer fields).
+/// Uses shared traverse_indirect_field logic.
+fn resolve_indirect_lvalue(
+    sel: &vo_syntax::ast::SelectorExpr,
+    indices: &[usize],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<LValue, CodegenError> {
+    let result = crate::expr::traverse_indirect_field(sel, indices, ctx, func, info)?;
+    
+    if result.is_ptr {
+        Ok(LValue::Deref { ptr_reg: result.base_reg, offset: result.offset, elem_slots: result.slots })
+    } else {
+        Ok(LValue::Variable(StorageKind::StackValue { 
+            slot: result.base_reg + result.offset, 
+            slots: result.slots 
+        }))
+    }
 }
