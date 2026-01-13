@@ -594,3 +594,22 @@ tests:
 # Test: dynamic access on struct with channel field
   - file: dyn/dyn_chan_field_access.vo
 
+# ============================================================
+# Coverage tests (2026-01-13 new batch) - Bug discoveries
+# ============================================================
+
+# Bug #1: Nested array compound assignment - FIXED
+# Fixed: resolve_lvalue now computes flattened index for nested stack arrays
+  - file: bug_nested_array_compound.vo
+
+# Bug #2: break label in nested for-range doesn't work correctly
+# Root cause: for-range expansion doesn't properly handle break to outer label
+  - file: bug_for_range_break_label.vo
+    skip: [vm, jit]
+    reason: "Vo implementation bug: break label in nested for-range"
+
+# Passing tests from coverage analysis
+  - file: defer_panic_named_return.vo
+  - file: type_assertion_chain_method.vo
+  - file: embed_ptr_iface_complex.vo
+

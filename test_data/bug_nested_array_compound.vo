@@ -1,0 +1,31 @@
+// Bug reproduction: nested array compound assignment
+package main
+
+var evalCount int
+
+func getIndex() int {
+    evalCount += 1
+    return 0
+}
+
+func main() {
+    // Test 1: 2D nested array
+    evalCount = 0
+    nested := [2][2]int{{1, 2}, {3, 4}}
+    nested[getIndex()][getIndex()] += 10
+    assert(evalCount == 2, "2D: indices should each be evaluated once")
+    assert(nested[0][0] == 11, "2D: nested[0][0] should be 11")
+    
+    // Test 2: 3D nested array (verifies recursive solution)
+    evalCount = 0
+    cube := [2][2][2]int{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}
+    cube[getIndex()][getIndex()][getIndex()] += 100
+    assert(evalCount == 3, "3D: indices should each be evaluated once")
+    assert(cube[0][0][0] == 101, "3D: cube[0][0][0] should be 101")
+    
+    // Test 3: Simple read after compound (ensures write went to correct location)
+    nested[1][1] += 5
+    assert(nested[1][1] == 9, "nested[1][1] should be 9 after += 5")
+    
+    println("ok")
+}

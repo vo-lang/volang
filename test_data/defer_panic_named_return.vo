@@ -1,0 +1,60 @@
+// Test: defer modifying named return values during panic recovery
+// Go spec: deferred function can modify named return values
+package main
+
+func panicWithRecover() (result int) {
+    defer func() {
+        if r := recover(); r != nil {
+            result = 999  // Modify named return on recovery
+        }
+    }()
+    result = 42
+    panic("test panic")
+    return  // Never reached
+}
+
+func normalWithDefer() (result int) {
+    defer func() {
+        result = result * 2  // Double the result
+    }()
+    result = 21
+    return  // result should be 42 after defer
+}
+
+func explicitReturnWithDefer() (result int) {
+    defer func() {
+        result = result + 10
+    }()
+    return 100  // result=100, then defer adds 10, final=110
+}
+
+func multiReturnWithDefer() (a, b int) {
+    defer func() {
+        a = a * 2
+        b = b * 3
+    }()
+    a = 10
+    b = 20
+    return  // a=20, b=60 after defer
+}
+
+func main() {
+    // Test 1: Defer can modify return value during panic recovery
+    r1 := panicWithRecover()
+    assert(r1 == 999, "panic recovery should set result to 999, got ", r1)
+    
+    // Test 2: Normal return with defer modification
+    r2 := normalWithDefer()
+    assert(r2 == 42, "defer should double 21 to 42, got ", r2)
+    
+    // Test 3: Explicit return with defer modification
+    r3 := explicitReturnWithDefer()
+    assert(r3 == 110, "explicit return 100 + defer 10 = 110, got ", r3)
+    
+    // Test 4: Multiple named returns with defer
+    a, b := multiReturnWithDefer()
+    assert(a == 20, "a should be 20, got ", a)
+    assert(b == 60, "b should be 60, got ", b)
+    
+    println("defer_panic_named_return: ok")
+}

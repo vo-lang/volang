@@ -1,0 +1,84 @@
+// Test: Complex embedded pointer with interface implementation
+// Tests method promotion from embedded pointer field to interface
+package main
+
+type Base struct {
+    value int
+}
+
+func (b *Base) GetValue() int {
+    return b.value
+}
+
+func (b *Base) SetValue(v int) {
+    b.value = v
+}
+
+func (b Base) Double() int {
+    return b.value * 2
+}
+
+type Derived struct {
+    *Base  // Embedded pointer
+    extra  int
+}
+
+type Getter interface {
+    GetValue() int
+}
+
+type Setter interface {
+    SetValue(int)
+}
+
+type GetterSetter interface {
+    GetValue() int
+    SetValue(int)
+}
+
+func main() {
+    // Test 1: Embedded pointer - method promoted
+    base := &Base{value: 10}
+    d := Derived{Base: base, extra: 5}
+    
+    // Direct method call on embedded pointer
+    result1 := d.GetValue()
+    assert(result1 == 10, "d.GetValue() should be 10, got ", result1)
+    
+    // Test 2: Setter method on embedded pointer
+    d.SetValue(20)
+    assert(d.value == 20, "d.value should be 20 after SetValue")
+    assert(base.value == 20, "base.value should also be 20 (shared)")
+    
+    // Test 3: Value receiver method through embedded pointer
+    result3 := d.Double()
+    assert(result3 == 40, "d.Double() should be 40, got ", result3)
+    
+    // Test 4: Derived implements Getter interface
+    var g Getter = d
+    result4 := g.GetValue()
+    assert(result4 == 20, "g.GetValue() should be 20")
+    
+    // Test 5: Derived implements Setter interface
+    var s Setter = d
+    s.SetValue(30)
+    assert(d.value == 30, "value should be 30 after Setter.SetValue")
+    
+    // Test 6: Derived implements combined interface
+    var gs GetterSetter = d
+    gs.SetValue(40)
+    result6 := gs.GetValue()
+    assert(result6 == 40, "gs.GetValue() should be 40")
+    
+    // Test 7: Nil embedded pointer - should not panic on struct creation
+    d2 := Derived{Base: nil, extra: 100}
+    assert(d2.extra == 100, "d2.extra should be 100")
+    
+    // Test 8: Pointer to Derived also implements interface
+    dp := &Derived{Base: &Base{value: 500}, extra: 50}
+    var g2 Getter = dp
+    result8 := g2.GetValue()
+    assert(result8 == 500, "g2.GetValue() should be 500, got ", result8)
+    
+    println("embed_ptr_iface_complex: ok")
+}

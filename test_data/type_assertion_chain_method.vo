@@ -1,0 +1,71 @@
+// Test: chained type assertions with immediate method calls
+// Complex interaction between type assertions and method dispatch
+package main
+
+type Inner struct {
+    value int
+}
+
+func (i Inner) Double() int {
+    return i.value * 2
+}
+
+func (i *Inner) Triple() int {
+    return i.value * 3
+}
+
+type Outer struct {
+    inner Inner
+}
+
+func (o Outer) GetInner() Inner {
+    return o.inner
+}
+
+func main() {
+    // Test 1: Type assertion followed by method call
+    var a any = Inner{value: 10}
+    result1 := a.(Inner).Double()
+    assert(result1 == 20, "a.(Inner).Double() should be 20, got ", result1)
+    
+    // Test 2: Type assertion with ok form followed by method call
+    val, ok := a.(Inner)
+    assert(ok, "type assertion should succeed")
+    result2 := val.Double()
+    assert(result2 == 20, "val.Double() should be 20")
+    
+    // Test 3: Chained type assertions (any -> interface -> concrete)
+    type Doubler interface {
+        Double() int
+    }
+    var b any = Inner{value: 5}
+    doubler := b.(Doubler)
+    result3 := doubler.Double()
+    assert(result3 == 10, "doubler.Double() should be 10")
+    
+    // Test 4: Interface to concrete type assertion
+    var c Doubler = Inner{value: 7}
+    inner := c.(Inner)
+    result4 := inner.Double()
+    assert(result4 == 14, "inner.Double() should be 14")
+    
+    // Test 5: Nested struct with type assertion
+    var d any = Outer{inner: Inner{value: 100}}
+    outer := d.(Outer)
+    result5 := outer.GetInner().Double()
+    assert(result5 == 200, "outer.GetInner().Double() should be 200")
+    
+    // Test 6: Pointer type assertion with method call
+    inner6 := Inner{value: 3}
+    var e any = &inner6
+    ptr := e.(*Inner)
+    result6 := ptr.Triple()
+    assert(result6 == 9, "ptr.Triple() should be 9, got ", result6)
+    
+    // Test 7: Failed type assertion with ok form
+    var f any = "not an Inner"
+    _, ok2 := f.(Inner)
+    assert(!ok2, "type assertion to Inner should fail for string")
+    
+    println("type_assertion_chain_method: ok")
+}
