@@ -754,10 +754,28 @@ fn compile_stmt_with_label(
                 }
             } else if assign.op == AssignOp::Assign && assign.lhs.len() > 1 {
                 // Parallel assignment: a, b = b, a
-                // Must evaluate all RHS first, then assign to LHS to avoid interference
-                use crate::lvalue::{resolve_lvalue, emit_lvalue_store};
+                // Go spec: LHS evaluated left-to-right, then RHS left-to-right, then assignments
+                use crate::lvalue::{resolve_lvalue, emit_lvalue_store, snapshot_lvalue_index, LValue};
                 
-                // 1. Evaluate all RHS to temporaries
+                // 1. Resolve all LHS left-to-right (this evaluates index expressions)
+                let mut lhs_lvalues: Vec<Option<(LValue, vo_analysis::objects::TypeKey)>> = Vec::with_capacity(assign.lhs.len());
+                for lhs in &assign.lhs {
+                    // Skip blank identifier
+                    if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
+                        if info.project.interner.resolve(ident.symbol) == Some("_") {
+                            lhs_lvalues.push(None);
+                            continue;
+                        }
+                    }
+                    let lhs_type = info.expr_type(lhs.id);
+                    let mut lv = resolve_lvalue(lhs, ctx, func, info)?;
+                    // Snapshot index values to prevent later LHS assignments from affecting them
+                    // e.g., `idx, m[idx] = 5, 10` - the map key must use old idx value
+                    snapshot_lvalue_index(&mut lv, func);
+                    lhs_lvalues.push(Some((lv, lhs_type)));
+                }
+                
+                // 2. Evaluate all RHS left-to-right to temporaries
                 let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
                 for rhs in &assign.rhs {
                     let rhs_type = info.expr_type(rhs.id);
@@ -768,21 +786,14 @@ fn compile_stmt_with_label(
                     rhs_temps.push((tmp, rhs_slots, rhs_type));
                 }
                 
-                // 2. Assign temporaries to LHS using LValue system
-                for (lhs, (tmp, _slots, _rhs_type)) in assign.lhs.iter().zip(rhs_temps.iter()) {
-                    // Skip blank identifier
-                    if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
-                        if info.project.interner.resolve(ident.symbol) == Some("_") {
-                            continue;
-                        }
+                // 3. Assign temporaries to LHS
+                for (lhs_opt, (tmp, _slots, _rhs_type)) in lhs_lvalues.into_iter().zip(rhs_temps.iter()) {
+                    if let Some((lv, lhs_type)) = lhs_opt {
+                        // Apply truncation for narrow integer types (Go semantics)
+                        emit_int_trunc(*tmp, lhs_type, func, info);
+                        let slot_types = info.type_slot_types(lhs_type);
+                        emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types);
                     }
-                    
-                    let lhs_type = info.expr_type(lhs.id);
-                    // Apply truncation for narrow integer types (Go semantics)
-                    emit_int_trunc(*tmp, lhs_type, func, info);
-                    let lv = resolve_lvalue(lhs, ctx, func, info)?;
-                    let slot_types = info.type_slot_types(lhs_type);
-                    emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types);
                 }
             } else {
                 // Single assignment or compound assignment

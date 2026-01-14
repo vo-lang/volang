@@ -694,6 +694,33 @@ pub fn emit_lvalue_store(
     }
 }
 
+/// Snapshot index registers in LValue to new temporaries.
+/// Used by multi-assignment to capture index values before any LHS is modified.
+/// Go spec: LHS evaluated left-to-right, then RHS left-to-right.
+/// For `idx, m[idx] = 5, 10`, the map key must be captured as 0 (old idx value).
+pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
+    match lv {
+        LValue::Index { kind, index_reg, .. } => {
+            let key_slots = match kind {
+                ContainerKind::Map { key_slots, .. } => *key_slots,
+                ContainerKind::StackArray { elem_slots, .. } => 1.min(*elem_slots),
+                _ => 1,
+            };
+            // Only snapshot if index_reg might be a variable slot that could be modified
+            // Always copy to be safe - the cost is minimal (one copy instruction)
+            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; key_slots as usize]);
+            func.emit_copy(tmp, *index_reg, key_slots);
+            *index_reg = tmp;
+        }
+        LValue::StackArrayField { index_reg, .. } => {
+            let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+            func.emit_copy(tmp, *index_reg, 1);
+            *index_reg = tmp;
+        }
+        // Other LValue types don't have index registers that could be aliased
+        _ => {}
+    }
+}
 
 // === Internal helpers ===
 

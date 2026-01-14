@@ -36,34 +36,30 @@ func main() {
 	assert(m3["x"] == 200, "m3[x] should be 200 after swap, got ", m3["x"])
 	assert(m3["y"] == 100, "m3[y] should be 100 after swap, got ", m3["y"])
 
-	// Test 4: Evaluation order - RHS evaluated before LHS assignment
+	// Test 4: Evaluation order - LHS evaluated before RHS
 	evalLog = make([]string, 0)
 	m4 := make(map[string]int)
 	m4[logKey("lhs1", "a")], m4[logKey("lhs2", "b")] = logVal("rhs1", 1), logVal("rhs2", 2)
-	// Go spec: all RHS evaluated first, then all LHS
+	// Go spec: LHS index expressions evaluated left-to-right, then RHS left-to-right
 	assert(len(evalLog) == 4, "should have 4 evals, got ", len(evalLog))
-	// RHS first
-	assert(evalLog[0] == "val:rhs1", "rhs1 first, got ", evalLog[0])
-	assert(evalLog[1] == "val:rhs2", "rhs2 second, got ", evalLog[1])
-	// Then LHS keys
-	assert(evalLog[2] == "key:lhs1", "lhs1 third, got ", evalLog[2])
-	assert(evalLog[3] == "key:lhs2", "lhs2 fourth, got ", evalLog[3])
+	// LHS keys first (left-to-right)
+	assert(evalLog[0] == "key:lhs1", "lhs1 first, got ", evalLog[0])
+	assert(evalLog[1] == "key:lhs2", "lhs2 second, got ", evalLog[1])
+	// Then RHS values (left-to-right)
+	assert(evalLog[2] == "val:rhs1", "rhs1 third, got ", evalLog[2])
+	assert(evalLog[3] == "val:rhs2", "rhs2 fourth, got ", evalLog[3])
 
 	// Test 5: Map with computed key from RHS value
 	m5 := make(map[int]int)
 	idx := 0
 	idx, m5[idx] = 5, 10
-	// idx becomes 5, but m5[idx] uses OLD idx value (0)? 
-	// Actually: RHS evaluated first (5, 10), then LHS assigned
-	// So idx=5 first, then m5[5]=10 (uses new idx? no, key is evaluated during LHS assignment)
-	// Go spec: "index expressions... are evaluated in the usual order"
-	// The key is idx, and when we assign m5[idx]=10, idx has already been set to 5
+	// Go spec: LHS index expressions evaluated BEFORE RHS
+	// So m5[idx] uses OLD idx value (0), then RHS values are computed
 	assert(idx == 5, "idx should be 5")
-	// This is tricky: the map key evaluation happens after RHS
-	// But in Go, the LHS index is evaluated after all RHS
-	_, ok := m5[5]
-	assert(ok == true, "m5[5] should exist")
-	assert(m5[5] == 10, "m5[5] should be 10")
+	// The key 0 was captured before idx was assigned to 5
+	_, ok := m5[0]
+	assert(ok == true, "m5[0] should exist (key evaluated before RHS)")
+	assert(m5[0] == 10, "m5[0] should be 10")
 
 	// Test 6: Mix of var and map in multi-assign
 	m6 := make(map[string]int)

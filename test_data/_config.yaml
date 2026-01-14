@@ -727,11 +727,9 @@ tests:
 # Coverage tests (2026-01-14 new batch 4) - New coverage tests
 # ============================================================
 
-# Bug #1: Multi-assignment evaluation order - RHS evaluated before LHS (should be LHS first)
+# Test: Multi-assignment evaluation order (FIXED)
 # Go spec: LHS evaluated left-to-right, then RHS left-to-right
   - file: multi_assign_eval_order.vo
-    skip: [vm, jit]
-    reason: "Vo evaluates RHS before LHS, should be LHS first per Go spec"
 
 # Bug #2: panic with closure value - recover returns empty
   - file: closure_panic_recover.vo
