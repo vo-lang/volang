@@ -2,6 +2,9 @@
 //!
 //! This crate implements the Rust side of the egui wrapper for Vo.
 //! It uses eframe (winit + egui + wgpu) for desktop rendering.
+//!
+//! This is the low-level FFI layer. High-level architecture (Event/Signal)
+//! is implemented in Vo (app.vo).
 
 use std::cell::RefCell;
 
@@ -657,6 +660,31 @@ fn egui_vertical(ctx: &mut ExternCallContext) -> ExternResult {
 static __VO_EGUI_VERTICAL: ExternEntryWithContext = ExternEntryWithContext {
     name: ".._libs_vegui_Vertical",
     func: egui_vertical,
+};
+
+// =============================================================================
+// Theme
+// =============================================================================
+
+/// egui_set_dark_mode(dark bool)
+fn egui_set_dark_mode(ctx: &mut ExternCallContext) -> ExternResult {
+    let dark = ctx.arg_i64(0) != 0;
+    
+    with_current_ctx(|egui_ctx| {
+        if dark {
+            egui_ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            egui_ctx.set_visuals(egui::Visuals::light());
+        }
+    });
+    
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_EGUI_SET_DARK_MODE: ExternEntryWithContext = ExternEntryWithContext {
+    name: ".._libs_vegui_SetDarkMode",
+    func: egui_set_dark_mode,
 };
 
 // =============================================================================

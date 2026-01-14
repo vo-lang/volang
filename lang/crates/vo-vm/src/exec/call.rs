@@ -91,7 +91,7 @@ pub fn exec_call_closure(
         // Method closure: receiver from captures goes to slot 0
         stack[new_bp] = closure::get_capture(closure_ref, 0);
         recv_slots
-    } else if capture_count > 0 || func.param_slots > func.param_count {
+    } else if capture_count > 0 || func.is_closure {
         // Closure with captures or anonymous closure: closure ref goes to slot 0
         stack[new_bp] = closure_ref as u64;
         1

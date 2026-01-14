@@ -365,12 +365,31 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace if self.allow_composite_lit => {
                 // This handles cases like: Type{...} where Type was parsed as an expression
                 // We need to convert the left expression to a type
-                if let ExprKind::Ident(ident) = left.kind {
-                    let ty = self.make_type_expr(TypeExprKind::Ident(ident), left.span);
-                    self.parse_composite_lit_body(ty)
-                } else {
-                    self.error("expected type for composite literal");
-                    Err(())
+                match left.kind {
+                    ExprKind::Ident(ident) => {
+                        let ty = self.make_type_expr(TypeExprKind::Ident(ident), left.span);
+                        self.parse_composite_lit_body(ty)
+                    }
+                    ExprKind::Selector(sel) => {
+                        // Handle pkg.Type{...} - convert selector expr to selector type
+                        if let ExprKind::Ident(pkg_ident) = sel.expr.kind {
+                            let ty = self.make_type_expr(
+                                TypeExprKind::Selector(Box::new(crate::ast::SelectorTypeExpr {
+                                    pkg: pkg_ident,
+                                    sel: sel.sel,
+                                })),
+                                left.span,
+                            );
+                            self.parse_composite_lit_body(ty)
+                        } else {
+                            self.error("expected package.Type for composite literal");
+                            Err(())
+                        }
+                    }
+                    _ => {
+                        self.error("expected type for composite literal");
+                        Err(())
+                    }
                 }
             }
             // Try-unwrap operator (error propagation)

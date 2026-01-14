@@ -139,6 +139,8 @@ pub struct FuncBuilder {
     // When a variable is defined that shadows an existing one, we save the old LocalVar here.
     // On exit_scope, we restore the saved values.
     scope_stack: Vec<Vec<(Symbol, Option<LocalVar>)>>,
+    // True if this is a closure (anonymous function) that expects closure ref in slot 0
+    is_closure: bool,
 }
 
 impl FuncBuilder {
@@ -160,6 +162,7 @@ impl FuncBuilder {
             labels: HashMap::new(),
             goto_patches: Vec::new(),
             scope_stack: Vec::new(),
+            is_closure: false,
         }
     }
 
@@ -170,6 +173,7 @@ impl FuncBuilder {
         builder.slot_types.push(SlotType::GcRef);
         builder.next_slot = 1;
         builder.param_slots = 1;  // closure ref is the first param slot
+        builder.is_closure = true;
         builder
     }
 
@@ -1003,6 +1007,7 @@ impl FuncBuilder {
             heap_ret_gcref_count,
             heap_ret_gcref_start,
             heap_ret_slots,
+            is_closure: self.is_closure,
             code: self.code,
             slot_types: self.slot_types,
         }

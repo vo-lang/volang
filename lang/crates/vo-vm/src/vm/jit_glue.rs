@@ -152,13 +152,11 @@ pub extern "C" fn closure_call_trampoline(
         let func_def = &module.functions[func_id as usize];
         let recv_slots = func_def.recv_slots as usize;
         let capture_count = closure::capture_count(closure_gcref);
-        let param_slots = func_def.param_slots as usize;
-        let param_count = func_def.param_count as usize;
         
         // Build full_args based on closure type (matches VM's exec_call_closure logic)
         let slot0 = if recv_slots > 0 && capture_count > 0 {
             Some(closure::get_capture(closure_gcref, 0))
-        } else if capture_count > 0 || param_slots > param_count {
+        } else if capture_count > 0 || func_def.is_closure {
             Some(closure_ref)
         } else {
             None

@@ -505,6 +505,7 @@ impl Module {
             w.write_u16(f.heap_ret_gcref_count);
             w.write_u16(f.heap_ret_gcref_start);
             w.write_vec(&f.heap_ret_slots, |w, s| w.write_u16(*s));
+            w.write_u8(f.is_closure as u8);
             w.write_vec(&f.slot_types, |w, st| w.write_u8(*st as u8));
             w.write_u32(f.code.len() as u32);
             for inst in &f.code {
@@ -672,6 +673,7 @@ impl Module {
             let heap_ret_gcref_count = r.read_u16()?;
             let heap_ret_gcref_start = r.read_u16()?;
             let heap_ret_slots = r.read_vec(|r| r.read_u16())?;
+            let is_closure = r.read_u8()? != 0;
             let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
             let code_len = r.read_u32()? as usize;
             let mut code = Vec::with_capacity(code_len);
@@ -693,6 +695,7 @@ impl Module {
                 heap_ret_gcref_count,
                 heap_ret_gcref_start,
                 heap_ret_slots,
+                is_closure,
                 slot_types,
                 code,
             })
@@ -797,6 +800,7 @@ mod tests {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: vec![],
+            is_closure: false,
             slot_types: vec![SlotType::Value, SlotType::Value],
             code: vec![
                 Instruction::new(Opcode::LoadInt, 0, 0x0001, 0x0000),

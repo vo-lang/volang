@@ -1,4 +1,4 @@
-package egui
+package vegui
 
 // Run starts the egui application with the given title and frame callback.
 // The frame closure is called each frame to build the UI.
@@ -58,3 +58,6 @@ func Space(size float64)
 
 // Indent indents the content by the given amount.
 func Indent(indent float64, body func())
+
+// SetDarkMode sets dark or light theme.
+func SetDarkMode(dark bool)

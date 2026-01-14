@@ -329,6 +329,7 @@ mod tests {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: vec![],
+            is_closure: false,
             code,
             slot_types: vec![],
         }

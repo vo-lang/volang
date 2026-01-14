@@ -326,14 +326,11 @@ pub extern "C" fn vo_call_closure(
     
     // Build full_args based on closure type (matches VM's exec_call_closure logic)
     // - Method closure (recv_slots > 0 && capture_count > 0): receiver from captures[0] to slot 0
-    // - Closure with captures or anonymous: closure ref to slot 0
-    // - Named function wrapper (no captures, param_slots == param_count): args start at slot 0
-    let param_slots = func_def.param_slots as usize;
-    let param_count = func_def.param_count as usize;
-    
+    // - Closure with captures or anonymous (is_closure = true): closure ref to slot 0
+    // - Named function wrapper (no captures, is_closure = false): args start at slot 0
     let slot0 = if recv_slots > 0 && capture_count > 0 {
         Some(closure::get_capture(closure_gcref, 0))
-    } else if capture_count > 0 || param_slots > param_count {
+    } else if capture_count > 0 || func_def.is_closure {
         Some(closure_ref)
     } else {
         None

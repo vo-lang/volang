@@ -2,19 +2,169 @@ package main
 
 import "../libs/vegui"
 
-func main() {
-	egui.Run("Vibe Studio", func() {
-		egui.CentralPanel(func() {
-			egui.Heading("Welcome to Vibe Studio!")
-			egui.Separator()
-			egui.Label("A Vo IDE built with egui")
-			if egui.Button("Click me") {
-				println("Button clicked!")
-			}
-			egui.Horizontal(func() {
-				egui.Label("Left")
-				egui.Label("Right")
+// =============================================================================
+// Events (UI → App)
+// =============================================================================
+
+type ClickIncrement struct{}
+type ClickDecrement struct{}
+type ClickReset struct{}
+type SetSlider struct{ value int }
+type ToggleDarkMode struct{ enabled bool }
+
+// =============================================================================
+// Signals (App → UI)
+// =============================================================================
+
+type UpdateUI struct {
+	count    int
+	slider   int
+	darkMode bool
+}
+
+// =============================================================================
+// App State & Logic
+// =============================================================================
+
+type AppState struct {
+	count    int
+	slider   int
+	darkMode bool
+}
+
+func appInit() any {
+	return AppState{count: 0, slider: 50, darkMode: false}
+}
+
+func appHandle(state any, event vegui.Event) any {
+	s := state.(AppState)
+	switch e := event.(type) {
+	case ClickIncrement:
+		s.count++
+	case ClickDecrement:
+		s.count--
+	case ClickReset:
+		s.count = 0
+	case SetSlider:
+		s.slider = e.value
+	case ToggleDarkMode:
+		s.darkMode = e.enabled
+	}
+	return s
+}
+
+func appRender(state any) vegui.Signal {
+	s := state.(AppState)
+	return UpdateUI{count: s.count, slider: s.slider, darkMode: s.darkMode}
+}
+
+// =============================================================================
+// UI Model & View
+// =============================================================================
+
+type Model struct {
+	count    int
+	slider   int
+	darkMode bool
+}
+
+func uiInit() any {
+	return Model{count: 0, slider: 50, darkMode: false}
+}
+
+func uiApply(model any, signal vegui.Signal) any {
+	m := model.(Model)
+	switch sig := signal.(type) {
+	case UpdateUI:
+		m.count = sig.count
+		m.slider = sig.slider
+		m.darkMode = sig.darkMode
+	}
+	return m
+}
+
+func uiView(model any) {
+	m := model.(Model)
+	vegui.SetDarkMode(m.darkMode)
+	vegui.CentralPanel(func() {
+		vegui.Heading("Vibe Studio Demo")
+		vegui.Separator()
+		vegui.Label("Two-Fiber Architecture with Event/Signal")
+		vegui.Space(10)
+
+		vegui.CollapsingHeader("Counter", func() {
+			vegui.Horizontal(func() {
+				if vegui.Button("-") {
+					vegui.Send(ClickDecrement{})
+				}
+				vegui.Label("  " + itoa(m.count) + "  ")
+				if vegui.Button("+") {
+					vegui.Send(ClickIncrement{})
+				}
+				vegui.Space(20)
+				if vegui.Button("Reset") {
+					vegui.Send(ClickReset{})
+				}
 			})
 		})
+
+		vegui.CollapsingHeader("Slider", func() {
+			newVal, changed := vegui.SliderInt("Value", m.slider, 0, 100)
+			if changed {
+				vegui.Send(SetSlider{value: newVal})
+			}
+			vegui.ProgressBar(float64(m.slider) / 100.0)
+		})
+
+		vegui.CollapsingHeader("Settings", func() {
+			newDark, changed := vegui.Checkbox("Dark Mode", m.darkMode)
+			if changed {
+				vegui.Send(ToggleDarkMode{enabled: newDark})
+			}
+		})
 	})
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var digits []byte
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n = n / 10
+	}
+	if neg {
+		digits = append([]byte{'-'}, digits...)
+	}
+	return string(digits)
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+func main() {
+	vegui.RunWithApp(
+		vegui.Config{
+			Title:  "Vibe Studio",
+			Width:  800,
+			Height: 600,
+		},
+		vegui.App{
+			Init:   appInit,
+			Handle: appHandle,
+			Render: appRender,
+		},
+		vegui.UI{
+			Init:  uiInit,
+			Apply: uiApply,
+			View:  uiView,
+		},
+	)
 }

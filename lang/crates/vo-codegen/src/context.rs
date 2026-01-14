@@ -698,6 +698,7 @@ impl CodegenContext {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
+            is_closure: false,
             code: Vec::new(),
             slot_types: Vec::new(),
         });
@@ -1022,6 +1023,7 @@ impl CodegenContext {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
+            is_closure: true,
             code,
             slot_types: Vec::new(),
         };
@@ -1100,6 +1102,7 @@ impl CodegenContext {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
+            is_closure: true,
             code,
             slot_types: Vec::new(),
         };
@@ -1178,6 +1181,7 @@ impl CodegenContext {
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
+            is_closure: true,
             code,
             slot_types: Vec::new(),
         };

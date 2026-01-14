@@ -1,0 +1,47 @@
+// Test: Struct function field call with any parameter
+// BUG: When a struct has multiple function fields and one returns any,
+// passing that any value to another function field causes type assertion to fail.
+//
+// Expected: Type assertion should succeed
+// Actual: panic: panic (type assertion fails)
+
+package main
+
+type MyState struct {
+	count int
+}
+
+type App struct {
+	Init   func() any
+	Render func(state any) any
+}
+
+func myInit() any {
+	return MyState{count: 42}
+}
+
+func myRender(state any) any {
+	// This type assertion fails when called via struct field
+	s := state.(MyState)
+	assert(s.count == 42, "count should be 42")
+	return s
+}
+
+func runApp(app App) {
+	state := app.Init()
+	
+	// Direct assertion works
+	s := state.(MyState)
+	assert(s.count == 42, "direct assertion should work")
+	
+	// Calling via struct field with any parameter fails
+	app.Render(state)
+}
+
+func main() {
+	runApp(App{
+		Init:   myInit,
+		Render: myRender,
+	})
+	println("struct_func_field_any_bug: PASSED")
+}

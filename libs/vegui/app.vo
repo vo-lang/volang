@@ -1,0 +1,113 @@
+package vegui
+
+// =============================================================================
+// Two-Fiber Architecture: Event/Signal Model
+// =============================================================================
+
+// Event is sent from UI Fiber to App Fiber (user actions)
+type Event any
+
+// Signal is sent from App Fiber to UI Fiber (state updates)
+type Signal any
+
+// =============================================================================
+// App Fiber: Business Logic
+// =============================================================================
+
+// App defines the application logic that runs in the App Fiber.
+// It handles Events and produces Signals.
+type App struct {
+    // Init initializes the App state.
+    Init func() any
+
+    // Handle processes an Event and returns the new state.
+    // This is where business logic lives. Can spawn goroutines for async work.
+    Handle func(state any, event Event) any
+
+    // Render produces a Signal from the current state.
+    // Called after Handle to notify UI of state changes.
+    Render func(state any) Signal
+}
+
+// =============================================================================
+// UI Fiber: Rendering
+// =============================================================================
+
+// UI defines the UI rendering logic that runs in the UI Fiber.
+// It applies Signals to update the Model and renders the View.
+type UI struct {
+    // Init initializes the UI Model.
+    Init func() any
+
+    // Apply applies a Signal to the Model and returns the new Model.
+    // This should be a pure function with no side effects.
+    Apply func(model any, signal Signal) any
+
+    // View renders the UI based on the current Model.
+    // Calls egui widget functions and Send() for user interactions.
+    View func(model any)
+}
+
+// =============================================================================
+// Runtime State (package-level)
+// =============================================================================
+
+var eventQueue []Event
+var signalQueue []Signal
+
+// =============================================================================
+// Runtime
+// =============================================================================
+
+// Config specifies window configuration.
+type Config struct {
+    Title       string
+    Width       int
+    Height      int
+    Resizable   bool
+    VSync       bool
+}
+
+// RunWithApp starts the vegui application with the Two-Fiber architecture.
+// This function blocks until the window is closed.
+func RunWithApp(config Config, app App, ui UI) {
+    // Initialize state
+    appState := app.Init()
+    uiModel := ui.Init()
+    
+    // Queue initial signal so UI reflects initial state
+    initialSignal := app.Render(appState)
+    signalQueue = append(signalQueue, initialSignal)
+    
+    // Run with frame callback
+    Run(config.Title, func() {
+        // 1. Apply pending Signals to UI Model
+        for _, signal := range signalQueue {
+            uiModel = ui.Apply(uiModel, signal)
+        }
+        signalQueue = nil
+        
+        // 2. Render UI
+        ui.View(uiModel)
+        
+        // 3. Process Events: Handle -> Render -> queue Signal
+        for _, event := range eventQueue {
+            appState = app.Handle(appState, event)
+            signal := app.Render(appState)
+            signalQueue = append(signalQueue, signal)
+        }
+        eventQueue = nil
+    })
+}
+
+// Send sends an Event from the UI to the App.
+// Called from within View when user interacts (e.g., button click).
+func Send(event Event) {
+    eventQueue = append(eventQueue, event)
+}
+
+// EmitSignal sends a Signal from the App to the UI.
+// Called from background goroutines when async work completes.
+func EmitSignal(signal Signal) {
+    signalQueue = append(signalQueue, signal)
+}

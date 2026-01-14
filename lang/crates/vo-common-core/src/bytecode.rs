@@ -44,6 +44,9 @@ pub struct FunctionDef {
     /// Slot count for each heap-allocated named return (parallel to GcRefs).
     /// Length equals heap_ret_gcref_count. Empty if no heap returns.
     pub heap_ret_slots: Vec<u16>,
+    /// True if this is a closure (anonymous function) that expects closure ref in slot 0.
+    /// Named functions wrapped as closures have this set to false.
+    pub is_closure: bool,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
 }
