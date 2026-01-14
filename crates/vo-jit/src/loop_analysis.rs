@@ -326,6 +326,9 @@ mod tests {
             local_slots: 20,
             ret_slots: 0,
             recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: vec![],
             code,
             slot_types: vec![],
         }
