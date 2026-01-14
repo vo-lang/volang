@@ -1,0 +1,85 @@
+// Test: type conversion followed by method call
+// Tests named type conversions and method availability
+package main
+
+type MyInt int
+
+func (m MyInt) Double() MyInt {
+    return m * 2
+}
+
+func (m MyInt) Add(n MyInt) MyInt {
+    return m + n
+}
+
+func (m MyInt) ToInt() int {
+    return int(m)
+}
+
+type MyString string
+
+func (s MyString) Len() int {
+    return len(s)
+}
+
+func (s MyString) Concat(other MyString) MyString {
+    return s + other
+}
+
+type MySlice []int
+
+func (s MySlice) Sum() int {
+    total := 0
+    for _, v := range s {
+        total += v
+    }
+    return total
+}
+
+func (s MySlice) First() int {
+    if len(s) == 0 {
+        return 0
+    }
+    return s[0]
+}
+
+func main() {
+    // Test 1: Convert and call method
+    x := MyInt(10).Double()
+    assert(x == 20, "double of 10 should be 20, got ", int(x))
+    
+    // Test 2: Chained method calls after conversion
+    y := MyInt(5).Double().Add(MyInt(3))
+    assert(y == 13, "5*2+3 should be 13, got ", int(y))
+    
+    // Test 3: Convert back to base type
+    z := MyInt(7).Double().ToInt()
+    assert(z == 14, "ToInt result should be 14, got ", z)
+    
+    // Test 4: String type conversion and method
+    s := MyString("hello")
+    assert(s.Len() == 5, "len should be 5")
+    
+    // Test 5: String concat
+    s2 := MyString("hello").Concat(MyString(" world"))
+    assert(s2.Len() == 11, "concat len should be 11")
+    
+    // Test 6: Slice conversion and method
+    slice := MySlice([]int{1, 2, 3, 4, 5})
+    assert(slice.Sum() == 15, "sum should be 15")
+    assert(slice.First() == 1, "first should be 1")
+    
+    // Test 7: In-place conversion and method
+    sum := MySlice([]int{10, 20, 30}).Sum()
+    assert(sum == 60, "sum should be 60, got ", sum)
+    
+    // Test 8: Multiple conversions
+    a := int(MyInt(100).Double())
+    assert(a == 200, "a should be 200")
+    
+    // Test 9: Conversion in expression
+    b := int(MyInt(3).Add(MyInt(4))) * 2
+    assert(b == 14, "b should be 14, got ", b)
+    
+    println("type_conversion_method_chain: ok")
+}

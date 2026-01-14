@@ -1,0 +1,70 @@
+// Test: interface nil semantics (Go gotcha - typed nil vs nil interface)
+// A typed nil (e.g., (*T)(nil)) is NOT equal to nil interface
+package main
+
+type Data struct {
+    value int
+}
+
+func getTypedNil(returnNil bool) any {
+    var ptr *Data // typed nil pointer
+    if !returnNil {
+        ptr = &Data{value: 42}
+    }
+    return ptr // returns typed nil when returnNil=true
+}
+
+func getNilInterface() any {
+    return nil // returns actual nil interface
+}
+
+func main() {
+    // Test 1: Typed nil is NOT nil interface (Go semantics)
+    val1 := getTypedNil(true)
+    // val1 has type (*Data, nil) wrapped in interface, NOT nil interface
+    // In Go: this is != nil because the interface has a type, just nil value
+    assert(val1 != nil, "typed nil should NOT equal nil interface")
+    
+    // Test 2: Actual nil interface IS nil
+    val2 := getNilInterface()
+    assert(val2 == nil, "nil interface should equal nil")
+    
+    // Test 3: Non-nil pointer
+    val3 := getTypedNil(false)
+    assert(val3 != nil, "non-nil value should not be nil")
+    
+    // Test 4: Direct typed nil comparison
+    var nilPtr *Data = nil
+    var iface any = nilPtr
+    assert(iface != nil, "interface holding typed nil != nil")
+    
+    // Test 5: Nil interface assigned explicitly
+    var nilIface any = nil
+    assert(nilIface == nil, "explicitly nil interface == nil")
+    
+    // Test 6: Type assertion on typed nil - value should be nil
+    v, ok := iface.(*Data)
+    assert(ok, "type assertion should succeed for typed nil")
+    assert(v == nil, "asserted value should be nil pointer")
+    
+    // Test 7: Compare two interfaces - both holding typed nil of same type
+    var nilPtr2 *Data = nil
+    var iface2 any = nilPtr2
+    assert(iface == iface2, "two typed nil interfaces of same type should be equal")
+    
+    // Test 8: Typed nil vs actual nil in function parameter
+    checkNil := func(i any) bool {
+        return i == nil
+    }
+    assert(!checkNil(getTypedNil(true)), "typed nil should fail nil check")
+    assert(checkNil(getNilInterface()), "nil interface should pass nil check")
+    
+    // Test 9: Non-nil value type assertion
+    val4 := getTypedNil(false)
+    d, ok2 := val4.(*Data)
+    assert(ok2, "type assertion should succeed")
+    assert(d != nil, "d should not be nil")
+    assert(d.value == 42, "d.value should be 42")
+    
+    println("interface_nil_semantics: ok")
+}

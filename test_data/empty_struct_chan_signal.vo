@@ -1,0 +1,59 @@
+// Test: empty struct as channel signal (common Go pattern)
+// Empty struct takes zero memory, ideal for signaling
+package main
+
+func main() {
+    // Test 1: Basic empty struct channel
+    done := make(chan struct{}, 1)
+    done <- struct{}{}
+    <-done
+    
+    // Test 2: Empty struct as synchronization signal
+    ready := make(chan struct{})
+    result := 0
+    
+    go func() {
+        result = 42
+        close(ready) // signal completion
+    }()
+    
+    <-ready // wait for signal
+    assert(result == 42, "result should be 42, got ", result)
+    
+    // Test 3: Empty struct in select
+    ch1 := make(chan struct{}, 1)
+    ch2 := make(chan int, 1)
+    ch1 <- struct{}{}
+    ch2 <- 100
+    
+    gotSignal := false
+    gotValue := 0
+    
+    for i := 0; i < 2; i++ {
+        select {
+        case <-ch1:
+            gotSignal = true
+        case v := <-ch2:
+            gotValue = v
+        }
+    }
+    
+    assert(gotSignal, "should receive from ch1")
+    assert(gotValue == 100, "should receive 100 from ch2")
+    
+    // Test 4: Empty struct in map (set pattern)
+    set := make(map[string]struct{})
+    set["a"] = struct{}{}
+    set["b"] = struct{}{}
+    
+    _, exists := set["a"]
+    assert(exists, "a should exist in set")
+    _, exists = set["c"]
+    assert(!exists, "c should not exist in set")
+    
+    // Test 5: Slice of empty struct
+    signals := make([]struct{}, 3)
+    assert(len(signals) == 3, "slice len should be 3")
+    
+    println("empty_struct_chan_signal: ok")
+}

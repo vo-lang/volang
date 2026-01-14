@@ -1,0 +1,31 @@
+// Bug: defer doesn't execute when using labeled break
+// Expected: defer should execute when function returns
+package main
+
+var globalResult string
+
+func testDefer() {
+    globalResult = ""
+outer:
+    for i := 0; i < 3; i++ {
+        defer func() {
+            globalResult += "defer,"
+        }()
+        if i == 0 {
+            break outer
+        }
+    }
+    globalResult += "done,"
+    // defer executes here when function returns
+}
+
+func main() {
+    testDefer()
+    
+    // Now check result AFTER testDefer has returned and defers have run
+    // Go semantics: defer runs at function return, AFTER "done," is appended
+    // Expected: "done,defer," 
+    assert(globalResult == "done,defer,", "expected 'done,defer,', got '", globalResult, "'")
+    
+    println("bug_labeled_break_defer: ok")
+}

@@ -764,3 +764,18 @@ tests:
 
 # FIXED: for-range direct closure capture now correctly allocates new heap object per iteration
   - file: bug_for_range_closure_capture.vo
+
+# ============================================================
+# Coverage tests (2026-01-14 new batch 7) - New coverage tests
+# ============================================================
+
+# Passing tests
+  - file: multi_init_order.vo
+  - file: empty_struct_chan_signal.vo
+  - file: composite_addr_method_call.vo
+  - file: type_conversion_method_chain.vo
+
+# Test: defer executes correctly when using labeled break
+  - file: bug_labeled_break_defer.vo
+
+  - file: interface_nil_semantics.vo

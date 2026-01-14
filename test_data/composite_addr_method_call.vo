@@ -1,0 +1,75 @@
+// Test: composite literal address + immediate method call
+// This tests: (&Type{...}).Method() pattern
+package main
+
+type Point struct {
+    x, y int
+}
+
+func (p *Point) Scale(factor int) {
+    p.x *= factor
+    p.y *= factor
+}
+
+func (p *Point) Sum() int {
+    return p.x + p.y
+}
+
+func (p Point) ValueSum() int {
+    return p.x + p.y
+}
+
+type Builder struct {
+    value int
+}
+
+func (b *Builder) Add(n int) *Builder {
+    b.value += n
+    return b
+}
+
+func (b *Builder) Mul(n int) *Builder {
+    b.value *= n
+    return b
+}
+
+func (b *Builder) Get() int {
+    return b.value
+}
+
+func main() {
+    // Test 1: Basic &Literal{}.Method()
+    p := &Point{x: 3, y: 4}
+    p.Scale(2)
+    assert(p.Sum() == 14, "scaled sum should be 14, got ", p.Sum())
+    
+    // Test 2: Inline composite literal with pointer method
+    sum := (&Point{x: 10, y: 20}).Sum()
+    assert(sum == 30, "inline sum should be 30, got ", sum)
+    
+    // Test 3: Method chaining on composite literal
+    result := (&Builder{value: 5}).Add(3).Mul(2).Get()
+    assert(result == 16, "chained result should be 16, got ", result)
+    
+    // Test 4: Multiple chained operations
+    result2 := (&Builder{value: 1}).Add(1).Add(1).Mul(3).Add(1).Get()
+    assert(result2 == 10, "result2 should be 10, got ", result2)
+    
+    // Test 5: Composite literal assigned then called
+    b := &Builder{value: 100}
+    r := b.Add(50).Mul(2).Get()
+    assert(r == 300, "r should be 300, got ", r)
+    
+    // Test 6: Value receiver on composite literal (no &)
+    vsum := Point{x: 5, y: 6}.ValueSum()
+    assert(vsum == 11, "value sum should be 11, got ", vsum)
+    
+    // Test 7: Nested composite literal with method
+    type Wrapper struct {
+        p Point
+    }
+    w := &Wrapper{p: Point{x: 7, y: 8}}
+    assert(w.p.ValueSum() == 15, "nested sum should be 15")
+    
+    println("composite_addr_method_call: ok")
+}

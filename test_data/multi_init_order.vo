@@ -1,0 +1,27 @@
+// Test: multiple init functions execution order
+// Go spec: multiple init() in same file execute in declaration order
+package main
+
+var order []int
+
+func init() {
+    order = append(order, 1)
+}
+
+func init() {
+    order = append(order, 2)
+}
+
+func init() {
+    order = append(order, 3)
+}
+
+func main() {
+    // All init functions should have run in declaration order
+    assert(len(order) == 3, "expected 3 init calls, got ", len(order))
+    assert(order[0] == 1, "first init should be 1, got ", order[0])
+    assert(order[1] == 2, "second init should be 2, got ", order[1])
+    assert(order[2] == 3, "third init should be 3, got ", order[2])
+    
+    println("multi_init_order: ok")
+}
