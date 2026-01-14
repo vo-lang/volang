@@ -701,8 +701,5 @@ tests:
 
   - file: defer_multi_return_arg.vo
 
-# Bug #7: break in type switch breaks outer for loop
   - file: type_switch_nested_break.vo
-    skip: [vm, jit]
-    reason: "Bug: break inside type switch incorrectly breaks outer for loop"
-
+  - file: select_nested_break.vo

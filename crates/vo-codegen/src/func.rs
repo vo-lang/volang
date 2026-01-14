@@ -753,11 +753,12 @@ impl FuncBuilder {
         }
     }
     
-    /// Enter switch statement (for break support).
-    pub fn enter_switch(&mut self, label: Option<Symbol>) {
+    /// Enter a breakable non-loop context (switch, type switch, select).
+    /// These support `break` but not `continue`.
+    pub fn enter_breakable(&mut self, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
             depth: self.loop_stack.len() as u8,
-            begin_pc: 0,  // not used for switch
+            begin_pc: 0,  // not used for breakable
             continue_pc: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
@@ -765,13 +766,13 @@ impl FuncBuilder {
             has_defer: false,
             has_labeled_break: false,
             has_labeled_continue: false,
-            is_switch: true,
+            is_switch: true,  // marks as non-loop (no continue)
         });
     }
     
-    /// Exit switch statement. Returns break patches to be patched to end of switch.
-    pub fn exit_switch(&mut self) -> Vec<usize> {
-        self.loop_stack.pop().expect("exit_switch without enter_switch").break_patches
+    /// Exit a breakable non-loop context. Returns break patches to be patched to end.
+    pub fn exit_breakable(&mut self) -> Vec<usize> {
+        self.loop_stack.pop().expect("exit_breakable without enter_breakable").break_patches
     }
 
     /// Exit loop: emit HINT_LOOP_END and patch HINT_LOOP_BEGIN flags.

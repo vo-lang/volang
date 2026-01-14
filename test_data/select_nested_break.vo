@@ -1,0 +1,29 @@
+// Test: break in select should not break outer for loop
+package main
+
+func testSelectBreakInLoop() int {
+    count := 0
+    ch := make(chan int, 3)
+    ch <- 1
+    ch <- 2
+    ch <- 3
+    
+    for i := 0; i < 5; i++ {
+        select {
+        case <-ch:
+            count += 1
+            break  // should only break select, not for loop
+        default:
+            count += 10
+        }
+    }
+    // ch has 3 values, then 2 defaults
+    // Should be: 1 + 1 + 1 + 10 + 10 = 23
+    return count
+}
+
+func main() {
+    r := testSelectBreakInLoop()
+    assert(r == 23, "should be 23, got", r)
+    println("select_nested_break: PASSED")
+}

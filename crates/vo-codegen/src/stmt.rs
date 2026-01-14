@@ -1344,7 +1344,7 @@ fn compile_stmt_with_label(
 
         // === Select ===
         StmtKind::Select(select_stmt) => {
-            compile_select(select_stmt, ctx, func, info)?;
+            compile_select(select_stmt, label, ctx, func, info)?;
         }
 
         // === Switch ===
@@ -1383,7 +1383,7 @@ fn compile_stmt_with_label(
 
         // === TypeSwitch ===
         StmtKind::TypeSwitch(type_switch) => {
-            compile_type_switch(type_switch, ctx, func, info)?;
+            compile_type_switch(type_switch, label, ctx, func, info)?;
         }
 
         // === ErrDefer ===
@@ -1717,6 +1717,7 @@ struct RecvCaseInfo {
 /// Compile select statement
 fn compile_select(
     select_stmt: &vo_syntax::ast::SelectStmt,
+    label: Option<vo_common::Symbol>,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -1728,6 +1729,9 @@ fn compile_select(
     
     // SelectBegin: a=case_count, flags=has_default
     func.emit_with_flags(Opcode::SelectBegin, has_default as u8, case_count as u16, 0, 0);
+    
+    // Enter breakable context for break support
+    func.enter_breakable(label);
     
     // Phase 1: Emit SelectSend/SelectRecv for each case
     let mut recv_infos: Vec<Option<RecvCaseInfo>> = Vec::with_capacity(case_count);
@@ -1800,10 +1804,13 @@ fn compile_select(
         end_jumps.push(func.emit_jump(Opcode::Jump, 0));
     }
     
-    // Patch all end jumps
+    // Exit breakable context and get break patches
+    let break_patches = func.exit_breakable();
+    
+    // Patch all end jumps (implicit break at end of case) and explicit breaks
     let end_pc = func.current_pc();
     func.patch_jump(fallthrough_jump, end_pc);
-    for jump_pc in end_jumps {
+    for jump_pc in end_jumps.into_iter().chain(break_patches) {
         func.patch_jump(jump_pc, end_pc);
     }
     
@@ -1849,6 +1856,7 @@ fn bind_recv_variables(
 /// Uses IfaceAssert instruction for type checking and value extraction.
 fn compile_type_switch(
     type_switch: &vo_syntax::ast::TypeSwitchStmt,
+    label: Option<vo_common::Symbol>,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -1873,6 +1881,9 @@ fn compile_type_switch(
     // Store interface for case comparisons
     let iface_slot = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
     func.emit_copy(iface_slot, expr_reg, 2);
+    
+    // Enter breakable context for break support
+    func.enter_breakable(label);
     
     // Collect case jumps and info for variable binding
     let mut case_jumps: Vec<(usize, usize)> = Vec::new(); // (case_idx, jump_pc)
@@ -2018,8 +2029,11 @@ fn compile_type_switch(
         }
     }
     
-    // Patch end jumps
-    for jump_pc in end_jumps {
+    // Exit breakable context and get break patches
+    let break_patches = func.exit_breakable();
+    
+    // Patch end jumps (implicit break at end of case) and explicit breaks
+    for jump_pc in end_jumps.into_iter().chain(break_patches) {
         func.patch_jump(jump_pc, end_pc);
     }
     
@@ -2052,8 +2066,8 @@ fn compile_switch_with_label(
         None
     };
     
-    // Enter switch context for break support
-    func.enter_switch(label);
+    // Enter breakable context for break support
+    func.enter_breakable(label);
     
     // Collect case jumps and body positions
     // case_jumps[i] -> case_body_idx[i]: maps each conditional jump to its target case
@@ -2122,8 +2136,8 @@ fn compile_switch_with_label(
         }
     }
     
-    // Exit switch context and get break patches
-    let break_patches = func.exit_switch();
+    // Exit breakable context and get break patches
+    let break_patches = func.exit_breakable();
     
     let end_pc = func.current_pc();
     
