@@ -1,0 +1,116 @@
+// Test: nested type switch with break
+// Break in type switch should only break from the switch, not outer loop
+package main
+
+func getValues() []interface{} {
+    return []interface{}{1, "hello", 3.14, true, 2, "world"}
+}
+
+// Test 1: break inside type switch should not break outer for loop
+func testTypeSwitchBreakInLoop() int {
+    count := 0
+    values := getValues()
+    for _, v := range values {
+        switch v.(type) {
+        case int:
+            count += 1
+        case string:
+            break  // should only break switch, not for loop
+        case float64:
+            count += 10
+        case bool:
+            count += 100
+        }
+    }
+    // Should process: int(1), string(break), float64(+10), bool(+100), int(+1), string(break)
+    // Total: 1 + 10 + 100 + 1 = 112
+    return count
+}
+
+// Test 2: labeled break in type switch breaks outer loop
+func testTypeSwitchLabeledBreak() int {
+    count := 0
+    values := getValues()
+outer:
+    for _, v := range values {
+        switch v.(type) {
+        case int:
+            count += 1
+        case string:
+            break outer  // breaks the for loop
+        case float64:
+            count += 10
+        }
+    }
+    // Should process: int(1), then string breaks outer
+    // Total: 1
+    return count
+}
+
+// Test 3: nested type switches with break
+func testNestedTypeSwitch() string {
+    var outer interface{} = []interface{}{1, "inner"}
+    result := ""
+    
+    switch o := outer.(type) {
+    case []interface{}:
+        for _, inner := range o {
+            switch inner.(type) {
+            case int:
+                result += "I"
+            case string:
+                result += "S"
+                break  // only breaks inner switch
+            }
+            result += "."
+        }
+    case int:
+        result = "single int"
+    }
+    // Should produce: "I.S."
+    return result
+}
+
+// Test 4: type switch inside regular switch
+func testTypeSwitchInSwitch() int {
+    var val interface{} = 42
+    mode := 1
+    result := 0
+    
+    switch mode {
+    case 1:
+        switch v := val.(type) {
+        case int:
+            result = v * 2
+        case string:
+            result = -1
+        }
+    case 2:
+        result = 999
+    }
+    return result
+}
+
+func main() {
+    println("Test 1: break in type switch inside loop")
+    r1 := testTypeSwitchBreakInLoop()
+    assert(r1 == 112, "should be 112, got", r1)
+    println("PASSED")
+    
+    println("Test 2: labeled break in type switch")
+    r2 := testTypeSwitchLabeledBreak()
+    assert(r2 == 1, "should be 1, got", r2)
+    println("PASSED")
+    
+    println("Test 3: nested type switches")
+    r3 := testNestedTypeSwitch()
+    assert(r3 == "I.S.", "should be 'I.S.', got", r3)
+    println("PASSED")
+    
+    println("Test 4: type switch inside regular switch")
+    r4 := testTypeSwitchInSwitch()
+    assert(r4 == 84, "should be 84, got", r4)
+    println("PASSED")
+    
+    println("type_switch_nested_break: ALL PASSED")
+}

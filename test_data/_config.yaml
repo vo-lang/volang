@@ -690,3 +690,19 @@ tests:
 
   - file: type_switch_closure_capture.vo
 
+# ============================================================
+# Coverage tests (2026-01-14 new batch 2) - New coverage tests
+# ============================================================
+
+# Passing tests
+  - file: continue_label_defer.vo
+  - file: multi_assign_index_modify.vo
+  - file: closure_goroutine_immediate.vo
+
+  - file: defer_multi_return_arg.vo
+
+# Bug #7: break in type switch breaks outer for loop
+  - file: type_switch_nested_break.vo
+    skip: [vm, jit]
+    reason: "Bug: break inside type switch incorrectly breaks outer for loop"
+

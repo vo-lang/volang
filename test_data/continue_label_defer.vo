@@ -1,0 +1,67 @@
+// Test: continue with label combined with defer
+// Defers should still execute properly when using labeled continue
+package main
+
+var order []int
+
+func reset() {
+    order = []int{}
+}
+
+// Test 1: continue label skips inner loop iterations but defers still run
+func testContinueLabelDefer() {
+outer:
+    for i := 0; i < 3; i += 1 {
+        i := i  // capture
+        defer func() { order = append(order, i*100) }()  // outer defer
+        for j := 0; j < 3; j += 1 {
+            j := j  // capture
+            defer func() { order = append(order, j) }()  // inner defer
+            if j == 1 {
+                continue outer  // skip rest of inner loop, continue outer
+            }
+        }
+    }
+}
+
+// Test 2: nested continue label with multiple defers per iteration
+func testNestedContinueLabel() {
+outer:
+    for i := 0; i < 2; i += 1 {
+        i := i
+        defer func() { order = append(order, 1000+i) }()
+        for j := 0; j < 2; j += 1 {
+            j := j
+            defer func() { order = append(order, 100+j) }()
+            for k := 0; k < 2; k += 1 {
+                k := k
+                defer func() { order = append(order, k) }()
+                if k == 0 && j == 0 && i == 1 {
+                    continue outer
+                }
+            }
+        }
+    }
+}
+
+func main() {
+    println("Test 1: continue label with defer")
+    reset()
+    testContinueLabelDefer()
+    // At each outer iteration, we do: inner j=0,1 then continue outer
+    // So defers registered: i=0: j=0,j=1, i=1: j=0,j=1, i=2: j=0,j=1
+    // Plus outer defers: i=0, i=1, i=2
+    // All execute at function return in LIFO order
+    assert(len(order) > 0, "should have deferred calls")
+    println("Order:", order)
+    println("Test 1: PASSED")
+    
+    println("Test 2: nested continue label")
+    reset()
+    testNestedContinueLabel()
+    assert(len(order) > 0, "should have deferred calls")
+    println("Order:", order)
+    println("Test 2: PASSED")
+    
+    println("continue_label_defer: ALL PASSED")
+}

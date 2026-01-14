@@ -675,12 +675,20 @@ pub fn compile_method_args(
 }
 
 /// Calculate arg slots for method call.
+/// Handles variadic packing and tuple expansion (f(g()) where g() returns multiple values).
 pub fn calc_method_arg_slots(
     call: &vo_syntax::ast::CallExpr,
     param_types: &[TypeKey],
     is_variadic: bool,
     info: &TypeInfoWrapper,
 ) -> u16 {
+    // Check for tuple expansion first
+    let arg_info = info.get_call_arg_info(&call.args, param_types);
+    if arg_info.tuple_expand.is_some() {
+        // Tuple expansion: slots = sum of all param types
+        return param_types.iter().map(|&t| info.type_slot_count(t)).sum();
+    }
+    
     let num_fixed_params = if is_variadic && !param_types.is_empty() {
         param_types.len() - 1
     } else {
@@ -693,6 +701,25 @@ pub fn calc_method_arg_slots(
         fixed_slots + 1  // +1 for the packed slice
     } else {
         param_types.iter().map(|&t| info.type_slot_count(t)).sum()
+    }
+}
+
+/// Calculate arg slots for non-variadic calls (defer, go).
+/// Handles tuple expansion (f(g()) where g() returns multiple values).
+pub fn calc_arg_slots(
+    args: &[vo_syntax::ast::Expr],
+    param_types: &[TypeKey],
+    info: &TypeInfoWrapper,
+) -> u16 {
+    let arg_info = info.get_call_arg_info(args, param_types);
+    if arg_info.tuple_expand.is_some() {
+        // Tuple expansion: slots = sum of all param types
+        param_types.iter().map(|&t| info.type_slot_count(t)).sum()
+    } else {
+        // Normal case: one arg per param
+        args.iter().enumerate()
+            .map(|(i, arg)| param_types.get(i).map(|&pt| info.type_slot_count(pt)).unwrap_or_else(|| info.expr_slots(arg.id)))
+            .sum()
     }
 }
 

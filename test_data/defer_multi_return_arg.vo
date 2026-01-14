@@ -1,0 +1,37 @@
+// Test: defer with multi-return function as argument
+// The multi-return values should be evaluated at defer statement time, not at defer execution time
+package main
+
+var order []string
+
+func getTwo() (int, string) {
+    order = append(order, "getTwo called")
+    return 42, "hello"
+}
+
+func appendNum(n int, s string) {
+    order = append(order, "appendNum: " + s)
+}
+
+func testDeferMultiReturnArg() int {
+    defer appendNum(getTwo())  // getTwo() should be called NOW, not at defer execution
+    order = append(order, "after defer statement")
+    return 100
+}
+
+func main() {
+    order = []string{}
+    result := testDeferMultiReturnArg()
+    assert(result == 100, "should return 100")
+    
+    // Expected order:
+    // 1. "getTwo called" - evaluated at defer statement
+    // 2. "after defer statement" - function body continues
+    // 3. "appendNum: hello" - defer executes at return
+    assert(len(order) == 3, "should have 3 entries, got", len(order))
+    assert(order[0] == "getTwo called", "getTwo should be called first")
+    assert(order[1] == "after defer statement", "body continues after defer")
+    assert(order[2] == "appendNum: hello", "defer executes last")
+    
+    println("defer_multi_return_arg: PASSED")
+}

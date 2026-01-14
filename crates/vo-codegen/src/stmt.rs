@@ -1546,10 +1546,7 @@ fn compile_defer_args_with_types(
     let func_type = info.expr_type(call_expr.func.id);
     let param_types = info.func_param_types(func_type);
     
-    let total_arg_slots: u16 = call_expr.args.iter().enumerate()
-        .map(|(i, arg)| param_types.get(i).map(|&pt| info.type_slot_count(pt)).unwrap_or_else(|| info.expr_slots(arg.id)))
-        .sum();
-    
+    let total_arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
     let args_start = func.alloc_args(total_arg_slots);
     crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start, ctx, func, info)?;
     
@@ -1618,8 +1615,12 @@ fn compile_defer_method_call(
         _ => None,
     };
     
+    // Get method parameter types (excluding receiver)
+    let method_type = info.expr_type(call_expr.func.id);
+    let param_types = info.func_param_types(method_type);
+    
     let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
-    let other_arg_slots: u16 = call_expr.args.iter().map(|arg| info.expr_slots(arg.id)).sum();
+    let other_arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
     let total_arg_slots = recv_slots + other_arg_slots;
     let args_start = func.alloc_args(total_arg_slots);
     
@@ -1628,12 +1629,7 @@ fn compile_defer_method_call(
         &call_info, actual_recv_type, ctx, func, info
     )?;
     
-    let mut offset = recv_slots;
-    for arg in &call_expr.args {
-        let slots = info.expr_slots(arg.id);
-        crate::expr::compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-        offset += slots;
-    }
+    crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start + recv_slots, ctx, func, info)?;
     
     emit_defer_func(opcode, func_id, args_start, total_arg_slots, func);
     Ok(())
@@ -1650,20 +1646,10 @@ fn compile_go(
     use vo_syntax::ast::ExprKind;
     
     if let ExprKind::Call(call_expr) = &call.kind {
-        // Compute total arg slots
+        // Compute total arg slots (handles tuple expansion)
         let func_type = info.expr_type(call_expr.func.id);
         let param_types = info.func_param_types(func_type);
-        
-        let mut total_arg_slots = 0u16;
-        for (i, arg) in call_expr.args.iter().enumerate() {
-            let param_type = param_types.get(i).copied();
-            let slots = if let Some(pt) = param_type {
-                info.type_slot_count(pt)
-            } else {
-                info.expr_slots(arg.id)
-            };
-            total_arg_slots += slots;
-        }
+        let total_arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
         
         // Check if it's a regular function call
         if let ExprKind::Ident(ident) = &call_expr.func.kind {

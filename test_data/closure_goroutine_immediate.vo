@@ -1,0 +1,138 @@
+// Test: closure passed to goroutine with immediate capture semantics
+// The closure captures variables at the moment go statement executes
+package main
+
+// Test 1: Classic loop variable capture problem (using channel for sync)
+func testLoopCapture() []int {
+    results := make([]int, 3)
+    done := make(chan bool, 3)
+    
+    for i := 0; i < 3; i += 1 {
+        i := i  // explicit capture
+        go func() {
+            results[i] = i * 10
+            done <- true
+        }()
+    }
+    // Wait for all
+    for j := 0; j < 3; j += 1 {
+        <-done
+    }
+    return results
+}
+
+// Test 2: Closure with argument (parameter capture)
+func testClosureWithArg() []int {
+    results := make([]int, 3)
+    done := make(chan bool, 3)
+    
+    for i := 0; i < 3; i += 1 {
+        go func(idx int) {
+            results[idx] = idx * 100
+            done <- true
+        }(i)  // pass i as argument - captured at go statement
+    }
+    // Wait for all
+    for j := 0; j < 3; j += 1 {
+        <-done
+    }
+    return results
+}
+
+// Test 3: Closure modifying outer variable (channel based sync)
+func testClosureModify() int {
+    sum := 0
+    done := make(chan bool, 3)
+    
+    for i := 1; i <= 3; i += 1 {
+        go func() {
+            done <- true
+        }()
+    }
+    
+    // Wait for all
+    for j := 0; j < 3; j += 1 {
+        <-done
+        sum += 1
+    }
+    return sum
+}
+
+// Test 4: Nested closure in goroutine
+func testNestedClosure() int {
+    result := make(chan int, 1)
+    base := 10
+    
+    go func() {
+        multiplier := 5
+        inner := func() int {
+            return base * multiplier
+        }
+        result <- inner()
+    }()
+    
+    return <-result
+}
+
+// Test 5: Multiple goroutines with shared closure
+func testSharedClosure() int {
+    ch := make(chan int, 5)
+    done := make(chan bool, 5)
+    
+    increment := func(n int) {
+        ch <- n
+    }
+    
+    for i := 1; i <= 5; i += 1 {
+        i := i
+        go func() {
+            increment(i)
+            done <- true
+        }()
+    }
+    
+    // Wait for all goroutines
+    for j := 0; j < 5; j += 1 {
+        <-done
+    }
+    close(ch)
+    
+    counter := 0
+    for v := range ch {
+        counter += v
+    }
+    return counter  // 1+2+3+4+5 = 15
+}
+
+func main() {
+    println("Test 1: loop variable capture")
+    r1 := testLoopCapture()
+    assert(r1[0] == 0, "r1[0] should be 0")
+    assert(r1[1] == 10, "r1[1] should be 10")
+    assert(r1[2] == 20, "r1[2] should be 20")
+    println("PASSED")
+    
+    println("Test 2: closure with argument")
+    r2 := testClosureWithArg()
+    assert(r2[0] == 0, "r2[0] should be 0")
+    assert(r2[1] == 100, "r2[1] should be 100")
+    assert(r2[2] == 200, "r2[2] should be 200")
+    println("PASSED")
+    
+    println("Test 3: closure modify with channel sync")
+    r3 := testClosureModify()
+    assert(r3 == 3, "should count 3 goroutines")
+    println("PASSED")
+    
+    println("Test 4: nested closure in goroutine")
+    r4 := testNestedClosure()
+    assert(r4 == 50, "should be 10*5=50, got", r4)
+    println("PASSED")
+    
+    println("Test 5: shared closure across goroutines")
+    r5 := testSharedClosure()
+    assert(r5 == 15, "should be 1+2+3+4+5=15, got", r5)
+    println("PASSED")
+    
+    println("closure_goroutine_immediate: ALL PASSED")
+}
