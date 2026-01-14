@@ -1,37 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-  # Core (no_std)
-  "crates/vo-common-core",
-  
-  # Frontend
-  "crates/vo-common",
-  "crates/vo-syntax",
-  "crates/vo-analysis",
-  "crates/vo-module",
-  
-  # Code Generation
-  "crates/vo-codegen",
-  # "crates/vo-codegen-cranelift",
-  
-  # Runtime
-  "crates/vo-runtime",
-  "crates/vo-runtime-native",
-  
-  # VM
-  "crates/vo-vm",
-  
-  # JIT
-  "crates/vo-jit",
-  
-  # FFI Macro
-  "crates/vo-ffi-macro",
-  
-  # Tools
-  "crates/vo-cli",
-  
-  # Web (WASM) - pending
-  # "crates/vo-web",
+  "lang/crates/*",
+  "libs/*/rust/*",
+  "vibe-studio",
 ]
 
 [workspace.package]

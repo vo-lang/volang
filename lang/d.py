@@ -92,10 +92,10 @@ if not sys.stdout.isatty():
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = SCRIPT_DIR  # d.py is now in project root
-TEST_DIR = PROJECT_ROOT / 'test_data'
+PROJECT_ROOT = SCRIPT_DIR.parent
+TEST_DIR = PROJECT_ROOT / 'lang' / 'test_data'
 TEST_CONFIG = TEST_DIR / '_config.yaml'
-BENCHMARK_DIR = PROJECT_ROOT / 'benchmark'
+BENCHMARK_DIR = PROJECT_ROOT / 'lang' / 'benchmark'
 RESULTS_DIR = BENCHMARK_DIR / 'results'
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
 VO_BIN_RELEASE = PROJECT_ROOT / 'target' / 'release' / 'vo'
@@ -694,7 +694,7 @@ class BenchmarkRunner:
 # =============================================================================
 
 class LocStats:
-    CRATES_DIR = PROJECT_ROOT / 'crates'
+    CRATES_DIR = PROJECT_ROOT / 'lang' / 'crates'
 
     CATEGORIES = {
         'Frontend (syntax)': ['vo-syntax'],
@@ -770,7 +770,7 @@ class LocStats:
     def _print_test_stats(self):
         print(f"{Colors.YELLOW}Test Statistics (excluded from above):{Colors.NC}")
 
-        test_data_dir = PROJECT_ROOT / 'test_data'
+        test_data_dir = PROJECT_ROOT / 'lang' / 'test_data'
         if test_data_dir.exists():
             vo_files = list(test_data_dir.rglob('*.vo'))
             vo_lines = sum(sum(1 for _ in open(f, encoding='utf-8', errors='ignore')) for f in vo_files)

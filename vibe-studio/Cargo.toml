@@ -1,0 +1,8 @@
+[package]
+name = "vibe-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vo-cli = { path = "../lang/crates/vo-cli" }

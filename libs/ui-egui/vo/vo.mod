@@ -1,0 +1,1 @@
+module vibe/ui-egui

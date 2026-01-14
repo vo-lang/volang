@@ -1,0 +1,8 @@
+[package]
+name = "vo-egui-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vo-runtime = { path = "../../../../lang/crates/vo-runtime" }
