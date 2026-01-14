@@ -1,0 +1,86 @@
+// Test: goroutine panic without recover crashes the program
+// Go semantics: panic in goroutine that isn't recovered crashes entire program
+// We can't test crash directly, but we can test that goroutine panic propagates
+package main
+
+func main() {
+    // Test 1: goroutine with recover should work
+    done := make(chan bool, 1)
+    result := ""
+    
+    go func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result = "recovered"
+            }
+            done <- true
+        }()
+        panic("test panic")
+    }()
+    
+    <-done
+    assert(result == "recovered", "goroutine should recover its own panic")
+    
+    // Test 2: goroutine panic with recover in nested defer
+    done2 := make(chan string, 1)
+    
+    go func() {
+        defer func() {
+            r := recover()
+            if r != nil {
+                done2 <- "caught: " + r.(string)
+            } else {
+                done2 <- "not caught"
+            }
+        }()
+        
+        defer func() {
+            // This defer runs before the recover defer
+            // It should not affect panic propagation
+        }()
+        
+        panic("inner panic")
+    }()
+    
+    msg := <-done2
+    assert(msg == "caught: inner panic", "should catch inner panic, got: " + msg)
+    
+    // Test 3: multiple goroutines, each with its own panic/recover
+    ch := make(chan int, 3)
+    
+    for i := 0; i < 3; i += 1 {
+        i := i
+        go func() {
+            defer func() {
+                recover()
+                ch <- i
+            }()
+            panic("panic " + string(rune('0' + i)))
+        }()
+    }
+    
+    sum := 0
+    for j := 0; j < 3; j += 1 {
+        sum += <-ch
+    }
+    assert(sum == 3, "all goroutines should complete") // 0+1+2 = 3
+    
+    // Test 4: goroutine panic with channel communication before panic
+    ch2 := make(chan int, 1)
+    done3 := make(chan bool, 1)
+    
+    go func() {
+        defer func() {
+            recover()
+            done3 <- true
+        }()
+        ch2 <- 42
+        panic("after send")
+    }()
+    
+    val := <-ch2
+    assert(val == 42, "should receive value before panic")
+    <-done3
+    
+    println("goroutine_panic_crash: PASSED")
+}

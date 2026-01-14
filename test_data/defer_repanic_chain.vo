@@ -1,0 +1,135 @@
+// Test: defer recover then repanic, and panic chain in defers
+// Go semantics: recover() clears panic state, but you can panic again
+package main
+
+var order []string
+
+func main() {
+    // Test 1: recover then repanic with different value
+    result1 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result1 = r.(string)
+            }
+        }()
+        
+        defer func() {
+            if r := recover(); r != nil {
+                // Recover original panic, then repanic with new value
+                panic("repanic: " + r.(string))
+            }
+        }()
+        
+        panic("original")
+    }()
+    assert(result1 == "repanic: original", "should get repanic value, got: " + result1)
+    
+    // Test 2: multiple recover attempts, only first succeeds
+    result2 := []string{}
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result2 = append(result2, "d1: " + r.(string))
+            } else {
+                result2 = append(result2, "d1: nil")
+            }
+        }()
+        
+        defer func() {
+            if r := recover(); r != nil {
+                result2 = append(result2, "d2: " + r.(string))
+            } else {
+                result2 = append(result2, "d2: nil")
+            }
+        }()
+        
+        panic("test")
+    }()
+    // d2 runs first (LIFO), recovers the panic
+    // d1 runs second, recover returns nil
+    assert(len(result2) == 2, "should have 2 results")
+    assert(result2[0] == "d2: test", "d2 should recover")
+    assert(result2[1] == "d1: nil", "d1 should get nil")
+    
+    // Test 3: panic in defer without recover propagates
+    result3 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result3 = r.(string)
+            }
+        }()
+        
+        defer func() {
+            panic("defer panic")
+        }()
+        
+        // This defer registers but the function doesn't panic
+    }()
+    assert(result3 == "defer panic", "should catch defer panic")
+    
+    // Test 4: original panic replaced by defer panic
+    result4 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result4 = r.(string)
+            }
+        }()
+        
+        defer func() {
+            // This defer panics, replacing the original panic
+            panic("new panic")
+        }()
+        
+        panic("original panic")
+    }()
+    // The new panic replaces the original
+    assert(result4 == "new panic", "defer panic should replace original")
+    
+    // Test 5: chain of panic-recover-repanic
+    order = []string{}
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                order = append(order, "final: " + r.(string))
+            }
+        }()
+        
+        defer func() {
+            if r := recover(); r != nil {
+                order = append(order, "mid: " + r.(string))
+                panic("repanic2")
+            }
+        }()
+        
+        defer func() {
+            if r := recover(); r != nil {
+                order = append(order, "first: " + r.(string))
+                panic("repanic1")
+            }
+        }()
+        
+        panic("start")
+    }()
+    assert(len(order) == 3, "should have 3 entries")
+    assert(order[0] == "first: start", "first recover")
+    assert(order[1] == "mid: repanic1", "mid recover")
+    assert(order[2] == "final: repanic2", "final recover")
+    
+    // Test 6: recover in defer after normal return
+    result6 := ""
+    func() {
+        defer func() {
+            r := recover()
+            if r == nil {
+                result6 = "no panic"
+            }
+        }()
+        // Normal return, no panic
+    }()
+    assert(result6 == "no panic", "recover should return nil on normal return")
+    
+    println("defer_repanic_chain: PASSED")
+}

@@ -6,12 +6,35 @@ use vo_runtime::objects::slice;
 
 use crate::instruction::Instruction;
 
+/// Result of exec_slice_new: Ok(()) on success, Err(msg) on invalid parameters
+pub type SliceNewResult = Result<(), String>;
+
 #[inline]
-pub fn exec_slice_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_slice_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) -> SliceNewResult {
     let meta_raw = stack[bp + inst.b as usize] as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
-    let len = stack[bp + inst.c as usize] as usize;
-    let cap = stack[bp + inst.c as usize + 1] as usize;
+    
+    // Read as i64 first to check for negative values
+    let len_i64 = stack[bp + inst.c as usize] as i64;
+    let cap_i64 = stack[bp + inst.c as usize + 1] as i64;
+    
+    // Check for negative length
+    if len_i64 < 0 {
+        return Err(format!("runtime error: makeslice: len out of range"));
+    }
+    // Check for negative capacity
+    if cap_i64 < 0 {
+        return Err(format!("runtime error: makeslice: cap out of range"));
+    }
+    
+    let len = len_i64 as usize;
+    let cap = cap_i64 as usize;
+    
+    // Check len > cap
+    if len > cap {
+        return Err(format!("runtime error: makeslice: len larger than cap"));
+    }
+    
     // flags: 0=dynamic (read from c+2), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
     let elem_bytes = match inst.flags {
         0 => stack[bp + inst.c as usize + 2] as usize,  // dynamic: elem_bytes in c+2
@@ -20,8 +43,17 @@ pub fn exec_slice_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut
         0x84 | 0x44 => 4,   // int32 or float32
         f => f as usize,
     };
+    
+    // Check for overflow in allocation size
+    // Use isize::MAX as limit (similar to Go's maxAlloc)
+    match cap.checked_mul(elem_bytes) {
+        Some(total) if total <= isize::MAX as usize => {}
+        _ => return Err(format!("runtime error: makeslice: cap out of range")),
+    }
+    
     let s = slice::create(gc, elem_meta, elem_bytes, len, cap);
     stack[bp + inst.a as usize] = s as u64;
+    Ok(())
 }
 
 /// SliceSlice: a[lo:hi] or a[lo:hi:max]

@@ -920,8 +920,10 @@ impl Vm {
 
                 // Slice operations
                 Opcode::SliceNew => {
-                    exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    match exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
+                        Ok(()) => ExecResult::Continue,
+                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
+                    }
                 }
                 Opcode::SliceGet => {
                     // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
@@ -1094,8 +1096,10 @@ impl Vm {
 
                 // Channel operations - need scheduler access
                 Opcode::ChanNew => {
-                    exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    match exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc) {
+                        Ok(()) => ExecResult::Continue,
+                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
+                    }
                 }
                 Opcode::ChanSend => {
                     match exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst) {

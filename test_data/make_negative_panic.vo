@@ -1,0 +1,107 @@
+// Test: make with negative or invalid size should panic
+// Go semantics: make([]T, n) with n < 0 panics at runtime
+package main
+
+func main() {
+    // Test 1: make slice with negative length should panic
+    result1 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result1 = "panicked"
+            }
+        }()
+        n := -1
+        _ = make([]int, n)
+        result1 = "no panic"
+    }()
+    assert(result1 == "panicked", "make slice with negative length should panic")
+    
+    // Test 2: make slice with negative cap should panic
+    result2 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result2 = "panicked"
+            }
+        }()
+        n := -5
+        _ = make([]int, 0, n)
+        result2 = "no panic"
+    }()
+    assert(result2 == "panicked", "make slice with negative cap should panic")
+    
+    // Test 3: make slice with len > cap should panic (using variables to bypass compile-time check)
+    result3 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result3 = "panicked"
+            }
+        }()
+        l := 10
+        c := 5
+        _ = make([]int, l, c)
+        result3 = "no panic"
+    }()
+    assert(result3 == "panicked", "make slice with len > cap should panic")
+    
+    // Test 4: make map with negative size hint (should NOT panic - it's a hint)
+    result4 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result4 = "panicked"
+            }
+        }()
+        n := -1
+        m := make(map[string]int, n)
+        m["test"] = 1
+        result4 = "no panic"
+    }()
+    // Go allows negative size hint for map, it just uses default
+    assert(result4 == "no panic", "make map with negative hint should not panic")
+    
+    // Test 5: make channel with negative buffer should panic
+    result5 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result5 = "panicked"
+            }
+        }()
+        n := -1
+        _ = make(chan int, n)
+        result5 = "no panic"
+    }()
+    assert(result5 == "panicked", "make channel with negative buffer should panic")
+    
+    // Test 6: make with zero is valid
+    s := make([]int, 0)
+    assert(len(s) == 0, "zero length slice")
+    
+    m := make(map[string]int, 0)
+    m["x"] = 1
+    assert(m["x"] == 1, "zero hint map works")
+    
+    ch := make(chan int, 0)
+    // unbuffered channel is valid
+    assert(ch != nil, "zero buffer channel is valid")
+    
+    // Test 7: make slice with size that causes overflow (deterministic test)
+    result7 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result7 = "panicked"
+            }
+        }()
+        // 1<<62 * 8 bytes would overflow usize on 64-bit
+        huge := 1 << 62
+        _ = make([]int, huge)
+        result7 = "no panic"
+    }()
+    assert(result7 == "panicked", "make slice with overflow size should panic")
+    
+    println("make_negative_panic: PASSED")
+}

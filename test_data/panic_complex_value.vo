@@ -1,0 +1,109 @@
+// Test: panic with complex values (struct, closure, slice)
+// Go semantics: panic can accept any value
+package main
+
+type MyError struct {
+    code int
+    msg  string
+}
+
+func main() {
+    // Test 1: panic with struct value
+    result1 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                err := r.(MyError)
+                result1 = err.msg
+            }
+        }()
+        panic(MyError{code: 42, msg: "struct error"})
+    }()
+    assert(result1 == "struct error", "should recover struct, got: " + result1)
+    
+    // Test 2: panic with slice value
+    result2 := []int{}
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result2 = r.([]int)
+            }
+        }()
+        panic([]int{1, 2, 3})
+    }()
+    assert(len(result2) == 3, "should recover slice")
+    assert(result2[0] == 1 && result2[1] == 2 && result2[2] == 3, "slice values")
+    
+    // Test 3: panic with closure value
+    result3 := 0
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                fn := r.(func() int)
+                result3 = fn()
+            }
+        }()
+        x := 100
+        panic(func() int { return x })
+    }()
+    assert(result3 == 100, "should recover and call closure")
+    
+    // Test 4: panic with interface containing struct
+    result4 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                // r is any, containing MyError
+                err := r.(MyError)
+                result4 = err.msg
+            }
+        }()
+        var val any = MyError{code: 1, msg: "iface error"}
+        panic(val)
+    }()
+    assert(result4 == "iface error", "should recover interface containing struct")
+    
+    // Test 5: panic with nil value
+    result5 := "not nil"
+    func() {
+        defer func() {
+            r := recover()
+            if r == nil {
+                result5 = "nil"
+            }
+        }()
+        panic(nil)
+    }()
+    assert(result5 == "nil", "should recover nil panic value")
+    
+    // Test 6: panic with map value
+    result6 := map[string]int{}
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result6 = r.(map[string]int)
+            }
+        }()
+        m := map[string]int{"a": 1, "b": 2}
+        panic(m)
+    }()
+    assert(result6["a"] == 1, "map value a")
+    assert(result6["b"] == 2, "map value b")
+    
+    // Test 7: panic with channel
+    ch := make(chan int, 1)
+    ch <- 99
+    result7 := 0
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                recoveredCh := r.(chan int)
+                result7 = <-recoveredCh
+            }
+        }()
+        panic(ch)
+    }()
+    assert(result7 == 99, "should recover channel and receive")
+    
+    println("panic_complex_value: PASSED")
+}

@@ -739,3 +739,16 @@ tests:
   - file: switch_fallthrough_complex.vo
   - file: slice_aliasing.vo
   - file: map_iteration_order.vo
+
+# ============================================================
+# Coverage tests (2026-01-14 new batch 5) - New coverage tests
+# ============================================================
+
+# Passing tests
+  - file: goroutine_panic_crash.vo
+  - file: panic_complex_value.vo
+  - file: defer_repanic_chain.vo
+  - file: nil_value_receiver_method.vo
+
+# FIXED: make with negative size now correctly triggers recoverable Vo panic
+  - file: make_negative_panic.vo

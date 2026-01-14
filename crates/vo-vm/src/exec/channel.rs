@@ -19,14 +19,27 @@ pub enum ChanResult {
     WakeMultiple(Vec<u32>),
 }
 
+/// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
+pub type ChanNewResult = Result<(), String>;
+
 #[inline]
-pub fn exec_chan_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_chan_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) -> ChanNewResult {
     let meta_raw = stack[bp + inst.b as usize] as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
-    let cap = stack[bp + inst.c as usize] as usize;
+    
+    // Read as i64 first to check for negative values
+    let cap_i64 = stack[bp + inst.c as usize] as i64;
+    
+    // Check for negative capacity
+    if cap_i64 < 0 {
+        return Err(format!("runtime error: makechan: size out of range"));
+    }
+    
+    let cap = cap_i64 as usize;
     let elem_slots = inst.flags as u16;
     let ch = channel::create(gc, elem_meta, elem_slots, cap);
     stack[bp + inst.a as usize] = ch as u64;
+    Ok(())
 }
 
 pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {

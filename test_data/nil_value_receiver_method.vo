@@ -1,0 +1,108 @@
+// Test: method call on nil value receiver (not pointer receiver)
+// Go semantics: calling a value receiver method on nil pointer panics
+// because it needs to dereference the pointer to get the value
+package main
+
+type Counter struct {
+    count int
+}
+
+func (c Counter) GetCount() int {
+    return c.count
+}
+
+func (c Counter) Add(n int) int {
+    return c.count + n
+}
+
+func (c *Counter) GetCountPtr() int {
+    if c == nil {
+        return -1
+    }
+    return c.count
+}
+
+type Stringer interface {
+    String() string
+}
+
+type MyString struct {
+    s string
+}
+
+func (m MyString) String() string {
+    return m.s
+}
+
+func main() {
+    // Test 1: nil pointer with pointer receiver (should work if method handles nil)
+    var p *Counter
+    result1 := p.GetCountPtr()
+    assert(result1 == -1, "nil pointer with ptr receiver should return -1")
+    
+    // Test 2: nil pointer with value receiver should panic
+    result2 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result2 = "panicked"
+            }
+        }()
+        var p2 *Counter
+        _ = p2.GetCount() // This should panic - needs to deref nil
+        result2 = "no panic"
+    }()
+    assert(result2 == "panicked", "nil pointer with value receiver should panic")
+    
+    // Test 3: nil pointer value receiver with argument
+    result3 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result3 = "panicked"
+            }
+        }()
+        var p3 *Counter
+        _ = p3.Add(5)
+        result3 = "no panic"
+    }()
+    assert(result3 == "panicked", "nil pointer value receiver with arg should panic")
+    
+    // Test 4: non-nil pointer with value receiver works
+    c := &Counter{count: 42}
+    assert(c.GetCount() == 42, "non-nil pointer value receiver")
+    assert(c.Add(8) == 50, "non-nil pointer value receiver with arg")
+    
+    // Test 5: interface containing nil pointer - type assertion succeeds but method may panic
+    var iface any = (*Counter)(nil)
+    
+    // Type assertion to *Counter succeeds (typed nil)
+    ptr, ok := iface.(*Counter)
+    assert(ok, "type assertion to *Counter should succeed")
+    assert(ptr == nil, "ptr should be nil")
+    
+    // Calling pointer receiver method on typed nil works
+    result5 := ptr.GetCountPtr()
+    assert(result5 == -1, "typed nil pointer receiver method")
+    
+    // Test 6: interface method call on nil concrete value
+    result6 := ""
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result6 = "panicked"
+            }
+        }()
+        var iface2 Stringer = (*MyString)(nil)
+        _ = iface2.String() // value receiver on nil pointer through interface
+        result6 = "no panic"
+    }()
+    assert(result6 == "panicked", "interface value receiver on nil should panic")
+    
+    // Test 7: zero value struct (not nil) works fine
+    var zero Counter
+    assert(zero.GetCount() == 0, "zero value struct works")
+    assert(zero.Add(10) == 10, "zero value struct with arg")
+    
+    println("nil_value_receiver_method: PASSED")
+}
