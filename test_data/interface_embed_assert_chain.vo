@@ -1,0 +1,189 @@
+// Test: interface embedding + method shadowing + type assertion chain
+// Coverage: complex interface hierarchy with assertions
+package main
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type Closer interface {
+    Close()
+}
+
+type ReadWriteCloser interface {
+    ReadWriter
+    Closer
+}
+
+type Buffer struct {
+    data   string
+    closed bool
+}
+
+func (b *Buffer) Read() string {
+    return b.data
+}
+
+func (b *Buffer) Write(s string) {
+    b.data += s
+}
+
+func (b *Buffer) Close() {
+    b.closed = true
+}
+
+// Test 1: chain of type assertions through embedded interfaces
+func testAssertChain() {
+    var rwc ReadWriteCloser = &Buffer{data: "init"}
+    
+    // Assert down to ReadWriter
+    rw, ok := rwc.(ReadWriter)
+    assert(ok, "should be ReadWriter")
+    rw.Write("-rw")
+    
+    // Assert to Reader
+    r, ok := rw.(Reader)
+    assert(ok, "should be Reader")
+    s := r.Read()
+    assert(s == "init-rw", "should be init-rw, got", s)
+    
+    // Assert back to concrete type
+    buf, ok := r.(*Buffer)
+    assert(ok, "should be *Buffer")
+    assert(buf.data == "init-rw", "data should match")
+}
+
+// Test 2: type assertion on interface field - underlying type matters
+type Container struct {
+    rw ReadWriter
+}
+
+func testEmbeddedFieldAssert() {
+    buf := &Buffer{data: "hello"}
+    c := Container{rw: buf}
+    
+    // Assert the field to Closer - succeeds because underlying *Buffer implements Closer
+    // This is Go semantics: type assertion checks the dynamic (underlying) type
+    closer, ok := c.rw.(Closer)
+    assert(ok, "underlying *Buffer implements Closer")
+    closer.Close()
+    assert(buf.closed, "buffer should be closed")
+    
+    // Reset and test with non-Closer type
+    buf.closed = false
+    
+    // Test assertion to concrete type
+    buf2, ok := c.rw.(*Buffer)
+    assert(ok, "should assert to *Buffer")
+    assert(buf2 == buf, "should be same buffer")
+}
+
+// Test 3: interface with same method from multiple paths
+type A interface {
+    Do() int
+}
+
+type B interface {
+    Do() int
+}
+
+type AB interface {
+    A
+    B  // Same method, should be fine (diamond)
+}
+
+type Impl struct {
+    val int
+}
+
+func (i *Impl) Do() int {
+    return i.val
+}
+
+func testDiamondInterface() {
+    var ab AB = &Impl{val: 42}
+    
+    a, ok := ab.(A)
+    assert(ok, "should be A")
+    assert(a.Do() == 42, "A.Do should be 42")
+    
+    b, ok := ab.(B)
+    assert(ok, "should be B")
+    assert(b.Do() == 42, "B.Do should be 42")
+}
+
+// Test 4: nil interface assertion
+func testNilAssert() {
+    var r Reader
+    
+    // nil interface to concrete should fail
+    _, ok := r.(*Buffer)
+    assert(!ok, "nil Reader should not be *Buffer")
+    
+    // nil interface to another interface should fail
+    _, ok = r.(Writer)
+    assert(!ok, "nil Reader should not be Writer")
+}
+
+// Test 5: type switch with embedded interfaces
+func classify(x interface{}) string {
+    switch x.(type) {
+    case ReadWriteCloser:
+        return "rwc"
+    case ReadWriter:
+        return "rw"
+    case Reader:
+        return "r"
+    case Writer:
+        return "w"
+    default:
+        return "unknown"
+    }
+}
+
+func testTypeSwitchEmbedded() {
+    buf := &Buffer{}
+    
+    // *Buffer implements ReadWriteCloser
+    result := classify(buf)
+    assert(result == "rwc", "should be rwc, got", result)
+    
+    // Cast to ReadWriter first
+    var rw ReadWriter = buf
+    result = classify(rw)
+    // The underlying type is still *Buffer which is ReadWriteCloser
+    assert(result == "rwc", "should still be rwc, got", result)
+}
+
+func main() {
+    println("Test 1: assertion chain")
+    testAssertChain()
+    println("PASSED")
+    
+    println("Test 2: embedded field assert")
+    testEmbeddedFieldAssert()
+    println("PASSED")
+    
+    println("Test 3: diamond interface")
+    testDiamondInterface()
+    println("PASSED")
+    
+    println("Test 4: nil assert")
+    testNilAssert()
+    println("PASSED")
+    
+    println("Test 5: type switch embedded")
+    testTypeSwitchEmbedded()
+    println("PASSED")
+    
+    println("interface_embed_assert_chain: ALL PASSED")
+}

@@ -1,0 +1,139 @@
+// Test: select send expression evaluation order
+// Coverage: select case send expressions are evaluated before select
+package main
+
+var evalOrder []string
+
+func reset() {
+    evalOrder = []string{}
+}
+
+func log(s string) {
+    evalOrder = append(evalOrder, s)
+}
+
+func getChan() chan int {
+    log("getChan")
+    ch := make(chan int, 1)
+    return ch
+}
+
+func getValue() int {
+    log("getValue")
+    return 42
+}
+
+func getValueA() int {
+    log("getValueA")
+    return 1
+}
+
+func getValueB() int {
+    log("getValueB")
+    return 2
+}
+
+// Test 1: send case expression evaluation order
+func testSendEvalOrder() {
+    reset()
+    ch := make(chan int, 1)
+    
+    select {
+    case getChan() <- getValue():
+        log("sent")
+    default:
+        log("default")
+    }
+    // getChan and getValue should be evaluated before select executes
+    // But since getChan returns a new buffered channel, send should succeed
+    assert(len(evalOrder) >= 2, "should evaluate expressions")
+    assert(evalOrder[0] == "getChan", "getChan first")
+    assert(evalOrder[1] == "getValue", "getValue second")
+}
+
+// Test 2: multiple send cases - all expressions evaluated
+func testMultipleSendEval() {
+    reset()
+    ch1 := make(chan int, 1)
+    ch2 := make(chan int, 1)
+    
+    select {
+    case ch1 <- getValueA():
+        log("sent-A")
+    case ch2 <- getValueB():
+        log("sent-B")
+    }
+    // Both getValueA and getValueB should be evaluated
+    // One of them will be selected
+    hasA := false
+    hasB := false
+    for _, e := range evalOrder {
+        if e == "getValueA" {
+            hasA = true
+        }
+        if e == "getValueB" {
+            hasB = true
+        }
+    }
+    assert(hasA, "getValueA should be evaluated")
+    assert(hasB, "getValueB should be evaluated")
+}
+
+// Test 3: recv and send mixed - evaluation order
+func testMixedCaseEval() {
+    reset()
+    chSend := make(chan int, 1)
+    chRecv := make(chan int, 1)
+    chRecv <- 100
+    
+    select {
+    case chSend <- getValue():
+        log("sent")
+    case v := <-chRecv:
+        log("recv")
+        _ = v
+    }
+    // getValue should still be evaluated even if recv case is selected
+    // This depends on Go semantics - all send values are evaluated
+}
+
+// Test 4: side effects in send expression
+func testSendSideEffect() int {
+    counter := 0
+    ch := make(chan int, 1)
+    
+    increment := func() int {
+        counter++
+        return counter
+    }
+    
+    select {
+    case ch <- increment():
+        // counter should be 1
+    default:
+        // should not reach here since ch is buffered
+    }
+    
+    return counter
+}
+
+func main() {
+    println("Test 1: send case eval order")
+    testSendEvalOrder()
+    println("PASSED")
+    
+    println("Test 2: multiple send cases eval")
+    testMultipleSendEval()
+    println("PASSED")
+    
+    println("Test 3: mixed case eval")
+    testMixedCaseEval()
+    println("PASSED")
+    
+    println("Test 4: send side effect")
+    r4 := testSendSideEffect()
+    assert(r4 == 1, "counter should be 1, got", r4)
+    println("PASSED")
+    
+    println("select_send_eval_order: ALL PASSED")
+}

@@ -1,0 +1,201 @@
+// Test: map iteration and modification during iteration
+// Coverage: map semantics, delete during range, concurrent-safe patterns
+package main
+
+// Test 1: map iteration visits all keys
+func testMapIterationComplete() {
+    m := map[int]string{
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+    }
+    
+    visited := make(map[int]bool)
+    count := 0
+    for k := range m {
+        visited[k] = true
+        count++
+    }
+    
+    assert(count == 5, "should visit 5 keys")
+    for i := 1; i <= 5; i++ {
+        assert(visited[i], "should visit key", i)
+    }
+}
+
+// Test 2: delete during iteration is safe
+func testDeleteDuringIteration() {
+    m := map[int]int{
+        1: 10,
+        2: 20,
+        3: 30,
+        4: 40,
+        5: 50,
+    }
+    
+    // Delete even keys during iteration
+    for k := range m {
+        if k%2 == 0 {
+            delete(m, k)
+        }
+    }
+    
+    // Only odd keys remain
+    assert(len(m) == 3, "should have 3 keys left")
+    _, ok1 := m[1]
+    _, ok2 := m[2]
+    _, ok3 := m[3]
+    assert(ok1, "key 1 should exist")
+    assert(!ok2, "key 2 should be deleted")
+    assert(ok3, "key 3 should exist")
+}
+
+// Test 3: add during iteration may or may not be seen
+func testAddDuringIteration() {
+    m := map[int]int{1: 10}
+    
+    seen := make(map[int]bool)
+    for k := range m {
+        seen[k] = true
+        if k == 1 {
+            m[2] = 20  // may or may not be seen
+        }
+    }
+    
+    // Key 1 was definitely seen
+    assert(seen[1], "key 1 should be seen")
+    // Key 2 was added
+    assert(m[2] == 20, "key 2 should be in map")
+}
+
+// Test 4: map with struct value modification
+func testMapStructValueModify() {
+    type Point struct {
+        x, y int
+    }
+    
+    m := make(map[string]Point)
+    m["a"] = Point{1, 2}
+    m["b"] = Point{3, 4}
+    
+    // Cannot modify struct value in place in Go
+    // Must read, modify, write back
+    p := m["a"]
+    p.x = 100
+    m["a"] = p
+    
+    assert(m["a"].x == 100, "a.x should be 100")
+}
+
+// Test 5: map with pointer value
+func testMapPointerValue() {
+    type Counter struct {
+        count int
+    }
+    
+    m := make(map[string]*Counter)
+    m["a"] = &Counter{count: 1}
+    m["b"] = &Counter{count: 2}
+    
+    // Can modify through pointer
+    m["a"].count = 100
+    assert(m["a"].count == 100, "a.count should be 100")
+    
+    // Iteration with pointer modification
+    for _, v := range m {
+        v.count += 10
+    }
+    assert(m["a"].count == 110, "a.count should be 110")
+    assert(m["b"].count == 12, "b.count should be 12")
+}
+
+// Test 6: map equality with nil
+func testMapNilEquality() {
+    var m1 map[string]int
+    m2 := make(map[string]int)
+    
+    assert(m1 == nil, "m1 should be nil")
+    assert(m2 != nil, "m2 should not be nil")
+    
+    // Both have len 0
+    assert(len(m1) == 0, "m1 len should be 0")
+    assert(len(m2) == 0, "m2 len should be 0")
+}
+
+// Test 7: map key types
+func testMapKeyTypes() {
+    // String key
+    ms := map[string]int{"a": 1}
+    assert(ms["a"] == 1, "string key")
+    
+    // Int key
+    mi := map[int]string{42: "answer"}
+    assert(mi[42] == "answer", "int key")
+    
+    // Bool key
+    mb := map[bool]string{true: "yes", false: "no"}
+    assert(mb[true] == "yes", "bool key true")
+    assert(mb[false] == "no", "bool key false")
+    
+    // Struct key (comparable)
+    type Point struct{ x, y int }
+    mp := make(map[Point]string)
+    mp[Point{1, 2}] = "p1"
+    mp[Point{3, 4}] = "p2"
+    assert(mp[Point{1, 2}] == "p1", "struct key")
+}
+
+// Test 8: map with interface key
+func testMapInterfaceKey() {
+    m := make(map[interface{}]string)
+    m[1] = "int"
+    m["hello"] = "string"
+    m[true] = "bool"
+    
+    assert(m[1] == "int", "int key")
+    assert(m["hello"] == "string", "string key")
+    assert(m[true] == "bool", "bool key")
+    
+    // Different types don't collide
+    m[int64(1)] = "int64"
+    assert(m[1] == "int", "int key unchanged")
+    assert(m[int64(1)] == "int64", "int64 key")
+}
+
+func main() {
+    println("Test 1: map iteration complete")
+    testMapIterationComplete()
+    println("PASSED")
+    
+    println("Test 2: delete during iteration")
+    testDeleteDuringIteration()
+    println("PASSED")
+    
+    println("Test 3: add during iteration")
+    testAddDuringIteration()
+    println("PASSED")
+    
+    println("Test 4: map struct value modify")
+    testMapStructValueModify()
+    println("PASSED")
+    
+    println("Test 5: map pointer value")
+    testMapPointerValue()
+    println("PASSED")
+    
+    println("Test 6: map nil equality")
+    testMapNilEquality()
+    println("PASSED")
+    
+    println("Test 7: map key types")
+    testMapKeyTypes()
+    println("PASSED")
+    
+    println("Test 8: map interface key")
+    testMapInterfaceKey()
+    println("PASSED")
+    
+    println("map_iteration_order: ALL PASSED")
+}

@@ -1,0 +1,155 @@
+// Test: panic and recover inside closures
+// Coverage: complex panic/recover scenarios with closures
+package main
+
+// Test 1: recover inside closure called from defer
+func testRecoverInClosure() int {
+    defer func() {
+        if r := recover(); r != nil {
+            println("recovered:", r)
+        }
+    }()
+    
+    panic("test panic")
+    return 0  // unreachable
+}
+
+// Test 2: closure captures recover result
+func testClosureCapturesRecover() string {
+    result := "none"
+    
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result = "caught"
+            }
+        }()
+        panic("inner panic")
+    }()
+    
+    return result
+}
+
+// Test 3: nested closures with panic
+func testNestedClosurePanic() string {
+    result := ""
+    
+    defer func() {
+        if r := recover(); r != nil {
+            result += "-outer"
+        }
+    }()
+    
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result += "-inner"
+            }
+        }()
+        
+        func() {
+            panic("deep panic")
+        }()
+        
+        result += "-after-inner"  // should not reach
+    }()
+    
+    result += "-after-outer"
+    return result
+}
+
+// Test 4: panic with closure value
+func testPanicClosureValue() string {
+    result := ""
+    
+    defer func() {
+        if r := recover(); r != nil {
+            // r should be the closure
+            if f, ok := r.(func() string); ok {
+                result = f()
+            } else {
+                result = "not-func"
+            }
+        }
+    }()
+    
+    panic(func() string { return "closure-panic" })
+    return ""
+}
+
+// Test 5: recover only works in direct defer call
+func testRecoverOnlyInDefer() string {
+    result := "none"
+    
+    helper := func() {
+        if r := recover(); r != nil {
+            result = "helper-caught"
+        }
+    }
+    
+    defer func() {
+        helper()  // recover() called inside helper, not direct defer
+        if r := recover(); r != nil {
+            result = "defer-caught"
+        }
+    }()
+    
+    panic("test")
+    return result
+}
+
+// Test 6: panic in defer
+func testPanicInDefer() string {
+    result := ""
+    
+    defer func() {
+        if r := recover(); r != nil {
+            result += r.(string)
+        }
+    }()
+    
+    defer func() {
+        panic("second")
+    }()
+    
+    defer func() {
+        result += "first-"
+    }()
+    
+    return result
+}
+
+func main() {
+    println("Test 1: recover in closure")
+    testRecoverInClosure()
+    println("PASSED")
+    
+    println("Test 2: closure captures recover")
+    r2 := testClosureCapturesRecover()
+    assert(r2 == "caught", "should be caught, got", r2)
+    println("PASSED")
+    
+    println("Test 3: nested closure panic")
+    r3 := testNestedClosurePanic()
+    // Inner recover catches, so outer continues
+    assert(r3 == "-inner-after-outer", "expected -inner-after-outer, got", r3)
+    println("PASSED")
+    
+    println("Test 4: panic closure value")
+    r4 := testPanicClosureValue()
+    assert(r4 == "closure-panic", "expected closure-panic, got", r4)
+    println("PASSED")
+    
+    println("Test 5: recover only in defer")
+    r5 := testRecoverOnlyInDefer()
+    // helper's recover doesn't work, but direct defer's does
+    assert(r5 == "defer-caught", "expected defer-caught, got", r5)
+    println("PASSED")
+    
+    println("Test 6: panic in defer")
+    r6 := testPanicInDefer()
+    assert(r6 == "first-second", "expected first-second, got", r6)
+    println("PASSED")
+    
+    println("closure_panic_recover: ALL PASSED")
+}

@@ -703,3 +703,43 @@ tests:
 
   - file: type_switch_nested_break.vo
   - file: select_nested_break.vo
+
+# ============================================================
+# Coverage tests (2026-01-14 new batch 3) - New coverage tests
+# ============================================================
+
+# Test: select combined with type switch
+  - file: select_type_switch_combo.vo
+
+# Test: errdefer + defer ordering and semantics
+  - file: errdefer_closure_panic.vo
+
+# Test: select send expression evaluation order
+  - file: select_send_eval_order.vo
+
+# Test: for-range + defer + goroutine interaction
+  - file: for_range_defer_goroutine.vo
+
+# Test: interface embedding + type assertion chains
+  - file: interface_embed_assert_chain.vo
+
+# ============================================================
+# Coverage tests (2026-01-14 new batch 4) - New coverage tests
+# ============================================================
+
+# Bug #1: Multi-assignment evaluation order - RHS evaluated before LHS (should be LHS first)
+# Go spec: LHS evaluated left-to-right, then RHS left-to-right
+  - file: multi_assign_eval_order.vo
+    skip: [vm, jit]
+    reason: "Vo evaluates RHS before LHS, should be LHS first per Go spec"
+
+# Bug #2: panic with closure value - recover returns empty
+  - file: closure_panic_recover.vo
+    skip: [vm, jit]
+    reason: "panic(closure) then recover() returns empty, closure value lost"
+
+# Passing tests
+  - file: defer_return_shadow.vo
+  - file: switch_fallthrough_complex.vo
+  - file: slice_aliasing.vo
+  - file: map_iteration_order.vo

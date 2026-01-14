@@ -1,0 +1,174 @@
+// Test: complex fallthrough scenarios
+// Coverage: fallthrough with various control flow combinations
+package main
+
+// Test 1: fallthrough skips case condition
+func testFallthroughSkipsCondition() int {
+    x := 1
+    result := 0
+    
+    switch x {
+    case 1:
+        result += 1
+        fallthrough
+    case 999:  // condition not checked due to fallthrough
+        result += 10
+    case 3:
+        result += 100
+    }
+    
+    return result  // 1 + 10 = 11
+}
+
+// Test 2: multiple consecutive fallthrough
+func testMultipleFallthrough() int {
+    result := 0
+    
+    switch 1 {
+    case 1:
+        result += 1
+        fallthrough
+    case 2:
+        result += 10
+        fallthrough
+    case 3:
+        result += 100
+    case 4:
+        result += 1000
+    }
+    
+    return result  // 1 + 10 + 100 = 111
+}
+
+// Test 3: fallthrough to default
+func testFallthroughToDefault() int {
+    result := 0
+    
+    switch 1 {
+    case 1:
+        result += 1
+        fallthrough
+    default:
+        result += 10
+    case 2:
+        result += 100
+    }
+    
+    return result  // 1 + 10 = 11
+}
+
+// Test 4: fallthrough with type switch NOT allowed
+// This is a compile error in Go, so we skip it
+
+// Test 5: fallthrough at end of switch (no effect)
+func testFallthroughLast() int {
+    result := 0
+    
+    switch 3 {
+    case 1:
+        result += 1
+    case 2:
+        result += 10
+    case 3:
+        result += 100
+        // fallthrough here would be compile error (no next case)
+    }
+    
+    return result  // 100
+}
+
+// Test 6: simple fallthrough
+func testSimpleFallthrough() int {
+    result := 0
+    
+    switch 1 {
+    case 1:
+        result += 1
+        fallthrough
+    case 2:
+        result += 10
+    }
+    
+    return result  // 11
+}
+
+// Test 7: fallthrough in nested switch
+func testNestedSwitchFallthrough() int {
+    result := 0
+    
+    switch 1 {
+    case 1:
+        result += 1
+        switch 2 {
+        case 2:
+            result += 10
+            fallthrough  // falls through in inner switch
+        case 3:
+            result += 100
+        }
+        result += 1000  // continues after inner switch
+    case 2:
+        result += 10000
+    }
+    
+    return result  // 1 + 10 + 100 + 1000 = 1111
+}
+
+// Test 8: default in middle with fallthrough
+func testDefaultMiddleFallthrough() int {
+    result := 0
+    
+    switch 999 {  // matches default
+    case 1:
+        result += 1
+        fallthrough
+    default:
+        result += 10
+        fallthrough
+    case 2:
+        result += 100
+    case 3:
+        result += 1000
+    }
+    
+    return result  // default matches, 10 + 100 = 110
+}
+
+func main() {
+    println("Test 1: fallthrough skips condition")
+    r1 := testFallthroughSkipsCondition()
+    assert(r1 == 11, "expected 11, got", r1)
+    println("PASSED")
+    
+    println("Test 2: multiple fallthrough")
+    r2 := testMultipleFallthrough()
+    assert(r2 == 111, "expected 111, got", r2)
+    println("PASSED")
+    
+    println("Test 3: fallthrough to default")
+    r3 := testFallthroughToDefault()
+    assert(r3 == 11, "expected 11, got", r3)
+    println("PASSED")
+    
+    println("Test 5: fallthrough last (no effect)")
+    r5 := testFallthroughLast()
+    assert(r5 == 100, "expected 100, got", r5)
+    println("PASSED")
+    
+    println("Test 6: simple fallthrough")
+    r6 := testSimpleFallthrough()
+    assert(r6 == 11, "expected 11, got", r6)
+    println("PASSED")
+    
+    println("Test 7: nested switch fallthrough")
+    r7 := testNestedSwitchFallthrough()
+    assert(r7 == 1111, "expected 1111, got", r7)
+    println("PASSED")
+    
+    println("Test 8: default middle fallthrough")
+    r8 := testDefaultMiddleFallthrough()
+    assert(r8 == 110, "expected 110, got", r8)
+    println("PASSED")
+    
+    println("switch_fallthrough_complex: ALL PASSED")
+}

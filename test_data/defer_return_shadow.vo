@@ -1,0 +1,123 @@
+// Test: defer modifying shadowed return values
+// Coverage: complex defer + named return + shadowing scenarios
+package main
+
+// Test 1: defer modifies named return
+func testDeferModifyReturn() (result int) {
+    result = 10
+    defer func() {
+        result = 20
+    }()
+    return result  // returns 20, not 10
+}
+
+// Test 2: defer with explicit return value
+func testDeferExplicitReturn() (result int) {
+    defer func() {
+        result += 100
+    }()
+    return 5  // result = 5, then defer adds 100, returns 105
+}
+
+// Test 3: multiple named returns
+func testMultiNamedReturn() (a, b int) {
+    defer func() {
+        a, b = b, a  // swap
+    }()
+    a, b = 1, 2
+    return  // bare return, defer swaps, returns (2, 1)
+}
+
+// Test 4: named return with shadow in defer
+func testDeferShadow() (result int) {
+    result = 10
+    defer func() {
+        result := 999  // shadows outer result
+        _ = result
+    }()
+    return result  // returns 10, shadow doesn't affect outer
+}
+
+// Test 5: chained defer modifications
+func testChainedDefer() (result int) {
+    defer func() { result *= 2 }()  // last: *2
+    defer func() { result += 10 }() // second: +10
+    defer func() { result = 5 }()   // first: =5
+    return 0  // 0 -> 5 -> 15 -> 30
+}
+
+// Test 6: defer with panic and named return
+func testDeferPanicReturn() (result int) {
+    defer func() {
+        if r := recover(); r != nil {
+            result = -1
+        }
+    }()
+    result = 100
+    panic("test")
+    return result
+}
+
+// Test 7: defer closure captures named return by reference
+func testDeferCaptureReturn() (result int) {
+    for i := 0; i < 3; i++ {
+        defer func() {
+            result += i  // captures i by ref, all see final i=3
+        }()
+    }
+    return 0  // 0 + 3 + 3 + 3 = 9
+}
+
+// Test 8: defer with captured variable vs named return
+func testDeferCaptureVsReturn() (result int) {
+    x := 10
+    defer func() {
+        result = x  // captures x
+    }()
+    x = 20
+    return 0  // result = x (20)
+}
+
+func main() {
+    println("Test 1: defer modify return")
+    r1 := testDeferModifyReturn()
+    assert(r1 == 20, "expected 20, got", r1)
+    println("PASSED")
+    
+    println("Test 2: defer explicit return")
+    r2 := testDeferExplicitReturn()
+    assert(r2 == 105, "expected 105, got", r2)
+    println("PASSED")
+    
+    println("Test 3: multi named return")
+    a3, b3 := testMultiNamedReturn()
+    assert(a3 == 2 && b3 == 1, "expected (2,1), got", a3, b3)
+    println("PASSED")
+    
+    println("Test 4: defer shadow")
+    r4 := testDeferShadow()
+    assert(r4 == 10, "expected 10, got", r4)
+    println("PASSED")
+    
+    println("Test 5: chained defer")
+    r5 := testChainedDefer()
+    assert(r5 == 30, "expected 30, got", r5)
+    println("PASSED")
+    
+    println("Test 6: defer panic return")
+    r6 := testDeferPanicReturn()
+    assert(r6 == -1, "expected -1, got", r6)
+    println("PASSED")
+    
+    println("Test 7: defer capture return")
+    r7 := testDeferCaptureReturn()
+    assert(r7 == 9, "expected 9, got", r7)
+    println("PASSED")
+    
+    println("Test 8: defer capture vs return")
+    r8 := testDeferCaptureVsReturn()
+    assert(r8 == 20, "expected 20, got", r8)
+    println("PASSED")
+    
+    println("defer_return_shadow: ALL PASSED")
+}

@@ -1,0 +1,155 @@
+// Test: slice aliasing and modification semantics
+// Coverage: slice share underlying array, append reallocation
+package main
+
+// Test 1: slices share underlying array
+func testSliceAliasing() {
+    arr := [5]int{1, 2, 3, 4, 5}
+    s1 := arr[1:4]  // [2, 3, 4]
+    s2 := arr[2:5]  // [3, 4, 5]
+    
+    // s1 and s2 share elements
+    s1[1] = 999  // arr[2] = 999
+    assert(s2[0] == 999, "s2[0] should be 999")
+    assert(arr[2] == 999, "arr[2] should be 999")
+}
+
+// Test 2: append may reallocate
+func testAppendRealloc() {
+    s1 := make([]int, 2, 2)  // len=2, cap=2
+    s1[0], s1[1] = 1, 2
+    
+    s2 := s1  // same underlying array
+    
+    // Append to s1 causes reallocation (cap exceeded)
+    s1 = append(s1, 3)
+    s1[0] = 100  // modifies new array
+    
+    assert(s2[0] == 1, "s2[0] should still be 1 (not reallocated)")
+    assert(s1[0] == 100, "s1[0] should be 100")
+}
+
+// Test 3: append within capacity shares array
+func testAppendWithinCap() {
+    s1 := make([]int, 2, 5)  // len=2, cap=5
+    s1[0], s1[1] = 1, 2
+    
+    s2 := s1[:2]  // same underlying array
+    
+    // Append within capacity - no reallocation
+    s1 = append(s1, 3)
+    s1[0] = 100
+    
+    // s2 still sees old data because len(s2) is still 2
+    // but underlying array changed
+    assert(s2[0] == 100, "s2[0] should be 100 (shared array)")
+}
+
+// Test 4: reslice extends into capacity
+func testResliceExtend() {
+    s := make([]int, 2, 5)
+    s[0], s[1] = 1, 2
+    
+    // Can extend slice up to capacity
+    s2 := s[:4]  // len=4, accessing uninitialized slots
+    assert(len(s2) == 4, "len should be 4")
+    assert(s2[2] == 0, "s2[2] should be zero")
+    
+    s2[2] = 100
+    
+    // Original s can also extend and see the change
+    s3 := s[:3]
+    assert(s3[2] == 100, "s3[2] should be 100")
+}
+
+// Test 5: nil slice behavior
+func testNilSlice() {
+    var s []int
+    
+    assert(s == nil, "should be nil")
+    assert(len(s) == 0, "len should be 0")
+    assert(cap(s) == 0, "cap should be 0")
+    
+    // Append to nil slice works
+    s = append(s, 1, 2, 3)
+    assert(len(s) == 3, "len should be 3")
+    assert(s[0] == 1, "s[0] should be 1")
+}
+
+// Test 6: empty vs nil slice
+func testEmptyVsNil() {
+    var nilSlice []int
+    emptySlice := []int{}
+    makeSlice := make([]int, 0)
+    
+    assert(nilSlice == nil, "nilSlice should be nil")
+    assert(emptySlice != nil, "emptySlice should not be nil")
+    assert(makeSlice != nil, "makeSlice should not be nil")
+    
+    // All have len 0
+    assert(len(nilSlice) == 0, "nilSlice len")
+    assert(len(emptySlice) == 0, "emptySlice len")
+    assert(len(makeSlice) == 0, "makeSlice len")
+}
+
+// Test 7: copy with overlapping slices
+func testCopyOverlap() {
+    s := []int{1, 2, 3, 4, 5}
+    
+    // Copy overlapping (forward)
+    copy(s[1:], s[:4])  // s becomes [1, 1, 2, 3, 4]
+    assert(s[0] == 1, "s[0]")
+    assert(s[1] == 1, "s[1]")
+    assert(s[2] == 2, "s[2]")
+    assert(s[3] == 3, "s[3]")
+    assert(s[4] == 4, "s[4]")
+}
+
+// Test 8: three-index slice controls capacity
+func testThreeIndexSlice() {
+    arr := [10]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    
+    s := arr[2:5:7]  // len=3, cap=5
+    assert(len(s) == 3, "len should be 3")
+    assert(cap(s) == 5, "cap should be 5")
+    
+    // Cannot reslice beyond the third index
+    s2 := s[:5]  // max reslice
+    assert(len(s2) == 5, "s2 len should be 5")
+}
+
+func main() {
+    println("Test 1: slice aliasing")
+    testSliceAliasing()
+    println("PASSED")
+    
+    println("Test 2: append realloc")
+    testAppendRealloc()
+    println("PASSED")
+    
+    println("Test 3: append within cap")
+    testAppendWithinCap()
+    println("PASSED")
+    
+    println("Test 4: reslice extend")
+    testResliceExtend()
+    println("PASSED")
+    
+    println("Test 5: nil slice")
+    testNilSlice()
+    println("PASSED")
+    
+    println("Test 6: empty vs nil")
+    testEmptyVsNil()
+    println("PASSED")
+    
+    println("Test 7: copy overlap")
+    testCopyOverlap()
+    println("PASSED")
+    
+    println("Test 8: three-index slice")
+    testThreeIndexSlice()
+    println("PASSED")
+    
+    println("slice_aliasing: ALL PASSED")
+}

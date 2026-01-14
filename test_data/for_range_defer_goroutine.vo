@@ -1,0 +1,120 @@
+// Test: for-range + defer + goroutine interaction
+// Coverage: complex interaction between iteration, deferred calls, and concurrency
+package main
+
+var trace []int
+
+func reset() {
+    trace = []int{}
+}
+
+// Test 1: defer inside for-range with goroutine (using channel for sync)
+func testDeferInRangeGoroutine() {
+    results := make(chan int, 10)
+    done := make(chan bool, 3)
+    
+    for i := 0; i < 3; i++ {
+        i := i  // capture
+        go func() {
+            defer func() { done <- true }()
+            defer func() { results <- i * 10 }()
+            results <- i
+        }()
+    }
+    
+    // Wait for all goroutines
+    for j := 0; j < 3; j++ {
+        <-done
+    }
+    close(results)
+    
+    sum := 0
+    for v := range results {
+        sum += v
+    }
+    // Each goroutine sends i and i*10
+    // i=0: 0, 0; i=1: 1, 10; i=2: 2, 20
+    // Total: 0 + 0 + 1 + 10 + 2 + 20 = 33
+    assert(sum == 33, "sum should be 33, got", sum)
+}
+
+// Test 2: range over channel with defer
+func testRangeChannelDefer() {
+    ch := make(chan int, 3)
+    ch <- 1
+    ch <- 2
+    ch <- 3
+    close(ch)
+    
+    sum := 0
+    func() {
+        for v := range ch {
+            v := v
+            defer func() { sum += v * 10 }()
+            sum += v
+        }
+    }()
+    // During iteration: sum = 1 + 2 + 3 = 6
+    // After function returns, defers run LIFO: 30, 20, 10
+    // Final: 6 + 30 + 20 + 10 = 66
+    assert(sum == 66, "sum should be 66, got", sum)
+}
+
+// Test 3: nested range with defer in inner
+func testNestedRangeDefer() {
+    outer := []int{1, 2}
+    inner := []int{10, 20}
+    
+    sum := 0
+    func() {
+        for _, o := range outer {
+            o := o
+            for _, i := range inner {
+                i := i
+                defer func() { sum += o * i }()
+            }
+        }
+    }()
+    // Defers registered: (o=1,i=10), (o=1,i=20), (o=2,i=10), (o=2,i=20)
+    // LIFO execution: 2*20=40, 2*10=20, 1*20=20, 1*10=10
+    // Total: 40 + 20 + 20 + 10 = 90
+    assert(sum == 90, "sum should be 90, got", sum)
+}
+
+// Test 4: range with index, defer uses index
+func testRangeIndexDefer() {
+    arr := []string{"a", "b", "c"}
+    
+    var indices []int
+    func() {
+        for idx := range arr {
+            idx := idx
+            defer func() { indices = append(indices, idx) }()
+        }
+    }()
+    // LIFO: 2, 1, 0
+    assert(len(indices) == 3, "should have 3 indices")
+    assert(indices[0] == 2, "first should be 2")
+    assert(indices[1] == 1, "second should be 1")
+    assert(indices[2] == 0, "third should be 0")
+}
+
+func main() {
+    println("Test 1: defer in range goroutine")
+    testDeferInRangeGoroutine()
+    println("PASSED")
+    
+    println("Test 2: range channel with defer")
+    testRangeChannelDefer()
+    println("PASSED")
+    
+    println("Test 3: nested range with defer")
+    testNestedRangeDefer()
+    println("PASSED")
+    
+    println("Test 4: range index with defer")
+    testRangeIndexDefer()
+    println("PASSED")
+    
+    println("for_range_defer_goroutine: ALL PASSED")
+}

@@ -1,0 +1,101 @@
+// Test: select combined with type switch
+// Coverage: complex control flow - select cases with type switch
+package main
+
+func testSelectWithTypeSwitch() string {
+    ch := make(chan interface{}, 3)
+    ch <- 42
+    ch <- "hello"
+    ch <- 3.14
+    
+    result := ""
+    for i := 0; i < 4; i++ {
+        select {
+        case v := <-ch:
+            // Type switch inside select case
+            switch t := v.(type) {
+            case int:
+                result += "I"
+            case string:
+                result += "S" + t[:1]
+            case float64:
+                if t > 3.0 {
+                    result += "F"
+                }
+            default:
+                result += "?"
+            }
+        default:
+            result += "D"
+        }
+    }
+    return result
+}
+
+func testSelectSendTypeSwitch() int {
+    ch := make(chan int, 1)
+    var val interface{} = 100
+    
+    // Type switch determines what to send
+    switch v := val.(type) {
+    case int:
+        select {
+        case ch <- v:
+            return <-ch
+        default:
+            return -1
+        }
+    case string:
+        return len(v)
+    }
+    return 0
+}
+
+// Test: nested select with type assertions
+func testNestedSelectTypeAssert() string {
+    ch1 := make(chan interface{}, 1)
+    ch2 := make(chan interface{}, 1)
+    ch1 <- "outer"
+    ch2 <- 999
+    
+    result := ""
+    select {
+    case v1 := <-ch1:
+        if s, ok := v1.(string); ok {
+            result += s
+            select {
+            case v2 := <-ch2:
+                if n, ok := v2.(int); ok {
+                    if n > 100 {
+                        result += "-big"
+                    }
+                }
+            default:
+                result += "-nodata"
+            }
+        }
+    default:
+        result = "empty"
+    }
+    return result
+}
+
+func main() {
+    println("Test 1: select with type switch")
+    r1 := testSelectWithTypeSwitch()
+    // Should be: I (42), Sh (hello[0]='h'), F (3.14>3), D (empty)
+    assert(r1 == "IShFD", "expected IShFD, got", r1)
+    println("PASSED")
+    
+    println("Test 2: select send with type switch")
+    r2 := testSelectSendTypeSwitch()
+    assert(r2 == 100, "expected 100, got", r2)
+    println("PASSED")
+    
+    println("Test 3: nested select with type assertions")
+    r3 := testNestedSelectTypeAssert()
+    assert(r3 == "outer-big", "expected outer-big, got", r3)
+    println("PASSED")
+    
+    println("select_type_switch_combo: ALL PASSED")
+}

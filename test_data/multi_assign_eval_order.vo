@@ -1,0 +1,135 @@
+// Test: multiple assignment evaluation order
+// Go spec: LHS evaluated left-to-right, then RHS left-to-right, then assignments
+package main
+
+var evalOrder []string
+
+func reset() {
+    evalOrder = []string{}
+}
+
+func log(s string) {
+    evalOrder = append(evalOrder, s)
+}
+
+func getIndex(name string, idx int) int {
+    log("idx-" + name)
+    return idx
+}
+
+func getValue(name string, val int) int {
+    log("val-" + name)
+    return val
+}
+
+// Test 1: array index evaluation order
+func testArrayIndexOrder() {
+    reset()
+    arr := [3]int{10, 20, 30}
+    
+    // Both indices evaluated before values
+    arr[getIndex("a", 0)], arr[getIndex("b", 1)] = getValue("x", 100), getValue("y", 200)
+    
+    // Print actual order
+    println("Actual order:", evalOrder)
+    assert(len(evalOrder) == 4, "should have 4 evals")
+    // Go spec: LHS evaluated left-to-right, then RHS left-to-right
+    // Expected order: idx-a, idx-b, val-x, val-y
+    assert(evalOrder[0] == "idx-a", "first: idx-a, got", evalOrder[0])
+    assert(evalOrder[1] == "idx-b", "second: idx-b, got", evalOrder[1])
+    assert(evalOrder[2] == "val-x", "third: val-x, got", evalOrder[2])
+    assert(evalOrder[3] == "val-y", "fourth: val-y, got", evalOrder[3])
+    assert(arr[0] == 100, "arr[0] should be 100")
+    assert(arr[1] == 200, "arr[1] should be 200")
+}
+
+// Test 2: map key evaluation order
+func testMapKeyOrder() {
+    reset()
+    m := make(map[int]int)
+    
+    m[getIndex("k1", 1)], m[getIndex("k2", 2)] = getValue("v1", 10), getValue("v2", 20)
+    
+    // Expected: k1, k2, v1, v2
+    assert(len(evalOrder) == 4, "should have 4 evals")
+    assert(evalOrder[0] == "idx-k1", "first: idx-k1")
+    assert(evalOrder[1] == "idx-k2", "second: idx-k2")
+    assert(m[1] == 10, "m[1] should be 10")
+    assert(m[2] == 20, "m[2] should be 20")
+}
+
+// Test 3: pointer dereference in multi-assign
+type Point struct {
+    x, y int
+}
+
+func getPtr(name string, p *Point) *Point {
+    log("ptr-" + name)
+    return p
+}
+
+func testPointerMultiAssign() {
+    reset()
+    p1 := &Point{x: 1, y: 2}
+    p2 := &Point{x: 3, y: 4}
+    
+    getPtr("a", p1).x, getPtr("b", p2).y = getValue("x", 100), getValue("y", 200)
+    
+    // Expected: ptr-a, ptr-b, val-x, val-y
+    assert(len(evalOrder) == 4, "should have 4 evals, got", len(evalOrder))
+    assert(p1.x == 100, "p1.x should be 100")
+    assert(p2.y == 200, "p2.y should be 200")
+}
+
+// Test 4: swap idiom
+func testSwapIdiom() {
+    a, b := 1, 2
+    a, b = b, a
+    assert(a == 2, "a should be 2")
+    assert(b == 1, "b should be 1")
+    
+    // Triple rotate
+    x, y, z := 1, 2, 3
+    x, y, z = y, z, x
+    assert(x == 2, "x should be 2")
+    assert(y == 3, "y should be 3")
+    assert(z == 1, "z should be 1")
+}
+
+// Test 5: self-referencing array swap
+func testArraySelfSwap() {
+    arr := []int{0, 1, 2, 3, 4}
+    i := 1
+    
+    // Swap arr[i] and arr[arr[i]]
+    // arr[1]=1, arr[arr[1]]=arr[1]=1
+    // After: arr[1], arr[1] = arr[1], arr[1] (no change expected)
+    arr[i], arr[arr[i]] = arr[arr[i]], arr[i]
+    
+    // Both refer to arr[1], so effectively arr[1], arr[1] = 1, 1
+    assert(arr[1] == 1, "arr[1] should still be 1")
+}
+
+func main() {
+    println("Test 1: array index eval order")
+    testArrayIndexOrder()
+    println("PASSED")
+    
+    println("Test 2: map key eval order")
+    testMapKeyOrder()
+    println("PASSED")
+    
+    println("Test 3: pointer multi-assign")
+    testPointerMultiAssign()
+    println("PASSED")
+    
+    println("Test 4: swap idiom")
+    testSwapIdiom()
+    println("PASSED")
+    
+    println("Test 5: array self-swap")
+    testArraySelfSwap()
+    println("PASSED")
+    
+    println("multi_assign_eval_order: ALL PASSED")
+}

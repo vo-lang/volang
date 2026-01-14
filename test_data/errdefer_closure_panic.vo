@@ -1,0 +1,131 @@
+// Test: errdefer + closure capture + panic interaction
+// Coverage: complex error handling scenarios
+package main
+
+import "errors"
+
+var trace []string
+
+func reset() {
+    trace = []string{}
+}
+
+func log(s string) {
+    trace = append(trace, s)
+}
+
+// Test 1: errdefer captures variable, triggered by fail
+func innerWithErrdefer(shouldFail bool) (int, error) {
+    x := 10
+    errdefer log("errdefer-x=" + str(x))
+    
+    if shouldFail {
+        x = 20
+        fail errors.New("failed")  // fail triggers errdefer
+    }
+    x = 30
+    return x, nil
+}
+
+func testErrdeferCapture() {
+    reset()
+    _, err := innerWithErrdefer(true)
+    assert(err != nil, "should have error")
+    assert(len(trace) == 1, "should have 1 trace")
+    // Note: errdefer argument is evaluated at registration time (x=10), not at fail time
+    // This is correct defer semantics - arguments are evaluated when defer is registered
+    assert(trace[0] == "errdefer-x=10", "errdefer captures x=10 at registration, got", trace[0])
+}
+
+// Test 2: errdefer + defer ordering
+func mixedDefers() (int, error) {
+    defer log("defer1")
+    errdefer log("errdefer1")
+    defer log("defer2")
+    errdefer log("errdefer2")
+    fail errors.New("fail")
+}
+
+func testMixedDeferOrder() {
+    reset()
+    _, _ = mixedDefers()
+    println("Actual trace:", trace)
+    // According to Vo semantics, all defers (both regular and errdefer) run in LIFO order
+    // Registration order: defer1, errdefer1, defer2, errdefer2
+    // LIFO execution: errdefer2, defer2, errdefer1, defer1
+    assert(len(trace) == 4, "should have 4 traces, got", len(trace))
+    assert(trace[0] == "errdefer2", "first should be errdefer2, got", trace[0])
+    assert(trace[1] == "defer2", "second should be defer2, got", trace[1])
+    assert(trace[2] == "errdefer1", "third should be errdefer1, got", trace[2])
+    assert(trace[3] == "defer1", "fourth should be defer1, got", trace[3])
+}
+
+// Test 3: errdefer does NOT run on success
+func noErrorPath() (int, error) {
+    errdefer log("errdefer-should-not-run")
+    defer log("defer-should-run")
+    return 42, nil
+}
+
+func testErrdeferSkippedOnSuccess() {
+    reset()
+    r, err := noErrorPath()
+    assert(err == nil, "should have no error")
+    assert(r == 42, "should return 42")
+    assert(len(trace) == 1, "should have 1 trace")
+    assert(trace[0] == "defer-should-run", "only defer should run")
+}
+
+// Test 4: nested function with errdefer
+func outer() (int, error) {
+    defer log("outer-defer")
+    errdefer log("outer-errdefer")
+    
+    r := inner()?  // ? propagates error and triggers errdefer
+    return r, nil
+}
+
+func inner() (int, error) {
+    defer log("inner-defer")
+    errdefer log("inner-errdefer")
+    fail errors.New("inner-fail")
+}
+
+func testNestedErrdefer() {
+    reset()
+    _, _ = outer()
+    // inner: errdefer, defer (inner returns error)
+    // outer: errdefer, defer (outer returns error from inner)
+    assert(len(trace) == 4, "should have 4 traces, got", len(trace))
+}
+
+func str(n int) string {
+    if n == 10 {
+        return "10"
+    } else if n == 20 {
+        return "20"
+    } else if n == 30 {
+        return "30"
+    }
+    return "?"
+}
+
+func main() {
+    println("Test 1: errdefer captures variable value")
+    testErrdeferCapture()
+    println("PASSED")
+    
+    println("Test 2: mixed defer/errdefer ordering")
+    testMixedDeferOrder()
+    println("PASSED")
+    
+    println("Test 3: errdefer skipped on success")
+    testErrdeferSkippedOnSuccess()
+    println("PASSED")
+    
+    println("Test 4: nested errdefer")
+    testNestedErrdefer()
+    println("PASSED")
+    
+    println("errdefer_closure_panic: ALL PASSED")
+}
