@@ -1,0 +1,120 @@
+package main
+
+import (
+    "dyn"
+    "encoding/toml"
+)
+
+func main() {
+    testParseSimple()
+    testParseTable()
+    testParseArray()
+    testParseNested()
+    testStringify()
+    testArrayOfTables()
+    println("All TOML tests passed!")
+}
+
+func testParseSimple() {
+    input := "title = \"TOML Example\"\ncount = 42\npi = 3.14\nenabled = true\n"
+    obj, err := toml.ParseString(input)
+    assert(err == nil, "parse simple error")
+    assert(obj["title"].(string) == "TOML Example", "title")
+    assert(obj["count"].(int) == 42, "count")
+    assert(obj["enabled"].(bool) == true, "enabled")
+    
+    // Float comparison
+    pi := obj["pi"].(float64)
+    assert(pi > 3.13 && pi < 3.15, "pi")
+    
+    println("  testParseSimple passed")
+}
+
+func testParseTable() {
+    input := "[server]\nhost = \"localhost\"\nport = 8080\n\n[database]\nname = \"mydb\"\n"
+    obj, err := toml.ParseString(input)
+    assert(err == nil, "parse table error")
+    
+    server := obj["server"].(dyn.MapObject)
+    assert(server["host"].(string) == "localhost", "server.host")
+    assert(server["port"].(int) == 8080, "server.port")
+    
+    db := obj["database"].(dyn.MapObject)
+    assert(db["name"].(string) == "mydb", "database.name")
+    
+    println("  testParseTable passed")
+}
+
+func testParseArray() {
+    input := "numbers = [1, 2, 3]\nnames = [\"alice\", \"bob\"]\nmixed = [1, \"two\", true]\n"
+    obj, err := toml.ParseString(input)
+    assert(err == nil, "parse array error")
+    
+    numbers := obj["numbers"].(dyn.SliceObject)
+    assert(len(numbers) == 3, "numbers len")
+    assert(numbers[0].(int) == 1, "numbers[0]")
+    
+    names := obj["names"].(dyn.SliceObject)
+    assert(len(names) == 2, "names len")
+    assert(names[0].(string) == "alice", "names[0]")
+    
+    println("  testParseArray passed")
+}
+
+func testParseNested() {
+    input := "[server.http]\nport = 80\n\n[server.https]\nport = 443\n"
+    obj, err := toml.ParseString(input)
+    assert(err == nil, "parse nested error")
+    
+    server := obj["server"].(dyn.MapObject)
+    http := server["http"].(dyn.MapObject)
+    assert(http["port"].(int) == 80, "http port")
+    
+    https := server["https"].(dyn.MapObject)
+    assert(https["port"].(int) == 443, "https port")
+    
+    println("  testParseNested passed")
+}
+
+func testStringify() {
+    obj := make(dyn.MapObject)
+    obj["name"] = "test"
+    obj["count"] = 100
+    obj["enabled"] = true
+    
+    data, err := toml.Stringify(obj)
+    assert(err == nil, "stringify error")
+    
+    // Re-parse to verify
+    parsed, err := toml.Parse(data)
+    assert(err == nil, "reparse error")
+    assert(parsed["name"].(string) == "test", "stringify name")
+    assert(parsed["count"].(int) == 100, "stringify count")
+    assert(parsed["enabled"].(bool) == true, "stringify enabled")
+    
+    println("  testStringify passed")
+}
+
+func testArrayOfTables() {
+    input := "[[products]]\nname = \"Hammer\"\nprice = 9.99\n\n[[products]]\nname = \"Nail\"\nprice = 0.05\n"
+    obj, err := toml.ParseString(input)
+    assert(err == nil, "parse array of tables error")
+    
+    products := obj["products"].(dyn.SliceObject)
+    assert(len(products) == 2, "products len")
+    
+    p1 := products[0].(dyn.MapObject)
+    assert(p1["name"].(string) == "Hammer", "product 1 name")
+    
+    p2 := products[1].(dyn.MapObject)
+    assert(p2["name"].(string) == "Nail", "product 2 name")
+    
+    println("  testArrayOfTables passed")
+}
+
+func assert(cond bool, msg string) {
+    if !cond {
+        println("ASSERT FAILED:", msg)
+        panic("assertion failed: " + msg)
+    }
+}

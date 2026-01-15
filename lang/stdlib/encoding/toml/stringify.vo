@@ -1,0 +1,318 @@
+package toml
+
+import (
+    "dyn"
+    "errors"
+    "strconv"
+)
+
+// Stringify serializes a value to TOML bytes.
+func Stringify(v any) ([]byte, error) {
+    obj, ok := v.(dyn.MapObject)
+    if !ok {
+        if m, ok := v.(map[string]any); ok {
+            obj = dyn.MapObject(m)
+        } else {
+            return nil, errors.Wrap(ErrMarshal, "TOML root must be a table")
+        }
+    }
+    buf := make([]byte, 0, 256)
+    buf, err := writeTable(buf, obj, "")
+    if err != nil {
+        return nil, err
+    }
+    return buf, nil
+}
+
+func writeTable(buf []byte, obj dyn.MapObject, prefix string) ([]byte, error) {
+    // Collect keys by category in one pass
+    var simpleKeys, inlineKeys, nestedKeys, arrayTableKeys []string
+    for k, v := range obj {
+        c := classifyValue(v)
+        if c == valueSimple {
+            simpleKeys = append(simpleKeys, k)
+        } else if c == valueInlineTable {
+            inlineKeys = append(inlineKeys, k)
+        } else if c == valueNestedTable {
+            nestedKeys = append(nestedKeys, k)
+        } else if c == valueArrayOfTables {
+            arrayTableKeys = append(arrayTableKeys, k)
+        }
+    }
+
+    // Write simple key-value pairs
+    for _, k := range simpleKeys {
+        buf = writeKey(buf, k)
+        buf = append(buf, " = "...)
+        var err error
+        buf, err = writeValue(buf, obj[k])
+        if err != nil {
+            return nil, err
+        }
+        buf = append(buf, '\n')
+    }
+
+    // Write inline tables
+    for _, k := range inlineKeys {
+        buf = writeKey(buf, k)
+        buf = append(buf, " = "...)
+        var err error
+        buf, err = writeValue(buf, obj[k])
+        if err != nil {
+            return nil, err
+        }
+        buf = append(buf, '\n')
+    }
+
+    // Write nested tables
+    for _, k := range nestedKeys {
+        tableName := k
+        if prefix != "" {
+            tableName = prefix + "." + k
+        }
+        table := asMapObject(obj[k])
+        buf = append(buf, '\n', '[')
+        buf = append(buf, tableName...)
+        buf = append(buf, ']', '\n')
+        var err error
+        buf, err = writeTable(buf, table, tableName)
+        if err != nil {
+            return nil, err
+        }
+    }
+
+    // Write arrays of tables
+    for _, k := range arrayTableKeys {
+        tableName := k
+        if prefix != "" {
+            tableName = prefix + "." + k
+        }
+        arr := asSliceObject(obj[k])
+        for i := 0; i < len(arr); i++ {
+            table := asMapObject(arr[i])
+            buf = append(buf, '\n', '[', '[')
+            buf = append(buf, tableName...)
+            buf = append(buf, ']', ']', '\n')
+            var err error
+            buf, err = writeTable(buf, table, tableName)
+            if err != nil {
+                return nil, err
+            }
+        }
+    }
+
+    return buf, nil
+}
+
+func writeKey(buf []byte, key string) []byte {
+    // Check if key needs quoting
+    needsQuote := false
+    if len(key) == 0 {
+        needsQuote = true
+    } else {
+        for i := 0; i < len(key); i++ {
+            c := key[i]
+            if !isKeyChar(c) {
+                needsQuote = true
+                break
+            }
+        }
+    }
+
+    if needsQuote {
+        buf = append(buf, '"')
+        buf = writeStringContent(buf, key)
+        buf = append(buf, '"')
+    } else {
+        buf = append(buf, key...)
+    }
+    return buf
+}
+
+func writeValue(buf []byte, v any) ([]byte, error) {
+    if v == nil {
+        return nil, errors.Wrap(ErrMarshal, "TOML does not support null values")
+    }
+
+    switch val := v.(type) {
+    case string:
+        buf = append(buf, '"')
+        buf = writeStringContent(buf, val)
+        buf = append(buf, '"')
+        return buf, nil
+    case int:
+        return strconv.AppendInt(buf, val, 10), nil
+    case int64:
+        return strconv.AppendInt(buf, int(val), 10), nil
+    case float64:
+        return append(buf, strconv.FormatFloat(val, 'g', -1, 64)...), nil
+    case bool:
+        return strconv.AppendBool(buf, val), nil
+    case dyn.SliceObject:
+        return writeArray(buf, val)
+    case []any:
+        return writeArray(buf, dyn.SliceObject(val))
+    case dyn.MapObject:
+        return writeInlineTable(buf, val)
+    case map[string]any:
+        return writeInlineTable(buf, dyn.MapObject(val))
+    default:
+        return nil, errors.Wrap(ErrMarshal, "unsupported type for TOML serialization")
+    }
+}
+
+func writeStringContent(buf []byte, s string) []byte {
+    for i := 0; i < len(s); i++ {
+        c := s[i]
+        switch c {
+        case '"':
+            buf = append(buf, '\\', '"')
+        case '\\':
+            buf = append(buf, '\\', '\\')
+        case '\b':
+            buf = append(buf, '\\', 'b')
+        case '\t':
+            buf = append(buf, '\\', 't')
+        case '\n':
+            buf = append(buf, '\\', 'n')
+        case '\f':
+            buf = append(buf, '\\', 'f')
+        case '\r':
+            buf = append(buf, '\\', 'r')
+        default:
+            if c < 0x20 {
+                buf = append(buf, '\\', 'u', '0', '0')
+                buf = append(buf, hexDigit(c>>4), hexDigit(c&0xF))
+            } else {
+                buf = append(buf, c)
+            }
+        }
+    }
+    return buf
+}
+
+func hexDigit(n byte) byte {
+    if n < 10 {
+        return '0' + n
+    }
+    return 'a' + n - 10
+}
+
+func writeArray(buf []byte, arr dyn.SliceObject) ([]byte, error) {
+    buf = append(buf, '[')
+    for i := 0; i < len(arr); i++ {
+        if i > 0 {
+            buf = append(buf, ", "...)
+        }
+        var err error
+        buf, err = writeValue(buf, arr[i])
+        if err != nil {
+            return nil, err
+        }
+    }
+    buf = append(buf, ']')
+    return buf, nil
+}
+
+func writeInlineTable(buf []byte, obj dyn.MapObject) ([]byte, error) {
+    buf = append(buf, '{')
+    first := true
+    for k, v := range obj {
+        if !first {
+            buf = append(buf, ", "...)
+        }
+        first = false
+        buf = writeKey(buf, k)
+        buf = append(buf, " = "...)
+        var err error
+        buf, err = writeValue(buf, v)
+        if err != nil {
+            return nil, err
+        }
+    }
+    buf = append(buf, '}')
+    return buf, nil
+}
+
+const (
+    valueSimple       = 0
+    valueInlineTable  = 1
+    valueNestedTable  = 2
+    valueArrayOfTables = 3
+)
+
+func classifyValue(v any) int {
+    switch val := v.(type) {
+    case string, int, int64, float64, bool:
+        return valueSimple
+    case dyn.SliceObject:
+        if isArrayOfTables(val) {
+            return valueArrayOfTables
+        }
+        return valueSimple
+    case []any:
+        if isArrayOfTables(dyn.SliceObject(val)) {
+            return valueArrayOfTables
+        }
+        return valueSimple
+    case dyn.MapObject:
+        if isSmallTable(val) {
+            return valueInlineTable
+        }
+        return valueNestedTable
+    case map[string]any:
+        if isSmallTable(dyn.MapObject(val)) {
+            return valueInlineTable
+        }
+        return valueNestedTable
+    default:
+        return valueSimple
+    }
+}
+
+func isSmallTable(obj dyn.MapObject) bool {
+    if len(obj) > 3 {
+        return false
+    }
+    for _, v := range obj {
+        switch v.(type) {
+        case string, int, int64, float64, bool:
+            continue
+        default:
+            return false
+        }
+    }
+    return true
+}
+
+func isArrayOfTables(arr dyn.SliceObject) bool {
+    if len(arr) == 0 {
+        return false
+    }
+    switch arr[0].(type) {
+    case dyn.MapObject, map[string]any:
+        return true
+    default:
+        return false
+    }
+}
+
+func asMapObject(v any) dyn.MapObject {
+    if m, ok := v.(dyn.MapObject); ok {
+        return m
+    }
+    if m, ok := v.(map[string]any); ok {
+        return dyn.MapObject(m)
+    }
+    return nil
+}
+
+func asSliceObject(v any) dyn.SliceObject {
+    if s, ok := v.(dyn.SliceObject); ok {
+        return s
+    }
+    if s, ok := v.([]any); ok {
+        return dyn.SliceObject(s)
+    }
+    return nil
+}

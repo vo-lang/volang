@@ -2111,6 +2111,63 @@ fn bind_recv_variables(
     }
 }
 
+/// Returns the single concrete type if exactly one exists, None otherwise.
+fn get_single_concrete_type(types: &[Option<vo_syntax::ast::TypeExpr>]) -> Option<&vo_syntax::ast::TypeExpr> {
+    let mut iter = types.iter().filter_map(|t| t.as_ref());
+    let first = iter.next()?;
+    if iter.next().is_some() {
+        None // More than one concrete type
+    } else {
+        Some(first)
+    }
+}
+
+/// Emit binding for type switch case variable.
+/// - `single_type`: Some(type_key) for single-type case (extract via IfaceAssert)
+/// - `single_type`: None for multi-type case (keep interface type)
+fn emit_type_switch_binding(
+    name: vo_common::Symbol,
+    single_type: Option<TypeKey>,
+    case_span: vo_common::span::Span,
+    iface_slot: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    let type_key = single_type.unwrap_or_else(|| info.any_type());
+    let slots = info.type_slot_count(type_key);
+    let slot_types = info.type_slot_types(type_key);
+    
+    let case_var_obj = info.get_implicit(case_span);
+    let needs_boxing = case_var_obj
+        .map(|obj| info.needs_boxing(obj, type_key))
+        .unwrap_or(false);
+    
+    // Emit value extraction to temp or directly to var slot
+    let value_slot = if needs_boxing {
+        func.alloc_temp_typed(&slot_types)
+    } else {
+        func.define_local_stack(name, slots, &slot_types)
+    };
+    
+    if single_type.is_some() {
+        let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
+        let flags = assert_kind | ((slots as u8) << 3);
+        func.emit_with_flags(Opcode::IfaceAssert, flags, value_slot, iface_slot, target_id as u16);
+    } else {
+        func.emit_copy(value_slot, iface_slot, slots);
+    }
+    
+    // Box if captured by closure
+    if needs_boxing {
+        let gcref_slot = func.define_local_heap_boxed(name, slots);
+        let meta_idx = ctx.get_or_create_value_meta(type_key, info);
+        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
+        func.emit_ptr_set(gcref_slot, 0, value_slot, slots);
+    }
+}
 
 /// Compile type switch statement
 /// Uses IfaceAssert instruction for type checking and value extraction.
@@ -2207,15 +2264,12 @@ fn compile_type_switch(
     }
     
     // Jump to default or end if no case matched
-    let no_match_jump = if let Some(default_idx) = default_case_idx {
-        Some((default_idx, func.emit_jump(Opcode::Jump, 0)))
-    } else {
-        Some((usize::MAX, func.emit_jump(Opcode::Jump, 0)))
-    };
+    let no_match_target = default_case_idx.unwrap_or(usize::MAX);
+    let no_match_jump_pc = func.emit_jump(Opcode::Jump, 0);
     
     // Compile case bodies
     let mut case_body_starts: Vec<usize> = Vec::new();
-    for (case_idx, case) in type_switch.cases.iter().enumerate() {
+    for case in type_switch.cases.iter() {
         case_body_starts.push(func.current_pc());
         
         // Enter scope for case-local variables (Go semantics: each case has its own scope)
@@ -2224,38 +2278,12 @@ fn compile_type_switch(
         // If assign variable is specified, bind it to the asserted value
         if let Some(assign_name) = &type_switch.assign {
             if !case.types.is_empty() {
-                if let Some(Some(type_expr)) = case.types.first() {
-                    let type_key = info.type_expr_type(type_expr.id);
-                    let slots = info.type_slot_count(type_key);
-                    let slot_types = info.type_slot_types(type_key);
-                    
-                    // Check if case variable is escaped (captured by closure)
-                    let case_var_obj = info.get_implicit(case.span);
-                    let needs_boxing = case_var_obj
-                        .map(|obj| info.needs_boxing(obj, type_key))
-                        .unwrap_or(false);
-                    
-                    // Common: compute IfaceAssert params and emit to extract value
-                    let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
-                    let flags = assert_kind | ((slots as u8) << 3);
-                    
-                    if needs_boxing {
-                        // Variable captured by closure - extract to temp, then box
-                        let temp_slot = func.alloc_temp_typed(&slot_types);
-                        func.emit_with_flags(Opcode::IfaceAssert, flags, temp_slot, iface_slot, target_id as u16);
-                        
-                        let gcref_slot = func.define_local_heap_boxed(assign_name.symbol, slots);
-                        let meta_idx = ctx.get_or_create_value_meta(type_key, info);
-                        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                        func.emit_with_flags(Opcode::PtrNew, slots as u8, gcref_slot, meta_reg, 0);
-                        func.emit_ptr_set(gcref_slot, 0, temp_slot, slots);
-                    } else {
-                        // Variable stays on stack - extract directly
-                        let var_slot = func.define_local_stack(assign_name.symbol, slots, &slot_types);
-                        func.emit_with_flags(Opcode::IfaceAssert, flags, var_slot, iface_slot, target_id as u16);
-                    }
-                }
+                let single_type = get_single_concrete_type(&case.types)
+                    .map(|te| info.type_expr_type(te.id));
+                emit_type_switch_binding(
+                    assign_name.symbol, single_type, case.span, iface_slot,
+                    ctx, func, info,
+                );
             }
         }
         
@@ -2281,13 +2309,12 @@ fn compile_type_switch(
     }
     
     // Patch no match jump
-    if let Some((idx, jump_pc)) = no_match_jump {
-        if idx < case_body_starts.len() {
-            func.patch_jump(jump_pc, case_body_starts[idx]);
-        } else {
-            func.patch_jump(jump_pc, end_pc);
-        }
-    }
+    let no_match_pc = if no_match_target < case_body_starts.len() {
+        case_body_starts[no_match_target]
+    } else {
+        end_pc
+    };
+    func.patch_jump(no_match_jump_pc, no_match_pc);
     
     // Exit breakable context and get break patches
     let break_patches = func.exit_breakable();
