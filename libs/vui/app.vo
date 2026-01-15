@@ -1,4 +1,4 @@
-package vegui
+package vui
 
 // =============================================================================
 // Two-Fiber Architecture: Event/Signal Model
@@ -68,7 +68,7 @@ type Config struct {
     VSync       bool
 }
 
-// RunWithApp starts the vegui application with the Two-Fiber architecture.
+// RunWithApp starts the vui application with the Two-Fiber architecture.
 // This function blocks until the window is closed.
 func RunWithApp(config Config, app App, ui UI) {
     // Initialize state

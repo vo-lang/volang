@@ -3811,17 +3811,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "vegui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "linkme",
- "vo-ext",
- "vo-runtime",
-]
-
-[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3986,6 +3975,17 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
+]
+
+[[package]]
+name = "vui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "linkme",
+ "vo-ext",
+ "vo-runtime",
 ]
 
 [[package]]

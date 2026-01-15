@@ -1,3 +1,0 @@
-[extension]
-name = "vegui"
-path = "../../target/debug/libvegui.so"

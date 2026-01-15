@@ -1,6 +1,6 @@
 package main
 
-import "../libs/vegui"
+import "../libs/vui"
 
 // =============================================================================
 // Events (UI → App)
@@ -36,7 +36,7 @@ func appInit() any {
 	return AppState{count: 0, slider: 50, darkMode: false}
 }
 
-func appHandle(state any, event vegui.Event) any {
+func appHandle(state any, event vui.Event) any {
 	s := state.(AppState)
 	switch e := event.(type) {
 	case ClickIncrement:
@@ -53,7 +53,7 @@ func appHandle(state any, event vegui.Event) any {
 	return s
 }
 
-func appRender(state any) vegui.Signal {
+func appRender(state any) vui.Signal {
 	s := state.(AppState)
 	return UpdateUI{count: s.count, slider: s.slider, darkMode: s.darkMode}
 }
@@ -72,7 +72,7 @@ func uiInit() any {
 	return Model{count: 0, slider: 50, darkMode: false}
 }
 
-func uiApply(model any, signal vegui.Signal) any {
+func uiApply(model any, signal vui.Signal) any {
 	m := model.(Model)
 	switch sig := signal.(type) {
 	case UpdateUI:
@@ -85,41 +85,41 @@ func uiApply(model any, signal vegui.Signal) any {
 
 func uiView(model any) {
 	m := model.(Model)
-	vegui.SetDarkMode(m.darkMode)
-	vegui.CentralPanel(func() {
-		vegui.Heading("Vibe Studio Demo")
-		vegui.Separator()
-		vegui.Label("Two-Fiber Architecture with Event/Signal")
-		vegui.Space(10)
+	vui.SetDarkMode(m.darkMode)
+	vui.CentralPanel(func() {
+		vui.Heading("Vibe Studio Demo")
+		vui.Separator()
+		vui.Label("Two-Fiber Architecture with Event/Signal")
+		vui.Space(10)
 
-		vegui.CollapsingHeader("Counter", func() {
-			vegui.Horizontal(func() {
-				if vegui.Button("-") {
-					vegui.Send(ClickDecrement{})
+		vui.CollapsingHeader("Counter", func() {
+			vui.Horizontal(func() {
+				if vui.Button("-") {
+					vui.Send(ClickDecrement{})
 				}
-				vegui.Label("  " + itoa(m.count) + "  ")
-				if vegui.Button("+") {
-					vegui.Send(ClickIncrement{})
+				vui.Label("  " + itoa(m.count) + "  ")
+				if vui.Button("+") {
+					vui.Send(ClickIncrement{})
 				}
-				vegui.Space(20)
-				if vegui.Button("Reset") {
-					vegui.Send(ClickReset{})
+				vui.Space(20)
+				if vui.Button("Reset") {
+					vui.Send(ClickReset{})
 				}
 			})
 		})
 
-		vegui.CollapsingHeader("Slider", func() {
-			newVal, changed := vegui.SliderInt("Value", m.slider, 0, 100)
+		vui.CollapsingHeader("Slider", func() {
+			newVal, changed := vui.SliderInt("Value", m.slider, 0, 100)
 			if changed {
-				vegui.Send(SetSlider{value: newVal})
+				vui.Send(SetSlider{value: newVal})
 			}
-			vegui.ProgressBar(float64(m.slider) / 100.0)
+			vui.ProgressBar(float64(m.slider) / 100.0)
 		})
 
-		vegui.CollapsingHeader("Settings", func() {
-			newDark, changed := vegui.Checkbox("Dark Mode", m.darkMode)
+		vui.CollapsingHeader("Settings", func() {
+			newDark, changed := vui.Checkbox("Dark Mode", m.darkMode)
 			if changed {
-				vegui.Send(ToggleDarkMode{enabled: newDark})
+				vui.Send(ToggleDarkMode{enabled: newDark})
 			}
 		})
 	})
@@ -150,18 +150,18 @@ func itoa(n int) string {
 // =============================================================================
 
 func main() {
-	vegui.RunWithApp(
-		vegui.Config{
+	vui.RunWithApp(
+		vui.Config{
 			Title:  "Vibe Studio",
 			Width:  800,
 			Height: 600,
 		},
-		vegui.App{
+		vui.App{
 			Init:   appInit,
 			Handle: appHandle,
 			Render: appRender,
 		},
-		vegui.UI{
+		vui.UI{
 			Init:  uiInit,
 			Apply: uiApply,
 			View:  uiView,

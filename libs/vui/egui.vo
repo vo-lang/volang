@@ -1,4 +1,4 @@
-package vegui
+package vui
 
 // Run starts the egui application with the given title and frame callback.
 // The frame closure is called each frame to build the UI.

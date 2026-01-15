@@ -1,4 +1,4 @@
-# vegui System Design
+# vui System Design
 
 A comprehensive Elm-style UI framework for Vo.
 
@@ -15,7 +15,7 @@ A comprehensive Elm-style UI framework for Vo.
 │          │                  │                  │                    │
 │          ▼                  ▼                  ▼                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│                         vegui (Vo)                                  │
+│                         vui (Vo)                                  │
 │                                                                     │
 │   Two-Fiber UI framework with Event/Signal model                    │
 │   - UI Fiber: Apply Signal, View, Send Event                        │
@@ -33,7 +33,7 @@ A comprehensive Elm-style UI framework for Vo.
 ```
 
 **Key Design Decisions:**
-- vegui uses **Two-Fiber Architecture**: UI Fiber (渲染) + App Fiber (业务逻辑)
+- vui uses **Two-Fiber Architecture**: UI Fiber (渲染) + App Fiber (业务逻辑)
 - **Event/Signal Model**: Event (UI → App) + Signal (App → UI) 消息驱动
 - Fully leverages Vo's **goroutine + channel** for async operations
 - Rust backend is internal implementation detail, users only see Vo API
@@ -66,7 +66,7 @@ A comprehensive Elm-style UI framework for Vo.
 | **Signal** | App → UI | 数据 | 状态变更描述 |
 
 ```vo
-package vegui
+package vui
 
 type Event any   // UI → App
 type Signal any  // App → UI
@@ -75,7 +75,7 @@ type Signal any  // App → UI
 ### 2.3 App & UI Structure
 
 ```vo
-package vegui
+package vui
 
 type App struct {
     Init    func() any                              // Initialize App state
@@ -182,7 +182,7 @@ func Run(config Config, app App, ui UI) {
 ```vo
 package main
 
-import "vegui"
+import "vui"
 
 // ============ Events (UI → App) ============
 type ClickIncrement struct{}
@@ -204,7 +204,7 @@ func appInit() any {
     return AppState{count: 0}
 }
 
-func appHandle(state any, event vegui.Event) any {
+func appHandle(state any, event vui.Event) any {
     s := state.(AppState)
     
     switch event.(type) {
@@ -217,15 +217,15 @@ func appHandle(state any, event vegui.Event) any {
         go func() {
             data := http.Get("https://api.example.com/data")
             // Send result back through internal mechanism
-            vegui.EmitSignal(SetData{value: data})
-            vegui.EmitSignal(SetLoading{value: false})
+            vui.EmitSignal(SetData{value: data})
+            vui.EmitSignal(SetLoading{value: false})
         }()
     }
     
     return s
 }
 
-func appRender(state any) vegui.Signal {
+func appRender(state any) vui.Signal {
     s := state.(AppState)
     // Produce Signal based on current state
     return SetCount{value: s.count}
@@ -242,7 +242,7 @@ func uiInit() any {
     return Model{count: 0}
 }
 
-func uiApply(model any, signal vegui.Signal) any {
+func uiApply(model any, signal vui.Signal) any {
     m := model.(Model)
     
     switch sig := signal.(type) {
@@ -260,30 +260,30 @@ func uiApply(model any, signal vegui.Signal) any {
 func uiView(model any) {
     m := model.(Model)
     
-    vegui.CentralPanel(func() {
-        vegui.Heading("Counter Example")
-        vegui.Separator()
+    vui.CentralPanel(func() {
+        vui.Heading("Counter Example")
+        vui.Separator()
         
-        vegui.Horizontal(func() {
-            if vegui.Button("-") {
-                vegui.Send(ClickDecrement{})
+        vui.Horizontal(func() {
+            if vui.Button("-") {
+                vui.Send(ClickDecrement{})
             }
-            vegui.Label(fmt.Sprintf("  %d  ", m.count))
-            if vegui.Button("+") {
-                vegui.Send(ClickIncrement{})
+            vui.Label(fmt.Sprintf("  %d  ", m.count))
+            if vui.Button("+") {
+                vui.Send(ClickIncrement{})
             }
         })
         
-        vegui.Space(20)
+        vui.Space(20)
         
         if m.loading {
-            vegui.Spinner()
+            vui.Spinner()
         } else {
-            if vegui.Button("Fetch Data") {
-                vegui.Send(ClickFetch{})
+            if vui.Button("Fetch Data") {
+                vui.Send(ClickFetch{})
             }
             if m.data != "" {
-                vegui.Label("Data: " + m.data)
+                vui.Label("Data: " + m.data)
             }
         }
     })
@@ -291,18 +291,18 @@ func uiView(model any) {
 
 // ============ Main ============
 func main() {
-    vegui.Run(
-        vegui.Config{
+    vui.Run(
+        vui.Config{
             Title:  "My App",
             Width:  800,
             Height: 600,
         },
-        vegui.App{
+        vui.App{
             Init:   appInit,
             Handle: appHandle,
             Render: appRender,
         },
-        vegui.UI{
+        vui.UI{
             Init:  uiInit,
             Apply: uiApply,
             View:  uiView,
@@ -329,13 +329,13 @@ Widgets that need internal state require an ID:
 
 ```vo
 // ID required - framework manages internal state
-vegui.TextInput("input-id", value)      // cursor position
-vegui.ScrollArea("scroll-id", func(){}) // scroll position
-vegui.Collapsing("section-id", "Title", func(){}) // open/close
+vui.TextInput("input-id", value)      // cursor position
+vui.ScrollArea("scroll-id", func(){}) // scroll position
+vui.Collapsing("section-id", "Title", func(){}) // open/close
 
 // No ID needed - stateless
-vegui.Label("text")
-vegui.Button("click")
+vui.Label("text")
+vui.Button("click")
 ```
 
 ### 4.3 User-Managed Complex State
@@ -349,7 +349,7 @@ type Model struct {
 
 func view(model any) {
     m := model.(Model)
-    vegui.DockArea("dock", &m.dock, func(nodeId int, tabId string) {
+    vui.DockArea("dock", &m.dock, func(nodeId int, tabId string) {
         // Render tab content
     })
 }
@@ -360,7 +360,7 @@ func view(model any) {
 ## 5. Package Structure
 
 ```
-libs/vegui/
+libs/vui/
 ├── vo/                       # Vo API (what users import)
 │   ├── vo.mod
 │   ├── app.vo                # App, Config, Run, Cmd, Sub
@@ -385,7 +385,7 @@ libs/vegui/
 ### App Lifecycle
 
 ```vo
-package vegui
+package vui
 
 type Config struct {
     Title       string
@@ -493,24 +493,24 @@ func DockCloseNode(state *DockState, nodeId DockNodeId)
 ```vo
 package main
 
-import "vegui"
+import "vui"
 
 func main() {
     // Initialize dock state in Init
-    dockState := vegui.NewDockState()
-    root := vegui.DockRootNode(dockState)
-    vegui.DockAddTab(&dockState, root, "file1", "main.vo")
-    vegui.DockAddTab(&dockState, root, "file2", "utils.vo")
+    dockState := vui.NewDockState()
+    root := vui.DockRootNode(dockState)
+    vui.DockAddTab(&dockState, root, "file1", "main.vo")
+    vui.DockAddTab(&dockState, root, "file2", "utils.vo")
     
-    vegui.Run(vegui.Config{Title: "Editor"}, vegui.App{
-        Init: func() (any, vegui.Cmd) {
-            return Model{dock: dockState}, vegui.None
+    vui.Run(vui.Config{Title: "Editor"}, vui.App{
+        Init: func() (any, vui.Cmd) {
+            return Model{dock: dockState}, vui.None
         },
         Update: updateEditor,
         View: func(model any) {
             m := model.(Model)
-            vegui.CentralPanel(func() {
-                vegui.DockArea("main-dock", &m.dock, func(nodeId vegui.DockNodeId, tabIndex int, tabId string) {
+            vui.CentralPanel(func() {
+                vui.DockArea("main-dock", &m.dock, func(nodeId vui.DockNodeId, tabIndex int, tabId string) {
                     switch tabId {
                     case "file1":
                         renderEditor("main.vo content...")
@@ -521,8 +521,8 @@ func main() {
             })
             
             // Handle split via keyboard
-            if vegui.IsKeyPressed(vegui.KeyBackslash) && vegui.GetModifiers().Ctrl {
-                vegui.Send(SplitPane{})
+            if vui.IsKeyPressed(vui.KeyBackslash) && vui.GetModifiers().Ctrl {
+                vui.Send(SplitPane{})
             }
         },
     })

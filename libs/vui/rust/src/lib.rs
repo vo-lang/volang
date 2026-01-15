@@ -134,7 +134,7 @@ fn egui_run(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_RUN: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Run",
+    name: ".._libs_vui_Run",
     func: egui_run,
 };
 
@@ -190,7 +190,7 @@ fn egui_window(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_WINDOW: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Window",
+    name: ".._libs_vui_Window",
     func: egui_window,
 };
 
@@ -241,7 +241,7 @@ fn egui_central_panel(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_CENTRAL_PANEL: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_CentralPanel",
+    name: ".._libs_vui_CentralPanel",
     func: egui_central_panel,
 };
 
@@ -263,7 +263,7 @@ fn egui_label(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_LABEL: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Label",
+    name: ".._libs_vui_Label",
     func: egui_label,
 };
 
@@ -282,7 +282,7 @@ fn egui_button(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_BUTTON: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Button",
+    name: ".._libs_vui_Button",
     func: egui_button,
 };
 
@@ -300,7 +300,7 @@ fn egui_heading(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_HEADING: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Heading",
+    name: ".._libs_vui_Heading",
     func: egui_heading,
 };
 
@@ -316,7 +316,7 @@ fn egui_separator(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SEPARATOR: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Separator",
+    name: ".._libs_vui_Separator",
     func: egui_separator,
 };
 
@@ -344,7 +344,7 @@ fn egui_checkbox(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_CHECKBOX: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Checkbox",
+    name: ".._libs_vui_Checkbox",
     func: egui_checkbox,
 };
 
@@ -370,7 +370,7 @@ fn egui_slider_f64(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SLIDER_F64: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_SliderF64",
+    name: ".._libs_vui_SliderF64",
     func: egui_slider_f64,
 };
 
@@ -396,7 +396,7 @@ fn egui_slider_int(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SLIDER_INT: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_SliderInt",
+    name: ".._libs_vui_SliderInt",
     func: egui_slider_int,
 };
 
@@ -449,7 +449,7 @@ fn egui_collapsing_header(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_COLLAPSING_HEADER: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_CollapsingHeader",
+    name: ".._libs_vui_CollapsingHeader",
     func: egui_collapsing_header,
 };
 
@@ -466,7 +466,7 @@ fn egui_progress_bar(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_PROGRESS_BAR: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_ProgressBar",
+    name: ".._libs_vui_ProgressBar",
     func: egui_progress_bar,
 };
 
@@ -482,7 +482,7 @@ fn egui_spinner(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SPINNER: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Spinner",
+    name: ".._libs_vui_Spinner",
     func: egui_spinner,
 };
 
@@ -499,7 +499,7 @@ fn egui_space(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SPACE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Space",
+    name: ".._libs_vui_Space",
     func: egui_space,
 };
 
@@ -552,7 +552,7 @@ fn egui_indent(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_INDENT: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Indent",
+    name: ".._libs_vui_Indent",
     func: egui_indent,
 };
 
@@ -607,7 +607,7 @@ fn egui_horizontal(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_HORIZONTAL: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Horizontal",
+    name: ".._libs_vui_Horizontal",
     func: egui_horizontal,
 };
 
@@ -658,7 +658,7 @@ fn egui_vertical(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_VERTICAL: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_Vertical",
+    name: ".._libs_vui_Vertical",
     func: egui_vertical,
 };
 
@@ -683,7 +683,7 @@ fn egui_set_dark_mode(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_EGUI_SET_DARK_MODE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_vegui_SetDarkMode",
+    name: ".._libs_vui_SetDarkMode",
     func: egui_set_dark_mode,
 };
 
