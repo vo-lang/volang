@@ -6,6 +6,7 @@
 //! - Validates signature against .vo file declaration
 //! - Auto-registers to EXTERN_TABLE via linkme for runtime lookup
 
+pub mod error_helper;
 pub mod fmt;
 pub mod builtin;
 pub mod math;
@@ -16,3 +17,4 @@ pub mod strconv;
 pub mod unicode;
 pub mod regexp;
 pub mod dynamic;
+pub mod os;

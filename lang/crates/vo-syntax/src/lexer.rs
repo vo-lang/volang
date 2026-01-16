@@ -497,8 +497,8 @@ impl<'src> Lexer<'src> {
                     return self.scan_float_exponent();
                 }
                 Some(c) if c.is_ascii_digit() => {
-                    // Legacy octal or decimal with leading zero
-                    return self.scan_decimal_number();
+                    // Legacy octal: 0644 style (Go compatible)
+                    return self.scan_legacy_octal_number();
                 }
                 _ => return TokenKind::IntLit,
             }
@@ -566,7 +566,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Scans an octal number.
+    /// Scans an octal number (0o prefix style).
     fn scan_octal_number(&mut self) -> TokenKind {
         self.advance(); // o or O
         
@@ -576,19 +576,32 @@ impl<'src> Lexer<'src> {
             return TokenKind::Invalid;
         }
 
+        self.scan_octal_digits();
+        TokenKind::IntLit
+    }
+
+    /// Scans a legacy octal number (0644 style, Go compatible).
+    fn scan_legacy_octal_number(&mut self) -> TokenKind {
+        self.scan_octal_digits();
+        TokenKind::IntLit
+    }
+
+    /// Scans octal digits (0-7), emitting errors for invalid digits 8-9.
+    fn scan_octal_digits(&mut self) {
         while let Some(c) = self.peek() {
             match c {
                 '0'..='7' | '_' => { self.advance(); }
                 '8' | '9' => {
                     let digit_start = self.pos();
                     self.advance();
-                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(digit_start..self.pos(), format!("invalid digit '{}' in octal literal", c)));
+                    self.diagnostics.emit(SyntaxError::OctalInvalidDigit.at_with_message(
+                        digit_start..self.pos(),
+                        format!("invalid digit '{}' in octal literal", c),
+                    ));
                 }
                 _ => break,
             }
         }
-
-        TokenKind::IntLit
     }
 
     /// Scans a binary number.

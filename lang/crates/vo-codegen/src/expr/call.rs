@@ -115,45 +115,22 @@ pub fn compile_call(
             return Ok(());
         }
         
-        // Check if it's a local variable (could be a closure)
-        if func.lookup_local(ident.symbol).is_some() || func.lookup_capture(ident.symbol).is_some() {
-            // Closure call - compile closure expression first
-            let closure_reg = compile_expr(&call.func, ctx, func, info)?;
-            
-            // Compile arguments with variadic packing support
-            let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots) as usize]);
-            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-            
-            // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
-            let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
-            func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
-            
-            // Copy result to dst if needed
-            if ret_slots > 0 && dst != args_start {
-                func.emit_copy(dst, args_start, ret_slots);
-            }
-            
-            return Ok(());
-        }
+        // Check if it's a closure (local, capture, or global variable)
+        let is_closure = func.lookup_local(ident.symbol).is_some() 
+            || func.lookup_capture(ident.symbol).is_some()
+            || ctx.get_global_index(ident.symbol).is_some();
         
-        // Check if it's a global variable (could be a closure stored in global)
-        if ctx.get_global_index(ident.symbol).is_some() {
-            // Global closure call - compile closure expression first (uses GlobalGet)
+        if is_closure {
             let closure_reg = compile_expr(&call.func, ctx, func, info)?;
-            
-            // Compile arguments with variadic packing support
             let args_start = func.alloc_temp_typed(&vec![SlotType::Value; total_arg_slots.max(ret_slots) as usize]);
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
             
-            // CallClosure: a=closure, b=args_start, c=(arg_slots<<8|ret_slots)
             let c = crate::type_info::encode_call_args(total_arg_slots as u16, ret_slots as u16);
             func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
             
-            // Copy result to dst if needed
             if ret_slots > 0 && dst != args_start {
                 func.emit_copy(dst, args_start, ret_slots);
             }
-            
             return Ok(());
         }
         
@@ -532,10 +509,14 @@ pub fn compile_extern_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let extern_id = ctx.get_or_register_extern(extern_name);
     let func_type = info.expr_type(call.func.id);
     let is_variadic = info.is_variadic(func_type);
     let param_types = info.func_param_types(func_type);
+    
+    // Get return slot count from the function's result type
+    let sig = info.as_signature(func_type);
+    let ret_slots = info.type_slot_count(sig.results()) as u16;
+    let extern_id = ctx.get_or_register_extern_with_ret_slots(extern_name, ret_slots);
     
     // Use compile_method_args for proper type conversion (e.g., boxing to `any`)
     let total_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);

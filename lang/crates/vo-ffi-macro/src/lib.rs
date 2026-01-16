@@ -110,6 +110,82 @@ pub fn vo_builtin(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Attribute macro for context-based extern functions.
+///
+/// Use this for functions that need direct access to `ExternCallContext`,
+/// typically for functions that return errors or handle complex types.
+///
+/// The function must have signature:
+/// `fn(call: &mut ExternCallContext) -> ExternResult`
+///
+/// # Example
+///
+/// ```ignore
+/// #[vo_extern_ctx("os", "fileRead")]
+/// fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
+///     let fd = call.arg_i64(0);
+///     // ... implementation
+///     ExternResult::Ok
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn vo_extern_ctx(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+    let func = parse_macro_input!(item as ItemFn);
+    
+    match vo_extern_ctx_impl(args, func) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn vo_extern_ctx_impl(
+    args: Punctuated<Expr, Token![,]>,
+    func: ItemFn,
+) -> syn::Result<TokenStream2> {
+    let (pkg_path, func_name) = parse_extern_args(&args)?;
+    
+    let fn_name = &func.sig.ident;
+    
+    // Generate lookup name: "pkg_FuncName" format
+    let lookup_name = format!(
+        "{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    
+    // Generate entry name for the static
+    let entry_name = format_ident!("__VO_CTX_ENTRY_{}", lookup_name.to_uppercase().replace('/', "_"));
+    
+    let is_runtime_core = std::env::var("CARGO_PKG_NAME")
+        .map(|n| n == "vo-runtime")
+        .unwrap_or(false);
+    
+    if is_runtime_core {
+        Ok(quote! {
+            #func
+
+            #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
+            #[doc(hidden)]
+            static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
+                name: #lookup_name,
+                func: #fn_name,
+            };
+        })
+    } else {
+        Ok(quote! {
+            #func
+
+            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
+            #[doc(hidden)]
+            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
+                name: #lookup_name,
+                func: #fn_name,
+            };
+        })
+    }
+}
+
 fn vo_extern_impl(
     args: Punctuated<Expr, Token![,]>,
     func: ItemFn,

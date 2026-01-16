@@ -32,31 +32,46 @@ enum MethodValueWrapperKey {
     Interface { method_idx: u32 },
 }
 
-/// Get ret_slots for known builtin extern functions.
+/// Get ret_slots for builtin extern functions.
+/// 
+/// All externs registered via `get_or_register_extern` MUST be listed here.
 /// For variable-size externs (dyn_call_prepare, dyn_repack_args, dyn_call_closure),
-/// use get_or_register_extern_with_ret_slots with explicit size at each call site.
+/// use `get_or_register_extern_with_ret_slots` with explicit size at each call site.
 fn builtin_extern_ret_slots(name: &str) -> u16 {
     match name {
-        // Dynamic access: (data[2], error[2]) = 4 slots
+        // === Dynamic access ===
+        // (data[2], error[2]) = 4 slots
         "dyn_get_attr" | "dyn_get_index" | "dyn_GetAttr" | "dyn_GetIndex" => 4,
-        // Dynamic set: error[2] = 2 slots
+        // error[2] = 2 slots
         "dyn_set_attr" | "dyn_set_index" | "dyn_SetAttr" | "dyn_SetIndex" => 2,
-        // Type assertion error: error[2]
+        // error[2] = 2 slots
         "dyn_type_assert_error" => 2,
-        // Print functions: no return
+        
+        // === Builtins (no return) ===
         "vo_print" | "vo_println" => 0,
-        // Copy: returns int
-        "vo_copy" => 1,
-        // Assert: no return (may panic)
         "vo_assert" => 0,
-        // String conversion
+        "panic_with_error" => 0,
+        
+        // === Builtins (return 1 slot) ===
+        "vo_copy" => 1,
+        "vo_slice_append_slice" => 1,
+        
+        // === Type conversions (return 1 slot: string or slice) ===
+        "vo_conv_int_str" => 1,
+        "vo_conv_bytes_str" => 1,
+        "vo_conv_runes_str" => 1,
+        "vo_conv_str_bytes" => 1,
+        "vo_conv_str_runes" => 1,
         "vo_string_to_bytes" | "vo_bytes_to_string" => 1,
-        // Regexp: matchString/matchBytes return (bool, bool) = 2 slots
+        
+        // === Regexp ===
+        // (bool, bool) = 2 slots
         "regexp_matchString" | "regexp_matchBytes" => 2,
-        // Regexp: findStringIndex returns (int, int) = 2 slots
+        // (int, int) = 2 slots
         "regexp_findStringIndex" => 2,
-        // Default: assume 1 slot return for safety
-        _ => 1,
+        
+        // Unknown extern - this is a bug, all externs must be listed above
+        _ => panic!("builtin_extern_ret_slots: unknown extern '{}', add it to the list", name),
     }
 }
 use vo_analysis::objects::{ObjKey, TypeKey};

@@ -1,0 +1,102 @@
+package main
+
+import "os"
+
+func main() {
+	// Test environment functions
+	os.Setenv("VO_TEST_VAR", "hello")
+	val := os.Getenv("VO_TEST_VAR")
+	assert(val == "hello", "Getenv should return 'hello'")
+	
+	val2, ok := os.LookupEnv("VO_TEST_VAR")
+	assert(ok, "LookupEnv should return true")
+	assert(val2 == "hello", "LookupEnv should return 'hello'")
+	
+	os.Unsetenv("VO_TEST_VAR")
+	val3, ok2 := os.LookupEnv("VO_TEST_VAR")
+	assert(!ok2, "LookupEnv should return false after Unsetenv")
+	assert(val3 == "", "LookupEnv should return empty string")
+	
+	// Test working directory
+	cwd, err := os.Getwd()
+	assert(err == nil, "Getwd should not error")
+	assert(len(cwd) > 0, "Getwd should return non-empty path")
+	
+	// Test process info
+	pid := os.Getpid()
+	assert(pid > 0, "Getpid should return positive value")
+	
+	// Test temp dir
+	tmpDir := os.TempDir()
+	assert(len(tmpDir) > 0, "TempDir should return non-empty path")
+	
+	// Test file operations - write and read
+	testFile := tmpDir + "/vo_os_test.txt"
+	testData := []byte("Hello, Vo OS Package!")
+	
+	err = os.WriteFile(testFile, testData, 0644)
+	assert(err == nil, "WriteFile should not error")
+	
+	readData, err := os.ReadFile(testFile)
+	assert(err == nil, "ReadFile should not error")
+	assert(string(readData) == string(testData), "ReadFile should return written data")
+	
+	// Test Stat
+	info, err := os.Stat(testFile)
+	assert(err == nil, "Stat should not error")
+	assert(info.Size() == int64(len(testData)), "File size should match")
+	assert(!info.IsDir(), "File should not be a directory")
+	
+	// Test Remove
+	err = os.Remove(testFile)
+	assert(err == nil, "Remove should not error")
+	
+	// Verify file is removed
+	_, err = os.Stat(testFile)
+	assert(os.IsNotExist(err), "File should not exist after Remove")
+	
+	// Test directory operations
+	testDir := tmpDir + "/vo_os_test_dir"
+	err = os.Mkdir(testDir, 0755)
+	assert(err == nil, "Mkdir should not error")
+	
+	info, err = os.Stat(testDir)
+	assert(err == nil, "Stat on dir should not error")
+	assert(info.IsDir(), "Should be a directory")
+	
+	err = os.Remove(testDir)
+	assert(err == nil, "Remove dir should not error")
+	
+	// Test MkdirAll and RemoveAll
+	nestedDir := tmpDir + "/vo_os_test/nested/dir"
+	err = os.MkdirAll(nestedDir, 0755)
+	assert(err == nil, "MkdirAll should not error")
+	
+	err = os.RemoveAll(tmpDir + "/vo_os_test")
+	assert(err == nil, "RemoveAll should not error")
+	
+	// Test File open/read/write/close
+	f, err := os.Create(testFile)
+	assert(err == nil, "Create should not error")
+	assert(f != nil, "File should not be nil")
+	
+	n, err := f.WriteString("Test content")
+	assert(err == nil, "WriteString should not error")
+	assert(n == 12, "WriteString should return 12")
+	
+	err = f.Close()
+	assert(err == nil, "Close should not error")
+	
+	f, err = os.Open(testFile)
+	assert(err == nil, "Open should not error")
+	
+	buf := make([]byte, 20)
+	n, err = f.Read(buf)
+	assert(n == 12, "Read should return 12 bytes")
+	assert(string(buf[:n]) == "Test content", "Read content should match")
+	
+	f.Close()
+	os.Remove(testFile)
+	
+	println("All os package tests passed!")
+}

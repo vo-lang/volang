@@ -26,8 +26,8 @@ dyn = { path = "dyn" }
 # Standard packages (requires OS support)
 [packages.std]
 # fmt = { path = "fmt" }
-# io = { path = "io" }
-# os = { path = "os" }
+io = { path = "io" }
+os = { path = "os" }
 # time = { path = "time" }
 # "math/rand" = { path = "math/rand" }
 # path = { path = "path" }

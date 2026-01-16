@@ -1,0 +1,21 @@
+package main
+
+func main() {
+	// Test octal literals
+	a := 0644      // octal = 420 decimal
+	b := 0755      // octal = 493 decimal
+	c := 0777      // octal = 511 decimal
+	d := 0o644     // explicit octal = 420 decimal
+	
+	assert(a == 420, "0644 should equal 420")
+	assert(b == 493, "0755 should equal 493")
+	assert(c == 511, "0777 should equal 511")
+	assert(d == 420, "0o644 should equal 420")
+	assert(a == d, "0644 should equal 0o644")
+	
+	// Test in expressions
+	perm := 0644 | 0111  // 420 | 73 = 493
+	assert(perm == 493, "0644 | 0111 should equal 493")
+	
+	println("All octal tests passed!")
+}

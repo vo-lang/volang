@@ -287,43 +287,39 @@ pub fn make_from_literal(lit: &str, kind: LitKind) -> Value {
     }
 }
 
+/// Detects the radix and digit start position for an integer literal.
+/// Returns (radix, start_index).
+fn detect_int_radix(lit: &str) -> (u32, usize) {
+    if lit.starts_with("0x") || lit.starts_with("0X") {
+        (16, 2)
+    } else if lit.starts_with("0o") || lit.starts_with("0O") {
+        (8, 2)
+    } else if lit.starts_with("0b") || lit.starts_with("0B") {
+        (2, 2)
+    } else if lit.len() > 1 && lit.starts_with('0') && lit.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        // Legacy octal: 0644 style (Go compatible)
+        (8, 1)
+    } else {
+        (10, 0)
+    }
+}
+
 /// Parses an integer literal string.
 pub fn int_from_literal(lit: &str) -> Value {
     // Remove underscores
     let lit = lit.replace('_', "");
+    let (radix, start) = detect_int_radix(&lit);
+    let digits = &lit[start..];
     
     // Try parsing as i64 first (fast path)
-    if let Ok(x) = parse_int_str(&lit) {
+    if let Ok(x) = i64::from_str_radix(digits, radix) {
         return Value::Int64(x);
     }
     
-    // Try parsing as BigInt
-    let result = if lit.starts_with("0x") || lit.starts_with("0X") {
-        BigInt::from_str_radix(&lit[2..], 16)
-    } else if lit.starts_with("0o") || lit.starts_with("0O") {
-        BigInt::from_str_radix(&lit[2..], 8)
-    } else if lit.starts_with("0b") || lit.starts_with("0B") {
-        BigInt::from_str_radix(&lit[2..], 2)
-    } else {
-        BigInt::from_str_radix(&lit, 10)
-    };
-    
-    match result {
+    // Try parsing as BigInt for large numbers
+    match BigInt::from_str_radix(digits, radix) {
         Ok(x) => make_int(x),
         Err(_) => Value::Unknown,
-    }
-}
-
-/// Helper to parse int string with different bases.
-fn parse_int_str(lit: &str) -> Result<i64, std::num::ParseIntError> {
-    if lit.starts_with("0x") || lit.starts_with("0X") {
-        i64::from_str_radix(&lit[2..], 16)
-    } else if lit.starts_with("0o") || lit.starts_with("0O") {
-        i64::from_str_radix(&lit[2..], 8)
-    } else if lit.starts_with("0b") || lit.starts_with("0B") {
-        i64::from_str_radix(&lit[2..], 2)
-    } else {
-        lit.parse()
     }
 }
 

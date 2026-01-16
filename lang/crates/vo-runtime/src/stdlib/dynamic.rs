@@ -12,6 +12,7 @@ use crate::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN
 use crate::gc::{Gc, GcRef};
 use crate::objects::{array, interface, map, slice, string, struct_ops};
 use vo_common_core::runtime_type::RuntimeType;
+use super::error_helper::write_error_to;
 
 // ==================== Error codes ====================
 // Error codes are now read from errors.vo at codegen time and stored in
@@ -335,45 +336,6 @@ fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64,
     call.ret_nil(3);
     
     ExternResult::Ok
-}
-
-fn write_error_to(call: &mut ExternCallContext, ret_slot: u16, code: isize, msg: &str) {
-    let wk = call.well_known();
-    
-    // Use pre-computed IDs from WellKnownTypes
-    let named_type_id = wk.error_named_type_id
-        .expect("dyn_error: errors.Error not found in WellKnownTypes");
-    let error_iface_meta_id = wk.error_iface_meta_id
-        .expect("dyn_error: error interface not found in WellKnownTypes");
-    let error_ptr_rttid = wk.error_ptr_rttid
-        .expect("dyn_error: *errors.Error rttid not found in WellKnownTypes");
-    let struct_meta_id = wk.error_struct_meta_id
-        .expect("dyn_error: errors.Error struct_meta_id not found in WellKnownTypes");
-    let field_offsets = wk.error_field_offsets
-        .expect("dyn_error: errors.Error field_offsets not found in WellKnownTypes");
-    
-    let struct_meta = call
-        .struct_meta(struct_meta_id as usize)
-        .expect("dyn_error: struct meta for errors.Error not found");
-    let slots = struct_meta.slot_count() as usize;
-    let err_obj = struct_ops::create(call.gc(), struct_meta_id, slots);
-
-    let err_str = call.alloc_str(msg);
-
-    // Use pre-computed field offsets: [code, msg, cause, data]
-    unsafe {
-        Gc::write_slot(err_obj, field_offsets[0] as usize, code as u64); // code
-        Gc::write_slot(err_obj, field_offsets[1] as usize, err_str as u64);    // msg
-        Gc::write_slot(err_obj, field_offsets[2] as usize, 0);                 // cause slot0
-        Gc::write_slot(err_obj, field_offsets[2] as usize + 1, 0);             // cause slot1
-        Gc::write_slot(err_obj, field_offsets[3] as usize, 0);                 // data slot0
-        Gc::write_slot(err_obj, field_offsets[3] as usize + 1, 0);             // data slot1
-    }
-
-    let itab_id = call.get_or_create_itab(named_type_id, error_iface_meta_id);
-    let err_slot0 = interface::pack_slot0(itab_id, error_ptr_rttid, ValueKind::Pointer);
-    call.ret_u64(ret_slot, err_slot0);
-    call.ret_ref(ret_slot + 1, err_obj);
 }
 
 fn dyn_error(call: &mut ExternCallContext, code: isize, msg: &str) -> ExternResult {

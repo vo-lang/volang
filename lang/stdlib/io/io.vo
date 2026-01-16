@@ -305,7 +305,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 			}
 		}
 		if er != nil {
-			if er != EOF {
+			if !errors.Is(er, EOF) {
 				err = er
 			}
 			break
@@ -498,8 +498,8 @@ type teeReader struct {
 func (t *teeReader) Read(p []byte) (n int, err error) {
 	n, err = t.r.Read(p)
 	if n > 0 {
-		if n, err := t.w.Write(p[:n]); err != nil {
-			return n, err
+		if nw, ew := t.w.Write(p[:n]); ew != nil {
+			return nw, ew
 		}
 	}
 	return
@@ -522,14 +522,16 @@ type multiReader struct {
 func (mr *multiReader) Read(p []byte) (n int, err error) {
 	for len(mr.readers) > 0 {
 		n, err = mr.readers[0].Read(p)
-		if errors.Is(err, EOF) {
-			mr.readers = mr.readers[1:]
-			continue
-		}
-		if n > 0 || err != nil {
-			if errors.Is(err, EOF) && len(mr.readers) > 0 {
-				err = nil
+		if n > 0 {
+			if errors.Is(err, EOF) {
+				mr.readers = mr.readers[1:]
+				if len(mr.readers) > 0 {
+					err = nil
+				}
 			}
+			return
+		}
+		if err != nil && !errors.Is(err, EOF) {
 			return
 		}
 		mr.readers = mr.readers[1:]

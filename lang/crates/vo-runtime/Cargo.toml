@@ -7,7 +7,7 @@ description = "Vo language runtime - shared data structures for VM and JIT (no_s
 
 [features]
 default = ["std"]
-std = ["vo-common-core/std", "linkme", "vo-ffi-macro", "regex", "libloading"]
+std = ["vo-common-core/std", "linkme", "vo-ffi-macro", "regex", "libloading", "lazy_static", "dirs", "hostname", "libc"]
 gc-debug = ["std"]  # GC 验证模式，需要 std
 
 [dependencies]
@@ -19,3 +19,7 @@ linkme = { version = "0.3", optional = true }
 vo-ffi-macro = { path = "../vo-ffi-macro", optional = true }
 regex = { version = "1", optional = true }
 libloading = { version = "0.8", optional = true }
+lazy_static = { version = "1.4", optional = true }
+dirs = { version = "5.0", optional = true }
+hostname = { version = "0.3", optional = true }
+libc = { version = "0.2", optional = true }
