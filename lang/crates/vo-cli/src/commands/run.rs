@@ -384,7 +384,8 @@ fn load_extensions(source_root: &Path) -> Option<vo_runtime::ext_loader::Extensi
     let mut found_any = false;
     
     // Find libs/ directory relative to source_root
-    let libs_dir = source_root.join("../libs").canonicalize().ok()?;
+    let libs_path = source_root.join("../libs");
+    let libs_dir = libs_path.canonicalize().ok()?;
     if !libs_dir.is_dir() {
         return None;
     }

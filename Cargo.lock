@@ -1146,6 +1146,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "detra"
+version = "0.1.0"
+dependencies = [
+ "detra-renderable",
+ "linkme",
+ "vo-ext",
+ "vo-runtime",
+]
+
+[[package]]
+name = "detra-renderable"
+version = "0.1.0"
+
+[[package]]
+name = "detra_renderer"
+version = "0.1.0"
+dependencies = [
+ "detra-renderable",
+ "eframe",
+ "egui",
+ "lazy_static",
+ "libloading",
+ "linkme",
+ "vo-ext",
+ "vo-runtime",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3975,17 +4003,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
-]
-
-[[package]]
-name = "vui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "linkme",
- "vo-ext",
- "vo-runtime",
 ]
 
 [[package]]

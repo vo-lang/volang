@@ -1,170 +1,125 @@
 package main
 
-import "../libs/vui"
-
-// =============================================================================
-// Events (UI → App)
-// =============================================================================
-
-type ClickIncrement struct{}
-type ClickDecrement struct{}
-type ClickReset struct{}
-type SetSlider struct{ value int }
-type ToggleDarkMode struct{ enabled bool }
-
-// =============================================================================
-// Signals (App → UI)
-// =============================================================================
-
-type UpdateUI struct {
-	count    int
-	slider   int
-	darkMode bool
-}
-
-// =============================================================================
-// App State & Logic
-// =============================================================================
-
-type AppState struct {
-	count    int
-	slider   int
-	darkMode bool
-}
-
-func appInit() any {
-	return AppState{count: 0, slider: 50, darkMode: false}
-}
-
-func appHandle(state any, event vui.Event) any {
-	s := state.(AppState)
-	switch e := event.(type) {
-	case ClickIncrement:
-		s.count++
-	case ClickDecrement:
-		s.count--
-	case ClickReset:
-		s.count = 0
-	case SetSlider:
-		s.slider = e.value
-	case ToggleDarkMode:
-		s.darkMode = e.enabled
-	}
-	return s
-}
-
-func appRender(state any) vui.Signal {
-	s := state.(AppState)
-	return UpdateUI{count: s.count, slider: s.slider, darkMode: s.darkMode}
-}
-
-// =============================================================================
-// UI Model & View
-// =============================================================================
-
-type Model struct {
-	count    int
-	slider   int
-	darkMode bool
-}
-
-func uiInit() any {
-	return Model{count: 0, slider: 50, darkMode: false}
-}
-
-func uiApply(model any, signal vui.Signal) any {
-	m := model.(Model)
-	switch sig := signal.(type) {
-	case UpdateUI:
-		m.count = sig.count
-		m.slider = sig.slider
-		m.darkMode = sig.darkMode
-	}
-	return m
-}
-
-func uiView(model any) {
-	m := model.(Model)
-	vui.SetDarkMode(m.darkMode)
-	vui.CentralPanel(func() {
-		vui.Heading("Vibe Studio Demo")
-		vui.Separator()
-		vui.Label("Two-Fiber Architecture with Event/Signal")
-		vui.Space(10)
-
-		vui.CollapsingHeader("Counter", func() {
-			vui.Horizontal(func() {
-				if vui.Button("-") {
-					vui.Send(ClickDecrement{})
-				}
-				vui.Label("  " + itoa(m.count) + "  ")
-				if vui.Button("+") {
-					vui.Send(ClickIncrement{})
-				}
-				vui.Space(20)
-				if vui.Button("Reset") {
-					vui.Send(ClickReset{})
-				}
-			})
-		})
-
-		vui.CollapsingHeader("Slider", func() {
-			newVal, changed := vui.SliderInt("Value", m.slider, 0, 100)
-			if changed {
-				vui.Send(SetSlider{value: newVal})
-			}
-			vui.ProgressBar(float64(m.slider) / 100.0)
-		})
-
-		vui.CollapsingHeader("Settings", func() {
-			newDark, changed := vui.Checkbox("Dark Mode", m.darkMode)
-			if changed {
-				vui.Send(ToggleDarkMode{enabled: newDark})
-			}
-		})
-	})
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n = n / 10
-	}
-	if neg {
-		digits = append([]byte{'-'}, digits...)
-	}
-	return string(digits)
-}
-
-// =============================================================================
-// Main
-// =============================================================================
+import (
+    "../libs/detra"
+    "../libs/detra-renderer"
+)
 
 func main() {
-	vui.RunWithApp(
-		vui.Config{
-			Title:  "Vibe Studio",
-			Width:  800,
-			Height: 600,
-		},
-		vui.App{
-			Init:   appInit,
-			Handle: appHandle,
-			Render: appRender,
-		},
-		vui.UI{
-			Init:  uiInit,
-			Apply: uiApply,
-			View:  uiView,
-		},
-	)
+    source := readDetraSource()
+    
+    program := detra.Compile(source)
+    state := detra.InitState(program)
+    
+    state, tree, errMsg, errKind := detra.Execute(program, state, nil, "", nil)
+    if errKind != "" {
+        println("Execute error:", errKind, errMsg)
+        return
+    }
+    
+    detra_renderer.Render(detra_renderer.Tree(tree))
+    
+    detra_renderer.Run(
+        detra_renderer.Config{
+            Title:  "Vibe Studio",
+            Width:  800,
+            Height: 600,
+        },
+        func() {
+            actionName := detra_renderer.PendingAction()
+            actionArgs := map[string]string{
+                "value": detra_renderer.PendingActionArg("value"),
+            }
+            state, tree, errMsg, errKind = detra.Execute(program, state, nil, actionName, actionArgs)
+            if errKind != "" {
+                println("Action error:", errKind, errMsg)
+                return
+            }
+            
+            // Vo handles commands emitted by Detra
+            handleCommands()
+            
+            detra_renderer.Render(detra_renderer.Tree(tree))
+        },
+    )
+}
+
+// handleCommands processes commands emitted by Detra actions.
+// This demonstrates Vo-Detra collaboration: Detra emits commands, Vo executes them.
+func handleCommands() {
+    count := detra.CommandCount()
+    for i := 0; i < count; i++ {
+        name := detra.CommandName(i)
+        switch name {
+        case "Log":
+            message := detra.CommandArg(i, "message")
+            println("[Detra Log]", message)
+        default:
+            println("[Unknown command]", name)
+        }
+    }
+}
+
+func readDetraSource() string {
+    return `
+state App {
+    count int = 0
+    text string
+    valid bool
+    const maxCount int = 100
+}
+
+command Log(message string)
+
+action Inc(step int = 1) {
+    require state.count + step <= state.maxCount
+    set state.count = state.count + step
+    emit Log(message: "Incremented to " + string(state.count))
+}
+
+action Dec(step int = 1) {
+    require state.count - step >= 0
+    set state.count = state.count - step
+}
+
+action Reset() {
+    set state.count = 0
+}
+
+action SetText(value string) {
+    set state.text = value
+}
+
+rule Validate {
+    derive state.valid = state.text != ""
+}
+
+view Main {
+    Column(padding: 16, spacing: 12) {
+        Text(text: "Vibe Studio Demo", size: 24, bold: true)
+        Divider()
+        
+        Card(title: "Counter") {
+            Row(spacing: 8) {
+                Button(text: "-", onClick: Dec)
+                Text(text: string(state.count), size: 20)
+                Button(text: "+", onClick: Inc)
+                Spacer(size: 20)
+                Button(text: "Reset", onClick: Reset)
+            }
+        }
+        
+        Card(title: "Input") {
+            Column(spacing: 8) {
+                Input(value: state.text, placeholder: "Enter text...", onChange: SetText(value: $value))
+                if state.valid {
+                    Text(text: "Valid input")
+                } else {
+                    Text(text: "Please enter some text")
+                }
+            }
+        }
+    }
+}
+`
 }

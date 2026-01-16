@@ -1,5 +1,5 @@
 [package]
-name = "vui"
+name = "detra_renderer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 vo-runtime = { path = "../../../lang/crates/vo-runtime" }
 vo-ext = { path = "../../../lang/crates/vo-ext" }
+detra-renderable = { path = "../../detra-renderable" }
+linkme = "0.3"
 eframe = "0.29"
 egui = "0.29"
-linkme = "0.3"
+lazy_static = "1.4"
+libloading = "0.8"

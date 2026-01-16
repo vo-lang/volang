@@ -1,0 +1,30 @@
+package detra_renderer
+
+// Config specifies window configuration for the renderer.
+type Config struct {
+    Title     string
+    Width     int
+    Height    int
+    Resizable bool
+    VSync     bool
+}
+
+// Tree is an opaque handle for a rendered UI tree (same as detra.Tree).
+type Tree any
+
+// Run starts the renderer event loop and registers an action callback.
+// The onAction callback is invoked when user interacts with the UI.
+// Use PendingAction() to get the action name.
+func Run(config Config, onAction func())
+
+// Render applies a UI tree to the platform.
+// tree is the tree handle returned by detra.Execute.
+func Render(tree Tree)
+
+// PendingAction returns the name of the action triggered by user interaction.
+// Call this inside onAction callback.
+func PendingAction() string
+
+// PendingActionArg returns a string argument for the pending action.
+// key is the argument name (e.g. "value" for Input onChange).
+func PendingActionArg(key string) string

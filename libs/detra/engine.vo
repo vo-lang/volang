@@ -1,0 +1,27 @@
+package detra
+
+// Compile parses and compiles Detra source into an opaque Program.
+// Returns program handle (int).
+func Compile(source string) Program
+
+// InitState creates the initial state for a Program.
+// Returns state handle (int).
+func InitState(program Program) State
+
+// Execute runs an action, applies rules, and computes the UI tree.
+// actionName is the action to execute, or "" for initial render.
+// actionArgs is a map of argument values (for actions like SetText(value: $value)).
+// Returns (stateHandle, treeHandle, errorMsg, errorKind).
+func Execute(program Program, state State, external External, actionName string, actionArgs map[string]string) (State, Tree, string, string)
+
+// CommandCount returns the number of commands emitted during the last Execute call.
+func CommandCount() int
+
+// CommandName returns the name of the i-th command.
+func CommandName(index int) string
+
+// CommandArg returns the value of an argument for the i-th command.
+func CommandArg(index int, key string) string
+
+// Tree is an opaque handle for a rendered UI tree.
+type Tree any

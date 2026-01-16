@@ -1,0 +1,62 @@
+// Vibe Studio - Counter Demo
+// A simple counter application demonstrating Detra UI
+
+state App {
+    count int = 0
+    text string
+    valid bool
+    const maxCount int = 100
+}
+
+command Log(message string)
+
+action Inc(step int = 1) {
+    require state.count + step <= state.maxCount
+    set state.count = state.count + step
+    emit Log(message: "incremented to " + string(state.count))
+}
+
+action Dec(step int = 1) {
+    require state.count - step >= 0
+    set state.count = state.count - step
+}
+
+action Reset() {
+    set state.count = 0
+}
+
+action SetText(value string) {
+    set state.text = value
+}
+
+rule Validate {
+    derive state.valid = state.text != ""
+}
+
+view Main {
+    Column(padding: 16, spacing: 12) {
+        Text(text: "Vibe Studio Demo", size: 24, bold: true)
+        Divider()
+        
+        Card(title: "Counter") {
+            Row(spacing: 8) {
+                Button(text: "-", onClick: Dec)
+                Text(text: string(state.count), size: 20)
+                Button(text: "+", onClick: Inc)
+                Spacer(size: 20)
+                Button(text: "Reset", onClick: Reset)
+            }
+        }
+        
+        Card(title: "Input") {
+            Column(spacing: 8) {
+                Input(value: state.text, placeholder: "Enter text...", onChange: SetText(value: $value))
+                if state.valid {
+                    Text(text: "Valid input", color: "green")
+                } else {
+                    Text(text: "Please enter some text", color: "gray")
+                }
+            }
+        }
+    }
+}

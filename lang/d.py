@@ -125,8 +125,8 @@ def command_exists(cmd: str) -> bool:
 def run_vibe_studio():
     """Run Vibe Studio."""
     # Build vo-cli and vogui-egui first
-    print(f"{Colors.CYAN}Building vo-cli and vui...{Colors.NC}")
-    ret, _, stderr = run_cmd(['cargo', 'build', '-p', 'vo-cli', '-p', 'vui'])
+    print(f"{Colors.CYAN}Building vo-cli...{Colors.NC}")
+    ret, _, stderr = run_cmd(['cargo', 'build', '-p', 'vo-cli'])
     if ret != 0:
         print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
         sys.exit(1)

@@ -1,0 +1,3 @@
+[extension]
+name = "detra_renderer"
+path = "../../target/debug/libdetra_renderer.so"

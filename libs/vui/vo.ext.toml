@@ -1,3 +1,0 @@
-[extension]
-name = "vui"
-path = "../../target/debug/libvui.so"
