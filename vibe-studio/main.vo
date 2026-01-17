@@ -1,12 +1,17 @@
 package main
 
 import (
+    "os"
     "../libs/detra"
     "../libs/detra-renderer"
 )
 
 func main() {
-    source := readDetraSource()
+    data, err := os.ReadFile("vibe-studio/ui/app.detra")
+    if err != nil {
+        panic("failed to read file: " + err.Error())
+    }
+    source := string(data)
     
     program := detra.Compile(source)
     state := detra.InitState(program)
@@ -36,7 +41,6 @@ func main() {
                 return
             }
             
-            // Vo handles commands emitted by Detra
             handleCommands()
             
             detra_renderer.Render(detra_renderer.Tree(tree))
@@ -45,7 +49,6 @@ func main() {
 }
 
 // handleCommands processes commands emitted by Detra actions.
-// This demonstrates Vo-Detra collaboration: Detra emits commands, Vo executes them.
 func handleCommands() {
     count := detra.CommandCount()
     for i := 0; i < count; i++ {
@@ -58,68 +61,4 @@ func handleCommands() {
             println("[Unknown command]", name)
         }
     }
-}
-
-func readDetraSource() string {
-    return `
-state App {
-    count int = 0
-    text string
-    valid bool
-    const maxCount int = 100
-}
-
-command Log(message string)
-
-action Inc(step int = 1) {
-    require state.count + step <= state.maxCount
-    set state.count = state.count + step
-    emit Log(message: "Incremented to " + string(state.count))
-}
-
-action Dec(step int = 1) {
-    require state.count - step >= 0
-    set state.count = state.count - step
-}
-
-action Reset() {
-    set state.count = 0
-}
-
-action SetText(value string) {
-    set state.text = value
-}
-
-rule Validate {
-    derive state.valid = state.text != ""
-}
-
-view Main {
-    Column(padding: 16, spacing: 12) {
-        Text(text: "Vibe Studio Demo", size: 24, bold: true)
-        Divider()
-        
-        Card(title: "Counter") {
-            Row(spacing: 8) {
-                Button(text: "-", onClick: Dec)
-                Text(text: string(state.count), size: 20)
-                Button(text: "+", onClick: Inc)
-                Spacer(size: 20)
-                Button(text: "Reset", onClick: Reset)
-            }
-        }
-        
-        Card(title: "Input") {
-            Column(spacing: 8) {
-                Input(value: state.text, placeholder: "Enter text...", onChange: SetText(value: $value))
-                if state.valid {
-                    Text(text: "Valid input")
-                } else {
-                    Text(text: "Please enter some text")
-                }
-            }
-        }
-    }
-}
-`
 }
