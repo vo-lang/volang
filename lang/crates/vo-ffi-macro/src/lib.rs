@@ -25,6 +25,7 @@ use quote::{quote, format_ident};
 use syn::{
     parse_macro_input, ItemFn, FnArg, ReturnType, Type, Pat,
     punctuated::Punctuated, Token, Expr, Lit,
+    spanned::Spanned,
 };
 
 use std::path::{Path, PathBuf};
@@ -137,6 +138,136 @@ pub fn vo_extern_ctx(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
+}
+
+/// Procedural macro to import constants from Vo source files.
+///
+/// This macro reads constant values directly from .vo files at compile time,
+/// generating Rust `const` declarations with the same values.
+///
+/// # Example
+///
+/// ```ignore
+/// vo_consts! {
+///     "os" => {
+///         codeErrInvalid,
+///         codeErrPermission,
+///         O_RDONLY,
+///         O_APPEND,
+///     }
+/// }
+///
+/// // Expands to:
+/// // pub const CODE_ERR_INVALID: i64 = 3000;
+/// // pub const CODE_ERR_PERMISSION: i64 = 3001;
+/// // pub const O_RDONLY: i64 = 0;
+/// // pub const O_APPEND: i64 = 8;
+/// ```
+///
+/// The constant names are converted from camelCase to SCREAMING_SNAKE_CASE.
+#[proc_macro]
+pub fn vo_consts(input: TokenStream) -> TokenStream {
+    match vo_consts_impl(input.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
+    // Parse: "pkg" => { name1, name2, ... }
+    let input_span = input.span();
+    let parsed: VoConstsInput = syn::parse2(input)?;
+    
+    let pkg_path = &parsed.pkg_path;
+    
+    // Find stdlib directory
+    let stdlib_dir = find_stdlib_dir().ok_or_else(|| {
+        syn::Error::new(input_span, "stdlib directory not found")
+    })?;
+    
+    let pkg_dir = stdlib_dir.join(pkg_path);
+    if !pkg_dir.exists() {
+        return Err(syn::Error::new(
+            input_span,
+            format!("package directory not found: {:?}", pkg_dir),
+        ));
+    }
+    
+    // Generate const declarations
+    let mut consts = Vec::new();
+    for const_name in &parsed.const_names {
+        let vo_name = const_name.to_string();
+        let rust_name = to_screaming_snake_case(&vo_name);
+        let rust_ident = format_ident!("{}", rust_name);
+        
+        let value = vo_parser::find_const(&pkg_dir, &vo_name).map_err(|e| {
+            syn::Error::new(const_name.span(), e)
+        })?;
+        
+        consts.push(quote! {
+            pub const #rust_ident: isize = #value as isize;
+        });
+    }
+    
+    Ok(quote! {
+        #(#consts)*
+    })
+}
+
+/// Input for vo_consts! macro: "pkg" => { name1, name2, ... }
+struct VoConstsInput {
+    pkg_path: String,
+    const_names: Vec<syn::Ident>,
+}
+
+impl syn::parse::Parse for VoConstsInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        // Parse package path string
+        let pkg_lit: syn::LitStr = input.parse()?;
+        let pkg_path = pkg_lit.value();
+        
+        // Parse =>
+        input.parse::<Token![=>]>()?;
+        
+        // Parse { name1, name2, ... }
+        let content;
+        syn::braced!(content in input);
+        
+        let names: Punctuated<syn::Ident, Token![,]> = 
+            content.parse_terminated(syn::Ident::parse, Token![,])?;
+        
+        Ok(VoConstsInput {
+            pkg_path,
+            const_names: names.into_iter().collect(),
+        })
+    }
+}
+
+/// Convert camelCase or PascalCase to SCREAMING_SNAKE_CASE.
+/// Also handles already-snake-case names like O_RDONLY.
+fn to_screaming_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut prev_lower = false;
+    
+    for (i, c) in s.chars().enumerate() {
+        if c == '_' {
+            result.push('_');
+            prev_lower = false;
+        } else if c.is_uppercase() {
+            // Insert underscore before uppercase if previous was lowercase
+            // and we're not at the start
+            if prev_lower && i > 0 {
+                result.push('_');
+            }
+            result.push(c);
+            prev_lower = false;
+        } else {
+            result.push(c.to_ascii_uppercase());
+            prev_lower = true;
+        }
+    }
+    
+    result
 }
 
 fn vo_extern_ctx_impl(

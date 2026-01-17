@@ -2,23 +2,6 @@ package io
 
 import "errors"
 
-// ==================== Error Codes ====================
-
-// Error codes for io operations (internal, use error values below instead)
-const (
-	codeEOF           = 2000 // End of file
-	codeUnexpectedEOF = 2001 // Unexpected end of file
-	codeShortWrite    = 2002 // Short write
-	codeShortBuffer   = 2003 // Short buffer
-	codeNoProgress    = 2004 // Multiple Read calls return no data or error
-	codeClosedPipe    = 2005 // Read/write on closed pipe
-	codeInvalidWrite  = 2006 // Write returned impossible count
-	codeWhence        = 2007 // Invalid Seek whence
-	codeOffset        = 2008 // Invalid Seek offset
-	codeNegativeRead  = 2009 // Reader returned negative count
-	codeNegativeCount = 2010 // Negative count
-)
-
 // Seek whence values
 const (
 	SeekStart   = 0 // Seek relative to the origin of the file
@@ -27,37 +10,37 @@ const (
 )
 
 // EOF is returned by Read when no more input is available.
-var EOF = errors.NewCode(codeEOF, "EOF")
+var EOF = errors.NewCode(errors.CodeEOF, "EOF")
 
 // ErrUnexpectedEOF means that EOF was encountered in the middle of reading a fixed-size block or data structure.
-var ErrUnexpectedEOF = errors.NewCode(codeUnexpectedEOF, "unexpected EOF")
+var ErrUnexpectedEOF = errors.NewCode(errors.CodeUnexpectedEOF, "unexpected EOF")
 
 // ErrShortWrite means that a write accepted fewer bytes than requested but failed to return an explicit error.
-var ErrShortWrite = errors.NewCode(codeShortWrite, "short write")
+var ErrShortWrite = errors.NewCode(errors.CodeShortWrite, "short write")
 
 // ErrShortBuffer means that a read required a longer buffer than was provided.
-var ErrShortBuffer = errors.NewCode(codeShortBuffer, "short buffer")
+var ErrShortBuffer = errors.NewCode(errors.CodeShortBuffer, "short buffer")
 
 // ErrNoProgress is returned by some clients of a Reader when many calls to Read have failed to return any data or error.
-var ErrNoProgress = errors.NewCode(codeNoProgress, "multiple Read calls return no data or error")
+var ErrNoProgress = errors.NewCode(errors.CodeNoProgress, "multiple Read calls return no data or error")
 
 // ErrClosedPipe is the error used for read or write operations on a closed pipe.
-var ErrClosedPipe = errors.NewCode(codeClosedPipe, "io: read/write on closed pipe")
+var ErrClosedPipe = errors.NewCode(errors.CodeClosedPipe, "io: read/write on closed pipe")
 
 // ErrInvalidWrite means that a write returned an impossible count.
-var ErrInvalidWrite = errors.NewCode(codeInvalidWrite, "invalid write result")
+var ErrInvalidWrite = errors.NewCode(errors.CodeInvalidWrite, "invalid write result")
 
 // ErrWhence means an invalid Seek whence value.
-var ErrWhence = errors.NewCode(codeWhence, "invalid whence")
+var ErrWhence = errors.NewCode(errors.CodeWhence, "invalid whence")
 
 // ErrOffset means an invalid Seek offset.
-var ErrOffset = errors.NewCode(codeOffset, "invalid offset")
+var ErrOffset = errors.NewCode(errors.CodeOffset, "invalid offset")
 
 // ErrNegativeRead means a Reader returned a negative count.
-var ErrNegativeRead = errors.NewCode(codeNegativeRead, "negative read count")
+var ErrNegativeRead = errors.NewCode(errors.CodeNegativeRead, "negative read count")
 
 // ErrNegativeCount means a negative count was passed.
-var ErrNegativeCount = errors.NewCode(codeNegativeCount, "negative count")
+var ErrNegativeCount = errors.NewCode(errors.CodeNegativeCount, "negative count")
 
 // ==================== Core Interfaces ====================
 

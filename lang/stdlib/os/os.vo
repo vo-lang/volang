@@ -5,29 +5,16 @@ import (
 	"io"
 )
 
-// ==================== Error Codes ====================
-
-const (
-	codeErrInvalid    = 3000 // Invalid argument
-	codeErrPermission = 3001 // Permission denied
-	codeErrExist      = 3002 // File already exists
-	codeErrNotExist   = 3003 // File does not exist
-	codeErrClosed     = 3004 // File already closed
-	codeErrTimeout    = 3005 // Operation timed out
-	codeErrNotDir     = 3006 // Not a directory
-	codeErrIsDir      = 3007 // Is a directory
-)
-
 // Common errors returned by os functions.
 var (
-	ErrInvalid    = errors.NewCode(codeErrInvalid, "invalid argument")
-	ErrPermission = errors.NewCode(codeErrPermission, "permission denied")
-	ErrExist      = errors.NewCode(codeErrExist, "file already exists")
-	ErrNotExist   = errors.NewCode(codeErrNotExist, "file does not exist")
-	ErrClosed     = errors.NewCode(codeErrClosed, "file already closed")
-	ErrTimeout    = errors.NewCode(codeErrTimeout, "operation timed out")
-	ErrNotDir     = errors.NewCode(codeErrNotDir, "not a directory")
-	ErrIsDir      = errors.NewCode(codeErrIsDir, "is a directory")
+	ErrInvalid    = errors.NewCode(errors.CodeOsInvalid, "invalid argument")
+	ErrPermission = errors.NewCode(errors.CodeOsPermission, "permission denied")
+	ErrExist      = errors.NewCode(errors.CodeOsExist, "file already exists")
+	ErrNotExist   = errors.NewCode(errors.CodeOsNotExist, "file does not exist")
+	ErrClosed     = errors.NewCode(errors.CodeOsClosed, "file already closed")
+	ErrTimeout    = errors.NewCode(errors.CodeOsTimeout, "operation timed out")
+	ErrNotDir     = errors.NewCode(errors.CodeOsNotDir, "not a directory")
+	ErrIsDir      = errors.NewCode(errors.CodeOsIsDir, "is a directory")
 )
 
 // ==================== File Mode ====================

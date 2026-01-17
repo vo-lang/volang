@@ -447,14 +447,14 @@ impl CodegenContext {
         };
         
         vo_vm::bytecode::DynErrorCodes {
-            unknown: read_const("dynUnknown"),
-            nil_base: read_const("dynNilBase"),
-            bad_field: read_const("dynBadField"),
-            bad_index: read_const("dynBadIndex"),
-            out_of_bounds: read_const("dynOutOfBounds"),
-            bad_call: read_const("dynBadCall"),
-            sig_mismatch: read_const("dynSigMismatch"),
-            type_mismatch: read_const("dynTypeMismatch"),
+            unknown: read_const("CodeDynUnknown"),
+            nil_base: read_const("CodeDynNilBase"),
+            bad_field: read_const("CodeDynBadField"),
+            bad_index: read_const("CodeDynBadIndex"),
+            out_of_bounds: read_const("CodeDynOutOfBounds"),
+            bad_call: read_const("CodeDynBadCall"),
+            sig_mismatch: read_const("CodeDynSigMismatch"),
+            type_mismatch: read_const("CodeDynTypeMismatch"),
         }
     }
 

@@ -3,17 +3,11 @@ package strconv
 import "errors"
 import "unicode/utf8"
 
-// Error codes for strconv (internal)
-const (
-    codeSyntax = 3000 // Invalid syntax
-    codeRange  = 3001 // Value out of range
-)
-
 // ErrSyntax indicates that a value does not have the right syntax.
-var ErrSyntax = errors.NewCode(codeSyntax, "invalid syntax")
+var ErrSyntax = errors.NewCode(errors.CodeSyntax, "invalid syntax")
 
 // ErrRange indicates that a value is out of range.
-var ErrRange = errors.NewCode(codeRange, "value out of range")
+var ErrRange = errors.NewCode(errors.CodeRange, "value out of range")
 
 // Extern functions (implemented in Rust)
 func ParseFloat(s string, bitSize int) (float64, bool)

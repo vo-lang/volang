@@ -1,0 +1,121 @@
+package errors
+
+// ============================================================================
+// Centralized Error Codes for stdlib
+// ============================================================================
+//
+// All stdlib packages should import error codes from this file.
+// Rust native code uses vo_consts! macro to import these values.
+//
+// Range allocation:
+//   0:          errors (CodeUnknown)
+//   1000-1099:  errors (dynamic errors)
+//   2000-2099:  io
+//   3000-3099:  strconv
+//   4000-4099:  encoding/json
+//   4100-4199:  encoding/hex
+//   4200-4299:  encoding/base64
+//   4300-4399:  encoding/toml
+//   5000-5099:  regexp
+//   6000-6099:  bytes
+//   7000-7099:  os
+//
+// ============================================================================
+
+// errors package (0)
+const (
+	CodeUnknown = 0
+)
+
+// Dynamic access errors (1000-1099, used by runtime)
+const (
+	CodeDynUnknown      = 1000 // Unknown error
+	CodeDynNilBase      = 1001 // Base value is nil
+	CodeDynBadField     = 1002 // Field does not exist
+	CodeDynBadIndex     = 1003 // Invalid index type
+	CodeDynOutOfBounds  = 1004 // Index out of bounds
+	CodeDynBadCall      = 1005 // Cannot call value
+	CodeDynSigMismatch  = 1006 // Signature mismatch
+	CodeDynTypeMismatch = 1007 // Type mismatch
+)
+
+// io package (2000-2099)
+const (
+	CodeEOF           = 2000 // End of file
+	CodeUnexpectedEOF = 2001 // Unexpected end of file
+	CodeShortWrite    = 2002 // Short write
+	CodeShortBuffer   = 2003 // Short buffer
+	CodeNoProgress    = 2004 // Multiple Read calls return no data or error
+	CodeClosedPipe    = 2005 // Read/write on closed pipe
+	CodeInvalidWrite  = 2006 // Write returned impossible count
+	CodeWhence        = 2007 // Invalid Seek whence
+	CodeOffset        = 2008 // Invalid Seek offset
+	CodeNegativeRead  = 2009 // Reader returned negative count
+	CodeNegativeCount = 2010 // Negative count
+)
+
+// strconv package (3000-3099)
+const (
+	CodeSyntax = 3000 // Invalid syntax
+	CodeRange  = 3001 // Value out of range
+)
+
+// encoding/json package (4000-4099)
+const (
+	CodeJsonSyntax        = 4000 // JSON syntax error
+	CodeJsonUnexpectedEOF = 4001 // Unexpected end of input
+	CodeJsonInvalidValue  = 4002 // Invalid value
+	CodeJsonTypeMismatch  = 4003 // Type mismatch
+	CodeJsonPathNotFound  = 4004 // Path not found
+	CodeJsonNotObject     = 4005 // Not an object type
+	CodeJsonNotArray      = 4006 // Not an array type
+	CodeJsonMarshal       = 4007 // Serialization error
+	CodeJsonUnmarshal     = 4008 // Deserialization error
+)
+
+// encoding/hex package (4100-4199)
+const (
+	CodeHexLength      = 4100 // Odd length hex string
+	CodeHexInvalidByte = 4101 // Invalid byte in hex string
+)
+
+// encoding/base64 package (4200-4299)
+const (
+	CodeBase64CorruptInput = 4200 // Corrupt input
+)
+
+// encoding/toml package (4300-4399)
+const (
+	CodeTomlSyntax        = 4300 // TOML syntax error
+	CodeTomlUnexpectedEOF = 4301 // Unexpected end of input
+	CodeTomlInvalidValue  = 4302 // Invalid value
+	CodeTomlTypeMismatch  = 4303 // Type mismatch
+	CodeTomlKeyNotFound   = 4304 // Key not found
+	CodeTomlDuplicateKey  = 4305 // Duplicate key
+	CodeTomlMarshal       = 4306 // Serialization error
+	CodeTomlUnmarshal     = 4307 // Deserialization error
+)
+
+// regexp package (5000-5099)
+const (
+	CodeRegexpInvalidPattern = 5000 // Invalid regular expression pattern
+)
+
+// bytes package (6000-6099)
+const (
+	CodeBytesUnreadByte = 6000 // UnreadByte: previous operation was not a read
+	CodeBytesUnreadRune = 6001 // UnreadRune: previous operation was not ReadRune
+	CodeBytesTooLarge   = 6002 // Buffer too large
+)
+
+// os package (7000-7099)
+const (
+	CodeOsInvalid    = 7000 // Invalid argument
+	CodeOsPermission = 7001 // Permission denied
+	CodeOsExist      = 7002 // File already exists
+	CodeOsNotExist   = 7003 // File does not exist
+	CodeOsClosed     = 7004 // File already closed
+	CodeOsTimeout    = 7005 // Operation timed out
+	CodeOsNotDir     = 7006 // Not a directory
+	CodeOsIsDir      = 7007 // Is a directory
+)

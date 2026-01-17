@@ -2,13 +2,8 @@ package regexp
 
 import "errors"
 
-// Error codes for regexp (internal, range 5000-5099)
-const (
-    codeInvalidPattern = 5000 // Invalid regular expression pattern
-)
-
 // ErrInvalidPattern indicates an invalid regular expression pattern.
-var ErrInvalidPattern = errors.NewCode(codeInvalidPattern, "invalid regexp pattern")
+var ErrInvalidPattern = errors.NewCode(errors.CodeRegexpInvalidPattern, "invalid regexp pattern")
 
 // Extern functions (implemented in Rust)
 func matchString(pattern, s string) (bool, bool)

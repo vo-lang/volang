@@ -2,17 +2,11 @@ package hex
 
 import "errors"
 
-// Error codes for hex (internal, range 4100-4199)
-const (
-    codeLength      = 4100 // Odd length hex string
-    codeInvalidByte = 4101 // Invalid byte in hex string
-)
-
 // ErrLength indicates an odd length hex string.
-var ErrLength = errors.NewCode(codeLength, "hex: odd length hex string")
+var ErrLength = errors.NewCode(errors.CodeHexLength, "hex: odd length hex string")
 
 // ErrInvalidByte indicates an invalid byte in hex string.
-var ErrInvalidByte = errors.NewCode(codeInvalidByte, "hex: invalid byte")
+var ErrInvalidByte = errors.NewCode(errors.CodeHexInvalidByte, "hex: invalid byte")
 
 const hextable = "0123456789abcdef"
 

@@ -2,38 +2,26 @@ package toml
 
 import "errors"
 
-// TOML error codes (internal, range 4300-4399)
-const (
-    codeSyntax        = 4300 // TOML syntax error
-    codeUnexpectedEOF = 4301 // Unexpected end of input
-    codeInvalidValue  = 4302 // Invalid value
-    codeTypeMismatch  = 4303 // Type mismatch
-    codeKeyNotFound   = 4304 // Key not found
-    codeDuplicateKey  = 4305 // Duplicate key
-    codeMarshal       = 4306 // Serialization error
-    codeUnmarshal     = 4307 // Deserialization error
-)
-
 // ErrSyntax indicates a TOML syntax error.
-var ErrSyntax = errors.NewCode(codeSyntax, "toml syntax error")
+var ErrSyntax = errors.NewCode(errors.CodeTomlSyntax, "toml syntax error")
 
 // ErrUnexpectedEOF indicates unexpected end of input.
-var ErrUnexpectedEOF = errors.NewCode(codeUnexpectedEOF, "unexpected end of TOML input")
+var ErrUnexpectedEOF = errors.NewCode(errors.CodeTomlUnexpectedEOF, "unexpected end of TOML input")
 
 // ErrInvalidValue indicates an invalid value.
-var ErrInvalidValue = errors.NewCode(codeInvalidValue, "invalid TOML value")
+var ErrInvalidValue = errors.NewCode(errors.CodeTomlInvalidValue, "invalid TOML value")
 
 // ErrTypeMismatch indicates a type mismatch.
-var ErrTypeMismatch = errors.NewCode(codeTypeMismatch, "TOML type mismatch")
+var ErrTypeMismatch = errors.NewCode(errors.CodeTomlTypeMismatch, "TOML type mismatch")
 
 // ErrKeyNotFound indicates a key was not found.
-var ErrKeyNotFound = errors.NewCode(codeKeyNotFound, "TOML key not found")
+var ErrKeyNotFound = errors.NewCode(errors.CodeTomlKeyNotFound, "TOML key not found")
 
 // ErrDuplicateKey indicates a duplicate key.
-var ErrDuplicateKey = errors.NewCode(codeDuplicateKey, "duplicate TOML key")
+var ErrDuplicateKey = errors.NewCode(errors.CodeTomlDuplicateKey, "duplicate TOML key")
 
 // ErrMarshal indicates a serialization error.
-var ErrMarshal = errors.NewCode(codeMarshal, "TOML marshal error")
+var ErrMarshal = errors.NewCode(errors.CodeTomlMarshal, "TOML marshal error")
 
 // ErrUnmarshal indicates a deserialization error.
-var ErrUnmarshal = errors.NewCode(codeUnmarshal, "TOML unmarshal error")
+var ErrUnmarshal = errors.NewCode(errors.CodeTomlUnmarshal, "TOML unmarshal error")

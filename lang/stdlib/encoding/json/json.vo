@@ -5,45 +5,32 @@ import (
     "strconv"
 )
 
-// JSON error codes (internal, range 4000-4099)
-const (
-    codeSyntax        = 4000 // JSON syntax error
-    codeUnexpectedEOF = 4001 // Unexpected end of input
-    codeInvalidValue  = 4002 // Invalid value
-    codeTypeMismatch  = 4003 // Type mismatch
-    codePathNotFound  = 4004 // Path not found
-    codeNotObject     = 4005 // Not an object type
-    codeNotArray      = 4006 // Not an array type
-    codeMarshal       = 4007 // Serialization error
-    codeUnmarshal     = 4008 // Deserialization error
-)
-
 // ErrSyntax indicates a JSON syntax error.
-var ErrSyntax = errors.NewCode(codeSyntax, "json syntax error")
+var ErrSyntax = errors.NewCode(errors.CodeJsonSyntax, "json syntax error")
 
 // ErrUnexpectedEOF indicates unexpected end of input.
-var ErrUnexpectedEOF = errors.NewCode(codeUnexpectedEOF, "unexpected end of JSON input")
+var ErrUnexpectedEOF = errors.NewCode(errors.CodeJsonUnexpectedEOF, "unexpected end of JSON input")
 
 // ErrInvalidValue indicates an invalid value.
-var ErrInvalidValue = errors.NewCode(codeInvalidValue, "invalid JSON value")
+var ErrInvalidValue = errors.NewCode(errors.CodeJsonInvalidValue, "invalid JSON value")
 
 // ErrTypeMismatch indicates a type mismatch.
-var ErrTypeMismatch = errors.NewCode(codeTypeMismatch, "JSON type mismatch")
+var ErrTypeMismatch = errors.NewCode(errors.CodeJsonTypeMismatch, "JSON type mismatch")
 
 // ErrPathNotFound indicates a path was not found.
-var ErrPathNotFound = errors.NewCode(codePathNotFound, "JSON path not found")
+var ErrPathNotFound = errors.NewCode(errors.CodeJsonPathNotFound, "JSON path not found")
 
 // ErrNotObject indicates the value is not an object.
-var ErrNotObject = errors.NewCode(codeNotObject, "not a JSON object")
+var ErrNotObject = errors.NewCode(errors.CodeJsonNotObject, "not a JSON object")
 
 // ErrNotArray indicates the value is not an array.
-var ErrNotArray = errors.NewCode(codeNotArray, "not a JSON array")
+var ErrNotArray = errors.NewCode(errors.CodeJsonNotArray, "not a JSON array")
 
 // ErrMarshal indicates a serialization error.
-var ErrMarshal = errors.NewCode(codeMarshal, "JSON marshal error")
+var ErrMarshal = errors.NewCode(errors.CodeJsonMarshal, "JSON marshal error")
 
 // ErrUnmarshal indicates a deserialization error.
-var ErrUnmarshal = errors.NewCode(codeUnmarshal, "JSON unmarshal error")
+var ErrUnmarshal = errors.NewCode(errors.CodeJsonUnmarshal, "JSON unmarshal error")
 
 // Number represents a JSON number literal.
 // It preserves the original string representation for precision.

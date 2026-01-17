@@ -2,13 +2,8 @@ package base64
 
 import "errors"
 
-// Error codes for base64 (internal, range 4200-4299)
-const (
-    codeCorruptInput = 4200 // Corrupt input
-)
-
 // ErrCorruptInput indicates corrupt base64 input.
-var ErrCorruptInput = errors.NewCode(codeCorruptInput, "base64: corrupt input")
+var ErrCorruptInput = errors.NewCode(errors.CodeBase64CorruptInput, "base64: corrupt input")
 
 // Standard encoding alphabet
 const encodeStd = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

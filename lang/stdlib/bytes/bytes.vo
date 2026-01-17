@@ -390,21 +390,14 @@ func indexRuneInString(s string, r rune) int {
 
 // ==================== Buffer ====================
 
-// Error codes for bytes-specific errors (internal)
-const (
-    codeUnreadByte = 6000 // UnreadByte: previous operation was not a read
-    codeUnreadRune = 6001 // UnreadRune: previous operation was not ReadRune
-    codeTooLarge   = 6002 // Buffer too large
-)
-
 // ErrUnreadByte is returned by UnreadByte when the previous operation was not a read.
-var ErrUnreadByte = errors.NewCode(codeUnreadByte, "bytes.Buffer: UnreadByte: previous operation was not a successful read")
+var ErrUnreadByte = errors.NewCode(errors.CodeBytesUnreadByte, "bytes.Buffer: UnreadByte: previous operation was not a successful read")
 
 // ErrUnreadRune is returned by UnreadRune when the previous operation was not ReadRune.
-var ErrUnreadRune = errors.NewCode(codeUnreadRune, "bytes.Buffer: UnreadRune: previous operation was not a successful ReadRune")
+var ErrUnreadRune = errors.NewCode(errors.CodeBytesUnreadRune, "bytes.Buffer: UnreadRune: previous operation was not a successful ReadRune")
 
 // ErrTooLarge is passed to panic if memory cannot be allocated to store data in a buffer.
-var ErrTooLarge = errors.NewCode(codeTooLarge, "bytes.Buffer: too large")
+var ErrTooLarge = errors.NewCode(errors.CodeBytesTooLarge, "bytes.Buffer: too large")
 
 // smallBufferSize is an initial allocation minimal capacity.
 const smallBufferSize = 64

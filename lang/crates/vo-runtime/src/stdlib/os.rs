@@ -7,18 +7,24 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use vo_common_core::types::ValueKind;
-use vo_ffi_macro::vo_extern_ctx;
+use vo_ffi_macro::{vo_extern_ctx, vo_consts};
 
 use crate::ffi::{ExternCallContext, ExternResult};
 use crate::gc::{Gc, GcRef};
 use crate::objects::slice;
 use super::error_helper::{write_error_to, write_nil_error};
 
-const CODE_EOF: isize = 2000;  // io.EOF
-const CODE_ERR_INVALID: isize = 3000;
-const CODE_ERR_PERMISSION: isize = 3001;
-const CODE_ERR_EXIST: isize = 3002;
-const CODE_ERR_NOT_EXIST: isize = 3003;
+// Import error codes from centralized errors/code.vo
+vo_consts! {
+    "errors" => {
+        CodeEOF,
+        CodeOsInvalid,
+        CodeOsPermission,
+        CodeOsExist,
+        CodeOsNotExist,
+    }
+}
+
 const MODE_DIR: u32 = 1 << 31;
 const MODE_SYMLINK: u32 = 1 << 27;
 
@@ -56,12 +62,12 @@ macro_rules! with_file_mut {
     ($fd:expr, $call:expr, $err_slot:expr, |$file:ident| $body:expr) => {{
         let mut handles = FILE_HANDLES.lock().unwrap();
         if let Some($file) = handles.get_mut(&$fd) { $body }
-        else { write_error_to($call, $err_slot, CODE_ERR_INVALID, "invalid file descriptor"); }
+        else { write_error_to($call, $err_slot, CODE_OS_INVALID, "invalid file descriptor"); }
     }};
     ($fd:expr, $call:expr, $err_slot:expr, ret0, |$file:ident| $body:expr) => {{
         let mut handles = FILE_HANDLES.lock().unwrap();
         if let Some($file) = handles.get_mut(&$fd) { $body }
-        else { $call.ret_i64(0, 0); write_error_to($call, $err_slot, CODE_ERR_INVALID, "invalid file descriptor"); }
+        else { $call.ret_i64(0, 0); write_error_to($call, $err_slot, CODE_OS_INVALID, "invalid file descriptor"); }
     }};
 }
 
@@ -69,21 +75,21 @@ macro_rules! with_file {
     ($fd:expr, $call:expr, $err_slot:expr, |$file:ident| $body:expr) => {{
         let handles = FILE_HANDLES.lock().unwrap();
         if let Some($file) = handles.get(&$fd) { $body }
-        else { write_error_to($call, $err_slot, CODE_ERR_INVALID, "invalid file descriptor"); }
+        else { write_error_to($call, $err_slot, CODE_OS_INVALID, "invalid file descriptor"); }
     }};
     ($fd:expr, $call:expr, $err_slot:expr, nil $n:expr, |$file:ident| $body:expr) => {{
         let handles = FILE_HANDLES.lock().unwrap();
         if let Some($file) = handles.get(&$fd) { $body }
-        else { for i in 0..$n { $call.ret_nil(i as u16); } write_error_to($call, $err_slot, CODE_ERR_INVALID, "invalid fd"); }
+        else { for i in 0..$n { $call.ret_nil(i as u16); } write_error_to($call, $err_slot, CODE_OS_INVALID, "invalid fd"); }
     }};
 }
 
 fn io_error_to_code(err: &std::io::Error) -> isize {
     match err.kind() {
-        std::io::ErrorKind::NotFound => CODE_ERR_NOT_EXIST,
-        std::io::ErrorKind::PermissionDenied => CODE_ERR_PERMISSION,
-        std::io::ErrorKind::AlreadyExists => CODE_ERR_EXIST,
-        _ => CODE_ERR_INVALID,
+        std::io::ErrorKind::NotFound => CODE_OS_NOT_EXIST,
+        std::io::ErrorKind::PermissionDenied => CODE_OS_PERMISSION,
+        std::io::ErrorKind::AlreadyExists => CODE_OS_EXIST,
+        _ => CODE_OS_INVALID,
     }
 }
 
@@ -228,7 +234,7 @@ fn os_file_seek(call: &mut ExternCallContext) -> ExternResult {
             0 => Some(SeekFrom::Start(offset as u64)),
             1 => Some(SeekFrom::Current(offset)),
             2 => Some(SeekFrom::End(offset)),
-            _ => { call.ret_i64(0, 0); write_error_to(call, 1, CODE_ERR_INVALID, "invalid whence"); None }
+            _ => { call.ret_i64(0, 0); write_error_to(call, 1, CODE_OS_INVALID, "invalid whence"); None }
         };
         if let Some(sf) = seek_from {
             match file.seek(sf) {
@@ -245,7 +251,7 @@ fn os_file_close(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     if fd <= 2 { write_nil_error(call, 0); return ExternResult::Ok; }
     if remove_file(fd).is_some() { write_nil_error(call, 0); }
-    else { write_error_to(call, 0, CODE_ERR_INVALID, "invalid file descriptor"); }
+    else { write_error_to(call, 0, CODE_OS_INVALID, "invalid file descriptor"); }
     ExternResult::Ok
 }
 
@@ -284,16 +290,19 @@ fn os_file_truncate(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-// Abstract Vo flags (must match os.vo constants)
-const VO_O_RDONLY: i32 = 0;
-const VO_O_WRONLY: i32 = 1;
-const VO_O_RDWR: i32 = 2;
-const VO_O_APPEND: i32 = 1 << 3;
-const VO_O_CREATE: i32 = 1 << 4;
-const VO_O_EXCL: i32 = 1 << 5;
-#[allow(dead_code)]
-const VO_O_SYNC: i32 = 1 << 6;
-const VO_O_TRUNC: i32 = 1 << 7;
+// Import O_* flags from os.vo
+vo_consts! {
+    "os" => {
+        O_RDONLY,
+        O_WRONLY,
+        O_RDWR,
+        O_APPEND,
+        O_CREATE,
+        O_EXCL,
+        O_SYNC,
+        O_TRUNC,
+    }
+}
 
 #[vo_extern_ctx("os", "openFile")]
 fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
@@ -303,18 +312,18 @@ fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
     
     let mut opts = OpenOptions::new();
     let access = flag & 0x3;
-    if access == VO_O_RDONLY { opts.read(true); }
-    else if access == VO_O_WRONLY { opts.write(true); }
-    else if access == VO_O_RDWR { opts.read(true).write(true); }
-    if flag & VO_O_APPEND != 0 { opts.append(true); }
-    if flag & VO_O_CREATE != 0 { opts.create(true); }
-    if flag & VO_O_EXCL != 0 { opts.create_new(true); }
-    if flag & VO_O_TRUNC != 0 { opts.truncate(true); }
+    if access == O_RDONLY as i32 { opts.read(true); }
+    else if access == O_WRONLY as i32 { opts.write(true); }
+    else if access == O_RDWR as i32 { opts.read(true).write(true); }
+    if flag & O_APPEND as i32 != 0 { opts.append(true); }
+    if flag & O_CREATE as i32 != 0 { opts.create(true); }
+    if flag & O_EXCL as i32 != 0 { opts.create_new(true); }
+    if flag & O_TRUNC as i32 != 0 { opts.truncate(true); }
     
     match opts.open(name) {
         Ok(file) => {
             #[cfg(unix)]
-            if flag & VO_O_CREATE != 0 { let _ = file.set_permissions(fs::Permissions::from_mode(perm)); }
+            if flag & O_CREATE as i32 != 0 { let _ = file.set_permissions(fs::Permissions::from_mode(perm)); }
             let fd = register_file(file);
             call.ret_i64(0, fd as i64);
             write_nil_error(call, 1);
@@ -443,7 +452,7 @@ fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
     let name = call.arg_str(0);
     let mode = call.arg_u64(1) as u32;
     #[cfg(unix)] { match fs::set_permissions(name, fs::Permissions::from_mode(mode)) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_ERR_INVALID, "chmod not supported"); }
+    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "chmod not supported"); }
     ExternResult::Ok
 }
 
@@ -453,7 +462,7 @@ fn os_chown(call: &mut ExternCallContext) -> ExternResult {
     let uid = call.arg_i64(1) as u32;
     let gid = call.arg_i64(2) as u32;
     #[cfg(unix)] { use std::os::unix::fs::chown; match chown(name, Some(uid), Some(gid)) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_ERR_INVALID, "chown not supported"); }
+    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "chown not supported"); }
     ExternResult::Ok
 }
 
@@ -462,7 +471,7 @@ fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
     let oldname = call.arg_str(0);
     let newname = call.arg_str(1);
     #[cfg(unix)] { match symlink(oldname, newname) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_ERR_INVALID, "symlink not supported"); }
+    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "symlink not supported"); }
     ExternResult::Ok
 }
 
@@ -592,7 +601,7 @@ fn os_chdir(call: &mut ExternCallContext) -> ExternResult {
 fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::home_dir() {
         Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_ERR_NOT_EXIST, "home directory not found"); }
+        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "home directory not found"); }
     }
     ExternResult::Ok
 }
@@ -601,7 +610,7 @@ fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
 fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::cache_dir() {
         Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_ERR_NOT_EXIST, "cache directory not found"); }
+        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "cache directory not found"); }
     }
     ExternResult::Ok
 }
@@ -610,7 +619,7 @@ fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
 fn os_user_config_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::config_dir() {
         Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_ERR_NOT_EXIST, "config directory not found"); }
+        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "config directory not found"); }
     }
     ExternResult::Ok
 }
@@ -671,7 +680,7 @@ fn os_create_temp(call: &mut ExternCallContext) -> ExternResult {
             Err(e) => { call.ret_i64(0, -1); call.ret_str(1, ""); write_io_error(call, 2, e); return ExternResult::Ok; }
         }
     }
-    call.ret_i64(0, -1); call.ret_str(1, ""); write_error_to(call, 2, CODE_ERR_EXIST, "failed to create temp file");
+    call.ret_i64(0, -1); call.ret_str(1, ""); write_error_to(call, 2, CODE_OS_EXIST, "failed to create temp file");
     ExternResult::Ok
 }
 
@@ -690,7 +699,7 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
             Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); return ExternResult::Ok; }
         }
     }
-    call.ret_str(0, ""); write_error_to(call, 1, CODE_ERR_EXIST, "failed to create temp dir");
+    call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_EXIST, "failed to create temp dir");
     ExternResult::Ok
 }
 

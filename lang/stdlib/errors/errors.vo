@@ -24,10 +24,6 @@ func (e *Error) Data() any {
     return e.data
 }
 
-const (
-    CodeUnknown int = 0
-)
-
 // New returns a new error with default code CodeUnknown.
 func New(msg string) error {
     return &Error{code: CodeUnknown, msg: msg}

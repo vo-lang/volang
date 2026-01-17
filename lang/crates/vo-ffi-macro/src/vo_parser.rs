@@ -533,6 +533,293 @@ fn parse_returns(s: &str) -> Vec<VoType> {
     }
 }
 
+// =============================================================================
+// Constant Parsing
+// =============================================================================
+
+/// Find and parse a constant value from a package directory.
+pub fn find_const(pkg_dir: &Path, const_name: &str) -> Result<i64, String> {
+    let entries = std::fs::read_dir(pkg_dir)
+        .map_err(|e| format!("cannot read directory {:?}: {}", pkg_dir, e))?;
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "vo").unwrap_or(false) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(val) = parse_const_value(&content, const_name) {
+                    return Ok(val);
+                }
+            }
+        }
+    }
+    
+    Err(format!("const '{}' not found in {:?}", const_name, pkg_dir))
+}
+
+/// Parse a constant value from Vo source code.
+fn parse_const_value(source: &str, const_name: &str) -> Option<i64> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut in_const_block = false;
+    
+    for line in &lines {
+        let trimmed = line.trim();
+        
+        // Start of const block: "const ("
+        if trimmed == "const (" {
+            in_const_block = true;
+            continue;
+        }
+        
+        // End of const block: ")"
+        if in_const_block && trimmed == ")" {
+            in_const_block = false;
+            continue;
+        }
+        
+        // Single const: "const Name = value" or "const Name type = value"
+        if let Some(rest) = trimmed.strip_prefix("const ") {
+            if !rest.starts_with('(') {
+                if let Some(val) = parse_const_assignment(rest, const_name) {
+                    return Some(val);
+                }
+            }
+            continue;
+        }
+        
+        // Inside const block: "Name = value" or "Name type = value"
+        if in_const_block {
+            if let Some(val) = parse_const_assignment(trimmed, const_name) {
+                return Some(val);
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse a single constant assignment line.
+/// Formats: "Name = value", "Name type = value", "Name = value // comment"
+fn parse_const_assignment(line: &str, const_name: &str) -> Option<i64> {
+    // Remove trailing comment
+    let line = line.split("//").next()?.trim();
+    
+    // Split by '='
+    let (name_part, value_part) = line.split_once('=')?;
+    let name_part = name_part.trim();
+    let value_part = value_part.trim();
+    
+    // name_part could be "Name" or "Name type"
+    let name = name_part.split_whitespace().next()?;
+    
+    if name != const_name {
+        return None;
+    }
+    
+    eval_const_expr(value_part)
+}
+
+/// Evaluate a simple constant expression.
+fn eval_const_expr(expr: &str) -> Option<i64> {
+    let expr = expr.trim();
+    
+    // Empty
+    if expr.is_empty() {
+        return None;
+    }
+    
+    // Parenthesized expression
+    if expr.starts_with('(') && expr.ends_with(')') {
+        return eval_const_expr(&expr[1..expr.len()-1]);
+    }
+    
+    // Bit OR: a | b
+    if let Some((left, right)) = split_binary_op(expr, '|') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l | r);
+    }
+    
+    // Bit AND: a & b
+    if let Some((left, right)) = split_binary_op(expr, '&') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l & r);
+    }
+    
+    // Bit shift left: a << b
+    if let Some((left, right)) = expr.split_once("<<") {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l << r);
+    }
+    
+    // Bit shift right: a >> b
+    if let Some((left, right)) = expr.split_once(">>") {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l >> r);
+    }
+    
+    // Addition: a + b
+    if let Some((left, right)) = split_binary_op(expr, '+') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l + r);
+    }
+    
+    // Subtraction: a - b (careful with negative numbers)
+    if let Some((left, right)) = split_binary_op_careful(expr, '-') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l - r);
+    }
+    
+    // Multiplication: a * b
+    if let Some((left, right)) = split_binary_op(expr, '*') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        return Some(l * r);
+    }
+    
+    // Division: a / b
+    if let Some((left, right)) = split_binary_op(expr, '/') {
+        let l = eval_const_expr(left)?;
+        let r = eval_const_expr(right)?;
+        if r != 0 {
+            return Some(l / r);
+        }
+        return None;
+    }
+    
+    // Unary minus: -x
+    if let Some(rest) = expr.strip_prefix('-') {
+        let val = eval_const_expr(rest)?;
+        return Some(-val);
+    }
+    
+    // Character literal: 'x' or '\n' etc
+    if expr.starts_with('\'') && expr.ends_with('\'') {
+        return parse_char_literal(expr);
+    }
+    
+    // Hex literal: 0x...
+    if let Some(hex) = expr.strip_prefix("0x").or_else(|| expr.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    
+    // Octal literal: 0o...
+    if let Some(oct) = expr.strip_prefix("0o").or_else(|| expr.strip_prefix("0O")) {
+        return i64::from_str_radix(oct, 8).ok();
+    }
+    
+    // Binary literal: 0b...
+    if let Some(bin) = expr.strip_prefix("0b").or_else(|| expr.strip_prefix("0B")) {
+        return i64::from_str_radix(bin, 2).ok();
+    }
+    
+    // Integer literal
+    expr.parse::<i64>().ok()
+}
+
+/// Split by binary operator, but only at top level (not inside parens or quotes).
+fn split_binary_op(expr: &str, op: char) -> Option<(&str, &str)> {
+    let mut depth = 0;
+    let mut in_char = false;
+    let mut prev_backslash = false;
+    
+    for (i, c) in expr.char_indices() {
+        if in_char {
+            if c == '\'' && !prev_backslash {
+                in_char = false;
+            }
+            prev_backslash = c == '\\' && !prev_backslash;
+            continue;
+        }
+        
+        match c {
+            '\'' => in_char = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if c == op && depth == 0 => {
+                return Some((&expr[..i], &expr[i+1..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split by '-' but avoid splitting on negative number prefix.
+fn split_binary_op_careful(expr: &str, op: char) -> Option<(&str, &str)> {
+    let mut depth = 0;
+    let mut in_char = false;
+    let mut prev_backslash = false;
+    let chars: Vec<char> = expr.chars().collect();
+    
+    for (i, &c) in chars.iter().enumerate() {
+        if in_char {
+            if c == '\'' && !prev_backslash {
+                in_char = false;
+            }
+            prev_backslash = c == '\\' && !prev_backslash;
+            continue;
+        }
+        
+        match c {
+            '\'' => in_char = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if c == op && depth == 0 && i > 0 => {
+                // Make sure it's not a negative prefix (preceded by operator or start)
+                // Look for the last non-whitespace character before this position
+                let mut prev_idx = i - 1;
+                while prev_idx > 0 && chars[prev_idx].is_whitespace() {
+                    prev_idx -= 1;
+                }
+                let prev = chars.get(prev_idx).copied();
+                if let Some(p) = prev {
+                    if p.is_ascii_digit() || p == ')' || p == '\'' {
+                        let byte_pos: usize = expr.char_indices()
+                            .nth(i)
+                            .map(|(pos, _)| pos)
+                            .unwrap_or(0);
+                        return Some((&expr[..byte_pos], &expr[byte_pos+1..]));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse character literal like 'x', '\n', '\t', '\\', '\''
+fn parse_char_literal(s: &str) -> Option<i64> {
+    if s.len() < 3 || !s.starts_with('\'') || !s.ends_with('\'') {
+        return None;
+    }
+    
+    let inner = &s[1..s.len()-1];
+    
+    if inner.starts_with('\\') {
+        // Escape sequence
+        match inner {
+            "\\n" => Some('\n' as i64),
+            "\\t" => Some('\t' as i64),
+            "\\r" => Some('\r' as i64),
+            "\\\\" => Some('\\' as i64),
+            "\\'" => Some('\'' as i64),
+            "\\\"" => Some('"' as i64),
+            "\\0" => Some(0),
+            _ => None,
+        }
+    } else if inner.len() == 1 {
+        Some(inner.chars().next()? as i64)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +919,47 @@ func helper() {
         let sig = parse_func_signature(source, "Divmod").unwrap();
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.results.len(), 2);
+    }
+
+    #[test]
+    fn test_eval_const_expr() {
+        assert_eq!(eval_const_expr("3000"), Some(3000));
+        assert_eq!(eval_const_expr("0"), Some(0));
+        assert_eq!(eval_const_expr("-1"), Some(-1));
+        assert_eq!(eval_const_expr("0x1F"), Some(31));
+        assert_eq!(eval_const_expr("0xff"), Some(255));
+        assert_eq!(eval_const_expr("1 << 3"), Some(8));
+        assert_eq!(eval_const_expr("1 << 7"), Some(128));
+        assert_eq!(eval_const_expr("'/'"), Some(47));
+        assert_eq!(eval_const_expr("'\\n'"), Some(10));
+        assert_eq!(eval_const_expr("'\\t'"), Some(9));
+        assert_eq!(eval_const_expr("1 + 2"), Some(3));
+        assert_eq!(eval_const_expr("10 - 3"), Some(7));
+        assert_eq!(eval_const_expr("2 * 3"), Some(6));
+        assert_eq!(eval_const_expr("10 / 2"), Some(5));
+        assert_eq!(eval_const_expr("1 | 2"), Some(3));
+        assert_eq!(eval_const_expr("3 & 1"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_const_value() {
+        let source = r#"
+package os
+
+const (
+    codeErrInvalid    = 3000 // Invalid argument
+    codeErrPermission = 3001 // Permission denied
+    O_RDONLY int = 0
+    O_APPEND int = 1 << 3
+)
+
+const PathSeparator = '/'
+"#;
+        assert_eq!(parse_const_value(source, "codeErrInvalid"), Some(3000));
+        assert_eq!(parse_const_value(source, "codeErrPermission"), Some(3001));
+        assert_eq!(parse_const_value(source, "O_RDONLY"), Some(0));
+        assert_eq!(parse_const_value(source, "O_APPEND"), Some(8));
+        assert_eq!(parse_const_value(source, "PathSeparator"), Some(47));
+        assert_eq!(parse_const_value(source, "NotExist"), None);
     }
 }
