@@ -113,7 +113,6 @@ pub fn compile_call(
         
         if obj.entity_type().func_has_body() {
             // Vo function - use Call instruction
-            // Use ObjKey for consistency (though same-package calls wouldn't collide)
             let func_idx = ctx.get_func_by_objkey(obj_key)
                 .ok_or_else(|| CodegenError::Internal(format!("function not registered: {:?}", ident.symbol)))?;
             
@@ -139,10 +138,15 @@ pub fn compile_call(
             let func_name = info.project.interner.resolve(ident.symbol)
                 .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
             let pkg_key = obj.pkg();
-            let pkg_path = pkg_key
-                .map(|pk| info.project.tc_objs.pkgs[pk].path().to_string())
+            let pkg_name = pkg_key
+                .map(|pk| {
+                    let pkg = &info.project.tc_objs.pkgs[pk];
+                    pkg.name().clone().unwrap_or_else(|| {
+                        pkg.path().rsplit('/').next().unwrap_or("main").to_string()
+                    })
+                })
                 .unwrap_or_else(|| "main".to_string());
-            let extern_name = format!("{}_{}", pkg_path.replace("/", "_"), func_name);
+            let extern_name = format!("{}_{}", pkg_name, func_name);
             return compile_extern_call(call, &extern_name, dst, ctx, func, info);
         }
     }
@@ -605,11 +609,12 @@ fn get_extern_name(
     info: &TypeInfoWrapper,
 ) -> Result<String, CodegenError> {
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
-        let pkg_path = info.package_path(pkg_ident)
+        // Use package name (not path) for extern name to match extension registration
+        let pkg_name = info.package_name(pkg_ident)
             .ok_or_else(|| CodegenError::Internal("cannot resolve package".to_string()))?;
         let func_name = info.project.interner.resolve(sel.sel.symbol)
             .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
-        Ok(format!("{}_{}", pkg_path.replace("/", "_"), func_name))
+        Ok(format!("{}_{}", pkg_name, func_name))
     } else {
         Err(CodegenError::Internal("expected package.func".to_string()))
     }

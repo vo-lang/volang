@@ -12,4 +12,3 @@ vo-runtime = { path = "../../../lang/crates/vo-runtime" }
 vo-ext = { path = "../../../lang/crates/vo-ext" }
 detra-renderable = { path = "../../detra-renderable" }
 linkme = "0.3"
-taffy = "0.5"

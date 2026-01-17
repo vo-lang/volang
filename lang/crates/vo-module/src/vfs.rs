@@ -1,102 +1,13 @@
 //! Package resolution system.
 //!
 //! Provides three package sources:
-//! - StdSource: Standard library packages
+//! - StdSource: Standard library packages (embedded in binary for vo-cli)
 //! - LocalSource: Local packages (relative paths)
 //! - ModSource: External module dependencies
 
 use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{FileSystem, RealFs};
-
-/// Package resolver configuration with three root paths.
-#[derive(Debug, Clone)]
-pub struct ResolverConfig {
-    /// Standard library root path
-    pub std_root: PathBuf,
-    /// Local packages root path (project directory)
-    pub local_root: PathBuf,
-    /// Module cache root path
-    pub mod_root: PathBuf,
-}
-
-impl ResolverConfig {
-    /// Create a new resolver config with the given paths.
-    pub fn new(std_root: PathBuf, local_root: PathBuf, mod_root: PathBuf) -> Self {
-        Self { std_root, local_root, mod_root }
-    }
-    
-    /// Create a config using environment variables and common defaults.
-    pub fn from_env(project_dir: PathBuf) -> Self {
-        let std_root = std::env::var("VO_STD")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                // Try common locations for stdlib
-                // We check for "fmt/" subdir to verify it's a real stdlib, not just a coincidentally named dir
-                let is_valid_stdlib = |p: &Path| p.is_dir() && p.join("fmt").is_dir();
-                
-                // 1. Project dir's "stdlib" folder
-                let in_project = project_dir.join("stdlib");
-                if is_valid_stdlib(&in_project) {
-                    return in_project;
-                }
-                // 2. Parent dir's "stdlib" (for examples/)
-                if let Some(parent) = project_dir.parent() {
-                    let in_parent = parent.join("stdlib");
-                    if is_valid_stdlib(&in_parent) {
-                        return in_parent;
-                    }
-                    // 3. Grandparent (for examples/subdir/)
-                    if let Some(grandparent) = parent.parent() {
-                        let in_grandparent = grandparent.join("stdlib");
-                        if is_valid_stdlib(&in_grandparent) {
-                            return in_grandparent;
-                        }
-                        // 4. Great-grandparent (for test_data/stdlib/)
-                        if let Some(great_grandparent) = grandparent.parent() {
-                            let in_great = great_grandparent.join("stdlib");
-                            if is_valid_stdlib(&in_great) {
-                                return in_great;
-                            }
-                        }
-                    }
-                }
-                // 5. Relative to executable
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Some(exe_dir) = exe.parent() {
-                        // Check ../stdlib (development) and ../lib/vo/stdlib (installed)
-                        for rel in &["../../../stdlib", "../../stdlib", "../stdlib", "../lib/vo/stdlib"] {
-                            let p = exe_dir.join(rel);
-                            if is_valid_stdlib(&p) {
-                                return p;
-                            }
-                        }
-                    }
-                }
-                // Fallback
-                project_dir.join("stdlib")
-            });
-        
-        let mod_root = dirs::home_dir()
-            .map(|h| h.join(".vo/mod"))
-            .unwrap_or_else(|| project_dir.join(".vo/mod"));
-        
-        Self {
-            std_root,
-            local_root: project_dir,
-            mod_root,
-        }
-    }
-    
-    /// Build a PackageResolver from this config.
-    pub fn to_resolver(&self) -> PackageResolver {
-        PackageResolver::with_roots(
-            self.std_root.clone(),
-            self.local_root.clone(),
-            self.mod_root.clone(),
-        )
-    }
-}
 
 /// A resolved package from the package resolver.
 #[derive(Debug, Clone)]
@@ -116,15 +27,6 @@ pub struct VfsFile {
     pub path: PathBuf,
     /// File content
     pub content: String,
-}
-
-/// Package source trait for package resolution.
-pub trait PackageSource: Send + Sync {
-    /// Resolve a package by import path.
-    fn resolve(&self, import_path: &str) -> Option<VfsPackage>;
-    
-    /// Check if this source can handle the given import path.
-    fn can_handle(&self, import_path: &str) -> bool;
 }
 
 /// Standard library package source.
@@ -168,9 +70,17 @@ impl<F: FileSystem> LocalSource<F> {
         Self { fs }
     }
     
-    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
-        let rel_path = import_path.trim_start_matches("./");
-        resolve_package(&self.fs, rel_path, import_path)
+    /// Resolve a local import path relative to the importer's directory.
+    /// 
+    /// Go semantics: `../foo` from `pkg/sub/` resolves to `pkg/foo/`
+    pub fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
+        // Combine importer_dir with the relative import path
+        let full_path = if importer_dir.is_empty() || importer_dir == "." {
+            import_path.trim_start_matches("./").to_string()
+        } else {
+            format!("{}/{}", importer_dir, import_path.trim_start_matches("./"))
+        };
+        resolve_package(&self.fs, &full_path, import_path)
     }
     
     pub fn can_handle(&self, import_path: &str) -> bool {
@@ -205,20 +115,27 @@ impl<F: FileSystem> ModSource<F> {
     }
 }
 
-/// Combined package resolver that delegates to the appropriate source.
-pub struct PackageResolver<F: FileSystem = RealFs> {
-    pub std: StdSource<F>,
-    pub local: LocalSource<F>,
-    pub r#mod: ModSource<F>,
+/// Trait for package resolution.
+pub trait Resolver: Send + Sync {
+    /// Resolve an import path.
+    /// 
+    /// `import_path` - the import path (e.g., "fmt", "./foo", "../bar")
+    /// `importer_dir` - directory of the importing package (for relative path resolution)
+    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage>;
 }
+
+/// Package resolver with potentially different file systems for each source.
+pub struct PackageResolverMixed<S: FileSystem, L: FileSystem, M: FileSystem> {
+    pub std: StdSource<S>,
+    pub local: LocalSource<L>,
+    pub r#mod: ModSource<M>,
+}
+
+/// Type alias for resolver with same filesystem for all sources.
+pub type PackageResolver<F = RealFs> = PackageResolverMixed<F, F, F>;
 
 impl PackageResolver<RealFs> {
     /// Create a resolver with three filesystem root paths using real filesystem.
-    ///
-    /// # Arguments
-    /// * `std_root` - Root path for standard library (e.g., "/usr/local/vo/std")
-    /// * `local_root` - Root path for local packages (usually project directory)
-    /// * `mod_root` - Root path for module cache (e.g., "~/.vo/mod")
     pub fn with_roots(std_root: PathBuf, local_root: PathBuf, mod_root: PathBuf) -> Self {
         Self {
             std: StdSource::new(std_root),
@@ -230,7 +147,6 @@ impl PackageResolver<RealFs> {
 
 impl<F: FileSystem + Clone> PackageResolver<F> {
     /// Create a resolver with a single shared filesystem (e.g., MemoryFs, ZipFs).
-    /// All three sources share the same filesystem instance.
     pub fn with_fs(fs: F) -> Self {
         Self {
             std: StdSource::with_fs(fs.clone()),
@@ -240,34 +156,21 @@ impl<F: FileSystem + Clone> PackageResolver<F> {
     }
 }
 
-impl<F: FileSystem> PackageResolver<F> {
-    /// Resolve a package by import path.
-    /// 
-    /// Resolution order follows module.md spec:
-    /// 1. Explicit local paths (./xxx or ../xxx) → LocalSource
-    /// 2. External dependencies (has dots like github.com/...) → ModSource  
-    /// 3. Non-dotted paths: try stdlib first, then local fallback
-    pub fn resolve(&self, import_path: &str) -> Option<VfsPackage> {
-        // Explicit local paths
+impl<S: FileSystem + Send + Sync, L: FileSystem + Send + Sync, M: FileSystem + Send + Sync> Resolver for PackageResolverMixed<S, L, M> {
+    fn resolve(&self, import_path: &str, importer_dir: &str) -> Option<VfsPackage> {
         if import_path.starts_with("./") || import_path.starts_with("../") {
-            return self.local.resolve(import_path);
+            return self.local.resolve(import_path, importer_dir);
         }
         
-        // External dependencies (has dots = domain name)
         if import_path.contains('.') {
             return self.r#mod.resolve(import_path);
         }
         
-        // Non-dotted paths: try stdlib first, then local fallback
-        // This matches module.md spec section 6.3:
-        //   "P" (known stdlib) → stdlib
-        //   "P" (not stdlib) → <project-root>/<P>/
         if let Some(pkg) = self.std.resolve(import_path) {
             return Some(pkg);
         }
         
-        // Fallback to local package (e.g., "iface" → ./iface/)
-        self.local.resolve(import_path)
+        self.local.resolve(import_path, importer_dir)
     }
 }
 

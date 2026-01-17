@@ -87,13 +87,11 @@ use vo_common::span::Span;
 pub struct CodegenContext {
     module: Module,
 
-    /// Function index: (receiver_base_type, is_pointer_recv, name) -> func_id
+    /// Method index: (receiver_type, is_pointer_recv, name) -> func_id
+    /// Only for methods (recv.is_some()), used by embed.rs for method lookup
     func_indices: HashMap<(Option<TypeKey>, bool, Symbol), u32>,
 
     /// Extern function index: name -> extern_id
-    extern_indices: HashMap<Symbol, u32>,
-
-    /// Extern function by string name (for builtins)
     extern_names: HashMap<String, u32>,
 
     /// Global variable slot offset: ObjKey -> slot_offset
@@ -182,7 +180,6 @@ impl CodegenContext {
                 debug_info: vo_common_core::debug_info::DebugInfo::new(),
             },
             func_indices: HashMap::new(),
-            extern_indices: HashMap::new(),
             extern_names: HashMap::new(),
             global_indices: HashMap::new(),
             global_slot_offset: 0,
@@ -698,12 +695,13 @@ impl CodegenContext {
     
     // === Function registration ===
 
-    /// Pre-register a function name for forward references.
+    /// Pre-register a function for forward references.
     /// Allocates a placeholder FunctionDef so the ID is valid immediately.
-    /// Also registers ObjKey for cross-package lookup.
+    /// - Methods: registered to func_indices for embed.rs method lookup
+    /// - All functions: registered to objkey_to_func for cross-package lookup
     pub fn declare_func(&mut self, recv: Option<TypeKey>, is_pointer_recv: bool, name: Symbol, obj_key: vo_analysis::objects::ObjKey, func_name: &str) {
         let id = self.module.functions.len() as u32;
-        // Push a placeholder that will be replaced by define_func
+        // Push a placeholder that will be replaced later
         self.module.functions.push(FunctionDef {
             name: String::new(),
             param_count: 0,
@@ -718,8 +716,12 @@ impl CodegenContext {
             code: Vec::new(),
             slot_types: Vec::new(),
         });
-        self.func_indices.insert((recv, is_pointer_recv, name), id);
-        // Register ObjKey for cross-package lookup (avoids Symbol collision)
+        // Methods: register to func_indices for embed.rs method lookup (TypeKey is unique)
+        // Plain functions: skip func_indices (Symbol can collide across packages)
+        if recv.is_some() {
+            self.func_indices.insert((recv, is_pointer_recv, name), id);
+        }
+        // All functions: register ObjKey for cross-package lookup
         self.objkey_to_func.insert(obj_key, id);
         // Track main function
         if recv.is_none() && func_name == "main" {
@@ -736,33 +738,19 @@ impl CodegenContext {
         self.func_indices.get(&(recv, is_pointer_recv, name)).copied()
     }
 
-    /// Define a function: replace placeholder with real definition.
-    pub fn define_func(&mut self, func: FunctionDef, recv: Option<TypeKey>, is_pointer_recv: bool, name: Symbol) -> u32 {
-        let id = *self.func_indices.get(&(recv, is_pointer_recv, name))
-            .expect("function must be declared before defined");
-        self.module.functions[id as usize] = func;
-        id
-    }
-
     /// Add anonymous function (for generated functions like __init__, __entry__).
     pub fn add_function(&mut self, func: FunctionDef) -> u32 {
         let id = self.module.functions.len() as u32;
         self.module.functions.push(func);
         id
     }
+    
+    /// Replace function at given ID (used by compile_func_decl_at).
+    pub fn replace_function(&mut self, func_id: u32, func: FunctionDef) {
+        self.module.functions[func_id as usize] = func;
+    }
 
     // === Extern registration ===
-
-    pub fn register_extern(&mut self, name: Symbol, def: ExternDef) -> u32 {
-        let id = self.module.externs.len() as u32;
-        self.module.externs.push(def);
-        self.extern_indices.insert(name, id);
-        id
-    }
-
-    pub fn get_extern_index(&self, name: Symbol) -> Option<u32> {
-        self.extern_indices.get(&name).copied()
-    }
 
     /// Get or register an extern function by string name.
     /// Uses builtin_extern_ret_slots for known externs, 0 for unknown.

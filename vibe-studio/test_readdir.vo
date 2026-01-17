@@ -1,0 +1,17 @@
+package main
+
+import (
+    "os"
+    "fmt"
+)
+
+func main() {
+    entries, err := os.ReadDir("vibe-studio")
+    if err != nil {
+        fmt.Println("Error:", err.Error())
+        return
+    }
+    for _, entry := range entries {
+        fmt.Println(entry.Name(), entry.IsDir())
+    }
+}

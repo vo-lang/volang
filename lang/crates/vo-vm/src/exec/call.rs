@@ -30,21 +30,13 @@ pub fn exec_call(
     // Get caller's bp before pushing new frame
     let caller_bp = frames.last().map_or(0, |f| f.bp);
     
-    // Ensure caller's stack is large enough for return value write-back
-    // This must happen BEFORE computing new_bp
-    let ret_write_end = caller_bp + arg_start + ret_slots;
-    if stack.len() < ret_write_end {
-        stack.resize(ret_write_end, 0);
-    }
-    
-    // New frame's bp is current stack top (now guaranteed >= ret_write_end)
+    // New frame's bp is current stack top
     let new_bp = stack.len();
     
     // Extend stack for new frame
     stack.resize(new_bp + func.local_slots as usize, 0);
     
-    // Copy args directly from caller's frame to new frame (no Vec allocation)
-    // SAFETY: source and dest don't overlap since new_bp >= caller_bp + arg_start + arg_slots
+    // Copy args from caller's frame to new frame
     for i in 0..arg_slots {
         stack[new_bp + i] = stack[caller_bp + arg_start + i];
     }
@@ -139,14 +131,7 @@ pub fn exec_call_iface(
     let func = &module.functions[func_id as usize];
     let recv_slots = func.recv_slots as usize;
 
-    // Ensure caller's stack is large enough for return value write-back
-    // ret_reg is inst.b (args_start), return values written to caller_bp + ret_reg
-    let ret_write_end = caller_bp + inst.b as usize + ret_slots;
-    if stack.len() < ret_write_end {
-        stack.resize(ret_write_end, 0);
-    }
-    
-    // New frame's bp is current stack top (now guaranteed >= ret_write_end)
+    // New frame's bp is current stack top
     let new_bp = stack.len();
     
     // Extend stack for new frame

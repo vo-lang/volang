@@ -24,5 +24,7 @@ vo-module = { path = "../vo-module" }
 vo-vm = { path = "../vo-vm", features = ["jit"] }
 vo-jit = { path = "../vo-jit" }
 clap = { version = "4.4", features = ["derive"] }
+rust-embed = "8"
+dirs = "5"
 
 [dev-dependencies]

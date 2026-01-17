@@ -1,128 +1,86 @@
 // Vibe Studio - IDE Interface
-// A VSCode-like development environment
+// Using Detra Semantic Components
 
 state App {
-    leftPanel string = "files"
-    bottomPanel string = "terminal"
+    activePanel string = "files"
+    activeBottomTab string = "terminal"
     showBottom bool = true
-    currentFile string = "main.vo"
-    editorContent string = "// Welcome to Vibe Studio\n\nfunc main() {\n    println(\"Hello, World!\")\n}"
+    external currentFile string
+    external editorContent string
+    external fileTree string
+    external terminalOutput string
 }
 
-command Log(message string)
 command OpenFile(path string)
 command SaveFile(path string, content string)
+command RunFile(path string)
+command ClearTerminal()
 
-action SetLeftPanel(mode string) {
-    set state.leftPanel = mode
+action SetPanel(id string) {
+    set state.activePanel = id
 }
 
-action SetBottomPanel(mode string) {
-    set state.bottomPanel = mode
+action SetBottomTab(id string) {
+    set state.activeBottomTab = id
 }
 
 action ToggleBottom() {
     set state.showBottom = !state.showBottom
 }
 
-action SetContent(value string) {
-    set state.editorContent = value
+action UpdateContent(content string) {
+    set state.editorContent = content
 }
 
-component SidebarButton(icon string, label string, panel string, active bool) {
-    Button(text: icon, style: "icon", active: active, onClick: SetLeftPanel(mode: panel))
+action DoOpenFile(path string) {
+    emit OpenFile(path: path)
 }
 
-component PanelTab(label string, panel string, active bool) {
-    Button(text: label, style: "tab", active: active, onClick: SetBottomPanel(mode: panel))
+action DoSave() {
+    emit SaveFile(path: state.currentFile, content: state.editorContent)
+}
+
+action DoRun() {
+    set state.showBottom = true
+    set state.activeBottomTab = "terminal"
+    emit RunFile(path: state.currentFile)
+}
+
+action DoClear() {
+    emit ClearTerminal()
 }
 
 view Main {
-    Column(fill: true) {
-        Row(height: 28, style: "menubar") {
-            Text(text: "Vibe Studio", size: 14, bold: true)
-        }
+    AppShell(showBottomPanel: state.showBottom) {
+        ActivityBar(active: state.activePanel, onSelect: SetPanel(id: $id))
         
-        Row(fill: true, flex: 1) {
-            Column(width: 48, style: "sidebar") {
-                SidebarButton(icon: "📁", label: "Files", panel: "files", active: state.leftPanel == "files")
-                SidebarButton(icon: "🔍", label: "Search", panel: "search", active: state.leftPanel == "search")
-                SidebarButton(icon: "⚙", label: "Settings", panel: "settings", active: state.leftPanel == "settings")
-            }
-            
-            Column(width: 200, style: "panel") {
-                switch state.leftPanel {
-                case "files":
-                    Column(padding: 8, spacing: 4) {
-                        Text(text: "EXPLORER", size: 11, bold: true)
-                        Text(text: "📁 src", size: 12)
-                        Text(text: "  📄 main.vo", size: 12)
-                        Text(text: "  📄 utils.vo", size: 12)
-                        Text(text: "📁 test", size: 12)
-                        Text(text: "📄 README.md", size: 12)
-                    }
-                case "search":
-                    Column(padding: 8, spacing: 4) {
-                        Text(text: "SEARCH", size: 11, bold: true)
-                        Input(placeholder: "Search...", onChange: SetContent(value: $value))
-                    }
-                default:
-                    Column(padding: 8, spacing: 4) {
-                        Text(text: "SETTINGS", size: 11, bold: true)
-                        Text(text: "Theme: Dark", size: 12)
-                    }
-                }
-            }
-            
-            Divider(vertical: true)
-            
-            Column(flex: 1) {
-                Row(height: 35, style: "tabbar") {
-                    Button(text: state.currentFile, style: "tab", active: true)
-                }
-                
-                Column(flex: 1, padding: 8, style: "editor") {
-                    Input(value: state.editorContent, multiline: true, onChange: SetContent(value: $value))
-                }
-                
-                if state.showBottom {
-                    Divider()
-                    Column(height: 150, style: "panel") {
-                        Row(height: 28, style: "tabbar") {
-                            PanelTab(label: "TERMINAL", panel: "terminal", active: state.bottomPanel == "terminal")
-                            PanelTab(label: "OUTPUT", panel: "output", active: state.bottomPanel == "output")
-                            PanelTab(label: "PROBLEMS", panel: "problems", active: state.bottomPanel == "problems")
-                            Spacer()
-                            Button(text: "×", style: "icon", onClick: ToggleBottom)
-                        }
-                        
-                        switch state.bottomPanel {
-                        case "terminal":
-                            Column(padding: 8) {
-                                Text(text: "$ ./d.py vibe", size: 12, font: "monospace")
-                                Text(text: "Building vo-cli...", size: 12, font: "monospace")
-                                Text(text: "Running Vibe Studio...", size: 12, font: "monospace")
-                            }
-                        case "output":
-                            Column(padding: 8) {
-                                Text(text: "Build output will appear here", size: 12, color: "gray")
-                            }
-                        default:
-                            Column(padding: 8) {
-                                Text(text: "No problems detected", size: 12, color: "gray")
-                            }
-                        }
-                    }
+        Sidebar(width: 220) {
+            switch state.activePanel {
+            case "files":
+                FileTree(selected: state.currentFile, onSelect: DoOpenFile(path: $path))
+            case "search":
+                SearchPanel()
+            default:
+                Column(padding: 16) {
+                    Text(text: "Settings", size: 14, bold: true)
                 }
             }
         }
         
-        Row(height: 22, style: "statusbar") {
-            Text(text: "Ln 1, Col 1", size: 11)
-            Spacer()
-            Text(text: "UTF-8", size: 11)
-            Spacer(size: 16)
-            Text(text: "Vo", size: 11)
+        MainArea() {
+            TabBar(active: state.currentFile)
+            CodeEditor(content: state.editorContent, language: "vo", onChange: UpdateContent(content: $content))
+        }
+        
+        BottomPanel(height: 180) {
+            TabBar(active: state.activeBottomTab, onSelect: SetBottomTab(id: $id), onClose: ToggleBottom())
+            Terminal(output: state.terminalOutput, onClear: DoClear())
+        }
+        
+        StatusBar() {
+            StatusBarItem(text: "Ln 1, Col 1")
+            StatusBarItem(text: "UTF-8", align: "right")
+            StatusBarItem(text: "Vo", align: "right")
         }
     }
 }

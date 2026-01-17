@@ -11,7 +11,8 @@ type Program any
 type State any
 
 // External is the host-provided external state map.
-type External map[string]Value
+// Using map[string]string for simplicity (values are serialized as strings).
+type External map[string]string
 
 // ActionCall is a concrete action invocation from host or renderer.
 type ActionCall struct {

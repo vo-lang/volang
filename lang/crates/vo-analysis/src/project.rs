@@ -11,8 +11,8 @@ use std::rc::Rc;
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
-use vo_common::vfs::{FileSet, FileSystem};
-use vo_module::vfs::PackageResolver;
+use vo_common::vfs::FileSet;
+use vo_module::Resolver;
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
@@ -214,17 +214,17 @@ struct ProjectState {
 ///
 /// This is the main entry point for type checking a Vo project.
 /// It handles recursive package imports through the provided VFS.
-pub fn analyze_project<F: FileSystem>(
+pub fn analyze_project<R: Resolver>(
     files: FileSet,
-    vfs: &PackageResolver<F>,
+    vfs: &R,
 ) -> Result<Project, AnalysisError> {
     analyze_project_with_options(files, vfs, &AnalysisOptions::default())
 }
 
 /// Analyze a project with custom options.
-pub fn analyze_project_with_options<F: FileSystem>(
+pub fn analyze_project_with_options<R: Resolver>(
     files: FileSet,
-    vfs: &PackageResolver<F>,
+    vfs: &R,
     options: &AnalysisOptions,
 ) -> Result<Project, AnalysisError> {
     let state = Rc::new(RefCell::new(ProjectState {
@@ -373,32 +373,43 @@ impl Importer for NullImporter {
     }
 }
 
+/// Parse a single file and update state.
+fn parse_single_file(
+    path: &std::path::Path,
+    content: &str,
+    state: &Rc<RefCell<ProjectState>>,
+    id_state: parser::IdState,
+) -> Result<(File, parser::IdState), AnalysisError> {
+    let mut state_ref = state.borrow_mut();
+    let file_name = path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let file_id = state_ref.source_map.add_file_with_path(file_name, path.to_path_buf(), content);
+    let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
+    let interner = state_ref.interner.clone();
+    drop(state_ref);
+    
+    let (file, diags, new_interner, new_id_state) = parser::parse_with_state(content, base, interner, id_state);
+    
+    let mut state_ref = state.borrow_mut();
+    state_ref.interner = new_interner;
+    
+    if diags.has_errors() {
+        let source_map = std::mem::take(&mut state_ref.source_map);
+        return Err(AnalysisError::Parse(diags, source_map));
+    }
+    
+    Ok((file, new_id_state))
+}
+
 /// Parse source files from a FileSet.
 fn parse_files(files: &FileSet, state: &Rc<RefCell<ProjectState>>) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
     
     for (path, content) in &files.files {
-        let mut state_ref = state.borrow_mut();
-        // Add file to source map and get base offset
-        let file_name = path.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        let file_id = state_ref.source_map.add_file_with_path(file_name, path.clone(), content.as_str());
-        let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
-        let interner = state_ref.interner.clone();
-        let id_state = state_ref.id_state.clone();
-        drop(state_ref);
-        
-        let (file, diags, new_interner, new_id_state) = parser::parse_with_state(content, base, interner, id_state);
-        
-        let mut state_ref = state.borrow_mut();
-        state_ref.interner = new_interner;
-        state_ref.id_state = new_id_state;
-        
-        if diags.has_errors() {
-            let source_map = std::mem::take(&mut state_ref.source_map);
-            return Err(AnalysisError::Parse(diags, source_map));
-        }
+        let id_state = state.borrow().id_state.clone();
+        let (file, new_id_state) = parse_single_file(path, content, state, id_state)?;
+        state.borrow_mut().id_state = new_id_state;
         parsed_files.push(file);
     }
     
@@ -411,41 +422,38 @@ fn parse_vfs_package(
     state: &Rc<RefCell<ProjectState>>,
 ) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
-    let mut local_id_state = parser::IdState::default();
+    let mut id_state = parser::IdState::default();
     
     for vfs_file in &vfs_pkg.files {
-        let mut state_ref = state.borrow_mut();
-        // Add file to source map and get base offset
-        let file_name = vfs_file.path.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| vfs_file.path.to_string_lossy().into_owned());
-        let file_id = state_ref.source_map.add_file_with_path(file_name, vfs_file.path.clone(), vfs_file.content.as_str());
-        let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
-        let interner = state_ref.interner.clone();
-        drop(state_ref);
-        
-        let (file, diags, new_interner, new_id_state) = parser::parse_with_state(&vfs_file.content, base, interner, local_id_state);
-        local_id_state = new_id_state;
-        
-        let mut state_ref = state.borrow_mut();
-        state_ref.interner = new_interner;
-        
-        if diags.has_errors() {
-            let source_map = std::mem::take(&mut state_ref.source_map);
-            return Err(AnalysisError::Parse(diags, source_map));
-        }
+        let (file, new_id_state) = parse_single_file(&vfs_file.path, &vfs_file.content, state, id_state)?;
+        id_state = new_id_state;
         parsed_files.push(file);
     }
     
     Ok(parsed_files)
 }
 
+/// Compute the package directory for nested imports.
+/// 
+/// Given the import path (e.g., "./system") and the importer's directory (e.g., "."),
+/// returns the resolved directory (e.g., "system").
+fn get_pkg_dir(import_path: &str, importer_dir: &str) -> String {
+    let rel_path = import_path.trim_start_matches("./");
+    if importer_dir.is_empty() || importer_dir == "." {
+        rel_path.to_string()
+    } else {
+        format!("{}/{}", importer_dir, rel_path)
+    }
+}
+
 /// Pre-load imports from files. Must be called BEFORE swapping tc_objs with checker.
-fn preload_file_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter<F>) -> Result<(), String> {
+/// 
+/// `pkg_dir` is the directory of the package containing these files (for relative import resolution).
+fn preload_file_imports<R: Resolver>(files: &[File], pkg_dir: &str, importer: &mut ProjectImporter<R>) -> Result<(), String> {
     for file in files {
         for import in &file.imports {
             let path = &import.path.value;
-            let key = ImportKey::new(path, ".");
+            let key = ImportKey::new(path, pkg_dir);
             match importer.import(&key) {
                 ImportResult::Ok(_) => {}
                 ImportResult::Err(e) => return Err(e),
@@ -457,7 +465,7 @@ fn preload_file_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImp
 }
 
 /// Pre-load all imports including core packages. For main package entry point.
-fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter<F>) -> Result<(), String> {
+fn preload_imports<R: Resolver>(files: &[File], importer: &mut ProjectImporter<R>) -> Result<(), String> {
     // Always-link core packages required by runtime.
     let key = ImportKey::new("errors", ".");
     match importer.import(&key) {
@@ -465,21 +473,22 @@ fn preload_imports<F: FileSystem>(files: &[File], importer: &mut ProjectImporter
         ImportResult::Err(e) => return Err(e),
         ImportResult::Cycle => return Err("import cycle detected for 'errors'".to_string()),
     }
-    preload_file_imports(files, importer)
+    // Main package is at root, so pkg_dir = "."
+    preload_file_imports(files, ".", importer)
 }
 
 /// Project-level importer that uses VFS to resolve packages.
-struct ProjectImporter<'a, F: FileSystem> {
+struct ProjectImporter<'a, R: Resolver> {
     /// VFS for resolving import paths.
-    vfs: &'a PackageResolver<F>,
+    vfs: &'a R,
     /// Working directory (project root).
     working_dir: PathBuf,
     /// Shared project state.
     state: Rc<RefCell<ProjectState>>,
 }
 
-impl<'a, F: FileSystem> ProjectImporter<'a, F> {
-    fn new(vfs: &'a PackageResolver<F>, working_dir: &std::path::Path, state: Rc<RefCell<ProjectState>>) -> Self {
+impl<'a, R: Resolver> ProjectImporter<'a, R> {
+    fn new(vfs: &'a R, working_dir: &std::path::Path, state: Rc<RefCell<ProjectState>>) -> Self {
         Self {
             vfs,
             working_dir: working_dir.to_path_buf(),
@@ -488,7 +497,7 @@ impl<'a, F: FileSystem> ProjectImporter<'a, F> {
     }
 }
 
-impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
+impl<R: Resolver> Importer for ProjectImporter<'_, R> {
     fn import(&mut self, key: &ImportKey) -> ImportResult {
         let import_path = &key.path;
         
@@ -505,8 +514,8 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
             }
         }
         
-        // Resolve package using VFS
-        let vfs_pkg = match self.vfs.resolve(import_path) {
+        // Resolve package using VFS (importer_dir from ImportKey.dir)
+        let vfs_pkg = match self.vfs.resolve(import_path, &key.dir) {
             Some(pkg) => pkg,
             None => return ImportResult::Err(format!("package not found: {}", import_path)),
         };
@@ -524,9 +533,11 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
         };
         
         // Pre-load imports BEFORE swap (importer needs state.tc_objs)
+        // Use the resolved package path as the importer directory for nested imports
+        let pkg_dir = get_pkg_dir(&vfs_pkg.path, &key.dir);
         {
             let mut sub_importer = ProjectImporter::new(self.vfs, &self.working_dir, Rc::clone(&self.state));
-            if let Err(e) = preload_file_imports(&parsed_files, &mut sub_importer) {
+            if let Err(e) = preload_file_imports(&parsed_files, &pkg_dir, &mut sub_importer) {
                 self.state.borrow_mut().in_progress.remove(import_path);
                 return ImportResult::Err(e);
             }
@@ -594,7 +605,7 @@ impl<F: FileSystem> Importer for ProjectImporter<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_module::vfs::ResolverConfig;
+    use vo_module::PackageResolver;
     use std::path::Path;
 
     /// Test that analyze_project can parse and start analyzing a multipackage project.
@@ -614,8 +625,12 @@ mod tests {
         let mut file_set = FileSet::new(project_dir.clone());
         file_set.files.insert(main_path, main_content);
         
-        let vfs_config = ResolverConfig::from_env(project_dir);
-        let vfs = vfs_config.to_resolver();
+        let stdlib_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("stdlib");
+        let mod_root = project_dir.join(".vo/mod");
+        let vfs = PackageResolver::with_roots(stdlib_dir, project_dir, mod_root);
         
         let result = analyze_project(file_set, &vfs);
         
@@ -625,7 +640,6 @@ mod tests {
                 println!("✓ Multipackage: analyzed {} packages", project.packages.len());
             }
             Err(e) => {
-                // Some errors are expected during development
                 println!("✓ Multipackage: analysis returned error: {}", e);
             }
         }
@@ -645,8 +659,12 @@ mod tests {
         let mut file_set = FileSet::new(project_dir.clone());
         file_set.files.insert(main_path, main_content);
         
-        let vfs_config = ResolverConfig::from_env(project_dir);
-        let vfs = vfs_config.to_resolver();
+        let stdlib_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("stdlib");
+        let mod_root = project_dir.join(".vo/mod");
+        let vfs = PackageResolver::with_roots(stdlib_dir, project_dir, mod_root);
         
         let result = analyze_project(file_set, &vfs);
         
@@ -656,7 +674,6 @@ mod tests {
                 println!("✓ Simple: analyzed successfully");
             }
             Err(e) => {
-                // Some errors are expected during development
                 println!("✓ Simple: analysis returned error: {}", e);
             }
         }
@@ -670,8 +687,12 @@ mod tests {
             .parent().unwrap()
             .join("examples/multipackage");
         
-        let vfs_config = ResolverConfig::from_env(project_dir);
-        let vfs = vfs_config.to_resolver();
+        let stdlib_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("stdlib");
+        let mod_root = project_dir.join(".vo/mod");
+        let vfs = PackageResolver::with_roots(stdlib_dir, project_dir.clone(), mod_root);
         
         // Should resolve the local math package
         let pkg = vfs.resolve("./math");

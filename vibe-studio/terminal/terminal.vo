@@ -1,0 +1,67 @@
+package terminal
+
+import (
+    "os"
+    "strings"
+)
+
+type Output struct {
+    Lines []Line
+}
+
+type Line struct {
+    Text  string
+    Style string // "normal", "error", "success", "info"
+}
+
+func NewOutput() *Output {
+    return &Output{
+        Lines: []Line{},
+    }
+}
+
+func (o *Output) AddLine(text string, style string) {
+    o.Lines = append(o.Lines, Line{Text: text, Style: style})
+}
+
+func (o *Output) Clear() {
+    o.Lines = []Line{}
+}
+
+func (o *Output) ToJSON() string {
+    if len(o.Lines) == 0 {
+        return "[]"
+    }
+    
+    var sb strings.Builder
+    sb.WriteString("[")
+    for i, line := range o.Lines {
+        if i > 0 {
+            sb.WriteString(",")
+        }
+        sb.WriteString(`{"text":"`)
+        sb.WriteString(escapeJSON(line.Text))
+        sb.WriteString(`","style":"`)
+        sb.WriteString(line.Style)
+        sb.WriteString(`"}`)
+    }
+    sb.WriteString("]")
+    return sb.String()
+}
+
+func RunCommand(cmd string, args []string) (string, string, error) {
+    output, err := os.Exec(cmd, args...)
+    if err != nil {
+        return "", err.Error(), err
+    }
+    return output, "", nil
+}
+
+func escapeJSON(s string) string {
+    s = strings.ReplaceAll(s, `\`, `\\`)
+    s = strings.ReplaceAll(s, `"`, `\"`)
+    s = strings.ReplaceAll(s, "\n", `\n`)
+    s = strings.ReplaceAll(s, "\r", `\r`)
+    s = strings.ReplaceAll(s, "\t", `\t`)
+    return s
+}

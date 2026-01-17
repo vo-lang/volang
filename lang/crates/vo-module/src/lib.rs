@@ -30,4 +30,4 @@ pub mod vfs;
 pub use modfile::{ModFile, Require};
 pub use resolver::{ModuleResolver, ModuleClosure, ResolvedPackage};
 pub use error::{ModuleError, ModuleResult};
-pub use vfs::{PackageResolver, ResolverConfig, VfsPackage, VfsFile, PackageSource};
+pub use vfs::{PackageResolver, PackageResolverMixed, Resolver, VfsPackage, VfsFile, StdSource, LocalSource, ModSource};

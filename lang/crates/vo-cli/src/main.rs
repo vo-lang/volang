@@ -31,6 +31,7 @@ mod bytecode_tests;
 mod output;
 mod commands;
 mod printer;
+pub mod stdlib;
 
 pub mod bytecode_text;
 

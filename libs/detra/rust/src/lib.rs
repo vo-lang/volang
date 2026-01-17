@@ -5,7 +5,6 @@ pub mod lexer;
 pub mod parser;
 pub mod value;
 pub mod executor;
-pub mod layout;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -49,7 +48,7 @@ fn detra_compile(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_COMPILE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_Compile",
+    name: "detra_Compile",
     func: detra_compile,
 };
 
@@ -74,7 +73,7 @@ fn detra_init_state(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_INIT_STATE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_InitState",
+    name: "detra_InitState",
     func: detra_init_state,
 };
 
@@ -86,7 +85,7 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
     // actionArgs (map = 1 slot): slot 6
     let program_id = ctx.arg_i64(0) as usize;
     let state_id = ctx.arg_i64(2) as usize;
-    let _external_ref = ctx.arg_ref(4);
+    let external_ref = ctx.arg_ref(4);
     let action_name_ref = ctx.arg_ref(5);
     let action_args_ref = ctx.arg_ref(6);
 
@@ -133,7 +132,20 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let external = HashMap::new();
+    // Parse external map[string]Value
+    let mut external = HashMap::new();
+    if !external_ref.is_null() {
+        use vo_runtime::objects::map;
+        let mut iter = map::iter_init(external_ref);
+        while let Some((k, v)) = map::iter_next(&mut iter) {
+            let key_ref = k[0] as GcRef;
+            let val_ref = v[0] as GcRef;
+            let key = string::as_str(key_ref).to_string();
+            // External values are strings (map[string]Value where Value is string)
+            let val = string::as_str(val_ref).to_string();
+            external.insert(key, value::Value::String(val));
+        }
+    }
 
     let result = Executor::execute(&program, state, external, action);
 
@@ -171,7 +183,7 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_EXECUTE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_Execute",
+    name: "detra_Execute",
     func: detra_execute,
 };
 
@@ -183,7 +195,7 @@ fn detra_command_count(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_COMMAND_COUNT: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_CommandCount",
+    name: "detra_CommandCount",
     func: detra_command_count,
 };
 
@@ -200,8 +212,31 @@ fn detra_command_name(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_COMMAND_NAME: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_CommandName",
+    name: "detra_CommandName",
     func: detra_command_name,
+};
+
+fn detra_set_state(ctx: &mut ExternCallContext) -> ExternResult {
+    // State is `any` type = 2 slots (slot 0-1), key is slot 2, value is slot 3
+    let state_id = ctx.arg_i64(0) as usize;
+    let key_ref = ctx.arg_ref(2);  // slot 2, not 1
+    let value_ref = ctx.arg_ref(3);  // slot 3, not 2
+    
+    let key = string::as_str(key_ref).to_string();
+    let val = string::as_str(value_ref).to_string();
+    
+    let mut states = STATES.lock().unwrap();
+    if let Some(state) = states.get_mut(state_id) {
+        state.fields.insert(key, value::Value::String(val));
+    }
+    
+    ExternResult::Ok
+}
+
+#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
+static __VO_DETRA_SET_STATE: ExternEntryWithContext = ExternEntryWithContext {
+    name: "detra_SetState",
+    func: detra_set_state,
 };
 
 fn detra_command_arg(ctx: &mut ExternCallContext) -> ExternResult {
@@ -231,28 +266,9 @@ fn detra_command_arg(ctx: &mut ExternCallContext) -> ExternResult {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_COMMAND_ARG: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_CommandArg",
+    name: "detra_CommandArg",
     func: detra_command_arg,
 };
-
-// C ABI for TUI renderer to get current tree (RuntimeNode)
-static CURRENT_TREE_FOR_TUI: Mutex<Option<Box<RuntimeNode>>> = Mutex::new(None);
-
-#[no_mangle]
-pub extern "C" fn detra_get_current_tree() -> *const RuntimeNode {
-    let current = CURRENT_TREE.lock().unwrap();
-    let mut tui_copy = CURRENT_TREE_FOR_TUI.lock().unwrap();
-    
-    if let Some(tree) = current.as_ref() {
-        let boxed = Box::new(tree.clone());
-        let ptr = &*boxed as *const RuntimeNode;
-        *tui_copy = Some(boxed);
-        ptr
-    } else {
-        *tui_copy = None;
-        std::ptr::null()
-    }
-}
 
 fn detra_debug_print_tree(_ctx: &mut ExternCallContext) -> ExternResult {
     let current = CURRENT_TREE.lock().unwrap();
@@ -310,7 +326,7 @@ fn print_node(node: &RuntimeNode, indent: usize) {
 
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DETRA_DEBUG_PRINT_TREE: ExternEntryWithContext = ExternEntryWithContext {
-    name: ".._libs_detra_DebugPrintTree",
+    name: "detra_DebugPrintTree",
     func: detra_debug_print_tree,
 };
 
@@ -318,41 +334,30 @@ pub fn link_detra_externs() {
     let _ = &__VO_DETRA_COMPILE;
     let _ = &__VO_DETRA_INIT_STATE;
     let _ = &__VO_DETRA_EXECUTE;
+    let _ = &__VO_DETRA_SET_STATE;
     let _ = &__VO_DETRA_DEBUG_PRINT_TREE;
 }
 
-// Layout API for renderers
-static RENDER_TREES: Mutex<Vec<detra_renderable::RenderTree>> = Mutex::new(Vec::new());
+// Storage for RuntimeNode returned to renderer
+static CURRENT_TREE_FOR_RENDERER: Mutex<Option<Box<detra_renderable::RuntimeNode>>> = Mutex::new(None);
 
-/// Compute layout and return a RenderTree.
-/// Called by renderers with viewport dimensions.
-/// Uses CURRENT_TREE (set by last Execute) instead of tree_id parameter.
+/// Get current RuntimeNode for renderer.
+/// Returns a pointer to detra_renderable::RuntimeNode.
 #[no_mangle]
-pub extern "C" fn detra_layout(
-    _tree_id: usize,
-    viewport_width: f32,
-    viewport_height: f32,
-) -> *const detra_renderable::RenderTree {
-    // Use CURRENT_TREE instead of looking up by tree_id
-    // This ensures we always use the latest tree from Execute
+pub extern "C" fn detra_get_current_tree() -> *const detra_renderable::RuntimeNode {
     let current = CURRENT_TREE.lock().unwrap();
-    let runtime_node = match current.as_ref() {
-        Some(node) => node,
-        None => return std::ptr::null(),
-    };
+    let mut renderer_copy = CURRENT_TREE_FOR_RENDERER.lock().unwrap();
     
-    // Convert RuntimeNode to detra_renderable::RuntimeNode
-    let renderable_node = convert_to_renderable(runtime_node);
-    drop(current); // Release lock before layout computation
-    
-    // Compute layout
-    let render_tree = layout::layout(&renderable_node, viewport_width, viewport_height);
-    
-    // Store and return pointer
-    let mut render_trees = RENDER_TREES.lock().unwrap();
-    let id = render_trees.len();
-    render_trees.push(render_tree);
-    &render_trees[id] as *const detra_renderable::RenderTree
+    if let Some(tree) = current.as_ref() {
+        let renderable = convert_to_renderable(tree);
+        let boxed = Box::new(renderable);
+        let ptr = &*boxed as *const detra_renderable::RuntimeNode;
+        *renderer_copy = Some(boxed);
+        ptr
+    } else {
+        *renderer_copy = None;
+        std::ptr::null()
+    }
 }
 
 fn convert_to_renderable(node: &RuntimeNode) -> detra_renderable::RuntimeNode {

@@ -2,15 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use vo_common::diagnostics::render_error;
-use vo_common::vfs::{FileSet, RealFs, ZipFs, OverlayFs};
+use vo_common::vfs::{FileSet, RealFs, ZipFs};
 use vo_analysis::analyze_project;
-use vo_module::ResolverConfig;
+use vo_module::{PackageResolverMixed, StdSource, LocalSource, ModSource};
 use vo_codegen::compile_project;
 use vo_vm::bytecode::Module;
 use vo_vm::vm::{Vm, VmError};
 use vo_syntax::parser;
 use crate::printer::AstPrinter;
 use crate::bytecode_text;
+use crate::stdlib::{EmbeddedStdlib, create_resolver};
 use crate::output::{TAG_OK, format_tag, ErrorKind, SourceLoc, report_analysis_error};
 
 /// Execution mode for running programs.
@@ -231,8 +232,7 @@ fn compile_source_file(path: &Path) -> Option<(Module, PathBuf)> {
     }
     
     let source_root = file_set.root.clone();
-    let config = ResolverConfig::from_env(file_set.root.clone());
-    let resolver = config.to_resolver();
+    let resolver = create_resolver(&abs_root);
     
     let project = match analyze_project(file_set, &resolver) {
         Ok(p) => p,
@@ -250,6 +250,7 @@ fn compile_source_file(path: &Path) -> Option<(Module, PathBuf)> {
         }
     }
 }
+
 
 /// Compile a zip file to a Module.
 /// 
@@ -287,15 +288,16 @@ fn compile_zip(zip_path: &Path, internal_root: Option<&str>) -> Option<(Module, 
         return None;
     }
     
-    // Get stdlib path from environment config (same as regular file compilation)
-    let config = ResolverConfig::from_env(abs_root.clone());
+    // Create resolver with embedded stdlib and zip filesystem for local
+    let mod_root = dirs::home_dir()
+        .map(|h| h.join(".vo/mod"))
+        .unwrap_or_else(|| abs_root.join(".vo/mod"));
     
-    // Create overlay filesystem: zip for project files, real fs for stdlib
-    let stdlib_fs = RealFs::new(&config.std_root);
-    let overlay_fs = OverlayFs::new(zip_fs.clone(), stdlib_fs);
-    
-    // Create resolver with overlay filesystem
-    let resolver = vo_module::PackageResolver::with_fs(overlay_fs);
+    let resolver = PackageResolverMixed {
+        std: StdSource::with_fs(EmbeddedStdlib::new()),
+        local: LocalSource::with_fs(zip_fs),
+        r#mod: ModSource::with_fs(RealFs::new(mod_root)),
+    };
     
     let project = match analyze_project(file_set, &resolver) {
         Ok(p) => p,

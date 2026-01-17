@@ -563,12 +563,14 @@ fn compile_functions(
     // (recv_type, method_name, func_id, is_pointer_receiver, signature)
     let mut method_mappings: Vec<(vo_analysis::objects::TypeKey, String, u32, bool, u32)> = Vec::new();
     
-    // First compile main package files (using main type_info)
+    // Note: Functions are already pre-registered by collect_declarations via declare_func.
+    // This handles forward references (function A calls function B defined later).
+    
+    // Compile function bodies - main package files first
     for file in &project.files {
         compile_file_functions(file, project, ctx, info, &mut method_mappings)?;
     }
-    
-    // Then compile imported package files (using their respective type_info)
+    // Then imported package files
     for (pkg_path, files) in &project.imported_files {
         if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
             let pkg_info = TypeInfoWrapper::for_package(project, pkg_type_info);
@@ -603,16 +605,25 @@ fn compile_file_functions(
             
             let func_name = project.interner.resolve(func_decl.name.symbol)
                 .unwrap_or("unknown");
-            let func_id = compile_func_decl(func_decl, ctx, info)?;
             
-            // Register ObjKey -> func_id mapping for lookup_field_or_method in itab building
+            // init() functions are not pre-declared (can have multiple with same name)
+            let is_init = func_decl.receiver.is_none() && func_name == "init";
             let func_obj_key = info.get_def(&func_decl.name);
-            ctx.register_objkey_func(func_obj_key, func_id);
             
-            // Check if this is an init() function (no receiver, name is "init")
-            if func_decl.receiver.is_none() && func_name == "init" {
-                ctx.register_init_function(func_id);
-            }
+            let func_id = if is_init {
+                // Compile init() directly (not pre-declared)
+                let id = compile_func_decl_new(func_decl, ctx, info)?;
+                ctx.register_init_function(id);
+                id
+            } else {
+                // Get pre-declared func_id using ObjKey (not func_indices which can collide across packages)
+                let id = ctx.get_func_by_objkey(func_obj_key)
+                    .ok_or_else(|| CodegenError::Internal(format!("function not pre-declared: {} obj_key={:?}", func_name, func_obj_key)))?;
+                
+                // Compile function body and replace placeholder
+                compile_func_decl_at(func_decl, id, ctx, info)?;
+                id
+            };
             
             // If this is a method, record the mapping
             if let Some(recv) = &func_decl.receiver {
@@ -919,27 +930,36 @@ fn signature_type_to_runtime_type(
     }
 }
 
-fn compile_func_decl(
+/// Compile function body and replace placeholder at pre-allocated func_id.
+fn compile_func_decl_at(
+    func_decl: &vo_syntax::ast::FuncDecl,
+    func_id: u32,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    ctx.set_current_func_id(func_id);
+    let func_def = compile_func_body(func_decl, ctx, info)?;
+    ctx.replace_function(func_id, func_def);
+    Ok(())
+}
+
+/// Compile function body without pre-allocated func_id (for init() functions).
+fn compile_func_decl_new(
     func_decl: &vo_syntax::ast::FuncDecl,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<u32, CodegenError> {
+    let func_def = compile_func_body(func_decl, ctx, info)?;
+    Ok(ctx.add_function(func_def))
+}
+
+fn compile_func_body(
+    func_decl: &vo_syntax::ast::FuncDecl,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<vo_vm::bytecode::FunctionDef, CodegenError> {
     let name = info.project.interner.resolve(func_decl.name.symbol)
         .unwrap_or("unknown");
-    
-    // Get the func_id for pre-declared functions (for debug info recording)
-    let (recv_base_type, is_pointer_recv) = func_decl.receiver.as_ref()
-        .map(|recv| {
-            let base_type = info.method_receiver_base_type(func_decl)
-                .expect("method receiver must have type");
-            (Some(base_type), recv.is_pointer)
-        })
-        .unwrap_or((None, false));
-    
-    // Set current function ID for debug info (if pre-declared)
-    if let Some(func_id) = ctx.get_func_index(recv_base_type, is_pointer_recv, func_decl.name.symbol) {
-        ctx.set_current_func_id(func_id);
-    }
     
     let mut builder = FuncBuilder::new(name);
     
@@ -1050,24 +1070,8 @@ fn compile_func_decl(
     // Add return if not present at end
     builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
     
-    // Build and add to module with proper name registration
-    let func_def = builder.build();
-    // Get receiver base type and is_pointer flag
-    let (recv_base_type, is_pointer_recv) = func_decl.receiver.as_ref()
-        .map(|recv| {
-            let base_type = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
-            (Some(base_type), recv.is_pointer)
-        })
-        .unwrap_or((None, false));
-    // init() functions use add_function (they're not pre-declared since there can be multiple)
-    let func_name = info.project.interner.resolve(func_decl.name.symbol).unwrap_or("");
-    let func_id = if recv_base_type.is_none() && func_name == "init" {
-        ctx.add_function(func_def)
-    } else {
-        ctx.define_func(func_def, recv_base_type, is_pointer_recv, func_decl.name.symbol)
-    };
-    
-    Ok(func_id)
+    // Build and return FunctionDef
+    Ok(builder.build())
 }
 
 /// Emit GlobalSet or GlobalSetN depending on slot count.

@@ -3,10 +3,11 @@
 use std::path::Path;
 use vo_common::vfs::{FileSet, RealFs};
 use vo_analysis::analyze_project;
-use vo_module::{ModFile, ResolverConfig};
+use vo_module::ModFile;
 use vo_codegen::compile_project;
 use vo_vm::vm::Vm;
 use super::run::StdMode;
+use crate::stdlib::create_resolver;
 use crate::output::{TAG_OK, format_tag, ErrorKind, report_analysis_error};
 
 /// Build and run a Vo project.
@@ -52,9 +53,8 @@ pub fn run(path: &str, std_mode: StdMode) -> bool {
     
     println!("Found {} source files", file_set.files.len());
     
-    // Initialize package resolver
-    let config = ResolverConfig::from_env(project_dir.clone());
-    let resolver = config.to_resolver();
+    // Initialize package resolver with embedded stdlib
+    let resolver = create_resolver(&project_dir);
     
     // Analyze project
     let project = match analyze_project(file_set, &resolver) {
@@ -90,3 +90,4 @@ pub fn run(path: &str, std_mode: StdMode) -> bool {
         }
     }
 }
+

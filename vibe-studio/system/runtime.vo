@@ -2,19 +2,36 @@ package system
 
 import (
     "os"
-    "../libs/detra"
-    "../libs/detra-renderer"
+    "strings"
+    "../../libs/detra"
+    "../../libs/detra-renderer"
 )
 
-type CommandHandler func(name string, getArg func(string) string)
+// CommandHandler receives command name, arg getter, and external setter
+type CommandHandler func(name string, getArg func(string) string, setExternal func(string, string))
 
-func Run(detraPath string, title string, width int, height int, handler CommandHandler) {
+// ExternalProvider provides dynamic external state
+type ExternalProvider func() map[string]string
+
+func Run(detraPath string, title string, width int, height int, handler CommandHandler, getExternals ExternalProvider) {
     source := readDetraFile(detraPath)
     
     program := detra.Compile(source)
     state := detra.InitState(program)
     
-    _, errMsg, errKind := detra.Execute(program, state, nil, "", nil)
+    // Scan workspace directory for file tree
+    workDir := "vibe-studio"
+    fileTree := scanDirectoryToJSON(workDir)
+    
+    // Host-owned external state injected into Detra
+    external := detra.External{
+        "currentFile":    "",
+        "editorContent":  "// Welcome to Vibe Studio\n// Select a file from the explorer to start editing\n",
+        "fileTree":       fileTree,
+        "terminalOutput": "[]",
+    }
+    
+    _, errMsg, errKind := detra.Execute(program, state, external, "", nil)
     if errKind != "" {
         println("Execute error:", errKind, errMsg)
         return
@@ -27,31 +44,48 @@ func Run(detraPath string, title string, width int, height int, handler CommandH
             Height: height,
         },
         func() {
+            // Merge dynamic externals from main
+            if getExternals != nil {
+                for k, v := range getExternals() {
+                    external[k] = v
+                }
+            }
+            
             actionName := detra_renderer.PendingAction()
             actionArgs := map[string]string{
-                "value": detra_renderer.PendingActionArg("value"),
-                "mode":  detra_renderer.PendingActionArg("mode"),
-                "step":  detra_renderer.PendingActionArg("step"),
+                "value":   detra_renderer.PendingActionArg("value"),
+                "mode":    detra_renderer.PendingActionArg("mode"),
+                "step":    detra_renderer.PendingActionArg("step"),
+                "path":    detra_renderer.PendingActionArg("path"),
+                "id":      detra_renderer.PendingActionArg("id"),
+                "content": detra_renderer.PendingActionArg("content"),
             }
-            _, errMsg, errKind := detra.Execute(program, state, nil, actionName, actionArgs)
+            _, errMsg, errKind := detra.Execute(program, state, external, actionName, actionArgs)
             if errKind != "" {
                 println("Action error:", errKind, errMsg)
                 return
             }
             
-            processCommands(handler)
+            processCommands(handler, program, state, external)
         },
     )
 }
 
-func processCommands(handler CommandHandler) {
+func processCommands(handler CommandHandler, program detra.Program, state detra.State, external detra.External) {
     count := detra.CommandCount()
+    needRerender := false
     for i := 0; i < count; i++ {
         name := detra.CommandName(i)
         idx := i
         handler(name, func(argName string) string {
             return detra.CommandArg(idx, argName)
+        }, func(key string, value string) {
+            external[key] = value
+            needRerender = true
         })
+    }
+    if needRerender {
+        detra.Execute(program, state, external, "", nil)
     }
 }
 
@@ -61,4 +95,51 @@ func readDetraFile(path string) string {
         panic("failed to read detra file: " + path + ": " + err.Error())
     }
     return string(data)
+}
+
+func scanDirectoryToJSON(root string) string {
+    entries, err := os.ReadDir(root)
+    if err != nil {
+        return "[]"
+    }
+    
+    result := "["
+    first := true
+    
+    for _, entry := range entries {
+        name := entry.Name()
+        
+        // Skip hidden files and common non-source directories
+        if strings.HasPrefix(name, ".") || name == "target" || name == "node_modules" {
+            continue
+        }
+        
+        if !first {
+            result += ","
+        }
+        first = false
+        
+        path := root + "/" + name
+        result += `{"path":"` + escapeJSON(path) + `","name":"` + escapeJSON(name) + `","isDir":`
+        if entry.IsDir() {
+            result += "true"
+            children := scanDirectoryToJSON(path)
+            result += `,"children":` + children
+        } else {
+            result += "false"
+        }
+        result += "}"
+    }
+    
+    result += "]"
+    return result
+}
+
+func escapeJSON(s string) string {
+    s = strings.ReplaceAll(s, `\`, `\\`)
+    s = strings.ReplaceAll(s, `"`, `\"`)
+    s = strings.ReplaceAll(s, "\n", `\n`)
+    s = strings.ReplaceAll(s, "\r", `\r`)
+    s = strings.ReplaceAll(s, "\t", `\t`)
+    return s
 }

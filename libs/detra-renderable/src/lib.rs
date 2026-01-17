@@ -1,7 +1,16 @@
-//! Detra Renderable - shared types between engine and renderer.
+//! Detra Renderable - shared types between Detra engine and renderers.
+//!
+//! This crate defines the contract between Detra and renderers:
+//! - Detra outputs RuntimeNode (UI tree with layout hints and event bindings)
+//! - Renderer handles layout, rendering, and user interaction
+//! - Renderer triggers ActionCall back to Detra
 
 use std::collections::HashMap;
 use std::fmt;
+
+// ============================================================================
+// Value - Dynamic value type shared between Detra and Renderer
+// ============================================================================
 
 #[derive(Clone, PartialEq)]
 pub enum Value {
@@ -126,18 +135,38 @@ impl Default for Value {
     }
 }
 
+// ============================================================================
+// ActionCall - Renderer triggers this back to Detra
+// ============================================================================
+
 #[derive(Debug, Clone)]
 pub struct ActionCall {
     pub name: String,
     pub args: HashMap<String, Value>,
 }
 
+// ============================================================================
+// RuntimeNode - Detra outputs this, Renderer consumes it
+// ============================================================================
+
 #[derive(Debug, Clone)]
 pub struct RuntimeNode {
+    /// Node type: "Row", "Column", "Button", "Input", "Text", etc.
     pub kind: String,
+    
+    /// Stable key for widget identity (used by renderer for state persistence)
     pub key: Option<Value>,
+    
+    /// Properties including:
+    /// - Layout: width, height, flex, padding, spacing, align
+    /// - Content: text, value, placeholder, src
+    /// - Style: color, background, fontSize, bold, etc.
     pub props: HashMap<String, Value>,
+    
+    /// Event handlers: onClick, onChange, onFocus, etc.
     pub events: HashMap<String, ActionCall>,
+    
+    /// Child nodes
     pub children: Vec<RuntimeNode>,
 }
 
@@ -151,219 +180,16 @@ impl RuntimeNode {
             children: Vec::new(),
         }
     }
-}
-
-// ============================================================================
-// Layout Output Types - Used by Renderer (no layout calculation needed)
-// ============================================================================
-
-/// Absolute rectangle (calculated by layout engine)
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+    
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        self.props.get(key).and_then(|v| v.as_string())
     }
     
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.width &&
-        py >= self.y && py < self.y + self.height
-    }
-}
-
-/// RGBA color
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
-}
-
-impl Color {
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
+    pub fn get_float(&self, key: &str) -> Option<f64> {
+        self.props.get(key).and_then(|v| v.as_float())
     }
     
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.props.get(key).and_then(|v| v.as_bool())
     }
-    
-    pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 };
-    pub const WHITE: Color = Color::rgb(255, 255, 255);
-    pub const BLACK: Color = Color::rgb(0, 0, 0);
-}
-
-/// Border style
-#[derive(Debug, Clone, Default)]
-pub struct Border {
-    pub width: f32,
-    pub color: Color,
-    pub radius: f32,
-}
-
-/// Text style
-#[derive(Debug, Clone)]
-pub struct TextStyle {
-    pub size: f32,
-    pub color: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub monospace: bool,
-}
-
-impl Default for TextStyle {
-    fn default() -> Self {
-        Self {
-            size: 14.0,
-            color: Color::WHITE,
-            bold: false,
-            italic: false,
-            monospace: false,
-        }
-    }
-}
-
-/// Render node types - each variant contains all info needed to render
-#[derive(Debug, Clone)]
-pub enum RenderKind {
-    /// Container - background and border only, children rendered separately
-    Container {
-        background: Option<Color>,
-        border: Option<Border>,
-    },
-    
-    /// Text label
-    Text {
-        content: String,
-        style: TextStyle,
-    },
-    
-    /// Clickable button
-    Button {
-        text: String,
-        style: TextStyle,
-        background: Color,
-        border: Option<Border>,
-        active: bool,
-    },
-    
-    /// Text input
-    Input {
-        value: String,
-        placeholder: String,
-        multiline: bool,
-        style: TextStyle,
-        background: Color,
-    },
-    
-    /// Divider line
-    Divider {
-        color: Color,
-        vertical: bool,
-    },
-    
-    /// Spacer (invisible)
-    Spacer,
-    
-    /// Image
-    Image {
-        src: String,
-    },
-}
-
-/// Render node - fully laid out, ready to render
-#[derive(Debug, Clone)]
-pub struct RenderNode {
-    /// Unique ID for interaction tracking
-    pub id: usize,
-    
-    /// Absolute position and size (calculated by layout engine)
-    pub rect: Rect,
-    
-    /// What to render
-    pub kind: RenderKind,
-    
-    /// Click handler (action name + args)
-    pub on_click: Option<ActionCall>,
-    
-    /// Change handler for inputs
-    pub on_change: Option<ActionCall>,
-    
-    /// Is this node focusable?
-    pub focusable: bool,
-    
-    /// Child nodes (already have absolute positions)
-    pub children: Vec<RenderNode>,
-    
-    /// Clip children to this rect (for scrolling)
-    pub clip: Option<Rect>,
-    
-    /// Is visible?
-    pub visible: bool,
-}
-
-impl RenderNode {
-    pub fn new(id: usize, rect: Rect, kind: RenderKind) -> Self {
-        Self {
-            id,
-            rect,
-            kind,
-            on_click: None,
-            on_change: None,
-            focusable: false,
-            children: Vec::new(),
-            clip: None,
-            visible: true,
-        }
-    }
-}
-
-/// Complete render tree with metadata
-#[derive(Debug, Clone)]
-pub struct RenderTree {
-    pub root: RenderNode,
-    pub viewport_width: f32,
-    pub viewport_height: f32,
-    pub version: u64,
-}
-
-impl RenderTree {
-    /// Find the deepest interactive node at position (x, y).
-    /// Returns the node with on_click handler that contains the point.
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<&RenderNode> {
-        hit_test_node(&self.root, x, y)
-    }
-}
-
-fn hit_test_node(node: &RenderNode, x: f32, y: f32) -> Option<&RenderNode> {
-    // Skip invisible nodes
-    if !node.visible {
-        return None;
-    }
-    
-    // Check if point is inside this node's rect
-    if !node.rect.contains(x, y) {
-        return None;
-    }
-    
-    // Check children first (depth-first, reverse order for z-index)
-    for child in node.children.iter().rev() {
-        if let Some(hit) = hit_test_node(child, x, y) {
-            return Some(hit);
-        }
-    }
-    
-    // If this node has click handler, return it
-    if node.on_click.is_some() {
-        return Some(node);
-    }
-    
-    None
 }

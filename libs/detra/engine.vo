@@ -24,5 +24,9 @@ func CommandName(index int) string
 // CommandArg returns the value of an argument for the i-th command.
 func CommandArg(index int, key string) string
 
+// SetState sets a state field value from the host application.
+// This allows the Vo layer to update UI state (e.g., after loading a file).
+func SetState(state State, key string, value string)
+
 // DebugPrintTree prints the current tree structure to stdout for debugging.
 func DebugPrintTree()
