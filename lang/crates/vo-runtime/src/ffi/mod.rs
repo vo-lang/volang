@@ -21,6 +21,252 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+// Container accessors
+pub mod containers;
+pub use containers::{
+    VoElem, VoStringElem, VoSlice, VoSliceCursor,
+    VoMap, VoMapCursor,
+    VoArray, VoArrayCursor,
+    VoString, VoBytes,
+    VoPtr, VoClosure,
+};
+
+// ==================== Type-Safe Slot Wrappers ====================
+
+/// Represents a Vo `any` or `interface{}` type (2 slots).
+///
+/// Layout:
+/// - slot0: `[itab_id:32 | rttid:24 | value_kind:8]`
+/// - slot1: data (immediate value or GcRef)
+///
+/// # Usage in `#[vo_extern]`
+///
+/// ```ignore
+/// #[vo_extern("mylib", "Process")]
+/// fn process(value: AnySlot) -> AnySlot {
+///     // Access the underlying data
+///     let vk = value.value_kind();
+///     if vk == ValueKind::Int {
+///         let n = value.as_i64();
+///         return AnySlot::from_i64(n * 2);
+///     }
+///     value
+/// }
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AnySlot {
+    /// Metadata: `[itab_id:32 | rttid:24 | value_kind:8]`
+    pub slot0: u64,
+    /// Data: immediate value or GcRef
+    pub slot1: u64,
+}
+
+impl AnySlot {
+    /// Create a new AnySlot from raw slot values.
+    #[inline]
+    pub fn new(slot0: u64, slot1: u64) -> Self {
+        Self { slot0, slot1 }
+    }
+
+    /// Create an AnySlot containing an i64 value.
+    #[inline]
+    pub fn from_i64(val: i64) -> Self {
+        use crate::objects::interface;
+        Self {
+            slot0: interface::pack_slot0(0, vo_common_core::types::ValueKind::Int as u32, vo_common_core::types::ValueKind::Int),
+            slot1: val as u64,
+        }
+    }
+
+    /// Create an AnySlot containing a bool value.
+    #[inline]
+    pub fn from_bool(val: bool) -> Self {
+        use crate::objects::interface;
+        Self {
+            slot0: interface::pack_slot0(0, vo_common_core::types::ValueKind::Bool as u32, vo_common_core::types::ValueKind::Bool),
+            slot1: val as u64,
+        }
+    }
+
+    /// Create an AnySlot containing a f64 value.
+    #[inline]
+    pub fn from_f64(val: f64) -> Self {
+        use crate::objects::interface;
+        Self {
+            slot0: interface::pack_slot0(0, vo_common_core::types::ValueKind::Float64 as u32, vo_common_core::types::ValueKind::Float64),
+            slot1: val.to_bits(),
+        }
+    }
+
+    /// Create an AnySlot containing a GcRef (for reference types).
+    #[inline]
+    pub fn from_ref(gc_ref: GcRef, rttid: u32, vk: vo_common_core::types::ValueKind) -> Self {
+        use crate::objects::interface;
+        Self {
+            slot0: interface::pack_slot0(0, rttid, vk),
+            slot1: gc_ref as u64,
+        }
+    }
+
+    /// Create a nil AnySlot.
+    #[inline]
+    pub fn nil() -> Self {
+        Self { slot0: 0, slot1: 0 }
+    }
+
+    /// Check if this is a nil interface.
+    #[inline]
+    pub fn is_nil(&self) -> bool {
+        self.value_kind() == vo_common_core::types::ValueKind::Void
+    }
+
+    /// Get the value kind.
+    #[inline]
+    pub fn value_kind(&self) -> vo_common_core::types::ValueKind {
+        use crate::objects::interface;
+        interface::unpack_value_kind(self.slot0)
+    }
+
+    /// Get the runtime type ID.
+    #[inline]
+    pub fn rttid(&self) -> u32 {
+        use crate::objects::interface;
+        interface::unpack_rttid(self.slot0)
+    }
+
+    /// Get the itab ID (for interface method dispatch).
+    #[inline]
+    pub fn itab_id(&self) -> u32 {
+        use crate::objects::interface;
+        interface::unpack_itab_id(self.slot0)
+    }
+
+    /// Get the data as i64 (for Int types).
+    #[inline]
+    pub fn as_i64(&self) -> i64 {
+        self.slot1 as i64
+    }
+
+    /// Get the data as u64.
+    #[inline]
+    pub fn as_u64(&self) -> u64 {
+        self.slot1
+    }
+
+    /// Get the data as f64 (for Float types).
+    #[inline]
+    pub fn as_f64(&self) -> f64 {
+        f64::from_bits(self.slot1)
+    }
+
+    /// Get the data as bool (for Bool types).
+    #[inline]
+    pub fn as_bool(&self) -> bool {
+        self.slot1 != 0
+    }
+
+    /// Get the data as GcRef (for reference types).
+    #[inline]
+    pub fn as_ref(&self) -> GcRef {
+        self.slot1 as GcRef
+    }
+    
+    /// Get the data as string.
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        string::as_str(self.slot1 as GcRef)
+    }
+    
+    // ---- Type checking ----
+    
+    /// Check if int.
+    #[inline]
+    pub fn is_int(&self) -> bool {
+        self.value_kind() == vo_common_core::types::ValueKind::Int
+    }
+    
+    /// Check if float.
+    #[inline]
+    pub fn is_float(&self) -> bool {
+        self.value_kind() == vo_common_core::types::ValueKind::Float64
+    }
+    
+    /// Check if bool.
+    #[inline]
+    pub fn is_bool(&self) -> bool {
+        self.value_kind() == vo_common_core::types::ValueKind::Bool
+    }
+    
+    /// Check if string.
+    #[inline]
+    pub fn is_string(&self) -> bool {
+        self.value_kind() == vo_common_core::types::ValueKind::String
+    }
+    
+    /// Check if reference type.
+    #[inline]
+    pub fn is_ref_type(&self) -> bool {
+        use vo_common_core::types::ValueKind;
+        matches!(self.value_kind(), 
+            ValueKind::Slice | ValueKind::Map | ValueKind::Pointer |
+            ValueKind::Struct | ValueKind::Array | ValueKind::Channel |
+            ValueKind::Closure | ValueKind::String)
+    }
+    
+    // ---- Additional creation ----
+    
+    /// Create from u64.
+    #[inline]
+    pub fn from_u64(val: u64) -> Self {
+        use crate::objects::interface;
+        Self {
+            slot0: interface::pack_slot0(0, vo_common_core::types::ValueKind::Int as u32, vo_common_core::types::ValueKind::Int),
+            slot1: val,
+        }
+    }
+}
+
+/// Type alias for interface types (same layout as AnySlot).
+pub type InterfaceSlot = AnySlot;
+
+/// Type alias for error types (interface with Error() method).
+pub type ErrorSlot = AnySlot;
+
+impl ErrorSlot {
+    /// Check if this error is nil (no error).
+    #[inline]
+    pub fn is_ok(&self) -> bool {
+        self.is_nil()
+    }
+
+    /// Check if this error is non-nil.
+    #[inline]
+    pub fn is_err(&self) -> bool {
+        !self.is_nil()
+    }
+    
+    /// Get error message (if error is a simple string error).
+    #[inline]
+    pub fn message(&self) -> &'static str {
+        if self.is_ok() {
+            return "";
+        }
+        let vk = self.value_kind();
+        if vk == vo_common_core::types::ValueKind::String {
+            string::as_str(self.slot1 as GcRef)
+        } else {
+            "<complex error>"
+        }
+    }
+    
+    /// Create nil error (success).
+    #[inline]
+    pub fn ok() -> Self {
+        Self::nil()
+    }
+}
+
 use linkme::distributed_slice;
 
 use crate::gc::{Gc, GcRef};
@@ -493,6 +739,53 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    /// Read argument as AnySlot (2 slots: any/interface type).
+    #[inline]
+    pub fn arg_any(&self, n: u16) -> AnySlot {
+        AnySlot {
+            slot0: self.call.arg_u64(n),
+            slot1: self.call.arg_u64(n + 1),
+        }
+    }
+
+    /// Read argument as ErrorSlot (2 slots: error interface type).
+    #[inline]
+    pub fn arg_error(&self, n: u16) -> ErrorSlot {
+        self.arg_any(n)
+    }
+
+    // ==================== AnySlot Convenience Methods ====================
+
+    /// Read any argument directly as i64.
+    #[inline]
+    pub fn arg_any_as_i64(&self, n: u16) -> i64 {
+        self.call.arg_u64(n + 1) as i64
+    }
+
+    /// Read any argument directly as u64.
+    #[inline]
+    pub fn arg_any_as_u64(&self, n: u16) -> u64 {
+        self.call.arg_u64(n + 1)
+    }
+
+    /// Read any argument directly as f64.
+    #[inline]
+    pub fn arg_any_as_f64(&self, n: u16) -> f64 {
+        f64::from_bits(self.call.arg_u64(n + 1))
+    }
+
+    /// Read any argument directly as bool.
+    #[inline]
+    pub fn arg_any_as_bool(&self, n: u16) -> bool {
+        self.call.arg_u64(n + 1) != 0
+    }
+
+    /// Read any argument directly as GcRef.
+    #[inline]
+    pub fn arg_any_as_ref(&self, n: u16) -> GcRef {
+        self.call.arg_u64(n + 1) as GcRef
+    }
+
     // ==================== Return Value Writing (delegated) ====================
 
     #[inline]
@@ -513,6 +806,25 @@ impl<'a> ExternCallContext<'a> {
     pub fn ret_str(&mut self, n: u16, s: &str) {
         let ptr = string::from_rust_str(self.gc, s);
         self.call.ret_ref(n, ptr);
+    }
+
+    /// Write return value as AnySlot (2 slots: any/interface type).
+    #[inline]
+    pub fn ret_any(&mut self, n: u16, val: AnySlot) {
+        self.call.ret_u64(n, val.slot0);
+        self.call.ret_u64(n + 1, val.slot1);
+    }
+
+    /// Write return value as ErrorSlot (2 slots: error interface type).
+    #[inline]
+    pub fn ret_error(&mut self, n: u16, val: ErrorSlot) {
+        self.ret_any(n, val);
+    }
+
+    /// Write a nil error (no error).
+    #[inline]
+    pub fn ret_nil_error(&mut self, n: u16) {
+        self.ret_any(n, ErrorSlot::nil());
     }
 
     /// Allocate a new string.

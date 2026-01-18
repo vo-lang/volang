@@ -9,10 +9,8 @@ pub mod executor;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use linkme::distributed_slice;
-use vo_runtime::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN_TABLE_WITH_CONTEXT};
+use vo_ext::prelude::*;
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::string;
 
 use crate::ast::Program;
 use crate::executor::{Executor, State, ActionCall, RuntimeNode};
@@ -22,9 +20,9 @@ static STATES: Mutex<Vec<State>> = Mutex::new(Vec::new());
 static CURRENT_TREE: Mutex<Option<RuntimeNode>> = Mutex::new(None);
 static CURRENT_COMMANDS: Mutex<Vec<executor::CommandCall>> = Mutex::new(Vec::new());
 
+#[vo_extern_ctx("detra", "Compile")]
 fn detra_compile(ctx: &mut ExternCallContext) -> ExternResult {
-    let source_ref = ctx.arg_ref(0);
-    let source = string::as_str(source_ref);
+    let source = ctx.arg_str(slots::ARG_SOURCE);
 
     let mut lexer = lexer::Lexer::new(source);
     let tokens = match lexer.tokenize() {
@@ -42,18 +40,14 @@ fn detra_compile(ctx: &mut ExternCallContext) -> ExternResult {
     let id = programs.len();
     programs.push(program);
 
-    ctx.ret_i64(0, id as i64);
+    // Return as AnySlot (Program = any)
+    ctx.ret_any(slots::RET_0, AnySlot::from_i64(id as i64));
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_COMPILE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_Compile",
-    func: detra_compile,
-};
-
+#[vo_extern_ctx("detra", "InitState")]
 fn detra_init_state(ctx: &mut ExternCallContext) -> ExternResult {
-    let program_id = ctx.arg_i64(0) as usize;
+    let program_id = ctx.arg_any_as_i64(slots::ARG_PROGRAM) as usize;
 
     let programs = PROGRAMS.lock().unwrap();
     let program = match programs.get(program_id) {
@@ -67,27 +61,19 @@ fn detra_init_state(ctx: &mut ExternCallContext) -> ExternResult {
     let state_id = states.len();
     states.push(state);
 
-    ctx.ret_i64(0, state_id as i64);
+    // Return as AnySlot (State = any)
+    ctx.ret_any(slots::RET_0, AnySlot::from_i64(state_id as i64));
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_INIT_STATE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_InitState",
-    func: detra_init_state,
-};
-
+#[vo_extern_ctx("detra", "Execute")]
 fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
-    // Program (any = 2 slots): slot 0-1, we use slot 0 as the int id
-    // State (any = 2 slots): slot 2-3, we use slot 2 as the int id
-    // External (map = 1 slot): slot 4
-    // actionName (string = 1 slot): slot 5
-    // actionArgs (map = 1 slot): slot 6
-    let program_id = ctx.arg_i64(0) as usize;
-    let state_id = ctx.arg_i64(2) as usize;
-    let external_ref = ctx.arg_ref(4);
-    let action_name_ref = ctx.arg_ref(5);
-    let action_args_ref = ctx.arg_ref(6);
+    let program_id = ctx.arg_any_as_i64(slots::ARG_PROGRAM) as usize;
+    let state_id = ctx.arg_any_as_i64(slots::ARG_STATE) as usize;
+    let external_ref = ctx.arg_ref(slots::ARG_EXTERNAL);
+    let action_name_ref = ctx.arg_ref(slots::ARG_ACTION_NAME);
+    let action_args_ref = ctx.arg_ref(slots::ARG_ACTION_ARGS);
+
 
     let programs = PROGRAMS.lock().unwrap();
     let program = match programs.get(program_id) {
@@ -107,21 +93,16 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
     let action = if action_name_ref.is_null() {
         None
     } else {
-        let action_name = string::as_str(action_name_ref);
+        let action_name = vo_runtime::objects::string::as_str(action_name_ref);
         if action_name.is_empty() {
             None
         } else {
-            // Parse actionArgs map[string]string
+            // Parse actionArgs map[string]string using VoMap cursor
             let mut args = HashMap::new();
             if !action_args_ref.is_null() {
-                use vo_runtime::objects::map;
-                let mut iter = map::iter_init(action_args_ref);
-                while let Some((k, v)) = map::iter_next(&mut iter) {
-                    // k and v are slices - for string keys/values, slot 0 is the GcRef (as u64)
-                    let key_ref = k[0] as GcRef;
-                    let val_ref = v[0] as GcRef;
-                    let key = string::as_str(key_ref).to_string();
-                    let val = string::as_str(val_ref).to_string();
+                let map = VoMap::<String, String>::from_ref(action_args_ref);
+                let mut cursor = map.cursor();
+                while let Some((key, val)) = cursor.next() {
                     args.insert(key, value::Value::String(val));
                 }
             }
@@ -132,17 +113,12 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    // Parse external map[string]Value
+    // Parse external map[string]Value using VoMap cursor
     let mut external = HashMap::new();
     if !external_ref.is_null() {
-        use vo_runtime::objects::map;
-        let mut iter = map::iter_init(external_ref);
-        while let Some((k, v)) = map::iter_next(&mut iter) {
-            let key_ref = k[0] as GcRef;
-            let val_ref = v[0] as GcRef;
-            let key = string::as_str(key_ref).to_string();
-            // External values are strings (map[string]Value where Value is string)
-            let val = string::as_str(val_ref).to_string();
+        let map = VoMap::<String, String>::from_ref(external_ref);
+        let mut cursor = map.cursor();
+        while let Some((key, val)) = cursor.next() {
             external.insert(key, value::Value::String(val));
         }
     }
@@ -168,62 +144,44 @@ fn detra_execute(ctx: &mut ExternCallContext) -> ExternResult {
         }
     }
 
-    ctx.ret_i64(0, state_id as i64);
+    // Return values: (State, string, string)
+    ctx.ret_any(slots::RET_0, AnySlot::from_i64(state_id as i64));
 
     if let Some(ref err) = result.error {
-        ctx.ret_str(1, &err.message);
-        ctx.ret_str(2, &err.kind);
+        ctx.ret_str(slots::RET_1, &err.message);
+        ctx.ret_str(slots::RET_2, &err.kind);
     } else {
-        ctx.ret_str(1, "");
-        ctx.ret_str(2, "");
+        ctx.ret_str(slots::RET_1, "");
+        ctx.ret_str(slots::RET_2, "");
     }
 
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_EXECUTE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_Execute",
-    func: detra_execute,
-};
-
+#[vo_extern_ctx("detra", "CommandCount")]
 fn detra_command_count(ctx: &mut ExternCallContext) -> ExternResult {
     let cmds = CURRENT_COMMANDS.lock().unwrap();
-    ctx.ret_i64(0, cmds.len() as i64);
+    ctx.ret_i64(slots::RET_0, cmds.len() as i64);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_COMMAND_COUNT: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_CommandCount",
-    func: detra_command_count,
-};
-
+#[vo_extern_ctx("detra", "CommandName")]
 fn detra_command_name(ctx: &mut ExternCallContext) -> ExternResult {
-    let index = ctx.arg_i64(0) as usize;
+    let index = ctx.arg_i64(slots::ARG_INDEX) as usize;
     let cmds = CURRENT_COMMANDS.lock().unwrap();
     if index < cmds.len() {
-        ctx.ret_str(0, &cmds[index].name);
+        ctx.ret_str(slots::RET_0, &cmds[index].name);
     } else {
-        ctx.ret_str(0, "");
+        ctx.ret_str(slots::RET_0, "");
     }
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_COMMAND_NAME: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_CommandName",
-    func: detra_command_name,
-};
-
+#[vo_extern_ctx("detra", "SetState")]
 fn detra_set_state(ctx: &mut ExternCallContext) -> ExternResult {
-    // State is `any` type = 2 slots (slot 0-1), key is slot 2, value is slot 3
-    let state_id = ctx.arg_i64(0) as usize;
-    let key_ref = ctx.arg_ref(2);  // slot 2, not 1
-    let value_ref = ctx.arg_ref(3);  // slot 3, not 2
-    
-    let key = string::as_str(key_ref).to_string();
-    let val = string::as_str(value_ref).to_string();
+    let state_id = ctx.arg_any_as_i64(slots::ARG_STATE) as usize;
+    let key = ctx.arg_str(slots::ARG_KEY).to_string();
+    let val = ctx.arg_str(slots::ARG_VALUE).to_string();
     
     let mut states = STATES.lock().unwrap();
     if let Some(state) = states.get_mut(state_id) {
@@ -233,16 +191,10 @@ fn detra_set_state(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_SET_STATE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_SetState",
-    func: detra_set_state,
-};
-
+#[vo_extern_ctx("detra", "CommandArg")]
 fn detra_command_arg(ctx: &mut ExternCallContext) -> ExternResult {
-    let index = ctx.arg_i64(0) as usize;
-    let key_ref = ctx.arg_ref(1);
-    let key = string::as_str(key_ref);
+    let index = ctx.arg_i64(slots::ARG_INDEX) as usize;
+    let key = ctx.arg_str(slots::ARG_KEY);
     
     let cmds = CURRENT_COMMANDS.lock().unwrap();
     if index < cmds.len() {
@@ -254,22 +206,17 @@ fn detra_command_arg(ctx: &mut ExternCallContext) -> ExternResult {
                 value::Value::Bool(b) => b.to_string(),
                 _ => String::new(),
             };
-            ctx.ret_str(0, &val_str);
+            ctx.ret_str(slots::RET_0, &val_str);
         } else {
-            ctx.ret_str(0, "");
+            ctx.ret_str(slots::RET_0, "");
         }
     } else {
-        ctx.ret_str(0, "");
+        ctx.ret_str(slots::RET_0, "");
     }
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_COMMAND_ARG: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_CommandArg",
-    func: detra_command_arg,
-};
-
+#[vo_extern_ctx("detra", "DebugPrintTree")]
 fn detra_debug_print_tree(_ctx: &mut ExternCallContext) -> ExternResult {
     let current = CURRENT_TREE.lock().unwrap();
     if let Some(tree) = current.as_ref() {
@@ -324,18 +271,9 @@ fn print_node(node: &RuntimeNode, indent: usize) {
     }
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_DEBUG_PRINT_TREE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_DebugPrintTree",
-    func: detra_debug_print_tree,
-};
-
 pub fn link_detra_externs() {
-    let _ = &__VO_DETRA_COMPILE;
-    let _ = &__VO_DETRA_INIT_STATE;
-    let _ = &__VO_DETRA_EXECUTE;
-    let _ = &__VO_DETRA_SET_STATE;
-    let _ = &__VO_DETRA_DEBUG_PRINT_TREE;
+    // The vo_extern_ctx macros auto-generate the linkme statics,
+    // but we keep this function for explicit linking if needed.
 }
 
 // Storage for RuntimeNode returned to renderer

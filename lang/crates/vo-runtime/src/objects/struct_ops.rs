@@ -27,19 +27,15 @@ pub fn create(gc: &mut Gc, meta_id: u32, size_slots: usize) -> GcRef {
     gc.alloc(ValueMeta::new(meta_id, ValueKind::Struct), size_slots as u16)
 }
 
-/// Get field value.
-/// # Safety
-/// obj must be a valid GcRef and idx must be within bounds.
+/// Get field value (safe for FFI use).
 #[inline]
-pub unsafe fn get_field(obj: GcRef, idx: usize) -> u64 {
+pub fn get_field(obj: GcRef, idx: usize) -> u64 {
     unsafe { Gc::read_slot(obj, idx) }
 }
 
-/// Set field value.
-/// # Safety
-/// obj must be a valid GcRef and idx must be within bounds.
+/// Set field value (safe for FFI use).
 #[inline]
-pub unsafe fn set_field(obj: GcRef, idx: usize, val: u64) {
+pub fn set_field(obj: GcRef, idx: usize, val: u64) {
     unsafe { Gc::write_slot(obj, idx, val) }
 }
 
@@ -48,7 +44,7 @@ pub unsafe fn set_field(obj: GcRef, idx: usize, val: u64) {
 /// obj must be a valid GcRef and range must be within bounds.
 pub unsafe fn get_fields(obj: GcRef, start: usize, dest: &mut [u64]) {
     for (i, d) in dest.iter_mut().enumerate() {
-        *d = unsafe { Gc::read_slot(obj, start + i) };
+        *d = Gc::read_slot(obj, start + i);
     }
 }
 
@@ -57,6 +53,6 @@ pub unsafe fn get_fields(obj: GcRef, start: usize, dest: &mut [u64]) {
 /// obj must be a valid GcRef and range must be within bounds.
 pub unsafe fn set_fields(obj: GcRef, start: usize, src: &[u64]) {
     for (i, &s) in src.iter().enumerate() {
-        unsafe { Gc::write_slot(obj, start + i, s) };
+        Gc::write_slot(obj, start + i, s);
     }
 }

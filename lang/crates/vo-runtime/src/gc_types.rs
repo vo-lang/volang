@@ -1,7 +1,7 @@
 //! GC object scanning by type.
 
 use crate::gc::{scan_slots_by_types, Gc, GcRef};
-use crate::objects::{array, channel, closure, interface, map, slice, string};
+use crate::objects::{array, channel, closure, interface, map, slice};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind};
 

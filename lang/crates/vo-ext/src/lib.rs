@@ -34,10 +34,21 @@
 //! ```
 
 pub use vo_ffi_macro::vo_extern;
+pub use vo_ffi_macro::vo_extern_ctx;
+pub use vo_ffi_macro::vo_struct;
 pub use vo_runtime::ffi::{
     ExternCall, ExternCallContext, ExternEntry, ExternEntryWithContext, ExternFn,
     ExternFnWithContext, ExternResult, EXTERN_TABLE, EXTERN_TABLE_WITH_CONTEXT,
+    // Type-safe slot wrappers for any/interface/error types
+    AnySlot, InterfaceSlot, ErrorSlot,
+    // Container accessors
+    VoSlice, VoSliceCursor, VoMap, VoMapCursor,
+    VoArray, VoArrayCursor, VoString, VoBytes,
+    VoElem, VoStringElem,
+    // Pointer and closure accessors
+    VoPtr, VoClosure,
 };
+pub use vo_runtime::gc::GcRef;
 pub use vo_runtime::distributed_slice;
 
 /// ABI version for extension compatibility checking.
@@ -96,5 +107,18 @@ macro_rules! export_extensions {
 pub mod prelude {
     pub use crate::export_extensions;
     pub use crate::vo_extern;
+    pub use crate::vo_extern_ctx;
+    pub use crate::vo_struct;
     pub use crate::ExternResult;
+    pub use crate::ExternCallContext;
+    pub use crate::AnySlot;
+    pub use crate::InterfaceSlot;
+    pub use crate::ErrorSlot;
+    pub use crate::GcRef;
+    // Container accessors
+    pub use crate::{VoSlice, VoSliceCursor, VoMap, VoMapCursor};
+    pub use crate::{VoArray, VoArrayCursor, VoString, VoBytes};
+    pub use crate::{VoElem, VoStringElem};
+    // Pointer and closure accessors
+    pub use crate::{VoPtr, VoClosure};
 }

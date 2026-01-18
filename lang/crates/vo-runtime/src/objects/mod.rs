@@ -17,6 +17,7 @@ macro_rules! impl_gc_object {
     };
 }
 
+#[allow(unused_imports)]
 pub(crate) use impl_gc_object;
 
 pub mod array;

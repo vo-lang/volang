@@ -224,6 +224,7 @@ impl Gc {
     
     /// Check if object is dead (has the "other" white color).
     #[inline]
+    #[allow(dead_code)]
     fn is_dead(&self, obj: GcRef) -> bool {
         let header = Self::header(obj);
         (header.marked & WHITE_BITS) == self.other_white()

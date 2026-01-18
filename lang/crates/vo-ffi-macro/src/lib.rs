@@ -32,6 +32,13 @@ use std::path::{Path, PathBuf};
 
 mod vo_parser;
 
+/// Check if we're compiling inside vo-runtime crate.
+fn is_runtime_core() -> bool {
+    std::env::var("CARGO_PKG_NAME")
+        .map(|n| n == "vo-runtime")
+        .unwrap_or(false)
+}
+
 /// Attribute macro for implementing Vo extern functions (user projects).
 ///
 /// This macro is for user projects. It does NOT allow implementing stdlib extern functions.
@@ -277,6 +284,10 @@ fn vo_extern_ctx_impl(
     let (pkg_path, func_name) = parse_extern_args(&args)?;
     
     let fn_name = &func.sig.ident;
+    let fn_vis = &func.vis;
+    let fn_sig = &func.sig;
+    let fn_attrs = &func.attrs;
+    let fn_body = &func.block;
     
     // Generate lookup name: "pkg_FuncName" format
     let lookup_name = format!(
@@ -288,13 +299,16 @@ fn vo_extern_ctx_impl(
     // Generate entry name for the static
     let entry_name = format_ident!("__VO_CTX_ENTRY_{}", lookup_name.to_uppercase().replace('/', "_"));
     
-    let is_runtime_core = std::env::var("CARGO_PKG_NAME")
-        .map(|n| n == "vo-runtime")
-        .unwrap_or(false);
+    // Generate slot constants as inline mod (to be injected into function body)
+    let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
     
-    if is_runtime_core {
-        Ok(quote! {
-            #func
+    Ok(if is_runtime_core() {
+        quote! {
+            #(#fn_attrs)*
+            #fn_vis #fn_sig {
+                #slot_mod
+                #fn_body
+            }
 
             #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
             #[doc(hidden)]
@@ -302,10 +316,14 @@ fn vo_extern_ctx_impl(
                 name: #lookup_name,
                 func: #fn_name,
             };
-        })
+        }
     } else {
-        Ok(quote! {
-            #func
+        quote! {
+            #(#fn_attrs)*
+            #fn_vis #fn_sig {
+                #slot_mod
+                #fn_body
+            }
 
             #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
             #[doc(hidden)]
@@ -313,8 +331,124 @@ fn vo_extern_ctx_impl(
                 name: #lookup_name,
                 func: #fn_name,
             };
-        })
+        }
+    })
+}
+
+/// Generate inline slot module to be injected into function body.
+/// This creates `mod slots { ... }` that can be used directly as `slots::ARG_X`.
+fn generate_inline_slot_mod(pkg_path: &str, func_name: &str) -> TokenStream2 {
+    // Try to find the package directory
+    let pkg_dir = match find_pkg_dir_for_slots(pkg_path) {
+        Some(dir) => dir,
+        None => return quote! {},
+    };
+    
+    // Parse type aliases first
+    let type_aliases = vo_parser::parse_type_aliases(&pkg_dir);
+    
+    // Find the function signature
+    let vo_sig = match vo_parser::find_extern_func(&pkg_dir, func_name) {
+        Ok(sig) => sig,
+        Err(_) => return quote! {},
+    };
+    
+    // Generate parameter slot constants with doc comments
+    let mut param_consts = Vec::new();
+    let mut current_slot: u16 = 0;
+    
+    for param in &vo_sig.params {
+        let const_name = format_ident!("ARG_{}", to_screaming_snake_case(&param.name));
+        let slot = current_slot;
+        let slot_count = param.ty.slot_count(&type_aliases);
+        let type_str = format!("{}", param.ty);
+        let doc = format!("Argument `{}` ({}) at slot {}, {} slot(s)", 
+                          param.name, type_str, slot, slot_count);
+        param_consts.push(quote! {
+            #[doc = #doc]
+            pub const #const_name: u16 = #slot;
+        });
+        current_slot += slot_count;
     }
+    
+    // Generate return slot constants with doc comments
+    let mut ret_consts = Vec::new();
+    let mut ret_slot: u16 = 0;
+    
+    for (i, result) in vo_sig.results.iter().enumerate() {
+        let const_name = format_ident!("RET_{}", i);
+        let slot = ret_slot;
+        let slot_count = result.slot_count(&type_aliases);
+        let type_str = format!("{}", result);
+        let doc = format!("Return value {} ({}) at slot {}, {} slot(s)", 
+                          i, type_str, slot, slot_count);
+        ret_consts.push(quote! {
+            #[doc = #doc]
+            pub const #const_name: u16 = #slot;
+        });
+        ret_slot += slot_count;
+    }
+    
+    // Generate total slots info
+    let total_arg_slots = current_slot;
+    let total_ret_slots = ret_slot;
+    
+    // Inline mod named "slots" - available directly in function scope
+    quote! {
+        #[allow(dead_code)]
+        mod slots {
+            #(#param_consts)*
+            #(#ret_consts)*
+            pub const TOTAL_ARG_SLOTS: u16 = #total_arg_slots;
+            pub const TOTAL_RET_SLOTS: u16 = #total_ret_slots;
+        }
+    }
+}
+
+/// Find package directory for slot constant generation.
+fn find_pkg_dir_for_slots(pkg_path: &str) -> Option<PathBuf> {
+    // Also try with underscore-to-hyphen conversion (detra_renderer -> detra-renderer)
+    let pkg_path_hyphen = pkg_path.replace('_', "-");
+    let paths_to_try = [pkg_path, pkg_path_hyphen.as_str()];
+    
+    // Try stdlib first
+    if let Some(stdlib_dir) = find_stdlib_dir() {
+        for path in &paths_to_try {
+            let pkg_dir = stdlib_dir.join(path);
+            if pkg_dir.exists() {
+                return Some(pkg_dir);
+            }
+        }
+    }
+    
+    // Try project root
+    if let Some(project_root) = find_vo_mod_root() {
+        for path in &paths_to_try {
+            let pkg_dir = project_root.join(path);
+            if pkg_dir.exists() {
+                return Some(pkg_dir);
+            }
+        }
+    }
+    
+    // Try relative to CARGO_MANIFEST_DIR
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut dir = PathBuf::from(&manifest_dir);
+        // Go up to find the package
+        for _ in 0..5 {
+            for path in &paths_to_try {
+                let pkg_dir = dir.join(path);
+                if pkg_dir.exists() {
+                    return Some(pkg_dir);
+                }
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    
+    None
 }
 
 fn vo_extern_impl(
@@ -748,16 +882,30 @@ fn generate_wrapper(
     // Generate wrapper
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
-    // Determine crate path based on whether we're inside vo-runtime-core
-    let is_runtime_core = std::env::var("CARGO_PKG_NAME")
-        .map(|n| n == "vo-runtime")
-        .unwrap_or(false);
-    
-    // Generate wrapper with #[no_mangle] for dynamic library export
-    // and linkme registration for auto-discovery
-    if needs_gc {
-        if is_runtime_core {
-            Ok(quote! {
+    Ok(generate_extern_entry(
+        &wrapper_name,
+        &entry_name,
+        &lookup_name,
+        &arg_reads,
+        &call_expr,
+        &ret_writes,
+        needs_gc,
+    ))
+}
+
+/// Generate extern entry registration code (shared by generate_wrapper and vo_builtin_impl).
+fn generate_extern_entry(
+    wrapper_name: &syn::Ident,
+    entry_name: &syn::Ident,
+    lookup_name: &str,
+    arg_reads: &[TokenStream2],
+    call_expr: &TokenStream2,
+    ret_writes: &TokenStream2,
+    needs_gc: bool,
+) -> TokenStream2 {
+    if is_runtime_core() {
+        if needs_gc {
+            quote! {
                 #[doc(hidden)]
                 pub fn #wrapper_name(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
                     #(#arg_reads)*
@@ -772,28 +920,9 @@ fn generate_wrapper(
                     name: #lookup_name,
                     func: #wrapper_name,
                 };
-            })
+            }
         } else {
-            Ok(quote! {
-                #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-                    #(#arg_reads)*
-                    let __result = #call_expr;
-                    #ret_writes
-                    vo_runtime::ffi::ExternResult::Ok
-                }
-
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-                #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                    name: #lookup_name,
-                    func: #wrapper_name,
-                };
-            })
-        }
-    } else {
-        if is_runtime_core {
-            Ok(quote! {
+            quote! {
                 #[doc(hidden)]
                 pub fn #wrapper_name(call: &mut crate::ffi::ExternCall) -> crate::ffi::ExternResult {
                     #(#arg_reads)*
@@ -808,9 +937,28 @@ fn generate_wrapper(
                     name: #lookup_name,
                     func: #wrapper_name,
                 };
-            })
+            }
+        }
+    } else {
+        if needs_gc {
+            quote! {
+                #[doc(hidden)]
+                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+                    #(#arg_reads)*
+                    let __result = #call_expr;
+                    #ret_writes
+                    vo_runtime::ffi::ExternResult::Ok
+                }
+
+                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
+                #[doc(hidden)]
+                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
+                    name: #lookup_name,
+                    func: #wrapper_name,
+                };
+            }
         } else {
-            Ok(quote! {
+            quote! {
                 #[doc(hidden)]
                 pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCall) -> vo_runtime::ffi::ExternResult {
                     #(#arg_reads)*
@@ -825,7 +973,7 @@ fn generate_wrapper(
                     name: #lookup_name,
                     func: #wrapper_name,
                 };
-            })
+            }
         }
     }
 }
@@ -876,91 +1024,20 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
-    let is_runtime_core = std::env::var("CARGO_PKG_NAME")
-        .map(|n| n == "vo-runtime")
-        .unwrap_or(false);
+    let entry = generate_extern_entry(
+        &wrapper_name,
+        &entry_name,
+        &name,
+        &arg_reads,
+        &call_expr,
+        &ret_writes,
+        needs_gc,
+    );
     
-    if needs_gc {
-        if is_runtime_core {
-            Ok(quote! {
-                #func
-
-                #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
-                    #(#arg_reads)*
-                    let __result = #call_expr;
-                    #ret_writes
-                    crate::ffi::ExternResult::Ok
-                }
-
-                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
-                #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
-                    name: #name,
-                    func: #wrapper_name,
-                };
-            })
-        } else {
-            Ok(quote! {
-                #func
-
-                #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-                    #(#arg_reads)*
-                    let __result = #call_expr;
-                    #ret_writes
-                    vo_runtime::ffi::ExternResult::Ok
-                }
-
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-                #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                    name: #name,
-                    func: #wrapper_name,
-                };
-            })
-        }
-    } else {
-        if is_runtime_core {
-            Ok(quote! {
-                #func
-
-                #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut crate::ffi::ExternCall) -> crate::ffi::ExternResult {
-                    #(#arg_reads)*
-                    let __result = #call_expr;
-                    #ret_writes
-                    crate::ffi::ExternResult::Ok
-                }
-
-                #[crate::distributed_slice(crate::EXTERN_TABLE)]
-                #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntry = crate::ffi::ExternEntry {
-                    name: #name,
-                    func: #wrapper_name,
-                };
-            })
-        } else {
-            Ok(quote! {
-                #func
-
-                #[doc(hidden)]
-                pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCall) -> vo_runtime::ffi::ExternResult {
-                    #(#arg_reads)*
-                    let __result = #call_expr;
-                    #ret_writes
-                    vo_runtime::ffi::ExternResult::Ok
-                }
-
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
-                #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
-                    name: #name,
-                    func: #wrapper_name,
-                };
-            })
-        }
-    }
+    Ok(quote! {
+        #func
+        #entry
+    })
 }
 
 /// Extract the inner type name from a generic type like Vec<T>.
@@ -999,6 +1076,13 @@ fn generate_arg_read(ty: &Type, slot: u16) -> syn::Result<(TokenStream2, bool, u
                 }
                 "GcRef" => {
                     Ok((quote! { call.arg_ref(#slot) }, false, 1))
+                }
+                // 2-slot types: any, interface, error
+                "AnySlot" | "InterfaceSlot" => {
+                    Ok((quote! { call.arg_any(#slot) }, true, 2))
+                }
+                "ErrorSlot" => {
+                    Ok((quote! { call.arg_error(#slot) }, true, 2))
                 }
                 _ => Err(syn::Error::new_spanned(ty, format!("unsupported parameter type: {}", ident))),
             }
@@ -1067,14 +1151,22 @@ fn generate_ret_write(ret: &ReturnType) -> syn::Result<(TokenStream2, bool)> {
                                 None => Err(syn::Error::new_spanned(ty, "Vec requires generic type argument")),
                             }
                         }
+                        // 2-slot types: any, interface, error
+                        "AnySlot" | "InterfaceSlot" => {
+                            Ok((quote! { call.ret_any(0, __result); }, true))
+                        }
+                        "ErrorSlot" => {
+                            Ok((quote! { call.ret_error(0, __result); }, true))
+                        }
                         _ => Err(syn::Error::new_spanned(ty, format!("unsupported return type: {}", ident))),
                     }
                 }
                 Type::Tuple(tuple) => {
-                    // Handle multiple return values
+                    // Handle multiple return values with proper slot tracking
                     let mut writes = Vec::new();
+                    let mut current_slot: u16 = 0;
+                    
                     for (i, elem) in tuple.elems.iter().enumerate() {
-                        let idx = i as u16;
                         let field = syn::Index::from(i);
                         
                         if let Type::Path(type_path) = elem {
@@ -1082,30 +1174,591 @@ fn generate_ret_write(ret: &ReturnType) -> syn::Result<(TokenStream2, bool)> {
                                 .map(|s| s.ident.to_string())
                                 .unwrap_or_default();
                             
-                            let write = match ident.as_str() {
+                            let (write, slot_size) = match ident.as_str() {
                                 "i64" | "i32" | "i16" | "i8" | "isize" => {
-                                    quote! { call.ret_i64(#idx, __result.#field as i64); }
+                                    let slot = current_slot;
+                                    (quote! { call.ret_i64(#slot, __result.#field as i64); }, 1)
                                 }
                                 "u64" | "u32" | "u16" | "u8" | "usize" => {
-                                    quote! { call.ret_u64(#idx, __result.#field as u64); }
+                                    let slot = current_slot;
+                                    (quote! { call.ret_u64(#slot, __result.#field as u64); }, 1)
                                 }
                                 "f64" => {
-                                    quote! { call.ret_f64(#idx, __result.#field); }
+                                    let slot = current_slot;
+                                    (quote! { call.ret_f64(#slot, __result.#field); }, 1)
                                 }
                                 "bool" => {
-                                    quote! { call.ret_bool(#idx, __result.#field); }
+                                    let slot = current_slot;
+                                    (quote! { call.ret_bool(#slot, __result.#field); }, 1)
                                 }
-                                _ => return Err(syn::Error::new_spanned(elem, "unsupported tuple element type")),
+                                "String" => {
+                                    let slot = current_slot;
+                                    (quote! { call.ret_str(#slot, &__result.#field); }, 1)
+                                }
+                                "GcRef" => {
+                                    let slot = current_slot;
+                                    (quote! { call.ret_ref(#slot, __result.#field); }, 1)
+                                }
+                                // 2-slot types in tuples
+                                "AnySlot" | "InterfaceSlot" => {
+                                    let slot = current_slot;
+                                    (quote! { call.ret_any(#slot, __result.#field); }, 2)
+                                }
+                                "ErrorSlot" => {
+                                    let slot = current_slot;
+                                    (quote! { call.ret_error(#slot, __result.#field); }, 2)
+                                }
+                                _ => return Err(syn::Error::new_spanned(elem, format!("unsupported tuple element type: {}", ident))),
                             };
                             writes.push(write);
+                            current_slot += slot_size;
                         } else {
                             return Err(syn::Error::new_spanned(elem, "unsupported tuple element type"));
                         }
                     }
-                    Ok((quote! { #(#writes)* }, false))
+                    Ok((quote! { #(#writes)* }, true))
                 }
                 _ => Err(syn::Error::new_spanned(ty, "unsupported return type")),
             }
         }
     }
+}
+
+// ==================== vo_struct! Macro ====================
+
+/// Macro to generate type-safe struct field accessors from Vo struct definitions.
+///
+/// # Usage
+/// ```ignore
+/// vo_struct!("detra_renderer", "Config");
+///
+/// // Generates module with field accessors:
+/// // mod Config {
+/// //     pub const TITLE_OFFSET: u16 = 0;
+/// //     pub fn get_title(ptr: GcRef, base: u16) -> &str { ... }
+/// //     ...
+/// // }
+/// ```
+#[proc_macro]
+pub fn vo_struct(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input with Punctuated::<Expr, Token![,]>::parse_terminated);
+    
+    match vo_struct_impl(args) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn vo_struct_impl(args: Punctuated<Expr, Token![,]>) -> syn::Result<TokenStream2> {
+    // Parse arguments: ("pkg/path", "StructName")
+    let (pkg_path, struct_name) = parse_extern_args(&args)?;
+    
+    // Find the package directory
+    let pkg_dir = find_pkg_dir_for_slots(&pkg_path)
+        .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), format!("package '{}' not found", pkg_path)))?;
+    
+    // Parse type aliases
+    let type_aliases = vo_parser::parse_type_aliases(&pkg_dir);
+    
+    // Find the struct definition
+    let struct_def = vo_parser::find_struct_def(&pkg_dir, &struct_name)
+        .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), e))?;
+    
+    // Calculate field offsets
+    let offsets = struct_def.field_offsets(&type_aliases);
+    let total_slots = struct_def.total_slots(&type_aliases);
+    
+    // Generate names
+    let mod_name = format_ident!("{}", struct_name);
+    
+    // Generate field offset constants, accessor methods, ref methods, setters, and builder methods
+    let mut offset_consts = Vec::new();
+    let mut accessor_getters = Vec::new();
+    let mut accessor_setters = Vec::new();
+    let mut ref_getters = Vec::new();
+    let mut ref_setters = Vec::new();
+    let mut builder_methods = Vec::new();
+    
+    for (field, offset) in struct_def.fields.iter().zip(offsets.iter()) {
+        let field_upper = to_screaming_snake_case(&field.name);
+        let offset_name = format_ident!("{}_OFFSET", field_upper);
+        let method_name = format_ident!("{}", to_snake_case(&field.name));
+        let setter_name = format_ident!("set_{}", to_snake_case(&field.name));
+        let slot_count = field.ty.slot_count(&type_aliases);
+        let type_str = format!("{}", field.ty);
+        let doc = format!("Field `{}` ({}) at offset {}, {} slot(s)", 
+                          field.name, type_str, offset, slot_count);
+        
+        offset_consts.push(quote! {
+            #[doc = #doc]
+            pub const #offset_name: u16 = #offset;
+        });
+        
+        // Generate accessor getter/setter
+        let (getter, setter) = generate_accessor_methods(&field.ty, &method_name, &setter_name, *offset);
+        accessor_getters.push(getter);
+        accessor_setters.push(setter);
+        
+        // Generate ref getter/setter
+        let (ref_getter, ref_setter) = generate_ref_methods(&field.ty, &method_name, &setter_name, *offset);
+        ref_getters.push(ref_getter);
+        ref_setters.push(ref_setter);
+        
+        // Generate builder method
+        let b_method = generate_builder_method(&field.ty, &method_name, *offset);
+        builder_methods.push(b_method);
+    }
+    
+    let total_doc = format!("Total slots for struct {}", struct_name);
+    let accessor_doc = format!("Accessor for {} struct fields (stack-passed)", struct_name);
+    let ref_doc = format!("Ref accessor for {} struct fields (heap object)", struct_name);
+    let builder_doc = format!("Builder for creating {} struct", struct_name);
+    let total_slots_usize = total_slots as usize;
+    
+    Ok(quote! {
+        #[allow(dead_code)]
+        #[allow(non_snake_case)]
+        mod #mod_name {
+            use super::*;
+            
+            #[doc = #total_doc]
+            pub const TOTAL_SLOTS: u16 = #total_slots;
+            
+            #(#offset_consts)*
+            
+            /// Create an accessor for struct at given base slot (stack-passed).
+            #[inline]
+            pub fn at(base: u16) -> Accessor {
+                Accessor { base }
+            }
+            
+            /// Create a ref accessor for struct from GcRef (heap object).
+            #[inline]
+            pub fn from_ref(ptr: vo_runtime::gc::GcRef) -> Ref {
+                Ref { ptr }
+            }
+            
+            /// Create a builder for constructing a new struct.
+            #[inline]
+            pub fn builder() -> Builder {
+                Builder::new()
+            }
+            
+            #[doc = #accessor_doc]
+            #[derive(Clone, Copy)]
+            pub struct Accessor {
+                base: u16,
+            }
+            
+            impl Accessor {
+                /// Create accessor for struct at given base slot.
+                #[inline]
+                pub fn new(base: u16) -> Self {
+                    Self { base }
+                }
+                
+                /// Get the base slot offset.
+                #[inline]
+                pub fn base(&self) -> u16 {
+                    self.base
+                }
+                
+                #(#accessor_getters)*
+                #(#accessor_setters)*
+            }
+            
+            #[doc = #ref_doc]
+            #[derive(Clone, Copy)]
+            pub struct Ref {
+                ptr: vo_runtime::gc::GcRef,
+            }
+            
+            impl Ref {
+                /// Create ref accessor from GcRef.
+                #[inline]
+                pub fn new(ptr: vo_runtime::gc::GcRef) -> Self {
+                    Self { ptr }
+                }
+                
+                /// Get the underlying GcRef.
+                #[inline]
+                pub fn as_ref(&self) -> vo_runtime::gc::GcRef {
+                    self.ptr
+                }
+                
+                #(#ref_getters)*
+                #(#ref_setters)*
+            }
+            
+            #[doc = #builder_doc]
+            pub struct Builder {
+                data: [u64; #total_slots_usize],
+            }
+            
+            impl Builder {
+                /// Create a new builder with zero-initialized fields.
+                #[inline]
+                pub fn new() -> Self {
+                    Self { data: [0u64; #total_slots_usize] }
+                }
+                
+                #(#builder_methods)*
+                
+                /// Build the struct and return raw slot data.
+                /// Use with ctx to allocate and write.
+                #[inline]
+                pub fn data(&self) -> &[u64; #total_slots_usize] {
+                    &self.data
+                }
+            }
+            
+            impl Default for Builder {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+        }
+    })
+}
+
+/// Generate accessor getter and setter methods for a struct field (stack-passed).
+fn generate_accessor_methods(
+    ty: &vo_parser::VoType,
+    getter_name: &syn::Ident,
+    setter_name: &syn::Ident,
+    offset: u16,
+) -> (TokenStream2, TokenStream2) {
+    use vo_parser::VoType;
+    
+    match ty {
+        VoType::Int | VoType::Int64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> i64 {
+                    ctx.arg_i64(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: i64) {
+                    ctx.ret_i64(self.base + #offset, val);
+                }
+            },
+        ),
+        VoType::Uint | VoType::Uint64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> u64 {
+                    ctx.arg_u64(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: u64) {
+                    ctx.ret_u64(self.base + #offset, val);
+                }
+            },
+        ),
+        VoType::Float64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> f64 {
+                    ctx.arg_f64(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: f64) {
+                    ctx.ret_f64(self.base + #offset, val);
+                }
+            },
+        ),
+        VoType::Bool => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> bool {
+                    ctx.arg_bool(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: bool) {
+                    ctx.ret_bool(self.base + #offset, val);
+                }
+            },
+        ),
+        VoType::String => (
+            quote! {
+                #[inline]
+                pub fn #getter_name<'a>(&self, ctx: &'a vo_runtime::ffi::ExternCallContext) -> &'a str {
+                    ctx.arg_str(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: &str) {
+                    ctx.ret_str(self.base + #offset, val);
+                }
+            },
+        ),
+        // Reference types
+        VoType::Slice(_) | VoType::Map(_, _) | VoType::Pointer(_) | VoType::Chan(_, _) | VoType::Func(_, _) | VoType::Named(_) => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> vo_runtime::gc::GcRef {
+                    ctx.arg_ref(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: vo_runtime::gc::GcRef) {
+                    ctx.ret_ref(self.base + #offset, val);
+                }
+            },
+        ),
+        // Any/interface - 2 slots
+        VoType::Any => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::AnySlot {
+                    ctx.arg_any(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: vo_runtime::ffi::AnySlot) {
+                    ctx.ret_any(self.base + #offset, val);
+                }
+            },
+        ),
+        // Default
+        _ => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self, ctx: &vo_runtime::ffi::ExternCallContext) -> u64 {
+                    ctx.arg_u64(self.base + #offset)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: u64) {
+                    ctx.ret_u64(self.base + #offset, val);
+                }
+            },
+        ),
+    }
+}
+
+/// Generate ref getter and setter methods for a struct field (heap object).
+fn generate_ref_methods(
+    ty: &vo_parser::VoType,
+    getter_name: &syn::Ident,
+    setter_name: &syn::Ident,
+    offset: u16,
+) -> (TokenStream2, TokenStream2) {
+    use vo_parser::VoType;
+    let offset_usize = offset as usize;
+    
+    match ty {
+        VoType::Int | VoType::Int64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> i64 {
+                    vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize) as i64
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: i64) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val as u64);
+                }
+            },
+        ),
+        VoType::Uint | VoType::Uint64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> u64 {
+                    vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: u64) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val);
+                }
+            },
+        ),
+        VoType::Float64 => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> f64 {
+                    f64::from_bits(vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize))
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: f64) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val.to_bits());
+                }
+            },
+        ),
+        VoType::Bool => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> bool {
+                    vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize) != 0
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: bool) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val as u64);
+                }
+            },
+        ),
+        VoType::String => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> &'static str {
+                    let r = vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize) as vo_runtime::gc::GcRef;
+                    vo_runtime::objects::string::as_str(r)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, ctx: &mut vo_runtime::ffi::ExternCallContext, val: &str) {
+                    let r = ctx.alloc_str(val);
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, r as u64);
+                }
+            },
+        ),
+        // Reference types (slice, map, pointer, etc.)
+        VoType::Slice(_) | VoType::Map(_, _) | VoType::Pointer(_) | 
+        VoType::Chan(_, _) | VoType::Func(_, _) | VoType::Named(_) => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> vo_runtime::gc::GcRef {
+                    vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize) as vo_runtime::gc::GcRef
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: vo_runtime::gc::GcRef) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val as u64);
+                }
+            },
+        ),
+        // Any - 2 slots
+        VoType::Any => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> vo_runtime::ffi::AnySlot {
+                    let s0 = vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize);
+                    let s1 = vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize + 1);
+                    vo_runtime::ffi::AnySlot::new(s0, s1)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: vo_runtime::ffi::AnySlot) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val.slot0);
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize + 1, val.slot1);
+                }
+            },
+        ),
+        // Default
+        _ => (
+            quote! {
+                #[inline]
+                pub fn #getter_name(&self) -> u64 {
+                    vo_runtime::objects::struct_ops::get_field(self.ptr, #offset_usize)
+                }
+            },
+            quote! {
+                #[inline]
+                pub fn #setter_name(&self, val: u64) {
+                    vo_runtime::objects::struct_ops::set_field(self.ptr, #offset_usize, val);
+                }
+            },
+        ),
+    }
+}
+
+/// Generate builder method for a struct field.
+fn generate_builder_method(
+    ty: &vo_parser::VoType,
+    method_name: &syn::Ident,
+    offset: u16,
+) -> TokenStream2 {
+    use vo_parser::VoType;
+    let offset_usize = offset as usize;
+    
+    match ty {
+        VoType::Int | VoType::Int64 => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: i64) -> Self {
+                self.data[#offset_usize] = val as u64;
+                self
+            }
+        },
+        VoType::Uint | VoType::Uint64 => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: u64) -> Self {
+                self.data[#offset_usize] = val;
+                self
+            }
+        },
+        VoType::Float64 => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: f64) -> Self {
+                self.data[#offset_usize] = val.to_bits();
+                self
+            }
+        },
+        VoType::Bool => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: bool) -> Self {
+                self.data[#offset_usize] = val as u64;
+                self
+            }
+        },
+        VoType::String | VoType::Slice(_) | VoType::Map(_, _) | VoType::Pointer(_) | 
+        VoType::Chan(_, _) | VoType::Func(_, _) | VoType::Named(_) => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: vo_runtime::gc::GcRef) -> Self {
+                self.data[#offset_usize] = val as u64;
+                self
+            }
+        },
+        VoType::Any => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: vo_runtime::ffi::AnySlot) -> Self {
+                self.data[#offset_usize] = val.slot0;
+                self.data[#offset_usize + 1] = val.slot1;
+                self
+            }
+        },
+        _ => quote! {
+            #[inline]
+            pub fn #method_name(mut self, val: u64) -> Self {
+                self.data[#offset_usize] = val;
+                self
+            }
+        },
+    }
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

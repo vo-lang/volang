@@ -14,10 +14,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
-use linkme::distributed_slice;
-use vo_runtime::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN_TABLE_WITH_CONTEXT};
+use vo_ext::prelude::*;
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::string;
+
+// Generate type-safe accessors for Config struct
+vo_struct!("detra_renderer", "Config");
 
 use detra_renderable::{RuntimeNode, Value, ActionCall};
 
@@ -116,14 +117,16 @@ impl DetraApp {
     }
 }
 
+#[vo_extern_ctx("detra_renderer", "Run")]
 fn detra_renderer_run(ctx: &mut ExternCallContext) -> ExternResult {
-    let title_ref = ctx.arg_ref(0);
-    let title = string::as_str(title_ref).to_string();
-    let width = ctx.arg_i64(1) as u32;
-    let height = ctx.arg_i64(2) as u32;
-    let _resizable = ctx.arg_i64(3) != 0;
-    let _vsync = ctx.arg_i64(4) != 0;
-    let on_action_closure = ctx.arg_ref(5);
+    // Config struct accessor for clean field access
+    let config = Config::at(slots::ARG_CONFIG);
+    let title = config.title(ctx).to_string();
+    let width = config.width(ctx) as u32;
+    let height = config.height(ctx) as u32;
+    let _resizable = config.resizable(ctx);
+    let _vsync = config.v_sync(ctx);
+    let on_action_closure = ctx.arg_ref(slots::ARG_ON_ACTION);
     let vm = ctx.vm_ptr();
     let fiber = ctx.fiber_ptr();
     let call_closure_fn = ctx.closure_call_fn().unwrap();
@@ -142,27 +145,16 @@ fn detra_renderer_run(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_RENDERER_RUN: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_renderer_Run",
-    func: detra_renderer_run,
-};
-
+#[vo_extern_ctx("detra_renderer", "PendingAction")]
 fn detra_renderer_pending_action(ctx: &mut ExternCallContext) -> ExternResult {
     let name = CURRENT_ACTION_NAME.with(|cell| cell.borrow().clone());
-    ctx.ret_str(0, &name);
+    ctx.ret_str(slots::RET_0, &name);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_RENDERER_PENDING_ACTION: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_renderer_PendingAction",
-    func: detra_renderer_pending_action,
-};
-
+#[vo_extern_ctx("detra_renderer", "PendingActionArg")]
 fn detra_renderer_pending_action_arg(ctx: &mut ExternCallContext) -> ExternResult {
-    let key_ref = ctx.arg_ref(0);
-    let key = string::as_str(key_ref);
+    let key = ctx.arg_str(slots::ARG_KEY);
     let value = CURRENT_ACTION_ARGS.with(|cell| {
         let args = cell.borrow();
         match args.get(key) {
@@ -170,20 +162,12 @@ fn detra_renderer_pending_action_arg(ctx: &mut ExternCallContext) -> ExternResul
             _ => String::new(),
         }
     });
-    ctx.ret_str(0, &value);
+    ctx.ret_str(slots::RET_0, &value);
     ExternResult::Ok
 }
 
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DETRA_RENDERER_PENDING_ACTION_ARG: ExternEntryWithContext = ExternEntryWithContext {
-    name: "detra_renderer_PendingActionArg",
-    func: detra_renderer_pending_action_arg,
-};
-
 pub fn link_detra_renderer_externs() {
-    let _ = &__VO_DETRA_RENDERER_RUN;
-    let _ = &__VO_DETRA_RENDERER_PENDING_ACTION;
-    let _ = &__VO_DETRA_RENDERER_PENDING_ACTION_ARG;
+    // vo_extern_ctx macros auto-generate the linkme statics
 }
 
 vo_ext::export_extensions!();

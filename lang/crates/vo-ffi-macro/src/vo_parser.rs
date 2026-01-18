@@ -11,7 +11,6 @@ pub struct VoFuncSig {
     pub name: String,
     pub params: Vec<VoParam>,
     pub results: Vec<VoType>,
-    pub is_extern: bool,
 }
 
 impl VoFuncSig {
@@ -47,7 +46,6 @@ impl VoFuncSig {
             name: func.sig.ident.to_string(),
             params,
             results,
-            is_extern: true,
         }
     }
 }
@@ -138,7 +136,107 @@ pub enum ChanDir {
     Recv,
 }
 
+impl std::fmt::Display for VoType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VoType::Int => write!(f, "int"),
+            VoType::Int8 => write!(f, "int8"),
+            VoType::Int16 => write!(f, "int16"),
+            VoType::Int32 => write!(f, "int32"),
+            VoType::Int64 => write!(f, "int64"),
+            VoType::Uint => write!(f, "uint"),
+            VoType::Uint8 => write!(f, "uint8"),
+            VoType::Uint16 => write!(f, "uint16"),
+            VoType::Uint32 => write!(f, "uint32"),
+            VoType::Uint64 => write!(f, "uint64"),
+            VoType::Float32 => write!(f, "float32"),
+            VoType::Float64 => write!(f, "float64"),
+            VoType::Bool => write!(f, "bool"),
+            VoType::String => write!(f, "string"),
+            VoType::Any => write!(f, "any"),
+            VoType::Named(name) => write!(f, "{}", name),
+            VoType::Pointer(inner) => write!(f, "*{}", inner),
+            VoType::Slice(inner) => write!(f, "[]{}", inner),
+            VoType::Array(len, inner) => write!(f, "[{}]{}", len, inner),
+            VoType::Map(k, v) => write!(f, "map[{}]{}", k, v),
+            VoType::Chan(dir, inner) => {
+                match dir {
+                    ChanDir::Both => write!(f, "chan {}", inner),
+                    ChanDir::Send => write!(f, "chan<- {}", inner),
+                    ChanDir::Recv => write!(f, "<-chan {}", inner),
+                }
+            }
+            VoType::Func(params, results) => {
+                write!(f, "func(")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", p)?;
+                }
+                write!(f, ")")?;
+                if !results.is_empty() {
+                    if results.len() == 1 {
+                        write!(f, " {}", results[0])?;
+                    } else {
+                        write!(f, " (")?;
+                        for (i, r) in results.iter().enumerate() {
+                            if i > 0 { write!(f, ", ")?; }
+                            write!(f, "{}", r)?;
+                        }
+                        write!(f, ")")?;
+                    }
+                }
+                Ok(())
+            }
+            VoType::Variadic(inner) => write!(f, "...{}", inner),
+        }
+    }
+}
+
 impl VoType {
+    /// Get the number of stack slots this type occupies.
+    pub fn slot_count(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> u16 {
+        match self {
+            // Primitive types: 1 slot each
+            VoType::Int | VoType::Int8 | VoType::Int16 | VoType::Int32 | VoType::Int64 |
+            VoType::Uint | VoType::Uint8 | VoType::Uint16 | VoType::Uint32 | VoType::Uint64 |
+            VoType::Float32 | VoType::Float64 | VoType::Bool | VoType::String => 1,
+            
+            // Any/interface: 2 slots (slot0=metadata, slot1=data)
+            VoType::Any => 2,
+            
+            // Reference types: 1 slot (GcRef)
+            VoType::Pointer(_) | VoType::Slice(_) | VoType::Map(_, _) | 
+            VoType::Chan(_, _) | VoType::Func(_, _) => 1,
+            
+            // Array: elem_slots * length
+            VoType::Array(len, elem) => {
+                let elem_slots = elem.slot_count(type_aliases);
+                elem_slots * (*len as u16)
+            }
+            
+            // Named type: resolve alias
+            VoType::Named(name) => {
+                // Check for well-known types
+                match name.as_str() {
+                    "error" => 2, // error is an interface
+                    _ => {
+                        // Try to resolve type alias
+                        if let Some(underlying) = type_aliases.get(name) {
+                            underlying.slot_count(type_aliases)
+                        } else {
+                            // Unknown named type, assume it's a reference type (1 slot)
+                            // This handles struct types passed by reference
+                            1
+                        }
+                    }
+                }
+            }
+            
+            // Variadic: treated as slice (1 slot)
+            VoType::Variadic(_) => 1,
+        }
+    }
+
     /// Parse a type string.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
@@ -261,10 +359,6 @@ impl VoType {
         }
     }
 
-    /// Check if this type is variadic.
-    pub fn is_variadic(&self) -> bool {
-        matches!(self, VoType::Variadic(_))
-    }
 }
 
 /// Find matching bracket, handling nesting.
@@ -318,6 +412,168 @@ fn parse_func_type(s: &str) -> Option<VoType> {
     };
     
     Some(VoType::Func(params, results))
+}
+
+/// Parsed struct field information.
+#[derive(Debug, Clone)]
+pub struct VoStructField {
+    pub name: String,
+    pub ty: VoType,
+}
+
+/// Parsed struct definition.
+#[derive(Debug, Clone)]
+pub struct VoStructDef {
+    #[allow(dead_code)]
+    pub name: String,
+    pub fields: Vec<VoStructField>,
+}
+
+impl VoStructDef {
+    /// Calculate field offsets based on type slot counts.
+    pub fn field_offsets(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> Vec<u16> {
+        let mut offsets = Vec::new();
+        let mut current_offset: u16 = 0;
+        for field in &self.fields {
+            offsets.push(current_offset);
+            current_offset += field.ty.slot_count(type_aliases);
+        }
+        offsets
+    }
+    
+    /// Get total slot count for this struct.
+    pub fn total_slots(&self, type_aliases: &std::collections::HashMap<String, VoType>) -> u16 {
+        self.fields.iter().map(|f| f.ty.slot_count(type_aliases)).sum()
+    }
+}
+
+/// Find and parse a struct definition from a package directory.
+pub fn find_struct_def(pkg_dir: &Path, struct_name: &str) -> Result<VoStructDef, String> {
+    let entries = std::fs::read_dir(pkg_dir)
+        .map_err(|e| format!("cannot read directory {:?}: {}", pkg_dir, e))?;
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "vo").unwrap_or(false) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(def) = parse_struct_def(&content, struct_name) {
+                    return Ok(def);
+                }
+            }
+        }
+    }
+    
+    Err(format!("struct '{}' not found in {:?}", struct_name, pkg_dir))
+}
+
+/// Parse a struct definition from source code.
+fn parse_struct_def(source: &str, struct_name: &str) -> Option<VoStructDef> {
+    let lines: Vec<&str> = source.lines().collect();
+    
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        
+        // Look for "type StructName struct {"
+        if let Some(rest) = trimmed.strip_prefix("type ") {
+            let rest = rest.trim();
+            if let Some(after_name) = rest.strip_prefix(struct_name) {
+                let after_name = after_name.trim();
+                if after_name.starts_with("struct") {
+                    // Found the struct, now parse fields
+                    let mut fields = Vec::new();
+                    let mut j = i + 1;
+                    
+                    while j < lines.len() {
+                        let field_line = lines[j].trim();
+                        
+                        // End of struct
+                        if field_line == "}" || field_line.starts_with("}") {
+                            break;
+                        }
+                        
+                        // Skip empty lines and comments
+                        if field_line.is_empty() || field_line.starts_with("//") {
+                            j += 1;
+                            continue;
+                        }
+                        
+                        // Parse field: "FieldName Type" or "FieldName Type // comment"
+                        let field_line = field_line.split("//").next().unwrap_or(field_line).trim();
+                        let parts: Vec<&str> = field_line.splitn(2, char::is_whitespace).collect();
+                        if parts.len() == 2 {
+                            let field_name = parts[0].trim();
+                            let field_type_str = parts[1].trim();
+                            if let Some(field_ty) = VoType::parse(field_type_str) {
+                                fields.push(VoStructField {
+                                    name: field_name.to_string(),
+                                    ty: field_ty,
+                                });
+                            }
+                        }
+                        
+                        j += 1;
+                    }
+                    
+                    return Some(VoStructDef {
+                        name: struct_name.to_string(),
+                        fields,
+                    });
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse all type aliases from a package directory.
+/// Returns a map from type name to underlying type.
+pub fn parse_type_aliases(pkg_dir: &Path) -> std::collections::HashMap<String, VoType> {
+    let mut aliases = std::collections::HashMap::new();
+    
+    let entries = match std::fs::read_dir(pkg_dir) {
+        Ok(e) => e,
+        Err(_) => return aliases,
+    };
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "vo").unwrap_or(false) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parse_type_aliases_from_source(&content, &mut aliases);
+            }
+        }
+    }
+    
+    aliases
+}
+
+/// Parse type aliases from Vo source code.
+fn parse_type_aliases_from_source(source: &str, aliases: &mut std::collections::HashMap<String, VoType>) {
+    for line in source.lines() {
+        let trimmed = line.trim();
+        
+        // Look for "type Name underlying" pattern (simple type alias)
+        if let Some(rest) = trimmed.strip_prefix("type ") {
+            let rest = rest.trim();
+            
+            // Skip struct definitions: "type Name struct {"
+            if rest.contains("struct") || rest.contains("interface") {
+                continue;
+            }
+            
+            // Parse "Name Type"
+            let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+            if parts.len() == 2 {
+                let name = parts[0].trim();
+                let type_str = parts[1].trim();
+                
+                if let Some(ty) = VoType::parse(type_str) {
+                    aliases.insert(name.to_string(), ty);
+                }
+            }
+        }
+    }
 }
 
 /// Find and parse extern functions from a package directory.
@@ -433,7 +689,6 @@ fn parse_func_signature(sig: &str, name: &str) -> Option<VoFuncSig> {
         name: name.to_string(),
         params,
         results,
-        is_extern: true,
     })
 }
 

@@ -120,25 +120,25 @@ fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Me
 
 #[vo_extern_ctx("os", "fileRead")]
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let buf_ref = call.arg_ref(1);
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
     
     if fd == 0 {
         match std::io::stdin().read(buf) {
-            Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
         }
         return ExternResult::Ok;
     }
     
-    with_file_mut!(fd, call, 1, ret0, |file| {
+    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
         match file.read(buf) {
-            Ok(0) => { call.ret_i64(0, 0); write_error_to(call, 1, CODE_EOF, "EOF"); }
-            Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Ok(0) => { call.ret_i64(slots::RET_0, 0); write_error_to(call, slots::RET_1, CODE_EOF, "EOF"); }
+            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
         }
     });
     ExternResult::Ok
@@ -146,8 +146,8 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileWrite")]
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let buf_ref = call.arg_ref(1);
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
@@ -155,16 +155,16 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     if fd == 1 || fd == 2 {
         let result = if fd == 1 { std::io::stdout().write(buf) } else { std::io::stderr().write(buf) };
         match result {
-            Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
         }
         return ExternResult::Ok;
     }
     
-    with_file_mut!(fd, call, 1, ret0, |file| {
+    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
         match file.write(buf) {
-            Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
         }
     });
     ExternResult::Ok
@@ -172,24 +172,24 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileReadAt")]
 fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let buf_ref = call.arg_ref(1);
-    let offset = call.arg_i64(2);
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let buf_ref = call.arg_ref(slots::ARG_B);
+    let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
     
-    with_file_mut!(fd, call, 1, ret0, |file| {
+    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
         let current_pos = file.stream_position().unwrap_or(0);
         match file.seek(SeekFrom::Start(offset as u64)) {
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
             Ok(_) => {
                 let result = file.read(buf);
                 let _ = file.seek(SeekFrom::Start(current_pos));
                 match result {
-                    Ok(0) => { call.ret_i64(0, 0); write_error_to(call, 1, CODE_EOF, "EOF"); }
-                    Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-                    Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+                    Ok(0) => { call.ret_i64(slots::RET_0, 0); write_error_to(call, slots::RET_1, CODE_EOF, "EOF"); }
+                    Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+                    Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
                 }
             }
         }
@@ -199,23 +199,23 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileWriteAt")]
 fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let buf_ref = call.arg_ref(1);
-    let offset = call.arg_i64(2);
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let buf_ref = call.arg_ref(slots::ARG_B);
+    let offset = call.arg_i64(slots::ARG_OFF);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
     
-    with_file_mut!(fd, call, 1, ret0, |file| {
+    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
         let current_pos = file.stream_position().unwrap_or(0);
         match file.seek(SeekFrom::Start(offset as u64)) {
-            Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
             Ok(_) => {
                 let result = file.write(buf);
                 let _ = file.seek(SeekFrom::Start(current_pos));
                 match result {
-                    Ok(n) => { call.ret_i64(0, n as i64); write_nil_error(call, 1); }
-                    Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+                    Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
+                    Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
                 }
             }
         }
@@ -225,21 +225,21 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileSeek")]
 fn os_file_seek(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let offset = call.arg_i64(1);
-    let whence = call.arg_i64(2) as i32;
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let offset = call.arg_i64(slots::ARG_OFFSET);
+    let whence = call.arg_i64(slots::ARG_WHENCE) as i32;
     
-    with_file_mut!(fd, call, 1, ret0, |file| {
+    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
         let seek_from = match whence {
             0 => Some(SeekFrom::Start(offset as u64)),
             1 => Some(SeekFrom::Current(offset)),
             2 => Some(SeekFrom::End(offset)),
-            _ => { call.ret_i64(0, 0); write_error_to(call, 1, CODE_OS_INVALID, "invalid whence"); None }
+            _ => { call.ret_i64(slots::RET_0, 0); write_error_to(call, slots::RET_1, CODE_OS_INVALID, "invalid whence"); None }
         };
         if let Some(sf) = seek_from {
             match file.seek(sf) {
-                Ok(pos) => { call.ret_i64(0, pos as i64); write_nil_error(call, 1); }
-                Err(e) => { call.ret_i64(0, 0); write_io_error(call, 1, e); }
+                Ok(pos) => { call.ret_i64(slots::RET_0, pos as i64); write_nil_error(call, slots::RET_1); }
+                Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
             }
         }
     });
@@ -248,25 +248,25 @@ fn os_file_seek(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileClose")]
 fn os_file_close(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    if fd <= 2 { write_nil_error(call, 0); return ExternResult::Ok; }
-    if remove_file(fd).is_some() { write_nil_error(call, 0); }
-    else { write_error_to(call, 0, CODE_OS_INVALID, "invalid file descriptor"); }
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    if fd <= 2 { write_nil_error(call, slots::RET_0); return ExternResult::Ok; }
+    if remove_file(fd).is_some() { write_nil_error(call, slots::RET_0); }
+    else { write_error_to(call, slots::RET_0, CODE_OS_INVALID, "invalid file descriptor"); }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "fileSync")]
 fn os_file_sync(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    with_file!(fd, call, 0, |file| {
-        match file.sync_all() { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    with_file!(fd, call, slots::RET_0, |file| {
+        match file.sync_all() { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     });
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "fileStat")]
 fn os_file_stat(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
     with_file!(fd, call, 5, nil 5, |file| {
         match file.metadata() {
             Ok(meta) => {
@@ -282,10 +282,10 @@ fn os_file_stat(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "fileTruncate")]
 fn os_file_truncate(call: &mut ExternCallContext) -> ExternResult {
-    let fd = call.arg_i64(0) as i32;
-    let size = call.arg_i64(1) as u64;
-    with_file!(fd, call, 0, |file| {
-        match file.set_len(size) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+    let size = call.arg_i64(slots::ARG_SIZE) as u64;
+    with_file!(fd, call, slots::RET_0, |file| {
+        match file.set_len(size) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     });
     ExternResult::Ok
 }
@@ -306,9 +306,9 @@ vo_consts! {
 
 #[vo_extern_ctx("os", "openFile")]
 fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
-    let flag = call.arg_i64(1) as i32;
-    let perm = call.arg_u64(2) as u32;
+    let name = call.arg_str(slots::ARG_NAME);
+    let flag = call.arg_i64(slots::ARG_FLAG) as i32;
+    let perm = call.arg_u64(slots::ARG_PERM) as u32;
     
     let mut opts = OpenOptions::new();
     let access = flag & 0x3;
@@ -325,44 +325,44 @@ fn os_open_file(call: &mut ExternCallContext) -> ExternResult {
             #[cfg(unix)]
             if flag & O_CREATE as i32 != 0 { let _ = file.set_permissions(fs::Permissions::from_mode(perm)); }
             let fd = register_file(file);
-            call.ret_i64(0, fd as i64);
-            write_nil_error(call, 1);
+            call.ret_i64(slots::RET_0, fd as i64);
+            write_nil_error(call, slots::RET_1);
         }
-        Err(e) => { call.ret_i64(0, -1); write_io_error(call, 1, e); }
+        Err(e) => { call.ret_i64(slots::RET_0, -1); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeMkdir")]
 fn os_mkdir(call: &mut ExternCallContext) -> ExternResult {
-    let path = call.arg_str(0);
-    let perm = call.arg_u64(1) as u32;
+    let path = call.arg_str(slots::ARG_PATH);
+    let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::create_dir(path) {
-        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm)); } write_nil_error(call, 0); }
-        Err(e) => write_io_error(call, 0, e),
+        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm)); } write_nil_error(call, slots::RET_0); }
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeMkdirAll")]
 fn os_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
-    let path = call.arg_str(0);
-    let perm = call.arg_u64(1) as u32;
+    let path = call.arg_str(slots::ARG_PATH);
+    let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::create_dir_all(path) {
-        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm)); } write_nil_error(call, 0); }
-        Err(e) => write_io_error(call, 0, e),
+        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(path, fs::Permissions::from_mode(perm)); } write_nil_error(call, slots::RET_0); }
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeRemove")]
 fn os_remove(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::remove_file(name) {
-        Ok(_) => write_nil_error(call, 0),
+        Ok(_) => write_nil_error(call, slots::RET_0),
         Err(_) => match fs::remove_dir(name) {
-            Ok(_) => write_nil_error(call, 0),
-            Err(e) => write_io_error(call, 0, e),
+            Ok(_) => write_nil_error(call, slots::RET_0),
+            Err(e) => write_io_error(call, slots::RET_0, e),
         }
     }
     ExternResult::Ok
@@ -370,25 +370,25 @@ fn os_remove(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "nativeRemoveAll")]
 fn os_remove_all(call: &mut ExternCallContext) -> ExternResult {
-    let path = call.arg_str(0);
+    let path = call.arg_str(slots::ARG_PATH);
     match fs::remove_dir_all(path) {
-        Ok(_) => write_nil_error(call, 0),
-        Err(e) => match fs::remove_file(path) { Ok(_) => write_nil_error(call, 0), Err(_) => write_io_error(call, 0, e) }
+        Ok(_) => write_nil_error(call, slots::RET_0),
+        Err(e) => match fs::remove_file(path) { Ok(_) => write_nil_error(call, slots::RET_0), Err(_) => write_io_error(call, slots::RET_0, e) }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeRename")]
 fn os_rename(call: &mut ExternCallContext) -> ExternResult {
-    let oldpath = call.arg_str(0);
-    let newpath = call.arg_str(1);
-    match fs::rename(oldpath, newpath) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
+    let oldpath = call.arg_str(slots::ARG_OLDPATH);
+    let newpath = call.arg_str(slots::ARG_NEWPATH);
+    match fs::rename(oldpath, newpath) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeStat")]
 fn os_stat(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::metadata(name) {
         Ok(meta) => {
             let basename = std::path::Path::new(name).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -403,7 +403,7 @@ fn os_stat(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "nativeLstat")]
 fn os_lstat(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::symlink_metadata(name) {
         Ok(meta) => {
             let basename = std::path::Path::new(name).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -418,7 +418,7 @@ fn os_lstat(call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "nativeReadDir")]
 fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::read_dir(name) {
         Ok(entries) => {
             let mut dir_entries: Vec<(String, bool, u32)> = Vec::new();
@@ -439,127 +439,127 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
                 slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, 8);
                 slice::set(result, base + 2, *mode as u64, 8);
             }
-            call.ret_ref(0, result);
-            write_nil_error(call, 1);
+            call.ret_ref(slots::RET_0, result);
+            write_nil_error(call, slots::RET_1);
         }
-        Err(e) => { call.ret_nil(0); write_io_error(call, 1, e); }
+        Err(e) => { call.ret_nil(slots::RET_0); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeChmod")]
 fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
-    let mode = call.arg_u64(1) as u32;
-    #[cfg(unix)] { match fs::set_permissions(name, fs::Permissions::from_mode(mode)) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "chmod not supported"); }
+    let name = call.arg_str(slots::ARG_NAME);
+    let mode = call.arg_u64(slots::ARG_MODE) as u32;
+    #[cfg(unix)] { match fs::set_permissions(name, fs::Permissions::from_mode(mode)) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) } }
+    #[cfg(not(unix))] { write_error_to(call, slots::RET_0, CODE_OS_INVALID, "chmod not supported"); }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeChown")]
 fn os_chown(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
-    let uid = call.arg_i64(1) as u32;
-    let gid = call.arg_i64(2) as u32;
-    #[cfg(unix)] { use std::os::unix::fs::chown; match chown(name, Some(uid), Some(gid)) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "chown not supported"); }
+    let name = call.arg_str(slots::ARG_NAME);
+    let uid = call.arg_i64(slots::ARG_UID) as u32;
+    let gid = call.arg_i64(slots::ARG_GID) as u32;
+    #[cfg(unix)] { use std::os::unix::fs::chown; match chown(name, Some(uid), Some(gid)) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) } }
+    #[cfg(not(unix))] { write_error_to(call, slots::RET_0, CODE_OS_INVALID, "chown not supported"); }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeSymlink")]
 fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
-    let oldname = call.arg_str(0);
-    let newname = call.arg_str(1);
-    #[cfg(unix)] { match symlink(oldname, newname) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) } }
-    #[cfg(not(unix))] { write_error_to(call, 0, CODE_OS_INVALID, "symlink not supported"); }
+    let oldname = call.arg_str(slots::ARG_OLDNAME);
+    let newname = call.arg_str(slots::ARG_NEWNAME);
+    #[cfg(unix)] { match symlink(oldname, newname) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) } }
+    #[cfg(not(unix))] { write_error_to(call, slots::RET_0, CODE_OS_INVALID, "symlink not supported"); }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeReadlink")]
 fn os_readlink(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::read_link(name) {
-        Ok(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); }
+        Ok(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        Err(e) => { call.ret_str(slots::RET_0, ""); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeLink")]
 fn os_link(call: &mut ExternCallContext) -> ExternResult {
-    let oldname = call.arg_str(0);
-    let newname = call.arg_str(1);
-    match fs::hard_link(oldname, newname) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
+    let oldname = call.arg_str(slots::ARG_OLDNAME);
+    let newname = call.arg_str(slots::ARG_NEWNAME);
+    match fs::hard_link(oldname, newname) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeTruncate")]
 fn os_truncate(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
-    let size = call.arg_i64(1) as u64;
+    let name = call.arg_str(slots::ARG_NAME);
+    let size = call.arg_i64(slots::ARG_SIZE) as u64;
     match File::options().write(true).open(name) {
-        Ok(file) => match file.set_len(size) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
-        Err(e) => write_io_error(call, 0, e),
+        Ok(file) => match file.set_len(size) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeReadFile")]
 fn os_read_file_native(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
+    let name = call.arg_str(slots::ARG_NAME);
     match fs::read(name) {
-        Ok(data) => { call.ret_bytes(0, &data); write_nil_error(call, 1); }
-        Err(e) => { call.ret_nil(0); write_io_error(call, 1, e); }
+        Ok(data) => { call.ret_bytes(slots::RET_0, &data); write_nil_error(call, slots::RET_1); }
+        Err(e) => { call.ret_nil(slots::RET_0); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeWriteFile")]
 fn os_write_file_native(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0);
-    let data = call.arg_bytes(1);
-    let perm = call.arg_u64(2) as u32;
+    let name = call.arg_str(slots::ARG_NAME);
+    let data = call.arg_bytes(slots::ARG_DATA);
+    let perm = call.arg_u64(slots::ARG_PERM) as u32;
     match fs::write(name, data) {
-        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(name, fs::Permissions::from_mode(perm)); } write_nil_error(call, 0); }
-        Err(e) => write_io_error(call, 0, e),
+        Ok(_) => { #[cfg(unix)] { let _ = fs::set_permissions(name, fs::Permissions::from_mode(perm)); } write_nil_error(call, slots::RET_0); }
+        Err(e) => write_io_error(call, slots::RET_0, e),
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeGetenv")]
 fn os_getenv(call: &mut ExternCallContext) -> ExternResult {
-    let key = call.arg_str(0);
-    call.ret_str(0, &std::env::var(key).unwrap_or_default());
+    let key = call.arg_str(slots::ARG_KEY);
+    call.ret_str(slots::RET_0, &std::env::var(key).unwrap_or_default());
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeSetenv")]
 fn os_setenv(call: &mut ExternCallContext) -> ExternResult {
-    std::env::set_var(call.arg_str(0), call.arg_str(1));
-    write_nil_error(call, 0);
+    std::env::set_var(call.arg_str(slots::ARG_KEY), call.arg_str(slots::ARG_VALUE));
+    write_nil_error(call, slots::RET_0);
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeUnsetenv")]
 fn os_unsetenv(call: &mut ExternCallContext) -> ExternResult {
-    std::env::remove_var(call.arg_str(0));
-    write_nil_error(call, 0);
+    std::env::remove_var(call.arg_str(slots::ARG_KEY));
+    write_nil_error(call, slots::RET_0);
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeEnviron")]
 fn os_environ(call: &mut ExternCallContext) -> ExternResult {
     let vars: Vec<String> = std::env::vars().map(|(k, v)| format!("{}={}", k, v)).collect();
-    call.ret_string_slice(0, &vars);
+    call.ret_string_slice(slots::RET_0, &vars);
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeLookupEnv")]
 fn os_lookup_env(call: &mut ExternCallContext) -> ExternResult {
-    let key = call.arg_str(0);
+    let key = call.arg_str(slots::ARG_KEY);
     match std::env::var(key) {
-        Ok(value) => { call.ret_str(0, &value); call.ret_bool(1, true); }
-        Err(_) => { call.ret_str(0, ""); call.ret_bool(1, false); }
+        Ok(value) => { call.ret_str(slots::RET_0, &value); call.ret_bool(slots::RET_1, true); }
+        Err(_) => { call.ret_str(slots::RET_0, ""); call.ret_bool(slots::RET_1, false); }
     }
     ExternResult::Ok
 }
@@ -572,36 +572,36 @@ fn os_clearenv(_call: &mut ExternCallContext) -> ExternResult {
 
 #[vo_extern_ctx("os", "nativeExpandEnv")]
 fn os_expand_env(call: &mut ExternCallContext) -> ExternResult {
-    let s = call.arg_str(0);
+    let s = call.arg_str(slots::ARG_S);
     let mut result = s.to_string();
     for (key, value) in std::env::vars() {
-        result = result.replace(&format!("${{{}}}", key), &value);
+        result = result.replace(&format!("{{{{{}}}}}", key), &value);
         result = result.replace(&format!("${}", key), &value);
     }
-    call.ret_str(0, &result);
+    call.ret_str(slots::RET_0, &result);
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeGetwd")]
 fn os_getwd(call: &mut ExternCallContext) -> ExternResult {
     match std::env::current_dir() {
-        Ok(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); }
+        Ok(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        Err(e) => { call.ret_str(slots::RET_0, ""); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeChdir")]
 fn os_chdir(call: &mut ExternCallContext) -> ExternResult {
-    match std::env::set_current_dir(call.arg_str(0)) { Ok(_) => write_nil_error(call, 0), Err(e) => write_io_error(call, 0, e) }
+    match std::env::set_current_dir(call.arg_str(slots::ARG_DIR)) { Ok(_) => write_nil_error(call, slots::RET_0), Err(e) => write_io_error(call, slots::RET_0, e) }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeUserHomeDir")]
 fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::home_dir() {
-        Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "home directory not found"); }
+        Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        None => { call.ret_str(slots::RET_0, ""); write_error_to(call, slots::RET_1, CODE_OS_NOT_EXIST, "home directory not found"); }
     }
     ExternResult::Ok
 }
@@ -609,8 +609,8 @@ fn os_user_home_dir(call: &mut ExternCallContext) -> ExternResult {
 #[vo_extern_ctx("os", "nativeUserCacheDir")]
 fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::cache_dir() {
-        Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "cache directory not found"); }
+        Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        None => { call.ret_str(slots::RET_0, ""); write_error_to(call, slots::RET_1, CODE_OS_NOT_EXIST, "cache directory not found"); }
     }
     ExternResult::Ok
 }
@@ -618,40 +618,40 @@ fn os_user_cache_dir(call: &mut ExternCallContext) -> ExternResult {
 #[vo_extern_ctx("os", "nativeUserConfigDir")]
 fn os_user_config_dir(call: &mut ExternCallContext) -> ExternResult {
     match dirs::config_dir() {
-        Some(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        None => { call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_NOT_EXIST, "config directory not found"); }
+        Some(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        None => { call.ret_str(slots::RET_0, ""); write_error_to(call, slots::RET_1, CODE_OS_NOT_EXIST, "config directory not found"); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeTempDir")]
 fn os_temp_dir(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_str(0, &std::env::temp_dir().to_string_lossy());
+    call.ret_str(slots::RET_0, &std::env::temp_dir().to_string_lossy());
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeGetpid")]
-fn os_getpid(call: &mut ExternCallContext) -> ExternResult { call.ret_i64(0, std::process::id() as i64); ExternResult::Ok }
+fn os_getpid(call: &mut ExternCallContext) -> ExternResult { call.ret_i64(slots::RET_0, std::process::id() as i64); ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeGetppid")]
-fn os_getppid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(0, unsafe { libc::getppid() } as i64); } #[cfg(not(unix))] { call.ret_i64(0, 0); } ExternResult::Ok }
+fn os_getppid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getppid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeGetuid")]
-fn os_getuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(0, unsafe { libc::getuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(0, 0); } ExternResult::Ok }
+fn os_getuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeGeteuid")]
-fn os_geteuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(0, unsafe { libc::geteuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(0, 0); } ExternResult::Ok }
+fn os_geteuid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::geteuid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeGetgid")]
-fn os_getgid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(0, unsafe { libc::getgid() } as i64); } #[cfg(not(unix))] { call.ret_i64(0, 0); } ExternResult::Ok }
+fn os_getgid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getgid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeGetegid")]
-fn os_getegid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(0, unsafe { libc::getegid() } as i64); } #[cfg(not(unix))] { call.ret_i64(0, 0); } ExternResult::Ok }
+fn os_getegid(call: &mut ExternCallContext) -> ExternResult { #[cfg(unix)] { call.ret_i64(slots::RET_0, unsafe { libc::getegid() } as i64); } #[cfg(not(unix))] { call.ret_i64(slots::RET_0, 0); } ExternResult::Ok }
 #[vo_extern_ctx("os", "nativeExit")]
-fn os_exit(call: &mut ExternCallContext) -> ExternResult { std::process::exit(call.arg_i64(0) as i32); }
+fn os_exit(call: &mut ExternCallContext) -> ExternResult { std::process::exit(call.arg_i64(slots::ARG_CODE) as i32); }
 #[vo_extern_ctx("os", "nativeGetArgs")]
-fn os_get_args(call: &mut ExternCallContext) -> ExternResult { call.ret_string_slice(0, &std::env::args().collect::<Vec<_>>()); ExternResult::Ok }
+fn os_get_args(call: &mut ExternCallContext) -> ExternResult { call.ret_string_slice(slots::RET_0, &std::env::args().collect::<Vec<_>>()); ExternResult::Ok }
 
 #[vo_extern_ctx("os", "nativeHostname")]
 fn os_hostname(call: &mut ExternCallContext) -> ExternResult {
     match hostname::get() {
-        Ok(name) => { call.ret_str(0, &name.to_string_lossy()); write_nil_error(call, 1); }
-        Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); }
+        Ok(name) => { call.ret_str(slots::RET_0, &name.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        Err(e) => { call.ret_str(slots::RET_0, ""); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
@@ -659,47 +659,47 @@ fn os_hostname(call: &mut ExternCallContext) -> ExternResult {
 #[vo_extern_ctx("os", "nativeExecutable")]
 fn os_executable(call: &mut ExternCallContext) -> ExternResult {
     match std::env::current_exe() {
-        Ok(path) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); }
-        Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); }
+        Ok(path) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); }
+        Err(e) => { call.ret_str(slots::RET_0, ""); write_io_error(call, slots::RET_1, e); }
     }
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeCreateTemp")]
 fn os_create_temp(call: &mut ExternCallContext) -> ExternResult {
-    let dir = call.arg_str(0);
-    let pattern = call.arg_str(1);
+    let dir = call.arg_str(slots::ARG_DIR);
+    let pattern = call.arg_str(slots::ARG_PATTERN);
     let dir = if dir.is_empty() { std::env::temp_dir() } else { std::path::PathBuf::from(dir) };
     let (prefix, suffix) = if let Some(pos) = pattern.find('*') { (&pattern[..pos], &pattern[pos + 1..]) } else { (pattern, "") };
     for _ in 0..10000 {
         let name = format!("{}{:016x}{}", prefix, temp_random(), suffix);
         let path = dir.join(&name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => { let fd = register_file(file); call.ret_i64(0, fd as i64); call.ret_str(1, &path.to_string_lossy()); write_nil_error(call, 2); return ExternResult::Ok; }
+            Ok(file) => { let fd = register_file(file); call.ret_i64(slots::RET_0, fd as i64); call.ret_str(slots::RET_1, &path.to_string_lossy()); write_nil_error(call, slots::RET_2); return ExternResult::Ok; }
             Err(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => { call.ret_i64(0, -1); call.ret_str(1, ""); write_io_error(call, 2, e); return ExternResult::Ok; }
+            Err(e) => { call.ret_i64(slots::RET_0, -1); call.ret_str(slots::RET_1, ""); write_io_error(call, slots::RET_2, e); return ExternResult::Ok; }
         }
     }
-    call.ret_i64(0, -1); call.ret_str(1, ""); write_error_to(call, 2, CODE_OS_EXIST, "failed to create temp file");
+    call.ret_i64(slots::RET_0, -1); call.ret_str(slots::RET_1, ""); write_error_to(call, slots::RET_2, CODE_OS_EXIST, "failed to create temp file");
     ExternResult::Ok
 }
 
 #[vo_extern_ctx("os", "nativeMkdirTemp")]
 fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
-    let dir = call.arg_str(0);
-    let pattern = call.arg_str(1);
+    let dir = call.arg_str(slots::ARG_DIR);
+    let pattern = call.arg_str(slots::ARG_PATTERN);
     let dir = if dir.is_empty() { std::env::temp_dir() } else { std::path::PathBuf::from(dir) };
     let (prefix, suffix) = if let Some(pos) = pattern.find('*') { (&pattern[..pos], &pattern[pos + 1..]) } else { (pattern, "") };
     for _ in 0..10000 {
         let name = format!("{}{:016x}{}", prefix, temp_random(), suffix);
         let path = dir.join(&name);
         match fs::create_dir(&path) {
-            Ok(_) => { call.ret_str(0, &path.to_string_lossy()); write_nil_error(call, 1); return ExternResult::Ok; }
+            Ok(_) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); return ExternResult::Ok; }
             Err(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => { call.ret_str(0, ""); write_io_error(call, 1, e); return ExternResult::Ok; }
+            Err(e) => { call.ret_str(slots::RET_0, ""); write_io_error(call, slots::RET_1, e); return ExternResult::Ok; }
         }
     }
-    call.ret_str(0, ""); write_error_to(call, 1, CODE_OS_EXIST, "failed to create temp dir");
+    call.ret_str(slots::RET_0, ""); write_error_to(call, slots::RET_1, CODE_OS_EXIST, "failed to create temp dir");
     ExternResult::Ok
 }
 
