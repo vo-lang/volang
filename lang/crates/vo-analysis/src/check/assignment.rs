@@ -38,7 +38,7 @@ struct ExtractedDynAccess<'a> {
 
 /// Try to extract DynAccess from an expression.
 /// Returns Some if expr is DynAccess or TryUnwrap(DynAccess).
-fn extract_dyn_access(expr: &Expr) -> Option<ExtractedDynAccess> {
+fn extract_dyn_access(expr: &Expr) -> Option<ExtractedDynAccess<'_>> {
     use vo_syntax::ast::ExprKind;
     
     match &expr.kind {
@@ -351,7 +351,6 @@ impl Checker {
     pub(crate) fn init_vars(&mut self, lhs: &[ObjKey], rhs: &[Expr], return_pos: Option<Span>) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
-        use vo_syntax::ast::ExprKind;
         
         let invalid_type = self.invalid_type();
         let ll = lhs.len();
@@ -428,7 +427,6 @@ impl Checker {
     pub(crate) fn assign_vars(&mut self, lhs: &[Expr], rhs: &[Expr]) {
         use std::cmp::Ordering;
         use super::util::UnpackResult;
-        use vo_syntax::ast::ExprKind;
         
         let ll = lhs.len();
         

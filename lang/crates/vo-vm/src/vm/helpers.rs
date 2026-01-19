@@ -1,7 +1,7 @@
 //! Stack and memory access helpers.
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::{array, slice, string};
+use vo_runtime::objects::{slice, string};
 use vo_runtime::slot::{Slot, slot_to_ptr, slot_to_usize};
 
 use crate::bytecode::Module;
@@ -9,7 +9,6 @@ use crate::fiber::Fiber;
 use crate::exec;
 use super::types::ExecResult;
 
-const ARRAY_DATA_OFFSET: usize = array::HEADER_SLOTS;
 // String and slice have identical layout - use slice constants for both
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
 const FIELD_LEN: usize = slice::FIELD_LEN;

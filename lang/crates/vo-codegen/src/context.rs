@@ -78,7 +78,7 @@ use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use crate::type_interner::TypeInterner;
 use vo_vm::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
+    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 use vo_common::SourceMap;
 use vo_common::span::Span;

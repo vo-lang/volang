@@ -6,8 +6,6 @@
 //! - No UnsafePointer
 
 
-use vo_common::span::Span;
-
 use crate::objects::TypeKey;
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};

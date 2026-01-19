@@ -8,13 +8,7 @@ use vo_syntax::ast::{CaseClause, ExprKind, SelectCase, Stmt, StmtKind, TypeCaseC
 use super::checker::Checker;
 
 impl Checker {
-    /// Returns true if the statement is a terminating statement.
-    /// A terminating statement prevents execution from reaching the end of a function.
-    pub(crate) fn is_terminating(&self, stmt: &Stmt) -> bool {
-        self.is_terminating_impl(stmt, None)
-    }
-
-    /// Implementation of is_terminating with optional label for break checking.
+    /// Returns true if the statement is a terminating statement with optional label for break checking.
     fn is_terminating_impl(&self, stmt: &Stmt, label: Option<&str>) -> bool {
         match &stmt.kind {
             // Return always terminates

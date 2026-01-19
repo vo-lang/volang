@@ -220,7 +220,6 @@ fn compile_struct_lit(
     }
     
     // Initialize specified fields
-    let mut positional_offset = 0u16;
     for (i, elem) in lit.elems.iter().enumerate() {
         if let Some(key) = &elem.key {
             // Named field: key is field name
@@ -235,10 +234,9 @@ fn compile_struct_lit(
             }
         } else {
             // Positional field: use field index
-            let (offset, field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
+            let (offset, _field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
             // Use compile_value_to to handle interface conversion
             crate::stmt::compile_value_to(&elem.value, dst + offset, field_type, ctx, func, info)?;
-            positional_offset = offset + field_slots;
         }
     }
     Ok(())

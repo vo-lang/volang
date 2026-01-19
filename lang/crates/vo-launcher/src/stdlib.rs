@@ -1,6 +1,6 @@
 //! Embedded standard library.
 
-use rust_embed::{Embed, RustEmbed};
+use rust_embed::RustEmbed;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use vo_common::vfs::{FileSystem, RealFs};

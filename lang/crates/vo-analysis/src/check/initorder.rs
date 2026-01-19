@@ -8,8 +8,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use vo_common::span::Span;
-
 use crate::objects::{DeclInfoKey, ObjKey, TCObjects};
 
 use super::checker::Checker;

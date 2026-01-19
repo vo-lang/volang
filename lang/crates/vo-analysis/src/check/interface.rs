@@ -18,7 +18,7 @@ use std::rc::Rc;
 use vo_common::span::Span;
 use vo_syntax::ast::{InterfaceElem, InterfaceType};
 
-use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
+use crate::objects::{ObjKey, ScopeKey, TCObjects};
 use crate::typ::{self, InterfaceDetail, Type};
 
 use super::checker::Checker;
@@ -86,21 +86,6 @@ impl MethodInfo {
         self.data.borrow_mut().func = Some(func);
     }
 
-    /// Returns the method name from func or by looking up in the interface AST.
-    pub(crate) fn method_name_from_iface(&self, tc_objs: &TCObjects, iface: &InterfaceType, interner: &vo_common::symbol::SymbolInterner) -> String {
-        if let Some(okey) = self.func() {
-            tc_objs.lobjs[okey].name().to_string()
-        } else if let Some(idx) = self.src_index() {
-            if let Some(InterfaceElem::Method(m)) = iface.elems.get(idx) {
-                interner.resolve(m.name.symbol).unwrap_or("").to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    }
-
     /// Returns the method name (requires func to be set).
     pub(crate) fn method_name(&self, tc_objs: &TCObjects) -> String {
         if let Some(okey) = self.func() {
@@ -110,14 +95,6 @@ impl MethodInfo {
         }
     }
 
-    /// Returns the method id (for duplicate checking).
-    pub(crate) fn id(&self, _pkg: PackageKey, tc_objs: &TCObjects) -> String {
-        if let Some(okey) = self.func() {
-            tc_objs.lobjs[okey].id(tc_objs).to_string()
-        } else {
-            String::new()
-        }
-    }
 }
 
 /// Interface method set information.
@@ -479,17 +456,6 @@ impl Checker {
         // Method doesn't exist yet, add it
         set.insert(name.to_string(), mi);
         true
-    }
-
-    /// Computes method set for an interface.
-    pub(crate) fn interface_method_set(&self, iface: TypeKey) -> IfaceInfo {
-        let iface_detail = match &self.otype(iface) {
-            Type::Interface(i) => i,
-            _ => return IfaceInfo::new_empty(),
-        };
-
-        let rc = self.info_from_type(iface_detail);
-        (*rc).clone()
     }
 
 }

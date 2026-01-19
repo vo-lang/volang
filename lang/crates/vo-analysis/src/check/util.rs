@@ -9,12 +9,11 @@ use std::cmp::Ordering;
 use vo_common::span::Span;
 use vo_syntax::ast::{Expr, ExprKind};
 
-use crate::obj::{self, Builtin, LangObj};
-use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
+use crate::obj::LangObj;
+use crate::objects::{ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
 use crate::operand::{Operand, OperandMode};
 use crate::scope;
 use crate::typ::{self, BasicType, Type};
-use crate::universe::BuiltinInfo;
 
 use super::checker::Checker;
 use super::errors::TypeError;
@@ -105,10 +104,6 @@ impl<'a> UnpackResult<'a> {
         }
     }
 
-    /// Returns true if this is an error result.
-    pub(crate) fn is_err(&self) -> bool {
-        matches!(self, UnpackResult::Error)
-    }
 }
 
 /// Wrapper for UnpackResult with consumed operands.
@@ -181,12 +176,6 @@ impl Checker {
     /// Report an invalid operation error.
     pub(crate) fn invalid_op(&self, span: Span, err: &str) {
         self.error_code_msg(TypeError::InvalidOp, span, format!("invalid operation: {}", err));
-    }
-
-    /// Format object path as string for error messages.
-    pub(crate) fn obj_path_str(&self, path: &[ObjKey]) -> String {
-        let names: Vec<&str> = path.iter().map(|p| self.lobj(*p).name()).collect();
-        names.join("->")
     }
 
     /// Check if obj appears in path (cycle detection).
@@ -358,33 +347,6 @@ impl Checker {
         &mut self.tc_objs.types[key]
     }
 
-    /// Get an interface type by key.
-    pub(crate) fn otype_interface(&self, key: TypeKey) -> &typ::InterfaceDetail {
-        self.otype(key).try_as_interface().unwrap()
-    }
-
-    /// Get a signature type by key.
-    pub(crate) fn otype_signature(&self, key: TypeKey) -> &typ::SignatureDetail {
-        self.otype(key).try_as_signature().unwrap()
-    }
-
-    /// Get a mutable interface type by key.
-    pub(crate) fn otype_interface_mut(&mut self, key: TypeKey) -> &mut typ::InterfaceDetail {
-        self.otype_mut(key).try_as_interface_mut().unwrap()
-    }
-
-    /// Get a mutable signature type by key.
-    pub(crate) fn otype_signature_mut(&mut self, key: TypeKey) -> &mut typ::SignatureDetail {
-        self.otype_mut(key).try_as_signature_mut().unwrap()
-    }
-
-    // Note: package, package_mut, scope are in checker.rs
-
-    /// Get builtin function info.
-    pub(crate) fn builtin_info(&self, id: Builtin) -> &BuiltinInfo {
-        &self.universe().builtins()[&id]
-    }
-
     /// Get a basic type by kind.
     pub(crate) fn basic_type(&self, t: BasicType) -> TypeKey {
         self.universe().types()[&t]
@@ -405,18 +367,6 @@ impl Checker {
         &self.tc_objs
     }
     
-    /// Get a mutable reference to the TCObjects.
-    #[inline]
-    pub(crate) fn objs_mut(&mut self) -> &mut TCObjects {
-        &mut self.tc_objs
-    }
-    
-    /// Insert a declaration info and return its key.
-    #[inline]
-    pub(crate) fn insert_decl(&mut self, decl: super::resolver::DeclInfo) -> DeclInfoKey {
-        self.tc_objs.decls.insert(decl)
-    }
-    
     // Factory method wrappers
     
     #[inline]
@@ -427,11 +377,6 @@ impl Checker {
     #[inline]
     pub(crate) fn new_package(&mut self, path: String) -> PackageKey {
         self.tc_objs.new_package(path)
-    }
-    
-    #[inline]
-    pub(crate) fn new_pkg_name(&mut self, span: Span, pkg: Option<PackageKey>, name: String, imported: PackageKey) -> ObjKey {
-        self.tc_objs.new_pkg_name(span, pkg, name, imported)
     }
     
     #[inline]
@@ -462,11 +407,6 @@ impl Checker {
     #[inline]
     pub(crate) fn new_type_name(&mut self, span: Span, pkg: Option<PackageKey>, name: String, typ: Option<TypeKey>) -> ObjKey {
         self.tc_objs.new_type_name(span, pkg, name, typ)
-    }
-    
-    #[inline]
-    pub(crate) fn new_label(&mut self, span: Span, pkg: Option<PackageKey>, name: String) -> ObjKey {
-        self.tc_objs.new_label(span, pkg, name)
     }
     
     // Type creation wrappers

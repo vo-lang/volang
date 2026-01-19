@@ -566,19 +566,10 @@ fn trunc<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let signed = (flags & 0x80) != 0;
     let bytes = flags & 0x7F;
     
-    let (narrow_type, r) = match bytes {
-        1 => {
-            let v = e.builder().ins().ireduce(types::I8, a);
-            (types::I8, v)
-        }
-        2 => {
-            let v = e.builder().ins().ireduce(types::I16, a);
-            (types::I16, v)
-        }
-        4 => {
-            let v = e.builder().ins().ireduce(types::I32, a);
-            (types::I32, v)
-        }
+    let r = match bytes {
+        1 => e.builder().ins().ireduce(types::I8, a),
+        2 => e.builder().ins().ireduce(types::I16, a),
+        4 => e.builder().ins().ireduce(types::I32, a),
         _ => {
             e.write_var(inst.a, a);
             return;

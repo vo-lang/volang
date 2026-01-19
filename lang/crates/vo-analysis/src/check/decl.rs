@@ -9,7 +9,6 @@
 //! Adapted from goscript with Vo-specific modifications.
 
 
-use vo_common::span::Span;
 use vo_syntax::ast::{Expr, TypeExpr};
 
 use crate::constant::Value as ConstValue;

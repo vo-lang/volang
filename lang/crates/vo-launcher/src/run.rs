@@ -6,7 +6,7 @@ use vo_vm::bytecode::Module;
 use vo_vm::vm::{Vm, VmError};
 use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
 
-use crate::compile::{compile_source, compile_string, CompileOutput, CompileError};
+use crate::compile::{compile_source, CompileOutput, CompileError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {

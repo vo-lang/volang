@@ -664,10 +664,8 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             Err(e) => return dyn_error_only(call, call.dyn_err().type_mismatch, e),
         };
 
-        unsafe {
-            struct_ops::set_field(data_ref, field_offset, stored_slot0);
-            struct_ops::set_field(data_ref, field_offset + 1, stored_slot1);
-        }
+        struct_ops::set_field(data_ref, field_offset, stored_slot0);
+        struct_ops::set_field(data_ref, field_offset + 1, stored_slot1);
 
         call.ret_nil(0);
         call.ret_nil(1);
@@ -696,9 +694,9 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
                 unsafe { Gc::write_slot(data_ref, field_offset + i, v) };
             }
         }
-        _ => unsafe {
+        _ => {
             struct_ops::set_field(data_ref, field_offset, val_slot1);
-        },
+        }
     }
 
     call.ret_nil(0);

@@ -394,9 +394,10 @@ impl Universe {
             .insert(LangObj::new_func(Span::default(), None, "Data".to_string(), Some(data_sig), false));
 
         // Create underlying interface type
-        let mut iface = InterfaceDetail::new(vec![err_method, code_method, unwrap_method, data_method], vec![]);
-        // Universe-builtin interfaces must be complete: no embedded interfaces, method set is known.
-        iface.set_complete(vec![err_method, code_method, unwrap_method, data_method]);
+        let iface = InterfaceDetail::new_complete(
+            vec![err_method, code_method, unwrap_method, data_method],
+            vec![],
+        );
         let underlying = objs.types.insert(Type::Interface(iface));
 
         // Point named "error" to its underlying interface

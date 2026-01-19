@@ -16,7 +16,6 @@ use vo_module::{Resolver, discover_extensions, ExtensionManifest};
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
-use crate::arena::ArenaKey;
 use crate::check::Checker;
 use crate::importer::{ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};

@@ -104,34 +104,6 @@ impl DeclInfo {
         })
     }
 
-    pub(crate) fn as_const(&self) -> &DeclInfoConst {
-        match self {
-            DeclInfo::Const(c) => c,
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn as_var(&self) -> &DeclInfoVar {
-        match self {
-            DeclInfo::Var(v) => v,
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn as_type(&self) -> &DeclInfoType {
-        match self {
-            DeclInfo::Type(t) => t,
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn as_func(&self) -> &DeclInfoFunc {
-        match self {
-            DeclInfo::Func(f) => f,
-            _ => unreachable!(),
-        }
-    }
-
     pub(crate) fn file_scope(&self) -> ScopeKey {
         match self {
             DeclInfo::Const(c) => c.file_scope,

@@ -172,7 +172,7 @@ fn emit_nested_stack_array_index(
 ) -> u16 {
     let flattened_idx = func.alloc_temp_typed(&[SlotType::Value]);
     
-    for (i, (index_reg, elem_slots, array_len)) in nested_info.levels.iter().enumerate() {
+    for (i, (index_reg, _elem_slots, array_len)) in nested_info.levels.iter().enumerate() {
         // Bounds check
         let len_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, len_reg, *array_len, 0);

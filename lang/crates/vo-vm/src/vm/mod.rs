@@ -12,8 +12,10 @@ mod types;
 pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE};
 
-use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, panic_unwind, user_panic,
+use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, user_panic,
     ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT, ERR_NIL_FUNC_CALL};
+#[cfg(feature = "jit")]
+use helpers::panic_unwind;
 
 use crate::bytecode::Module;
 use crate::exec;
@@ -213,6 +215,7 @@ impl Vm {
     
     /// Run one round of scheduler to let other fibers make progress.
     /// Used when trampoline fiber blocks on channel operations.
+    #[cfg(feature = "jit")]
     fn run_scheduler_round(&mut self) {
         // Temporarily disable JIT to prevent nested trampoline calls
         #[cfg(feature = "jit")]
@@ -270,7 +273,7 @@ impl Vm {
         // Cache fiber pointer outside the loop
         // SAFETY: fiber_ptr is valid as long as we don't reallocate fibers vec (only GoStart does)
         let mut fiber_ptr = self.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
-        let mut fiber = unsafe { &mut *fiber_ptr };
+        let fiber = unsafe { &mut *fiber_ptr };
 
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // stack and frames are independent fields of fiber, accessed through raw pointers.
@@ -1260,7 +1263,7 @@ impl Vm {
                     // Trampoline fibers are in separate array, don't need reload
                     if let crate::scheduler::FiberId::Regular(idx) = fiber_id {
                         fiber_ptr = &mut self.scheduler.fibers[idx as usize] as *mut Fiber;
-                        fiber = unsafe { &mut *fiber_ptr };
+                        let _ = unsafe { &mut *fiber_ptr };
                     }
                     // Return Yield to restart loop with fresh stack/frames pointers
                     return ExecResult::Continue;

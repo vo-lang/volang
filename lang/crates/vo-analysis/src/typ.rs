@@ -619,6 +619,15 @@ impl InterfaceDetail {
         }
     }
 
+    pub fn new_complete(methods: Vec<ObjKey>, embeddeds: Vec<TypeKey>) -> InterfaceDetail {
+        let all = methods.clone();
+        InterfaceDetail {
+            methods,
+            embeddeds,
+            all_methods: Rc::new(RefCell::new(Some(all))),
+        }
+    }
+
     pub fn methods(&self) -> &Vec<ObjKey> {
         &self.methods
     }

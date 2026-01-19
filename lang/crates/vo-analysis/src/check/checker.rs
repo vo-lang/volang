@@ -156,43 +156,6 @@ impl Checker {
             obj_path: Vec::new(),
         }
     }
-    
-    /// Creates a new type checker with pre-existing TCObjects.
-    pub(crate) fn with_objs(
-        pkg: PackageKey,
-        interner: SymbolInterner,
-        tc_objs: TCObjects,
-        trace_enabled: bool,
-    ) -> Checker {
-        Checker {
-            tc_objs,
-            interner,
-            diagnostics: RefCell::new(DiagnosticSink::new()),
-            pkg,
-            obj_map: HashMap::new(),
-            imp_map: HashMap::new(),
-            octx: ObjContext::new(),
-            result: TypeInfo::new(),
-            trace_enabled,
-            trace_indent: Rc::new(RefCell::new(0)),
-            unused_dot_imports: HashMap::new(),
-            methods: HashMap::new(),
-            ifaces: HashMap::new(),
-            untyped: HashMap::new(),
-            delayed: Vec::new(),
-            obj_path: Vec::new(),
-        }
-    }
-    
-    /// Take ownership of tc_objs (for sharing between checkers).
-    pub(crate) fn take_objs(&mut self) -> TCObjects {
-        std::mem::take(&mut self.tc_objs)
-    }
-    
-    /// Put tc_objs back.
-    pub(crate) fn put_objs(&mut self, objs: TCObjects) {
-        self.tc_objs = objs;
-    }
 
     /// Resolves a symbol to its string.
     pub(crate) fn resolve_symbol(&self, symbol: vo_common::symbol::Symbol) -> &str {
@@ -209,25 +172,6 @@ impl Checker {
         self.tc_objs.universe()
     }
 
-    /// Returns a reference to the TCObjects.
-    pub(crate) fn objects(&self) -> &TCObjects {
-        &self.tc_objs
-    }
-
-    /// Returns a mutable reference to the TCObjects.
-    pub(crate) fn objects_mut(&mut self) -> &mut TCObjects {
-        &mut self.tc_objs
-    }
-
-    /// Returns the type checking results.
-    pub(crate) fn type_info(&self) -> &TypeInfo {
-        &self.result
-    }
-
-    /// Returns a mutable reference to the type checking results.
-    pub(crate) fn type_info_mut(&mut self) -> &mut TypeInfo {
-        &mut self.result
-    }
 
     /// Emit a diagnostic.
     pub(crate) fn emit(&self, diagnostic: Diagnostic) {
@@ -249,15 +193,6 @@ impl Checker {
         self.diagnostics.borrow().has_errors()
     }
 
-    /// Returns the error count.
-    pub(crate) fn error_count(&self) -> usize {
-        self.diagnostics.borrow().error_count()
-    }
-
-    /// Format a position for error messages.
-    pub(crate) fn position(&self, pos: usize) -> String {
-        format!("pos:{}", pos)
-    }
 
     /// Returns whether tracing is enabled.
     pub(crate) fn trace(&self) -> bool {
