@@ -1,6 +1,8 @@
 // Test: Complex variable initialization with function calls
 package main
 
+
+import "fmt"
 func getInitialValue() int {
     return 42
 }
@@ -16,5 +18,5 @@ func main() {
     assert(initialValue == 42, "initialValue should be 42")
     assert(doubledValue == 42, "doubledValue should be 42")
     
-    println("var_init_complex: ALL TESTS PASSED")
+    fmt.Println("var_init_complex: ALL TESTS PASSED")
 }

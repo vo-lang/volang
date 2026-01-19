@@ -2,6 +2,8 @@
 // Tests multi-layer interactions between closures, defer, and recovery
 package main
 
+
+import "fmt"
 func main() {
     testClosureInDefer()
     testDeferModifiesClosureVar()
@@ -9,7 +11,7 @@ func main() {
     testRecoverReturnsValueWrapper()
     testPanicInClosureRecoveredOutside()
     testMultiDeferWithClosure()
-    println("closure_defer_recover_combo: ok")
+    fmt.Println("closure_defer_recover_combo: ok")
 }
 
 func testClosureInDefer() {

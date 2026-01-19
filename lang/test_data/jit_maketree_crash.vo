@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Node struct {
 	value int
 	left  *Node
@@ -54,6 +56,6 @@ func main() {
 			values[i] = (i * 7 + iter * 13) % 100
 		}
 		tree := makeTree(values)
-		println(tree.sum())
+		fmt.Println(tree.sum())
 	}
 }

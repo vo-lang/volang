@@ -2,6 +2,8 @@
 // Tests []bool, []int8, []uint8, []int16, []uint16, []int32, []uint32, []float32
 package main
 
+
+import "fmt"
 func main() {
 	testBoolSlice()
 	testInt8Slice()
@@ -14,7 +16,7 @@ func main() {
 	testSliceOperations()
 	testForRange()
 	testAppendAndCopy()
-	println("packed array tests passed")
+	fmt.Println("packed array tests passed")
 }
 
 func testBoolSlice() {

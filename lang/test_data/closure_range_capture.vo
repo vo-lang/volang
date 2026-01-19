@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 // Classic loop variable capture problem
 func testLoopCapture() {
 	funcs := make([]func() int, 3)
@@ -176,5 +178,5 @@ func main() {
 	testGoroutineCapture()
 	testStructCapture()
 	checkDeferCapture()
-	println("PASS: closure_range_capture")
+	fmt.Println("PASS: closure_range_capture")
 }

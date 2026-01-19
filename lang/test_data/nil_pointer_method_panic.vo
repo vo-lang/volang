@@ -2,6 +2,8 @@
 // Go spec: calling a method on a nil pointer panics when dereferencing
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
 }
@@ -63,5 +65,5 @@ func main() {
     c.Set(100)
     assert(c.Get() == 100, "non-nil Set works")
     
-    println("nil_pointer_method_panic: ok")
+    fmt.Println("nil_pointer_method_panic: ok")
 }

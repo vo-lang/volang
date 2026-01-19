@@ -2,6 +2,8 @@
 // BUG: Multi-level chain with ? causes analysis panic
 package main
 
+
+import "fmt"
 type A struct {
     b *B
 }
@@ -58,12 +60,12 @@ func main() {
     // Test mid-chain nil
     _, err = getMidNilChain()
     assert(err != nil, "mid nil chain should error")
-    println("mid nil chain error:", err.Error())
+    fmt.Println("mid nil chain error:", err.Error())
     
     // Test early nil
     _, err = getEarlyNilChain()
     assert(err != nil, "early nil chain should error")
-    println("early nil chain error:", err.Error())
+    fmt.Println("early nil chain error:", err.Error())
     
-    println("error_propagation_chain: ok")
+    fmt.Println("error_propagation_chain: ok")
 }

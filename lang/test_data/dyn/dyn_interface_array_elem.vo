@@ -2,6 +2,8 @@
 // []interface{} elements with different concrete types
 package main
 
+
+import "fmt"
 type Dog struct {
     name string
 }
@@ -58,5 +60,5 @@ func main() {
     assert(sounds[1] == "meow", "second sound should be meow")
     assert(sounds[2] == "woof", "third sound should be woof")
     
-    println("dyn_interface_array_elem: ok")
+    fmt.Println("dyn_interface_array_elem: ok")
 }

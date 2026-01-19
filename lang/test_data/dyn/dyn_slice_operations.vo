@@ -2,6 +2,8 @@
 // append, copy, len, cap, reslice on ~> results.
 package main
 
+
+import "fmt"
 type SliceHolder struct {
     ints    []int
     strings []string
@@ -167,6 +169,6 @@ func main() error {
     assert(len(chainedAppended) == 6, "chained append len should be 6")
     assert(chainedAppended[5] == 99, "chained append[5] should be 99")
     
-    println("dyn_slice_operations: ok")
+    fmt.Println("dyn_slice_operations: ok")
     return nil
 }

@@ -1,6 +1,8 @@
 // Test dynamic attribute access: obj~>field
 package main
 
+
+import "fmt"
 type Person struct {
 	Name string
 	Age  int
@@ -19,17 +21,17 @@ func main() {
 	v1, err := obj~>Name
 	assert(err == nil, "Name error")
 	assert(v1.(string) == "Alice", "Name expected Alice")
-	println("Name =", v1.(string))
+	fmt.Println("Name =", v1.(string))
 	
 	v2, err := obj~>Age
 	assert(err == nil, "Age error")
 	assert(v2.(int) == 30, "Age expected 30")
-	println("Age =", v2.(int))
+	fmt.Println("Age =", v2.(int))
 	
 	// Non-existing field
 	_, err = obj~>NonExistent
 	assert(err != nil, "NonExistent should return error")
-	println("NonExistent error:", err)
+	fmt.Println("NonExistent error:", err)
 	
 	// Nested struct
 	n := &Nested{Inner: &Person{Name: "Bob", Age: 25}, Value: 100}
@@ -38,13 +40,13 @@ func main() {
 	v3, err := nobj~>Value
 	assert(err == nil, "Value error")
 	assert(v3.(int) == 100, "Value expected 100")
-	println("Value =", v3.(int))
+	fmt.Println("Value =", v3.(int))
 	
 	v4, err := nobj~>Inner
 	assert(err == nil, "Inner error")
 	inner := v4.(*Person)
 	assert(inner.Name == "Bob", "Inner.Name expected Bob")
-	println("Inner.Name =", inner.Name)
+	fmt.Println("Inner.Name =", inner.Name)
 	
-	println("All dyn_get_attr tests passed!")
+	fmt.Println("All dyn_get_attr tests passed!")
 }

@@ -2,6 +2,8 @@
 // Go spec: variables are initialized in dependency order
 package main
 
+
+import "fmt"
 // Declared out of order - dependency analysis should handle this
 var c = a + b    // depends on a and b
 var a = 10       // no dependencies
@@ -25,5 +27,5 @@ func main() {
     assert(x3 == 3, "x3 should be 3")
     assert(x4 == 4, "x4 should be 4 (x1+x3)")
     
-    println("var_dependency: ALL TESTS PASSED")
+    fmt.Println("var_dependency: ALL TESTS PASSED")
 }

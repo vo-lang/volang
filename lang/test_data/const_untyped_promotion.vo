@@ -2,6 +2,8 @@
 // Spec: integer < rune < floating-point (promotion precedence)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: integer + integer = integer
     const intPlusInt = 1 + 2
@@ -85,5 +87,5 @@ func main() {
     var p float64 = precise
     assert(p > 0.333 && p < 0.334, "1.0/3.0 precision")
     
-    println("const_untyped_promotion: ALL PASSED")
+    fmt.Println("const_untyped_promotion: ALL PASSED")
 }

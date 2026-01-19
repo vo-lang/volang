@@ -1,9 +1,12 @@
 package main
 
-import "encoding/hex"
+import (
+	"fmt"
+	"encoding/hex"
+)
 
 func main() {
-    println("Starting hex tests...")
+    fmt.Println("Starting hex tests...")
     
     // Test EncodedLen / DecodedLen
     assert(hex.EncodedLen(3) == 6, "EncodedLen(3) should be 6")
@@ -20,5 +23,5 @@ func main() {
     assert(len(decoded) == 5, "decoded length should be 5")
     assert(int(decoded[0]) == 72, "decoded[0] should be 72")
     
-    println("All hex tests passed!")
+    fmt.Println("All hex tests passed!")
 }

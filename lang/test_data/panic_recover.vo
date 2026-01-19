@@ -1,6 +1,8 @@
 // Test: panic and recover semantics
 package main
 
+
+import "fmt"
 var recoverResult any
 
 func main() {
@@ -15,7 +17,7 @@ func main() {
     // Test 3: Nested recover - only innermost catches
     testNestedRecover()
     
-    println("panic_recover: ALL PASSED")
+    fmt.Println("panic_recover: ALL PASSED")
 }
 
 func testBasicRecover() {

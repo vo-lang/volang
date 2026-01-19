@@ -2,6 +2,8 @@
 // Verifies that ~> operator works correctly in defer context.
 package main
 
+
+import "fmt"
 type Counter struct {
     count int
 }
@@ -80,7 +82,7 @@ func main() {
     }()
     assert(c2.count == 6, "defer Inc should increment to 6, got: ", c2.count)
 
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -26,9 +28,9 @@ func main() {
     assert(p.Sum() == 5555)  // 5555
     assert(p.x == 1)      // 1
     assert(p.y == 2)      // 2
-    println(p.Sum(), p.x, p.y)
+    fmt.Println(p.Sum(), p.x, p.y)
 
-    println(p.Sum2(), p.x, p.y)
+    fmt.Println(p.Sum2(), p.x, p.y)
     assert(p.Sum2() == 3333)  // 3333
     assert(p.x == 1111)      // 1
     assert(p.y == 2222)      // 2

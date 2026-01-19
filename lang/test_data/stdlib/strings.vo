@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 func main() {
     // Contains
@@ -64,6 +67,6 @@ func main() {
     assert(strings.EqualFold("HELLO", "hello"), "EqualFold failed")
     assert(!strings.EqualFold("hello", "world"), "EqualFold should be false")
     
-    println("All strings tests passed!")
+    fmt.Println("All strings tests passed!")
 }
 

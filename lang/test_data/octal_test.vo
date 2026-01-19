@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
 	// Test octal literals
 	a := 0644      // octal = 420 decimal
@@ -17,5 +19,5 @@ func main() {
 	perm := 0644 | 0111  // 420 | 73 = 493
 	assert(perm == 493, "0644 | 0111 should equal 493")
 	
-	println("All octal tests passed!")
+	fmt.Println("All octal tests passed!")
 }

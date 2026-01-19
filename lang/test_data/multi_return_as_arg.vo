@@ -2,13 +2,15 @@
 // Tests using multi-return function calls directly as function arguments
 package main
 
+
+import "fmt"
 func main() {
     testMultiReturnAsArgs()
     testMultiReturnAsVariadic()
     testMultiReturnChained()
     testMultiReturnWithDiscard()
     testMultiReturnInExpression()
-    println("multi_return_as_arg: ok")
+    fmt.Println("multi_return_as_arg: ok")
 }
 
 // Helper functions
@@ -45,7 +47,7 @@ func testMultiReturnAsVariadic() {
     // Using multi-return with variadic function (println)
     // This just tests it compiles and runs
     a, b := pair()
-    println("pair:", a, b)
+    fmt.Println("pair:", a, b)
 }
 
 func testMultiReturnChained() {

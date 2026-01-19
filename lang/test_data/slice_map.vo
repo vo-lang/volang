@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Comprehensive slice, map, and nested type tests
 
 type Point struct {
@@ -115,5 +117,5 @@ func main() {
     assert(pm[p2] == 200, "pm[p2] should be 200")
     assert(pm[p3] == 100, "pm[p3] should be 100 (same key as p1)")
     
-    println("slice_map_test: ALL PASSED")
+    fmt.Println("slice_map_test: ALL PASSED")
 }

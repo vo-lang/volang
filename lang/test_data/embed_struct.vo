@@ -1,6 +1,8 @@
 // Test: struct embedding - field promotion
 package main
 
+
+import "fmt"
 type Person struct {
 	name string
 	age  int
@@ -48,6 +50,6 @@ func main() {
 	}
 	assert(e2.name == "Carol", "e2.name should be Carol")
 	
-	println("struct embedding tests passed")
+	fmt.Println("struct embedding tests passed")
 }
 

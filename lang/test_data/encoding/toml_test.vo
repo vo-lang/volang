@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
     "dyn"
     "encoding/toml"
 )
@@ -12,7 +13,7 @@ func main() {
     testParseNested()
     testStringify()
     testArrayOfTables()
-    println("All TOML tests passed!")
+    fmt.Println("All TOML tests passed!")
 }
 
 func testParseSimple() {
@@ -27,7 +28,7 @@ func testParseSimple() {
     pi := obj["pi"].(float64)
     assert(pi > 3.13 && pi < 3.15, "pi")
     
-    println("  testParseSimple passed")
+    fmt.Println("  testParseSimple passed")
 }
 
 func testParseTable() {
@@ -42,7 +43,7 @@ func testParseTable() {
     db := obj["database"].(dyn.MapObject)
     assert(db["name"].(string) == "mydb", "database.name")
     
-    println("  testParseTable passed")
+    fmt.Println("  testParseTable passed")
 }
 
 func testParseArray() {
@@ -58,7 +59,7 @@ func testParseArray() {
     assert(len(names) == 2, "names len")
     assert(names[0].(string) == "alice", "names[0]")
     
-    println("  testParseArray passed")
+    fmt.Println("  testParseArray passed")
 }
 
 func testParseNested() {
@@ -73,7 +74,7 @@ func testParseNested() {
     https := server["https"].(dyn.MapObject)
     assert(https["port"].(int) == 443, "https port")
     
-    println("  testParseNested passed")
+    fmt.Println("  testParseNested passed")
 }
 
 func testStringify() {
@@ -92,7 +93,7 @@ func testStringify() {
     assert(parsed["count"].(int) == 100, "stringify count")
     assert(parsed["enabled"].(bool) == true, "stringify enabled")
     
-    println("  testStringify passed")
+    fmt.Println("  testStringify passed")
 }
 
 func testArrayOfTables() {
@@ -109,12 +110,12 @@ func testArrayOfTables() {
     p2 := products[1].(dyn.MapObject)
     assert(p2["name"].(string) == "Nail", "product 2 name")
     
-    println("  testArrayOfTables passed")
+    fmt.Println("  testArrayOfTables passed")
 }
 
 func assert(cond bool, msg string) {
     if !cond {
-        println("ASSERT FAILED:", msg)
+        fmt.Println("ASSERT FAILED:", msg)
         panic("assertion failed: " + msg)
     }
 }

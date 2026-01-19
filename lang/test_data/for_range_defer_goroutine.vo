@@ -2,6 +2,8 @@
 // Coverage: complex interaction between iteration, deferred calls, and concurrency
 package main
 
+
+import "fmt"
 var trace []int
 
 func reset() {
@@ -100,21 +102,21 @@ func testRangeIndexDefer() {
 }
 
 func main() {
-    println("Test 1: defer in range goroutine")
+    fmt.Println("Test 1: defer in range goroutine")
     testDeferInRangeGoroutine()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: range channel with defer")
+    fmt.Println("Test 2: range channel with defer")
     testRangeChannelDefer()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: nested range with defer")
+    fmt.Println("Test 3: nested range with defer")
     testNestedRangeDefer()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: range index with defer")
+    fmt.Println("Test 4: range index with defer")
     testRangeIndexDefer()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("for_range_defer_goroutine: ALL PASSED")
+    fmt.Println("for_range_defer_goroutine: ALL PASSED")
 }

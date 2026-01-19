@@ -1,7 +1,10 @@
 // Test ? syntax for error propagation in dynamic calls
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 type Data struct {
 	val int
@@ -24,7 +27,7 @@ func testDynCallSuccess() error {
 	result := obj~>GetVal()?
 	v := result.(int)
 	assert(v == 10, "GetVal expected 10")
-	println("testDynCallSuccess: GetVal =", v)
+	fmt.Println("testDynCallSuccess: GetVal =", v)
 	return nil
 }
 
@@ -37,7 +40,7 @@ func testDynCallError() error {
 	_ = obj~>NonExistent()?
 	
 	// Should not reach here
-	println("FAIL: should have propagated error")
+	fmt.Println("FAIL: should have propagated error")
 	return nil
 }
 
@@ -50,7 +53,7 @@ func testDynAttrSuccess() error {
 	result := obj~>val?
 	v := result.(int)
 	assert(v == 42, "val expected 42")
-	println("testDynAttrSuccess: val =", v)
+	fmt.Println("testDynAttrSuccess: val =", v)
 	return nil
 }
 
@@ -63,7 +66,7 @@ func testDynAttrError() error {
 	_ = obj~>nonexistent?
 	
 	// Should not reach here
-	println("FAIL: should have propagated error")
+	fmt.Println("FAIL: should have propagated error")
 	return nil
 }
 
@@ -76,7 +79,7 @@ func testDynIndexSuccess() error {
 	result := obj~>[1]?
 	v := result.(int)
 	assert(v == 200, "[1] expected 200")
-	println("testDynIndexSuccess: [1] =", v)
+	fmt.Println("testDynIndexSuccess: [1] =", v)
 	return nil
 }
 
@@ -93,7 +96,7 @@ func testChained() error {
 	v2 := r2.(int)
 	
 	assert(v1 == 5 && v2 == 10, "expected 5 and 10")
-	println("testChained: GetVal =", v1, ", Double =", v2)
+	fmt.Println("testChained: GetVal =", v1, ", Double =", v2)
 	return nil
 }
 
@@ -114,11 +117,11 @@ func main() {
 	// Test error propagation cases
 	err = testDynCallError()
 	assert(err != nil, "testDynCallError should have returned error")
-	println("testDynCallError propagated error:", err)
+	fmt.Println("testDynCallError propagated error:", err)
 	
 	err = testDynAttrError()
 	assert(err != nil, "testDynAttrError should have returned error")
-	println("testDynAttrError propagated error:", err)
+	fmt.Println("testDynAttrError propagated error:", err)
 	
-	println("All ? syntax tests passed!")
+	fmt.Println("All ? syntax tests passed!")
 }

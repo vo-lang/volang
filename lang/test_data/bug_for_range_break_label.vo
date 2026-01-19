@@ -1,6 +1,8 @@
 // Bug reproduction: break label in nested for-range
 package main
 
+
+import "fmt"
 func main() {
     sum := 0
 outer:
@@ -16,5 +18,5 @@ outer:
     // Expected: 10 + 20 = 30 (break after j=20)
     assert(sum == 30, "break outer should stop at sum=30, got ", sum)
     
-    println("ok")
+    fmt.Println("ok")
 }

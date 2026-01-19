@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Slice growth with append
 	s := []int{}
@@ -38,5 +40,5 @@ func main() {
 	}
 	assert(big[9999] == 9999)
 
-	println("gc_slice_grow: PASSED")
+	fmt.Println("gc_slice_grow: PASSED")
 }

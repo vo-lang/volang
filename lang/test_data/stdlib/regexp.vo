@@ -1,9 +1,12 @@
 package main
 
-import "regexp"
+import (
+	"fmt"
+	"regexp"
+)
 
 func main() {
-    println("Testing regexp...")
+    fmt.Println("Testing regexp...")
     
     // Test MatchString
     matched, err := regexp.MatchString("^hello", "hello world")
@@ -19,5 +22,5 @@ func main() {
     assert(re.MatchString("abc123def"), "should match digits")
     assert(!re.MatchString("abcdef"), "should not match without digits")
     
-    println("All regexp tests passed!")
+    fmt.Println("All regexp tests passed!")
 }

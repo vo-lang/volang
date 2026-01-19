@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // BUG: Empty struct assigned to interface causes misaligned pointer panic
 // When an empty struct (zero-size) like Calculator1{} is assigned to an
 // interface and then a method is called, it causes a misaligned pointer error.
@@ -21,5 +23,5 @@ func main() {
     result := a.Add(2, 3)
     assert(result == 5, "Calculator1.Add should return 5")
     
-    println("bug_empty_struct_interface: PASSED")
+    fmt.Println("bug_empty_struct_interface: PASSED")
 }

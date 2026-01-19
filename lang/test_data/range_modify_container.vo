@@ -2,13 +2,15 @@
 // Tests edge cases of modifying slice/map during iteration
 package main
 
+
+import "fmt"
 func main() {
     testSliceModifyElement()
     testSliceAppendDuring()
     testMapAddDuring()
     testRangeOverNil()
     testRangeEmptyContainers()
-    println("range_modify_container: ok")
+    fmt.Println("range_modify_container: ok")
 }
 
 func testSliceModifyElement() {

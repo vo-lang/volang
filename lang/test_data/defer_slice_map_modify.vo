@@ -2,6 +2,8 @@
 // Coverage: value vs reference semantics in defer
 package main
 
+
+import "fmt"
 // Test 1: Slice passed as argument (slice header copied)
 func testSliceArgument() []int {
     s := []int{1, 2, 3}
@@ -142,5 +144,5 @@ func main() {
     r8 := testStructWithSlice()
     assert(r8.data[0] == 100, "struct slice element should be modified")
     
-    println("defer_slice_map_modify: PASSED")
+    fmt.Println("defer_slice_map_modify: PASSED")
 }

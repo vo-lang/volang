@@ -2,6 +2,8 @@
 // Verifies that ~> operator works on values obtained from type switch.
 package main
 
+
+import "fmt"
 type Dog struct {
     Name string
     Age  int
@@ -93,7 +95,7 @@ func main() {
     }
     assert(isString, "name should be string")
 
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

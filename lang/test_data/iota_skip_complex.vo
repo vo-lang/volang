@@ -2,6 +2,8 @@
 // Coverage: iota continuation, blank identifier skipping, bit operations
 package main
 
+
+import "fmt"
 const (
     _  = iota // 0, skipped
     A1        // 1
@@ -81,5 +83,5 @@ func main() {
     assert(D1 == 2, "D1")
     assert(D2 == 4, "D2")
     
-    println("iota_skip_complex: ok")
+    fmt.Println("iota_skip_complex: ok")
 }

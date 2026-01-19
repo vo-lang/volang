@@ -1,6 +1,8 @@
 // Test: break in select should not break outer for loop
 package main
 
+
+import "fmt"
 func testSelectBreakInLoop() int {
     count := 0
     ch := make(chan int, 3)
@@ -25,5 +27,5 @@ func testSelectBreakInLoop() int {
 func main() {
     r := testSelectBreakInLoop()
     assert(r == 23, "should be 23, got", r)
-    println("select_nested_break: PASSED")
+    fmt.Println("select_nested_break: PASSED")
 }

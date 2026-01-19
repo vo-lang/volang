@@ -2,6 +2,8 @@
 // Coverage: interface containing interface, deep dynamic dispatch
 package main
 
+
+import "fmt"
 type Inner interface {
 	Value() int
 }
@@ -50,23 +52,23 @@ func main() {
 	nameVal, err := obj~>name
 	assert(err == nil, "name error")
 	assert(nameVal.(string) == "test", "name mismatch")
-	println("Test 1: name =", nameVal.(string))
+	fmt.Println("Test 1: name =", nameVal.(string))
 
 	// Test 2: Get outer via dyn call
 	outerVal, err := obj~>GetOuter()
 	assert(err == nil, "GetOuter error")
-	println("Test 2: GetOuter ok")
+	fmt.Println("Test 2: GetOuter ok")
 
 	// Test 3: Chain through interface - get inner from outer
 	innerVal, err := outerVal~>GetInner()
 	assert(err == nil, "GetInner error")
-	println("Test 3: GetInner ok")
+	fmt.Println("Test 3: GetInner ok")
 
 	// Test 4: Call Value on inner
 	valResult, err := innerVal~>Value()
 	assert(err == nil, "Value error")
 	assert(valResult.(int) == 42, "Value mismatch")
-	println("Test 4: Value() =", valResult.(int))
+	fmt.Println("Test 4: Value() =", valResult.(int))
 
 	// Test 5: Chained call - obj~>GetOuter()~>GetInner()~>Value()
 	v1, err := obj~>GetOuter()
@@ -76,13 +78,13 @@ func main() {
 	v3, err := v2~>Value()
 	assert(err == nil, "chain step 3 error")
 	assert(v3.(int) == 42, "chain value mismatch")
-	println("Test 5: chained call =", v3.(int))
+	fmt.Println("Test 5: chained call =", v3.(int))
 
 	// Test 6: Call method on outer that uses inner
 	doubleVal, err := outerVal~>Double()
 	assert(err == nil, "Double error")
 	assert(doubleVal.(int) == 84, "Double mismatch")
-	println("Test 6: Double() =", doubleVal.(int))
+	fmt.Println("Test 6: Double() =", doubleVal.(int))
 
 	// Test 7: interface -> interface field access
 	var outerIface any = outer
@@ -91,7 +93,7 @@ func main() {
 	vFromField, err := innerFromOuter~>Value()
 	assert(err == nil, "Value from field error")
 	assert(vFromField.(int) == 42, "Value from field mismatch")
-	println("Test 7: inner field Value() =", vFromField.(int))
+	fmt.Println("Test 7: inner field Value() =", vFromField.(int))
 
-	println("dyn_nested_interface: ok")
+	fmt.Println("dyn_nested_interface: ok")
 }

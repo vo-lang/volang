@@ -1,6 +1,8 @@
 // Test: type assertion i.(T)
 package main
 
+
+import "fmt"
 type Speaker interface {
     Speak() string
 }
@@ -20,24 +22,24 @@ func testEmptyInterfaceAssertion() {
     e = 42
     v := e.(int)
     assert(v == 42, "e.(int) should be 42")
-    println("Test 1a PASSED: e.(int)")
+    fmt.Println("Test 1a PASSED: e.(int)")
     
     e = "hello"
     s := e.(string)
     assert(s == "hello", "e.(string) should be hello")
-    println("Test 1b PASSED: e.(string)")
+    fmt.Println("Test 1b PASSED: e.(string)")
     
     e = 3.14
     f := e.(float64)
     assert(f == 3.14, "e.(float64) should be 3.14")
-    println("Test 1c PASSED: e.(float64)")
+    fmt.Println("Test 1c PASSED: e.(float64)")
     
     e = true
     b := e.(bool)
     assert(b, "e.(bool) should be true")
-    println("Test 1d PASSED: e.(bool)")
+    fmt.Println("Test 1d PASSED: e.(bool)")
     
-    println("Test 1 PASSED: empty interface assertion")
+    fmt.Println("Test 1 PASSED: empty interface assertion")
 }
 
 // Test 2: type assertion from named interface to concrete type
@@ -49,7 +51,7 @@ func testNamedInterfaceAssertion() {
     
     dog := s.(Dog)
     assert(dog.name == "Buddy", "dog.name should be Buddy")
-    println("Test 2 PASSED: Speaker.(Dog)")
+    fmt.Println("Test 2 PASSED: Speaker.(Dog)")
 }
 
 // Test 3: type assertion from empty interface to struct
@@ -61,7 +63,7 @@ func testStructAssertion() {
     
     dog := e.(Dog)
     assert(dog.name == "Rex", "dog.name should be Rex")
-    println("Test 3 PASSED: interface{}.(Dog)")
+    fmt.Println("Test 3 PASSED: interface{}.(Dog)")
 }
 
 // Test 4: type assertion from empty interface to interface
@@ -74,7 +76,7 @@ func testInterfaceToInterfaceAssertion() {
     speaker := e.(Speaker)
     result := speaker.Speak()
     assert(result == "woof", "speaker.Speak() should be woof")
-    println("Test 4 PASSED: interface to interface assertion")
+    fmt.Println("Test 4 PASSED: interface to interface assertion")
 }
 
 // Test 5: interface to interface with signature mismatch
@@ -104,12 +106,12 @@ func testSignatureMismatch() {
     ri := e.(ReturnsInt)
     result := ri.Foo()
     assert(result == 42, "ri.Foo() should be 42")
-    println("Test 5a PASSED: IntFoo implements ReturnsInt")
+    fmt.Println("Test 5a PASSED: IntFoo implements ReturnsInt")
     
     // Test 5b: This would panic - IntFoo does NOT implement ReturnsString
     // IntFoo.Foo() returns int, but ReturnsString.Foo() returns string
     // Uncomment to verify panic: _ = e.(ReturnsString)
-    println("Test 5b SKIPPED: signature mismatch detection verified (would panic)")
+    fmt.Println("Test 5b SKIPPED: signature mismatch detection verified (would panic)")
 }
 
 func main() {
@@ -119,5 +121,5 @@ func main() {
     testInterfaceToInterfaceAssertion()
     testSignatureMismatch()
     
-    println("type_assertion: ALL PASSED")
+    fmt.Println("type_assertion: ALL PASSED")
 }

@@ -1,6 +1,8 @@
 // Test: Fibonacci using goroutines and channels
 package main
 
+
+import "fmt"
 var result = make(chan int, 1)
 
 func fib(n int, ch chan int) {
@@ -26,5 +28,5 @@ func main() {
 	r := <-result
 	assert(r == 55, "fib(10) should be 55")
 	
-	println("fibonacci goroutine tests passed")
+	fmt.Println("fibonacci goroutine tests passed")
 }

@@ -2,6 +2,8 @@
 // Coverage: slice share underlying array, append reallocation
 package main
 
+
+import "fmt"
 // Test 1: slices share underlying array
 func testSliceAliasing() {
     arr := [5]int{1, 2, 3, 4, 5}
@@ -119,37 +121,37 @@ func testThreeIndexSlice() {
 }
 
 func main() {
-    println("Test 1: slice aliasing")
+    fmt.Println("Test 1: slice aliasing")
     testSliceAliasing()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: append realloc")
+    fmt.Println("Test 2: append realloc")
     testAppendRealloc()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: append within cap")
+    fmt.Println("Test 3: append within cap")
     testAppendWithinCap()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: reslice extend")
+    fmt.Println("Test 4: reslice extend")
     testResliceExtend()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: nil slice")
+    fmt.Println("Test 5: nil slice")
     testNilSlice()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: empty vs nil")
+    fmt.Println("Test 6: empty vs nil")
     testEmptyVsNil()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: copy overlap")
+    fmt.Println("Test 7: copy overlap")
     testCopyOverlap()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: three-index slice")
+    fmt.Println("Test 8: three-index slice")
     testThreeIndexSlice()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("slice_aliasing: ALL PASSED")
+    fmt.Println("slice_aliasing: ALL PASSED")
 }

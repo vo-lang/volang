@@ -2,6 +2,8 @@
 // Go spec: copy(dst, src) copies elements from src to dst, returns min(len(dst), len(src))
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic copy - same length
     src := []int{1, 2, 3, 4, 5}
@@ -45,5 +47,5 @@ func main() {
     assert(n6 == 5, "copied 5 bytes from string")
     assert(b[0] == 'h' && b[4] == 'o', "string bytes copied")
     
-    println("copy_builtin: ok")
+    fmt.Println("copy_builtin: ok")
 }

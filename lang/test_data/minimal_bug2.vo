@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -14,8 +16,8 @@ type Rect struct {
 func main() {
     // Create Point but don't assign to blank identifier
     p := Point{x: 100, y: 200}
-    println(p.x)  // 100
+    fmt.Println(p.x)  // 100
     
     r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
-    println(r.origin.x)  // should be 1
+    fmt.Println(r.origin.x)  // should be 1
 }

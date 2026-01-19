@@ -2,6 +2,8 @@
 // Go spec: multiple init() in same file execute in declaration order
 package main
 
+
+import "fmt"
 var order []int
 
 func init() {
@@ -23,5 +25,5 @@ func main() {
     assert(order[1] == 2, "second init should be 2, got ", order[1])
     assert(order[2] == 3, "third init should be 3, got ", order[2])
     
-    println("multi_init_order: ok")
+    fmt.Println("multi_init_order: ok")
 }

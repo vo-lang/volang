@@ -1,6 +1,8 @@
 // Test: Package initialization features (Go spec compliance)
 package main
 
+
+import "fmt"
 // ============================================================
 // Test 1: Multiple init() functions called in source order
 // ============================================================
@@ -35,5 +37,5 @@ func main() {
     assert(globalA == 100, "Test 2a: globalA should be 100")
     assert(globalB == 200, "Test 2b: globalB should be 200")
     
-    println("package_init: ALL TESTS PASSED")
+    fmt.Println("package_init: ALL TESTS PASSED")
 }

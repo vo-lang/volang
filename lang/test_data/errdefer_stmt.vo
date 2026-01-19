@@ -1,6 +1,8 @@
 // Test: errdefer statement - cleanup on error only extension syntax
 package main
 
+
+import "fmt"
 // Error type implementation
 type MyError struct {
     msg string
@@ -41,40 +43,40 @@ func resetCounters() {
 
 func cleanup1() {
     cleanupCounter += 1
-    println("  cleanup1 executed, counter:", cleanupCounter)
+    fmt.Println("  cleanup1 executed, counter:", cleanupCounter)
 }
 
 func cleanup2() {
     cleanupCounter += 10
-    println("  cleanup2 executed, counter:", cleanupCounter)
+    fmt.Println("  cleanup2 executed, counter:", cleanupCounter)
 }
 
 func cleanup3() {
     cleanupCounter += 100
-    println("  cleanup3 executed, counter:", cleanupCounter)
+    fmt.Println("  cleanup3 executed, counter:", cleanupCounter)
 }
 
 func errdeferCleanup() {
     errdeferCounter += 1
-    println("  errdefer cleanup executed, counter:", errdeferCounter)
+    fmt.Println("  errdefer cleanup executed, counter:", errdeferCounter)
 }
 
 func deferCleanup() {
     deferCounter += 1
-    println("  defer cleanup executed, counter:", deferCounter)
+    fmt.Println("  defer cleanup executed, counter:", deferCounter)
 }
 
 // ============ Test 1: Basic errdefer on success path ============
 func testErrdeferSuccess() error {
     errdefer cleanup1()
-    println("  function body executing")
+    fmt.Println("  function body executing")
     return nil
 }
 
 // ============ Test 2: Basic errdefer on failure path ============
 func testErrdeferFailure() error {
     errdefer cleanup1()
-    println("  function body executing")
+    fmt.Println("  function body executing")
     fail newError("intentional failure")
 }
 
@@ -95,7 +97,7 @@ func testDeferVsErrdeferSuccess() error {
     defer deferCleanup()
     errdefer errdeferCleanup()
     
-    println("  function body executing")
+    fmt.Println("  function body executing")
     return nil
 }
 
@@ -104,7 +106,7 @@ func testDeferVsErrdeferFailure() error {
     defer deferCleanup()
     errdefer errdeferCleanup()
     
-    println("  function body executing")
+    fmt.Println("  function body executing")
     fail newError("failure to test defer vs errdefer")
 }
 
@@ -154,7 +156,7 @@ type Resource struct {
 
 func (r *Resource) close() {
     r.closed = true
-    println("  Resource", r.name, "closed")
+    fmt.Println("  Resource", r.name, "closed")
     cleanupCounter += 1
 }
 
@@ -166,7 +168,7 @@ func testErrdeferMethod(shouldFail bool) error {
         fail newError("resource operation failed")
     }
     
-    println("  Resource operation succeeded")
+    fmt.Println("  Resource operation succeeded")
     return nil
 }
 
@@ -183,14 +185,14 @@ func testErrdeferWithQuestion(succeed bool) error {
     
     mayFail(succeed)?
     
-    println("  after ? operator")
+    fmt.Println("  after ? operator")
     return nil
 }
 
 // ============ Test 11: Multiple resources with errdefer ============
 func acquireResource(name string) (*Resource, error) {
     res := &Resource{name: name, closed: false}
-    println("  Acquired resource:", name)
+    fmt.Println("  Acquired resource:", name)
     return res, nil
 }
 
@@ -214,7 +216,7 @@ func testMultipleResources(failAt int) error {
         fail newError("failed after res3")
     }
     
-    println("  All resources acquired successfully")
+    fmt.Println("  All resources acquired successfully")
     return nil
 }
 
@@ -223,7 +225,7 @@ func testErrdeferClosure(shouldFail bool) (int, error) {
     value := 100
     
     errdefer func() {
-        println("  errdefer closure, captured value:", value)
+        fmt.Println("  errdefer closure, captured value:", value)
         cleanupCounter = value
     }()
     
@@ -236,164 +238,164 @@ func testErrdeferClosure(shouldFail bool) (int, error) {
 }
 
 func main() int {
-    println("=== Test 1: errdefer on success path ===")
+    fmt.Println("=== Test 1: errdefer on success path ===")
     resetCounters()
     err := testErrdeferSuccess()
     assert(err == nil, "should succeed")
     assert(cleanupCounter == 0, "errdefer should NOT run on success")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 2: errdefer on failure path ===")
+    fmt.Println("")
+    fmt.Println("=== Test 2: errdefer on failure path ===")
     resetCounters()
     err = testErrdeferFailure()
     assert(err != nil, "should fail")
     assert(cleanupCounter == 1, "errdefer should run on failure")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 3a: Multiple errdefer on success ===")
+    fmt.Println("")
+    fmt.Println("=== Test 3a: Multiple errdefer on success ===")
     resetCounters()
     err = testMultipleErrdefer(false)
     assert(err == nil, "should succeed")
     assert(cleanupCounter == 0, "no errdefer should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 3b: Multiple errdefer on failure (LIFO) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 3b: Multiple errdefer on failure (LIFO) ===")
     resetCounters()
     err = testMultipleErrdefer(true)
     assert(err != nil, "should fail")
     assert(cleanupCounter == 111, "all errdefer should run: 100+10+1=111")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 4: defer vs errdefer on success ===")
+    fmt.Println("")
+    fmt.Println("=== Test 4: defer vs errdefer on success ===")
     resetCounters()
     err = testDeferVsErrdeferSuccess()
     assert(err == nil, "should succeed")
     assert(deferCounter == 1, "defer should run")
     assert(errdeferCounter == 0, "errdefer should NOT run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 5: defer vs errdefer on failure ===")
+    fmt.Println("")
+    fmt.Println("=== Test 5: defer vs errdefer on failure ===")
     resetCounters()
     err = testDeferVsErrdeferFailure()
     assert(err != nil, "should fail")
     assert(deferCounter == 1, "defer should run")
     assert(errdeferCounter == 1, "errdefer should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 6a: errdefer with return value (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 6a: errdefer with return value (success) ===")
     resetCounters()
     val, err := testErrdeferWithReturn(false)
     assert(err == nil, "should succeed")
     assert(val == 42, "should return 42")
     assert(cleanupCounter == 0, "errdefer should NOT run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 6b: errdefer with return value (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 6b: errdefer with return value (failure) ===")
     resetCounters()
     _, err = testErrdeferWithReturn(true)
     assert(err != nil, "should fail")
     assert(cleanupCounter == 1, "errdefer should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 7: errdefer in nested control flow ===")
+    fmt.Println("")
+    fmt.Println("=== Test 7: errdefer in nested control flow ===")
     resetCounters()
     err = testErrdeferNested(5)
     assert(err != nil, "should fail")
     assert(cleanupCounter >= 1, "at least cleanup1 should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 8a: Interleaved defer/errdefer (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 8a: Interleaved defer/errdefer (success) ===")
     resetCounters()
     err = testInterleavedDeferErrdefer(false)
     assert(err == nil, "should succeed")
     assert(deferCounter == 2, "both defers should run")
     assert(cleanupCounter == 0, "no errdefer should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 8b: Interleaved defer/errdefer (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 8b: Interleaved defer/errdefer (failure) ===")
     resetCounters()
     err = testInterleavedDeferErrdefer(true)
     assert(err != nil, "should fail")
     assert(deferCounter == 2, "both defers should run")
     assert(cleanupCounter == 11, "both errdefer should run: 10+1=11")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 9a: errdefer method call (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 9a: errdefer method call (success) ===")
     resetCounters()
     err = testErrdeferMethod(false)
     assert(err == nil, "should succeed")
     assert(cleanupCounter == 0, "resource should NOT be closed")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 9b: errdefer method call (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 9b: errdefer method call (failure) ===")
     resetCounters()
     err = testErrdeferMethod(true)
     assert(err != nil, "should fail")
     assert(cleanupCounter == 1, "resource should be closed")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 10a: errdefer with ? operator (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 10a: errdefer with ? operator (success) ===")
     resetCounters()
     err = testErrdeferWithQuestion(true)
     assert(err == nil, "should succeed")
     assert(cleanupCounter == 0, "errdefer should NOT run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 10b: errdefer with ? operator (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 10b: errdefer with ? operator (failure) ===")
     resetCounters()
     err = testErrdeferWithQuestion(false)
     assert(err != nil, "should fail from ?")
     assert(cleanupCounter == 1, "errdefer should run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 11a: Multiple resources (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 11a: Multiple resources (success) ===")
     resetCounters()
     err = testMultipleResources(0)
     assert(err == nil, "should succeed")
     assert(cleanupCounter == 0, "no resources should be closed")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 11b: Multiple resources (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 11b: Multiple resources (failure) ===")
     resetCounters()
     err = testMultipleResources(3)
     assert(err != nil, "should fail")
     assert(cleanupCounter == 3, "all 3 resources should be closed")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 12a: errdefer closure (success) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 12a: errdefer closure (success) ===")
     resetCounters()
     val, err = testErrdeferClosure(false)
     assert(err == nil, "should succeed")
     assert(val == 200, "should return 200")
     assert(cleanupCounter == 0, "errdefer closure should NOT run")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 12b: errdefer closure (failure) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 12b: errdefer closure (failure) ===")
     resetCounters()
     _, err = testErrdeferClosure(true)
     assert(err != nil, "should fail")
     assert(cleanupCounter == 200, "errdefer closure should capture updated value")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== All errdefer tests PASSED ===")
+    fmt.Println("")
+    fmt.Println("=== All errdefer tests PASSED ===")
     return 0
 }

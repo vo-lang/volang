@@ -2,6 +2,8 @@
 // Break in type switch should only break from the switch, not outer loop
 package main
 
+
+import "fmt"
 func getValues() []interface{} {
     return []interface{}{1, "hello", 3.14, true, 2, "world"}
 }
@@ -92,25 +94,25 @@ func testTypeSwitchInSwitch() int {
 }
 
 func main() {
-    println("Test 1: break in type switch inside loop")
+    fmt.Println("Test 1: break in type switch inside loop")
     r1 := testTypeSwitchBreakInLoop()
     assert(r1 == 112, "should be 112, got", r1)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: labeled break in type switch")
+    fmt.Println("Test 2: labeled break in type switch")
     r2 := testTypeSwitchLabeledBreak()
     assert(r2 == 1, "should be 1, got", r2)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: nested type switches")
+    fmt.Println("Test 3: nested type switches")
     r3 := testNestedTypeSwitch()
     assert(r3 == "I.S.", "should be 'I.S.', got", r3)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: type switch inside regular switch")
+    fmt.Println("Test 4: type switch inside regular switch")
     r4 := testTypeSwitchInSwitch()
     assert(r4 == 84, "should be 84, got", r4)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("type_switch_nested_break: ALL PASSED")
+    fmt.Println("type_switch_nested_break: ALL PASSED")
 }

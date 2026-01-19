@@ -1,7 +1,10 @@
 // Test dynamic access on slice with interface elements
 // Bug #2: dyn_get_index returns interface element with wrong itab for any
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 func main() {
     // Create a slice of errors
@@ -20,7 +23,7 @@ func main() {
     assert(e != nil, "error is nil")
     assert(e.Error() == "err1", "error message mismatch")
     
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

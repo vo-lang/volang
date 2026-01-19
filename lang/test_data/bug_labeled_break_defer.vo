@@ -2,6 +2,8 @@
 // Expected: defer should execute when function returns
 package main
 
+
+import "fmt"
 var globalResult string
 
 func testDefer() {
@@ -27,5 +29,5 @@ func main() {
     // Expected: "done,defer," 
     assert(globalResult == "done,defer,", "expected 'done,defer,', got '", globalResult, "'")
     
-    println("bug_labeled_break_defer: ok")
+    fmt.Println("bug_labeled_break_defer: ok")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func mustPanic(name string, f func()) {
     var caught any
     func() {
@@ -47,5 +49,5 @@ func main() {
     testIfaceEqPanicOnMap()
     testIfaceEqPanicOnFunc()
     testMapKeyInterfacePanicOnSliceKey()
-    println("iface_noncomparable_panics: ok")
+    fmt.Println("iface_noncomparable_panics: ok")
 }

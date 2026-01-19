@@ -2,6 +2,8 @@
 // Coverage: dyn call returning channel, operating on it
 package main
 
+
+import "fmt"
 type Producer struct {
 	bufSize int
 }
@@ -35,7 +37,7 @@ func main() {
 	ch <- 42
 	val := <-ch
 	assert(val == 42, "channel round-trip failed")
-	println("Test 1: channel round-trip =", val)
+	fmt.Println("Test 1: channel round-trip =", val)
 
 	// Test 2: String channel
 	schAny, err := obj~>MakeStringChan()
@@ -44,7 +46,7 @@ func main() {
 	sch <- "hello"
 	sval := <-sch
 	assert(sval == "hello", "string channel failed")
-	println("Test 2: string channel =", sval)
+	fmt.Println("Test 2: string channel =", sval)
 
 	// Test 3: Get pre-filled channel
 	filledAny, err := obj~>GetFilledChan()
@@ -55,7 +57,7 @@ func main() {
 	v2 := <-filled
 	v3 := <-filled
 	assert(v1 == 10 && v2 == 20 && v3 == 30, "filled channel values")
-	println("Test 3: filled channel values =", v1, v2, v3)
+	fmt.Println("Test 3: filled channel values =", v1, v2, v3)
 
 	// Test 4: LHS typed channel
 	var typedCh chan int
@@ -63,7 +65,7 @@ func main() {
 	assert(err == nil, "typed chan error")
 	typedCh <- 99
 	assert(<-typedCh == 99, "typed chan round-trip")
-	println("Test 4: typed channel ok")
+	fmt.Println("Test 4: typed channel ok")
 
-	println("dyn_return_channel: ok")
+	fmt.Println("dyn_return_channel: ok")
 }

@@ -1,8 +1,10 @@
 // Test: multi-layer closures capturing and modifying the same variable
 package main
 
+
+import "fmt"
 func main() {
-    println("Test 1: Three closures sharing one variable")
+    fmt.Println("Test 1: Three closures sharing one variable")
     shared := 0
     inc := func() { shared += 1 }
     dec := func() { shared -= 1 }
@@ -14,7 +16,7 @@ func main() {
     dec()    // 3
     assert(shared == 3, "shared should be 3 after inc,inc,double,dec")
     
-    println("Test 2: Closure factory returning closures that share state")
+    fmt.Println("Test 2: Closure factory returning closures that share state")
     makeCounter := func() (func() int, func() int, func()) {
         count := 0
         getter := func() int { return count }
@@ -34,7 +36,7 @@ func main() {
     reset1()
     assert(get1() == 0, "get1() should be 0 after reset")
     
-    println("Test 3: Independent counters")
+    fmt.Println("Test 3: Independent counters")
     get2, inc2, _ := makeCounter()
     assert(get2() == 0, "counter2 should start at 0")
     inc2()
@@ -43,7 +45,7 @@ func main() {
     assert(get2() == 3, "counter2 should be 3")
     assert(get1() == 0, "counter1 should still be 0")
     
-    println("Test 4: Nested closure capturing outer's captured variable")
+    fmt.Println("Test 4: Nested closure capturing outer's captured variable")
     outer := 100
     makeNested := func() func() func() int {
         return func() func() int {
@@ -58,7 +60,7 @@ func main() {
     innermost2 := makeNested()()()
     assert(innermost2 == 200, "innermost2 should return 200 after outer changed")
     
-    println("Test 5: Closure modifying captured variable used by another closure")
+    fmt.Println("Test 5: Closure modifying captured variable used by another closure")
     value := 10
     reader := func() int { return value }
     writer := func(v int) { value = v }
@@ -69,7 +71,7 @@ func main() {
     writer(reader() * 2)
     assert(reader() == 100, "reader should return 100")
     
-    println("Test 6: Closure capturing loop variable with modification")
+    fmt.Println("Test 6: Closure capturing loop variable with modification")
     sum := 0
     adders := make([]func(), 5)
     for i := 0; i < 5; i += 1 {
@@ -81,7 +83,7 @@ func main() {
     }
     assert(sum == 10, "sum should be 0+1+2+3+4=10")
     
-    println("Test 7: Recursive-like pattern with closures")
+    fmt.Println("Test 7: Recursive-like pattern with closures")
     var factorial func(int) int
     factorial = func(n int) int {
         if n <= 1 {
@@ -92,7 +94,7 @@ func main() {
     assert(factorial(5) == 120, "factorial(5) should be 120")
     assert(factorial(0) == 1, "factorial(0) should be 1")
     
-    println("Test 8: Closure capturing struct field via pointer")
+    fmt.Println("Test 8: Closure capturing struct field via pointer")
     type Counter struct {
         val int
     }
@@ -105,5 +107,5 @@ func main() {
     incCounter()
     assert(getCounter() == 3, "counter.val should be 3")
     
-    println("closure_multilayer_capture: ALL PASSED")
+    fmt.Println("closure_multilayer_capture: ALL PASSED")
 }

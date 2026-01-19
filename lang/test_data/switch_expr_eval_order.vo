@@ -2,6 +2,8 @@
 // Coverage: evaluation order of switch tag, case expressions, side effects
 package main
 
+
+import "fmt"
 var evalLog []string
 
 func logAndReturn(name string, val int) int {
@@ -118,5 +120,5 @@ func main() {
 	assert(evalLog[5] == "m5", "m5")
 	assert(evalLog[6] == "45", "45 body")
 
-	println("switch_expr_eval_order: PASSED")
+	fmt.Println("switch_expr_eval_order: PASSED")
 }

@@ -2,6 +2,8 @@
 // Go spec: all RHS evaluated before any LHS assignment
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic variable swap
     a, b := 1, 2
@@ -60,5 +62,5 @@ func main() {
     assert(pt.X == 10, "pt.X should be 10")
     assert(pt.Y == 5, "pt.Y should be 5")
     
-    println("multi_assign_swap: ok")
+    fmt.Println("multi_assign_swap: ok")
 }

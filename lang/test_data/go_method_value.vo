@@ -2,6 +2,8 @@
 // Tests using method values as goroutine functions
 package main
 
+
+import "fmt"
 type Worker struct {
     id     int
     done   chan bool
@@ -92,5 +94,5 @@ func main() {
     r2 := <-w2.result
     assert(r2 == 21, "interface method goroutine result should be 21, got ", r2)
     
-    println("go_method_value: ok")
+    fmt.Println("go_method_value: ok")
 }

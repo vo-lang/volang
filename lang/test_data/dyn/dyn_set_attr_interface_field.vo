@@ -2,6 +2,8 @@
 // Bug #2: Interface field type mismatch in dyn_set_attr
 package main
 
+
+import "fmt"
 type Reader interface {
 	Read() string
 }
@@ -33,7 +35,7 @@ func testSetInterfaceField() error {
 	assert(c.Reader != nil, "Reader should not be nil")
 	result := c.Reader.Read()
 	assert(result == "hello", "Reader.Read() should return hello")
-	println("Test 1 (set interface field):", result)
+	fmt.Println("Test 1 (set interface field):", result)
 	
 	// Test 2: Set with different implementation
 	r2 := &MyReader{data: "world"}
@@ -41,7 +43,7 @@ func testSetInterfaceField() error {
 	
 	result2 := c.Reader.Read()
 	assert(result2 == "world", "Reader.Read() should return world")
-	println("Test 2 (set different impl):", result2)
+	fmt.Println("Test 2 (set different impl):", result2)
 	
 	return nil
 }
@@ -49,10 +51,10 @@ func testSetInterfaceField() error {
 func main() {
 	err := testSetInterfaceField()
 	if err != nil {
-		println("Error:", err.Error())
+		fmt.Println("Error:", err.Error())
 	}
 	assert(err == nil, "testSetInterfaceField should succeed")
-	println("done")
+	fmt.Println("done")
 }
 
 // expected output:

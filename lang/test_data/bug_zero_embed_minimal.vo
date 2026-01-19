@@ -1,6 +1,8 @@
 // Minimal test for zero-value embedded field method
 package main
 
+
+import "fmt"
 type Inner struct {
     value int
 }
@@ -23,13 +25,13 @@ func main() {
     var o1 Outer
     v := o1.GetValue()  // value receiver on zero Inner
     assert(v == 0, "zero Inner.GetValue should be 0")
-    println("test 1 ok")
+    fmt.Println("test 1 ok")
     
     // Test 2: Set via embedded pointer receiver
     var o2 Outer
     o2.SetValue(42)
     assert(o2.GetValue() == 42, "after SetValue")
-    println("test 2 ok")
+    fmt.Println("test 2 ok")
     
-    println("done")
+    fmt.Println("done")
 }

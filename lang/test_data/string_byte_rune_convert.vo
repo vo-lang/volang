@@ -1,6 +1,8 @@
 // Test: String <-> []byte <-> []rune conversion edge cases
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Empty string conversions
     s1 := ""
@@ -66,5 +68,5 @@ func main() {
     assert(len(r8) == 1, "emoji len([]rune) should be 1, got ", len(r8))
     assert(string(r8) == "😀", "emoji roundtrip")
     
-    println("string_byte_rune_convert: PASSED")
+    fmt.Println("string_byte_rune_convert: PASSED")
 }

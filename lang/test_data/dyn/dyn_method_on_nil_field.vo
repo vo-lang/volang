@@ -2,7 +2,10 @@
 // Accessing a nil pointer field and calling method on it
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 import "dyn"
 
 type Inner struct {
@@ -41,5 +44,5 @@ func main() {
     val := innerField2~>GetValue()?
     assert(val.(int) == 42, "GetValue should return 42")
     
-    println("dyn_method_on_nil_field: ok")
+    fmt.Println("dyn_method_on_nil_field: ok")
 }

@@ -2,6 +2,8 @@
 // Coverage: a, m[k] = x, y and evaluation order
 package main
 
+
+import "fmt"
 var evalLog []string
 
 func logKey(name string, k string) string {
@@ -96,5 +98,5 @@ func main() {
 	m9["dst"], _ = m9["src"], 0
 	assert(m9["dst"] == 50, "m9[dst] should be 50")
 
-	println("multi_assign_map_lhs: PASSED")
+	fmt.Println("multi_assign_map_lhs: PASSED")
 }

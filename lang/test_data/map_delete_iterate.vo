@@ -2,13 +2,15 @@
 // Tests delete on non-existent keys, delete during iteration, etc.
 package main
 
+
+import "fmt"
 func main() {
     testDeleteNonExistent()
     testDeleteDuringIteration()
     testDeleteAllKeys()
     testDeleteThenAdd()
     testNilMapDelete()
-    println("map_delete_iterate: ok")
+    fmt.Println("map_delete_iterate: ok")
 }
 
 func testDeleteNonExistent() {

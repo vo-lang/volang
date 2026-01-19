@@ -202,29 +202,29 @@ def clean_caches(target: str = 'all'):
 
 
 def build_wasm(release: bool = False):
-    """Build vo-web for WASM target."""
-    profile = 'release' if release else 'debug'
-    target = 'wasm32-unknown-unknown'
-    output_dir = PROJECT_ROOT / 'target' / target / profile
+    """Build vo-web for WASM using wasm-pack.
     
-    print(f"{Colors.BOLD}Building vo-web for WASM ({profile})...{Colors.NC}")
+    Note: Always builds in release mode because wasm-pack 0.13.1 has issues
+    with --dev + --features combination. Release builds are also what
+    `d.py test wasm` uses for consistency.
+    """
+    _ = release  # Always use release for now
     
-    build_cmd = ['cargo', 'build', '-p', 'vo-web', '--target', target]
-    if release:
-        build_cmd.append('--release')
+    print(f"{Colors.BOLD}Building vo-web WASM...{Colors.NC}")
+    
+    build_cmd = ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--features', 'compiler']
     
     code, stdout, stderr = run_cmd(build_cmd, capture=False)
     if code != 0:
         print(f"{Colors.RED}WASM build failed{Colors.NC}")
         sys.exit(1)
     
-    wasm_file = output_dir / 'vo_web.wasm'
+    pkg_dir = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'pkg'
+    wasm_file = pkg_dir / 'vo_web_bg.wasm'
     if wasm_file.exists():
         size_kb = wasm_file.stat().st_size / 1024
-        print(f"\n{Colors.GREEN}✓ Built:{Colors.NC} {wasm_file}")
-        print(f"  Size: {size_kb:.1f} KB")
-        print(f"\n{Colors.DIM}To generate JS bindings, use wasm-pack:{Colors.NC}")
-        print(f"  wasm-pack build lang/crates/vo-web --target web" + (" --release" if release else ""))
+        print(f"\n{Colors.GREEN}✓ Built:{Colors.NC} {pkg_dir}")
+        print(f"  WASM size: {size_kb:.1f} KB")
     else:
         print(f"{Colors.GREEN}✓ Build completed{Colors.NC}")
 
@@ -766,13 +766,50 @@ class TestRunner:
         """Run WASM tests using vo-web test runner."""
         print(f"{Colors.BOLD}Running WASM tests (vo-web)...{Colors.NC}\n")
         
-        # Check if pkg exists, build if not
+        # Check if wasm needs rebuild
         pkg_dir = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'pkg'
-        if not pkg_dir.exists():
-            print(f"{Colors.DIM}Building vo-web WASM (first time)...{Colors.NC}")
-            code, _, stderr = run_cmd(['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--out-dir', 'pkg'])
+        wasm_file = pkg_dir / 'vo_web_bg.wasm'
+        needs_build = not wasm_file.exists()
+        
+        if not needs_build:
+            # Check if any source files are newer than wasm
+            wasm_mtime = wasm_file.stat().st_mtime
+            
+            # Check vo-web sources
+            vo_web_src = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'src'
+            for f in vo_web_src.rglob('*.rs'):
+                if f.stat().st_mtime > wasm_mtime:
+                    needs_build = True
+                    break
+            
+            # Check stdlib (embedded via include_dir!)
+            if not needs_build:
+                stdlib_dir = PROJECT_ROOT / 'lang' / 'stdlib'
+                for f in stdlib_dir.rglob('*.vo'):
+                    if f.stat().st_mtime > wasm_mtime:
+                        needs_build = True
+                        break
+            
+            # Check vo-codegen, vo-analysis, vo-runtime (dependencies)
+            if not needs_build:
+                for crate in ['vo-codegen', 'vo-analysis', 'vo-runtime', 'vo-vm', 'vo-common-core']:
+                    crate_dir = PROJECT_ROOT / 'lang' / 'crates' / crate / 'src'
+                    if crate_dir.exists():
+                        for f in crate_dir.rglob('*.rs'):
+                            if f.stat().st_mtime > wasm_mtime:
+                                needs_build = True
+                                break
+                    if needs_build:
+                        break
+        
+        if needs_build:
+            print(f"{Colors.DIM}Building vo-web WASM...{Colors.NC}")
+            code, _, stderr = run_cmd(
+                ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--features', 'compiler'],
+                capture=False
+            )
             if code != 0:
-                print(f"{Colors.RED}wasm-pack build failed:{Colors.NC}\n{stderr}")
+                print(f"{Colors.RED}wasm-pack build failed{Colors.NC}")
                 sys.exit(1)
         
         # Run test runner

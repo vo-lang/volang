@@ -2,6 +2,8 @@
 // Go spec: blank identifier can be used to ignore values
 package main
 
+
+import "fmt"
 type Pair struct {
     first, second int
 }
@@ -106,5 +108,5 @@ func main() {
     }
     assert(isString, "should be string")
     
-    println("blank_identifier_complex: ok")
+    fmt.Println("blank_identifier_complex: ok")
 }

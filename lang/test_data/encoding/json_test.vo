@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
     "encoding/json"
 )
 
@@ -14,7 +15,7 @@ func main() {
     testBuilder()
     testNumber()
     testHelpers()
-    println("All JSON tests passed!")
+    fmt.Println("All JSON tests passed!")
 }
 
 func testParseSimple() {
@@ -46,7 +47,7 @@ func testParseSimple() {
     assert(err == nil, "parse null error")
     assert(v == nil, "parse null value")
 
-    println("  testParseSimple passed")
+    fmt.Println("  testParseSimple passed")
 }
 
 func testParseObject() {
@@ -74,7 +75,7 @@ func testParseObject() {
     assert(ok, "AsObject empty failed")
     assert(len(obj) == 0, "empty object len")
 
-    println("  testParseObject passed")
+    fmt.Println("  testParseObject passed")
 }
 
 func testParseArray() {
@@ -104,7 +105,7 @@ func testParseArray() {
     assert(ok, "AsArray empty failed")
     assert(len(arr) == 0, "empty array len")
 
-    println("  testParseArray passed")
+    fmt.Println("  testParseArray passed")
 }
 
 func testParseNested() {
@@ -134,7 +135,7 @@ func testParseNested() {
     countInt, _ := count.Int()
     assert(countInt == 42, "nested count")
 
-    println("  testParseNested passed")
+    fmt.Println("  testParseNested passed")
 }
 
 func testStringify() {
@@ -166,7 +167,7 @@ func testStringify() {
     assert(err == nil, "stringify null error")
     assert(string(data) == "null", "stringify null value")
 
-    println("  testStringify passed")
+    fmt.Println("  testStringify passed")
 }
 
 func testStringifyIndent() {
@@ -188,7 +189,7 @@ func testStringifyIndent() {
     }
     assert(hasNewline, "stringify indent should have newlines")
 
-    println("  testStringifyIndent passed")
+    fmt.Println("  testStringifyIndent passed")
 }
 
 func testBuilder() {
@@ -200,7 +201,7 @@ func testBuilder() {
     assert(len(arr) == 3, "builder array len")
     assert(arr[0].(string) == "a", "builder array[0]")
 
-    println("  testBuilder passed")
+    fmt.Println("  testBuilder passed")
 }
 
 func testNumber() {
@@ -224,7 +225,7 @@ func testNumber() {
     assert(err == nil, "int to float64 err")
     assert(f2 == 123.0, "int to float64 val")
 
-    println("  testNumber passed")
+    fmt.Println("  testNumber passed")
 }
 
 func testHelpers() {
@@ -249,12 +250,12 @@ func testHelpers() {
     assert(err == nil, "delete err")
     assert(!json.Has(obj, "foo"), "deleted foo")
 
-    println("  testHelpers passed")
+    fmt.Println("  testHelpers passed")
 }
 
 func assert(cond bool, msg string) {
     if !cond {
-        println("ASSERT FAILED:", msg)
+        fmt.Println("ASSERT FAILED:", msg)
         panic("assertion failed")
     }
 }

@@ -1,6 +1,9 @@
 package main
 
-import "iface"
+import (
+	"fmt"
+	"iface"
+)
 
 // MyGreeter embeds iface.Greeter using qualified name
 type MyGreeter interface {
@@ -22,7 +25,7 @@ func (p *Person) Farewell() string {
 
 func main() {
     var g MyGreeter = &Person{name: "World"}
-    println(g.Greet())
-    println(g.Farewell())
-    println("[GOX:OK]")
+    fmt.Println(g.Greet())
+    fmt.Println(g.Farewell())
+    fmt.Println("[GOX:OK]")
 }

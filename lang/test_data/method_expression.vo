@@ -1,6 +1,8 @@
 // Test: method values - bound method references
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
 }
@@ -54,5 +56,5 @@ func main() {
     // func (c *Counter) Increment() { c.value += 1 }
     // incFunc := c.Increment  // <- crashes VM
     
-    println("method_value_bound: ok")
+    fmt.Println("method_value_bound: ok")
 }

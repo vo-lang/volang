@@ -3,6 +3,8 @@
 // Pattern: r1~>Method() where r1 is result of obj~>Method()
 package main
 
+
+import "fmt"
 type Builder struct {
     value string
 }
@@ -44,5 +46,5 @@ func main() {
     assert(err == nil, "Build should succeed")
     assert(result.(string) == "say: hello world", "final result")
     
-    println("chained_method_calls: ok")
+    fmt.Println("chained_method_calls: ok")
 }

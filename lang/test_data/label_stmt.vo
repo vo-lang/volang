@@ -1,6 +1,8 @@
 // Test: label statements - break/continue with labels
 package main
 
+
+import "fmt"
 func main() {
 	// 1. break with label - exit outer loop
 	count1 := 0
@@ -59,5 +61,5 @@ outer3:
 	// Each outer: j=0,1 then break = 2 per outer = 6
 	assert(count4 == 6, "break no label")
 	
-	println("label statement tests passed")
+	fmt.Println("label statement tests passed")
 }

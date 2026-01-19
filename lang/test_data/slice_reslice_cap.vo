@@ -2,6 +2,8 @@
 // Coverage: slice capacity after various reslice operations
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: basic reslice preserves capacity
     arr := [5]int{1, 2, 3, 4, 5}
@@ -41,5 +43,5 @@ func main() {
     assert(len(m) == 3, "make len")
     assert(cap(m) == 10, "make cap")
     
-    println("slice_reslice_cap: ok")
+    fmt.Println("slice_reslice_cap: ok")
 }

@@ -2,11 +2,13 @@
 // Coverage: complex panic/recover scenarios with closures
 package main
 
+
+import "fmt"
 // Test 1: recover inside closure called from defer
 func testRecoverInClosure() int {
     defer func() {
         if r := recover(); r != nil {
-            println("recovered:", r)
+            fmt.Println("recovered:", r)
         }
     }()
     
@@ -119,36 +121,36 @@ func testPanicInDefer() (result string) {
 }
 
 func main() {
-    println("Test 1: recover in closure")
+    fmt.Println("Test 1: recover in closure")
     testRecoverInClosure()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: closure captures recover")
+    fmt.Println("Test 2: closure captures recover")
     r2 := testClosureCapturesRecover()
     assert(r2 == "caught", "should be caught, got", r2)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: nested closure panic")
+    fmt.Println("Test 3: nested closure panic")
     r3 := testNestedClosurePanic()
     // Inner recover catches, so outer continues
     assert(r3 == "-inner-after-outer", "expected -inner-after-outer, got", r3)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: panic closure value")
+    fmt.Println("Test 4: panic closure value")
     r4 := testPanicClosureValue()
     assert(r4 == "closure-panic", "expected closure-panic, got", r4)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: recover only in defer")
+    fmt.Println("Test 5: recover only in defer")
     r5 := testRecoverOnlyInDefer()
     // helper's recover doesn't work, but direct defer's does
     assert(r5 == "defer-caught", "expected defer-caught, got", r5)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: panic in defer")
+    fmt.Println("Test 6: panic in defer")
     r6 := testPanicInDefer()
     assert(r6 == "first-second", "expected first-second, got", r6)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("closure_panic_recover: ALL PASSED")
+    fmt.Println("closure_panic_recover: ALL PASSED")
 }

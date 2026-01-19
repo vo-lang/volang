@@ -2,6 +2,8 @@
 // Go spec: all LHS index expressions are evaluated before any assignment
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Index variable modified in same multi-assign
     arr := []int{10, 20, 30, 40, 50}
@@ -51,5 +53,5 @@ func main() {
     assert(item.vals[1] == 200, "item.vals[1] should be 200")
     assert(idx == 0, "idx should be 0")
     
-    println("multi_assign_index_modify: PASSED")
+    fmt.Println("multi_assign_index_modify: PASSED")
 }

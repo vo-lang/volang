@@ -2,6 +2,8 @@
 // Vo spec: struct keys are valid if all fields are comparable
 package main
 
+
+import "fmt"
 type Point struct {
     X, Y int
 }
@@ -64,5 +66,5 @@ func main() {
     m := map[Point]int{p1: 42}
     assert(m[p2] == 42, "equal struct keys should match")
     
-    println("map_struct_key: ok")
+    fmt.Println("map_struct_key: ok")
 }

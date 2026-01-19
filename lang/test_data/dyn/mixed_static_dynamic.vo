@@ -2,6 +2,8 @@
 // Verify that ~> and normal . access work correctly together.
 package main
 
+
+import "fmt"
 type Config struct {
     host string
     port int
@@ -55,5 +57,5 @@ func main() {
     port := configAny~>port?
     assert(port.(int) == 8080, "dynamic read of port")
     
-    println("mixed_static_dynamic: ok")
+    fmt.Println("mixed_static_dynamic: ok")
 }

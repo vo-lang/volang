@@ -2,7 +2,10 @@
 // BUG: nil slice dynamic index access causes runtime panic (null pointer dereference in slice.rs:28)
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 import "errors"
 
 type Node struct {
@@ -50,5 +53,5 @@ func main() {
     _, err = next~>value
     assert(err != nil, "access through nil pointer should error")
     
-    println("nil_handling: ok")
+    fmt.Println("nil_handling: ok")
 }

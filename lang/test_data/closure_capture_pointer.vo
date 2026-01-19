@@ -1,6 +1,8 @@
 // Test: Closure capturing pointer variables
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Closure captures pointer to struct
     type Counter struct {
@@ -71,5 +73,5 @@ func main() {
     assert(r2 == 20, "second double should be 20")
     assert(w.inner == 20, "w.inner should be 20")
     
-    println("closure_capture_pointer: PASSED")
+    fmt.Println("closure_capture_pointer: PASSED")
 }

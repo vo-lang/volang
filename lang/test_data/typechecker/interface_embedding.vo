@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Interface embedding and method set composition
 // Go spec: An interface can embed other interfaces, inheriting their methods
 
@@ -170,7 +172,7 @@ func testAnyToEmpty() {
     var rw ReadWriter = f
     e = rw
     
-    println("testAnyToEmpty: passed (no assertion needed)")
+    fmt.Println("testAnyToEmpty: passed (no assertion needed)")
 }
 
 // ============================================
@@ -221,5 +223,5 @@ func main() {
     testAnyToEmpty()
     testDisjointInterfaceEmbedding()
     
-    println("interface_embedding: ALL PASSED")
+    fmt.Println("interface_embedding: ALL PASSED")
 }

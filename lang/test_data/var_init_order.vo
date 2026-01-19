@@ -2,6 +2,8 @@
 // Go spec: $var_init runs before init() functions
 package main
 
+
+import "fmt"
 var globalValue = 42
 var anotherValue = 100
 
@@ -19,5 +21,5 @@ func main() {
     assert(globalValue == 43, "globalValue should be 43 (42+1 from init)")
     assert(anotherValue == 200, "anotherValue should be 200 (100*2 from init)")
     
-    println("var_init_order: ALL TESTS PASSED")
+    fmt.Println("var_init_order: ALL TESTS PASSED")
 }

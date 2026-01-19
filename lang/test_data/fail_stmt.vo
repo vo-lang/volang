@@ -1,6 +1,8 @@
 // Test: fail statement - error handling extension syntax
 package main
 
+
+import "fmt"
 // Error type implementation
 type MyError struct {
     msg string
@@ -120,84 +122,84 @@ func testComputedError(value int) error {
 }
 
 func main() int {
-    println("=== Test 1: Basic fail (success path) ===")
+    fmt.Println("=== Test 1: Basic fail (success path) ===")
     err := testBasicFail(false)
     assert(err == nil, "should succeed")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 1b: Basic fail (failure path) ===")
+    fmt.Println("")
+    fmt.Println("=== Test 1b: Basic fail (failure path) ===")
     err = testBasicFail(true)
     assert(err != nil, "should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 2: Sentinel errors ===")
+    fmt.Println("")
+    fmt.Println("=== Test 2: Sentinel errors ===")
     err = testFailWithSentinel(0)
     assert(err == nil, "code 0 should succeed")
     err = testFailWithSentinel(1)
     assert(err != nil, "code 1 should fail")
     err = testFailWithSentinel(2)
     assert(err != nil, "code 2 should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 3: Single return value ===")
+    fmt.Println("")
+    fmt.Println("=== Test 3: Single return value ===")
     val, err := getValue(true)
     assert(err == nil, "valid should succeed")
     assert(val == 42, "value should be 42")
     _, err = getValue(false)
     assert(err != nil, "invalid should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 4: Multiple return values ===")
+    fmt.Println("")
+    fmt.Println("=== Test 4: Multiple return values ===")
     v1, v2, err := getMultiple(true)
     assert(err == nil, "valid should succeed")
     assert(v1 == 100, "v1 should be 100")
     assert(v2 == "success", "v2 should be success")
     _, _, err = getMultiple(false)
     assert(err != nil, "invalid should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 5: Nested control flow ===")
+    fmt.Println("")
+    fmt.Println("=== Test 5: Nested control flow ===")
     err = testNestedFail(0)
     assert(err == nil, "depth 0 should succeed")
     err = testNestedFail(3)
     assert(err != nil, "depth 3 should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 6: Switch statement ===")
+    fmt.Println("")
+    fmt.Println("=== Test 6: Switch statement ===")
     err = testSwitchFail(3)
     assert(err == nil, "code 3 should succeed")
     err = testSwitchFail(1)
     assert(err != nil, "code 1 should fail")
     err = testSwitchFail(99)
     assert(err != nil, "code 99 should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 7: Partial success ===")
+    fmt.Println("")
+    fmt.Println("=== Test 7: Partial success ===")
     result, err := testPartialSuccess(3)
     assert(err == nil, "3 steps should succeed")
     assert(result == 3, "result should be 0+1+2=3")
     _, err = testPartialSuccess(10)
     assert(err != nil, "10 steps should fail at step 5")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== Test 8: Computed error ===")
+    fmt.Println("")
+    fmt.Println("=== Test 8: Computed error ===")
     err = testComputedError(50)
     assert(err == nil, "50 should succeed")
     err = testComputedError(-1)
     assert(err != nil, "negative should fail")
     err = testComputedError(200)
     assert(err != nil, "too large should fail")
-    println("PASSED")
+    fmt.Println("PASSED")
 
-    println("")
-    println("=== All fail statement tests PASSED ===")
+    fmt.Println("")
+    fmt.Println("=== All fail statement tests PASSED ===")
     return 0
 }

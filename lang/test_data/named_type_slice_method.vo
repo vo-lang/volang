@@ -2,6 +2,8 @@
 // Vo spec: "Any named type can have methods"
 package main
 
+
+import "fmt"
 type IntSlice []int
 
 func (s IntSlice) Sum() int {
@@ -64,5 +66,5 @@ func main() {
     var s3 IntSlice
     assert(s3.Sum() == 0, "empty slice sum should be 0")
     
-    println("named_type_slice_method: ok")
+    fmt.Println("named_type_slice_method: ok")
 }

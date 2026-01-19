@@ -2,6 +2,8 @@
 // Go allows calling pointer receiver methods on addressable composite literals
 package main
 
+
+import "fmt"
 type Point struct {
     X, Y int
 }
@@ -74,7 +76,7 @@ func main() {
     assert(slice[1].X == 60, "slice element Scale X")
     assert(slice[1].Y == 80, "slice element Scale Y")
     
-    println("composite_ptr_method: ok")
+    fmt.Println("composite_ptr_method: ok")
 }
 
 func getPoint() Point {

@@ -2,6 +2,8 @@
 // Coverage: Function returning multiple values directly spread to variadic parameter
 package main
 
+
+import "fmt"
 func pair() (int, int) {
 	return 10, 20
 }
@@ -89,5 +91,5 @@ func main() {
 	collected := collect(anySlice...)
 	assert(len(collected) == 3, "collect(anySlice...) len should be 3")
 	
-	println("multi_return_variadic_spread: ok")
+	fmt.Println("multi_return_variadic_spread: ok")
 }

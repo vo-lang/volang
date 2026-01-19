@@ -2,6 +2,8 @@
 // GoX supports pointers only for struct types
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -15,5 +17,5 @@ func main() {
     p := Point{1, 2}
     assert(p.x == 1, "p.x should be 1")
     assert(p.y == 2, "p.y should be 2")
-    println("pointer_type: ALL PASSED")
+    fmt.Println("pointer_type: ALL PASSED")
 }

@@ -2,7 +2,10 @@
 // This tests the DynCall protocol method and direct call on closures.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // Callable implements DynCall
 type Callable struct {
@@ -31,7 +34,7 @@ func testClosureDirectCall() {
     result, err := obj~>(10, 20)
     assert(err == nil, "closure direct call should succeed")
     assert(result.(int) == 30, "closure direct call should return 30")
-    println("closure~>(10, 20) =", result.(int))
+    fmt.Println("closure~>(10, 20) =", result.(int))
 }
 
 // Test DynCall protocol
@@ -43,17 +46,17 @@ func testDynCallProtocol() {
     result, err := obj~>(7)
     assert(err == nil, "DynCall should succeed")
     assert(result.(int) == 35, "DynCall should return 7*5=35")
-    println("Callable~>(7) =", result.(int))
+    fmt.Println("Callable~>(7) =", result.(int))
     
     // Wrong arg count should error
     _, err = obj~>(1, 2)
     assert(err != nil, "wrong arg count should error")
-    println("Callable~>(1,2): error (expected)")
+    fmt.Println("Callable~>(1,2): error (expected)")
     
     // Wrong arg type should error
     _, err = obj~>("wrong")
     assert(err != nil, "wrong arg type should error")
-    println("Callable~>(string): error (expected)")
+    fmt.Println("Callable~>(string): error (expected)")
 }
 
 // Test method value as callable
@@ -72,7 +75,7 @@ func testMethodValueCall() {
     result, err := method~>(50)
     assert(err == nil, "method value call should succeed")
     assert(result.(int) == 150, "method call should return 150")
-    println("c.Add~>(50) =", result.(int))
+    fmt.Println("c.Add~>(50) =", result.(int))
 }
 
 func (c *Calc) Add(x int) int {
@@ -87,5 +90,5 @@ func main() {
     testClosureDirectCall()
     testDynCallProtocol()
     testMethodValueCall()
-    println("dyn_call_direct: ok")
+    fmt.Println("dyn_call_direct: ok")
 }

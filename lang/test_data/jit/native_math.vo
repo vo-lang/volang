@@ -1,7 +1,10 @@
 // Native math function test
 package main
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 func main() {
     // Basic functions
@@ -44,5 +47,5 @@ func main() {
     posInf := math.Inf(1)
     assert(math.IsInf(posInf, 1), "Inf(1) should be +Inf")
     
-    println(1)
+    fmt.Println(1)
 }

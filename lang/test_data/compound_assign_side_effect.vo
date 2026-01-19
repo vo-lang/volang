@@ -1,6 +1,8 @@
 // Test: Compound assignment operators
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic compound operators
     x := 100
@@ -33,5 +35,5 @@ func main() {
     z >>= 2  // 4
     assert(z == 4, ">>= works")
     
-    println("compound_assign_side_effect: ok")
+    fmt.Println("compound_assign_side_effect: ok")
 }

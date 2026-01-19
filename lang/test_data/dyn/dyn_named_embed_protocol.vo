@@ -2,7 +2,10 @@
 // Named type should inherit the DynAttr implementation
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 type Base struct {
     data map[string]any
@@ -90,5 +93,5 @@ func main() {
     extraVal2 := objPtr~>extra?
     assert(extraVal2.(int) == 200, "extra should be 200")
     
-    println("dyn_named_embed_protocol: ok")
+    fmt.Println("dyn_named_embed_protocol: ok")
 }

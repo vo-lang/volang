@@ -2,6 +2,8 @@
 // This is a classic Go gotcha - an interface holding a typed nil is not == nil
 package main
 
+
+import "fmt"
 type Stringer interface {
     String() string
 }
@@ -101,5 +103,5 @@ func main() {
     var typedNilIface Stringer = (*MyType)(nil)
     assert(nilIface != typedNilIface, "nil interface != typed nil interface")
     
-    println("interface_typed_nil: ok")
+    fmt.Println("interface_typed_nil: ok")
 }

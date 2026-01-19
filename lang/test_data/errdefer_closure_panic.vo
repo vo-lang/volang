@@ -2,7 +2,10 @@
 // Coverage: complex error handling scenarios
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 var trace []string
 
@@ -49,7 +52,7 @@ func mixedDefers() (int, error) {
 func testMixedDeferOrder() {
     reset()
     _, _ = mixedDefers()
-    println("Actual trace:", trace)
+    fmt.Println("Actual trace:", trace)
     // According to Vo semantics, all defers (both regular and errdefer) run in LIFO order
     // Registration order: defer1, errdefer1, defer2, errdefer2
     // LIFO execution: errdefer2, defer2, errdefer1, defer1
@@ -111,21 +114,21 @@ func str(n int) string {
 }
 
 func main() {
-    println("Test 1: errdefer captures variable value")
+    fmt.Println("Test 1: errdefer captures variable value")
     testErrdeferCapture()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: mixed defer/errdefer ordering")
+    fmt.Println("Test 2: mixed defer/errdefer ordering")
     testMixedDeferOrder()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: errdefer skipped on success")
+    fmt.Println("Test 3: errdefer skipped on success")
     testErrdeferSkippedOnSuccess()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: nested errdefer")
+    fmt.Println("Test 4: nested errdefer")
     testNestedErrdefer()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("errdefer_closure_panic: ALL PASSED")
+    fmt.Println("errdefer_closure_panic: ALL PASSED")
 }

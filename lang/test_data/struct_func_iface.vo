@@ -1,6 +1,8 @@
 // Test: struct with func field returning interface{}
 package main
 
+
+import "fmt"
 type SimpleHandler struct {
     name     string
     priority int
@@ -35,5 +37,5 @@ func main() {
     assert(ok2 == true, "ok true")
     assert(msg2 == "ok", "msg ok")
     
-    println("struct_func_iface: PASSED")
+    fmt.Println("struct_func_iface: PASSED")
 }

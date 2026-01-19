@@ -2,7 +2,10 @@
 // Verify that errors from DynAttr/DynIndex are properly propagated.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 import "errors"
 
 // ValidatedStore requires values to pass validation
@@ -88,5 +91,5 @@ func main() {
     v = obj~>key1?
     assert(v.(string) == "value1", "original value should be unchanged")
     
-    println("protocol_error_handling: ok")
+    fmt.Println("protocol_error_handling: ok")
 }

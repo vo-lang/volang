@@ -1,6 +1,8 @@
 // Test: embedded field shadowing - outer field shadows promoted field
 package main
 
+
+import "fmt"
 type Inner struct {
 	value int
 }
@@ -46,6 +48,6 @@ func main() {
 	assert(d.Outer.value == 5, "d.Outer.value should be 5")
 	assert(d.Outer.Inner.value == 3, "d.Outer.Inner.value should be 3")
 	
-	println("shadowing tests passed")
+	fmt.Println("shadowing tests passed")
 }
 

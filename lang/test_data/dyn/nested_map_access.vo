@@ -2,6 +2,8 @@
 // BUG: Nested map[string]any access causes issues
 package main
 
+
+import "fmt"
 func main() error {
     // Create nested map structure
     inner1 := map[string]any{
@@ -56,6 +58,6 @@ func main() error {
     assert(inner1["x"].(int) == 100, "original inner1 x should be updated")
     assert(inner1["z"].(int) == 30, "original inner1 z should be added")
     
-    println("nested_map_access: ok")
+    fmt.Println("nested_map_access: ok")
     return nil
 }

@@ -2,6 +2,8 @@
 // Multiple goroutines accessing/modifying same object dynamically.
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
     name  string
@@ -162,6 +164,6 @@ func main() error {
     // 30 * 10 = 300
     assert(parallelSum == 300, "parallel sum should be 300, got ", parallelSum)
     
-    println("dyn_concurrent_modify: ok")
+    fmt.Println("dyn_concurrent_modify: ok")
     return nil
 }

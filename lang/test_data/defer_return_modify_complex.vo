@@ -2,6 +2,8 @@
 // Coverage: Interaction between defer, named returns, panic/recover, and closures
 package main
 
+
+import "fmt"
 // Test 1: defer modifies named return after panic/recover
 func recoverModify() (result int) {
 	defer func() {
@@ -111,5 +113,5 @@ func main() {
 	r7 := loopDefer()
 	assert(r7 == 103, "loopDefer should return 103, got ", r7)
 	
-	println("defer_return_modify_complex: ok")
+	fmt.Println("defer_return_modify_complex: ok")
 }

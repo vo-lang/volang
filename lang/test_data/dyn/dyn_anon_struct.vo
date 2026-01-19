@@ -2,6 +2,8 @@
 // Verifies that ~> operator works on struct{...} types.
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Anonymous struct as any
     anon := struct {
@@ -84,7 +86,7 @@ func main() {
     assert(err == nil, "Count access error")
     assert(count.(int) == 100, "Count mismatch")
 
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

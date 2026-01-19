@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: 栈上数组 for-range 遍历（index + value）
     var arr1 [5]int
@@ -14,7 +16,7 @@ func main() {
         sum1 = sum1 + v
     }
     assert(sum1 == 150)
-    println("Test 1 (with value):", sum1)
+    fmt.Println("Test 1 (with value):", sum1)
 
     // Test 2: 栈上数组 for-range 遍历（index + value）
     var arr2 [3]int
@@ -27,7 +29,7 @@ func main() {
         sum2 = sum2 + v
     }
     assert(sum2 == 600)
-    println("Test 2 (index + value):", sum2)
+    fmt.Println("Test 2 (index + value):", sum2)
 
     // Test 3: 栈上数组 for-range 遍历（只用 value）
     var arr3 [4]int
@@ -41,7 +43,7 @@ func main() {
         product = product * v
     }
     assert(product == 24)
-    println("Test 3 (value only):", product)
+    fmt.Println("Test 3 (value only):", product)
 
     // Test 4: 使用字面量初始化的栈上数组
     arr4 := [3]int{7, 8, 9}
@@ -51,7 +53,7 @@ func main() {
     }
     // sum4 = (0+7) + (1+8) + (2+9) = 7 + 9 + 11 = 27
     assert(sum4 == 27)
-    println("Test 4 (literal init):", sum4)
+    fmt.Println("Test 4 (literal init):", sum4)
 
     // Test 5: 修改数组不影响迭代（值语义）
     var arr5 [3]int
@@ -66,7 +68,7 @@ func main() {
     }
     // 迭代使用原始值，不受修改影响
     assert(sum5 == 6)
-    println("Test 5 (value semantics):", sum5)
+    fmt.Println("Test 5 (value semantics):", sum5)
 
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

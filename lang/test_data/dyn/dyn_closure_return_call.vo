@@ -2,6 +2,8 @@
 // obj~>GetFunc() returns func, then call that func dynamically
 package main
 
+
+import "fmt"
 type Calculator struct {
     base int
 }
@@ -76,5 +78,5 @@ func main() {
     assert(mul2(10) == 20, "10 * 2 = 20")
     assert(mul3(10) == 30, "10 * 3 = 30")
     
-    println("dyn_closure_return_call: ok")
+    fmt.Println("dyn_closure_return_call: ok")
 }

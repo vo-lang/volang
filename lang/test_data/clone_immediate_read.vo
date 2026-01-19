@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -16,8 +18,8 @@ func main() {
     r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
     
     // Immediately read fields
-    println(r.origin.x)  // should be 1
-    println(r.origin.y)  // should be 2
-    println(r.width)     // should be 10
-    println(r.height)    // should be 5
+    fmt.Println(r.origin.x)  // should be 1
+    fmt.Println(r.origin.y)  // should be 2
+    fmt.Println(r.width)     // should be 10
+    fmt.Println(r.height)    // should be 5
 }

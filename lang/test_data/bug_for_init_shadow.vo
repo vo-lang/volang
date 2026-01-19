@@ -1,14 +1,16 @@
 // Bug reproduction: for init variable shadowing corrupts outer variable
 package main
 
+
+import "fmt"
 func main() {
     i := 999
-    println("before for, i =", i)
+    fmt.Println("before for, i =", i)
     
     for i := 0; i < 3; i++ {
-        println("inside for, i =", i)
+        fmt.Println("inside for, i =", i)
     }
     
-    println("after for, i =", i)
+    fmt.Println("after for, i =", i)
     assert(i == 999, "BUG: outer i should be 999, but got corrupted by for init shadow")
 }

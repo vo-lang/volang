@@ -2,6 +2,8 @@
 // Get channel field dynamically
 package main
 
+
+import "fmt"
 type Worker struct {
     name   string
     taskCh chan int
@@ -43,5 +45,5 @@ func main() {
     nilCh := nilChAny.(chan int)
     assert(nilCh == nil, "nil channel should be nil")
     
-    println("dyn_chan_field_access: ok")
+    fmt.Println("dyn_chan_field_access: ok")
 }

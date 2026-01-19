@@ -2,6 +2,8 @@
 // Extract methods dynamically and compose them.
 package main
 
+
+import "fmt"
 type MathOps struct {
     offset int
 }
@@ -130,6 +132,6 @@ func main() error {
     val, err = applyDynMethod(obj, "Square", 4)
     assert(err == nil && val == 16, "dynamic Square(4) should be 16")
     
-    println("dyn_method_composition: ok")
+    fmt.Println("dyn_method_composition: ok")
     return nil
 }

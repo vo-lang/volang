@@ -1,21 +1,23 @@
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Simple BitNot on uint constant
     var a uint = ^uint(0)
-    println("^uint(0) =", a)
+    fmt.Println("^uint(0) =", a)
     
     // Test 2: BitNot with shift
     var b uint = ^uint(0) >> 1
-    println("^uint(0) >> 1 =", b)
+    fmt.Println("^uint(0) >> 1 =", b)
     
     // Test 3: int conversion
     var c int = int(^uint(0) >> 1)
-    println("int(^uint(0) >> 1) =", c)
+    fmt.Println("int(^uint(0) >> 1) =", c)
     
     // Test 4: Direct constant
     const maxInt = int(^uint(0) >> 1)
-    println("const maxInt =", maxInt)
+    fmt.Println("const maxInt =", maxInt)
     
     // Expected on 64-bit:
     // ^uint(0) = 18446744073709551615

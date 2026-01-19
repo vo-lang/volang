@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Counter struct {
 	value int
 }
@@ -29,7 +31,7 @@ func main() {
 	// Type assert to Counter
 	counterAny, err := box~>counter
 	if err != nil {
-		println("dyn access failed:", err.Error())
+		fmt.Println("dyn access failed:", err.Error())
 		return
 	}
 	counter, ok := counterAny.(Counter)
@@ -37,20 +39,20 @@ func main() {
 	
 	// Call method on extracted Counter
 	assert(counter.Get() == 10, "expected 10")
-	println("Get() before Inc:", counter.Get())
+	fmt.Println("Get() before Inc:", counter.Get())
 	
 	// Inc modifies local copy (value semantics)
 	counter.Inc()
 	assert(counter.Get() == 11, "after Inc expected 11")
-	println("Get() after Inc:", counter.Get())
+	fmt.Println("Get() after Inc:", counter.Get())
 	
 	// Original should be unchanged (value semantics)
 	counterAny2, _ := box~>counter
 	counter2, _ := counterAny2.(Counter)
 	assert(counter2.Get() == 10, "original should be 10")
-	println("original unchanged:", counter2.Get())
+	fmt.Println("original unchanged:", counter2.Get())
 	
-	println("done")
+	fmt.Println("done")
 }
 
 // expected output:

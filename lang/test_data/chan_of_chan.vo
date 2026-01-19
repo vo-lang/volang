@@ -2,6 +2,8 @@
 // Tests channel of channel - a less common but valid pattern
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic chan chan int
     outer := make(chan chan int, 1)
@@ -58,5 +60,5 @@ func main() {
     sendOnly <- innerCh
     // Note: can't receive from sendOnly, just testing type compatibility
     
-    println("chan_of_chan: ok")
+    fmt.Println("chan_of_chan: ok")
 }

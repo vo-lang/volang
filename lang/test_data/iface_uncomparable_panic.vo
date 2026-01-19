@@ -2,8 +2,10 @@
 // Go spec: comparing interfaces with non-comparable dynamic types causes runtime panic
 package main
 
+
+import "fmt"
 func main() {
-    println("Test 1: Comparable types in interface")
+    fmt.Println("Test 1: Comparable types in interface")
     var i1 any = 42
     var i2 any = 42
     assert(i1 == i2, "interfaces with same int should be equal")
@@ -12,18 +14,18 @@ func main() {
     var s2 any = "hello"
     assert(s1 == s2, "interfaces with same string should be equal")
     
-    println("Test 2: Different types in interface")
+    fmt.Println("Test 2: Different types in interface")
     var int1 any = 42
     var str1 any = "42"
     assert(int1 != str1, "int and string should not be equal")
     
-    println("Test 3: Nil interface comparison")
+    fmt.Println("Test 3: Nil interface comparison")
     var n1 any = nil
     var n2 any = nil
     assert(n1 == n2, "nil interfaces should be equal")
     assert(n1 == nil, "nil interface should equal nil")
     
-    println("Test 4: Slice in interface - should panic on compare")
+    fmt.Println("Test 4: Slice in interface - should panic on compare")
     var slice1 any = []int{1, 2, 3}
     var slice2 any = []int{1, 2, 3}
     
@@ -38,7 +40,7 @@ func main() {
     }()
     assert(panicked, "comparing slices in interface should panic")
     
-    println("Test 5: Map in interface - should panic on compare")
+    fmt.Println("Test 5: Map in interface - should panic on compare")
     var map1 any = map[string]int{"a": 1}
     var map2 any = map[string]int{"a": 1}
     
@@ -53,7 +55,7 @@ func main() {
     }()
     assert(panicked, "comparing maps in interface should panic")
     
-    println("Test 6: Func in interface - should panic on compare")
+    fmt.Println("Test 6: Func in interface - should panic on compare")
     var fn1 any = func() {}
     var fn2 any = func() {}
     
@@ -68,5 +70,5 @@ func main() {
     }()
     assert(panicked, "comparing funcs in interface should panic")
     
-    println("iface_uncomparable_panic: ALL PASSED")
+    fmt.Println("iface_uncomparable_panic: ALL PASSED")
 }

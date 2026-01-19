@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // ============================================================================
 // Interface to Interface Assertion Test Cases
 // ============================================================================
@@ -90,7 +92,7 @@ func test1() {
     var r Reader = f
     result := r.Read()
     assert(result == "file read", "test1: Read failed")
-    println("Test 1 PASSED: basic interface method call")
+    fmt.Println("Test 1 PASSED: basic interface method call")
 }
 
 // Test 2: interface{} -> Reader
@@ -99,7 +101,7 @@ func test2() {
     var r Reader = e.(Reader)
     result := r.Read()
     assert(result == "file read", "test2: Read failed")
-    println("Test 2 PASSED: interface{} -> Reader")
+    fmt.Println("Test 2 PASSED: interface{} -> Reader")
 }
 
 // Test 3: ReadWriteCloser -> Reader (superset to subset)
@@ -109,7 +111,7 @@ func test3() {
     var r Reader = rwc.(Reader)
     result := r.Read()
     assert(result == "file read", "test3: Read failed")
-    println("Test 3 PASSED: ReadWriteCloser -> Reader")
+    fmt.Println("Test 3 PASSED: ReadWriteCloser -> Reader")
 }
 
 // Test 4: ReadWriteCloser -> Writer
@@ -118,7 +120,7 @@ func test4() {
     var rwc ReadWriteCloser = f
     var w Writer = rwc.(Writer)
     w.Write("test")
-    println("Test 4 PASSED: ReadWriteCloser -> Writer")
+    fmt.Println("Test 4 PASSED: ReadWriteCloser -> Writer")
 }
 
 // Test 5: ReadWriteCloser -> Closer
@@ -127,7 +129,7 @@ func test5() {
     var rwc ReadWriteCloser = f
     var c Closer = rwc.(Closer)
     c.Close()
-    println("Test 5 PASSED: ReadWriteCloser -> Closer")
+    fmt.Println("Test 5 PASSED: ReadWriteCloser -> Closer")
 }
 
 // Test 6: ReadWriteCloser -> ReadWriter
@@ -137,7 +139,7 @@ func test6() {
     var rw ReadWriter = rwc.(ReadWriter)
     result := rw.Read()
     assert(result == "file read", "test6: Read failed")
-    println("Test 6 PASSED: ReadWriteCloser -> ReadWriter")
+    fmt.Println("Test 6 PASSED: ReadWriteCloser -> ReadWriter")
 }
 
 // Test 7: Chain: interface{} -> ReadWriteCloser -> ReadWriter -> Reader
@@ -148,7 +150,7 @@ func test7() {
     var r Reader = rw.(Reader)
     result := r.Read()
     assert(result == "file read", "test7: chained assertion failed")
-    println("Test 7 PASSED: chained assertions")
+    fmt.Println("Test 7 PASSED: chained assertions")
 }
 
 // Test 8: Same interface assertion
@@ -157,7 +159,7 @@ func test8() {
     var r2 Reader = r1.(Reader)
     result := r2.Read()
     assert(result == "file read", "test8: same interface assertion failed")
-    println("Test 8 PASSED: same interface assertion")
+    fmt.Println("Test 8 PASSED: same interface assertion")
 }
 
 // Test 9: Multiple concrete types implementing same interface
@@ -170,7 +172,7 @@ func test9() {
     
     assert(result1 == "file read", "test9: File.Read failed")
     assert(result2 == "buffer read", "test9: Buffer.Read failed")
-    println("Test 9 PASSED: multiple concrete types")
+    fmt.Println("Test 9 PASSED: multiple concrete types")
 }
 
 // Test 10: IntGetter interface directly
@@ -179,7 +181,7 @@ func test10() {
     var ig IntGetter = b
     result := ig.Get()
     assert(result == 42, "test10: IntGetter.Get failed")
-    println("Test 10 PASSED: IntGetter interface")
+    fmt.Println("Test 10 PASSED: IntGetter interface")
 }
 
 // Test 11: StringGetter interface
@@ -188,7 +190,7 @@ func test11() {
     var sg StringGetter = b
     result := sg.Get()
     assert(result == "hello", "test11: StringGetter.Get failed")
-    println("Test 11 PASSED: StringGetter interface")
+    fmt.Println("Test 11 PASSED: StringGetter interface")
 }
 
 // Test 12: File can be asserted to Closer
@@ -196,7 +198,7 @@ func test12() {
     var e interface{} = File{}
     var c Closer = e.(Closer)
     c.Close()
-    println("Test 12 PASSED: File -> Closer")
+    fmt.Println("Test 12 PASSED: File -> Closer")
 }
 
 func main() {
@@ -213,6 +215,6 @@ func main() {
     test11()
     test12()
     
-    println("")
-    println("=== iface_to_iface_assertion: ALL 12 TESTS PASSED ===")
+    fmt.Println("")
+    fmt.Println("=== iface_to_iface_assertion: ALL 12 TESTS PASSED ===")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
 	x int
 	y int
@@ -22,7 +24,7 @@ func testDynFieldWithTryUnwrap() error {
 	y = obj~>y?
 	assert(y == 100, "expected y=100, got ", y)
 	
-	println("testDynFieldWithTryUnwrap passed")
+	fmt.Println("testDynFieldWithTryUnwrap passed")
 	return nil
 }
 
@@ -37,7 +39,7 @@ func testDynFieldTypeMismatch() error {
 	s = obj~>x?
 	
 	// Should not reach here
-	println("ERROR: should have failed with type mismatch, got s=", s)
+	fmt.Println("ERROR: should have failed with type mismatch, got s=", s)
 	return nil
 }
 
@@ -52,7 +54,7 @@ func testDynFieldNotFound() error {
 	z = obj~>z?
 	
 	// Should not reach here
-	println("ERROR: should have failed with field not found, got z=", z)
+	fmt.Println("ERROR: should have failed with field not found, got z=", z)
 	return nil
 }
 
@@ -69,25 +71,25 @@ func main() {
 	// Test 1: Basic dyn field access with ? (should pass)
 	err := testDynFieldWithTryUnwrap()
 	if err != nil {
-		println("testDynFieldWithTryUnwrap failed:", err.Error())
+		fmt.Println("testDynFieldWithTryUnwrap failed:", err.Error())
 		return
 	}
 	
 	// Test 2: Type mismatch (should fail with error, not panic)
 	err = testDynFieldTypeMismatch()
 	if err != nil {
-		println("testDynFieldTypeMismatch correctly failed with error:", err.Error())
+		fmt.Println("testDynFieldTypeMismatch correctly failed with error:", err.Error())
 	} else {
-		println("ERROR: testDynFieldTypeMismatch should have failed")
+		fmt.Println("ERROR: testDynFieldTypeMismatch should have failed")
 	}
 	
 	// Test 3: Field not found (should fail with error)
 	err = testDynFieldNotFound()
 	if err != nil {
-		println("testDynFieldNotFound correctly failed with error:", err.Error())
+		fmt.Println("testDynFieldNotFound correctly failed with error:", err.Error())
 	} else {
-		println("ERROR: testDynFieldNotFound should have failed")
+		fmt.Println("ERROR: testDynFieldNotFound should have failed")
 	}
 	
-	println("All tests completed")
+	fmt.Println("All tests completed")
 }

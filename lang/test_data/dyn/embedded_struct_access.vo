@@ -2,6 +2,8 @@
 // Verify that embedded fields are properly accessible.
 package main
 
+
+import "fmt"
 type Base struct {
     id   int
     name string
@@ -75,5 +77,5 @@ func main() {
     level := ddObj~>level?
     assert(level.(int) == 3, "level should be 3")
     
-    println("embedded_struct_access: ok")
+    fmt.Println("embedded_struct_access: ok")
 }

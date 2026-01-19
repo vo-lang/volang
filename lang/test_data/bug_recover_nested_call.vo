@@ -3,6 +3,8 @@
 // not when called from a nested function. But the outer defer should still catch it.
 package main
 
+
+import "fmt"
 func innerRecover() any {
     return recover()  // This should NOT catch the panic
 }
@@ -40,17 +42,17 @@ func testCase2() {
 }
 
 func main() int {
-    println("Test 1: Single defer with recover")
+    fmt.Println("Test 1: Single defer with recover")
     testCase1()
     assert(result == "caught", "should catch panic, got: " + result)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Two defers, inner calls nested recover")
+    fmt.Println("Test 2: Two defers, inner calls nested recover")
     testCase2()
     // The outer defer should catch since innerRecover() doesn't consume the panic
     assert(result == "outer-caught", "outer should catch, got: " + result)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("bug_recover_nested_call: ALL PASSED")
+    fmt.Println("bug_recover_nested_call: ALL PASSED")
     return 0
 }

@@ -1,14 +1,17 @@
 // Native function call test - strings package
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 func main() {
     s := "hello world"
     
     // Test strings.Index
     idx := strings.Index(s, "world")
-    println(idx)
+    fmt.Println(idx)
     assert(idx == 6, "Index should be 6")
     
     // Test strings.Contains

@@ -3,6 +3,8 @@
 // because it needs to dereference the pointer to get the value
 package main
 
+
+import "fmt"
 type Counter struct {
     count int
 }
@@ -104,5 +106,5 @@ func main() {
     assert(zero.GetCount() == 0, "zero value struct works")
     assert(zero.Add(10) == 10, "zero value struct with arg")
     
-    println("nil_value_receiver_method: PASSED")
+    fmt.Println("nil_value_receiver_method: PASSED")
 }

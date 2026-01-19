@@ -2,6 +2,8 @@
 // Spec: If no tag expression, cases are evaluated as boolean conditions
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic tagless switch
     x := 5
@@ -92,7 +94,7 @@ func main() {
     }
     assert(result7 == "starts with h", "tagless switch: string case, got: ", result7)
     
-    println("switch_tagless: ALL PASSED")
+    fmt.Println("switch_tagless: ALL PASSED")
 }
 
 func getNumber() int {

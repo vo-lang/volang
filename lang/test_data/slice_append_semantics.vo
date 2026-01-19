@@ -2,6 +2,8 @@
 // Append returns new slice; original may share backing array or not
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic append creates new slice header
     original := []int{1, 2, 3}
@@ -79,5 +81,5 @@ func main() {
     // view1 appended within capacity, may affect base2
     assert(view2[0] == 2, "view2[0] unchanged")
     
-    println("slice_append_semantics: ok")
+    fmt.Println("slice_append_semantics: ok")
 }

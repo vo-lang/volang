@@ -2,6 +2,8 @@
 // Complex interaction between type assertions and method dispatch
 package main
 
+
+import "fmt"
 type Inner struct {
     value int
 }
@@ -67,5 +69,5 @@ func main() {
     _, ok2 := f.(Inner)
     assert(!ok2, "type assertion to Inner should fail for string")
     
-    println("type_assertion_chain_method: ok")
+    fmt.Println("type_assertion_chain_method: ok")
 }

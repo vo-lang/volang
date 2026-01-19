@@ -2,6 +2,8 @@
 // Tests multi-level path assignment with dynamic access.
 package main
 
+
+import "fmt"
 type Level3 struct {
     Value int
 }
@@ -34,18 +36,18 @@ func main() {
     v1, err := obj~>L1~>L2~>L3~>Value
     assert(err == nil, "deep read should succeed")
     assert(v1.(int) == 0, "initial value should be 0")
-    println("initial value:", v1.(int))
+    fmt.Println("initial value:", v1.(int))
     
     // Test 2: Deep write - 4 levels
     testDeepStructWrite(obj)
     assert(root.L1.L2.L3.Value == 42, "deep write should modify value")
-    println("after deep write:", root.L1.L2.L3.Value)
+    fmt.Println("after deep write:", root.L1.L2.L3.Value)
     
     // Test 3: Deep read after write
     v2, err := obj~>L1~>L2~>L3~>Value
     assert(err == nil, "deep read after write should succeed")
     assert(v2.(int) == 42, "value should be 42")
-    println("read after write:", v2.(int))
+    fmt.Println("read after write:", v2.(int))
     
     // Test 4: Map-based nested structure
     data := map[string]any{
@@ -63,12 +65,12 @@ func main() {
     theme, err := mobj~>["user"]~>["profile"]~>["settings"]~>["theme"]
     assert(err == nil, "deep map read should succeed")
     assert(theme.(string) == "dark", "theme should be 'dark'")
-    println("theme:", theme.(string))
+    fmt.Println("theme:", theme.(string))
     
     // Deep write on maps
     testDeepMapWrite(mobj)
     assert(data["user"].(map[string]any)["profile"].(map[string]any)["settings"].(map[string]any)["theme"].(string) == "light", "deep map write should modify")
-    println("after map write:", data["user"].(map[string]any)["profile"].(map[string]any)["settings"].(map[string]any)["theme"].(string))
+    fmt.Println("after map write:", data["user"].(map[string]any)["profile"].(map[string]any)["settings"].(map[string]any)["theme"].(string))
     
     // Test 5: Mixed struct and map
     type Config struct {
@@ -87,14 +89,14 @@ func main() {
     v3, err := cobj~>Data~>["nested"]~>["value"]
     assert(err == nil, "mixed read should succeed")
     assert(v3.(int) == 100, "nested value should be 100")
-    println("mixed read:", v3.(int))
+    fmt.Println("mixed read:", v3.(int))
     
     // Write through struct then map
     testMixedWrite(cobj)
     assert(cfg.Data["nested"].(map[string]any)["value"].(int) == 200, "mixed write should modify")
-    println("mixed write:", cfg.Data["nested"].(map[string]any)["value"].(int))
+    fmt.Println("mixed write:", cfg.Data["nested"].(map[string]any)["value"].(int))
     
-    println("dyn_deep_chained_assign: ok")
+    fmt.Println("dyn_deep_chained_assign: ok")
 }
 
 func testDeepStructWrite(obj any) error {

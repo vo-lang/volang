@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test for pointer access to embedded structs
 
 // ============================================
@@ -39,7 +41,7 @@ func main() {
     testPromotedMethods()
     testPointerToEmbedded()
     
-    println("pointer_embedded: ALL PASSED")
+    fmt.Println("pointer_embedded: ALL PASSED")
 }
 
 // Test 1: Access embedded fields through pointer

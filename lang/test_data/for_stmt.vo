@@ -1,6 +1,8 @@
 // Test: for statement - all forms
 package main
 
+
+import "fmt"
 func main() {
 	// 1. Infinite loop with break
 	i := 0
@@ -132,5 +134,5 @@ func main() {
 	}
 	assert(outerCount == 20, "break in nested")
 	
-	println("for statement tests passed")
+	fmt.Println("for statement tests passed")
 }

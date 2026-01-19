@@ -2,6 +2,8 @@
 // Coverage: methods on named types, type conversion chains, method set inheritance
 package main
 
+
+import "fmt"
 type Int int
 
 func (i Int) Double() Int {
@@ -112,5 +114,5 @@ func main() {
     assert(empty.Sum() == 0, "empty sum")
     assert(empty.First() == 0, "empty first")
     
-    println("type_alias_method_chain: ok")
+    fmt.Println("type_alias_method_chain: ok")
 }

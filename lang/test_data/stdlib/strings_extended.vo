@@ -1,9 +1,12 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 func main() {
-    println("Testing extended strings functions...")
+    fmt.Println("Testing extended strings functions...")
     
     // Test Cut
     before, after, found := strings.Cut("hello:world", ":")
@@ -86,5 +89,5 @@ func main() {
     assert(parts2[0] == "a,", "SplitAfterN first part")
     assert(parts2[1] == "b,c,d", "SplitAfterN second part contains rest")
     
-    println("All extended strings tests passed!")
+    fmt.Println("All extended strings tests passed!")
 }

@@ -1,6 +1,8 @@
 // Test: type switch statement
 package main
 
+
+import "fmt"
 func main() {
 	// 1. Basic type switch with int
 	var i interface{} = 42
@@ -79,5 +81,5 @@ func main() {
 	}
 	assert(result == 201, "type switch with init and binding")
 	
-	println("type switch tests passed")
+	fmt.Println("type switch tests passed")
 }

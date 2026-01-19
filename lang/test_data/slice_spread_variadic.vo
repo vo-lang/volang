@@ -2,6 +2,8 @@
 // Tests various edge cases of spreading slices into variadic parameters
 package main
 
+
+import "fmt"
 // Basic variadic sum
 func sum(nums ...int) int {
     total := 0
@@ -154,54 +156,54 @@ func testLargeSpread() {
 }
 
 func main() int {
-    println("Test 1: Basic slice spread")
+    fmt.Println("Test 1: Basic slice spread")
     testBasicSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Empty slice spread")
+    fmt.Println("Test 2: Empty slice spread")
     testEmptySpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: Nil slice spread")
+    fmt.Println("Test 3: Nil slice spread")
     testNilSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: Mixed args and spread")
+    fmt.Println("Test 4: Mixed args and spread")
     testMixedArgsSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: Spread with leading params")
+    fmt.Println("Test 5: Spread with leading params")
     testSpreadWithPrefix()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: String slice spread")
+    fmt.Println("Test 6: String slice spread")
     testStringSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: append with spread")
+    fmt.Println("Test 7: append with spread")
     testAppendSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: Spread in closure")
+    fmt.Println("Test 8: Spread in closure")
     testSpreadInClosure()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 9: Variadic any with spread")
+    fmt.Println("Test 9: Variadic any with spread")
     testAnySpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 10: Double spread")
+    fmt.Println("Test 10: Double spread")
     testDoubleSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 11: Single element spread")
+    fmt.Println("Test 11: Single element spread")
     testSingleElementSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 12: Large slice spread")
+    fmt.Println("Test 12: Large slice spread")
     testLargeSpread()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("slice_spread_variadic: ALL PASSED")
+    fmt.Println("slice_spread_variadic: ALL PASSED")
     return 0
 }

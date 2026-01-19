@@ -2,6 +2,8 @@
 // Coverage: complex type switch scenarios
 package main
 
+
+import "fmt"
 type Inner struct {
     val int
 }
@@ -85,5 +87,5 @@ func main() {
     var nilIface any
     assert(multiCase(nilIface) == "nil", "nil interface")
     
-    println("nested_type_switch: ok")
+    fmt.Println("nested_type_switch: ok")
 }

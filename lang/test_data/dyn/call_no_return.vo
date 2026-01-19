@@ -2,6 +2,8 @@
 // Methods returning void should work correctly.
 package main
 
+
+import "fmt"
 type Counter struct {
     count int
 }
@@ -51,5 +53,5 @@ func main() {
     assert(err == nil, "SetTo(100) should succeed")
     assert(c.count == 100, "count should be 100")
     
-    println("call_no_return: ok")
+    fmt.Println("call_no_return: ok")
 }

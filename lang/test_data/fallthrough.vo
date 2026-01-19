@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func grade(score int) string {
 	var result string
 	switch {
@@ -33,13 +35,13 @@ func classify(n int) string {
 }
 
 func main() {
-	println("grade(95):", grade(95))
-	println("grade(85):", grade(85))
-	println("grade(75):", grade(75))
-	println("grade(65):", grade(65))
+	fmt.Println("grade(95):", grade(95))
+	fmt.Println("grade(85):", grade(85))
+	fmt.Println("grade(75):", grade(75))
+	fmt.Println("grade(65):", grade(65))
 
-	println("classify(1):", classify(1))
-	println("classify(2):", classify(2))
-	println("classify(3):", classify(3))
-	println("classify(4):", classify(4))
+	fmt.Println("classify(1):", classify(1))
+	fmt.Println("classify(2):", classify(2))
+	fmt.Println("classify(3):", classify(3))
+	fmt.Println("classify(4):", classify(4))
 }

@@ -2,6 +2,8 @@
 // Bug: dyn_unpack_all_returns only handles Struct > 2 slots, not Array > 2 slots
 package main
 
+
+import "fmt"
 type Container struct {
 	data [4]int
 }
@@ -21,7 +23,7 @@ func main() {
 	arr := result.([4]int)
 	assert(arr[0] == 1 && arr[1] == 2 && arr[2] == 3 && arr[3] == 4, "array values mismatch")
 	
-	println("PASS")
+	fmt.Println("PASS")
 }
 
 // Expected output:

@@ -2,6 +2,8 @@
 // Coverage: closure capturing interface values and performing type switches
 package main
 
+
+import "fmt"
 type Animal interface {
     Speak() string
 }
@@ -107,5 +109,5 @@ func main() {
     mixed = "string"
     assert(!numericCheck(), "multi-type case string fails")
     
-    println("closure_type_switch: ok")
+    fmt.Println("closure_type_switch: ok")
 }

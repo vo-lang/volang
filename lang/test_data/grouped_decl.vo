@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 var (
 	globalA = 10
 	globalB = 20
@@ -41,5 +43,5 @@ func main() {
 	assert(LocalConstA == 10, "LocalConstA should be 10")
 	assert(LocalConstB == 20, "LocalConstB should be 20")
 
-	println("grouped_decl: PASS")
+	fmt.Println("grouped_decl: PASS")
 }

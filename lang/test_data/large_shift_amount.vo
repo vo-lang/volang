@@ -2,8 +2,10 @@
 // Go spec: shifts by amount >= type width are well-defined (result is 0 or sign-extended)
 package main
 
+
+import "fmt"
 func main() {
-    println("Test 1: Shift by exactly type width")
+    fmt.Println("Test 1: Shift by exactly type width")
     var u8 uint8 = 1
     result8 := u8 << 8
     assert(result8 == 0, "uint8: 1 << 8 should be 0")
@@ -16,18 +18,18 @@ func main() {
     result64 := u64 << 64
     assert(result64 == 0, "uint64: 1 << 64 should be 0")
     
-    println("Test 2: Shift by more than type width")
+    fmt.Println("Test 2: Shift by more than type width")
     assert(u8 << 100 == 0, "uint8: 1 << 100 should be 0")
     assert(u64 << 100 == 0, "uint64: 1 << 100 should be 0")
     
-    println("Test 3: Right shift by type width")
+    fmt.Println("Test 3: Right shift by type width")
     var maxU8 uint8 = 255
     assert(maxU8 >> 8 == 0, "uint8: 255 >> 8 should be 0")
     
     var maxU64 uint64 = 0xFFFFFFFFFFFFFFFF
     assert(maxU64 >> 64 == 0, "uint64: max >> 64 should be 0")
     
-    println("Test 4: Signed right shift by type width")
+    fmt.Println("Test 4: Signed right shift by type width")
     var neg8 int8 = -1
     shifted8 := neg8 >> 8
     assert(shifted8 == -1, "int8: -1 >> 8 should be -1 (all sign bits)")
@@ -36,11 +38,11 @@ func main() {
     shifted64 := neg64 >> 64
     assert(shifted64 == -1, "int64: -1 >> 64 should be -1")
     
-    println("Test 5: Signed positive right shift by type width")
+    fmt.Println("Test 5: Signed positive right shift by type width")
     var pos8 int8 = 127
     assert(pos8 >> 8 == 0, "int8: 127 >> 8 should be 0")
     
-    println("Test 6: Variable shift amount")
+    fmt.Println("Test 6: Variable shift amount")
     var shift uint = 64
     var val uint64 = 1
     assert(val << shift == 0, "1 << 64 (variable) should be 0")
@@ -48,12 +50,12 @@ func main() {
     shift = 100
     assert(val << shift == 0, "1 << 100 (variable) should be 0")
     
-    println("Test 7: Shift amount at boundary - 1")
+    fmt.Println("Test 7: Shift amount at boundary - 1")
     var x uint64 = 1
     assert(x << 63 == 0x8000000000000000, "1 << 63 should be 0x8000000000000000")
     assert(x << 64 == 0, "1 << 64 should be 0")
     
-    println("Test 8: Different types with same shift")
+    fmt.Println("Test 8: Different types with same shift")
     shift = 10
     var a uint8 = 1
     var b uint16 = 1
@@ -65,5 +67,5 @@ func main() {
     assert(c << shift == 1024, "uint32: 1 << 10 = 1024")
     assert(d << shift == 1024, "uint64: 1 << 10 = 1024")
     
-    println("large_shift_amount: ALL PASSED")
+    fmt.Println("large_shift_amount: ALL PASSED")
 }

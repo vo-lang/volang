@@ -1,6 +1,8 @@
 // Test: Taking address of composite literals
 // Coverage: &T{...} syntax for struct literals
 
+import "fmt"
+
 type Point struct {
 	x int
 	y int
@@ -100,7 +102,7 @@ func main() {
 	assert(pNew.x == pLit.x, "new(Point).x should equal &Point{}.x")
 	assert(pNew.y == pLit.y, "new(Point).y should equal &Point{}.y")
 
-	println("composite_literal_address: PASSED")
+	fmt.Println("composite_literal_address: PASSED")
 }
 
 func sumPoint(p *Point) int {

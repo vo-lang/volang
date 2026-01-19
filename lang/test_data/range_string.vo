@@ -1,12 +1,14 @@
 package main
 
+
+import "fmt"
 func main() {
-    println("Testing range string...")
+    fmt.Println("Testing range string...")
     
     s := "中b"
     for _, r := range s {
-        println(r)
+        fmt.Println(r)
     }
     
-    println("Range string test passed!")
+    fmt.Println("Range string test passed!")
 }

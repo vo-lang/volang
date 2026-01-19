@@ -1,6 +1,8 @@
 // Test: select statement with channels
 package main
 
+
+import "fmt"
 var ch1 = make(chan int, 1)
 var ch2 = make(chan int, 1)
 
@@ -41,5 +43,5 @@ func main() {
 	v := <-ch2
 	assert(v == 100, "should receive 100 from ch2")
 	
-	println("select statement tests passed")
+	fmt.Println("select statement tests passed")
 }

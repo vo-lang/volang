@@ -2,6 +2,8 @@
 // Coverage: Complex post statements in for loops
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Multiple increment in post
 	sum1 := 0
@@ -61,5 +63,5 @@ func main() {
 	assert(slice[1] == 1, "slice[1] should be 1")
 	assert(slice[2] == 2, "slice[2] should be 2")
 	
-	println("for_post_side_effect: ok")
+	fmt.Println("for_post_side_effect: ok")
 }

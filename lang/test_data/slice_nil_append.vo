@@ -2,6 +2,8 @@
 // Coverage: nil slice append semantics
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: append to nil slice creates new slice
     var s []int
@@ -41,5 +43,5 @@ func main() {
     }
     assert(count == 0, "range over nil slice should be empty")
     
-    println("slice_nil_append: ok")
+    fmt.Println("slice_nil_append: ok")
 }

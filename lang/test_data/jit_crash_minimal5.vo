@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Node struct {
 	value int
 	left  *Node
@@ -15,7 +17,7 @@ func (n *Node) sum() int {
 	
     // 这个block 注释了就不crash
 	if n.right != nil {
-        println(11111, n.right)
+        fmt.Println(11111, n.right)
 		total += n.right.sum()
 	}
 	return total
@@ -42,7 +44,7 @@ func main() {
 
         //会打印2222 ptr@0x64，而x64就是上面的100
         // 把100改成其他大于等于6的数就也会crash，5以下则不会
-        println(2222, tree.right)
+        fmt.Println(2222, tree.right)
 
 
 		//tree.sum()

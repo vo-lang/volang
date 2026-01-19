@@ -8,6 +8,8 @@
 
 package main
 
+
+import "fmt"
 // Small struct (16 bytes = 2 slots, flags != 0)
 type SmallStruct struct {
     a int64
@@ -46,11 +48,11 @@ func testInt8() {
     s[2] = 127
     s[3] = 0
     
-    if s[0] != 1 { println("FAIL: int8 s[0]") }
-    if s[1] != -128 { println("FAIL: int8 s[1]") }
-    if s[2] != 127 { println("FAIL: int8 s[2]") }
-    if s[3] != 0 { println("FAIL: int8 s[3]") }
-    println("int8 OK")
+    if s[0] != 1 { fmt.Println("FAIL: int8 s[0]") }
+    if s[1] != -128 { fmt.Println("FAIL: int8 s[1]") }
+    if s[2] != 127 { fmt.Println("FAIL: int8 s[2]") }
+    if s[3] != 0 { fmt.Println("FAIL: int8 s[3]") }
+    fmt.Println("int8 OK")
 }
 
 func testInt16() {
@@ -60,11 +62,11 @@ func testInt16() {
     s[2] = 32767
     s[3] = 0
     
-    if s[0] != 1 { println("FAIL: int16 s[0]") }
-    if s[1] != -32768 { println("FAIL: int16 s[1]") }
-    if s[2] != 32767 { println("FAIL: int16 s[2]") }
-    if s[3] != 0 { println("FAIL: int16 s[3]") }
-    println("int16 OK")
+    if s[0] != 1 { fmt.Println("FAIL: int16 s[0]") }
+    if s[1] != -32768 { fmt.Println("FAIL: int16 s[1]") }
+    if s[2] != 32767 { fmt.Println("FAIL: int16 s[2]") }
+    if s[3] != 0 { fmt.Println("FAIL: int16 s[3]") }
+    fmt.Println("int16 OK")
 }
 
 func testInt32() {
@@ -74,11 +76,11 @@ func testInt32() {
     s[2] = 2147483647
     s[3] = 0
     
-    if s[0] != 1 { println("FAIL: int32 s[0]") }
-    if s[1] != -2147483648 { println("FAIL: int32 s[1]") }
-    if s[2] != 2147483647 { println("FAIL: int32 s[2]") }
-    if s[3] != 0 { println("FAIL: int32 s[3]") }
-    println("int32 OK")
+    if s[0] != 1 { fmt.Println("FAIL: int32 s[0]") }
+    if s[1] != -2147483648 { fmt.Println("FAIL: int32 s[1]") }
+    if s[2] != 2147483647 { fmt.Println("FAIL: int32 s[2]") }
+    if s[3] != 0 { fmt.Println("FAIL: int32 s[3]") }
+    fmt.Println("int32 OK")
 }
 
 func testInt64() {
@@ -88,11 +90,11 @@ func testInt64() {
     s[2] = 9223372036854775807
     s[3] = 0
     
-    if s[0] != 1 { println("FAIL: int64 s[0]") }
-    if s[1] != -9223372036854775808 { println("FAIL: int64 s[1]") }
-    if s[2] != 9223372036854775807 { println("FAIL: int64 s[2]") }
-    if s[3] != 0 { println("FAIL: int64 s[3]") }
-    println("int64 OK")
+    if s[0] != 1 { fmt.Println("FAIL: int64 s[0]") }
+    if s[1] != -9223372036854775808 { fmt.Println("FAIL: int64 s[1]") }
+    if s[2] != 9223372036854775807 { fmt.Println("FAIL: int64 s[2]") }
+    if s[3] != 0 { fmt.Println("FAIL: int64 s[3]") }
+    fmt.Println("int64 OK")
 }
 
 func testFloat32() {
@@ -101,10 +103,10 @@ func testFloat32() {
     s[1] = -3.14
     s[2] = 0.0
     
-    if s[0] != 1.5 { println("FAIL: float32 s[0]") }
-    if s[1] != -3.14 { println("FAIL: float32 s[1]") }
-    if s[2] != 0.0 { println("FAIL: float32 s[2]") }
-    println("float32 OK")
+    if s[0] != 1.5 { fmt.Println("FAIL: float32 s[0]") }
+    if s[1] != -3.14 { fmt.Println("FAIL: float32 s[1]") }
+    if s[2] != 0.0 { fmt.Println("FAIL: float32 s[2]") }
+    fmt.Println("float32 OK")
 }
 
 func testFloat64() {
@@ -113,10 +115,10 @@ func testFloat64() {
     s[1] = -3.14159265358979
     s[2] = 0.0
     
-    if s[0] != 1.5 { println("FAIL: float64 s[0]") }
-    if s[1] != -3.14159265358979 { println("FAIL: float64 s[1]") }
-    if s[2] != 0.0 { println("FAIL: float64 s[2]") }
-    println("float64 OK")
+    if s[0] != 1.5 { fmt.Println("FAIL: float64 s[0]") }
+    if s[1] != -3.14159265358979 { fmt.Println("FAIL: float64 s[1]") }
+    if s[2] != 0.0 { fmt.Println("FAIL: float64 s[2]") }
+    fmt.Println("float64 OK")
 }
 
 func testSmallStruct() {
@@ -126,10 +128,10 @@ func testSmallStruct() {
     s[1] = SmallStruct{10, 20}
     s[2] = SmallStruct{100, 200}
     
-    if s[0].a != 1 || s[0].b != 2 { println("FAIL: SmallStruct s[0]") }
-    if s[1].a != 10 || s[1].b != 20 { println("FAIL: SmallStruct s[1]") }
-    if s[2].a != 100 || s[2].b != 200 { println("FAIL: SmallStruct s[2]") }
-    println("SmallStruct OK")
+    if s[0].a != 1 || s[0].b != 2 { fmt.Println("FAIL: SmallStruct s[0]") }
+    if s[1].a != 10 || s[1].b != 20 { fmt.Println("FAIL: SmallStruct s[1]") }
+    if s[2].a != 100 || s[2].b != 200 { fmt.Println("FAIL: SmallStruct s[2]") }
+    fmt.Println("SmallStruct OK")
 }
 
 func testMediumStruct() {
@@ -138,9 +140,9 @@ func testMediumStruct() {
     s[0] = MediumStruct{1, 2, 3, 4, 5, 6, 7}
     s[1] = MediumStruct{10, 20, 30, 40, 50, 60, 70}
     
-    if s[0].a != 1 || s[0].g != 7 { println("FAIL: MediumStruct s[0]") }
-    if s[1].a != 10 || s[1].g != 70 { println("FAIL: MediumStruct s[1]") }
-    println("MediumStruct OK")
+    if s[0].a != 1 || s[0].g != 7 { fmt.Println("FAIL: MediumStruct s[0]") }
+    if s[1].a != 10 || s[1].g != 70 { fmt.Println("FAIL: MediumStruct s[1]") }
+    fmt.Println("MediumStruct OK")
 }
 
 func testLargeStruct() {
@@ -152,13 +154,13 @@ func testLargeStruct() {
     v0 := s[0]
     v1 := s[1]
     
-    if v0.a != 1 { println("FAIL: LargeStruct v0.a") }
-    if v0.e != 5 { println("FAIL: LargeStruct v0.e") }
-    if v0.i != 9 { println("FAIL: LargeStruct v0.i") }
-    if v1.a != 10 { println("FAIL: LargeStruct v1.a") }
-    if v1.e != 50 { println("FAIL: LargeStruct v1.e") }
-    if v1.i != 90 { println("FAIL: LargeStruct v1.i") }
-    println("LargeStruct OK")
+    if v0.a != 1 { fmt.Println("FAIL: LargeStruct v0.a") }
+    if v0.e != 5 { fmt.Println("FAIL: LargeStruct v0.e") }
+    if v0.i != 9 { fmt.Println("FAIL: LargeStruct v0.i") }
+    if v1.a != 10 { fmt.Println("FAIL: LargeStruct v1.a") }
+    if v1.e != 50 { fmt.Println("FAIL: LargeStruct v1.e") }
+    if v1.i != 90 { fmt.Println("FAIL: LargeStruct v1.i") }
+    fmt.Println("LargeStruct OK")
 }
 
 func testStackArray() {
@@ -169,11 +171,11 @@ func testStackArray() {
     arr[2] = 300
     arr[3] = 400
     
-    if arr[0] != 100 { println("FAIL: stack array arr[0]") }
-    if arr[1] != 200 { println("FAIL: stack array arr[1]") }
-    if arr[2] != 300 { println("FAIL: stack array arr[2]") }
-    if arr[3] != 400 { println("FAIL: stack array arr[3]") }
-    println("Stack Array OK")
+    if arr[0] != 100 { fmt.Println("FAIL: stack array arr[0]") }
+    if arr[1] != 200 { fmt.Println("FAIL: stack array arr[1]") }
+    if arr[2] != 300 { fmt.Println("FAIL: stack array arr[2]") }
+    if arr[3] != 400 { fmt.Println("FAIL: stack array arr[3]") }
+    fmt.Println("Stack Array OK")
 }
 
 func testHeapArraySmall() {
@@ -187,10 +189,10 @@ func testHeapArraySmall() {
     // Force escape by taking slice
     s := arr[:]
     
-    if s[0].a != 1 || s[0].b != 2 { println("FAIL: heap array small s[0]") }
-    if s[1].a != 10 || s[1].b != 20 { println("FAIL: heap array small s[1]") }
-    if s[2].a != 100 || s[2].b != 200 { println("FAIL: heap array small s[2]") }
-    println("Heap Array SmallStruct OK")
+    if s[0].a != 1 || s[0].b != 2 { fmt.Println("FAIL: heap array small s[0]") }
+    if s[1].a != 10 || s[1].b != 20 { fmt.Println("FAIL: heap array small s[1]") }
+    if s[2].a != 100 || s[2].b != 200 { fmt.Println("FAIL: heap array small s[2]") }
+    fmt.Println("Heap Array SmallStruct OK")
 }
 
 func testHeapArrayLarge() {
@@ -202,19 +204,19 @@ func testHeapArrayLarge() {
     // Force escape
     s := arr[:]
     
-    if s[0].a != 1 || s[0].i != 9 { println("FAIL: heap array large s[0]") }
-    if s[1].a != 10 || s[1].i != 90 { println("FAIL: heap array large s[1]") }
-    println("Heap Array LargeStruct OK")
+    if s[0].a != 1 || s[0].i != 9 { fmt.Println("FAIL: heap array large s[0]") }
+    if s[1].a != 10 || s[1].i != 90 { fmt.Println("FAIL: heap array large s[1]") }
+    fmt.Println("Heap Array LargeStruct OK")
 }
 
 func testSliceLiteral() {
     // Slice literal
     s := []int64{1, 2, 3, 4, 5}
     
-    if s[0] != 1 { println("FAIL: literal s[0]") }
-    if s[4] != 5 { println("FAIL: literal s[4]") }
-    if len(s) != 5 { println("FAIL: literal len") }
-    println("Slice literal OK")
+    if s[0] != 1 { fmt.Println("FAIL: literal s[0]") }
+    if s[4] != 5 { fmt.Println("FAIL: literal s[4]") }
+    if len(s) != 5 { fmt.Println("FAIL: literal len") }
+    fmt.Println("Slice literal OK")
 }
 
 func testAppend() {
@@ -223,11 +225,11 @@ func testAppend() {
     s = append(s, 2)
     s = append(s, 3)
     
-    if s[0] != 1 { println("FAIL: append s[0]") }
-    if s[1] != 2 { println("FAIL: append s[1]") }
-    if s[2] != 3 { println("FAIL: append s[2]") }
-    if len(s) != 3 { println("FAIL: append len") }
-    println("Append OK")
+    if s[0] != 1 { fmt.Println("FAIL: append s[0]") }
+    if s[1] != 2 { fmt.Println("FAIL: append s[1]") }
+    if s[2] != 3 { fmt.Println("FAIL: append s[2]") }
+    if len(s) != 3 { fmt.Println("FAIL: append len") }
+    fmt.Println("Append OK")
 }
 
 func testAppendLargeStruct() {
@@ -236,9 +238,9 @@ func testAppendLargeStruct() {
     s = append(s, LargeStruct{1, 2, 3, 4, 5, 6, 7, 8, 9})
     s = append(s, LargeStruct{10, 20, 30, 40, 50, 60, 70, 80, 90})
     
-    if s[0].a != 1 || s[0].i != 9 { println("FAIL: append large s[0]") }
-    if s[1].a != 10 || s[1].i != 90 { println("FAIL: append large s[1]") }
-    println("Append LargeStruct OK")
+    if s[0].a != 1 || s[0].i != 9 { fmt.Println("FAIL: append large s[0]") }
+    if s[1].a != 10 || s[1].i != 90 { fmt.Println("FAIL: append large s[1]") }
+    fmt.Println("Append LargeStruct OK")
 }
 
 func main() {
@@ -267,5 +269,5 @@ func main() {
     testAppend()           // flags != 0
     testAppendLargeStruct() // flags == 0
     
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

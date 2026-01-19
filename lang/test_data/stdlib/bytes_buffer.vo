@@ -1,11 +1,14 @@
 package main
 
-import "bytes"
+import (
+	"fmt"
+	"bytes"
+)
 import "io"
 import "errors"
 
 func main() {
-    println("Testing bytes.Buffer...")
+    fmt.Println("Testing bytes.Buffer...")
     
     // Test NewBuffer and basic operations
     buf := bytes.NewBuffer([]byte("hello"))
@@ -90,5 +93,5 @@ func main() {
     buf12 := bytes.NewBufferString("from string")
     assert(buf12.Len() == 11, "NewBufferString length")
     
-    println("All bytes.Buffer tests passed!")
+    fmt.Println("All bytes.Buffer tests passed!")
 }

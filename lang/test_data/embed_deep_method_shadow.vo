@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 // Base types with methods
 type A struct {
 	val int
@@ -195,5 +197,5 @@ func main() {
 	testInterfaceSatisfaction()
 	testPtrEmbed()
 	testNilPtrEmbed()
-	println("PASS: embed_deep_method_shadow")
+	fmt.Println("PASS: embed_deep_method_shadow")
 }

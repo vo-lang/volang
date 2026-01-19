@@ -3,7 +3,10 @@
 
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 type Config struct {
     dyn.MapObject
@@ -20,7 +23,7 @@ func main() {
         panic(err.Error())
     }
     
-    println("ok")
+    fmt.Println("ok")
 }
 
 func testMapObject() error {

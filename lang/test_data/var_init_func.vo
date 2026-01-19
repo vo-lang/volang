@@ -2,6 +2,8 @@
 // Verifies that global variables are initialized correctly
 package main
 
+
+import "fmt"
 var simpleInt = 42
 var simpleBool = true
 var simpleString = "hello"
@@ -16,5 +18,5 @@ func main() {
     assert(simpleBool == true, "simpleBool should be true")
     assert(simpleString == "hello", "simpleString should be hello")
     
-    println("var_init_func: ALL TESTS PASSED")
+    fmt.Println("var_init_func: ALL TESTS PASSED")
 }

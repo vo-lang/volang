@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type MyNum struct {
     value int
 }
@@ -8,5 +10,5 @@ func main() {
     var a interface{}
     n := MyNum{value: 42}
     a = n
-    println("a:", a)
+    fmt.Println("a:", a)
 }

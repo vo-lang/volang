@@ -2,6 +2,8 @@
 // Spec: 0x/0X prefix with p/P binary exponent
 package main
 
+
+import "fmt"
 func main() {
     // Basic hex float literals
     a := 0x1p0        // 1.0 * 2^0 = 1.0
@@ -41,5 +43,5 @@ func main() {
     k := 0xFFp0       // 255.0
     assert(k == 255.0, "0xFFp0 should be 255.0, got ", k)
     
-    println("hex_float_literal: ALL PASSED")
+    fmt.Println("hex_float_literal: ALL PASSED")
 }

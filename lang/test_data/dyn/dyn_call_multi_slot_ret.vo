@@ -3,6 +3,8 @@
 // when previous return values take more than 1 slot.
 package main
 
+
+import "fmt"
 type Point struct {
 	X, Y, Z, W int
 }
@@ -23,7 +25,7 @@ func (c *Caller) RetIntThenStruct() (int, Point) {
 }
 
 func main() {
-	println("=== Testing multi-slot return value offset ===")
+	fmt.Println("=== Testing multi-slot return value offset ===")
 
 	caller := &Caller{val: 1}
 	var obj interface{} = caller
@@ -35,7 +37,7 @@ func main() {
 	num1 := n1.(int)
 	assert(pt1.X == 10 && pt1.Y == 20 && pt1.Z == 30 && pt1.W == 40, "RetStructThenInt Point wrong")
 	assert(num1 == 42, "RetStructThenInt int wrong")
-	println("RetStructThenInt: Point{", pt1.X, ",", pt1.Y, ",", pt1.Z, ",", pt1.W, "}, int:", num1)
+	fmt.Println("RetStructThenInt: Point{", pt1.X, ",", pt1.Y, ",", pt1.Z, ",", pt1.W, "}, int:", num1)
 
 	// Test 2: (int, struct) - int is 1 slot, struct is 4 slots
 	n2, p2, err := obj~>RetIntThenStruct()
@@ -44,7 +46,7 @@ func main() {
 	pt2 := p2.(Point)
 	assert(num2 == 99, "RetIntThenStruct int wrong")
 	assert(pt2.X == 30 && pt2.Y == 40 && pt2.Z == 50 && pt2.W == 60, "RetIntThenStruct Point wrong")
-	println("RetIntThenStruct: int:", num2, ", Point{", pt2.X, ",", pt2.Y, ",", pt2.Z, ",", pt2.W, "}")
+	fmt.Println("RetIntThenStruct: int:", num2, ", Point{", pt2.X, ",", pt2.Y, ",", pt2.Z, ",", pt2.W, "}")
 
-	println("=== All multi-slot return tests passed! ===")
+	fmt.Println("=== All multi-slot return tests passed! ===")
 }

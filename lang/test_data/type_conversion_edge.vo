@@ -1,6 +1,8 @@
 // Test type conversion edge cases
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: int to float (no precision loss for small ints)
     var i int = 42
@@ -84,5 +86,5 @@ func main() {
     // 40000 as int16 wraps: 40000 - 65536 = -25536
     assert(small16 == -25536, "int16 overflow wraps, got ", int(small16))
     
-    println("type_conversion_edge: ok")
+    fmt.Println("type_conversion_edge: ok")
 }

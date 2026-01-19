@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Method set equivalence for interface satisfaction
 // Go spec: Type T implements interface I if T's method set is a superset of I's method set
 
@@ -283,7 +285,7 @@ func testEmptyInterfaceMethod() {
     v3 := c.Get()
     _ = v3
     
-    println("testEmptyInterfaceMethod: passed")
+    fmt.Println("testEmptyInterfaceMethod: passed")
 }
 
 // ============================================
@@ -321,5 +323,5 @@ func main() {
     testEmptyInterfaceMethod()
     testNamedTypeMethod()
     
-    println("method_set_equivalence: ALL PASSED")
+    fmt.Println("method_set_equivalence: ALL PASSED")
 }

@@ -1,6 +1,8 @@
 // Test: goto statement
 package main
 
+
+import "fmt"
 func main() {
 	// 1. Forward goto
 	x := 0
@@ -29,5 +31,5 @@ loop:
 done:
 	assert(result == 2, "goto out of loop")
 	
-	println("goto statement tests passed")
+	fmt.Println("goto statement tests passed")
 }

@@ -2,6 +2,8 @@
 // map[string]T supports ~>fieldName syntax as shorthand for ~>["fieldName"].
 package main
 
+
+import "fmt"
 func main() error {
     m := map[string]int{
         "x": 10,
@@ -47,6 +49,6 @@ func main() error {
     assert(len(aSlice) == 3, "a should have 3 elements")
     assert(aSlice[0] == 1, "a[0] should be 1")
     
-    println("map_string_key_field: ok")
+    fmt.Println("map_string_key_field: ok")
     return nil
 }

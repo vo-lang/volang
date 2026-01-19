@@ -1,6 +1,9 @@
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 type MyError struct { msg string }
 func (e MyError) Error() string { return e.msg }
@@ -70,6 +73,6 @@ func main() int {
     err = testSliceSetIndex()
     assert(err == nil, "slice setindex should succeed")
 
-    println("done")
+    fmt.Println("done")
     return 0
 }

@@ -1,6 +1,8 @@
 // Test: Nested loops with labeled break and continue
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Labeled break from inner loop
     sum := 0
@@ -76,5 +78,5 @@ outer5:
     // total = 26
     assert(total == 26, "continue after inner: total should be 26, got ", total)
     
-    println("nested_label_break_continue: PASSED")
+    fmt.Println("nested_label_break_continue: PASSED")
 }

@@ -2,6 +2,8 @@
 // A typed nil (e.g., (*T)(nil)) is NOT equal to nil interface
 package main
 
+
+import "fmt"
 type Data struct {
     value int
 }
@@ -66,5 +68,5 @@ func main() {
     assert(d != nil, "d should not be nil")
     assert(d.value == 42, "d.value should be 42")
     
-    println("interface_nil_semantics: ok")
+    fmt.Println("interface_nil_semantics: ok")
 }

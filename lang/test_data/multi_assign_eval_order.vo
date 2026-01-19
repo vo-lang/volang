@@ -2,6 +2,8 @@
 // Go spec: LHS evaluated left-to-right, then RHS left-to-right, then assignments
 package main
 
+
+import "fmt"
 var evalOrder []string
 
 func reset() {
@@ -31,7 +33,7 @@ func testArrayIndexOrder() {
     arr[getIndex("a", 0)], arr[getIndex("b", 1)] = getValue("x", 100), getValue("y", 200)
     
     // Print actual order
-    println("Actual order:", evalOrder)
+    fmt.Println("Actual order:", evalOrder)
     assert(len(evalOrder) == 4, "should have 4 evals")
     // Go spec: LHS evaluated left-to-right, then RHS left-to-right
     // Expected order: idx-a, idx-b, val-x, val-y
@@ -111,25 +113,25 @@ func testArraySelfSwap() {
 }
 
 func main() {
-    println("Test 1: array index eval order")
+    fmt.Println("Test 1: array index eval order")
     testArrayIndexOrder()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: map key eval order")
+    fmt.Println("Test 2: map key eval order")
     testMapKeyOrder()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: pointer multi-assign")
+    fmt.Println("Test 3: pointer multi-assign")
     testPointerMultiAssign()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: swap idiom")
+    fmt.Println("Test 4: swap idiom")
     testSwapIdiom()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: array self-swap")
+    fmt.Println("Test 5: array self-swap")
     testArraySelfSwap()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("multi_assign_eval_order: ALL PASSED")
+    fmt.Println("multi_assign_eval_order: ALL PASSED")
 }

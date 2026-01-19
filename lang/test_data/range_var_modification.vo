@@ -1,6 +1,8 @@
 // Test: Modification of range variables during iteration
 // Coverage: Go spec says range variables are copies, modifying them doesn't affect the container
 
+import "fmt"
+
 func main() {
 	// Test 1: Modifying index variable in for-range over slice
 	nums := []int{0, 1, 2, 3, 4}
@@ -80,5 +82,5 @@ func main() {
 	}
 	assert(result == 3, "result should be 0+1+2=3, got ", result)
 
-	println("range_var_modification: PASSED")
+	fmt.Println("range_var_modification: PASSED")
 }

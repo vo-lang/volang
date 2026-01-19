@@ -2,7 +2,10 @@
 // Strings should support dynamic index access to get bytes/runes
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 import "dyn"
 
 func main() {
@@ -39,5 +42,5 @@ func main() {
     // This is the first byte of "世"
     assert(b5.(uint8) == 0xE4, "index 5 should be first byte of 世")
     
-    println("dyn_string_index: ok")
+    fmt.Println("dyn_string_index: ok")
 }

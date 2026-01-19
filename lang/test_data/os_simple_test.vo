@@ -1,40 +1,43 @@
 package main
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 func main() {
 	// Simple test - just get PID
 	pid := os.Getpid()
-	println("PID:", pid)
+	fmt.Println("PID:", pid)
 	assert(pid > 0, "PID should be positive")
 	
 	// Get temp dir
 	tmpDir := os.TempDir()
-	println("TempDir:", tmpDir)
+	fmt.Println("TempDir:", tmpDir)
 	assert(len(tmpDir) > 0, "TempDir should not be empty")
 	
 	// Write file
 	testFile := tmpDir + "/vo_simple_test.txt"
-	println("Writing to:", testFile)
+	fmt.Println("Writing to:", testFile)
 	
 	err := os.WriteFile(testFile, []byte("hello"), 0644)
 	if err != nil {
-		println("WriteFile error:", err.Error())
+		fmt.Println("WriteFile error:", err.Error())
 	}
 	assert(err == nil, "WriteFile should not error")
 	
 	// Read file
 	data, err := os.ReadFile(testFile)
 	if err != nil {
-		println("ReadFile error:", err.Error())
+		fmt.Println("ReadFile error:", err.Error())
 	}
 	assert(err == nil, "ReadFile should not error")
 	
-	println("Read data:", string(data))
+	fmt.Println("Read data:", string(data))
 	assert(string(data) == "hello", "Data should match")
 	
 	// Cleanup
 	os.Remove(testFile)
 	
-	println("Simple test passed!")
+	fmt.Println("Simple test passed!")
 }

@@ -2,6 +2,8 @@
 // Coverage: arrays are value types, assignment copies
 package main
 
+
+import "fmt"
 func modifyArray(arr [3]int) {
     arr[0] = 999 // modifies copy, not original
 }
@@ -55,5 +57,5 @@ func main() {
     assert(x == y, "equal arrays")
     assert(x != z, "unequal arrays")
     
-    println("array_value_semantics: ok")
+    fmt.Println("array_value_semantics: ok")
 }

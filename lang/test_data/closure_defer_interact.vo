@@ -2,6 +2,8 @@
 // Coverage: Complex scenarios of closure capture with defer
 package main
 
+
+import "fmt"
 var log []string
 
 func appendLog(s string) {
@@ -121,5 +123,5 @@ func main() {
     
     // Test 4, 5, 6: SKIPPED - nested defer closures cause panic (Vo implementation bug)
     
-    println("closure_defer_interact: ok")
+    fmt.Println("closure_defer_interact: ok")
 }

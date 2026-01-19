@@ -1,6 +1,8 @@
 // Multi-file test: main calls functions from math.gox
 package main
 
+
+import "fmt"
 func main() {
     // Test Add
     sum := Add(3, 4)
@@ -18,5 +20,5 @@ func main() {
     result := Add(Multiply(2, 3), 4)
     assert(result == 10, "Add(Multiply(2, 3), 4) should be 10")
     
-    println("proj_multifile: ALL PASSED")
+    fmt.Println("proj_multifile: ALL PASSED")
 }

@@ -2,6 +2,8 @@
 // Coverage: compile-time evaluation of complex bitwise operations
 package main
 
+
+import "fmt"
 const (
     // Basic shifts
     One = 1
@@ -72,5 +74,5 @@ func main() {
     const OrZero = 0x12345678 | 0
     assert(OrZero == 0x12345678, "or with zero")
     
-    println("const_bitwise_edge: ok")
+    fmt.Println("const_bitwise_edge: ok")
 }

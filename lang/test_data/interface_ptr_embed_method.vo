@@ -1,6 +1,8 @@
 // Test: Interface implementation with pointer receiver and embedding
 package main
 
+
+import "fmt"
 type Reader interface {
     Read() int
 }
@@ -74,5 +76,5 @@ func main() {
     var r2 Reader = rw2  // ReadWriter -> Reader
     assert(r2.Read() == 77, "Reader from ReadWriter should read 77")
     
-    println("interface_ptr_embed_method: PASSED")
+    fmt.Println("interface_ptr_embed_method: PASSED")
 }

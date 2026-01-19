@@ -1,5 +1,7 @@
 // Test dynamic access operator ~>
 
+import "fmt"
+
 type Person struct {
     Name string
     Age  int
@@ -13,14 +15,14 @@ func main() {
     assert(err == nil, "Name error")
     name, ok := result.(string)
     assert(ok, "Name type assert failed")
-    println("Name:", name)
+    fmt.Println("Name:", name)
     
     // Test 2: Dynamic field access - int field
     ageVal, err2 := p~>Age
     assert(err2 == nil, "Age error")
     age, ok := ageVal.(int)
     assert(ok, "Age type assert failed")
-    println("Age:", age)
+    fmt.Println("Age:", age)
     
     // Test 3: Dynamic index access on slice
     var slice interface{} = []int{10, 20, 30}
@@ -28,7 +30,7 @@ func main() {
     assert(sliceErr == nil, "slice index error")
     v, ok := elem.(int)
     assert(ok, "Slice type assert failed")
-    println("Slice[1]:", v)
+    fmt.Println("Slice[1]:", v)
     
     // Test 4b: Map index
     var m interface{} = map[string]int{"a": 1, "b": 2}
@@ -36,7 +38,7 @@ func main() {
     assert(mapErr == nil, "map index error")
     mapV, mapOk := mapVal.(int)
     assert(mapOk && mapV == 1, "Map[a] value mismatch")
-    println("Map[a]: ok")
+    fmt.Println("Map[a]: ok")
     
     // Test 4c: Dynamic index access on string
     var str interface{} = "hello"
@@ -44,54 +46,54 @@ func main() {
     assert(err4 == nil, "String index error")
     b, bOk := ch.(uint8)
     assert(bOk && b == 'h', "String[0] value mismatch")
-    println("String[0]: ok")
+    fmt.Println("String[0]: ok")
     
     // Test 5: Error on nil
     var nilVal interface{} = nil
     _, nilErr := nilVal~>field
     assert(nilErr != nil, "nil should error")
-    println("nil error: ok")
+    fmt.Println("nil error: ok")
     
     // Test 6: Error on non-struct field access
     var num interface{} = 42
     _, numErr := num~>field
     assert(numErr != nil, "non-struct should error")
-    println("non-struct error: ok")
+    fmt.Println("non-struct error: ok")
     
     // Test 7: Error on non-existent field
     _, fieldErr := p~>NonExistent
     assert(fieldErr != nil, "missing field should error")
-    println("missing field error: ok")
+    fmt.Println("missing field error: ok")
     
     // Test 8: a~>b? short-circuit on error
     _, err8 := testQuestionShortCircuit()
     assert(err8 != nil, "question should propagate error")
-    println("question short-circuit: ok")
+    fmt.Println("question short-circuit: ok")
     
     // Test 9: a~>b? success path
     result9, err9 := testQuestionSuccess()
     assert(err9 == nil, "question success path error")
     r9, r9Ok := result9.(string)
     assert(r9Ok && r9 == "Alice", "question success wrong value")
-    println("question success: ok")
+    fmt.Println("question success: ok")
     
     // Test 10: nested struct field with ?
     _, err10 := testNestedStruct()
     assert(err10 == nil, "nested struct error")
-    println("nested struct: ok")
+    fmt.Println("nested struct: ok")
     
     // Test 11: chained access without ? (o~>Inner~>Value)
     val11 := testChainedAccessNoQuestion()
     assert(val11 == 42, "chained no-? wrong value")
-    println("chained no-?: ok")
+    fmt.Println("chained no-?: ok")
     
     // Test 12: chained access with ? (o~>Inner?~>Value?)
     val12, err12 := testChainedAccessWithQuestion()
     assert(err12 == nil, "chained with-? error")
     assert(val12 == 42, "chained with-? wrong value")
-    println("chained with-?: ok")
+    fmt.Println("chained with-?: ok")
     
-    println("done")
+    fmt.Println("done")
 }
 
 // Test ? short-circuit on error

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Complex Literal Tests
 
 type Point struct {
@@ -128,5 +130,5 @@ func main() {
     }
     assert(gridSum == 45, "grid sum should be 45, got ", gridSum)
     
-    println("complex_literal_test: ALL PASSED")
+    fmt.Println("complex_literal_test: ALL PASSED")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type MyError struct {
     msg string
 }
@@ -93,6 +95,6 @@ func main() int {
     panicked = testSetArrayShouldFail()
     assert(panicked, "array index set should panic")
 
-    println("done")
+    fmt.Println("done")
     return 0
 }

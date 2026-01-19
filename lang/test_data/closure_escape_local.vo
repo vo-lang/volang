@@ -2,6 +2,8 @@
 // Coverage: closure escape analysis edge cases
 package main
 
+
+import "fmt"
 func makeCounter() func() int {
     count := 0
     return func() int {
@@ -74,5 +76,5 @@ func main() {
     assert(funcs[1]() == 10, "funcs[1] should be 10")
     assert(funcs[2]() == 20, "funcs[2] should be 20")
     
-    println("closure_escape_local: ok")
+    fmt.Println("closure_escape_local: ok")
 }

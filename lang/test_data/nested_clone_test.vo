@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -19,9 +21,9 @@ func main() {
     r := Rect{origin: Point{x: 1, y: 2}, width: 10}
     
     // Access nested fields directly
-    println(r.origin.x)  // 1
-    println(r.origin.y)  // 2
+    fmt.Println(r.origin.x)  // 1
+    fmt.Println(r.origin.y)  // 2
     
     // Call method on nested struct
-    println(r.origin.Sum())  // should be 3
+    fmt.Println(r.origin.Sum())  // should be 3
 }

@@ -2,6 +2,8 @@
 // Tests method promotion from embedded pointer field to interface
 package main
 
+
+import "fmt"
 type Base struct {
     value int
 }
@@ -80,5 +82,5 @@ func main() {
     result8 := g2.GetValue()
     assert(result8 == 500, "g2.GetValue() should be 500, got ", result8)
     
-    println("embed_ptr_iface_complex: ok")
+    fmt.Println("embed_ptr_iface_complex: ok")
 }

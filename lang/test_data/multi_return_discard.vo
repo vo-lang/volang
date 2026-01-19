@@ -2,7 +2,10 @@
 // Go spec: _ can be used to discard unwanted return values
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 func twoVals() (int, string) {
     return 42, "hello"
@@ -78,5 +81,5 @@ func main() {
     }
     assert(total == 6, "map value sum")
     
-    println("multi_return_discard: ok")
+    fmt.Println("multi_return_discard: ok")
 }

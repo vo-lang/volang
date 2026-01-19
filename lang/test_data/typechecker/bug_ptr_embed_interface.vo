@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // BUG: Pointer embedding + interface method wrapper
 // When *PointerEmbedder is assigned to an interface, calling methods through
 // the interface returns wrong values because the interface method wrapper
@@ -35,5 +37,5 @@ func main() {
     result := vg.GetValue()
     assert(result == 50, "Interface call should return 50")
     
-    println("bug_ptr_embed_interface: PASSED")
+    fmt.Println("bug_ptr_embed_interface: PASSED")
 }

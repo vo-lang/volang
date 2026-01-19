@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Method set rules for value vs pointer receivers
 // Go spec: Value type T only has value receiver methods in its method set
 // Pointer type *T has both value and pointer receiver methods
@@ -165,5 +167,5 @@ func main() {
     testValueSemanticsInInterface()
     testPointerSemanticsInInterface()
     
-    println("method_set_value_vs_pointer: ALL PASSED")
+    fmt.Println("method_set_value_vs_pointer: ALL PASSED")
 }

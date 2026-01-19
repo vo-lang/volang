@@ -2,6 +2,8 @@
 // Coverage: string[i] returns byte, range returns rune
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: ASCII string - index returns byte
     s := "hello"
@@ -46,5 +48,5 @@ func main() {
     assert(mixedRunes[1] == '世', "second rune '世'")
     assert(mixedRunes[2] == 'b', "third rune 'b'")
     
-    println("string_index_rune: ok")
+    fmt.Println("string_index_rune: ok")
 }

@@ -2,8 +2,10 @@
 // Go spec: init functions may not be referred to from anywhere in a program
 package main
 
+
+import "fmt"
 func init() {
-    println("init called")
+    fmt.Println("init called")
 }
 
 func main() {

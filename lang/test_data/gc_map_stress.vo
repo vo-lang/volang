@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Map with int keys and slice values
 	m := make(map[int][]int)
@@ -44,5 +46,5 @@ func main() {
 	}
 	assert(nested[5][3] == 53)
 
-	println("gc_map_stress: PASSED")
+	fmt.Println("gc_map_stress: PASSED")
 }

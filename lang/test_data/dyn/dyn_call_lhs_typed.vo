@@ -1,6 +1,8 @@
 // Test LHS type-driven conversion for dynamic calls
 package main
 
+
+import "fmt"
 type Calc struct {
 	val int
 }
@@ -49,7 +51,7 @@ func main() {
 	assert(err == nil, "GetInt should succeed")
 	// r1 is any, need type assertion
 	assert(r1.(int) == 42, "expected 42")
-	println("Test 1 (any): GetInt() =", r1.(int))
+	fmt.Println("Test 1 (any): GetInt() =", r1.(int))
 
 	// Test 2: LHS has concrete type - should NOT box
 	var result int
@@ -57,13 +59,13 @@ func main() {
 	assert(err == nil, "GetInt should succeed")
 	// result is int directly, no type assertion needed
 	assert(result == 42, "expected 42")
-	println("Test 2 (int): GetInt() =", result)
+	fmt.Println("Test 2 (int): GetInt() =", result)
 
 	// Test 3: Multi-return with any
 	r1, r2, err := obj~>GetPair()
 	assert(err == nil, "GetPair should succeed")
 	assert(r1.(int) == 42 && r2.(string) == "world", "GetPair mismatch")
-	println("Test 3 (any,any): GetPair() =", r1.(int), r2.(string))
+	fmt.Println("Test 3 (any,any): GetPair() =", r1.(int), r2.(string))
 
 	// Test 4: Multi-return with concrete types
 	var n int
@@ -71,26 +73,26 @@ func main() {
 	n, s, err = obj~>GetPair()
 	assert(err == nil, "GetPair should succeed")
 	assert(n == 42 && s == "world", "GetPair mismatch")
-	println("Test 4 (int,string): GetPair() =", n, s)
+	fmt.Println("Test 4 (int,string): GetPair() =", n, s)
 
 	// Test 4.1: Struct return with any
 	pAny, err := obj~>GetStruct()
 	assert(err == nil, "GetStruct should succeed")
 	assert(pAny.(Pair).A == 42 && pAny.(Pair).B == 7, "GetStruct mismatch")
-	println("Test 4.1 (any): GetStruct() =", pAny.(Pair).A, pAny.(Pair).B)
+	fmt.Println("Test 4.1 (any): GetStruct() =", pAny.(Pair).A, pAny.(Pair).B)
 
 	// Test 4.2: Struct return with concrete type
 	var p Pair
 	p, err = obj~>GetStruct()
 	assert(err == nil, "GetStruct should succeed")
 	assert(p.A == 42 && p.B == 7, "GetStruct mismatch")
-	println("Test 4.2 (Pair): GetStruct() =", p.A, p.B)
+	fmt.Println("Test 4.2 (Pair): GetStruct() =", p.A, p.B)
 
 	// Test 4.3: Multi-return with struct first (validates return layout/offset)
 	p2, i2, err := obj~>GetStructAndInt()
 	assert(err == nil, "GetStructAndInt should succeed")
 	assert(p2.(Pair).A == 42 && p2.(Pair).B == 7 && i2.(int) == 42, "GetStructAndInt mismatch")
-	println("Test 4.3 (any,any): GetStructAndInt() =", p2.(Pair).A, p2.(Pair).B, i2.(int))
+	fmt.Println("Test 4.3 (any,any): GetStructAndInt() =", p2.(Pair).A, p2.(Pair).B, i2.(int))
 
 	// Test 4.4: Multi-return with struct first (concrete types)
 	var p3 Pair
@@ -98,26 +100,26 @@ func main() {
 	p3, i3, err = obj~>GetStructAndInt()
 	assert(err == nil, "GetStructAndInt should succeed")
 	assert(p3.A == 42 && p3.B == 7 && i3 == 42, "GetStructAndInt mismatch")
-	println("Test 4.4 (Pair,int): GetStructAndInt() =", p3.A, p3.B, i3)
+	fmt.Println("Test 4.4 (Pair,int): GetStructAndInt() =", p3.A, p3.B, i3)
 
 	// Test 4.5: Struct pointer return with any
 	ppAny, err := obj~>GetStructPtr()
 	assert(err == nil, "GetStructPtr should succeed")
 	assert(ppAny.(*Pair).A == 42 && ppAny.(*Pair).B == 7, "GetStructPtr mismatch")
-	println("Test 4.5 (any): GetStructPtr() =", ppAny.(*Pair).A, ppAny.(*Pair).B)
+	fmt.Println("Test 4.5 (any): GetStructPtr() =", ppAny.(*Pair).A, ppAny.(*Pair).B)
 
 	// Test 4.6: Struct pointer return with concrete type
 	var pp *Pair
 	pp, err = obj~>GetStructPtr()
 	assert(err == nil, "GetStructPtr should succeed")
 	assert(pp.A == 42 && pp.B == 7, "GetStructPtr mismatch")
-	println("Test 4.6 (*Pair): GetStructPtr() =", pp.A, pp.B)
+	fmt.Println("Test 4.6 (*Pair): GetStructPtr() =", pp.A, pp.B)
 
 	// Test 4.7: Multi-return with pointer first (validates return layout/offset width=1)
 	pp2, i4, err := obj~>GetPtrAndInt()
 	assert(err == nil, "GetPtrAndInt should succeed")
 	assert(pp2.(*Pair).A == 42 && pp2.(*Pair).B == 7 && i4.(int) == 42, "GetPtrAndInt mismatch")
-	println("Test 4.7 (any,any): GetPtrAndInt() =", pp2.(*Pair).A, pp2.(*Pair).B, i4.(int))
+	fmt.Println("Test 4.7 (any,any): GetPtrAndInt() =", pp2.(*Pair).A, pp2.(*Pair).B, i4.(int))
 
 	// Test 4.8: Multi-return with pointer first (concrete types)
 	var pp3 *Pair
@@ -125,12 +127,12 @@ func main() {
 	pp3, i5, err = obj~>GetPtrAndInt()
 	assert(err == nil, "GetPtrAndInt should succeed")
 	assert(pp3.A == 42 && pp3.B == 7 && i5 == 42, "GetPtrAndInt mismatch")
-	println("Test 4.8 (*Pair,int): GetPtrAndInt() =", pp3.A, pp3.B, i5)
+	fmt.Println("Test 4.8 (*Pair,int): GetPtrAndInt() =", pp3.A, pp3.B, i5)
 
 	// ============================================================
 	// Field access tests
 	// ============================================================
-	println("=== Testing field access LHS types ===")
+	fmt.Println("=== Testing field access LHS types ===")
 
 	type Data struct {
 		Count int
@@ -143,25 +145,25 @@ func main() {
 	f1, err := data~>Count
 	assert(err == nil, "field Count should succeed")
 	assert(f1.(int) == 100, "expected 100")
-	println("Test 5 (any): data~>Count =", f1.(int))
+	fmt.Println("Test 5 (any): data~>Count =", f1.(int))
 
 	// Test 6: Field access with concrete type LHS
 	var count int
 	count, err = data~>Count
 	assert(err == nil, "field Count should succeed")
 	assert(count == 100, "expected 100")
-	println("Test 6 (int): data~>Count =", count)
+	fmt.Println("Test 6 (int): data~>Count =", count)
 
 	// Test 6.1: Field access on struct value (non-pointer)
 	f1v, err := dataVal~>Count
 	assert(err == nil, "field Count on value should succeed")
 	assert(f1v.(int) == 101, "expected 101")
-	println("Test 6.1 (any): dataVal~>Count =", f1v.(int))
+	fmt.Println("Test 6.1 (any): dataVal~>Count =", f1v.(int))
 
 	// ============================================================
 	// Map index tests
 	// ============================================================
-	println("=== Testing map index LHS types ===")
+	fmt.Println("=== Testing map index LHS types ===")
 
 	var m interface{} = map[string]int{"a": 1, "b": 2}
 
@@ -169,19 +171,19 @@ func main() {
 	v1, err := m~>["a"]
 	assert(err == nil, "map[a] should succeed")
 	assert(v1.(int) == 1, "expected 1")
-	println("Test 7 (any): m~>[a] =", v1.(int))
+	fmt.Println("Test 7 (any): m~>[a] =", v1.(int))
 
 	// Test 8: Map index with concrete type LHS
 	var val int
 	val, err = m~>["b"]
 	assert(err == nil, "map[b] should succeed")
 	assert(val == 2, "expected 2")
-	println("Test 8 (int): m~>[b] =", val)
+	fmt.Println("Test 8 (int): m~>[b] =", val)
 
 	// ============================================================
 	// Slice index tests
 	// ============================================================
-	println("=== Testing slice index LHS types ===")
+	fmt.Println("=== Testing slice index LHS types ===")
 
 	var sl interface{} = []int{10, 20, 30}
 
@@ -189,14 +191,14 @@ func main() {
 	s1, err := sl~>[1]
 	assert(err == nil, "slice[1] should succeed")
 	assert(s1.(int) == 20, "expected 20")
-	println("Test 9 (any): sl~>[1] =", s1.(int))
+	fmt.Println("Test 9 (any): sl~>[1] =", s1.(int))
 
 	// Test 10: Slice index with concrete type LHS
 	var elem int
 	elem, err = sl~>[2]
 	assert(err == nil, "slice[2] should succeed")
 	assert(elem == 30, "expected 30")
-	println("Test 10 (int): sl~>[2] =", elem)
+	fmt.Println("Test 10 (int): sl~>[2] =", elem)
 
-	println("=== All LHS type tests passed! ===")
+	fmt.Println("=== All LHS type tests passed! ===")
 }

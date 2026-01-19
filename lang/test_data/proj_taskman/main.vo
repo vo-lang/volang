@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
     "utils"
     "task"
 )
@@ -10,15 +11,15 @@ import (
 // printHeader prints a formatted header
 func printHeader(title string) {
     line := utils.Repeat("=", 50)
-    println(line)
-    println("  " + title)
-    println(line)
+    fmt.Println(line)
+    fmt.Println("  " + title)
+    fmt.Println(line)
 }
 
 // printSubHeader prints a sub-header
 func printSubHeader(title string) {
-    println("")
-    println("--- " + title + " ---")
+    fmt.Println("")
+    fmt.Println("--- " + title + " ---")
 }
 
 // testUtils tests utility functions
@@ -31,7 +32,7 @@ func testUtils() {
     assert(utils.Clamp(-5, 0, 10) == 0, "Clamp(-5, 0, 10) should be 0")
     assert(utils.Repeat("ab", 3) == "ababab", "Repeat should work")
     
-    println("  Utils: OK")
+    fmt.Println("  Utils: OK")
 }
 
 // testTaskManager tests TaskManager object (reference type)
@@ -53,7 +54,7 @@ func testTaskManager() {
     manager2.AddTask("Document", task.PriorityLow)
     assert(manager.Count() == 4, "Original sees new task (shared state)")
     
-    println("  TaskManager pointer reference semantics: OK")
+    fmt.Println("  TaskManager pointer reference semantics: OK")
     
     // Test status transitions
     assert(manager.StartTask(id1), "Should start task 1")
@@ -65,7 +66,7 @@ func testTaskManager() {
     assert(manager.CancelTask(id3), "Should cancel task 3")
     assert(manager.GetStatus(id3) == task.StatusCancelled, "Task 3 cancelled")
     
-    println("  Task state transitions: OK")
+    fmt.Println("  Task state transitions: OK")
 }
 
 // runDemo demonstrates the task management system
@@ -80,42 +81,42 @@ func runDemo() {
     manager.AddTask("Write tests", task.PriorityMedium)
     manager.AddTask("Documentation", task.PriorityLow)
     
-    println("")
-    println("Created " + string(manager.Count()) + " tasks")
+    fmt.Println("")
+    fmt.Println("Created " + string(manager.Count()) + " tasks")
     
     // Simulate workflow
-    println("")
-    println("Simulating workflow...")
+    fmt.Println("")
+    fmt.Println("Simulating workflow...")
     
     manager.StartTask(2)  // Start critical task first
     manager.StartTask(1)  // Start high priority
     manager.CompleteTask(1)  // Complete design
     
     // Print statistics
-    println("")
-    println("Statistics:")
-    println("  Total: " + string(manager.Count()))
-    println("  Pending: " + string(manager.CountByStatus(task.StatusPending)))
-    println("  In Progress: " + string(manager.CountByStatus(task.StatusInProgress)))
-    println("  Completed: " + string(manager.CountByStatus(task.StatusCompleted)))
+    fmt.Println("")
+    fmt.Println("Statistics:")
+    fmt.Println("  Total: " + string(manager.Count()))
+    fmt.Println("  Pending: " + string(manager.CountByStatus(task.StatusPending)))
+    fmt.Println("  In Progress: " + string(manager.CountByStatus(task.StatusInProgress)))
+    fmt.Println("  Completed: " + string(manager.CountByStatus(task.StatusCompleted)))
 }
 
 func main() {
     // Test cross-package string functions
-    println("Cross-package Hello:")
-    println(utils.Hello())
+    fmt.Println("Cross-package Hello:")
+    fmt.Println(utils.Hello())
     
-    println("Cross-package Concat:")
-    println(utils.Concat("foo", "bar"))
+    fmt.Println("Cross-package Concat:")
+    fmt.Println(utils.Concat("foo", "bar"))
     
-    println("Cross-package Repeat:")
-    println(utils.Repeat("ab", 3))
+    fmt.Println("Cross-package Repeat:")
+    fmt.Println(utils.Repeat("ab", 3))
     
     // Test cross-package int functions
-    println("Cross-package Max/Min/Clamp:")
-    println(utils.Max(10, 20))
-    println(utils.Min(10, 20))
-    println(utils.Clamp(15, 0, 10))
+    fmt.Println("Cross-package Max/Min/Clamp:")
+    fmt.Println(utils.Max(10, 20))
+    fmt.Println(utils.Min(10, 20))
+    fmt.Println(utils.Clamp(15, 0, 10))
     
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

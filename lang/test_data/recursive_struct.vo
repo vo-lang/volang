@@ -1,6 +1,8 @@
 // Test: recursive/self-referential data structures
 package main
 
+
+import "fmt"
 // Linked list node
 type Node struct {
     value int
@@ -15,7 +17,7 @@ type TreeNode struct {
 }
 
 func main() {
-    println("Test 1: Basic linked list")
+    fmt.Println("Test 1: Basic linked list")
     n1 := &Node{value: 1}
     n2 := &Node{value: 2}
     n3 := &Node{value: 3}
@@ -27,7 +29,7 @@ func main() {
     assert(n1.next.next.value == 3, "n1.next.next.value should be 3")
     assert(n1.next.next.next == nil, "n1.next.next.next should be nil")
     
-    println("Test 2: List traversal")
+    fmt.Println("Test 2: List traversal")
     sum := 0
     current := n1
     for current != nil {
@@ -36,7 +38,7 @@ func main() {
     }
     assert(sum == 6, "sum of 1+2+3 should be 6")
     
-    println("Test 3: Binary tree creation")
+    fmt.Println("Test 3: Binary tree creation")
     root := &TreeNode{value: 10}
     root.left = &TreeNode{value: 5}
     root.right = &TreeNode{value: 15}
@@ -48,15 +50,15 @@ func main() {
     assert(root.right.value == 15, "root.right.value should be 15")
     assert(root.left.left.value == 3, "root.left.left.value should be 3")
     
-    println("Test 4: Tree sum (manual)")
+    fmt.Println("Test 4: Tree sum (manual)")
     treeSum := root.value + root.left.value + root.right.value + root.left.left.value + root.left.right.value
     assert(treeSum == 40, "tree sum should be 40 (10+5+15+3+7)")
     
-    println("Test 5: Modify through pointer chain")
+    fmt.Println("Test 5: Modify through pointer chain")
     n1.next.value = 20
     assert(n2.value == 20, "n2.value should be 20 after modification")
     
-    println("Test 6: Circular reference")
+    fmt.Println("Test 6: Circular reference")
     c1 := &Node{value: 100}
     c2 := &Node{value: 200}
     c1.next = c2
@@ -65,7 +67,7 @@ func main() {
     assert(c1.next.next == c1, "circular: c1.next.next should be c1")
     assert(c1.next.next.value == 100, "circular: should traverse back to c1")
     
-    println("Test 7: Deep chain")
+    fmt.Println("Test 7: Deep chain")
     head := &Node{value: 0}
     tail := head
     for i := 1; i < 10; i += 1 {
@@ -91,9 +93,9 @@ func main() {
     }
     assert(deepSum == 45, "deep chain sum should be 45")
     
-    println("Test 8: Nil pointer check")
+    fmt.Println("Test 8: Nil pointer check")
     var nilNode *Node = nil
     assert(nilNode == nil, "nil pointer should be nil")
     
-    println("recursive_struct: ALL PASSED")
+    fmt.Println("recursive_struct: ALL PASSED")
 }

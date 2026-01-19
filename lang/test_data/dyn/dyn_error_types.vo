@@ -2,7 +2,10 @@
 // Validates error categorization: TypeError, AttributeError, SignatureError, etc.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 import "errors"
 
 func main() {
@@ -13,21 +16,21 @@ func main() {
     _, err := num~>field
     assert(err != nil, "field on int should error")
     assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for int field access")
-    println("Test 1: int~>field -> TypeError")
+    fmt.Println("Test 1: int~>field -> TypeError")
     
     // Test 2: Field access on nil
     var nilVal any = nil
     _, err = nilVal~>field
     assert(err != nil, "field on nil should error")
     assert(errors.Is(err, dyn.ErrNilBase), "should be NilError for nil field access")
-    println("Test 2: nil~>field -> NilError")
+    fmt.Println("Test 2: nil~>field -> NilError")
     
     // Test 3: Index on non-indexable
     var b any = true
     _, err = b~>[0]
     assert(err != nil, "index on bool should error")
     assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for bool index")
-    println("Test 3: bool~>[0] -> TypeError")
+    fmt.Println("Test 3: bool~>[0] -> TypeError")
     
     // ==== AttributeError tests ====
     
@@ -39,13 +42,13 @@ func main() {
     _, err = p~>NonExistent
     assert(err != nil, "non-existent field should error")
     assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing field")
-    println("Test 4: missing field -> AttributeError")
+    fmt.Println("Test 4: missing field -> AttributeError")
     
     // Test 5: Non-existent method
     _, err = p~>NonExistentMethod()
     assert(err != nil, "non-existent method should error")
     assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing method")
-    println("Test 5: missing method -> AttributeError")
+    fmt.Println("Test 5: missing method -> AttributeError")
     
     // ==== SignatureError tests ====
     // Calc with methods is defined at file scope (see bottom of file)
@@ -55,19 +58,19 @@ func main() {
     _, err = c~>Add()  // Add needs 1 arg
     assert(err != nil, "wrong param count should error")
     assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param count")
-    println("Test 6: wrong param count -> SignatureError")
+    fmt.Println("Test 6: wrong param count -> SignatureError")
     
     // Test 7: Wrong parameter type
     _, err = c~>Add("wrong")  // Add expects int
     assert(err != nil, "wrong param type should error")
     assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param type")
-    println("Test 7: wrong param type -> SignatureError")
+    fmt.Println("Test 7: wrong param type -> SignatureError")
     
     // Test 8: Wrong return count (expect 1, method returns 2)
     _, err = c~>Pair()  // Pair returns 2 values, we expect 1
     assert(err != nil, "wrong return count should error")
     assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong return count")
-    println("Test 8: wrong return count -> SignatureError")
+    fmt.Println("Test 8: wrong return count -> SignatureError")
     
     // ==== IndexError tests ====
     
@@ -76,13 +79,13 @@ func main() {
     _, err = s~>[10]
     assert(err != nil, "out of bounds should error")
     assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for out of bounds")
-    println("Test 9: slice out of bounds -> IndexError")
+    fmt.Println("Test 9: slice out of bounds -> IndexError")
     
     // Test 10: Negative index
     _, err = s~>[-1]
     assert(err != nil, "negative index should error")
     assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for negative index")
-    println("Test 10: negative index -> IndexError")
+    fmt.Println("Test 10: negative index -> IndexError")
     
     // ==== Successful operations for sanity ====
     
@@ -90,14 +93,14 @@ func main() {
     name, err := p~>Name
     assert(err == nil, "valid field access should succeed")
     assert(name.(string) == "Alice", "name should be Alice")
-    println("Test 11: valid field -> success")
+    fmt.Println("Test 11: valid field -> success")
     
     r, err := c~>Add(5)
     assert(err == nil, "valid method call should succeed")
     assert(r.(int) == 15, "Add(5) should return 15")
-    println("Test 12: valid method -> success")
+    fmt.Println("Test 12: valid method -> success")
     
-    println("dyn_error_types: ok")
+    fmt.Println("dyn_error_types: ok")
 }
 
 func (c *Calc) Add(x int) int {

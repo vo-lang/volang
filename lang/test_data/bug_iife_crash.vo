@@ -2,6 +2,8 @@
 // Simple IIFE works, but some complex patterns crash the VM
 package main
 
+
+import "fmt"
 func main() {
 	// These work:
 	// - Basic IIFE
@@ -52,5 +54,5 @@ func main() {
 	assert(len(computed) == 3, "computed slice len")
 	assert(computed[0]+computed[1]+computed[2] == 6, "computed slice sum")
 
-	println("bug_iife_crash: PASSED")
+	fmt.Println("bug_iife_crash: PASSED")
 }

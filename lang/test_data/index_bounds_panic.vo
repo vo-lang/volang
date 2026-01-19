@@ -1,8 +1,10 @@
 // Test: array/slice/string index out of bounds should panic
 package main
 
+
+import "fmt"
 func main() {
-    println("Test 1: Array index out of bounds (positive)")
+    fmt.Println("Test 1: Array index out of bounds (positive)")
     panicked := false
     func() {
         defer func() {
@@ -16,7 +18,7 @@ func main() {
     }()
     assert(panicked, "array index >= len should panic")
     
-    println("Test 2: Array index negative")
+    fmt.Println("Test 2: Array index negative")
     panicked = false
     func() {
         defer func() {
@@ -30,7 +32,7 @@ func main() {
     }()
     assert(panicked, "array negative index should panic")
     
-    println("Test 3: Slice index out of bounds")
+    fmt.Println("Test 3: Slice index out of bounds")
     panicked = false
     func() {
         defer func() {
@@ -44,7 +46,7 @@ func main() {
     }()
     assert(panicked, "slice index >= len should panic")
     
-    println("Test 4: String index out of bounds")
+    fmt.Println("Test 4: String index out of bounds")
     panicked = false
     func() {
         defer func() {
@@ -58,7 +60,7 @@ func main() {
     }()
     assert(panicked, "string index >= len should panic")
     
-    println("Test 5: Empty slice access")
+    fmt.Println("Test 5: Empty slice access")
     panicked = false
     func() {
         defer func() {
@@ -72,7 +74,7 @@ func main() {
     }()
     assert(panicked, "empty slice access should panic")
     
-    println("Test 6: Slice range out of bounds (high)")
+    fmt.Println("Test 6: Slice range out of bounds (high)")
     panicked = false
     func() {
         defer func() {
@@ -86,7 +88,7 @@ func main() {
     }()
     assert(panicked, "slice range high > len should panic")
     
-    println("Test 7: Slice range out of bounds (low > high)")
+    fmt.Println("Test 7: Slice range out of bounds (low > high)")
     panicked = false
     func() {
         defer func() {
@@ -101,7 +103,7 @@ func main() {
     }()
     assert(panicked, "slice range low > high should panic")
     
-    println("Test 8: Three-index slice cap out of bounds")
+    fmt.Println("Test 8: Three-index slice cap out of bounds")
     panicked = false
     func() {
         defer func() {
@@ -115,7 +117,7 @@ func main() {
     }()
     assert(panicked, "three-index slice cap > cap should panic")
     
-    println("Test 9: Valid boundary access (no panic)")
+    fmt.Println("Test 9: Valid boundary access (no panic)")
     arr := [3]int{1, 2, 3}
     assert(arr[0] == 1, "arr[0] should work")
     assert(arr[2] == 3, "arr[len-1] should work")
@@ -128,10 +130,10 @@ func main() {
     assert(str[0] == 'a', "str[0] should work")
     assert(str[2] == 'c', "str[len-1] should work")
     
-    println("Test 10: Slice to end boundary")
+    fmt.Println("Test 10: Slice to end boundary")
     sub := s[2:3]
     assert(len(sub) == 1, "s[2:3] should have len 1")
     assert(sub[0] == 3, "s[2:3][0] should be 3")
     
-    println("index_bounds_panic: ALL PASSED")
+    fmt.Println("index_bounds_panic: ALL PASSED")
 }

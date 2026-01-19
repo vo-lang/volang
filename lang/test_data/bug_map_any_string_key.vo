@@ -1,6 +1,8 @@
 // Bug reproduction: map[any] with string key fails to retrieve
 package main
 
+
+import "fmt"
 func main() {
     m := make(map[any]int)
     
@@ -9,22 +11,22 @@ func main() {
     
     // Read back - this returns 0 instead of 200!
     v := m["hello"]
-    println("m[\"hello\"] =", v)
+    fmt.Println("m[\"hello\"] =", v)
     
     // Check with ok form
     v2, ok := m["hello"]
-    println("v2 =", v2, "ok =", ok)
+    fmt.Println("v2 =", v2, "ok =", ok)
     
     // Try with variable
     key := "hello"
     m[key] = 300
     v3 := m[key]
-    println("m[key] =", v3)
+    fmt.Println("m[key] =", v3)
     
     // int key works
     m[1] = 100
     v4 := m[1]
-    println("m[1] =", v4)
+    fmt.Println("m[1] =", v4)
     assert(v4 == 100, "int key should work")
     
     // But string key fails

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: 从数组创建 slice
     var arr [3]int
@@ -12,7 +14,7 @@ func main() {
     assert(s[0] == 10)
     assert(s[1] == 20)
     assert(s[2] == 30)
-    println("Test 1 - Array to slice: passed")
+    fmt.Println("Test 1 - Array to slice: passed")
     
     // Test 2: slice for-range (_, v)
     sum := 0
@@ -20,7 +22,7 @@ func main() {
         sum = sum + v
     }
     assert(sum == 60)
-    println("Test 2 - Slice for-range: passed")
+    fmt.Println("Test 2 - Slice for-range: passed")
 
     // Test 3: slice for-range (i, v)
     sum2 := 0
@@ -31,24 +33,24 @@ func main() {
         }
     }
     assert(sum2 == 60)
-    println("Test 3 - Slice for-range (i, v): passed")
+    fmt.Println("Test 3 - Slice for-range (i, v): passed")
     
     // Test 4: slice 切片 s[i:j]
     s2 := s[1:3]
     assert(len(s2) == 2)
     assert(s2[0] == 20)
     assert(s2[1] == 30)
-    println("Test 4 - Slice slicing s[1:3]: passed")
+    fmt.Println("Test 4 - Slice slicing s[1:3]: passed")
 
     // Test 5: slice 完整切片 s[:]
     s3 := s[:]
     assert(len(s3) == 3)
-    println("Test 5 - Slice full slice s[:]: passed")
+    fmt.Println("Test 5 - Slice full slice s[:]: passed")
     
     // Test 6: slice 赋值
     s[1] = 200
     assert(s[1] == 200)
-    println("Test 6 - Slice assignment: passed")
+    fmt.Println("Test 6 - Slice assignment: passed")
 
     // Test 7: 修改 slice 后再次循环
     sum3 := 0
@@ -56,14 +58,14 @@ func main() {
         sum3 = sum3 + v
     }
     assert(sum3 == 240)  // 10 + 200 + 30
-    println("Test 7 - Modified slice for-range: passed")
+    fmt.Println("Test 7 - Modified slice for-range: passed")
 
     // Test 8: slice 切片的切片
     s4 := s[0:2]   // [10, 200]
     s5 := s4[1:2]  // [200]
     assert(len(s5) == 1)
     assert(s5[0] == 200)
-    println("Test 8 - Slice of slice: passed")
+    fmt.Println("Test 8 - Slice of slice: passed")
 
     // Test 9: slice literal
     s6 := []int{1, 2, 3}
@@ -71,7 +73,7 @@ func main() {
     assert(s6[0] == 1)
     assert(s6[1] == 2)
     assert(s6[2] == 3)
-    println("Test 9 - Slice literal: passed")
+    fmt.Println("Test 9 - Slice literal: passed")
 
     // Test 10: slice literal for-range
     sum4 := 0
@@ -79,14 +81,14 @@ func main() {
         sum4 = sum4 + v
     }
     assert(sum4 == 6)
-    println("Test 10 - Slice literal for-range: passed")
+    fmt.Println("Test 10 - Slice literal for-range: passed")
 
     // Test 11: slice append
     s7 := []int{1, 2}
     s7 = append(s7, 3)
     assert(len(s7) == 3)
     assert(s7[2] == 3)
-    println("Test 11 - Slice append: passed")
+    fmt.Println("Test 11 - Slice append: passed")
 
-    println("All slice tests passed!")
+    fmt.Println("All slice tests passed!")
 }

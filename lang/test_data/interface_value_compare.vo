@@ -2,6 +2,8 @@
 // Go spec: interface comparison checks dynamic type and value
 package main
 
+
+import "fmt"
 type Point struct { X, Y int }
 
 func main() {
@@ -64,5 +66,5 @@ func main() {
     // Note: struct/array deep comparison not yet implemented
     // They use reference identity in interface comparison
     
-    println("interface_value_compare: ok")
+    fmt.Println("interface_value_compare: ok")
 }

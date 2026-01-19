@@ -3,6 +3,8 @@
 // Error: "invalid operation: type assertion requires interface type"
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -25,5 +27,5 @@ func main() {
 		result = "int"
 	}
 	assert(result == "hello", "should match Stringer interface")
-	println("bug_type_switch_interface_case: PASSED")
+	fmt.Println("bug_type_switch_interface_case: PASSED")
 }

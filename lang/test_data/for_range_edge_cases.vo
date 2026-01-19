@@ -2,6 +2,8 @@
 // Go spec: range over nil slice/map is valid (zero iterations)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Range over empty slice
     emptySlice := []int{}
@@ -106,5 +108,5 @@ func main() {
     assert(existingIdx == 0, "existing idx should be 0")
     assert(existingVal == 10, "existing val should be 10")
     
-    println("for_range_edge_cases: ok")
+    fmt.Println("for_range_edge_cases: ok")
 }

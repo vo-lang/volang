@@ -2,6 +2,8 @@
 // Bug #3: Map key type validation inconsistency
 package main
 
+
+import "fmt"
 type MyInt int
 
 func testMapKeyTypeMatch() error {
@@ -10,14 +12,14 @@ func testMapKeyTypeMatch() error {
 	var box1 interface{} = m1
 	box1~>["key"] = 42
 	assert(m1["key"] == 42, "string key should work")
-	println("Test 1 (string key): ok")
+	fmt.Println("Test 1 (string key): ok")
 	
 	// Test 2: Basic int key map - should work
 	m2 := map[int]string{}
 	var box2 interface{} = m2
 	box2~>[1] = "one"
 	assert(m2[1] == "one", "int key should work")
-	println("Test 2 (int key): ok")
+	fmt.Println("Test 2 (int key): ok")
 	
 	// Test 3: Int64 key on int map - should work (integer coercion)
 	m3 := map[int]int{}
@@ -25,7 +27,7 @@ func testMapKeyTypeMatch() error {
 	var key64 int64 = 5
 	box3~>[key64] = 50
 	assert(m3[5] == 50, "int64 on int map should work")
-	println("Test 3 (int64 on int map): ok")
+	fmt.Println("Test 3 (int64 on int map): ok")
 	
 	return nil
 }
@@ -49,9 +51,9 @@ func main() {
 	
 	panicked := testMapKeyTypeMismatch()
 	assert(panicked, "testMapKeyTypeMismatch should panic")
-	println("Test 4 (wrong key type): panic caught")
+	fmt.Println("Test 4 (wrong key type): panic caught")
 	
-	println("done")
+	fmt.Println("done")
 }
 
 // expected output:

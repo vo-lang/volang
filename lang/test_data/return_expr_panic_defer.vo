@@ -2,6 +2,8 @@
 // Go spec: defer runs after return expression evaluation, even if it panics
 package main
 
+
+import "fmt"
 var log []string
 
 func appendLog(s string) {
@@ -128,5 +130,5 @@ func main() {
     r5 := testChainedReturnPanic()
     assert(r5 == "chain-recovered", "test5: chained return panic")
     
-    println("return_expr_panic_defer: PASSED")
+    fmt.Println("return_expr_panic_defer: PASSED")
 }

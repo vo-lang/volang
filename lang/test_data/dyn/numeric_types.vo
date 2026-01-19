@@ -2,6 +2,8 @@
 // int, int8, int16, int32, int64, uint, uint8, etc.
 package main
 
+
+import "fmt"
 type NumericStruct struct {
     i    int
     i8   int8
@@ -74,5 +76,5 @@ func main() {
     f64 := obj~>f64?
     assert(f64.(float64) > 2.71 && f64.(float64) < 2.72, "f64 should be ~2.718")
     
-    println("numeric_types: ok")
+    fmt.Println("numeric_types: ok")
 }

@@ -2,6 +2,8 @@
 // Methods retrieved via ~> should be callable closures.
 package main
 
+
+import "fmt"
 type Calculator struct {
     base int
 }
@@ -70,5 +72,5 @@ func main() {
     result = binOp(3, 7)
     assert(result == 30, "3 + 7 + 20 should be 30")
     
-    println("method_closure_return: ok")
+    fmt.Println("method_closure_return: ok")
 }

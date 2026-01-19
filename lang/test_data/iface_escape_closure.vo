@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: interface variable captured by closure must escape
 
 type Speaker interface {
@@ -22,7 +24,7 @@ func test_int_closure() {
     if result != 42 {
         panic("test_int_closure failed")
     }
-    println("Test 0 PASSED: int captured by closure")
+    fmt.Println("Test 0 PASSED: int captured by closure")
 }
 
 // Interface captured by closure - must escape
@@ -38,7 +40,7 @@ func test_iface_closure() {
     if result != "woof" {
         panic("test_iface_closure failed")
     }
-    println("Test 1 PASSED: interface captured by closure")
+    fmt.Println("Test 1 PASSED: interface captured by closure")
 }
 
 // Interface reassigned inside closure
@@ -54,7 +56,7 @@ func test_iface_closure_reassign() {
     if result != "woof" {
         panic("test_iface_closure_reassign failed")
     }
-    println("Test 2 PASSED: interface reassigned in closure")
+    fmt.Println("Test 2 PASSED: interface reassigned in closure")
 }
 
 // Return closure that captures interface
@@ -71,7 +73,7 @@ func test_iface_return_closure() {
     if result != "woof" {
         panic("test_iface_return_closure failed")
     }
-    println("Test 3 PASSED: closure returned with captured interface")
+    fmt.Println("Test 3 PASSED: closure returned with captured interface")
 }
 
 func main() {
@@ -80,6 +82,6 @@ func main() {
     test_iface_closure_reassign()
     test_iface_return_closure()
     
-    println("")
-    println("=== iface_escape_closure: ALL TESTS PASSED ===")
+    fmt.Println("")
+    fmt.Println("=== iface_escape_closure: ALL TESTS PASSED ===")
 }

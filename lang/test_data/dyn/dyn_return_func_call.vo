@@ -2,6 +2,8 @@
 // Coverage: dyn call returning closure/func, then invoking it dynamically or statically
 package main
 
+
+import "fmt"
 type Factory struct {
 	multiplier int
 }
@@ -41,7 +43,7 @@ func main() {
 	adder := adderAny.(func(int) int)
 	result := adder(5)
 	assert(result == 15, "adder(5) should be 15")
-	println("Test 1: adder(5) =", result)
+	fmt.Println("Test 1: adder(5) =", result)
 
 	// Test 2: Get multiplier function
 	mulAny, err := obj~>GetMultiplier()
@@ -49,7 +51,7 @@ func main() {
 	mul := mulAny.(func(int) int)
 	result2 := mul(7)
 	assert(result2 == 70, "mul(7) should be 70")
-	println("Test 2: mul(7) =", result2)
+	fmt.Println("Test 2: mul(7) =", result2)
 
 	// Test 3: Binary op function
 	binOpAny, err := obj~>GetBinaryOp()
@@ -57,7 +59,7 @@ func main() {
 	binOp := binOpAny.(func(int, int) int)
 	result3 := binOp(3, 4)
 	assert(result3 == 17, "binOp(3,4) should be 17")
-	println("Test 3: binOp(3,4) =", result3)
+	fmt.Println("Test 3: binOp(3,4) =", result3)
 
 	// Test 4: No arg function
 	noArgAny, err := obj~>GetNoArgFunc()
@@ -65,7 +67,7 @@ func main() {
 	noArg := noArgAny.(func() int)
 	result4 := noArg()
 	assert(result4 == 1000, "noArg() should be 1000")
-	println("Test 4: noArg() =", result4)
+	fmt.Println("Test 4: noArg() =", result4)
 
 	// Test 5: Chain - get and immediately type assert and call
 	fnAny, err := obj~>GetAdder()
@@ -73,7 +75,7 @@ func main() {
 	fn := fnAny.(func(int) int)
 	result5 := fn(100)
 	assert(result5 == 110, "chained adder(100) should be 110")
-	println("Test 5: chained =", result5)
+	fmt.Println("Test 5: chained =", result5)
 
-	println("dyn_return_func_call: ok")
+	fmt.Println("dyn_return_func_call: ok")
 }

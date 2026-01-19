@@ -2,6 +2,8 @@
 // Go semantics: recover() clears panic state, but you can panic again
 package main
 
+
+import "fmt"
 var order []string
 
 func main() {
@@ -131,5 +133,5 @@ func main() {
     }()
     assert(result6 == "no panic", "recover should return nil on normal return")
     
-    println("defer_repanic_chain: PASSED")
+    fmt.Println("defer_repanic_chain: PASSED")
 }

@@ -2,6 +2,8 @@
 // Go spec: LHS evaluated left-to-right, then RHS left-to-right
 package main
 
+
+import "fmt"
 var evalOrder []string
 
 func logAndReturn(name string, val int) int {
@@ -143,5 +145,5 @@ func main() {
     r5 := testSwapPanic()
     assert(r5 == "swap-panic", "test5: swap panic")
     
-    println("multi_assign_panic_order: PASSED")
+    fmt.Println("multi_assign_panic_order: PASSED")
 }

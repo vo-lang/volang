@@ -1,9 +1,12 @@
 package main
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 func main() {
-    println("Starting math tests...")
+    fmt.Println("Starting math tests...")
     
     // Basic functions
     abs5 := math.Abs(-5.0)
@@ -69,6 +72,6 @@ func main() {
     cs1 := math.Copysign(5.0, -1.0)
     assert(cs1 == -5.0, "Copysign(5, -1) should be -5")
     
-    println("All math tests passed!")
+    fmt.Println("All math tests passed!")
 }
 

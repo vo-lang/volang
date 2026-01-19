@@ -2,7 +2,10 @@
 // States and transitions accessed dynamically.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 type State struct {
     name        string
@@ -210,6 +213,6 @@ func main() error {
     pauseCount := pausedState~>enterCount?
     assert(pauseCount.(int) == 1, "Paused entered once")
     
-    println("dyn_state_machine: ok")
+    fmt.Println("dyn_state_machine: ok")
     return nil
 }

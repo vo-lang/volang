@@ -2,6 +2,8 @@
 // Coverage: nil map semantics (read returns zero, write panics)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: nil map read returns zero value
     var m map[string]int
@@ -47,5 +49,5 @@ func main() {
     }
     assert(count == 0, "nil map range should be empty")
     
-    println("nil_map_behavior: ok")
+    fmt.Println("nil_map_behavior: ok")
 }

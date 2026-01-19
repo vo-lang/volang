@@ -1,82 +1,85 @@
 // Test: floating-point special values (Inf, NaN, negative zero)
 package main
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 func main() {
-    println("Test 1: Positive infinity")
+    fmt.Println("Test 1: Positive infinity")
     posInf := math.Inf(1)
     assert(posInf > 0, "positive infinity should be > 0")
     assert(posInf > 1e308, "positive infinity should be > 1e308")
     
-    println("Test 2: Negative infinity")
+    fmt.Println("Test 2: Negative infinity")
     negInf := math.Inf(-1)
     assert(negInf < 0, "negative infinity should be < 0")
     assert(negInf < -1e308, "negative infinity should be < -1e308")
     
-    println("Test 3: Infinity comparisons")
+    fmt.Println("Test 3: Infinity comparisons")
     assert(posInf > negInf, "posInf > negInf")
     assert(posInf == posInf, "posInf == posInf")
     assert(negInf == negInf, "negInf == negInf")
     
-    println("Test 4: Infinity arithmetic")
+    fmt.Println("Test 4: Infinity arithmetic")
     assert(posInf + 1 == posInf, "Inf + 1 == Inf")
     assert(posInf * 2 == posInf, "Inf * 2 == Inf")
     assert(posInf + posInf == posInf, "Inf + Inf == Inf")
     
-    println("Test 5: NaN basics")
+    fmt.Println("Test 5: NaN basics")
     nan := math.NaN()
     assert(math.IsNaN(nan), "NaN should be detected by IsNaN")
     
-    println("Test 6: NaN comparison")
+    fmt.Println("Test 6: NaN comparison")
     assert(!(nan == nan), "NaN should not equal itself")
     assert(nan != nan, "NaN != NaN should be true")
     assert(!(nan < 0), "NaN < 0 should be false")
     assert(!(nan > 0), "NaN > 0 should be false")
     assert(!(nan == 0), "NaN == 0 should be false")
     
-    println("Test 7: NaN propagation")
+    fmt.Println("Test 7: NaN propagation")
     result := nan + 1
     assert(math.IsNaN(result), "NaN + 1 should be NaN")
     result2 := nan * 0
     assert(math.IsNaN(result2), "NaN * 0 should be NaN")
     
-    println("Test 8: IsInf checks")
+    fmt.Println("Test 8: IsInf checks")
     assert(math.IsInf(posInf, 1), "IsInf(posInf, 1) should be true")
     assert(math.IsInf(negInf, -1), "IsInf(negInf, -1) should be true")
     assert(math.IsInf(posInf, 0), "IsInf(posInf, 0) should be true (any sign)")
     assert(!math.IsInf(1.0, 0), "IsInf(1.0, 0) should be false")
     
-    println("Test 9: Special operations producing Inf")
+    fmt.Println("Test 9: Special operations producing Inf")
     bigNum := 1e308
     overflow := bigNum * 10
     assert(math.IsInf(overflow, 1), "1e308 * 10 should overflow to +Inf")
     
-    println("Test 10: Division by zero produces Inf")
+    fmt.Println("Test 10: Division by zero produces Inf")
     var zero float64 = 0.0
     divByZero := 1.0 / zero
     assert(math.IsInf(divByZero, 1), "1.0 / 0.0 should be +Inf")
     negDivByZero := -1.0 / zero
     assert(math.IsInf(negDivByZero, -1), "-1.0 / 0.0 should be -Inf")
     
-    println("Test 11: 0/0 produces NaN")
+    fmt.Println("Test 11: 0/0 produces NaN")
     zeroByZero := zero / zero
     assert(math.IsNaN(zeroByZero), "0.0 / 0.0 should be NaN")
     
-    println("Test 12: Inf - Inf produces NaN")
+    fmt.Println("Test 12: Inf - Inf produces NaN")
     infMinusInf := posInf - posInf
     assert(math.IsNaN(infMinusInf), "Inf - Inf should be NaN")
     
-    println("Test 13: Negative zero")
+    fmt.Println("Test 13: Negative zero")
     negZero := -0.0
     posZero := 0.0
     assert(negZero == posZero, "-0.0 == 0.0 should be true")
     
-    println("Test 14: 1/negZero vs 1/posZero")
+    fmt.Println("Test 14: 1/negZero vs 1/posZero")
     invNegZero := 1.0 / negZero
     invPosZero := 1.0 / posZero
     assert(math.IsInf(invNegZero, -1), "1/-0 should be -Inf")
     assert(math.IsInf(invPosZero, 1), "1/+0 should be +Inf")
     
-    println("float_special_values: ALL PASSED")
+    fmt.Println("float_special_values: ALL PASSED")
 }

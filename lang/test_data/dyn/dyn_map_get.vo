@@ -1,6 +1,8 @@
 // Test map get various ways
 package main
 
+
+import "fmt"
 func main() {
 	// Static map get
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
@@ -8,27 +10,27 @@ func main() {
 	// Simple get
 	v1 := m["a"]
 	assert(v1 == 1, "m[a] expected 1")
-	println("m[a] =", v1)
+	fmt.Println("m[a] =", v1)
 	
 	// Comma-ok get existing key
 	v2, ok2 := m["b"]
 	assert(ok2 && v2 == 2, "m[b] expected 2, true")
-	println("m[b] =", v2, ", ok =", ok2)
+	fmt.Println("m[b] =", v2, ", ok =", ok2)
 	
 	// Comma-ok get non-existing key
 	v3, ok3 := m["nonexistent"]
 	assert(!ok3 && v3 == 0, "m[nonexistent] expected 0, false")
-	println("m[nonexistent] =", v3, ", ok =", ok3)
+	fmt.Println("m[nonexistent] =", v3, ", ok =", ok3)
 	
 	// Map with different value types
 	m2 := map[int]string{1: "one", 2: "two"}
 	v4 := m2[1]
 	assert(v4 == "one", "m2[1] expected one")
-	println("m2[1] =", v4)
+	fmt.Println("m2[1] =", v4)
 	
 	v5, ok5 := m2[3]
 	assert(!ok5 && v5 == "", "m2[3] expected empty, false")
-	println("m2[3] = empty, ok =", ok5)
+	fmt.Println("m2[3] = empty, ok =", ok5)
 	
 	// Map with pointer values
 	type Data struct {
@@ -37,17 +39,17 @@ func main() {
 	m3 := map[string]*Data{"x": &Data{val: 100}}
 	v6 := m3["x"]
 	assert(v6 != nil && v6.val == 100, "m3[x] expected val=100")
-	println("m3[x].val =", v6.val)
+	fmt.Println("m3[x].val =", v6.val)
 	
 	v7, ok7 := m3["y"]
 	assert(!ok7 && v7 == nil, "m3[y] expected nil, false")
-	println("m3[y] = nil, ok =", ok7)
+	fmt.Println("m3[y] = nil, ok =", ok7)
 	
 	// Map with struct values
 	m4 := map[string]Data{"z": Data{val: 200}}
 	v8 := m4["z"]
 	assert(v8.val == 200, "m4[z] expected val=200")
-	println("m4[z].val =", v8.val)
+	fmt.Println("m4[z].val =", v8.val)
 	
-	println("All map get tests passed!")
+	fmt.Println("All map get tests passed!")
 }

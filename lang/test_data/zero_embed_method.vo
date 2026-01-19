@@ -2,6 +2,8 @@
 // Verifies that methods on embedded zero-value structs work correctly
 package main
 
+
+import "fmt"
 type Inner struct {
     value int
 }
@@ -94,5 +96,5 @@ func main() {
     // w2.SetValue(600)
     // assert(w2.GetValue() == 600, "embedded pointer SetValue")
     
-    println("zero_embed_method: ok")
+    fmt.Println("zero_embed_method: ok")
 }

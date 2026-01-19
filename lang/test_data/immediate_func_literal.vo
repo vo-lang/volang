@@ -2,6 +2,8 @@
 // Coverage: func literal definition and immediate call in various contexts
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic IIFE
     result := func() int {
@@ -86,5 +88,5 @@ func main() {
     }()
     assert(adder(5) == 15, "IIFE returning closure")
     
-    println("immediate_func_literal: ok")
+    fmt.Println("immediate_func_literal: ok")
 }

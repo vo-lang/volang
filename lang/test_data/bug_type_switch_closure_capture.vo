@@ -2,9 +2,11 @@
 // Error: misaligned pointer dereference in gc.rs
 package main
 
+
+import "fmt"
 func main() {
     result := captureInTypeSwitch(42)
-    println("result:", result())
+    fmt.Println("result:", result())
 }
 
 func captureInTypeSwitch(v any) func() int {

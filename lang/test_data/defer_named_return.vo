@@ -2,6 +2,8 @@
 // Go spec: deferred functions can read and modify named results
 package main
 
+
+import "fmt"
 // Basic: defer modifies named return
 func addOne() (result int) {
     result = 10
@@ -93,5 +95,5 @@ func main() {
     r6 := nested()
     assert(r6 == 10, "nested should return 10, got ", r6)
     
-    println("defer_named_return: ok")
+    fmt.Println("defer_named_return: ok")
 }

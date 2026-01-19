@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func divmod(a, b int) (quot int, rem int) {
 	quot = a / b
 	rem = a % b
@@ -77,5 +79,5 @@ func main() {
 	assert(b3 == "positive", "b3 should be 'positive'")
 	assert(c3 == true, "c3 should be true")
 
-	println("bare_return_multi: PASS")
+	fmt.Println("bare_return_multi: PASS")
 }

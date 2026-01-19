@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -17,5 +19,5 @@ type Rect struct {
 
 func main() {
     r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
-    println(r.origin.Sum())  // should be 3
+    fmt.Println(r.origin.Sum())  // should be 3
 }

@@ -3,6 +3,8 @@
 // We test that all cases CAN be selected (statistical test)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Two buffered channels both ready
     ch1 := make(chan int, 1)
@@ -51,7 +53,7 @@ func main() {
     assert(total == 100, "total should be 100")
     // Note: Random selection means all three SHOULD be selected
     // but we can't strictly require it (extremely unlikely to fail)
-    println("select distribution: a=", count1, " b=", count2, " c=", count3)
+    fmt.Println("select distribution: a=", count1, " b=", count2, " c=", count3)
     
     // Test 3: Send and receive both ready
     sendCh := make(chan int, 1)
@@ -77,7 +79,7 @@ func main() {
     
     totalOps := sendCount + recvCount
     assert(totalOps == 50, "total ops should be 50")
-    println("send/recv distribution: send=", sendCount, " recv=", recvCount)
+    fmt.Println("send/recv distribution: send=", sendCount, " recv=", recvCount)
     
     // Test 4: Default case not taken when other cases are ready
     ready := make(chan int, 1)
@@ -92,5 +94,5 @@ func main() {
     }
     assert(defaultTaken == false, "default should not be taken when channel is ready")
     
-    println("select_multi_ready: ok")
+    fmt.Println("select_multi_ready: ok")
 }

@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -95,5 +97,5 @@ func main() {
 	mixedToAny()
 	variadicWithNil()
 	nested()
-	println("PASS: variadic_interface_combo")
+	fmt.Println("PASS: variadic_interface_combo")
 }

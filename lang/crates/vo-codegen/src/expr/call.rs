@@ -620,6 +620,16 @@ fn get_extern_name(
     }
 }
 
+/// Calculate number of fixed (non-variadic) parameters.
+#[inline]
+fn num_fixed_params(param_types: &[TypeKey], is_variadic: bool) -> usize {
+    if is_variadic && !param_types.is_empty() {
+        param_types.len() - 1
+    } else {
+        param_types.len()
+    }
+}
+
 /// Compile method arguments with variadic packing and interface conversion.
 /// Returns the total slots used for arguments.
 pub fn compile_method_args(
@@ -631,57 +641,47 @@ pub fn compile_method_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let num_fixed_params = if is_variadic && !param_types.is_empty() {
-        param_types.len() - 1
-    } else {
-        param_types.len()
-    };
+    // Tuple expansion for non-variadic calls: f(g()) where g() returns multiple values
+    let arg_info = info.get_call_arg_info(&call.args, param_types);
+    if arg_info.tuple_expand.is_some() {
+        return compile_args_with_types(&call.args, param_types, args_start, ctx, func, info);
+    }
     
     if is_variadic && !call.spread {
-        // Emit fixed arguments with automatic interface conversion
-        let fixed_params = &param_types[..num_fixed_params];
-        let fixed_args: Vec<_> = call.args.iter().take(num_fixed_params).cloned().collect();
-        let mut offset = compile_args_with_types(&fixed_args, fixed_params, args_start, ctx, func, info)?;
+        let n_fixed = num_fixed_params(param_types, is_variadic);
         
-        // Pack variadic arguments into slice
-        let variadic_args: Vec<&vo_syntax::ast::Expr> = call.args.iter().skip(num_fixed_params).collect();
-        let slice_type = param_types.last().copied().unwrap();
-        let elem_type = info.slice_elem_type(slice_type);
+        // Emit fixed arguments
+        let fixed_args: Vec<_> = call.args.iter().take(n_fixed).cloned().collect();
+        let mut offset = compile_args_with_types(&fixed_args, &param_types[..n_fixed], args_start, ctx, func, info)?;
+        
+        // Pack variadic arguments into slice (handles tuple expansion internally)
+        let variadic_args: Vec<_> = call.args.iter().skip(n_fixed).collect();
+        let elem_type = info.slice_elem_type(param_types.last().copied().unwrap());
         let slice_reg = pack_variadic_args(&variadic_args, elem_type, ctx, func, info)?;
         func.emit_copy(args_start + offset, slice_reg, 1);
         offset += 1;
         Ok(offset)
     } else {
-        // Non-variadic or spread: emit all arguments with automatic interface conversion
         compile_args_with_types(&call.args, param_types, args_start, ctx, func, info)
     }
 }
 
 /// Calculate arg slots for method call.
-/// Handles variadic packing and tuple expansion (f(g()) where g() returns multiple values).
 pub fn calc_method_arg_slots(
     call: &vo_syntax::ast::CallExpr,
     param_types: &[TypeKey],
     is_variadic: bool,
     info: &TypeInfoWrapper,
 ) -> u16 {
-    // Check for tuple expansion first
     let arg_info = info.get_call_arg_info(&call.args, param_types);
     if arg_info.tuple_expand.is_some() {
-        // Tuple expansion: slots = sum of all param types
         return param_types.iter().map(|&t| info.type_slot_count(t)).sum();
     }
     
-    let num_fixed_params = if is_variadic && !param_types.is_empty() {
-        param_types.len() - 1
-    } else {
-        param_types.len()
-    };
-    
     if is_variadic && !call.spread {
-        let fixed_slots: u16 = param_types.iter().take(num_fixed_params)
-            .map(|&t| info.type_slot_count(t)).sum();
-        fixed_slots + 1  // +1 for the packed slice
+        let n_fixed = num_fixed_params(param_types, is_variadic);
+        let fixed_slots: u16 = param_types.iter().take(n_fixed).map(|&t| info.type_slot_count(t)).sum();
+        fixed_slots + 1  // +1 for packed slice
     } else {
         param_types.iter().map(|&t| info.type_slot_count(t)).sum()
     }
@@ -708,6 +708,7 @@ pub fn calc_arg_slots(
 
 /// Pack variadic arguments into a slice.
 /// For `f(a, b, c)` where f is variadic, this creates `[]T{a, b, c}` and returns its register.
+/// Handles tuple expansion: `f(g())` where g() returns multiple values expands to multiple elements.
 /// `variadic_args` are the arguments that should be packed (starting from first variadic arg).
 /// `elem_type` is the element type of the variadic slice.
 /// Returns the register containing the slice (1 slot).
@@ -718,11 +719,18 @@ fn pack_variadic_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let len = variadic_args.len();
     let elem_slots = info.type_slot_count(elem_type);
     let elem_bytes = (elem_slots as usize) * 8;
     let elem_slot_types = info.type_slot_types(elem_type);
     let elem_vk = info.type_value_kind(elem_type);
+    
+    // Calculate total element count (expanding tuples)
+    let total_elems: usize = variadic_args.iter()
+        .map(|arg| {
+            let arg_type = info.expr_type(arg.id);
+            if info.is_tuple(arg_type) { info.tuple_len(arg_type) } else { 1 }
+        })
+        .sum();
     
     // Get element meta
     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
@@ -734,7 +742,7 @@ fn pack_variadic_args(
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     let num_regs = if flags == 0 { 3 } else { 2 };
     let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
-    let (b, c) = crate::type_info::encode_i32(len as i32);
+    let (b, c) = crate::type_info::encode_i32(total_elems as i32);
     func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
     func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
     if flags == 0 {
@@ -743,18 +751,42 @@ fn pack_variadic_args(
     }
     func.emit_with_flags(Opcode::SliceNew, flags, dst, meta_reg, len_cap_reg);
     
-    // Set each element
-    for (i, elem) in variadic_args.iter().enumerate() {
-        let val_reg = if info.is_interface(elem_type) {
-            let iface_reg = func.alloc_temp_typed(&elem_slot_types);
-            crate::stmt::compile_iface_assign(iface_reg, elem, elem_type, ctx, func, info)?;
-            iface_reg
-        } else {
-            compile_expr(elem, ctx, func, info)?
-        };
+    // Helper to set one slice element
+    let mut slice_idx = 0usize;
+    let mut set_elem = |val_reg: u16, func: &mut FuncBuilder, ctx: &mut CodegenContext| {
         let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
+        func.emit_op(Opcode::LoadInt, idx_reg, slice_idx as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
+        slice_idx += 1;
+    };
+    
+    // Set each element (expanding tuples as needed)
+    for elem in variadic_args.iter() {
+        let arg_type = info.expr_type(elem.id);
+        
+        if info.is_tuple(arg_type) {
+            // Tuple expansion: compile once, set each element
+            let tuple = super::CompiledTuple::compile(elem, ctx, func, info)?;
+            tuple.for_each_element(info, |src_slot, src_type| {
+                let val_reg = if info.is_interface(elem_type) {
+                    let iface_reg = func.alloc_temp_typed(&elem_slot_types);
+                    let _ = crate::stmt::emit_value_convert(iface_reg, src_slot, src_type, elem_type, ctx, func, info);
+                    iface_reg
+                } else {
+                    src_slot
+                };
+                set_elem(val_reg, func, ctx);
+            });
+        } else {
+            let val_reg = if info.is_interface(elem_type) {
+                let iface_reg = func.alloc_temp_typed(&elem_slot_types);
+                crate::stmt::compile_iface_assign(iface_reg, elem, elem_type, ctx, func, info)?;
+                iface_reg
+            } else {
+                compile_expr(elem, ctx, func, info)?
+            };
+            set_elem(val_reg, func, ctx);
+        }
     }
     
     Ok(dst)

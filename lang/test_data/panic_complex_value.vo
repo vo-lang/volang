@@ -2,6 +2,8 @@
 // Go semantics: panic can accept any value
 package main
 
+
+import "fmt"
 type MyError struct {
     code int
     msg  string
@@ -105,5 +107,5 @@ func main() {
     }()
     assert(result7 == 99, "should recover channel and receive")
     
-    println("panic_complex_value: PASSED")
+    fmt.Println("panic_complex_value: PASSED")
 }

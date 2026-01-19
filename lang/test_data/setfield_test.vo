@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -15,6 +17,6 @@ func main() {
     origin := Point{x: 1, y: 2}
     r := Rect{origin: origin, width: 10}
     
-    println(r.origin.x)  // should be 1
-    println(r.origin.y)  // should be 2
+    fmt.Println(r.origin.x)  // should be 1
+    fmt.Println(r.origin.y)  // should be 2
 }

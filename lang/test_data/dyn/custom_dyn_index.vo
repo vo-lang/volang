@@ -2,7 +2,10 @@
 // Custom types can implement DynIndex to provide dynamic index access.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // IndexableList is a custom type that implements DynIndex
 type IndexableList struct {
@@ -53,5 +56,5 @@ func main() {
     _, err = obj~>["string_key"]
     assert(err != nil, "string key should error for IndexableList")
     
-    println("custom_dyn_index: ok")
+    fmt.Println("custom_dyn_index: ok")
 }

@@ -2,6 +2,8 @@
 // Verify proper handling of type assertion success and failure.
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -59,5 +61,5 @@ func main() {
     assert(point.x == 5, "point.x should be 5")
     assert(point.y == 6, "point.y should be 6")
     
-    println("type_assert_after_dyn: ok")
+    fmt.Println("type_assert_after_dyn: ok")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: nil assignability rules
 // Go spec: nil can be assigned to pointers, slices, maps, channels, functions, and interfaces
 
@@ -247,5 +249,5 @@ func main() {
     testSliceNilVsEmpty()
     testMapNilVsEmpty()
     
-    println("assignable_nil: ALL PASSED")
+    fmt.Println("assignable_nil: ALL PASSED")
 }

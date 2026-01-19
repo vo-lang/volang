@@ -2,6 +2,8 @@
 // Coverage: LIFO order of defers during panic unwinding
 package main
 
+
+import "fmt"
 var order []int
 
 func appendOrder(n int) {
@@ -50,5 +52,5 @@ func main() {
     assert(order[1] == 10, "then 10")
     assert(order[2] == 100, "finally 100 from recover defer")
     
-    println("defer_panic_order: ok")
+    fmt.Println("defer_panic_order: ok")
 }

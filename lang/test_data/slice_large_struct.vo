@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 // 9 int64 fields = 72 bytes > 63, triggers flags=0 (dynamic)
 type BigStruct struct {
     a int64
@@ -25,8 +27,8 @@ func main() {
     p0 := s[0]
     p1 := s[1]
     
-    println(p0.a)  // expect: 1
-    println(p0.i)  // expect: 9
-    println(p1.a)  // expect: 10
-    println(p1.i)  // expect: 90
+    fmt.Println(p0.a)  // expect: 1
+    fmt.Println(p0.i)  // expect: 9
+    fmt.Println(p1.a)  // expect: 10
+    fmt.Println(p1.i)  // expect: 90
 }

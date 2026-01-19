@@ -2,6 +2,8 @@
 // Coverage: using multi-return function as single argument to another function
 package main
 
+
+import "fmt"
 func pair() (int, string) {
     return 42, "answer"
 }
@@ -97,5 +99,5 @@ func main() {
     _, second := divmod(20, 6)
     assert(second == 2, "discard first return")
     
-    println("multi_return_chain: ok")
+    fmt.Println("multi_return_chain: ok")
 }

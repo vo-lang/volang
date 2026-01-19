@@ -1,7 +1,10 @@
 // Test that dynamic access returns any with itab_id=0
 // Bug #2: dyn_get_index should clear itab_id when wrapping interface element into any
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 type MyInterface interface {
     Method() int
@@ -47,7 +50,7 @@ func main() {
     assert(ok, "second type assertion failed")
     assert(impl2.Method() == 100, "second method call returned wrong value")
     
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

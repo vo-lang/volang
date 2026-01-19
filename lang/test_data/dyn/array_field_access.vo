@@ -2,6 +2,8 @@
 // Verify correct handling of fixed-size arrays.
 package main
 
+
+import "fmt"
 type Matrix struct {
     row1 [3]int
     row2 [3]int
@@ -51,5 +53,5 @@ func main() {
     assert(strArr[0] == "a", "data[0] should be 'a'")
     assert(strArr[4] == "e", "data[4] should be 'e'")
     
-    println("array_field_access: ok")
+    fmt.Println("array_field_access: ok")
 }

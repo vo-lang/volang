@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Pointer type, address-of operator, and pointer receiver
 
 type Point struct {
@@ -35,5 +37,5 @@ func main() {
     sum := p.Sum()
     assert(sum == 45, "Sum should be 45")
     
-    println("pointer_basic: ALL PASSED")
+    fmt.Println("pointer_basic: ALL PASSED")
 }

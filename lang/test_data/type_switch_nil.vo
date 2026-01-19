@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func describe(i interface{}) string {
 	switch v := i.(type) {
 	case nil:
@@ -39,7 +41,7 @@ func main() {
 	assert(describe(false) == "false", "false test failed")
 	assert(describe(3.14) == "unknown", "float should be unknown")
 	
-	println("type_switch_nil: PASS")
+	fmt.Println("type_switch_nil: PASS")
 }
 
 type Point struct {

@@ -2,6 +2,8 @@
 // Go spec: function values can be assigned to package-level variables
 package main
 
+
+import "fmt"
 // Global function variable - simple
 var add = func(a, b int) int {
     return a + b
@@ -90,5 +92,5 @@ func main() {
     }
     assert(lazyInit(4) == 12, "lazyInit(4) should be 12")
     
-    println("global_func_var: ok")
+    fmt.Println("global_func_var: ok")
 }

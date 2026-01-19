@@ -2,6 +2,8 @@
 // Defers registered in loop should all execute when returning early
 package main
 
+
+import "fmt"
 var order []int
 
 func reset() {
@@ -76,7 +78,7 @@ outer:
 }
 
 func main() int {
-    println("Test 1: Early return from for loop")
+    fmt.Println("Test 1: Early return from for loop")
     reset()
     result := testEarlyReturn(3)
     assert(result == 3, "should return at i=3")
@@ -86,9 +88,9 @@ func main() int {
     assert(order[1] == 2, "second defer should be 2")
     assert(order[2] == 1, "third defer should be 1")
     assert(order[3] == 0, "fourth defer should be 0")
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Break from for loop")
+    fmt.Println("Test 2: Break from for loop")
     reset()
     testBreakFromLoop(2)
     // Defers for i=0,1,2 should execute: 2,1,0
@@ -96,9 +98,9 @@ func main() int {
     assert(order[0] == 2, "first defer should be 2")
     assert(order[1] == 1, "second defer should be 1")
     assert(order[2] == 0, "third defer should be 0")
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: Nested loops with return")
+    fmt.Println("Test 3: Nested loops with return")
     reset()
     i, j := testNestedLoopReturn(1, 1)
     assert(i == 1 && j == 1, "should return at (1,1)")
@@ -106,9 +108,9 @@ func main() int {
     // At (1,1): inner j=0,1 + outer i=0 j=0,1,2 + outer i=1 j=0,1
     // Order: 1, 0, 10, 2, 1, 0, 0 (LIFO per function)
     assert(len(order) > 0, "should have deferred calls")
-    println("PASSED (order:", order, ")")
+    fmt.Println("PASSED (order:", order, ")")
     
-    println("Test 4: Continue in loop")
+    fmt.Println("Test 4: Continue in loop")
     reset()
     testContinueWithDefer()
     // Body with 100+i executes for i=1,3 (odd)
@@ -118,16 +120,16 @@ func main() int {
     assert(order[0] == 101, "first body should be 101")
     assert(order[1] == 103, "second body should be 103")
     assert(order[2] == 4, "first defer should be 4")
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: Labeled break with defers")
+    fmt.Println("Test 5: Labeled break with defers")
     reset()
     testLabeledBreakDefer()
     // At i=1, j=1 break outer
     // Defers: inner j=1,0 + outer i*100=100, inner j=2,1,0 + outer i*100=0
     assert(len(order) > 0, "should have deferred calls")
-    println("PASSED (order:", order, ")")
+    fmt.Println("PASSED (order:", order, ")")
     
-    println("defer_loop_return: ALL PASSED")
+    fmt.Println("defer_loop_return: ALL PASSED")
     return 0
 }

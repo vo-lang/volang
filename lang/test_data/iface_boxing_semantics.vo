@@ -4,6 +4,8 @@
 
 package main
 
+
+import "fmt"
 type Point struct {
     X int
     Y int
@@ -22,7 +24,7 @@ func main() {
     testSliceToAny()
     testArrayToAny()
     testInterfaceToInterface()
-    println("ok")
+    fmt.Println("ok")
 }
 
 // Test 1: Stack struct -> any (should be value copy)

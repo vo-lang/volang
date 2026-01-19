@@ -2,6 +2,8 @@
 // Coverage: for-range variable behavior when modified inside loop
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: modifying index variable has no effect on iteration
     arr := [5]int{10, 20, 30, 40, 50}
@@ -66,5 +68,5 @@ func main() {
     }
     assert(arr3[0] == 5 && arr3[1] == 6 && arr3[2] == 7, "original array unchanged")
     
-    println("range_var_reassign: ok")
+    fmt.Println("range_var_reassign: ok")
 }

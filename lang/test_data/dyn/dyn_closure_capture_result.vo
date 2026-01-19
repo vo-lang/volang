@@ -2,6 +2,8 @@
 // Verifies that closures correctly capture values obtained via ~> operator.
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
     name  string
@@ -69,26 +71,26 @@ func main() {
     capturer := makeFieldCapturer(obj)
     result := capturer()
     assert(result == 100, "captured value should be 100")
-    println("Test 1 - captured field:", result)
+    fmt.Println("Test 1 - captured field:", result)
     
     // Modify original - captured should not change
     c.value = 200
     result = capturer()
     assert(result == 100, "captured value should still be 100")
-    println("Test 1 - after modify:", result)
+    fmt.Println("Test 1 - after modify:", result)
     
     // Test 2: Capture method closure
     c.value = 50
     methodCapturer := makeMethodCapturer(obj)
     result = methodCapturer()
     assert(result == 50, "method should return 50")
-    println("Test 2 - method capturer:", result)
+    fmt.Println("Test 2 - method capturer:", result)
     
     // Method captures pointer, so modification visible
     c.value = 75
     result = methodCapturer()
     assert(result == 75, "method should see updated value 75")
-    println("Test 2 - after modify:", result)
+    fmt.Println("Test 2 - after modify:", result)
     
     // Test 3: Shared capturers
     c.value = 30
@@ -99,7 +101,7 @@ func main() {
     mulResult := multiplier()
     assert(addResult == 40, "adder should return 40")
     assert(mulResult == 60, "multiplier should return 60")
-    println("Test 3 - adder:", addResult, "multiplier:", mulResult)
+    fmt.Println("Test 3 - adder:", addResult, "multiplier:", mulResult)
     
     // Test 4: Deferred accessor
     data := map[string]any{
@@ -120,7 +122,7 @@ func main() {
     data["w"] = 40
     w, err := accessor("w")
     assert(err == nil && w.(int) == 40, "w should be 40")
-    println("Test 4 - deferred accessor works")
+    fmt.Println("Test 4 - deferred accessor works")
     
     // Test 5: Nested closure with dynamic access
     outer := func(obj any) func() func() int {
@@ -141,7 +143,7 @@ func main() {
     innerFn := innerMaker()
     innerResult := innerFn()
     assert(innerResult == 105, "nested should be 105")
-    println("Test 5 - nested closure:", innerResult)
+    fmt.Println("Test 5 - nested closure:", innerResult)
     
-    println("dyn_closure_capture_result: ok")
+    fmt.Println("dyn_closure_capture_result: ok")
 }

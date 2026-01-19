@@ -2,6 +2,8 @@
 // Coverage: multiple closure layers accessing same variable
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: three-level nested closure
     x := 0
@@ -60,5 +62,5 @@ func main() {
     assert(add100(1) == 101, "100 + 1")
     assert(add5(0) == 20, "add5 unchanged")
     
-    println("nested_closure_modify: ok")
+    fmt.Println("nested_closure_modify: ok")
 }

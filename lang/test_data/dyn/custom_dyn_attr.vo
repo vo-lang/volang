@@ -2,7 +2,10 @@
 // Custom types can implement DynAttr to provide dynamic field access.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // PropertyBag is a custom type that implements DynAttr
 type PropertyBag struct {
@@ -47,5 +50,5 @@ func main() {
     _, err := obj~>nonexistent
     assert(err != nil, "nonexistent field should error")
     
-    println("custom_dyn_attr: ok")
+    fmt.Println("custom_dyn_attr: ok")
 }

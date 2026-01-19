@@ -1,6 +1,8 @@
 // Test all map key types
 package main
 
+
+import "fmt"
 // Basic types as keys
 func testIntKey() {
     m := map[int]string{}
@@ -209,5 +211,5 @@ func main() {
     testMapDelete()
     testMapRange()
     
-    println("map_key_types: ok")
+    fmt.Println("map_key_types: ok")
 }

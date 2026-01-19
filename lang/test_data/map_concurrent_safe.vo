@@ -2,6 +2,8 @@
 // Coverage: map used in goroutine context
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: map created in main, used in goroutine
     m := make(map[string]int)
@@ -43,5 +45,5 @@ func main() {
     r2 := <-results
     assert(r1+r2 == 300, "sum should be 300")
     
-    println("map_concurrent_safe: ok")
+    fmt.Println("map_concurrent_safe: ok")
 }

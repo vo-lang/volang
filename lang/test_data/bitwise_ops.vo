@@ -1,6 +1,8 @@
 // Test: bitwise operations including &^=
 package main
 
+
+import "fmt"
 func main() {
 	// &^ (and-not / bit clear)
 	x := 0b1111
@@ -38,5 +40,5 @@ func main() {
 	a ^= 0b1111
 	assert(a == 0b1010, "^=")
 	
-	println("bitwise ops tests passed")
+	fmt.Println("bitwise ops tests passed")
 }

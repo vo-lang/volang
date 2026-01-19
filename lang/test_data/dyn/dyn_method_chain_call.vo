@@ -2,6 +2,8 @@
 // Verifies that obj~>Method1()~>Method2() works correctly.
 package main
 
+
+import "fmt"
 type Builder struct {
     value int
     name  string
@@ -53,7 +55,7 @@ func main() {
     val, err := result~>GetValue()
     assert(err == nil, "GetValue should succeed")
     assert(val.(int) == 10, "value should be 10")
-    println("Test 1: value =", val.(int))
+    fmt.Println("Test 1: value =", val.(int))
     
     // Test 2: Chain - call method on result of previous call
     b2 := NewBuilder()
@@ -68,7 +70,7 @@ func main() {
     v2, err := r2~>GetValue()
     assert(err == nil, "GetValue should succeed")
     assert(v2.(int) == 16, "value should be (5+3)*2=16")
-    println("Test 2: chained value =", v2.(int))
+    fmt.Println("Test 2: chained value =", v2.(int))
     
     // Test 3: Chain setting multiple fields
     b3 := NewBuilder()
@@ -85,7 +87,7 @@ func main() {
     n3, err := r3~>GetName()
     assert(err == nil, "GetName should succeed")
     assert(n3.(string) == "test", "name should be 'test'")
-    println("Test 3: value =", v3.(int), ", name =", n3.(string))
+    fmt.Println("Test 3: value =", v3.(int), ", name =", n3.(string))
     
     // Test 4: Chain with multi-return Build()
     b4 := NewBuilder()
@@ -99,7 +101,7 @@ func main() {
     assert(err == nil, "Build should succeed")
     assert(val4.(int) == 42, "Build value should be 42")
     assert(name4.(string) == "final", "Build name should be 'final'")
-    println("Test 4: Build() =", val4.(int), ",", name4.(string))
+    fmt.Println("Test 4: Build() =", val4.(int), ",", name4.(string))
     
     // Test 5: Access field on chained result
     b5 := NewBuilder()
@@ -110,7 +112,7 @@ func main() {
     fieldVal, err := r5~>value
     assert(err == nil, "field access should succeed")
     assert(fieldVal.(int) == 77, "field value should be 77")
-    println("Test 5: chained field access =", fieldVal.(int))
+    fmt.Println("Test 5: chained field access =", fieldVal.(int))
     
-    println("dyn_method_chain_call: ok")
+    fmt.Println("dyn_method_chain_call: ok")
 }

@@ -2,6 +2,8 @@
 // Coverage: fallthrough statement transferring control to default case
 package main
 
+
+import "fmt"
 func test1(n int) string {
 	var result string
 	switch n {
@@ -83,5 +85,5 @@ func main() {
 	// assert(test4(2) == 2, "test4(2) should be 2")
 	// assert(test4(99) == 1000, "test4(99) should be 1000")
 	
-	println("fallthrough_to_default: ok")
+	fmt.Println("fallthrough_to_default: ok")
 }

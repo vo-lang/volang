@@ -2,6 +2,8 @@
 // Verifies that ~> assignment correctly handles interface field writes.
 package main
 
+
+import "fmt"
 type Stringer interface {
     String() string
 }
@@ -61,52 +63,52 @@ func main() {
     // Test 1: Write primitive to any field
     obj~>Value = 999
     assert(c.Value.(int) == 999, "Value should be 999")
-    println("Test 1: Value =", c.Value.(int))
+    fmt.Println("Test 1: Value =", c.Value.(int))
     
     // Test 2: Write string to any field
     obj~>Value = "hello"
     assert(c.Value.(string) == "hello", "Value should be 'hello'")
-    println("Test 2: Value =", c.Value.(string))
+    fmt.Println("Test 2: Value =", c.Value.(string))
     
     // Test 3: Write struct to any field
     obj~>Value = IntVal{v: 42}
     iv := c.Value.(IntVal)
     assert(iv.v == 42, "Value should be IntVal{42}")
-    println("Test 3: Value.v =", iv.v)
+    fmt.Println("Test 3: Value.v =", iv.v)
     
     // Test 4: Write slice to any field
     obj~>Value = []int{1, 2, 3}
     sl := c.Value.([]int)
     assert(len(sl) == 3 && sl[0] == 1, "Value should be [1,2,3]")
-    println("Test 4: Value[0] =", sl[0])
+    fmt.Println("Test 4: Value[0] =", sl[0])
     
     // Test 5: Write map to any field
     obj~>Value = map[string]int{"a": 1}
     m := c.Value.(map[string]int)
     assert(m["a"] == 1, "Value should be map with a=1")
-    println("Test 5: Value[a] =", m["a"])
+    fmt.Println("Test 5: Value[a] =", m["a"])
     
     // Test 6: Write to Stringer interface field
     obj~>Stringer = StrVal{s: "dynamic"}
     assert(c.Stringer.String() == "dynamic", "Stringer should be 'dynamic'")
-    println("Test 6: Stringer.String() =", c.Stringer.String())
+    fmt.Println("Test 6: Stringer.String() =", c.Stringer.String())
     
     // Test 7: Write different type to Stringer field
     obj~>Stringer = IntVal{v: 777}
     assert(c.Stringer.String() == "777", "Stringer should be '777'")
-    println("Test 7: Stringer.String() =", c.Stringer.String())
+    fmt.Println("Test 7: Stringer.String() =", c.Stringer.String())
     
     // Test 8: Write nil to interface field
     obj~>Value = nil
     assert(c.Value == nil, "Value should be nil")
-    println("Test 8: Value is nil")
+    fmt.Println("Test 8: Value is nil")
     
     // Test 9: Nested interface field write
     outer := &Outer{Nested: &Nested{Inner: 0}}
     var outerObj any = outer
     outerObj~>Nested~>Inner = "nested value"
     assert(outer.Nested.Inner.(string) == "nested value", "nested write failed")
-    println("Test 9: Nested.Inner =", outer.Nested.Inner.(string))
+    fmt.Println("Test 9: Nested.Inner =", outer.Nested.Inner.(string))
     
     // Test 10: Write interface to map[string]any
     data := map[string]any{
@@ -116,7 +118,7 @@ func main() {
     mapObj~>["key"] = IntVal{v: 50}
     iv2 := data["key"].(IntVal)
     assert(iv2.v == 50, "map value should be IntVal{50}")
-    println("Test 10: map[key].v =", iv2.v)
+    fmt.Println("Test 10: map[key].v =", iv2.v)
     
-    println("dyn_interface_field_write: ok")
+    fmt.Println("dyn_interface_field_write: ok")
 }

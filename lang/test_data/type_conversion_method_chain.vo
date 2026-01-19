@@ -2,6 +2,8 @@
 // Tests named type conversions and method availability
 package main
 
+
+import "fmt"
 type MyInt int
 
 func (m MyInt) Double() MyInt {
@@ -81,5 +83,5 @@ func main() {
     b := int(MyInt(3).Add(MyInt(4))) * 2
     assert(b == 14, "b should be 14, got ", b)
     
-    println("type_conversion_method_chain: ok")
+    fmt.Println("type_conversion_method_chain: ok")
 }

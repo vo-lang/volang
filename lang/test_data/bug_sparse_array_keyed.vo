@@ -2,6 +2,8 @@
 // Keyed elements are placed sequentially at indices 0, 1, 2... instead of at specified indices
 package main
 
+
+import "fmt"
 func main() {
 	// This should put 20 at index 2, 50 at index 5, 90 at index 9
 	arr := [10]int{2: 20, 5: 50, 9: 90}
@@ -14,5 +16,5 @@ func main() {
 	assert(arr[5] == 50, "arr[5] should be 50, got ", arr[5])
 	assert(arr[9] == 90, "arr[9] should be 90, got ", arr[9])
 	
-	println("bug_sparse_array_keyed: ok")
+	fmt.Println("bug_sparse_array_keyed: ok")
 }

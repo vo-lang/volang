@@ -1,9 +1,12 @@
 package main
 
-import "encoding/base64"
+import (
+	"fmt"
+	"encoding/base64"
+)
 
 func main() {
-    println("Testing base64...")
+    fmt.Println("Testing base64...")
     
     // Test EncodeToString (standard encoding with padding)
     data := []byte{72, 101, 108, 108, 111}  // "Hello"
@@ -19,5 +22,5 @@ func main() {
     rawEncoded := base64.RawEncodeToString(data)
     assert(rawEncoded == "SGVsbG8", "RawEncodeToString (no padding)")
     
-    println("All base64 tests passed!")
+    fmt.Println("All base64 tests passed!")
 }

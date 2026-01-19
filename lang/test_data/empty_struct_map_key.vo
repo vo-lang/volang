@@ -2,6 +2,8 @@
 // Coverage: map[struct{}]V - useful for set semantics
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic empty struct as key
     type Empty struct{}
@@ -50,5 +52,5 @@ func main() {
     }
     assert(count == 1, "range should iterate once")
     
-    println("empty_struct_map_key: ok")
+    fmt.Println("empty_struct_map_key: ok")
 }

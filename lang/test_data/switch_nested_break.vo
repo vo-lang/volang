@@ -2,6 +2,8 @@
 // Go spec: break in switch exits the switch, not enclosing loop
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic switch break (implicit at end of case)
     result1 := 0
@@ -141,5 +143,5 @@ outer9:
     }
     assert(result10 == "one-two", "fallthrough stops at case 2")
     
-    println("switch_nested_break: ok")
+    fmt.Println("switch_nested_break: ok")
 }

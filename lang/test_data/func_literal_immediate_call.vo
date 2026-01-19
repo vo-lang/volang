@@ -2,23 +2,25 @@
 // Coverage: func literal definition and immediate call, closures in IIFE
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Basic IIFE returning value
-	println("Test 1")
+	fmt.Println("Test 1")
 	result := func() int {
 		return 42
 	}()
 	assert(result == 42, "IIFE should return 42")
 
 	// Test 2: IIFE with parameters
-	println("Test 2")
+	fmt.Println("Test 2")
 	sum := func(a, b int) int {
 		return a + b
 	}(10, 20)
 	assert(sum == 30, "IIFE with params should return 30")
 
 	// Test 3: IIFE capturing outer variable
-	println("Test 3")
+	fmt.Println("Test 3")
 	x := 100
 	captured := func() int {
 		return x * 2
@@ -26,7 +28,7 @@ func main() {
 	assert(captured == 200, "IIFE should capture x")
 
 	// Test 4: IIFE modifying outer variable
-	println("Test 4")
+	fmt.Println("Test 4")
 	counter := 0
 	func() {
 		counter = counter + 1
@@ -34,7 +36,7 @@ func main() {
 	assert(counter == 1, "IIFE should modify counter")
 
 	// Test 5: Nested IIFE
-	println("Test 5")
+	fmt.Println("Test 5")
 	nested := func() int {
 		inner := func() int {
 			return 5
@@ -44,12 +46,12 @@ func main() {
 	assert(nested == 15, "Nested IIFE should work")
 
 	// Test 6: IIFE returning multiple values
-	println("Test 6")
+	fmt.Println("Test 6")
 	a, b := func() (int, string) {
 		return 123, "hello"
 	}()
 	assert(a == 123, "IIFE multi-return a")
 	assert(b == "hello", "IIFE multi-return b")
 
-	println("func_literal_immediate_call: PASSED")
+	fmt.Println("func_literal_immediate_call: PASSED")
 }

@@ -1,6 +1,8 @@
 // Test: channel send/receive
 package main
 
+
+import "fmt"
 var ch = make(chan int, 1)
 
 func sendToChannel() {
@@ -15,5 +17,5 @@ func main() {
 	sendToChannel()
 	val := recvFromChannel()
 	assert(val == 42, "channel value should be 42")
-	println("channel send/receive test passed")
+	fmt.Println("channel send/receive test passed")
 }

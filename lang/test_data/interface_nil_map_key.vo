@@ -2,6 +2,8 @@
 // Coverage: Edge cases of nil interface and typed nil as map keys
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -72,5 +74,5 @@ func main() {
 	assert(emptyAny == nil, "zero-value any should be nil")
 	assert(m4[emptyAny] == 10, "m4[zero-value any] should be 10")
 	
-	println("interface_nil_map_key: ok")
+	fmt.Println("interface_nil_map_key: ok")
 }

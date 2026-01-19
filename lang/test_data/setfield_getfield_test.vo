@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Wrapper struct {
     value int
 }
@@ -11,5 +13,5 @@ type Container struct {
 func main() {
     // Create container with initial value
     c := Container{w: Wrapper{value: 42}}
-    println(c.w.value)  // should be 42
+    fmt.Println(c.w.value)  // should be 42
 }

@@ -2,6 +2,8 @@
 // This tests: (&Type{...}).Method() pattern
 package main
 
+
+import "fmt"
 type Point struct {
     x, y int
 }
@@ -71,5 +73,5 @@ func main() {
     w := &Wrapper{p: Point{x: 7, y: 8}}
     assert(w.p.ValueSum() == 15, "nested sum should be 15")
     
-    println("composite_addr_method_call: ok")
+    fmt.Println("composite_addr_method_call: ok")
 }

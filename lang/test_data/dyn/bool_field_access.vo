@@ -2,6 +2,8 @@
 // Verify correct handling of bool type in dynamic access.
 package main
 
+
+import "fmt"
 type Flags struct {
     enabled  bool
     visible  bool
@@ -72,6 +74,6 @@ func main() error {
     assert(result.(bool) == true, "Toggle should return true")
     assert(f.enabled == true, "enabled should be true after toggle")
     
-    println("bool_field_access: ok")
+    fmt.Println("bool_field_access: ok")
     return nil
 }

@@ -2,6 +2,8 @@
 // Coverage: dyn call on interface-typed receiver, interface-to-interface dispatch
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -47,14 +49,14 @@ func main() {
 	result, err := obj~>String()
 	assert(err == nil, "String() error")
 	assert(result.(string) == "Named:Alice", "String() mismatch")
-	println("Test 1: String() =", result.(string))
+	fmt.Println("Test 1: String() =", result.(string))
 
 	// Test 2: Call method not in the interface but on concrete type
 	// Named also has Greet method
 	greetResult, err := obj~>Greet("Hello")
 	assert(err == nil, "Greet error")
 	assert(greetResult.(string) == "Hello, Alice", "Greet mismatch")
-	println("Test 2: Greet() =", greetResult.(string))
+	fmt.Println("Test 2: Greet() =", greetResult.(string))
 
 	// Test 3: Different concrete type behind same interface
 	var stringer2 Stringer = &Counter{count: 0}
@@ -63,18 +65,18 @@ func main() {
 	result2, err := obj2~>String()
 	assert(err == nil, "Counter.String error")
 	assert(result2.(string) == "Counter", "Counter.String mismatch")
-	println("Test 3: Counter.String() =", result2.(string))
+	fmt.Println("Test 3: Counter.String() =", result2.(string))
 
 	// Test 4: Call Counter-specific method
 	incResult, err := obj2~>Increment()
 	assert(err == nil, "Increment error")
 	assert(incResult.(int) == 1, "first Increment should be 1")
-	println("Test 4: Increment() =", incResult.(int))
+	fmt.Println("Test 4: Increment() =", incResult.(int))
 
 	incResult2, err := obj2~>Increment()
 	assert(err == nil, "Increment2 error")
 	assert(incResult2.(int) == 2, "second Increment should be 2")
-	println("Test 4b: Increment() =", incResult2.(int))
+	fmt.Println("Test 4b: Increment() =", incResult2.(int))
 
 	// Test 5: Interface to interface - Namer
 	var namer Namer = &Named{name: "Bob"}
@@ -83,20 +85,20 @@ func main() {
 	nameResult, err := namerObj~>Name()
 	assert(err == nil, "Name() error")
 	assert(nameResult.(string) == "Bob", "Name() mismatch")
-	println("Test 5: Name() =", nameResult.(string))
+	fmt.Println("Test 5: Name() =", nameResult.(string))
 
 	// Test 6: Call String() which is not in Namer but exists on Named
 	stringResult, err := namerObj~>String()
 	assert(err == nil, "String() via Namer error")
 	assert(stringResult.(string) == "Named:Bob", "String() via Namer mismatch")
-	println("Test 6: String() via Namer =", stringResult.(string))
+	fmt.Println("Test 6: String() via Namer =", stringResult.(string))
 
 	// Test 7: Dynamic field access on interface receiver
 	// The underlying Named struct has 'name' field
 	fieldResult, err := namerObj~>name
 	assert(err == nil, "name field error")
 	assert(fieldResult.(string) == "Bob", "name field mismatch")
-	println("Test 7: name field =", fieldResult.(string))
+	fmt.Println("Test 7: name field =", fieldResult.(string))
 
-	println("dyn_interface_receiver: ok")
+	fmt.Println("dyn_interface_receiver: ok")
 }

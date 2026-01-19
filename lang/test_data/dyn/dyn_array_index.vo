@@ -2,6 +2,8 @@
 // Existing tests mainly use slices, this tests arrays specifically.
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Fixed-size array of int
     arr1 := [5]int{10, 20, 30, 40, 50}
@@ -10,12 +12,12 @@ func main() {
     v1, err := obj1~>[0]
     assert(err == nil, "arr[0] should succeed")
     assert(v1.(int) == 10, "arr[0] should be 10")
-    println("arr[0] =", v1.(int))
+    fmt.Println("arr[0] =", v1.(int))
     
     v2, err := obj1~>[4]
     assert(err == nil, "arr[4] should succeed")
     assert(v2.(int) == 50, "arr[4] should be 50")
-    println("arr[4] =", v2.(int))
+    fmt.Println("arr[4] =", v2.(int))
     
     // Test 2: Array of strings
     arr2 := [3]string{"hello", "world", "!"}
@@ -24,7 +26,7 @@ func main() {
     v3, err := obj2~>[1]
     assert(err == nil, "strArr[1] should succeed")
     assert(v3.(string) == "world", "strArr[1] should be 'world'")
-    println("strArr[1] =", v3.(string))
+    fmt.Println("strArr[1] =", v3.(string))
     
     // Test 3: Array of structs
     type Point struct {
@@ -37,24 +39,24 @@ func main() {
     assert(err == nil, "structArr[0] should succeed")
     p := v4.(Point)
     assert(p.X == 1 && p.Y == 2, "structArr[0] should be {1,2}")
-    println("structArr[0] = {", p.X, ",", p.Y, "}")
+    fmt.Println("structArr[0] = {", p.X, ",", p.Y, "}")
     
     // Test 4: Out of bounds access
     _, err = obj1~>[5]
     assert(err != nil, "arr[5] should error (out of bounds)")
-    println("arr[5]: error (expected)")
+    fmt.Println("arr[5]: error (expected)")
     
     _, err = obj1~>[-1]
     assert(err != nil, "arr[-1] should error (negative index)")
-    println("arr[-1]: error (expected)")
+    fmt.Println("arr[-1]: error (expected)")
     
     // Test 5: Set index on slice (not array - arrays are value types in any)
     sl := []int{100, 200, 300}
     testSliceSetIndex(sl)
     assert(sl[1] == 999, "sl[1] should be modified to 999")
-    println("sl[1] after set =", sl[1])
+    fmt.Println("sl[1] after set =", sl[1])
     
-    println("dyn_array_index: ok")
+    fmt.Println("dyn_array_index: ok")
 }
 
 func testSliceSetIndex(sl []int) error {

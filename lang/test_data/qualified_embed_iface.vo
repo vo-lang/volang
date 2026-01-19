@@ -1,6 +1,9 @@
 package main
 
-import "bytes"
+import (
+	"fmt"
+	"bytes"
+)
 
 // Test qualified embedded interface: bytes.Buffer implements io.Writer-like interface
 type MyWriter interface {
@@ -9,6 +12,6 @@ type MyWriter interface {
 
 func main() {
     // Simple parse test - if we get here, parsing qualified embed works
-    println("qualified embedded interface parsed successfully")
-    println("[GOX:OK]")
+    fmt.Println("qualified embedded interface parsed successfully")
+    fmt.Println("[GOX:OK]")
 }

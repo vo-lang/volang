@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"bytes"
 	"errors"
 	"io"
@@ -26,7 +27,7 @@ func main() {
 	testLenCap()
 	testBytes()
 	testString()
-	println("All bytes.Buffer tests passed!")
+	fmt.Println("All bytes.Buffer tests passed!")
 }
 
 func testNewBuffer() {

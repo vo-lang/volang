@@ -1,9 +1,12 @@
 package main
 
-import "maps"
+import (
+	"fmt"
+	"maps"
+)
 
 func main() {
-    println("Testing maps package...")
+    fmt.Println("Testing maps package...")
     
     // Test CloneStringString
     m1 := map[string]string{"a": "1", "b": "2", "c": "3"}
@@ -62,5 +65,5 @@ func main() {
     nilClone := maps.CloneStringString(nilMap)
     assert(nilClone == nil, "CloneStringString of nil should be nil")
     
-    println("All maps tests passed!")
+    fmt.Println("All maps tests passed!")
 }

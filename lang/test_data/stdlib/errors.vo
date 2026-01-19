@@ -1,13 +1,16 @@
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 func main() {
-    println("Starting errors tests...")
+    fmt.Println("Starting errors tests...")
     
     // Test errors.New
     err := errors.New("test error")
     assert(err != nil, "errors.New should return non-nil")
     
-    println("All errors tests passed!")
+    fmt.Println("All errors tests passed!")
 }

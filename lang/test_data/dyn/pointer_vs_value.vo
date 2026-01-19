@@ -2,6 +2,8 @@
 // Verify that modifications persist correctly.
 package main
 
+
+import "fmt"
 type Data struct {
     x int
     y int
@@ -46,6 +48,6 @@ func main() error {
     assert(d3.x == 111, "d3.x should be 111")
     assert(d3.y == 222, "d3.y should be 222")
     
-    println("pointer_vs_value: ok")
+    fmt.Println("pointer_vs_value: ok")
     return nil
 }

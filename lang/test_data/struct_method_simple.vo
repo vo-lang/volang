@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
 }
@@ -119,39 +121,39 @@ func main() {
     c := Counter{value: 10}
     
     // 值方法调用
-    println(c.GetValue())   // 10
-    println(c.Double())     // 20
+    fmt.Println(c.GetValue())   // 10
+    fmt.Println(c.Double())     // 20
     
     // 指针方法调用
     c.Increment()
-    println(c.GetValue())   // 11
+    fmt.Println(c.GetValue())   // 11
     
     c.Add(5)
-    println(c.GetValue())   // 16
+    fmt.Println(c.GetValue())   // 16
     
     // 通过指针调用
     p := &c
     p.Increment()
-    println(p.GetValue())   // 17
+    fmt.Println(p.GetValue())   // 17
     
     // 嵌套结构体方法调用
     r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
-    println(r.origin.Sum())  // 3
-    println(r.Area())        // 50
+    fmt.Println(r.origin.Sum())  // 3
+    fmt.Println(r.Area())        // 50
     r.MoveX(5)
-    println(r.origin.x)      // 6
+    fmt.Println(r.origin.x)      // 6
     
     // 链式调用
     b := Builder{value: 1}
-    println(b.Add(2).Mul(3).Result())  // (1+2)*3 = 9
-    println(b.Result())                 // 9 (b 已被修改)
+    fmt.Println(b.Add(2).Mul(3).Result())  // (1+2)*3 = 9
+    fmt.Println(b.Result())                 // 9 (b 已被修改)
     
     // 方法中调用其他方法
     calc := Calculator{x: 10, y: 3}
-    println(calc.Sum())            // 13
-    println(calc.Diff())           // 7
-    println(calc.SumPlusDiff())    // 13 + 7 = 20
+    fmt.Println(calc.Sum())            // 13
+    fmt.Println(calc.Diff())           // 7
+    fmt.Println(calc.SumPlusDiff())    // 13 + 7 = 20
     calc.Double()
-    println(calc.Sum())            // 26
-    // println(calc.DoubleAndGetSum()) // 暂时跳过 - 方法内调用方法有问题
+    fmt.Println(calc.Sum())            // 26
+    // fmt.Println(calc.DoubleAndGetSum()) // 暂时跳过 - 方法内调用方法有问题
 }

@@ -1,6 +1,8 @@
 // Test: interface captured by closure
 package main
 
+
+import "fmt"
 type Adder interface {
 	Add() int
 }
@@ -24,8 +26,8 @@ func main() {
 	}
 	
 	result := f()
-	println("closure result:", result)
+	fmt.Println("closure result:", result)
 	assert(result == 142, "closure should return 142")
 	
-	println("interface_closure: PASSED")
+	fmt.Println("interface_closure: PASSED")
 }

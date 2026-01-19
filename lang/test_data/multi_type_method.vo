@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -39,17 +41,17 @@ func (c Calculator) Sub() int {
 func main() {
     // Test Point
     p := Point{x: 1, y: 2}
-    println(p.Sum())  // 3
+    fmt.Println(p.Sum())  // 3
     
     // Test Rect with nested Point
     r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
-    println(r.origin.Sum())  // 3
-    println(r.Area())        // 50
+    fmt.Println(r.origin.Sum())  // 3
+    fmt.Println(r.Area())        // 50
     r.MoveX(5)
-    println(r.origin.x)      // 6
+    fmt.Println(r.origin.x)      // 6
     
     // Test Calculator
     c := Calculator{x: 10, y: 3}
-    println(c.Add())  // 13
-    println(c.Sub())  // 7
+    fmt.Println(c.Add())  // 13
+    fmt.Println(c.Sub())  // 7
 }

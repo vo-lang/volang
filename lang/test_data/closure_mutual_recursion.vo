@@ -2,6 +2,8 @@
 // Coverage: two closures calling each other, testing variable binding and recursion
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Basic mutual recursion (even/odd)
 	var isEven func(int) bool
@@ -137,5 +139,5 @@ func main() {
 	result5 := fn()
 	assert(result5 == 6, "should reach 6 calls, got ", result5)
 
-	println("closure_mutual_recursion: PASSED")
+	fmt.Println("closure_mutual_recursion: PASSED")
 }

@@ -1,6 +1,8 @@
 // Test various dynamic call patterns
 package main
 
+
+import "fmt"
 type Counter struct {
 	count int
 }
@@ -46,30 +48,30 @@ func main() {
 	r1, err := obj~>Get()
 	assert(err == nil, "Get error")
 	assert(r1.(int) == 1, "after Inc, expected 1")
-	println("After Inc: count =", r1.(int))
+	fmt.Println("After Inc: count =", r1.(int))
 	
 	// Test method with one arg
 	r2, err := obj~>Add(5)
 	assert(err == nil, "Add error")
 	assert(r2.(int) == 6, "after Add(5), expected 6")
-	println("After Add(5): count =", r2.(int))
+	fmt.Println("After Add(5): count =", r2.(int))
 	
 	// Test method with two args
 	r3, err := obj~>AddTwo(10, 20)
 	assert(err == nil, "AddTwo error")
 	assert(r3.(int) == 36, "after AddTwo(10,20), expected 36")
-	println("After AddTwo(10,20): count =", r3.(int))
+	fmt.Println("After AddTwo(10,20): count =", r3.(int))
 	
 	// Test value receiver method
 	r4, err := obj~>ValueMethod()
 	assert(err == nil, "ValueMethod error")
 	assert(r4.(int) == 72, "ValueMethod expected 72")
-	println("ValueMethod: count*2 =", r4.(int))
+	fmt.Println("ValueMethod: count*2 =", r4.(int))
 	
 	// Test method not found error
 	_, err = obj~>NonExistent()
 	assert(err != nil, "NonExistent should return error")
-	println("NonExistent error:", err)
+	fmt.Println("NonExistent error:", err)
 	
 	// Test nested call: get method, then call it
 	w := &Wrapper{counter: &Counter{count: 100}}
@@ -79,7 +81,7 @@ func main() {
 	assert(err == nil, "GetCounter error")
 	inner := r5.(*Counter)
 	assert(inner.count == 100, "GetCounter expected count=100")
-	println("GetCounter: inner.count =", inner.count)
+	fmt.Println("GetCounter: inner.count =", inner.count)
 	
-	println("All method call tests passed!")
+	fmt.Println("All method call tests passed!")
 }

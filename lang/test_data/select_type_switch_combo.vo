@@ -2,6 +2,8 @@
 // Coverage: complex control flow - select cases with type switch
 package main
 
+
+import "fmt"
 func testSelectWithTypeSwitch() string {
     ch := make(chan interface{}, 3)
     ch <- 42
@@ -81,21 +83,21 @@ func testNestedSelectTypeAssert() string {
 }
 
 func main() {
-    println("Test 1: select with type switch")
+    fmt.Println("Test 1: select with type switch")
     r1 := testSelectWithTypeSwitch()
     // Should be: I (42), Sh (hello[0]='h'), F (3.14>3), D (empty)
     assert(r1 == "IShFD", "expected IShFD, got", r1)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: select send with type switch")
+    fmt.Println("Test 2: select send with type switch")
     r2 := testSelectSendTypeSwitch()
     assert(r2 == 100, "expected 100, got", r2)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: nested select with type assertions")
+    fmt.Println("Test 3: nested select with type assertions")
     r3 := testNestedSelectTypeAssert()
     assert(r3 == "outer-big", "expected outer-big, got", r3)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("select_type_switch_combo: ALL PASSED")
+    fmt.Println("select_type_switch_combo: ALL PASSED")
 }

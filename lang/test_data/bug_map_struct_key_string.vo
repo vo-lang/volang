@@ -3,6 +3,8 @@
 // String is comparable, so this should work
 package main
 
+
+import "fmt"
 type Key struct {
     Name string
 }
@@ -11,5 +13,5 @@ func main() {
     m := map[Key]int{}
     m[Key{"alice"}] = 100
     assert(m[Key{"alice"}] == 100, "lookup failed")
-    println("bug_map_struct_key_string: ok")
+    fmt.Println("bug_map_struct_key_string: ok")
 }

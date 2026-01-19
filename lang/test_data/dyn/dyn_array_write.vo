@@ -2,6 +2,8 @@
 // Coverage: dyn set index on array type (not just slice/map)
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Write to slice element
 	s := []int{1, 2, 3, 4, 5}
@@ -9,7 +11,7 @@ func main() {
 
 	obj~>[2] = 100
 	assert(s[2] == 100, "slice[2] should be 100")
-	println("Test 1: slice[2] =", s[2])
+	fmt.Println("Test 1: slice[2] =", s[2])
 
 	// Test 2: Write to slice via dyn (slice is already a reference)
 	s2 := []int{10, 20, 30, 40, 50}
@@ -17,7 +19,7 @@ func main() {
 
 	s2Obj~>[1] = 200
 	assert(s2[1] == 200, "s2[1] should be 200")
-	println("Test 2: s2[1] =", s2[1])
+	fmt.Println("Test 2: s2[1] =", s2[1])
 
 	// Test 3: Write to map
 	m := map[string]int{"a": 1, "b": 2}
@@ -25,12 +27,12 @@ func main() {
 
 	mapObj~>["c"] = 300
 	assert(m["c"] == 300, "m[c] should be 300")
-	println("Test 3: m[c] =", m["c"])
+	fmt.Println("Test 3: m[c] =", m["c"])
 
 	// Overwrite existing
 	mapObj~>["a"] = 999
 	assert(m["a"] == 999, "m[a] should be 999")
-	println("Test 3b: m[a] =", m["a"])
+	fmt.Println("Test 3b: m[a] =", m["a"])
 
 	// Test 4: Write struct field via index-like syntax on struct-as-map
 	type Data struct {
@@ -43,7 +45,7 @@ func main() {
 	// Field write via ~>field = val
 	dObj~>X = 500
 	assert(d.X == 500, "d.X should be 500")
-	println("Test 4: d.X =", d.X)
+	fmt.Println("Test 4: d.X =", d.X)
 
 	// Test 5: Chained write
 	type Wrapper struct {
@@ -54,7 +56,7 @@ func main() {
 
 	wObj~>Items~>[0] = 777
 	assert(w.Items[0] == 777, "w.Items[0] should be 777")
-	println("Test 5: w.Items[0] =", w.Items[0])
+	fmt.Println("Test 5: w.Items[0] =", w.Items[0])
 
 	// Test 6: map[any]any write with different key types
 	anyMap := make(map[any]any)
@@ -67,7 +69,7 @@ func main() {
 	assert(anyMap[42].(string) == "forty-two", "anyMap[42] check")
 	assert(anyMap["key"].(int) == 123, "anyMap[key] check")
 	assert(anyMap[true].(bool) == false, "anyMap[true] check")
-	println("Test 6: map[any]any writes ok")
+	fmt.Println("Test 6: map[any]any writes ok")
 
-	println("dyn_array_write: ok")
+	fmt.Println("dyn_array_write: ok")
 }

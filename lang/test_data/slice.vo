@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     // Test break: loop should stop at i==3
     breakCount := 0
@@ -22,5 +24,5 @@ func main() {
     // sum of 0,1,3,4 = 8 (skipped 2)
     assert(continueSum == 8, "continue should skip i=2, sum should be 8")
     
-    println("slice_test: ALL PASSED")
+    fmt.Println("slice_test: ALL PASSED")
 }

@@ -2,7 +2,10 @@
 // Arrays (not slices) boxed into any
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 import "dyn"
 
 func main() {
@@ -73,5 +76,5 @@ func main() {
     py1 := ptr1~>y?
     assert(py1.(int) == 400, "ptrs[1].y should be 400")
     
-    println("dyn_array_as_base: ok")
+    fmt.Println("dyn_array_as_base: ok")
 }

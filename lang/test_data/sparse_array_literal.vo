@@ -3,6 +3,8 @@
 // BUG: Vo ignores index keys in array/slice literals, placing elements sequentially instead
 package main
 
+
+import "fmt"
 func main() {
 	// BUG: These tests fail because Vo ignores the index keys
 	// [10]int{2: 20, 5: 50, 9: 90} should put 20 at index 2, 50 at index 5, 90 at index 9
@@ -14,5 +16,5 @@ func main() {
 	assert(arr[1] == 2, "arr[1]")
 	assert(arr[2] == 3, "arr[2]")
 	
-	println("sparse_array_literal: ok (keyed elements skipped due to Vo bug)")
+	fmt.Println("sparse_array_literal: ok (keyed elements skipped due to Vo bug)")
 }

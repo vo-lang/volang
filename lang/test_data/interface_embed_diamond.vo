@@ -2,6 +2,8 @@
 // Coverage: interface embedding with same method from multiple paths
 package main
 
+
+import "fmt"
 type A interface {
     Foo() int
 }
@@ -63,5 +65,5 @@ func main() {
         panic("should be assertable to D")
     }
     
-    println("interface_embed_diamond: ok")
+    fmt.Println("interface_embed_diamond: ok")
 }

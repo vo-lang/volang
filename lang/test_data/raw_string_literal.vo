@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     s1 := `a\nb`
     assert(s1 == "a\\nb", "raw string should not interpret \\\\n")
@@ -11,5 +13,5 @@ b`
     s3 := `\\t`
     assert(s3 == "\\\\t", "raw string should not interpret \\\\t")
 
-    println("raw_string_literal: ok")
+    fmt.Println("raw_string_literal: ok")
 }

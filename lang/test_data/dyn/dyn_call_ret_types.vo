@@ -1,6 +1,8 @@
 // Test dyn_call with various return types
 package main
 
+
+import "fmt"
 type Data struct {
 	val int
 	name string
@@ -51,54 +53,54 @@ func main() {
 	assert(err == nil, "GetInt error")
 	v1 := r1.(int)
 	assert(v1 == 42, "GetInt expected 42")
-	println("GetInt:", v1)
+	fmt.Println("GetInt:", v1)
 	
 	// Test string return
 	r2, err := obj~>GetString()
 	assert(err == nil, "GetString error")
 	v2 := r2.(string)
 	assert(v2 == "hello", "GetString expected hello")
-	println("GetString:", v2)
+	fmt.Println("GetString:", v2)
 	
 	// Test bool return
 	r3, err := obj~>GetBool()
 	assert(err == nil, "GetBool error")
 	v3 := r3.(bool)
 	assert(v3 == true, "GetBool expected true")
-	println("GetBool:", v3)
+	fmt.Println("GetBool:", v3)
 	
 	// Test float64 return
 	r4, err := obj~>GetFloat()
 	assert(err == nil, "GetFloat error")
 	v4 := r4.(float64)
 	assert(v4 == 63.0, "GetFloat expected 63.0")
-	println("GetFloat:", v4)
+	fmt.Println("GetFloat:", v4)
 	
 	// Test pointer return
 	r5, err := obj~>GetPointer()
 	assert(err == nil, "GetPointer error")
 	v5 := r5.(*Data)
 	assert(v5.val == 42, "GetPointer expected val=42")
-	println("GetPointer: val =", v5.val)
+	fmt.Println("GetPointer: val =", v5.val)
 	
 	// Test slice return
 	r6, err := obj~>GetSlice()
 	assert(err == nil, "GetSlice error")
 	v6 := r6.([]int)
 	assert(len(v6) == 2 && v6[0] == 42 && v6[1] == 84, "GetSlice expected [42, 84]")
-	println("GetSlice:", v6[0], v6[1])
+	fmt.Println("GetSlice:", v6[0], v6[1])
 	
 	// Test nil return
 	r7, err := obj~>GetNil()
 	assert(err == nil, "GetNil error")
 	v7 := r7.(*Data)
 	assert(v7 == nil, "GetNil expected nil")
-	println("GetNil: nil")
+	fmt.Println("GetNil: nil")
 	
 	// Test no return value - expects error due to return count mismatch
 	_, err = obj~>NoReturn()
 	assert(err != nil, "NoReturn should error due to return count mismatch")
-	println("NoReturn: correctly rejected")
+	fmt.Println("NoReturn: correctly rejected")
 	
-	println("All return type tests passed!")
+	fmt.Println("All return type tests passed!")
 }

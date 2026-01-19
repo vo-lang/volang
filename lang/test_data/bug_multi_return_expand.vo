@@ -2,6 +2,9 @@
 // Go allows passing multi-return function result directly as arguments
 package main
 
+
+import "fmt"
+
 // Helper functions with multiple returns
 func pair() (int, int) {
     return 10, 20
@@ -76,8 +79,8 @@ func testNestedMultiReturn() {
 // Test 6: Multi-return in println (variadic)
 // Note: Go only allows multi-return as the ONLY argument, not mixed with other args
 func testPrintlnMultiReturn() {
-    // println(pair()) is valid - expands to println(10, 20)
-    println(pair())  // Should print: 10 20
+    // fmt.Println(pair()) is valid - expands to fmt.Println(10, 20)
+    fmt.Println(pair())  // Should print: 10 20
 }
 
 // Test 7: Multi-return in append
@@ -145,46 +148,46 @@ func testChainedMultiReturn() {
 }
 
 func main() int {
-    println("Test 1: Basic pair as args")
+    fmt.Println("Test 1: Basic pair as args")
     testBasicPair()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Triple as args")
+    fmt.Println("Test 2: Triple as args")
     testTriple()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: String pair")
+    fmt.Println("Test 3: String pair")
     testStringPair()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: With error return")
+    fmt.Println("Test 4: With error return")
     testWithError()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: Nested multi-return")
+    fmt.Println("Test 5: Nested multi-return")
     testNestedMultiReturn()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: Multi-return in println")
+    fmt.Println("Test 6: Multi-return in println")
     testPrintlnMultiReturn()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: Multi-return in append wrapper")
+    fmt.Println("Test 7: Multi-return in append wrapper")
     testAppendMultiReturn()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: Multi-return to any")
+    fmt.Println("Test 8: Multi-return to any")
     testMultiReturnToAny()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 9: Multi-return as helper args")
+    fmt.Println("Test 9: Multi-return as helper args")
     testMultiReturnMapHelper()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 10: Chained multi-return")
+    fmt.Println("Test 10: Chained multi-return")
     testChainedMultiReturn()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("bug_multi_return_expand: ALL PASSED")
+    fmt.Println("bug_multi_return_expand: ALL PASSED")
     return 0
 }

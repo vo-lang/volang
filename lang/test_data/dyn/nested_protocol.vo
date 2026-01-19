@@ -2,7 +2,10 @@
 // A type can contain another type with DynAttr, testing nested dynamic access.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // Inner implements DynAttr
 type Inner struct {
@@ -68,6 +71,6 @@ func main() error {
     z := innerObj~>z?
     assert(z.(string) == "new", "inner.z should be 'new'")
     
-    println("nested_protocol: ok")
+    fmt.Println("nested_protocol: ok")
     return nil
 }

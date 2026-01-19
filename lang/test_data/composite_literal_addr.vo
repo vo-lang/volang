@@ -2,6 +2,8 @@
 // &T{} creates a pointer to a new heap-allocated value
 package main
 
+
+import "fmt"
 type Point struct {
     x, y int
 }
@@ -120,5 +122,5 @@ func main() {
     assert(pointMap["origin"].x == 0, "origin x")
     assert(pointMap["unit"].x == 1, "unit x")
     
-    println("composite_literal_addr: ok")
+    fmt.Println("composite_literal_addr: ok")
 }

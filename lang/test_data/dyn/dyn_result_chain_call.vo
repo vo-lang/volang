@@ -2,6 +2,8 @@
 // obj~>GetFoo()~>Bar() pattern
 package main
 
+
+import "fmt"
 type Inner struct {
     value int
 }
@@ -70,5 +72,5 @@ func main() {
     d4 := i4~>Double()?
     assert(d4.(int) == 20, "Double() should return 20")
     
-    println("dyn_result_chain_call: ok")
+    fmt.Println("dyn_result_chain_call: ok")
 }

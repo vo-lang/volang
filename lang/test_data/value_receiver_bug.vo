@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -15,5 +17,5 @@ type Container struct {
 
 func main() {
     c := Container{pt: Point{x: 3, y: 4}}
-    println(c.pt.Sum())  // 应该是 7
+    fmt.Println(c.pt.Sum())  // 应该是 7
 }

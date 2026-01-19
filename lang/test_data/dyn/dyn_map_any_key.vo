@@ -2,6 +2,8 @@
 // Verifies that ~> operator handles any-keyed maps correctly.
 package main
 
+
+import "fmt"
 type Key struct {
     ID int
 }
@@ -89,7 +91,7 @@ func main() {
     assert(err == nil, "age field error")
     assert(age.(int) == 30, "age mismatch")
 
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

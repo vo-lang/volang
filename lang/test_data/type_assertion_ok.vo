@@ -1,6 +1,8 @@
 // Test: type assertion comma-ok form: v, ok := x.(T)
 package main
 
+
+import "fmt"
 type Speaker interface {
     Speak() string
 }
@@ -57,7 +59,7 @@ func testPrimitiveSuccess() {
     assert(ok, "bool assertion should succeed")
     assert(b, "b should be true")
     
-    println("Test 1 PASSED: primitive success")
+    fmt.Println("Test 1 PASSED: primitive success")
 }
 
 // Test 2: empty interface to primitive - failure cases
@@ -88,7 +90,7 @@ func testPrimitiveFailure() {
     assert(!ok, "float64 assertion should fail for bool")
     assert(f == 0.0, "f should be 0.0 on failure")
     
-    println("Test 2 PASSED: primitive failure")
+    fmt.Println("Test 2 PASSED: primitive failure")
 }
 
 // Test 3: empty interface to struct - success
@@ -102,7 +104,7 @@ func testStructSuccess() {
     assert(ok, "Dog assertion should succeed")
     assert(dog.name == "Buddy", "dog.name should be Buddy")
     
-    println("Test 3 PASSED: struct success")
+    fmt.Println("Test 3 PASSED: struct success")
 }
 
 // Test 4: empty interface to struct - failure
@@ -116,7 +118,7 @@ func testStructFailure() {
     assert(!ok, "Cat assertion should fail for Dog")
     assert(cat.name == "", "cat.name should be empty on failure")
     
-    println("Test 4 PASSED: struct failure")
+    fmt.Println("Test 4 PASSED: struct failure")
 }
 
 // Test 5: named interface to concrete type - success
@@ -130,7 +132,7 @@ func testNamedInterfaceSuccess() {
     assert(ok, "Dog assertion should succeed")
     assert(dog.name == "Rex", "dog.name should be Rex")
     
-    println("Test 5 PASSED: named interface success")
+    fmt.Println("Test 5 PASSED: named interface success")
 }
 
 // Test 6: named interface to concrete type - failure
@@ -144,7 +146,7 @@ func testNamedInterfaceFailure() {
     assert(!ok, "Cat assertion should fail for Dog")
     assert(cat.name == "", "cat.name should be empty")
     
-    println("Test 6 PASSED: named interface failure")
+    fmt.Println("Test 6 PASSED: named interface failure")
 }
 
 // Test 7: empty interface to interface - success
@@ -163,7 +165,7 @@ func testIfaceToIfaceSuccess() {
     assert(ok, "Walker assertion should succeed for Cat")
     assert(walker.Walk() == 4, "walker.Walk() should be 4")
     
-    println("Test 7 PASSED: interface to interface success")
+    fmt.Println("Test 7 PASSED: interface to interface success")
 }
 
 // Test 8: empty interface to interface - failure
@@ -177,7 +179,7 @@ func testIfaceToIfaceFailure() {
     _, ok := e.(Walker)
     assert(!ok, "Walker assertion should fail for Dog")
     
-    println("Test 8 PASSED: interface to interface failure")
+    fmt.Println("Test 8 PASSED: interface to interface failure")
 }
 
 // Test 9: nil interface - failure
@@ -197,7 +199,7 @@ func testNilInterface() {
     assert(!ok, "assertion on nil interface should fail")
     assert(dog.name == "", "dog.name should be empty")
     
-    println("Test 9 PASSED: nil interface")
+    fmt.Println("Test 9 PASSED: nil interface")
 }
 
 // Test 10: typed nil (interface containing nil pointer)
@@ -216,7 +218,7 @@ func testTypedNil() {
     assert(!ok, "wrong pointer type should fail")
     assert(cp == nil, "cp should be nil on failure")
     
-    println("Test 10 PASSED: typed nil")
+    fmt.Println("Test 10 PASSED: typed nil")
 }
 
 // Test 11: multiple assertions in sequence
@@ -235,7 +237,7 @@ func testSequentialAssertions() {
     v3, ok3 := e.(Dog)
     assert(ok3 && v3.name == "Max", "third assertion")
     
-    println("Test 11 PASSED: sequential assertions")
+    fmt.Println("Test 11 PASSED: sequential assertions")
 }
 
 // Test 12: assertion in conditional
@@ -250,7 +252,7 @@ func testConditionalAssertion() {
     _, ok := e.(string)
     assert(!ok, "string assertion should fail for int")
     
-    println("Test 12 PASSED: conditional assertion")
+    fmt.Println("Test 12 PASSED: conditional assertion")
 }
 
 // Test 13: assertion result used in expression
@@ -263,7 +265,7 @@ func testAssertionInExpression() {
     assert(ok, "assertion should succeed")
     assert(result == 20, "result should be 20")
     
-    println("Test 13 PASSED: assertion in expression")
+    fmt.Println("Test 13 PASSED: assertion in expression")
 }
 
 func main() {
@@ -281,5 +283,5 @@ func main() {
     testConditionalAssertion()
     testAssertionInExpression()
     
-    println("type_assertion_ok: ALL PASSED")
+    fmt.Println("type_assertion_ok: ALL PASSED")
 }

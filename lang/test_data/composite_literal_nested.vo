@@ -2,6 +2,8 @@
 // Note: Unlike Go, Vo does not support nested type elision
 package main
 
+
+import "fmt"
 type Point struct { X, Y int }
 type Line struct { Start, End Point }
 
@@ -60,5 +62,5 @@ func main() {
     assert(len(emptyMatrix[1]) == 1, "emptyMatrix[1] len")
     assert(len(emptyMatrix[2]) == 2, "emptyMatrix[2] len")
     
-    println("composite_literal_nested: ok")
+    fmt.Println("composite_literal_nested: ok")
 }

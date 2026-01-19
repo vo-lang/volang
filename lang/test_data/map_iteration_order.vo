@@ -2,6 +2,8 @@
 // Coverage: map semantics, delete during range, concurrent-safe patterns
 package main
 
+
+import "fmt"
 // Test 1: map iteration visits all keys
 func testMapIterationComplete() {
     m := map[int]string{
@@ -165,37 +167,37 @@ func testMapInterfaceKey() {
 }
 
 func main() {
-    println("Test 1: map iteration complete")
+    fmt.Println("Test 1: map iteration complete")
     testMapIterationComplete()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: delete during iteration")
+    fmt.Println("Test 2: delete during iteration")
     testDeleteDuringIteration()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: add during iteration")
+    fmt.Println("Test 3: add during iteration")
     testAddDuringIteration()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: map struct value modify")
+    fmt.Println("Test 4: map struct value modify")
     testMapStructValueModify()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: map pointer value")
+    fmt.Println("Test 5: map pointer value")
     testMapPointerValue()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: map nil equality")
+    fmt.Println("Test 6: map nil equality")
     testMapNilEquality()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: map key types")
+    fmt.Println("Test 7: map key types")
     testMapKeyTypes()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: map interface key")
+    fmt.Println("Test 8: map interface key")
     testMapInterfaceKey()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("map_iteration_order: ALL PASSED")
+    fmt.Println("map_iteration_order: ALL PASSED")
 }

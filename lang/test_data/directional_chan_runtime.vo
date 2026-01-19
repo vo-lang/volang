@@ -2,6 +2,8 @@
 // Coverage: chan<- T and <-chan T at runtime
 package main
 
+
+import "fmt"
 func sendOnly(ch chan<- int, val int) {
     ch <- val
 }
@@ -51,5 +53,5 @@ func main() {
     v2 := <-recvCh
     assert(v1 == 100 && v2 == 200, "directional channel assignment")
     
-    println("directional_chan_runtime: ok")
+    fmt.Println("directional_chan_runtime: ok")
 }

@@ -1,15 +1,17 @@
 package main
 
+
+import "fmt"
 func main() {
 	n := 100
 	arr := make([]int, n)
 	for i := 0; i < n; i++ {
 		arr[i] = i
 	}
-	println(arr[0])
-	println(arr[49])
-	println(arr[50])
-	println(arr[99])
+	fmt.Println(arr[0])
+	fmt.Println(arr[49])
+	fmt.Println(arr[50])
+	fmt.Println(arr[99])
 }
 
 /*
@@ -24,9 +26,9 @@ func main() {
 	n := 100
 	arr := make([]int, n)
 	jited(n, arr)
-	println(arr[0])
-	println(arr[49])
-	println(arr[50])
-	println(arr[99])
+	fmt.Println(arr[0])
+	fmt.Println(arr[49])
+	fmt.Println(arr[50])
+	fmt.Println(arr[99])
 }
 */

@@ -4,6 +4,8 @@
 
 package main
 
+
+import "fmt"
 var add = func(a, b int) int {
     return a + b
 }
@@ -11,5 +13,5 @@ var add = func(a, b int) int {
 func main() {
     result := add(3, 5)
     assert(result == 8, "should be 8")
-    println("ok")
+    fmt.Println("ok")
 }

@@ -2,6 +2,8 @@
 // Coverage: m[k] += v, s[i] *= v, etc.
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Map compound assignment with +=
     m := map[string]int{"a": 10, "b": 20}
@@ -56,5 +58,5 @@ func main() {
     shifts[2] >>= 1
     assert(shifts[2] == 2, "shifts[2] >>= 1 should give 2")
     
-    println("compound_assign_map: ok")
+    fmt.Println("compound_assign_map: ok")
 }

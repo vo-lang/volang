@@ -2,6 +2,8 @@
 // Coverage: fallthrough with various control flow combinations
 package main
 
+
+import "fmt"
 // Test 1: fallthrough skips case condition
 func testFallthroughSkipsCondition() int {
     x := 1
@@ -135,40 +137,40 @@ func testDefaultMiddleFallthrough() int {
 }
 
 func main() {
-    println("Test 1: fallthrough skips condition")
+    fmt.Println("Test 1: fallthrough skips condition")
     r1 := testFallthroughSkipsCondition()
     assert(r1 == 11, "expected 11, got", r1)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: multiple fallthrough")
+    fmt.Println("Test 2: multiple fallthrough")
     r2 := testMultipleFallthrough()
     assert(r2 == 111, "expected 111, got", r2)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: fallthrough to default")
+    fmt.Println("Test 3: fallthrough to default")
     r3 := testFallthroughToDefault()
     assert(r3 == 11, "expected 11, got", r3)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: fallthrough last (no effect)")
+    fmt.Println("Test 5: fallthrough last (no effect)")
     r5 := testFallthroughLast()
     assert(r5 == 100, "expected 100, got", r5)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: simple fallthrough")
+    fmt.Println("Test 6: simple fallthrough")
     r6 := testSimpleFallthrough()
     assert(r6 == 11, "expected 11, got", r6)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: nested switch fallthrough")
+    fmt.Println("Test 7: nested switch fallthrough")
     r7 := testNestedSwitchFallthrough()
     assert(r7 == 1111, "expected 1111, got", r7)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: default middle fallthrough")
+    fmt.Println("Test 8: default middle fallthrough")
     r8 := testDefaultMiddleFallthrough()
     assert(r8 == 110, "expected 110, got", r8)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("switch_fallthrough_complex: ALL PASSED")
+    fmt.Println("switch_fallthrough_complex: ALL PASSED")
 }

@@ -2,6 +2,8 @@
 // This tests correct behavior when source and destination overlap
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic self-append
     s1 := []int{1, 2, 3}
@@ -53,5 +55,5 @@ func main() {
     assert(s6[5] == 3, "s6[5] should be 3")
     assert(s6[6] == 4, "s6[6] should be 4")
     
-    println("append_self_slice: ok")
+    fmt.Println("append_self_slice: ok")
 }

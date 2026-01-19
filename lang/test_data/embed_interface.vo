@@ -2,6 +2,8 @@
 // Test: interface embedding
 package main
 
+
+import "fmt"
 type Reader interface {
 	Read() string
 }
@@ -40,6 +42,6 @@ func main() {
 	var r Reader = buf
 	assert(r.Read() == "hello", "r.Read() should be hello")
 	
-	println("interface embedding tests passed")
+	fmt.Println("interface embedding tests passed")
 }
 

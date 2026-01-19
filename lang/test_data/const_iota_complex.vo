@@ -2,6 +2,8 @@
 // Coverage: iota in various expressions
 package main
 
+
+import "fmt"
 const (
     A0 = iota      // 0
     A1             // 1
@@ -65,5 +67,5 @@ func main() {
     // Test 6: skipping with blank identifier
     assert(E0 == 100 && E2 == 102 && E4 == 104, "skip with _")
     
-    println("const_iota_complex: ok")
+    fmt.Println("const_iota_complex: ok")
 }

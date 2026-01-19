@@ -2,6 +2,8 @@
 // Verifies that ~> assignment works on fields promoted from embedded structs.
 package main
 
+
+import "fmt"
 type Base struct {
     id   int
     name string
@@ -27,22 +29,22 @@ func main() {
     
     obj~>id = 200
     assert(d.id == 200, "embedded id should be 200")
-    println("Test 1: d.id =", d.id)
+    fmt.Println("Test 1: d.id =", d.id)
     
     obj~>name = "modified"
     assert(d.name == "modified", "embedded name should be 'modified'")
-    println("Test 2: d.name =", d.name)
+    fmt.Println("Test 2: d.name =", d.name)
     
     // Test 3: Write to non-embedded field
     obj~>extra = "new-extra"
     assert(d.extra == "new-extra", "extra should be 'new-extra'")
-    println("Test 3: d.extra =", d.extra)
+    fmt.Println("Test 3: d.extra =", d.extra)
     
     // Test 4: Write to embedded struct as a whole
     obj~>Base = Base{id: 300, name: "replaced"}
     assert(d.id == 300, "Base.id should be 300")
     assert(d.name == "replaced", "Base.name should be 'replaced'")
-    println("Test 4: d.Base = {", d.id, ",", d.name, "}")
+    fmt.Println("Test 4: d.Base = {", d.id, ",", d.name, "}")
     
     // Test 5: Deep embedding write
     dd := &DeepDerived{
@@ -56,19 +58,19 @@ func main() {
     
     ddObj~>id = 999
     assert(dd.id == 999, "deep id should be 999")
-    println("Test 5: dd.id =", dd.id)
+    fmt.Println("Test 5: dd.id =", dd.id)
     
     ddObj~>name = "deep-modified"
     assert(dd.name == "deep-modified", "deep name should be 'deep-modified'")
-    println("Test 6: dd.name =", dd.name)
+    fmt.Println("Test 6: dd.name =", dd.name)
     
     ddObj~>extra = "deep-extra-modified"
     assert(dd.extra == "deep-extra-modified", "deep extra should be modified")
-    println("Test 7: dd.extra =", dd.extra)
+    fmt.Println("Test 7: dd.extra =", dd.extra)
     
     ddObj~>level = 42
     assert(dd.level == 42, "level should be 42")
-    println("Test 8: dd.level =", dd.level)
+    fmt.Println("Test 8: dd.level =", dd.level)
     
-    println("dyn_embed_field_write: ok")
+    fmt.Println("dyn_embed_field_write: ok")
 }

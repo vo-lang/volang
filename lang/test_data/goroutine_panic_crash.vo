@@ -3,6 +3,8 @@
 // We can't test crash directly, but we can test that goroutine panic propagates
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: goroutine with recover should work
     done := make(chan bool, 1)
@@ -82,5 +84,5 @@ func main() {
     assert(val == 42, "should receive value before panic")
     <-done3
     
-    println("goroutine_panic_crash: PASSED")
+    fmt.Println("goroutine_panic_crash: PASSED")
 }

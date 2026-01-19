@@ -1,22 +1,24 @@
 package main
 
+
+import "fmt"
 // ============ Test 1: Empty interface ============
 func testEmptyInterface() {
     var a interface{}
     
     // Assign int
     a = 42
-    println("empty interface int:", a)
+    fmt.Println("empty interface int:", a)
     
     // Assign float
     a = 3.14
-    println("empty interface float:", a)
+    fmt.Println("empty interface float:", a)
     
     // Assign string
     a = "hello"
-    println("empty interface string:", a)
+    fmt.Println("empty interface string:", a)
     
-    println("Test 1 PASSED: empty interface")
+    fmt.Println("Test 1 PASSED: empty interface")
 }
 
 // ============ Test 2: Named interface with struct ============
@@ -38,10 +40,10 @@ func testStructInterface() {
     a = n
     
     result := a.Add()
-    println("struct interface Add():", result)
+    fmt.Println("struct interface Add():", result)
     assert(result == 142, "struct Add() should return 142")
     
-    println("Test 2 PASSED: struct implements interface")
+    fmt.Println("Test 2 PASSED: struct implements interface")
 }
 
 // ============ Test 3: Named interface with object ============
@@ -60,16 +62,16 @@ func testObjectInterface() {
     a = c
     
     result := a.Add()
-    println("object interface Add():", result)
+    fmt.Println("object interface Add():", result)
     assert(result == 11, "object Add() should return 11")
     
     // Value semantics: each call operates on a copy, so count stays at 10
     // and Add() always returns 11 (10 + 1)
     result2 := a.Add()
-    println("object interface Add() again:", result2)
+    fmt.Println("object interface Add() again:", result2)
     assert(result2 == 11, "object Add() again should return 11 (value semantics)")
     
-    println("Test 3 PASSED: object implements interface")
+    fmt.Println("Test 3 PASSED: object implements interface")
 }
 
 // ============ Test 4: Multiple types same interface ============
@@ -88,17 +90,17 @@ func testMultipleTypes() {
     n := MyNum{value: 10}
     a = n
     r1 := a.Add()
-    println("MyNum.Add():", r1)
+    fmt.Println("MyNum.Add():", r1)
     assert(r1 == 110, "MyNum.Add() should be 110")
     
     // Then assign Doubler
     d := Doubler{value: 10}
     a = d
     r2 := a.Add()
-    println("Doubler.Add():", r2)
+    fmt.Println("Doubler.Add():", r2)
     assert(r2 == 20, "Doubler.Add() should be 20")
     
-    println("Test 4 PASSED: multiple types implement same interface")
+    fmt.Println("Test 4 PASSED: multiple types implement same interface")
 }
 
 // ============ Test 5: Interface to interface assignment ============
@@ -134,10 +136,10 @@ func testInterfaceToInterface() {
     // ReadWriter -> Reader (superset to subset): OK
     r = rw
     result := r.Read()
-    println("Reader.Read():", result)
+    fmt.Println("Reader.Read():", result)
     assert(result == 100, "Reader.Read() should be 100")
     
-    println("Test 5 PASSED: interface to interface assignment")
+    fmt.Println("Test 5 PASSED: interface to interface assignment")
 }
 
 // ============ Test 6: Named interface to empty interface ============
@@ -150,9 +152,9 @@ func testNamedToEmpty() {
     
     // Named interface -> empty interface: always OK
     e = a
-    println("empty interface from Adder:", e)
+    fmt.Println("empty interface from Adder:", e)
     
-    println("Test 6 PASSED: named interface to empty interface")
+    fmt.Println("Test 6 PASSED: named interface to empty interface")
 }
 
 // ============ Main ============
@@ -164,5 +166,5 @@ func main() {
     testInterfaceToInterface()
     testNamedToEmpty()
     
-    println("interface_test: ALL PASSED")
+    fmt.Println("interface_test: ALL PASSED")
 }

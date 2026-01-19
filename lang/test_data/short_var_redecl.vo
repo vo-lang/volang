@@ -2,6 +2,8 @@
 // Go spec: := can reassign existing vars if at least one is new
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic redeclaration
     x := 10
@@ -70,7 +72,7 @@ func main() {
     // var s string = "hello"
     // s, t := 42, 43  // error: cannot use 42 (int) as string
     
-    println("short_var_redecl: ok")
+    fmt.Println("short_var_redecl: ok")
 }
 
 func getData() (int, error) {

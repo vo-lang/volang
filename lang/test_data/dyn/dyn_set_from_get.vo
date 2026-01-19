@@ -2,6 +2,8 @@
 // obj~>field = other~>field pattern
 package main
 
+
+import "fmt"
 type Source struct {
     value   int
     name    string
@@ -86,5 +88,5 @@ func main() {
     obj2~>inner = innerVal
     assert(o2.inner.x == 999, "o2.inner.x should be 999")
     
-    println("dyn_set_from_get: ok")
+    fmt.Println("dyn_set_from_get: ok")
 }

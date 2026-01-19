@@ -2,6 +2,8 @@
 // Spec: For strings: i is byte index, v is rune (int32)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: ASCII string - byte index matches position
     s1 := "abc"
@@ -69,5 +71,5 @@ func main() {
     assert(len(indices6) == 1, "Emoji: should have 1 iteration")
     assert(indices6[0] == 0, "Emoji: index should be 0")
     
-    println("range_string_index: ALL PASSED")
+    fmt.Println("range_string_index: ALL PASSED")
 }

@@ -2,6 +2,8 @@
 // Different types with same dynamic interface in a collection.
 package main
 
+
+import "fmt"
 // Shape interface - all shapes have Area and Perimeter
 type Circle struct {
     radius float64
@@ -153,6 +155,6 @@ func main() error {
     h := rect~>height?
     assert(w.(float64) == 4.0 && h.(float64) == 6.0, "rect dimensions")
     
-    println("dyn_polymorphic_collection: ok")
+    fmt.Println("dyn_polymorphic_collection: ok")
     return nil
 }

@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: Closure captures slice
 	s := []int{1, 2, 3, 4, 5}
@@ -45,5 +47,5 @@ func main() {
 	assert(funcs[3]() == 9)
 	assert(funcs[4]() == 16)
 
-	println("gc_closure_capture: PASSED")
+	fmt.Println("gc_closure_capture: PASSED")
 }

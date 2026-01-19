@@ -1,9 +1,12 @@
 package main
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 func main() {
-    println("Testing slices package...")
+    fmt.Println("Testing slices package...")
     
     // Test IndexInt
     ints := []int{10, 20, 30, 40, 50}
@@ -68,5 +71,5 @@ func main() {
     assert(slices.ContainsString(strs, "cherry"), "ContainsString should find cherry")
     assert(!slices.ContainsString(strs, "grape"), "ContainsString should not find grape")
     
-    println("All slices tests passed!")
+    fmt.Println("All slices tests passed!")
 }

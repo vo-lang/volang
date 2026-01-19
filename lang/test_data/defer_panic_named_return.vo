@@ -2,6 +2,8 @@
 // Go spec: deferred function can modify named return values
 package main
 
+
+import "fmt"
 func panicWithRecover() (result int) {
     defer func() {
         if r := recover(); r != nil {
@@ -56,5 +58,5 @@ func main() {
     assert(a == 20, "a should be 20, got ", a)
     assert(b == 60, "b should be 60, got ", b)
     
-    println("defer_panic_named_return: ok")
+    fmt.Println("defer_panic_named_return: ok")
 }

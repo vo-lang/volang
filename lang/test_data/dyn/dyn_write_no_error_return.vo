@@ -2,6 +2,8 @@
 // Dynamic write now allowed - panics on error, succeeds otherwise.
 package main
 
+
+import "fmt"
 type S struct {
     x int
 }
@@ -11,6 +13,6 @@ func main() int {
     var a any = s
     a~>x = 2  // should succeed (correct type)
     assert(s.x == 2, "x should be 2")
-    println("dyn_write_no_error_return: ok")
+    fmt.Println("dyn_write_no_error_return: ok")
     return 0
 }

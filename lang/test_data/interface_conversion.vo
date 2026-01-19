@@ -1,6 +1,8 @@
 // Test: interface type conversions
 package main
 
+
+import "fmt"
 type E interface{}
 
 type I1 interface {
@@ -52,36 +54,36 @@ func main() {
     _ = E(i1)
     _ = E(i2)
     _ = E(i3)
-    println("Test 1 PASSED: conversion to empty interface")
+    fmt.Println("Test 1 PASSED: conversion to empty interface")
     
     // === Test 2: I1(nil) should work ===
     _ = I1(nil)
-    println("Test 2 PASSED: I1(nil)")
+    fmt.Println("Test 2 PASSED: I1(nil)")
     
     // === Test 3: I1(i1) should work ===
     _ = I1(i1)
-    println("Test 3 PASSED: I1(i1)")
+    fmt.Println("Test 3 PASSED: I1(i1)")
     
     // === Test 4: I1(i2) should work (I2 has m1()) ===
     _ = I1(i2)
-    println("Test 4 PASSED: I1(i2) - I2 implements I1")
+    fmt.Println("Test 4 PASSED: I1(i2) - I2 implements I1")
     
     // === Test 5: I2(nil) should work ===
     _ = I2(nil)
-    println("Test 5 PASSED: I2(nil)")
+    fmt.Println("Test 5 PASSED: I2(nil)")
     
     // === Test 6: I2(i2) should work ===
     _ = I2(i2)
-    println("Test 6 PASSED: I2(i2)")
+    fmt.Println("Test 6 PASSED: I2(i2)")
     
     // === Test 7: I3(nil) should work ===
     _ = I3(nil)
-    println("Test 7 PASSED: I3(nil)")
+    fmt.Println("Test 7 PASSED: I3(nil)")
     
     // === Test 8: I3(i3) should work ===
     _ = I3(i3)
-    println("Test 8 PASSED: I3(i3)")
+    fmt.Println("Test 8 PASSED: I3(i3)")
     
-    println("interface_conversion: ALL PASSED")
+    fmt.Println("interface_conversion: ALL PASSED")
 }
 

@@ -2,6 +2,8 @@
 // Empty struct takes zero memory, ideal for signaling
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic empty struct channel
     done := make(chan struct{}, 1)
@@ -55,5 +57,5 @@ func main() {
     signals := make([]struct{}, 3)
     assert(len(signals) == 3, "slice len should be 3")
     
-    println("empty_struct_chan_signal: ok")
+    fmt.Println("empty_struct_chan_signal: ok")
 }

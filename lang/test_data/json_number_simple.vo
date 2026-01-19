@@ -1,12 +1,15 @@
 package main
 
-import "encoding/json"
+import (
+	"fmt"
+	"encoding/json"
+)
 
 func main() {
     // Test String()
     n1 := json.Number("42")
     s := n1.String()
-    println("String:", s)
+    fmt.Println("String:", s)
     assert(s == "42", "String() should return '42'")
     
     // Test IsInt()
@@ -18,19 +21,19 @@ func main() {
     i1, err := n1.Int()
     assert(err == nil, "Int() should not error")
     assert(i1 == 42, "Int() should return 42")
-    println("Int:", i1)
+    fmt.Println("Int:", i1)
     
     // Test negative Int()
     n3 := json.Number("-123")
     i3, err := n3.Int()
     assert(err == nil, "Int() on negative should not error")
     assert(i3 == -123, "Int() should return -123")
-    println("Negative Int:", i3)
+    fmt.Println("Negative Int:", i3)
     
     // Test Int() on float should error
     _, err = n2.Int()
     assert(err != nil, "Int() on float should error")
-    println("Int on float error:", err)
+    fmt.Println("Int on float error:", err)
     
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

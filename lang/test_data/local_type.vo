@@ -1,6 +1,8 @@
 // Test: local type declarations inside functions
 package main
 
+
+import "fmt"
 func main() {
     // Local struct type
     type Point struct {
@@ -21,6 +23,6 @@ func main() {
     assert(p2.x == 30, "p2.x should be 30")
     assert(p2.y == 40, "p2.y should be 40")
     
-    println("local type declarations work correctly")
+    fmt.Println("local type declarations work correctly")
 }
 

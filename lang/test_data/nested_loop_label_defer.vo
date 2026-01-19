@@ -1,6 +1,8 @@
 // Test: nested loops with labels, break/continue, and defer interaction
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: break label in nested loop with defer
     result1 := testBreakLabel()
@@ -22,7 +24,7 @@ func main() {
     result5 := testLabelForRange()
     assert(result5 == 7, "label with for-range should work")
     
-    println("nested_loop_label_defer: ALL PASSED")
+    fmt.Println("nested_loop_label_defer: ALL PASSED")
 }
 
 func testBreakLabel() string {

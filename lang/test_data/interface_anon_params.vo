@@ -1,6 +1,8 @@
 // Test: Interface method signatures with anonymous parameters
 package main
 
+
+import "fmt"
 type Calculator interface {
     Add(int, int) int
     Sub(int, int) int
@@ -15,5 +17,5 @@ func main() {
     var calc Calculator = CalcImpl{}
     assert(calc.Add(10, 5) == 15, "Add")
     assert(calc.Sub(10, 5) == 5, "Sub")
-    println("interface_anon_params: PASSED")
+    fmt.Println("interface_anon_params: PASSED")
 }

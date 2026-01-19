@@ -2,6 +2,8 @@
 // Go spec: deferred function arguments are evaluated immediately, call is deferred
 package main
 
+
+import "fmt"
 var results []string
 
 func appendResult(s string) {
@@ -113,5 +115,5 @@ func main() {
     assert(results[0] == "body:20", "body sees 20")
     assert(results[1] == "deferred:10", "defer sees original 10")
     
-    println("defer_eval_timing: ok")
+    fmt.Println("defer_eval_timing: ok")
 }

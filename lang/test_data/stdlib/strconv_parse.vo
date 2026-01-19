@@ -1,10 +1,13 @@
 package main
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 import "errors"
 
 func main() {
-    println("Testing strconv parse functions...")
+    fmt.Println("Testing strconv parse functions...")
     
     // Test Atoi
     v1, err1 := strconv.Atoi("42")
@@ -96,5 +99,5 @@ func main() {
     
     // NOTE: AppendInt/AppendBool tests skipped - append(buf, s...) causes segfault (separate bug)
     
-    println("All strconv parse tests passed!")
+    fmt.Println("All strconv parse tests passed!")
 }

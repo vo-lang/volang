@@ -2,6 +2,8 @@
 // All integer types should work as slice/array indices.
 package main
 
+
+import "fmt"
 func main() {
     s := []string{"a", "b", "c", "d", "e"}
     var obj any = s
@@ -56,5 +58,5 @@ func main() {
     v = mObj~>[key32]?
     assert(v.(string) == "two", "map[int32(2)] should be 'two'")
     
-    println("int_index_variants: ok")
+    fmt.Println("int_index_variants: ok")
 }

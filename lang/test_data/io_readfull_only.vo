@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"bytes"
 	"io"
 )
@@ -9,10 +10,10 @@ func main() {
 	buf := bytes.NewBufferString("hello world")
 	data := make([]byte, 5)
 	n, err := io.ReadFull(buf, data)
-	println("io.ReadFull: n =", n, "data =", string(data))
+	fmt.Println("io.ReadFull: n =", n, "data =", string(data))
 	
 	if string(data) != "hello" {
 		panic("FAIL: expected 'hello', got '" + string(data) + "'")
 	}
-	println("PASS")
+	fmt.Println("PASS")
 }

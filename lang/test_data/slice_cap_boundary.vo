@@ -2,6 +2,8 @@
 // Go spec: cap(s) returns capacity, len(s) <= cap(s) always
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: make with length and capacity
     s1 := make([]int, 3, 10)
@@ -77,5 +79,5 @@ func main() {
     assert(len(s10) == 5, "s10 len is 5")
     assert(cap(s10) == 15, "s10 cap is 15 (20-5)")
     
-    println("slice_cap_boundary: ok")
+    fmt.Println("slice_cap_boundary: ok")
 }

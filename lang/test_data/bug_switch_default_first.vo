@@ -2,6 +2,8 @@
 // In Go, default can appear anywhere in switch; it's only used when no case matches
 package main
 
+
+import "fmt"
 func test(n int) int {
 	total := 0
 	switch n {
@@ -23,5 +25,5 @@ func main() {
 	assert(test(2) == 2, "test(2) should be 2, got ", test(2))
 	assert(test(99) == 1000, "test(99) should be 1000, got ", test(99))
 	
-	println("bug_switch_default_first: ok")
+	fmt.Println("bug_switch_default_first: ok")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
 	// Test assert with diagnostic messages (passing cases only)
 	x := 10
@@ -24,5 +26,5 @@ func main() {
 	assert(1 == 1)
 	assert(x > 5)
 
-	println("assert_diagnostic: PASS")
+	fmt.Println("assert_diagnostic: PASS")
 }

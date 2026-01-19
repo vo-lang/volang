@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // BUG: Interface method with multiple return values
 // Calling interface methods that return multiple values may cause issues.
 
@@ -26,5 +28,5 @@ func main() {
     result, ok = d.Divide(10, 0)
     assert(ok == false, "divide by zero should fail")
     
-    println("bug_interface_multi_return: PASSED")
+    fmt.Println("bug_interface_multi_return: PASSED")
 }

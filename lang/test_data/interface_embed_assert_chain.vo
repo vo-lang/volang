@@ -2,6 +2,8 @@
 // Coverage: complex interface hierarchy with assertions
 package main
 
+
+import "fmt"
 type Reader interface {
     Read() string
 }
@@ -165,25 +167,25 @@ func testTypeSwitchEmbedded() {
 }
 
 func main() {
-    println("Test 1: assertion chain")
+    fmt.Println("Test 1: assertion chain")
     testAssertChain()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: embedded field assert")
+    fmt.Println("Test 2: embedded field assert")
     testEmbeddedFieldAssert()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: diamond interface")
+    fmt.Println("Test 3: diamond interface")
     testDiamondInterface()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: nil assert")
+    fmt.Println("Test 4: nil assert")
     testNilAssert()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: type switch embedded")
+    fmt.Println("Test 5: type switch embedded")
     testTypeSwitchEmbedded()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("interface_embed_assert_chain: ALL PASSED")
+    fmt.Println("interface_embed_assert_chain: ALL PASSED")
 }

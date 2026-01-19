@@ -1,6 +1,8 @@
 // Test: go statement with channels
 package main
 
+
+import "fmt"
 var ch = make(chan int, 2)
 
 func main() {
@@ -15,7 +17,7 @@ func main() {
 	sum := r1 + r2
 	assert(sum == 21, "sum should be 21 (1 + 20)")
 	
-	println("go statement tests passed")
+	fmt.Println("go statement tests passed")
 }
 
 func worker() {

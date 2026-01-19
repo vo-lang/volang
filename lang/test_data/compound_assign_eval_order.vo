@@ -2,6 +2,8 @@
 // The index expression should only be evaluated once
 package main
 
+
+import "fmt"
 var callCount int
 
 func getIndex() int {
@@ -41,5 +43,5 @@ func main() {
     assert(callCount == 1, "getIndex should be called once for nested +=")
     assert(w.values[0] == 105, "w.values[0] should be 105")
     
-    println("compound_assign_eval_order: PASSED")
+    fmt.Println("compound_assign_eval_order: PASSED")
 }

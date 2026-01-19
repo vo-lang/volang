@@ -1,6 +1,8 @@
 // Test: Captured struct with inline array field - arbitrary nesting depth
 package main
 
+
+import "fmt"
 type Inner struct {
     arr [3]int
 }
@@ -67,5 +69,5 @@ func main() {
     assert(o.middle.inner.arr[1] == 200, "o.middle.inner.arr[1] should be 200")
     assert(o.middle.inner.arr[2] == 400, "o.middle.inner.arr[2] should be 400")
 
-    println("ok")
+    fmt.Println("ok")
 }

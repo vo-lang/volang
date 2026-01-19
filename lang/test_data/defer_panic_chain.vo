@@ -1,6 +1,8 @@
 // Test: defer + panic chain behavior - focused tests
 package main
 
+
+import "fmt"
 var order []string
 
 func reset() {
@@ -9,7 +11,7 @@ func reset() {
 
 func log(s string) {
     order = append(order, s)
-    println("  ", s)
+    fmt.Println("  ", s)
 }
 
 // Test 1: recover() returns nil when no panic
@@ -64,23 +66,23 @@ func testMultipleDeferBeforePanic() {
 }
 
 func main() int {
-    println("Test 1: recover() returns nil when no panic")
+    fmt.Println("Test 1: recover() returns nil when no panic")
     reset()
     _ = testRecoverNoPanic()
     // Note: result is set in defer which runs after return value is set
     // So we check order instead
     assert(order[0] == "normal-execution", "should log normal execution")
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Panic string value")
+    fmt.Println("Test 2: Panic string value")
     testPanicString()  // Should not crash
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: Panic int value")
+    fmt.Println("Test 3: Panic int value")
     testPanicInt()  // Should not crash
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: Multiple defers before recover")
+    fmt.Println("Test 4: Multiple defers before recover")
     reset()
     testMultipleDeferBeforePanic()
     // Expected: body, defer-1, defer-2, defer-3 (LIFO for defers)
@@ -88,8 +90,8 @@ func main() int {
     assert(order[1] == "defer-1", "defer-1 second")
     assert(order[2] == "defer-2", "defer-2 third")
     assert(order[3] == "defer-3", "defer-3 fourth")
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("defer_panic_chain: ALL PASSED")
+    fmt.Println("defer_panic_chain: ALL PASSED")
     return 0
 }

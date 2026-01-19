@@ -1,7 +1,10 @@
 // Test dyn.SliceObject built-in type
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 func main() error {
     // Create SliceObject
@@ -45,6 +48,6 @@ func main() error {
     _, err = obj~>["string"]
     assert(err != nil, "string key read should error")
     
-    println("slice_object: ok")
+    fmt.Println("slice_object: ok")
     return nil
 }

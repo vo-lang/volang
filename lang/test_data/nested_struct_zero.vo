@@ -5,6 +5,8 @@
 // - Struct with both array field AND func field
 package main
 
+
+import "fmt"
 type Inner struct {
     x int
     s string
@@ -82,5 +84,5 @@ func main() {
     pinner.x = 123
     assert(pinner.x == 123, "can modify through new pointer")
     
-    println("nested_struct_zero: ok")
+    fmt.Println("nested_struct_zero: ok")
 }

@@ -2,6 +2,8 @@
 // Complex interface test with embedded interface fields
 package main
 
+
+import "fmt"
 type Executor interface {
     Execute(string) string
     Status() string
@@ -40,5 +42,5 @@ func main() {
     assert(wrapped.calls == 1, "wrapped calls")
     assert(exec.Status() == "executed:PRE:cmd1", "wrapped status from embedded")
     
-    println("interface_complex_subset: PASSED")
+    fmt.Println("interface_complex_subset: PASSED")
 }

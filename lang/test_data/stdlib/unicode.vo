@@ -1,9 +1,12 @@
 package main
 
-import "unicode"
+import (
+	"fmt"
+	"unicode"
+)
 
 func main() {
-    println("Starting unicode tests...")
+    fmt.Println("Starting unicode tests...")
     
     // Test IsLetter
     assert(unicode.IsLetter('a'), "IsLetter('a')")
@@ -35,6 +38,6 @@ func main() {
     assert(unicode.IsControl('\x00'), "IsControl(NUL)")
     assert(!unicode.IsControl('a'), "!IsControl('a')")
     
-    println("All unicode tests passed!")
+    fmt.Println("All unicode tests passed!")
 }
 

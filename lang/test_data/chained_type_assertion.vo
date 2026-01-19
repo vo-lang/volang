@@ -1,6 +1,8 @@
 // Test: chained type assertions through multiple interface layers
 package main
 
+
+import "fmt"
 type Reader interface {
     Read() int
 }
@@ -79,5 +81,5 @@ func main() {
     _, ok2 := a6.(ReadWriter)
     assert(!ok2, "OnlyReader does not implement ReadWriter")
     
-    println("chained_type_assertion: ok")
+    fmt.Println("chained_type_assertion: ok")
 }

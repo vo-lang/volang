@@ -2,6 +2,8 @@
 // Named types like `type MyInt int` can have methods.
 package main
 
+
+import "fmt"
 // Named int type with methods
 type MyInt int
 
@@ -78,17 +80,17 @@ func main() {
     r1, err := obj~>Double()
     assert(err == nil, "Double should succeed")
     assert(r1.(int) == 42, "Double should return 42")
-    println("MyInt(21).Double() =", r1.(int))
+    fmt.Println("MyInt(21).Double() =", r1.(int))
     
     r2, err := obj~>Add(9)
     assert(err == nil, "Add should succeed")
     assert(r2.(int) == 30, "Add(9) should return 30")
-    println("MyInt(21).Add(9) =", r2.(int))
+    fmt.Println("MyInt(21).Add(9) =", r2.(int))
     
     r3, err := obj~>IsPositive()
     assert(err == nil, "IsPositive should succeed")
     assert(r3.(bool) == true, "IsPositive should be true")
-    println("MyInt(21).IsPositive() =", r3.(bool))
+    fmt.Println("MyInt(21).IsPositive() =", r3.(bool))
     
     // Note: Pointer to named non-struct types not allowed in Vo
     // Skipping mutation test for MyInt
@@ -100,17 +102,17 @@ func main() {
     r4, err := sobj~>Length()
     assert(err == nil, "Length should succeed")
     assert(r4.(int) == 5, "Length should be 5")
-    println("MyString.Length() =", r4.(int))
+    fmt.Println("MyString.Length() =", r4.(int))
     
     r5, err := sobj~>Concat(" world")
     assert(err == nil, "Concat should succeed")
     assert(r5.(string) == "hello world", "Concat should return 'hello world'")
-    println("MyString.Concat(' world') =", r5.(string))
+    fmt.Println("MyString.Concat(' world') =", r5.(string))
     
     r6, err := sobj~>Upper()
     assert(err == nil, "Upper should succeed")
     assert(r6.(string) == "HELLO", "Upper should return 'HELLO'")
-    println("MyString.Upper() =", r6.(string))
+    fmt.Println("MyString.Upper() =", r6.(string))
     
     // Test 4: Named slice type
     var list IntList = []int{1, 2, 3, 4, 5}
@@ -119,15 +121,15 @@ func main() {
     r7, err := lobj~>Sum()
     assert(err == nil, "Sum should succeed")
     assert(r7.(int) == 15, "Sum should be 15")
-    println("IntList.Sum() =", r7.(int))
+    fmt.Println("IntList.Sum() =", r7.(int))
     
     r8, err := lobj~>Max()
     assert(err == nil, "Max should succeed")
     assert(r8.(int) == 5, "Max should be 5")
-    println("IntList.Max() =", r8.(int))
+    fmt.Println("IntList.Max() =", r8.(int))
     
     // Note: Pointer to named slice types not allowed in Vo
     // Skipping mutation test for IntList
     
-    println("dyn_named_type_method: ok")
+    fmt.Println("dyn_named_type_method: ok")
 }

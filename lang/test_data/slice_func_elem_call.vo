@@ -1,6 +1,8 @@
 // Test: slice containing functions, indexed and called
 package main
 
+
+import "fmt"
 type Calculator struct {
     ops []func(int, int) int
 }
@@ -74,7 +76,7 @@ func main() {
     result := applyOp(ops[0], 100, 23)
     assert(result == 123, "applyOp with add should be 123")
     
-    println("slice_func_elem_call: ALL PASSED")
+    fmt.Println("slice_func_elem_call: ALL PASSED")
 }
 
 func makeOps() []func(int, int) int {

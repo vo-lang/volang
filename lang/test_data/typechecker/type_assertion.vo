@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Type assertion rules
 // Go spec: x.(T) asserts that x is not nil and the value stored in x is of type T
 
@@ -273,5 +275,5 @@ func main() {
     testChainedAssertions()
     testAssertionWithMethodCall()
     
-    println("type_assertion: ALL PASSED")
+    fmt.Println("type_assertion: ALL PASSED")
 }

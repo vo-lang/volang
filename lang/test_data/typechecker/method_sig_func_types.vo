@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Methods with function types as parameters and return values
 // Focus: Higher-order functions, callbacks, closures implementing interfaces
 
@@ -426,5 +428,5 @@ func main() {
     testCallbackPattern()
     testCurrying()
     
-    println("method_sig_func_types: ALL PASSED")
+    fmt.Println("method_sig_func_types: ALL PASSED")
 }

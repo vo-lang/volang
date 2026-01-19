@@ -2,6 +2,8 @@
 // Fields of type any/interface{} should be accessible.
 package main
 
+
+import "fmt"
 type Container struct {
     data  any
     count int
@@ -34,5 +36,5 @@ func main() {
     data = obj~>data?
     assert(data.(bool) == true, "data should be true")
     
-    println("interface_field_dyn: ok")
+    fmt.Println("interface_field_dyn: ok")
 }

@@ -2,6 +2,8 @@
 // a~>b~>c~>d patterns with mixed struct and protocol types.
 package main
 
+
+import "fmt"
 type Level3 struct {
     value int
 }
@@ -68,5 +70,5 @@ func testChain() error {
 func main() {
     err := testChain()
     assert(err == nil, "testChain should succeed")
-    println("multi_level_chain: ok")
+    fmt.Println("multi_level_chain: ok")
 }

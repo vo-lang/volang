@@ -1,7 +1,10 @@
 // Test dynamic access on interface-typed fields
 // Bug #1: dyn_get_attr reads interface fields incorrectly (only 1 slot instead of 2)
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 type S struct {
     E error
@@ -24,7 +27,7 @@ func main() {
     assert(e != nil, "error is nil")
     assert(e.Error() == "boom", "error message mismatch")
     
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

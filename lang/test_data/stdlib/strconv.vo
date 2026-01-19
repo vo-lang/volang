@@ -1,6 +1,9 @@
 package main
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 func main() {
     // Itoa
@@ -22,6 +25,6 @@ func main() {
     quoted := strconv.Quote("hello")
     assert(len(quoted) == 7, "Quote should return 7 chars for 'hello'")
     
-    println("All strconv tests passed!")
+    fmt.Println("All strconv tests passed!")
 }
 

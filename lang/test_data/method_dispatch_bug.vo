@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type A struct {
     x int
 }
@@ -19,6 +21,6 @@ func (b B) Value() int {
 func main() {
     a := A{x: 5}
     b := B{x: 5}
-    println(a.Value())  // 应该是 5
-    println(b.Value())  // 应该是 50
+    fmt.Println(a.Value())  // 应该是 5
+    fmt.Println(b.Value())  // 应该是 50
 }

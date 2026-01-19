@@ -2,6 +2,8 @@
 // Patterns like: obj~>field = obj~>field + 1
 package main
 
+
+import "fmt"
 type Stats struct {
     count int
     total float64
@@ -52,6 +54,6 @@ func main() error {
     assert(s.count == 100, "s.count should be 100 after swap")
     assert(s2.count == 20, "s2.count should be 20 after swap")
     
-    println("combined_read_write: ok")
+    fmt.Println("combined_read_write: ok")
     return nil
 }

@@ -2,6 +2,8 @@
 // Coverage: method set with shadowing in embedding
 package main
 
+
+import "fmt"
 type Inner struct {
     val int
 }
@@ -62,5 +64,5 @@ func main() {
     var g Getter = d
     assert(g.Get() == 500, "interface should use DeepOuter.Get()")
     
-    println("struct_embed_method_shadow: ok")
+    fmt.Println("struct_embed_method_shadow: ok")
 }

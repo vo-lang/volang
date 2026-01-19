@@ -3,6 +3,8 @@
 // Go spec: A nil channel is never ready for communication
 package main
 
+
+import "fmt"
 func main() {
 	// Test 1: nil recv channel with default
 	var nilCh chan int
@@ -86,5 +88,5 @@ func main() {
 	}
 	assert(selected6 == "ch3", "non-nil channel should be selectable")
 
-	println("select_nil_channel: PASSED")
+	fmt.Println("select_nil_channel: PASSED")
 }

@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Comprehensive test for interface implementation with pointer receivers
 
 // ============================================
@@ -59,7 +61,7 @@ func main() {
     testValueImplementsSummer()
     testMethodCallThroughInterface()
     
-    println("interface_pointer: ALL PASSED")
+    fmt.Println("interface_pointer: ALL PASSED")
 }
 
 // Test 1: *Vector implements Mover (pointer receiver method)

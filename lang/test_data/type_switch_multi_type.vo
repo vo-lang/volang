@@ -3,6 +3,8 @@
 // NOTE: Tests without binding variable (x :=) work; with binding + multi-type may have issues
 package main
 
+
+import "fmt"
 func classify(v any) string {
     switch v.(type) {
     case int, int64:
@@ -47,5 +49,5 @@ func main() {
     assert(classifyWithBinding(-1) == "non-positive int", "negative int binding")
     assert(classifyWithBinding("world") == "string: world", "string binding")
     
-    println("type_switch_multi_type: ok")
+    fmt.Println("type_switch_multi_type: ok")
 }

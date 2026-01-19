@@ -2,6 +2,8 @@
 // Coverage: nil function variable behavior
 package main
 
+
+import "fmt"
 func main() {
     var f func()
     
@@ -31,5 +33,5 @@ func main() {
     
     assert(recovered2, "calling nil func returning value should panic")
     
-    println("nil_func_call_panic: ok")
+    fmt.Println("nil_func_call_panic: ok")
 }

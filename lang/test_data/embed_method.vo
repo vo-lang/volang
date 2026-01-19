@@ -2,6 +2,8 @@
 // Test: struct embedding - method promotion
 package main
 
+
+import "fmt"
 type Animal struct {
 	name string
 }
@@ -48,6 +50,6 @@ func main() {
 	assert(sd.GetName() == "Max", "sd.GetName() should be Max")
 	assert(sd.Bark() == "Woof!", "sd.Bark() should be Woof!")
 	
-	println("method promotion tests passed")
+	fmt.Println("method promotion tests passed")
 }
 

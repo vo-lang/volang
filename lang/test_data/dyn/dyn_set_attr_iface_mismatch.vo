@@ -2,6 +2,8 @@
 // Bug: when assigning to interface field, should check if value implements the interface
 package main
 
+
+import "fmt"
 type Reader interface {
 	Read() string
 }
@@ -45,8 +47,8 @@ func testSetMismatch() (panicked bool) {
 func main() {
 	panicked := testSetMismatch()
 	assert(panicked, "should have panicked for interface mismatch")
-	println("Got expected panic")
-	println("PASS")
+	fmt.Println("Got expected panic")
+	fmt.Println("PASS")
 }
 
 // Expected: error when assigning MyWriter to Reader field

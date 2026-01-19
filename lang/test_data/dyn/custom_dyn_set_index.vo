@@ -2,7 +2,10 @@
 // Custom types can implement DynSetIndex to provide dynamic index write access.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // MutableArray implements DynSetIndex
 type MutableArray struct {
@@ -90,5 +93,5 @@ func main() {
     panicked = testBadKeyType(arr)
     assert(panicked, "string key write should panic")
     
-    println("custom_dyn_set_index: ok")
+    fmt.Println("custom_dyn_set_index: ok")
 }

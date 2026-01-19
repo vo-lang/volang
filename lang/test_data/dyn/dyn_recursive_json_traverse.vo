@@ -2,6 +2,8 @@
 // This tests the pattern used in JSON-like data processing.
 package main
 
+
+import "fmt"
 // Simulate JSON-like nested structure
 func buildNestedData() map[string]any {
     return map[string]any{
@@ -119,24 +121,24 @@ func main() {
     sum, err := sumValues(root)
     assert(err == nil, "sumValues should succeed")
     assert(sum == 330, "sum should be 330, got ", sum)
-    println("Total sum:", sum)
+    fmt.Println("Total sum:", sum)
     
     // Test 2: Find by name - exists
     found, ok := findByName(root, "grandchild1")
     assert(ok, "grandchild1 should be found")
     v, _ := found~>["value"]
     assert(v.(int) == 10, "grandchild1 value should be 10")
-    println("Found grandchild1 with value:", v.(int))
+    fmt.Println("Found grandchild1 with value:", v.(int))
     
     // Test 3: Find by name - not exists
     _, ok = findByName(root, "nonexistent")
     assert(!ok, "nonexistent should not be found")
-    println("nonexistent correctly not found")
+    fmt.Println("nonexistent correctly not found")
     
     // Test 4: Count nodes (root + child1 + grandchild1 + grandchild2 + child2 = 5)
     count := countNodes(root)
     assert(count == 5, "should have 5 nodes, got ", count)
-    println("Node count:", count)
+    fmt.Println("Node count:", count)
     
     // Test 5: Nested dynamic access chain
     children := root~>["children"]?
@@ -145,7 +147,7 @@ func main() {
     firstGrandchild := grandchildren.([]any)[0]
     name := firstGrandchild~>["name"]?
     assert(name.(string) == "grandchild1", "first grandchild name")
-    println("First grandchild:", name.(string))
+    fmt.Println("First grandchild:", name.(string))
     
-    println("dyn_recursive_json_traverse: ok")
+    fmt.Println("dyn_recursive_json_traverse: ok")
 }

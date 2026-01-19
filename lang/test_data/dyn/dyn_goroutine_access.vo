@@ -2,6 +2,8 @@
 // Verifies that ~> operator works correctly when called from goroutines.
 package main
 
+
+import "fmt"
 type Data struct {
     Value int
     Name  string
@@ -49,7 +51,7 @@ func main() {
     
     assert(d.Value == 99, "dynamic write from goroutine failed")
 
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

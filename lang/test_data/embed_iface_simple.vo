@@ -2,6 +2,8 @@
 // SKIP: embed interface not yet supported
 package main
 
+
+import "fmt"
 type Inner interface {
     Foo() int
 }
@@ -29,5 +31,5 @@ func main() {
     result2 := iface.Foo()
     assert(result2 == 42, "interface call")
     
-    println("embed_iface_simple: PASSED")
+    fmt.Println("embed_iface_simple: PASSED")
 }

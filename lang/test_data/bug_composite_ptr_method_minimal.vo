@@ -2,6 +2,8 @@
 // BUG: Causes "misaligned pointer dereference" panic in GC
 package main
 
+
+import "fmt"
 type Point struct {
     X, Y int
 }
@@ -15,5 +17,5 @@ func main() {
     arr := [2]Point{{X: 1, Y: 2}, {X: 3, Y: 4}}
     arr[0].SetX(100)  // BUG: GC misaligned pointer
     assert(arr[0].X == 100, "array element method")
-    println("ok")
+    fmt.Println("ok")
 }

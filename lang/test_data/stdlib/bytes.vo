@@ -1,9 +1,12 @@
 package main
 
-import "bytes"
+import (
+	"fmt"
+	"bytes"
+)
 
 func main() {
-    println("Starting bytes tests...")
+    fmt.Println("Starting bytes tests...")
     
     // Test Equal
     a := []byte{1, 2, 3}
@@ -54,6 +57,6 @@ func main() {
     assert(len(rep) == 6, "Repeat length")
     assert(rep[4] == 1, "Repeat content")
     
-    println("All bytes tests passed!")
+    fmt.Println("All bytes tests passed!")
 }
 

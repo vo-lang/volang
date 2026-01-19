@@ -2,6 +2,8 @@
 // Vo spec: string is immutable UTF-8, rune is int32 (Unicode code point)
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: string to []byte
     s := "hello"
@@ -68,5 +70,5 @@ func main() {
     assert(len(runesEmoji) == 1, "emoji is 1 rune")
     assert(runesEmoji[0] == 0x1F389, "emoji code point")
     
-    println("string_byte_rune_conv: ok")
+    fmt.Println("string_byte_rune_conv: ok")
 }

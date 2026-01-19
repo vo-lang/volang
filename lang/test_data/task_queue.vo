@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 const StatusPending = 0
 const StatusCompleted = 2
 
@@ -95,8 +97,8 @@ func main() {
 		totalTime += q.totalTime
 	}
 	
-	println(totalCompleted)
-	println(totalTime)
+	fmt.Println(totalCompleted)
+	fmt.Println(totalTime)
 }
 // expect: 100
 // expect: 2050

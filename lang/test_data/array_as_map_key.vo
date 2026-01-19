@@ -2,6 +2,8 @@
 // Go spec: arrays are comparable and can be used as map keys
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic array as map key
     type Key [3]int
@@ -51,5 +53,5 @@ func main() {
     assert(!ok, "k1 should be deleted")
     assert(len(m) == 1, "should have 1 entry after delete")
     
-    println("array_as_map_key: ok")
+    fmt.Println("array_as_map_key: ok")
 }

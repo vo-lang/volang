@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Interface assignability rules
 // Go spec: T is assignable to interface I if T implements all methods of I
 
@@ -158,7 +160,7 @@ func testAssignToEmptyInterface() {
     m := map[string]int{"a": 1}
     e = m
     
-    println("testAssignToEmptyInterface: passed")
+    fmt.Println("testAssignToEmptyInterface: passed")
 }
 
 func testNamedInterfaceToEmpty() {
@@ -172,7 +174,7 @@ func testNamedInterfaceToEmpty() {
     e = s
     _ = e
     
-    println("testNamedInterfaceToEmpty: passed")
+    fmt.Println("testNamedInterfaceToEmpty: passed")
 }
 
 // ============================================
@@ -291,5 +293,5 @@ func main() {
     testDifferentTypesImplement()
     testInterfaceReassignment()
     
-    println("assignable_interface: ALL PASSED")
+    fmt.Println("assignable_interface: ALL PASSED")
 }

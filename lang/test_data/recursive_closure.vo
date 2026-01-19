@@ -2,6 +2,8 @@
 // Go spec: closure can reference itself if the variable is declared first
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic recursive closure - factorial
     var factorial func(int) int
@@ -86,5 +88,5 @@ func main() {
     assert(c2() == 1, "c2() first (independent)")
     assert(c1() == 3, "c1() third")
     
-    println("recursive_closure: ok")
+    fmt.Println("recursive_closure: ok")
 }

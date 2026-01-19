@@ -2,6 +2,8 @@
 // Getting a method value from an interface should work correctly
 package main
 
+
+import "fmt"
 type Adder interface {
     Add(int) int
 }
@@ -52,7 +54,7 @@ func main() {
     assert(result4 == 20, "method value as argument: expected 20, got ", result4)
     assert(c3.value == 20, "counter should be 20")
     
-    println("interface_method_value: ok")
+    fmt.Println("interface_method_value: ok")
 }
 
 func applyTwice(fn func(int) int, n int) int {

@@ -2,6 +2,8 @@
 // The multi-return values should be evaluated at defer statement time, not at defer execution time
 package main
 
+
+import "fmt"
 var order []string
 
 func getTwo() (int, string) {
@@ -33,5 +35,5 @@ func main() {
     assert(order[1] == "after defer statement", "body continues after defer")
     assert(order[2] == "appendNum: hello", "defer executes last")
     
-    println("defer_multi_return_arg: PASSED")
+    fmt.Println("defer_multi_return_arg: PASSED")
 }

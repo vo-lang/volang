@@ -2,6 +2,8 @@
 // Test: interface satisfaction via embedded fields
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -42,6 +44,6 @@ func main() {
 	assert(p.String() == "Widget", "p.String() should be Widget")
 	assert(c.String() == "Electronics", "c.String() should be Electronics")
 	
-	println("interface via embedding tests passed")
+	fmt.Println("interface via embedding tests passed")
 }
 

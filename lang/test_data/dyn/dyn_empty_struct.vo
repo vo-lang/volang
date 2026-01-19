@@ -2,6 +2,8 @@
 // Verifies edge cases for zero-size types.
 package main
 
+
+import "fmt"
 type Empty struct{}
 
 func (e Empty) Method() string {
@@ -30,7 +32,7 @@ func main() {
     result, err := obj~>Method()
     assert(err == nil, "Method should succeed")
     assert(result.(string) == "empty", "Method should return 'empty'")
-    println("Test 1: Method() =", result.(string))
+    fmt.Println("Test 1: Method() =", result.(string))
     
     // Test 2: Empty struct pointer - method call
     ep := &Empty{}
@@ -39,13 +41,13 @@ func main() {
     result, err = ptrObj~>PtrMethod()
     assert(err == nil, "PtrMethod should succeed")
     assert(result.(string) == "empty-ptr", "PtrMethod should return 'empty-ptr'")
-    println("Test 2: PtrMethod() =", result.(string))
+    fmt.Println("Test 2: PtrMethod() =", result.(string))
     
     // Test 3: Empty struct pointer - value method call
     result, err = ptrObj~>Method()
     assert(err == nil, "Method on ptr should succeed")
     assert(result.(string) == "empty", "Method on ptr should return 'empty'")
-    println("Test 3: ptr->Method() =", result.(string))
+    fmt.Println("Test 3: ptr->Method() =", result.(string))
     
     // Test 4: Struct with empty field - access empty field
     w := &WithEmpty{e: Empty{}, name: "test"}
@@ -57,13 +59,13 @@ func main() {
     eResult, err := eField~>Method()
     assert(err == nil, "Method on empty field should succeed")
     assert(eResult.(string) == "empty", "Method should return 'empty'")
-    println("Test 4: w.e.Method() =", eResult.(string))
+    fmt.Println("Test 4: w.e.Method() =", eResult.(string))
     
     // Test 5: Struct with empty field - access other field
     nameField, err := wObj~>name
     assert(err == nil, "name field should succeed")
     assert(nameField.(string) == "test", "name should be 'test'")
-    println("Test 5: w.name =", nameField.(string))
+    fmt.Println("Test 5: w.name =", nameField.(string))
     
     // Test 6: Nested empty struct - promoted method
     ne := &NestedEmpty{Empty: Empty{}, count: 10}
@@ -72,13 +74,13 @@ func main() {
     neResult, err := neObj~>Method()
     assert(err == nil, "promoted Method should succeed")
     assert(neResult.(string) == "empty", "promoted Method should return 'empty'")
-    println("Test 6: nested.Method() =", neResult.(string))
+    fmt.Println("Test 6: nested.Method() =", neResult.(string))
     
     // Test 7: Nested empty struct - own field
     countField, err := neObj~>count
     assert(err == nil, "count field should succeed")
     assert(countField.(int) == 10, "count should be 10")
-    println("Test 7: nested.count =", countField.(int))
+    fmt.Println("Test 7: nested.count =", countField.(int))
     
     // Test 8: Empty struct in slice
     empties := []Empty{{}, {}, {}}
@@ -89,7 +91,7 @@ func main() {
     elemResult, err := elem~>Method()
     assert(err == nil, "Method on slice elem should succeed")
     assert(elemResult.(string) == "empty", "Method should return 'empty'")
-    println("Test 8: empties[1].Method() =", elemResult.(string))
+    fmt.Println("Test 8: empties[1].Method() =", elemResult.(string))
     
     // Test 9: Empty struct in map
     emptyMap := map[string]Empty{"a": {}, "b": {}}
@@ -100,12 +102,12 @@ func main() {
     aResult, err := aVal~>Method()
     assert(err == nil, "Method on map val should succeed")
     assert(aResult.(string) == "empty", "Method should return 'empty'")
-    println("Test 9: map[a].Method() =", aResult.(string))
+    fmt.Println("Test 9: map[a].Method() =", aResult.(string))
     
     // Test 10: Error case - accessing non-existent field on empty struct
     _, err = obj~>nonexistent
     assert(err != nil, "nonexistent field should error")
-    println("Test 10: Empty{}.nonexistent error (expected)")
+    fmt.Println("Test 10: Empty{}.nonexistent error (expected)")
     
-    println("dyn_empty_struct: ok")
+    fmt.Println("dyn_empty_struct: ok")
 }

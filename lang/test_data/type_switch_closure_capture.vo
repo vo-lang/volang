@@ -1,6 +1,8 @@
 // Test: type switch with closure capturing the switched variable
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic closure capturing type switch variable
     result1 := captureInTypeSwitch(42)
@@ -28,7 +30,7 @@ func main() {
     assert(results[1]() == 5, "second closure should return string len")
     assert(results[2]() == 1, "third closure should return 1 for bool")
     
-    println("type_switch_closure_capture: ALL PASSED")
+    fmt.Println("type_switch_closure_capture: ALL PASSED")
 }
 
 func captureInTypeSwitch(v any) func() int {

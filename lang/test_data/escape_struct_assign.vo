@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -30,8 +32,8 @@ func main() {
     escaped.y = 67890
     
     // 如果 codegen 正确，nonEscaped 应该还是 77777, 88888
-    println("nonEscaped.x =", nonEscaped.x)
-    println("nonEscaped.y =", nonEscaped.y)
+    fmt.Println("nonEscaped.x =", nonEscaped.x)
+    fmt.Println("nonEscaped.y =", nonEscaped.y)
     assert(nonEscaped.x == 77777, "nonEscaped.x should be 77777")
     assert(nonEscaped.y == 88888, "nonEscaped.y should be 88888")
     
@@ -59,5 +61,5 @@ func main() {
     // 验证 ptr 仍然指向 escaped
     assert(ptr.x == 50, "ptr should point to escaped")
     
-    println("escape_struct_assign: ALL PASSED")
+    fmt.Println("escape_struct_assign: ALL PASSED")
 }

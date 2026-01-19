@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 type Builder struct {
 	value int
 	name  string
@@ -110,5 +112,5 @@ func main() {
 	testSliceElement()
 	testFieldAddressable()
 	testPtrField()
-	println("PASS: method_chain_receiver")
+	fmt.Println("PASS: method_chain_receiver")
 }

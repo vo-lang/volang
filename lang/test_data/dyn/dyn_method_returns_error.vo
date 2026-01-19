@@ -2,7 +2,10 @@
 // Tests interaction between method's error return and dynamic call's error.
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 type Parser struct {
     data   string
@@ -105,7 +108,7 @@ func main() {
     assert(dynErr == nil, "dyn call should succeed")
     assert(r1.(int) == 123, "parsed int should be 123")
     assert(r2 == nil, "method error should be nil")
-    println("Test 1: ParseInt =", r1.(int), "method_err =", r2)
+    fmt.Println("Test 1: ParseInt =", r1.(int), "method_err =", r2)
     
     // Test 2: Dynamic call on method returning (value, error) - method fails
     p2 := NewParser("abc")
@@ -114,7 +117,7 @@ func main() {
     r1, r2, dynErr = obj~>ParseInt()
     assert(dynErr == nil, "dyn call itself should succeed")
     assert(r2 != nil, "method should return error")
-    println("Test 2: method returned error:", r2.(error))
+    fmt.Println("Test 2: method returned error:", r2.(error))
     
     // Test 3: Dynamic call on method returning only error
     p3 := NewParser("  \t  hello")
@@ -124,7 +127,7 @@ func main() {
     assert(dynErr == nil, "dyn call should succeed")
     assert(errResult == nil, "SkipWhitespace should succeed")
     assert(p3.cursor == 5, "cursor should be at 5")
-    println("Test 3: SkipWhitespace succeeded, cursor =", p3.cursor)
+    fmt.Println("Test 3: SkipWhitespace succeeded, cursor =", p3.cursor)
     
     // Test 4: Dynamic call on method returning multi-value + error - success
     p4 := NewParser("(10, 20)")
@@ -134,7 +137,7 @@ func main() {
     assert(dynErr == nil, "dyn call should succeed")
     assert(methodErr == nil, "ParsePair should succeed")
     assert(a.(int) == 10 && b.(int) == 20, "pair should be (10, 20)")
-    println("Test 4: ParsePair = (", a.(int), ",", b.(int), ")")
+    fmt.Println("Test 4: ParsePair = (", a.(int), ",", b.(int), ")")
     
     // Test 5: Dynamic call on method returning multi-value + error - method fails
     p5 := NewParser("(10 20)")  // Missing comma
@@ -143,7 +146,7 @@ func main() {
     a, b, methodErr, dynErr = obj~>ParsePair()
     assert(dynErr == nil, "dyn call should succeed")
     assert(methodErr != nil, "ParsePair should fail")
-    println("Test 5: ParsePair error:", methodErr.(error))
+    fmt.Println("Test 5: ParsePair error:", methodErr.(error))
     
     // Test 6: Chain dynamic calls with error handling
     p6 := NewParser("42")
@@ -153,7 +156,7 @@ func main() {
     result := obj~>ParseInt()?
     val := result.(int)
     // Note: can't use ? on method error directly as it's wrapped in any
-    println("Test 6: chained result =", val)
+    fmt.Println("Test 6: chained result =", val)
     
-    println("dyn_method_returns_error: ok")
+    fmt.Println("dyn_method_returns_error: ok")
 }

@@ -1,6 +1,8 @@
 // Test: shift operations - signed vs unsigned
 package main
 
+
+import "fmt"
 func main() {
 	// Signed shift (arithmetic) - preserves sign bit
 	var si int = -8
@@ -24,5 +26,5 @@ func main() {
 	ui >>= 6
 	assert(ui == 2, "unsigned >>=")
 	
-	println("shift ops tests passed")
+	fmt.Println("shift ops tests passed")
 }

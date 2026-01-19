@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Channel assignability rules
 // Go spec: A bidirectional channel can be assigned to a directional channel
 // of the same element type
@@ -234,5 +236,5 @@ func main() {
     testProducerConsumer()
     testSelectWithDirectionalChannels()
     
-    println("assignable_channel: ALL PASSED")
+    fmt.Println("assignable_channel: ALL PASSED")
 }

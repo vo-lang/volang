@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: Interface method set rules
 // Go rule: Value type T only has value receiver methods
 // Pointer type *T has both value and pointer receiver methods
@@ -25,5 +27,5 @@ func main() {
     pp.Move(5, 10)
     assert(pp.x == 15, "pp.x should be 15")
     
-    println("interface_method_set: ALL PASSED")
+    fmt.Println("interface_method_set: ALL PASSED")
 }

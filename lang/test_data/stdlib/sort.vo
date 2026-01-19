@@ -1,9 +1,12 @@
 package main
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 func main() {
-    println("Starting sort tests...")
+    fmt.Println("Starting sort tests...")
     
     // Test sorting integers
     ints := []int{5, 2, 8, 1, 9, 3}
@@ -34,5 +37,5 @@ func main() {
     sort.Ints(single)
     assert(sort.IntsAreSorted(single), "single element should be sorted")
     
-    println("All sort tests passed!")
+    fmt.Println("All sort tests passed!")
 }

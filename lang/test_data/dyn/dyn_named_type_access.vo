@@ -2,6 +2,8 @@
 // Verifies that ~> works correctly on named types like type MySlice []int.
 package main
 
+
+import "fmt"
 type IntSlice []int
 type StringMap map[string]int
 type IntArray [5]int
@@ -41,23 +43,23 @@ func main() {
     v1, err := obj~>[0]
     assert(err == nil, "index 0 should succeed")
     assert(v1.(int) == 10, "s[0] should be 10")
-    println("Test 1: s[0] =", v1.(int))
+    fmt.Println("Test 1: s[0] =", v1.(int))
     
     v2, err := obj~>[4]
     assert(err == nil, "index 4 should succeed")
     assert(v2.(int) == 50, "s[4] should be 50")
-    println("Test 2: s[4] =", v2.(int))
+    fmt.Println("Test 2: s[4] =", v2.(int))
     
     // Test 3: Named slice type - method call
     sum, err := obj~>Sum()
     assert(err == nil, "Sum should succeed")
     assert(sum.(int) == 150, "Sum should be 150")
-    println("Test 3: Sum() =", sum.(int))
+    fmt.Println("Test 3: Sum() =", sum.(int))
     
     first, err := obj~>First()
     assert(err == nil, "First should succeed")
     assert(first.(int) == 10, "First should be 10")
-    println("Test 4: First() =", first.(int))
+    fmt.Println("Test 4: First() =", first.(int))
     
     // Test 5: Named map type - index access
     m := StringMap{"a": 1, "b": 2, "c": 3}
@@ -66,13 +68,13 @@ func main() {
     va, err := mapObj~>["a"]
     assert(err == nil, "map[a] should succeed")
     assert(va.(int) == 1, "map[a] should be 1")
-    println("Test 5: m[a] =", va.(int))
+    fmt.Println("Test 5: m[a] =", va.(int))
     
     // Test 6: Named map type - method call
     got, err := mapObj~>Get("b")
     assert(err == nil, "Get should succeed")
     assert(got.(int) == 2, "Get(b) should be 2")
-    println("Test 6: Get(b) =", got.(int))
+    fmt.Println("Test 6: Get(b) =", got.(int))
     
     // Test 7: Named array type - index access
     arr := IntArray{100, 200, 300, 400, 500}
@@ -81,25 +83,25 @@ func main() {
     arrV, err := arrObj~>[2]
     assert(err == nil, "arr[2] should succeed")
     assert(arrV.(int) == 300, "arr[2] should be 300")
-    println("Test 7: arr[2] =", arrV.(int))
+    fmt.Println("Test 7: arr[2] =", arrV.(int))
     
     // Test 8: Named slice - out of bounds
     _, err = obj~>[10]
     assert(err != nil, "index 10 should error")
-    println("Test 8: s[10] error (expected)")
+    fmt.Println("Test 8: s[10] error (expected)")
     
     // Test 9: Named map - missing key returns zero
     missing, err := mapObj~>["missing"]
     assert(err == nil, "missing key should not error")
     assert(missing.(int) == 0, "missing key should return zero")
-    println("Test 9: m[missing] =", missing.(int))
+    fmt.Println("Test 9: m[missing] =", missing.(int))
     
     // Test 10: Named slice - modify via slice (slices are reference types)
     sp := IntSlice{1, 2, 3}
     var spObj any = sp
     spObj~>[1] = 99
     assert(sp[1] == 99, "sp[1] should be 99")
-    println("Test 10: sp[1] =", sp[1])
+    fmt.Println("Test 10: sp[1] =", sp[1])
     
-    println("dyn_named_type_access: ok")
+    fmt.Println("dyn_named_type_access: ok")
 }

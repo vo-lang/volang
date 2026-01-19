@@ -1,6 +1,8 @@
 // Test dynamic access returning big struct (slots > 2)
 // Bug #3: codegen panics when LHS expects a struct with more than 2 slots
 
+import "fmt"
+
 type BigStruct struct {
     A int
     B int
@@ -26,7 +28,7 @@ func main() {
     assert(err == nil, "unexpected error")
     assert(data.A == 1 && data.B == 2 && data.C == 3 && data.D == 4, "data mismatch")
     
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

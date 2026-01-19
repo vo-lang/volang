@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -58,5 +60,5 @@ func main() {
 	assert(m["first"].String() == "Eve")
 	assert(m["second"].String() == "BigCorp")
 
-	println("gc_interface_dynamic: PASSED")
+	fmt.Println("gc_interface_dynamic: PASSED")
 }

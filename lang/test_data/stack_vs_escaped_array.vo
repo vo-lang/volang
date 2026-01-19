@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     // ========== Test 1: 栈上数组 for-range ==========
     var stackArr [5]int
@@ -14,7 +16,7 @@ func main() {
         sumStack = sumStack + v
     }
     assert(sumStack == 150)
-    println("Test 1 - Stack array for-range sum:", sumStack)
+    fmt.Println("Test 1 - Stack array for-range sum:", sumStack)
 
     // ========== Test 2: 栈上数组字面量 ==========
     stackLit := [4]int{1, 2, 3, 4}
@@ -23,7 +25,7 @@ func main() {
         sumLit = sumLit + v
     }
     assert(sumLit == 10)
-    println("Test 2 - Stack literal for-range sum:", sumLit)
+    fmt.Println("Test 2 - Stack literal for-range sum:", sumLit)
 
     // ========== Test 3: 修改不影响迭代（值语义）==========
     var stackArr3 [3]int
@@ -37,9 +39,9 @@ func main() {
         sumMod = sumMod + v
     }
     assert(sumMod == 6)
-    println("Test 3 - Value semantics (modified during iter):", sumMod)
+    fmt.Println("Test 3 - Value semantics (modified during iter):", sumMod)
 
-    println("All stack array tests passed!")
+    fmt.Println("All stack array tests passed!")
 
     // ========== Test 4: 逃逸数组（通过 slice）==========
     var escapedArr [3]int
@@ -52,14 +54,14 @@ func main() {
     assert(s[0] == 100)
     assert(s[1] == 200)
     assert(s[2] == 300)
-    println("Test 4 - Escaped array slice: passed")
+    fmt.Println("Test 4 - Escaped array slice: passed")
 
     // ========== Test 5: blank identifier ==========
     var arr5 [2]int
     arr5[0] = 1
     arr5[1] = 2
     _ = arr5[:]
-    println("Test 5 - Blank identifier assignment: passed")
+    fmt.Println("Test 5 - Blank identifier assignment: passed")
 
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

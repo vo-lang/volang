@@ -4,10 +4,12 @@
 // (defer does execute, but doesn't affect the already-evaluated return value)
 package main
 
+
+import "fmt"
 func main() {
     result := testBreakLabel()
     assert(result == "outer", "return value should be evaluated before defer runs")
-    println("bug_defer_break_label: PASSED")
+    fmt.Println("bug_defer_break_label: PASSED")
 }
 
 func testBreakLabel() string {

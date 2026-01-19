@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // Test: private (lowercase) type assigned to interface
 
 type Writer interface {
@@ -20,5 +22,5 @@ func main() {
 	n, err := Discard.Write([]byte("hello"))
 	assert(n == 5, "should write 5 bytes")
 	assert(err == nil, "should not have error")
-	println("private_type_itab: PASSED")
+	fmt.Println("private_type_itab: PASSED")
 }

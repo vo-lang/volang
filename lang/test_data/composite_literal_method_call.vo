@@ -1,6 +1,8 @@
 // Test: composite literal used directly for method calls
 package main
 
+
+import "fmt"
 type Point struct {
     x, y int
 }
@@ -67,7 +69,7 @@ func main() {
     zeroSum := Point{}.Sum()
     assert(zeroSum == 0, "zero Point sum should be 0")
     
-    println("composite_literal_method_call: ALL PASSED")
+    fmt.Println("composite_literal_method_call: ALL PASSED")
 }
 
 func processPoint(p Point) int {

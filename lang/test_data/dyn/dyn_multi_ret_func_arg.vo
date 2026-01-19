@@ -2,6 +2,8 @@
 // Call a function with results from dynamic call.
 package main
 
+
+import "fmt"
 type Pair struct {
     first  int
     second int
@@ -146,6 +148,6 @@ func main() error {
     // (3+10) + (4+20) = 13 + 24 = 37
     assert(combined == 37, "combined should be 37, got ", combined)
     
-    println("dyn_multi_ret_func_arg: ok")
+    fmt.Println("dyn_multi_ret_func_arg: ok")
     return nil
 }

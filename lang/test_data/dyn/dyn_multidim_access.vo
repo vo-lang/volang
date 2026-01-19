@@ -2,7 +2,10 @@
 // [][]int, [3][3]int, map[string][]int etc.
 package main
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 import "dyn"
 
 func main() {
@@ -80,5 +83,5 @@ func main() {
     by := bMap~>["y"]?
     assert(by.(int) == 4, "nested['b']['y'] should be 4")
     
-    println("dyn_multidim_access: ok")
+    fmt.Println("dyn_multidim_access: ok")
 }

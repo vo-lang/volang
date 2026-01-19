@@ -2,6 +2,8 @@
 // Traverse a tree using dynamic field access.
 package main
 
+
+import "fmt"
 type TreeNode struct {
     value int
     left  *TreeNode
@@ -125,6 +127,6 @@ func main() error {
     llVal := leftLeftNode~>value?
     assert(llVal.(int) == 20, "left-left should be 20")
     
-    println("recursive_tree_traverse: ok")
+    fmt.Println("recursive_tree_traverse: ok")
     return nil
 }

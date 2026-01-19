@@ -2,6 +2,8 @@
 // Coverage: ==, != for arrays and structs with various element/field types
 package main
 
+
+import "fmt"
 func main() {
     testArrayInt()
     testArrayString()
@@ -17,7 +19,7 @@ func main() {
     testStructWithInterface()
     testStructEmpty()
     
-    println("composite_comparison: ok")
+    fmt.Println("composite_comparison: ok")
 }
 
 // ============ Array Tests ============

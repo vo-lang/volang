@@ -2,6 +2,8 @@
 // Coverage: calling method on interface holding typed nil
 package main
 
+
+import "fmt"
 type Counter struct {
     count int
 }
@@ -57,5 +59,5 @@ func main() {
     }()
     assert(recovered2, "Get() on nil receiver should panic")
     
-    println("interface_method_nil_recv: ok")
+    fmt.Println("interface_method_nil_recv: ok")
 }

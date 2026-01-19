@@ -1,7 +1,10 @@
 // Test dynamic access on map with interface values
 // Bug #2: dyn_get_index returns interface value with wrong itab for any
 
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 func main() {
     // Create a map with error values
@@ -37,7 +40,7 @@ func main() {
     assert(e != nil, "error is nil")
     assert(e.Error() == "err_a", "error message mismatch")
     
-    println("PASS")
+    fmt.Println("PASS")
 }
 
 // Expected output:

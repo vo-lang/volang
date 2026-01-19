@@ -1,6 +1,8 @@
 // Test rune literal escape sequences
 package main
 
+
+import "fmt"
 func main() {
     // Simple rune literals
     assert('a' == 97, "rune 'a' should be 97")
@@ -44,6 +46,6 @@ func main() {
     r = 'Z' - 'A'
     assert(r == 25, "rune arithmetic: 'Z' - 'A' should be 25")
 
-    println("rune_literal: ALL TESTS PASSED")
+    fmt.Println("rune_literal: ALL TESTS PASSED")
 }
 

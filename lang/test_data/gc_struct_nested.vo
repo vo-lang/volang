@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 type Node struct {
 	Value int
 	Left  *Node
@@ -72,5 +74,5 @@ func main() {
 	assert(alice.Friends[0].Name == "Bob")
 	assert(charlie.Friends[1].Data["role"] == "user")
 
-	println("gc_struct_nested: PASSED")
+	fmt.Println("gc_struct_nested: PASSED")
 }

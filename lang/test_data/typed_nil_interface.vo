@@ -2,6 +2,8 @@
 // A nil pointer assigned to interface is NOT a nil interface
 package main
 
+
+import "fmt"
 type MyError struct{}
 
 func (e *MyError) Error() string { return "err" }
@@ -21,5 +23,5 @@ func main() {
     if foo() == nil {
         panic("WRONG: typed nil should NOT equal nil interface")
     }
-    println("typed_nil_interface: PASSED")
+    fmt.Println("typed_nil_interface: PASSED")
 }

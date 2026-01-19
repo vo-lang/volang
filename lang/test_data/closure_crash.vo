@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func fibonacci(n int) int {
 	if n <= 1 {
 		return n
@@ -36,6 +38,6 @@ func main() {
 				panic("wrong result")
 			}
 		}
-		println(processed[i])
+		fmt.Println(processed[i])
 	}
 }

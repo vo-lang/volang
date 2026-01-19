@@ -2,6 +2,8 @@
 // Get func field dynamically and call it
 package main
 
+
+import "fmt"
 type Handler struct {
     name    string
     process func(int) int
@@ -66,5 +68,5 @@ func main() {
     assert(proc3(5) == 15, "second call should return 15")
     assert(counter == 15, "counter should be 15")
     
-    println("dyn_func_field_call: ok")
+    fmt.Println("dyn_func_field_call: ok")
 }

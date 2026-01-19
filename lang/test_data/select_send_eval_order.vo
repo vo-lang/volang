@@ -2,6 +2,8 @@
 // Coverage: select case send expressions are evaluated before select
 package main
 
+
+import "fmt"
 var evalOrder []string
 
 func reset() {
@@ -118,22 +120,22 @@ func testSendSideEffect() int {
 }
 
 func main() {
-    println("Test 1: send case eval order")
+    fmt.Println("Test 1: send case eval order")
     testSendEvalOrder()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: multiple send cases eval")
+    fmt.Println("Test 2: multiple send cases eval")
     testMultipleSendEval()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: mixed case eval")
+    fmt.Println("Test 3: mixed case eval")
     testMixedCaseEval()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: send side effect")
+    fmt.Println("Test 4: send side effect")
     r4 := testSendSideEffect()
     assert(r4 == 1, "counter should be 1, got", r4)
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("select_send_eval_order: ALL PASSED")
+    fmt.Println("select_send_eval_order: ALL PASSED")
 }

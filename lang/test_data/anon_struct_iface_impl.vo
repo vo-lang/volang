@@ -2,6 +2,8 @@
 // Tests that anonymous struct literals can be used with interfaces
 package main
 
+
+import "fmt"
 type Stringer interface {
     String() string
 }
@@ -141,42 +143,42 @@ func testFuncParamAnonStruct() {
 }
 
 func main() int {
-    println("Test 1: Named struct implements interface")
+    fmt.Println("Test 1: Named struct implements interface")
     testNamedStruct()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 2: Anonymous struct in any")
+    fmt.Println("Test 2: Anonymous struct in any")
     testAnonStructInAny()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 3: Anonymous struct slice")
+    fmt.Println("Test 3: Anonymous struct slice")
     testAnonStructSlice()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 4: Anonymous struct map value")
+    fmt.Println("Test 4: Anonymous struct map value")
     testAnonStructMapValue()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 5: Nested anonymous structs")
+    fmt.Println("Test 5: Nested anonymous structs")
     testNestedAnonStruct()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 6: Empty anonymous struct")
+    fmt.Println("Test 6: Empty anonymous struct")
     testEmptyAnonStruct()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 7: Anonymous struct comparison")
+    fmt.Println("Test 7: Anonymous struct comparison")
     testAnonStructCompare()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 8: Function returning anonymous struct")
+    fmt.Println("Test 8: Function returning anonymous struct")
     testFuncReturnAnonStruct()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("Test 9: Anonymous struct as function parameter")
+    fmt.Println("Test 9: Anonymous struct as function parameter")
     testFuncParamAnonStruct()
-    println("PASSED")
+    fmt.Println("PASSED")
     
-    println("anon_struct_iface_impl: ALL PASSED")
+    fmt.Println("anon_struct_iface_impl: ALL PASSED")
     return 0
 }

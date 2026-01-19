@@ -1,6 +1,9 @@
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 import "errors"
 
 type Person struct {
@@ -220,5 +223,5 @@ func main() {
     testSetIndex()
     testSetIndexErrors()
     
-    println("All dyn API tests passed!")
+    fmt.Println("All dyn API tests passed!")
 }

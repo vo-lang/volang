@@ -2,6 +2,8 @@
 // Go spec: iota is 0 at start of const block, increments by 1 per ConstSpec
 package main
 
+
+import "fmt"
 // Basic iota
 const (
     A0 = iota  // 0
@@ -135,5 +137,5 @@ func main() {
     assert(C2 == 9, "C2")
     assert(C3 == 16, "C3")
     
-    println("iota_complex: ok")
+    fmt.Println("iota_complex: ok")
 }

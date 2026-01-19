@@ -2,6 +2,8 @@
 // Coverage: embedded *T promoting both value and pointer receiver methods
 package main
 
+
+import "fmt"
 type Inner struct {
     value int
 }
@@ -97,5 +99,5 @@ func main() {
     assert(deep.Get() == 2000, "deep embedded Set")
     assert(deepInner.value == 2000, "deep mutation affects original")
     
-    println("embed_ptr_method_promote: ok")
+    fmt.Println("embed_ptr_method_promote: ok")
 }

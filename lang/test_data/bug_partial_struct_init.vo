@@ -3,6 +3,8 @@
 
 package main
 
+
+import "fmt"
 type Inner struct {
     x int
 }
@@ -18,5 +20,5 @@ func main() {
     }
     assert(o.inner.x == 0, "uninitialized should be zero")
     assert(o.arr[0] == 1, "arr[0] should be 1")
-    println("ok")
+    fmt.Println("ok")
 }

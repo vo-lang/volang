@@ -2,6 +2,8 @@
 // This tests that closures capture the correct value
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Explicit copy pattern (always works)
     funcs := make([]func() int, 3)
@@ -81,5 +83,5 @@ func main() {
     assert(add5(3) == 8, "add5(3) should be 8")
     assert(add10(3) == 13, "add10(3) should be 13")
     
-    println("closure_loop_capture: ok")
+    fmt.Println("closure_loop_capture: ok")
 }

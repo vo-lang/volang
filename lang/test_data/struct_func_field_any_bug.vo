@@ -7,6 +7,8 @@
 
 package main
 
+
+import "fmt"
 type MyState struct {
 	count int
 }
@@ -43,5 +45,5 @@ func main() {
 		Init:   myInit,
 		Render: myRender,
 	})
-	println("struct_func_field_any_bug: PASSED")
+	fmt.Println("struct_func_field_any_bug: PASSED")
 }

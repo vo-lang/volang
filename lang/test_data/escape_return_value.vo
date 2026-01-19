@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 type Point struct {
     x int
     y int
@@ -22,7 +24,7 @@ func main() {
     assert(p1.Sum() == 30)
     assert(p1.x == 10)  // Sum 不修改原值
     assert(p1.y == 20)
-    println("p1.Sum():", p1.Sum())
+    fmt.Println("p1.Sum():", p1.Sum())
 
     // Test 2: 逃逸的 struct - 调用指针接收者方法
     p2 := Point{x: 100, y: 200}
@@ -30,11 +32,11 @@ func main() {
     assert(p2.x == 200)  // 100 * 2
     assert(p2.y == 400)  // 200 * 2
     assert(p2.Sum() == 600)
-    println("p2 after Double:", p2.Sum())
+    fmt.Println("p2 after Double:", p2.Sum())
 
     // Test 3: 值语义 - p1 和 p2 独立
     assert(p1.x == 10)  // p1 未被 p2.Double 影响
     assert(p1.y == 20)
 
-    println("All tests passed!")
+    fmt.Println("All tests passed!")
 }

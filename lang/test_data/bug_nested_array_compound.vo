@@ -1,6 +1,8 @@
 // Bug reproduction: nested array compound assignment
 package main
 
+
+import "fmt"
 var evalCount int
 
 func getIndex() int {
@@ -27,5 +29,5 @@ func main() {
     nested[1][1] += 5
     assert(nested[1][1] == 9, "nested[1][1] should be 9 after += 5")
     
-    println("ok")
+    fmt.Println("ok")
 }

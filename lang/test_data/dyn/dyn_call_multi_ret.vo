@@ -1,6 +1,8 @@
 // Test dyn_call signature mismatch scenarios
 package main
 
+
+import "fmt"
 type Point struct {
 	X, Y int
 }
@@ -129,147 +131,147 @@ func main() {
 	// ============================================================
 	// 1. RETURN VALUE COUNT MISMATCH (runtime check)
 	// ============================================================
-	println("=== Testing return count mismatch ===")
+	fmt.Println("=== Testing return count mismatch ===")
 
 	// Expect 1 return, method returns 0
 	_, err := obj~>NoRet()
 	assert(err != nil, "NoRet() with 1 lhs should error")
-	println("NoRet() -> 1 lhs: error (expected)")
+	fmt.Println("NoRet() -> 1 lhs: error (expected)")
 
 	// Expect 1 return, method returns 2
 	_, err = obj~>TwoRet()
 	assert(err != nil, "TwoRet() with 1 lhs should error")
-	println("TwoRet() -> 1 lhs: error (expected)")
+	fmt.Println("TwoRet() -> 1 lhs: error (expected)")
 
 	// Expect 2 returns, method returns 1
 	_, _, err = obj~>OneRet()
 	assert(err != nil, "OneRet() with 2 lhs should error")
-	println("OneRet() -> 2 lhs: error (expected)")
+	fmt.Println("OneRet() -> 2 lhs: error (expected)")
 
 	// Expect 2 returns, method returns 3
 	_, _, err = obj~>ThreeRet()
 	assert(err != nil, "ThreeRet() with 2 lhs should error")
-	println("ThreeRet() -> 2 lhs: error (expected)")
+	fmt.Println("ThreeRet() -> 2 lhs: error (expected)")
 
 	// Expect 3 returns, method returns 2
 	_, _, _, err = obj~>TwoRet()
 	assert(err != nil, "TwoRet() with 3 lhs should error")
-	println("TwoRet() -> 3 lhs: error (expected)")
+	fmt.Println("TwoRet() -> 3 lhs: error (expected)")
 
 	// ============================================================
 	// 2. PARAMETER COUNT MISMATCH (runtime check)
 	// ============================================================
-	println("=== Testing parameter count mismatch ===")
+	fmt.Println("=== Testing parameter count mismatch ===")
 
 	// Method needs 0 args, pass 1
 	_, err = obj~>NoArg(1)
 	assert(err != nil, "NoArg(1) should error")
-	println("NoArg(1): error (expected)")
+	fmt.Println("NoArg(1): error (expected)")
 
 	// Method needs 1 arg, pass 0
 	_, err = obj~>OneArg()
 	assert(err != nil, "OneArg() should error")
-	println("OneArg(): error (expected)")
+	fmt.Println("OneArg(): error (expected)")
 
 	// Method needs 1 arg, pass 2
 	_, err = obj~>OneArg(1, 2)
 	assert(err != nil, "OneArg(1,2) should error")
-	println("OneArg(1,2): error (expected)")
+	fmt.Println("OneArg(1,2): error (expected)")
 
 	// Method needs 2 args, pass 1
 	_, err = obj~>TwoArg(1)
 	assert(err != nil, "TwoArg(1) should error")
-	println("TwoArg(1): error (expected)")
+	fmt.Println("TwoArg(1): error (expected)")
 
 	// Method needs 2 args, pass 3
 	_, err = obj~>TwoArg(1, 2, 3)
 	assert(err != nil, "TwoArg(1,2,3) should error")
-	println("TwoArg(1,2,3): error (expected)")
+	fmt.Println("TwoArg(1,2,3): error (expected)")
 
 	// Method needs 3 args, pass 2
 	_, err = obj~>ThreeArg(1, "s")
 	assert(err != nil, "ThreeArg(1,s) should error")
-	println("ThreeArg(1,s): error (expected)")
+	fmt.Println("ThreeArg(1,s): error (expected)")
 
 	// ============================================================
 	// 3. PARAMETER TYPE MISMATCH (runtime check)
 	// ============================================================
-	println("=== Testing parameter type mismatch ===")
+	fmt.Println("=== Testing parameter type mismatch ===")
 
 	// Expect int, pass string
 	_, err = obj~>ArgInt("wrong")
 	assert(err != nil, "ArgInt(string) should error")
-	println("ArgInt(string): error (expected)")
+	fmt.Println("ArgInt(string): error (expected)")
 
 	// Expect string, pass int
 	_, err = obj~>ArgString(123)
 	assert(err != nil, "ArgString(int) should error")
-	println("ArgString(int): error (expected)")
+	fmt.Println("ArgString(int): error (expected)")
 
 	// Expect bool, pass int
 	_, err = obj~>ArgBool(1)
 	assert(err != nil, "ArgBool(int) should error")
-	println("ArgBool(int): error (expected)")
+	fmt.Println("ArgBool(int): error (expected)")
 
 	// Expect float64, pass string
 	_, err = obj~>ArgFloat("1.5")
 	assert(err != nil, "ArgFloat(string) should error")
-	println("ArgFloat(string): error (expected)")
+	fmt.Println("ArgFloat(string): error (expected)")
 
 	// Expect []int, pass []string
 	_, err = obj~>ArgSlice([]string{"a", "b"})
 	assert(err != nil, "ArgSlice([]string) should error")
-	println("ArgSlice([]string): error (expected)")
+	fmt.Println("ArgSlice([]string): error (expected)")
 
 	// Expect map[string]int, pass map[int]string
 	_, err = obj~>ArgMap(map[int]string{1: "a"})
 	assert(err != nil, "ArgMap(map[int]string) should error")
-	println("ArgMap(map[int]string): error (expected)")
+	fmt.Println("ArgMap(map[int]string): error (expected)")
 
 	// ============================================================
 	// 4. SUCCESSFUL CALLS (sanity check)
 	// ============================================================
-	println("=== Testing successful calls ===")
+	fmt.Println("=== Testing successful calls ===")
 
 	// Correct return counts
 	r1, err := obj~>OneRet()
 	assert(err == nil, "OneRet() should succeed")
 	assert(r1.(int) == 42, "OneRet expected 42")
-	println("OneRet():", r1.(int))
+	fmt.Println("OneRet():", r1.(int))
 
 	r1, r2, err := obj~>TwoRet()
 	assert(err == nil, "TwoRet() should succeed")
-	println("TwoRet():", r1.(int), r2.(string))
+	fmt.Println("TwoRet():", r1.(int), r2.(string))
 
 	r1, r2, r3, err := obj~>ThreeRet()
 	assert(err == nil, "ThreeRet() should succeed")
-	println("ThreeRet():", r1.(int), r2.(string), r3.(bool))
+	fmt.Println("ThreeRet():", r1.(int), r2.(string), r3.(bool))
 
 	// Correct parameter types
 	result, err := obj~>ArgInt(10)
 	assert(err == nil, "ArgInt(10) should succeed")
-	println("ArgInt(10):", result.(int))
+	fmt.Println("ArgInt(10):", result.(int))
 
 	sresult, err := obj~>ArgString("hello")
 	assert(err == nil, "ArgString should succeed")
-	println("ArgString(hello):", sresult.(string))
+	fmt.Println("ArgString(hello):", sresult.(string))
 
 	sliceResult, err := obj~>ArgSlice([]int{10, 20, 30})
 	assert(err == nil, "ArgSlice should succeed")
-	println("ArgSlice([10,20,30]):", sliceResult.(int))
+	fmt.Println("ArgSlice([10,20,30]):", sliceResult.(int))
 
 	mapResult, err := obj~>ArgMap(map[string]int{"x": 1, "y": 2, "z": 3})
 	assert(err == nil, "ArgMap should succeed")
-	println("ArgMap(3 items):", mapResult.(int))
+	fmt.Println("ArgMap(3 items):", mapResult.(int))
 
 	structResult, err := obj~>ArgStruct(Point{X: 5, Y: 7})
 	assert(err == nil, "ArgStruct should succeed")
-	println("ArgStruct({5,7}):", structResult.(int))
+	fmt.Println("ArgStruct({5,7}):", structResult.(int))
 
 	// Complex successful call
 	cr1, cr2, cr3, err := obj~>Complex(100, "yes", []int{1, 2, 3}, map[string]int{"a": 1})
 	assert(err == nil, "Complex should succeed")
-	println("Complex(100,yes,[3],{1}):", cr1.(int), cr2.(string), cr3.(bool))
+	fmt.Println("Complex(100,yes,[3],{1}):", cr1.(int), cr2.(string), cr3.(bool))
 
-	println("=== All signature mismatch tests passed! ===")
+	fmt.Println("=== All signature mismatch tests passed! ===")
 }

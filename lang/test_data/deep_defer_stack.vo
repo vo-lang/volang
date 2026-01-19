@@ -1,10 +1,12 @@
 // Test: deep defer stack and LIFO execution order
 package main
 
+
+import "fmt"
 var order []int
 
 func main() {
-    println("Test 1: Basic LIFO order")
+    fmt.Println("Test 1: Basic LIFO order")
     order = []int{}
     testBasicOrder()
     assert(len(order) == 5, "should have 5 deferred calls")
@@ -14,7 +16,7 @@ func main() {
     assert(order[3] == 2, "fourth executed should be 2")
     assert(order[4] == 1, "fifth executed should be 1")
     
-    println("Test 2: Defer in loop")
+    fmt.Println("Test 2: Defer in loop")
     order = []int{}
     testDeferInLoop()
     assert(len(order) == 10, "should have 10 deferred calls")
@@ -22,14 +24,14 @@ func main() {
         assert(order[i] == 9-i, "defers should execute in reverse order")
     }
     
-    println("Test 3: Defer with captured variables (by value)")
+    fmt.Println("Test 3: Defer with captured variables (by value)")
     order = []int{}
     testDeferCapturedValue()
     assert(order[0] == 3, "first defer captured 3")
     assert(order[1] == 2, "second defer captured 2")
     assert(order[2] == 1, "third defer captured 1")
     
-    println("Test 4: Defer with panic and recover")
+    fmt.Println("Test 4: Defer with panic and recover")
     order = []int{}
     testDeferWithPanic()
     assert(len(order) == 4, "all 4 defers should execute")
@@ -38,7 +40,7 @@ func main() {
     assert(order[2] == 2, "third defer (has recover)")
     assert(order[3] == 1, "fourth defer (outermost)")
     
-    println("Test 5: Nested function defer stacks")
+    fmt.Println("Test 5: Nested function defer stacks")
     order = []int{}
     testNestedFunctionDefers()
     assert(len(order) == 6, "should have 6 deferred calls total")
@@ -49,7 +51,7 @@ func main() {
     assert(order[4] == 2, "outer defer 2")
     assert(order[5] == 1, "outer defer 1")
     
-    println("Test 6: Deep defer stack (100 defers)")
+    fmt.Println("Test 6: Deep defer stack (100 defers)")
     order = []int{}
     testDeepDeferStack()
     assert(len(order) == 100, "should have 100 deferred calls")
@@ -57,7 +59,7 @@ func main() {
         assert(order[i] == 99-i, "deep defers should be in reverse order")
     }
     
-    println("deep_defer_stack: ALL PASSED")
+    fmt.Println("deep_defer_stack: ALL PASSED")
 }
 
 func testBasicOrder() {

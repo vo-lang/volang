@@ -2,6 +2,8 @@
 // A method that dynamically calls itself
 package main
 
+
+import "fmt"
 type Counter struct {
     count int
     max   int
@@ -95,5 +97,5 @@ func main() {
     depth := treeObj~>Depth()?
     assert(depth.(int) == 3, "tree depth should be 3")
     
-    println("dyn_recursive_self_call: ok")
+    fmt.Println("dyn_recursive_self_call: ok")
 }

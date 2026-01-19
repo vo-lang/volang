@@ -1,6 +1,8 @@
 // Test: closures stored in map and called through map access
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: Basic closure in map
     handlers := make(map[string]func() int)
@@ -63,5 +65,5 @@ func main() {
     nested["level1"]["greet"] = func() string { return "hello" }
     assert(nested["level1"]["greet"]() == "hello", "nested greet should return hello")
     
-    println("closure_as_map_value: ALL PASSED")
+    fmt.Println("closure_as_map_value: ALL PASSED")
 }

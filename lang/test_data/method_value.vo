@@ -2,6 +2,8 @@
 // Go spec: t.M is a method value, a function that calls M with t as receiver
 package main
 
+
+import "fmt"
 type Counter struct {
     value int
 }
@@ -70,5 +72,5 @@ func main() {
     getFn := iface.Get
     assert(getFn() == 42, "interface method value")
     
-    println("method_value: ok")
+    fmt.Println("method_value: ok")
 }

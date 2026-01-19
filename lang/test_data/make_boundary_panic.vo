@@ -2,6 +2,8 @@
 // Tests various make() scenarios for slices, maps, and channels
 package main
 
+
+import "fmt"
 func main() {
     testMakeSliceNormal()
     testMakeSliceZeroCap()
@@ -9,7 +11,7 @@ func main() {
     testMakeMapNormal()
     testMakeChanNormal()
     testMakeSliceLargeSize()
-    println("make_boundary_panic: ok")
+    fmt.Println("make_boundary_panic: ok")
 }
 
 func testMakeSliceNormal() {

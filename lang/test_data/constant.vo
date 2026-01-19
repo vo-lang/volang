@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 func main() {
     // ========== Large Integer Constants ==========
     // Use int64 for 32-bit compatibility
@@ -80,5 +82,5 @@ func main() {
     assert(negf < 0.0, "negf should be < 0")
     assert(negf > -124.0, "negf should be > -124")
     
-    println("constant_test: ALL PASSED")
+    fmt.Println("constant_test: ALL PASSED")
 }

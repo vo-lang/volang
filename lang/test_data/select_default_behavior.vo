@@ -1,9 +1,11 @@
 // Test: Select statement default behavior
 // Coverage: select with default case when no channels are ready
 
+import "fmt"
+
 func main() {
 	// Test 1: select with default - no channels ready
-	println("Test 1 starting")
+	fmt.Println("Test 1 starting")
 	ch := make(chan int, 1)
 	selected := ""
 	select {
@@ -12,11 +14,11 @@ func main() {
 	default:
 		selected = "default"
 	}
-	println("Test 1: selected=", selected)
+	fmt.Println("Test 1: selected=", selected)
 	assert(selected == "default", "should select default when channel empty")
 
 	// Test 2: select with default - send channel full
-	println("Test 2 starting")
+	fmt.Println("Test 2 starting")
 	fullCh := make(chan int, 1)
 	fullCh <- 1 // Fill the buffer
 	selected2 := ""
@@ -26,15 +28,15 @@ func main() {
 	default:
 		selected2 = "default"
 	}
-	println("Test 2: selected2=", selected2)
+	fmt.Println("Test 2: selected2=", selected2)
 	assert(selected2 == "default", "should select default when send would block")
 	// Drain the channel
-	println("Draining fullCh")
+	fmt.Println("Draining fullCh")
 	<-fullCh
-	println("Drained")
+	fmt.Println("Drained")
 
 	// Test 3: select with default - channel has data
-	println("Test 3 starting")
+	fmt.Println("Test 3 starting")
 	dataCh := make(chan int, 1)
 	dataCh <- 42
 	val := 0
@@ -45,7 +47,7 @@ func main() {
 	default:
 		selected3 = "default"
 	}
-	println("Test 3: selected3=", selected3, " val=", val)
+	fmt.Println("Test 3: selected3=", selected3, " val=", val)
 	assert(selected3 == "recv", "should select recv when channel has data")
 	assert(val == 42, "should receive 42, got ", val)
 
@@ -133,5 +135,5 @@ polling:
 	assert(collected[0] == 1, "first should be 1")
 	assert(collected[2] == 3, "third should be 3")
 
-	println("select_default_behavior: PASSED")
+	fmt.Println("select_default_behavior: PASSED")
 }

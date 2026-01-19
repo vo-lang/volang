@@ -2,6 +2,8 @@
 // Coverage: interface A embeds B embeds C, type implements all
 package main
 
+
+import "fmt"
 type Reader interface {
     Read() int
 }
@@ -113,5 +115,5 @@ func main() {
     // Test 10: Interface with same method from different paths
     // (Tested via top-level types defined above)
     
-    println("interface_nested_embed: ok")
+    fmt.Println("interface_nested_embed: ok")
 }

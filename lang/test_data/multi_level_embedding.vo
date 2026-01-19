@@ -1,6 +1,8 @@
 // Test: Multi-level struct embedding with field access and method promotion
 // Coverage: 3+ levels of embedding, field shadowing, method promotion chain
 
+import "fmt"
+
 type Base struct {
 	id   int
 	name string
@@ -154,7 +156,7 @@ func main() {
 	assert(cx.ownField == 555, "cx.ownField should be 555")
 	assert(cx.GetExtra() == 999, "GetExtra should return 999")
 
-	println("multi_level_embedding: PASSED")
+	fmt.Println("multi_level_embedding: PASSED")
 }
 
 type IDGetter interface {

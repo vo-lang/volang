@@ -1,5 +1,7 @@
 package main
 
+
+import "fmt"
 // ============================================================================
 // Interface to Interface Assignment - Dynamic Itab Generation Test
 // ============================================================================
@@ -117,7 +119,7 @@ func test1() {
     
     result := r.Read()
     assert(result == "file:test.txt", "test1: Read failed")
-    println("Test 1 PASSED: ReadWriteCloser -> Reader")
+    fmt.Println("Test 1 PASSED: ReadWriteCloser -> Reader")
 }
 
 // ----------------------------------------------------------------------------
@@ -129,7 +131,7 @@ func test2() {
     
     w.Write("modified")
     // Note: w is a copy, so original rwc is not affected
-    println("Test 2 PASSED: ReadWriteCloser -> Writer")
+    fmt.Println("Test 2 PASSED: ReadWriteCloser -> Writer")
 }
 
 // ----------------------------------------------------------------------------
@@ -141,7 +143,7 @@ func test3() {
     
     code := c.Close()
     assert(code == 0, "test3: Close return code failed")
-    println("Test 3 PASSED: ReadWriteCloser -> Closer")
+    fmt.Println("Test 3 PASSED: ReadWriteCloser -> Closer")
 }
 
 // ----------------------------------------------------------------------------
@@ -154,7 +156,7 @@ func test4() {
     result := rw.Read()
     assert(result == "buffer:hello", "test4: Read failed")
     rw.Write("world")
-    println("Test 4 PASSED: ReadWriteCloser -> ReadWriter")
+    fmt.Println("Test 4 PASSED: ReadWriteCloser -> ReadWriter")
 }
 
 // ----------------------------------------------------------------------------
@@ -168,7 +170,7 @@ func test5() {
     assert(result == "socket:localhost", "test5: Read failed")
     code := rc.Close()
     assert(code == 2, "test5: Close code failed")
-    println("Test 5 PASSED: ReadWriteCloser -> ReadCloser")
+    fmt.Println("Test 5 PASSED: ReadWriteCloser -> ReadCloser")
 }
 
 // ----------------------------------------------------------------------------
@@ -181,7 +183,7 @@ func test6() {
     wc.Write("new content")
     code := wc.Close()
     assert(code == 0, "test6: Close code failed")
-    println("Test 6 PASSED: ReadWriteCloser -> WriteCloser")
+    fmt.Println("Test 6 PASSED: ReadWriteCloser -> WriteCloser")
 }
 
 // ----------------------------------------------------------------------------
@@ -194,7 +196,7 @@ func test7() {
     
     result := r.Read()
     assert(result == "buffer:chain", "test7: chained Read failed")
-    println("Test 7 PASSED: chained interface assignment")
+    fmt.Println("Test 7 PASSED: chained interface assignment")
 }
 
 // ----------------------------------------------------------------------------
@@ -212,7 +214,7 @@ func test8() {
     
     assert(result1 == "file:file1", "test8: r1.Read failed")
     assert(result2 == "file:file2", "test8: r2.Read failed")
-    println("Test 8 PASSED: itab cache reuse")
+    fmt.Println("Test 8 PASSED: itab cache reuse")
 }
 
 // ----------------------------------------------------------------------------
@@ -230,7 +232,7 @@ func test9() {
     assert(r1.Read() == "file:f", "test9: File.Read failed")
     assert(r2.Read() == "buffer:b", "test9: Buffer.Read failed")
     assert(r3.Read() == "socket:s", "test9: Socket.Read failed")
-    println("Test 9 PASSED: different types -> same interface")
+    fmt.Println("Test 9 PASSED: different types -> same interface")
 }
 
 // ----------------------------------------------------------------------------
@@ -244,7 +246,7 @@ func test10() {
     var rwc ReadWriteCloser = &File{name: "param"}
     result := acceptReader(rwc)  // Implicit conversion at call site
     assert(result == "file:param", "test10: param conversion failed")
-    println("Test 10 PASSED: function parameter conversion")
+    fmt.Println("Test 10 PASSED: function parameter conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -259,7 +261,7 @@ func test11() {
     r := returnReader(rwc)
     result := r.Read()
     assert(result == "buffer:return", "test11: return conversion failed")
-    println("Test 11 PASSED: function return conversion")
+    fmt.Println("Test 11 PASSED: function return conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -273,7 +275,7 @@ func test12() {
     code := cr.Close()
     assert(result == "file:order", "test12: Read failed")
     assert(code == 0, "test12: Close failed")
-    println("Test 12 PASSED: different method order")
+    fmt.Println("Test 12 PASSED: different method order")
 }
 
 // ----------------------------------------------------------------------------
@@ -287,7 +289,7 @@ func test13() {
     // Cannot directly assign e to Reader without assertion
     // This tests interface{} as intermediate storage
     
-    println("Test 13 PASSED: interface{} intermediate")
+    fmt.Println("Test 13 PASSED: interface{} intermediate")
 }
 
 // ----------------------------------------------------------------------------
@@ -304,7 +306,7 @@ func test14() {
     
     assert(readers[0].Read() == "file:slice1", "test14: slice[0] failed")
     assert(readers[1].Read() == "buffer:slice2", "test14: slice[1] failed")
-    println("Test 14 PASSED: slice append implicit conversion")
+    fmt.Println("Test 14 PASSED: slice append implicit conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -319,7 +321,7 @@ func test15() {
     // rwc -> Reader (outer) -> pass through -> Reader (return)
     r := wrapReader(rwc)
     assert(r.Read() == "file:nested", "test15: nested call failed")
-    println("Test 15 PASSED: nested function calls")
+    fmt.Println("Test 15 PASSED: nested function calls")
 }
 
 // ----------------------------------------------------------------------------
@@ -336,7 +338,7 @@ func test16() {
     r = rc   // Buffer via ReadCloser (different source iface)
     assert(r.Read() == "buffer:second", "test16: second assign failed")
     
-    println("Test 16 PASSED: reassignment different sources")
+    fmt.Println("Test 16 PASSED: reassignment different sources")
 }
 
 // ----------------------------------------------------------------------------
@@ -359,7 +361,7 @@ func test17() {
         r = rwc  // Runtime itab creation in loop
         assert(r.Read() == expected[i], "test17: loop iteration failed")
     }
-    println("Test 17 PASSED: loop with conversion")
+    fmt.Println("Test 17 PASSED: loop with conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -377,7 +379,7 @@ func test18() {
     
     assert(m["file"].Read() == "file:map1", "test18: map file failed")
     assert(m["buffer"].Read() == "buffer:map2", "test18: map buffer failed")
-    println("Test 18 PASSED: map implicit conversion")
+    fmt.Println("Test 18 PASSED: map implicit conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -393,7 +395,7 @@ func test19() {
     c := Container{reader: rwc}
     
     assert(c.reader.Read() == "socket:field", "test19: field failed")
-    println("Test 19 PASSED: struct field implicit conversion")
+    fmt.Println("Test 19 PASSED: struct field implicit conversion")
 }
 
 // ----------------------------------------------------------------------------
@@ -428,7 +430,7 @@ func test20() {
     wc.Write("wc_mod")
     assert(wc.Close() == 0, "test20: WriteCloser failed")
     
-    println("Test 20 PASSED: multiple target interfaces")
+    fmt.Println("Test 20 PASSED: multiple target interfaces")
 }
 
 // ============================================================================
@@ -455,6 +457,6 @@ func main() {
     test19()
     test20()
     
-    println("")
-    println("=== iface_to_iface_assign: ALL 20 TESTS PASSED ===")
+    fmt.Println("")
+    fmt.Println("=== iface_to_iface_assign: ALL 20 TESTS PASSED ===")
 }

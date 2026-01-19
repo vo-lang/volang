@@ -2,6 +2,8 @@
 // Iterate over slice/map obtained via ~> operator.
 package main
 
+
+import "fmt"
 type DataStore struct {
     items  []int
     lookup map[string]int
@@ -151,6 +153,6 @@ func main() error {
     }
     assert(partial == 90, "partial sum (20+30+40) should be 90, got ", partial)
     
-    println("dyn_range_iteration: ok")
+    fmt.Println("dyn_range_iteration: ok")
     return nil
 }

@@ -2,7 +2,10 @@
 // Custom types can implement DynSetAttr to provide dynamic field write access.
 package main
 
-import "dyn"
+import (
+	"fmt"
+	"dyn"
+)
 
 // ConfigStore implements DynSetAttr for dynamic configuration
 type ConfigStore struct {
@@ -52,6 +55,6 @@ func main() error {
     obj~>port = 9090
     assert(cfg.Get("port").(int) == 9090, "port should be updated to 9090")
     
-    println("custom_dyn_set_attr: ok")
+    fmt.Println("custom_dyn_set_attr: ok")
     return nil
 }

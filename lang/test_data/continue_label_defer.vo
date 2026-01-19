@@ -2,6 +2,8 @@
 // Defers should still execute properly when using labeled continue
 package main
 
+
+import "fmt"
 var order []int
 
 func reset() {
@@ -45,7 +47,7 @@ outer:
 }
 
 func main() {
-    println("Test 1: continue label with defer")
+    fmt.Println("Test 1: continue label with defer")
     reset()
     testContinueLabelDefer()
     // At each outer iteration, we do: inner j=0,1 then continue outer
@@ -53,15 +55,15 @@ func main() {
     // Plus outer defers: i=0, i=1, i=2
     // All execute at function return in LIFO order
     assert(len(order) > 0, "should have deferred calls")
-    println("Order:", order)
-    println("Test 1: PASSED")
+    fmt.Println("Order:", order)
+    fmt.Println("Test 1: PASSED")
     
-    println("Test 2: nested continue label")
+    fmt.Println("Test 2: nested continue label")
     reset()
     testNestedContinueLabel()
     assert(len(order) > 0, "should have deferred calls")
-    println("Order:", order)
-    println("Test 2: PASSED")
+    fmt.Println("Order:", order)
+    fmt.Println("Test 2: PASSED")
     
-    println("continue_label_defer: ALL PASSED")
+    fmt.Println("continue_label_defer: ALL PASSED")
 }

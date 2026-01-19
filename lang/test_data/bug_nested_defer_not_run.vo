@@ -2,6 +2,8 @@
 // When a defer function itself contains a defer, the inner defer never runs
 package main
 
+
+import "fmt"
 func nestedDefer() (val int) {
 	defer func() {
 		defer func() {
@@ -23,5 +25,5 @@ func main() {
 	
 	assert(r == 111, "nestedDefer should return 111, got ", r)
 	
-	println("bug_nested_defer_not_run: ok")
+	fmt.Println("bug_nested_defer_not_run: ok")
 }

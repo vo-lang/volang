@@ -1,6 +1,8 @@
 // Test: switch statement - comprehensive tests
 package main
 
+
+import "fmt"
 func main() {
 	// 1. Basic switch with tag
 	x := 2
@@ -91,6 +93,6 @@ func main() {
 	}
 	assert(nested == 21, "nested switch")
 	
-	println("switch tests passed")
+	fmt.Println("switch tests passed")
 }
 

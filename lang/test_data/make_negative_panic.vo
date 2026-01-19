@@ -2,6 +2,8 @@
 // Go semantics: make([]T, n) with n < 0 panics at runtime
 package main
 
+
+import "fmt"
 func main() {
     // Test 1: make slice with negative length should panic
     result1 := ""
@@ -107,5 +109,5 @@ func main() {
         assert(result7 == "panicked", "make slice with overflow size should panic")
     }
     
-    println("make_negative_panic: PASSED")
+    fmt.Println("make_negative_panic: PASSED")
 }

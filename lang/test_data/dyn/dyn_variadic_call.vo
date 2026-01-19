@@ -2,6 +2,8 @@
 // Variadic functions should work with dynamic calls.
 package main
 
+
+import "fmt"
 type Logger struct {
     prefix string
 }
@@ -81,33 +83,33 @@ func main() {
     r1, err := obj~>Log("hello", 42, true)
     assert(err == nil, "Log should succeed")
     assert(r1.(string) == "[INFO] hello 42 true", "Log result mismatch")
-    println("Log result:", r1.(string))
+    fmt.Println("Log result:", r1.(string))
     
     // Test 2: Method with variadic int
     r2, err := obj~>Count(1, 2, 3, 4, 5)
     assert(err == nil, "Count should succeed")
     assert(r2.(int) == 15, "Count should be 15")
-    println("Count(1,2,3,4,5) =", r2.(int))
+    fmt.Println("Count(1,2,3,4,5) =", r2.(int))
     
     // Test 3: Empty variadic
     r3, err := obj~>Count()
     assert(err == nil, "Count() should succeed")
     assert(r3.(int) == 0, "Count() should be 0")
-    println("Count() =", r3.(int))
+    fmt.Println("Count() =", r3.(int))
     
     // Test 4: Plain variadic function
     var fn any = sum
     r4, err := fn~>(10, 20, 30)
     assert(err == nil, "sum should succeed")
     assert(r4.(int) == 60, "sum should be 60")
-    println("sum(10,20,30) =", r4.(int))
+    fmt.Println("sum(10,20,30) =", r4.(int))
     
     // Test 5: Variadic with leading non-variadic param
     var fn2 any = concat
     r5, err := fn2~>("-", "a", "b", "c")
     assert(err == nil, "concat should succeed")
     assert(r5.(string) == "a-b-c", "concat should be 'a-b-c'")
-    println("concat('-','a','b','c') =", r5.(string))
+    fmt.Println("concat('-','a','b','c') =", r5.(string))
     
-    println("dyn_variadic_call: ok")
+    fmt.Println("dyn_variadic_call: ok")
 }

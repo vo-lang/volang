@@ -5,6 +5,7 @@ version = "0.1.0"
 
 # Core packages (no OS dependency, no_std compatible)
 [packages.core]
+fmt = { path = "fmt" }
 errors = { path = "errors" }
 strings = { path = "strings" }
 strconv = { path = "strconv" }
@@ -25,7 +26,6 @@ dyn = { path = "dyn" }
 
 # Standard packages (requires OS support)
 [packages.std]
-# fmt = { path = "fmt" }
 io = { path = "io" }
 os = { path = "os" }
 # time = { path = "time" }

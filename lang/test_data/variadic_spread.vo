@@ -2,6 +2,8 @@
 // Go spec: variadic final parameter, spread with ...
 package main
 
+
+import "fmt"
 func sum(nums ...int) int {
     total := 0
     for _, n := range nums {
@@ -78,5 +80,5 @@ func main() {
     original[0] = 100  // modify original
     assert(result == 6, "result should not be affected by original modification")
     
-    println("variadic_spread: ok")
+    fmt.Println("variadic_spread: ok")
 }

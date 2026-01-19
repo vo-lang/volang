@@ -2,6 +2,8 @@
 // Vo spec: Method sets are computed by union with duplicate checking
 package main
 
+
+import "fmt"
 type Reader interface {
     Read(buf []byte) int
 }
@@ -152,5 +154,5 @@ func main() {
     _ = wc
     _ = c
     
-    println("interface_embed_hierarchy: ok")
+    fmt.Println("interface_embed_hierarchy: ok")
 }

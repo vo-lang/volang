@@ -4,6 +4,8 @@
 
 package main
 
+
+import "fmt"
 type Stringer interface {
     String() string
 }
@@ -41,10 +43,10 @@ func main() {
     for i := 0; i < 10; i++ {
         result := testConcreteAssertion(s)
         if result != 42 {
-            println("FAIL iteration", i, ": expected 42, got:", result)
+            fmt.Println("FAIL iteration", i, ": expected 42, got:", result)
             return
         }
     }
     
-    println("PASS")
+    fmt.Println("PASS")
 }

@@ -6,6 +6,8 @@
 
 package main
 
+
+import "fmt"
 type Stringer interface {
     String() string
 }
@@ -38,14 +40,14 @@ func main() {
         // If JIT set rttid=0, this will panic
         m2, ok := a.(MyType)
         if !ok {
-            println("FAIL: type assertion failed at iteration", i)
+            fmt.Println("FAIL: type assertion failed at iteration", i)
             return
         }
         if m2.value != 42 {
-            println("FAIL: wrong value at iteration", i)
+            fmt.Println("FAIL: wrong value at iteration", i)
             return
         }
     }
     
-    println("PASS")
+    fmt.Println("PASS")
 }

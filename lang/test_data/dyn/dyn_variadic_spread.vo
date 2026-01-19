@@ -2,6 +2,8 @@
 // Call variadic methods dynamically with slice spread.
 package main
 
+
+import "fmt"
 type Calculator struct {
     base int
 }
@@ -125,6 +127,6 @@ func main() error {
     assert(err == nil, "Sum(dynSlice...) error: ", err)
     assert(sumDyn.(int) == 124, "Sum(dynSlice...) should be 124, got ", sumDyn.(int))
     
-    println("dyn_variadic_spread: ok")
+    fmt.Println("dyn_variadic_spread: ok")
     return nil
 }
