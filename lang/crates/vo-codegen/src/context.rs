@@ -64,12 +64,6 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "vo_conv_str_runes" => 1,
         "vo_string_to_bytes" | "vo_bytes_to_string" => 1,
         
-        // === Regexp ===
-        // (bool, bool) = 2 slots
-        "regexp_matchString" | "regexp_matchBytes" => 2,
-        // (int, int) = 2 slots
-        "regexp_findStringIndex" => 2,
-        
         // Unknown extern - this is a bug, all externs must be listed above
         _ => panic!("builtin_extern_ret_slots: unknown extern '{}', add it to the list", name),
     }
