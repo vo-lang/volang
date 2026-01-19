@@ -8,11 +8,11 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-use vo_ffi_macro::vo_extern_std;
+use vo_ffi_macro::vostd_extern;
 
 // ==================== Float parsing ====================
 
-#[vo_extern_std("strconv", "ParseFloat")]
+#[vostd_extern("strconv", "ParseFloat")]
 fn parse_float(s: &str, bit_size: i64) -> (f64, bool) {
     match s.trim().parse::<f64>() {
         Ok(v) => {
@@ -33,7 +33,7 @@ fn parse_float(s: &str, bit_size: i64) -> (f64, bool) {
 
 // ==================== Float formatting ====================
 
-#[vo_extern_std("strconv", "FormatFloat")]
+#[vostd_extern("strconv", "FormatFloat")]
 fn format_float(f: f64, fmt: u8, prec: i64, bit_size: i64) -> String {
     let f = if bit_size == 32 { (f as f32) as f64 } else { f };
     

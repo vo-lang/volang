@@ -1,0 +1,161 @@
+package main
+
+import "fmt"
+
+func main() {
+	testSprint()
+	testSprintln()
+	testSprintf()
+	testPrintFunctions()
+	testFormatVerbs()
+	testEdgeCases()
+	fmt.Println("All fmt tests passed!")
+}
+
+func testSprint() {
+	// Basic types
+	assert(fmt.Sprint() == "")
+	assert(fmt.Sprint("hello") == "hello")
+	assert(fmt.Sprint(123) == "123")
+	assert(fmt.Sprint(true) == "true")
+	assert(fmt.Sprint(false) == "false")
+	
+	// Multiple arguments (space separated)
+	assert(fmt.Sprint("a", "b") == "a b")
+	assert(fmt.Sprint(1, 2, 3) == "1 2 3")
+	assert(fmt.Sprint("x", 42, true) == "x 42 true")
+	
+	// Float values
+	assert(fmt.Sprint(3.14) == "3.14")
+	assert(fmt.Sprint(0.0) == "0")
+	
+	// Negative numbers
+	assert(fmt.Sprint(-42) == "-42")
+	assert(fmt.Sprint(-3.14) == "-3.14")
+}
+
+func testSprintln() {
+	// Sprintln adds newline
+	assert(fmt.Sprintln() == "\n")
+	assert(fmt.Sprintln("hello") == "hello\n")
+	assert(fmt.Sprintln(1, 2, 3) == "1 2 3\n")
+}
+
+func testSprintf() {
+	// %d - integers
+	assert(fmt.Sprintf("%d", 42) == "42")
+	assert(fmt.Sprintf("%d", -42) == "-42")
+	assert(fmt.Sprintf("%d", 0) == "0")
+	
+	// %s - strings
+	assert(fmt.Sprintf("%s", "hello") == "hello")
+	assert(fmt.Sprintf("%s", "") == "")
+	
+	// %v - default format
+	assert(fmt.Sprintf("%v", 42) == "42")
+	assert(fmt.Sprintf("%v", "hello") == "hello")
+	assert(fmt.Sprintf("%v", true) == "true")
+	assert(fmt.Sprintf("%v", false) == "false")
+	
+	// %t - boolean
+	assert(fmt.Sprintf("%t", true) == "true")
+	assert(fmt.Sprintf("%t", false) == "false")
+	
+	// %f - floats
+	assert(fmt.Sprintf("%f", 3.14) == "3.14")
+	assert(fmt.Sprintf("%f", 0.0) == "0")
+	
+	// %x - hex lowercase
+	assert(fmt.Sprintf("%x", 255) == "ff")
+	assert(fmt.Sprintf("%x", 16) == "10")
+	assert(fmt.Sprintf("%x", 0) == "0")
+	
+	// %X - hex uppercase
+	assert(fmt.Sprintf("%X", 255) == "FF")
+	assert(fmt.Sprintf("%X", 16) == "10")
+	
+	// %p - pointer (just check it starts with 0x)
+	type S struct{ x int }
+	ps := &S{42}
+	p := fmt.Sprintf("%p", ps)
+	assert(len(p) > 2 && p[0] == '0' && p[1] == 'x')
+	
+	// %q - quoted string
+	assert(fmt.Sprintf("%q", "hello") == "\"hello\"")
+	assert(fmt.Sprintf("%q", "") == "\"\"")
+	
+	// %% - literal percent
+	assert(fmt.Sprintf("%%") == "%")
+	assert(fmt.Sprintf("100%%") == "100%")
+	
+	// Multiple format specifiers
+	assert(fmt.Sprintf("%s=%d", "x", 10) == "x=10")
+	assert(fmt.Sprintf("%d+%d=%d", 1, 2, 3) == "1+2=3")
+	
+	// Mixed text and format
+	assert(fmt.Sprintf("hello %s world", "foo") == "hello foo world")
+	assert(fmt.Sprintf("[%d]", 42) == "[42]")
+}
+
+func testPrintFunctions() {
+	// Test return values (byte count)
+	n := fmt.Sprint("hello")
+	assert(len(n) == 5)
+	
+	n2 := fmt.Sprintln("hello")
+	assert(len(n2) == 6) // "hello\n"
+	
+	n3 := fmt.Sprintf("%d", 123)
+	assert(len(n3) == 3)
+}
+
+func testFormatVerbs() {
+	// Integer types
+	var i8 int8 = -128
+	var i16 int16 = -32768
+	var i32 int32 = -2147483648
+	var i64 int64 = -9223372036854775808
+	
+	assert(fmt.Sprintf("%d", i8) == "-128")
+	assert(fmt.Sprintf("%d", i16) == "-32768")
+	assert(fmt.Sprintf("%d", i32) == "-2147483648")
+	assert(fmt.Sprintf("%d", i64) == "-9223372036854775808")
+	
+	// Unsigned types
+	var u8 uint8 = 255
+	var u16 uint16 = 65535
+	var u32 uint32 = 4294967295
+	
+	assert(fmt.Sprintf("%d", u8) == "255")
+	assert(fmt.Sprintf("%d", u16) == "65535")
+	assert(fmt.Sprintf("%d", u32) == "4294967295")
+	
+	// Hex for different sizes
+	assert(fmt.Sprintf("%x", u8) == "ff")
+	assert(fmt.Sprintf("%x", u16) == "ffff")
+	assert(fmt.Sprintf("%x", u32) == "ffffffff")
+	
+	// String hex encoding
+	assert(fmt.Sprintf("%x", "AB") == "4142")
+	assert(fmt.Sprintf("%X", "AB") == "4142")
+}
+
+func testEdgeCases() {
+	// Missing arguments
+	s := fmt.Sprintf("%d %d", 1)
+	assert(s == "1 %!d(MISSING)")
+	
+	// Wrong type for verb
+	s2 := fmt.Sprintf("%d", "hello")
+	assert(len(s2) > 0) // Should produce error format
+	
+	// Empty format string
+	assert(fmt.Sprintf("") == "")
+	
+	// No format specifiers
+	assert(fmt.Sprintf("hello world") == "hello world")
+	
+	// Nil interface
+	var x interface{}
+	assert(fmt.Sprint(x) == "<nil>")
+}

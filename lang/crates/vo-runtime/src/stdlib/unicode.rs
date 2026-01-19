@@ -3,81 +3,81 @@
 //! All Unicode character classification and case conversion requires
 //! Unicode tables, so they must be native.
 
-use vo_ffi_macro::vo_extern_std;
+use vo_ffi_macro::vostd_extern;
 
 // ==================== Character classification ====================
 
-#[vo_extern_std("unicode", "IsLetter")]
+#[vostd_extern("unicode", "IsLetter")]
 fn is_letter(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_alphabetic())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsDigit")]
+#[vostd_extern("unicode", "IsDigit")]
 fn is_digit(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_ascii_digit()) // Go's IsDigit is decimal digits only
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsSpace")]
+#[vostd_extern("unicode", "IsSpace")]
 fn is_space(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_whitespace())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsUpper")]
+#[vostd_extern("unicode", "IsUpper")]
 fn is_upper(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_uppercase())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsLower")]
+#[vostd_extern("unicode", "IsLower")]
 fn is_lower(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_lowercase())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsControl")]
+#[vostd_extern("unicode", "IsControl")]
 fn is_control(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_control())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsPrint")]
+#[vostd_extern("unicode", "IsPrint")]
 fn is_print(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| !c.is_control() && c != '\u{FFFD}')
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsPunct")]
+#[vostd_extern("unicode", "IsPunct")]
 fn is_punct(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_ascii_punctuation() || unicode_is_punct(c))
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsGraphic")]
+#[vostd_extern("unicode", "IsGraphic")]
 fn is_graphic(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| !c.is_control() && !c.is_whitespace() || c == ' ')
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsNumber")]
+#[vostd_extern("unicode", "IsNumber")]
 fn is_number(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(|c| c.is_numeric())
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsMark")]
+#[vostd_extern("unicode", "IsMark")]
 fn is_mark(r: i32) -> bool {
     // Unicode Mark category (Mn, Mc, Me)
     char::from_u32(r as u32)
@@ -85,7 +85,7 @@ fn is_mark(r: i32) -> bool {
         .unwrap_or(false)
 }
 
-#[vo_extern_std("unicode", "IsSymbol")]
+#[vostd_extern("unicode", "IsSymbol")]
 fn is_symbol(r: i32) -> bool {
     char::from_u32(r as u32)
         .map(unicode_is_symbol)
@@ -94,7 +94,7 @@ fn is_symbol(r: i32) -> bool {
 
 // ==================== Case conversion ====================
 
-#[vo_extern_std("unicode", "ToLower")]
+#[vostd_extern("unicode", "ToLower")]
 fn to_lower(r: i32) -> i32 {
     char::from_u32(r as u32)
         .and_then(|c| c.to_lowercase().next())
@@ -102,7 +102,7 @@ fn to_lower(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vo_extern_std("unicode", "ToUpper")]
+#[vostd_extern("unicode", "ToUpper")]
 fn to_upper(r: i32) -> i32 {
     char::from_u32(r as u32)
         .and_then(|c| c.to_uppercase().next())
@@ -110,7 +110,7 @@ fn to_upper(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vo_extern_std("unicode", "ToTitle")]
+#[vostd_extern("unicode", "ToTitle")]
 fn to_title(r: i32) -> i32 {
     // In most cases, title case is the same as uppercase
     char::from_u32(r as u32)
@@ -119,7 +119,7 @@ fn to_title(r: i32) -> i32 {
         .unwrap_or(r)
 }
 
-#[vo_extern_std("unicode", "SimpleFold")]
+#[vostd_extern("unicode", "SimpleFold")]
 fn simple_fold(r: i32) -> i32 {
     // SimpleFold returns the next character in the Unicode case fold orbit
     // For most characters, this cycles: lower -> upper -> lower

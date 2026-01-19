@@ -9,13 +9,9 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-#[cfg(feature = "std")]
-use linkme::distributed_slice;
 use vo_common_core::types::ValueKind;
 
 use crate::ffi::{ExternCallContext, ExternResult};
-#[cfg(feature = "std")]
-use crate::ffi::{ExternEntryWithContext, EXTERN_TABLE_WITH_CONTEXT};
 use crate::gc::{Gc, GcRef};
 use crate::objects::{array, interface, map, slice, string, struct_ops};
 use crate::slot::SLOT_BYTES;
@@ -358,13 +354,6 @@ fn dyn_error_only(call: &mut ExternCallContext, code: isize, msg: &str) -> Exter
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_get_attr",
-    func: dyn_get_attr,
-};
-
 /// dyn_get_index: Get an element from an interface value by index/key.
 ///
 /// Args: (base: any[2], key: any[2]) -> (data[2], error[2])
@@ -525,13 +514,6 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
     
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_GET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_get_index",
-    func: dyn_get_index,
-};
 
 /// dyn_set_attr: Set a struct field on an interface value by name.
 ///
@@ -712,13 +694,6 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     call.ret_nil(1);
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_SET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_set_attr",
-    func: dyn_set_attr,
-};
 
 /// dyn_set_index: Set an element in a map or slice by key/index.
 ///
@@ -918,13 +893,6 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_set_index",
-    func: dyn_set_index,
-};
-
 /// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check + variadic info.
 ///
 /// # Design: LHS determines expected signature
@@ -1026,13 +994,6 @@ fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
     
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_CALL_PREPARE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_call_prepare",
-    func: dyn_call_prepare,
-};
 
 /// Unbox an interface-format argument to the expected parameter format.
 /// Returns the number of slots written.
@@ -1197,13 +1158,6 @@ fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_REPACK_ARGS: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_repack_args",
-    func: dyn_repack_args,
-};
-
 /// dyn_call_closure: Call a closure and unpack returns in one step.
 ///
 /// Dynamically allocates buffer based on actual closure return slots at runtime.
@@ -1328,13 +1282,6 @@ fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_CALL_CLOSURE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_call_closure",
-    func: dyn_call_closure,
-};
-
 /// dyn_type_assert_error: Create a type assertion error for dynamic access.
 ///
 /// Args: (expected_rttid[1], expected_vk[1], got_slot0[1]) -> error[2]
@@ -1364,46 +1311,11 @@ fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_TYPE_ASSERT_ERROR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_type_assert_error",
-    func: dyn_type_assert_error,
-};
-
 // =============================================================================
 // Public API - exposed via dyn package in stdlib
 // =============================================================================
 // These extern entries use Vo package naming convention (dyn_FuncName)
 // to match the generated extern names from `dyn.FuncName()` calls.
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_PKG_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_GetAttr",
-    func: dyn_get_attr,
-};
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_PKG_GET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_GetIndex",
-    func: dyn_get_index,
-};
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_PKG_SET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_SetAttr",
-    func: dyn_set_attr,
-};
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_DYN_PKG_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
-    name: "dyn_SetIndex",
-    func: dyn_set_index,
-};
 
 /// Register dynamic extern functions (for no_std mode).
 /// Note: dynamic functions use ExternCallContext directly, not wrapper functions.

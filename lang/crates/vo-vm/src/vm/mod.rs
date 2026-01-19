@@ -148,14 +148,8 @@ impl Vm {
         module: Module,
         ext_loader: Option<&vo_runtime::ext_loader::ExtensionLoader>,
     ) {
-        // Register extern functions from built-in linkme tables
-        for (id, def) in module.externs.iter().enumerate() {
-            if let Some(func) = vo_runtime::lookup_extern(&def.name) {
-                self.state.extern_registry.register(id as u32, func);
-            } else if let Some(func) = vo_runtime::lookup_extern_with_context(&def.name) {
-                self.state.extern_registry.register_with_context(id as u32, func);
-            }
-        }
+        // Register stdlib extern functions
+        vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
         
         // Register extern functions from extension loader (if provided)
         if let Some(loader) = ext_loader {

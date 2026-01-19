@@ -9,11 +9,11 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_ffi_macro::vo_extern_std;
+use vo_ffi_macro::vostd_extern;
 
 // ==================== Search ====================
 
-#[vo_extern_std("bytes", "Index")]
+#[vostd_extern("bytes", "Index")]
 fn index(s: &[u8], sep: &[u8]) -> i64 {
     if sep.is_empty() {
         return 0;
@@ -24,7 +24,7 @@ fn index(s: &[u8], sep: &[u8]) -> i64 {
         .unwrap_or(-1)
 }
 
-#[vo_extern_std("bytes", "LastIndex")]
+#[vostd_extern("bytes", "LastIndex")]
 fn last_index(s: &[u8], sep: &[u8]) -> i64 {
     if sep.is_empty() {
         return s.len() as i64;
@@ -35,7 +35,7 @@ fn last_index(s: &[u8], sep: &[u8]) -> i64 {
         .unwrap_or(-1)
 }
 
-#[vo_extern_std("bytes", "Count")]
+#[vostd_extern("bytes", "Count")]
 fn count(s: &[u8], sep: &[u8]) -> i64 {
     if sep.is_empty() {
         return (s.len() + 1) as i64;
@@ -55,19 +55,19 @@ fn count(s: &[u8], sep: &[u8]) -> i64 {
 
 // ==================== Case conversion ====================
 
-#[vo_extern_std("bytes", "ToLower")]
+#[vostd_extern("bytes", "ToLower")]
 fn to_lower(s: &[u8]) -> Vec<u8> {
     s.to_ascii_lowercase()
 }
 
-#[vo_extern_std("bytes", "ToUpper")]
+#[vostd_extern("bytes", "ToUpper")]
 fn to_upper(s: &[u8]) -> Vec<u8> {
     s.to_ascii_uppercase()
 }
 
 // ==================== Replace ====================
 
-#[vo_extern_std("bytes", "Replace")]
+#[vostd_extern("bytes", "Replace")]
 fn replace(s: &[u8], old: &[u8], new: &[u8], n: i64) -> Vec<u8> {
     if old.is_empty() || n == 0 {
         return s.to_vec();

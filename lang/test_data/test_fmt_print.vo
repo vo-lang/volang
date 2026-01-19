@@ -1,0 +1,16 @@
+package main
+import "fmt"
+func main() {
+    fmt.Println("Hello", "from", "fmt!")
+    fmt.Print("No newline ")
+    fmt.Print("here\n")
+    fmt.Printf("Number: %d, String: %s\n", 42, "test")
+    
+    s := fmt.Sprint("Sprint", 123)
+    assert(s == "Sprint 123")
+    
+    s2 := fmt.Sprintf("x=%d y=%s", 10, "hello")
+    assert(s2 == "x=10 y=hello")
+    
+    fmt.Println("All tests passed!")
+}

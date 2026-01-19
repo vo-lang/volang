@@ -10,13 +10,9 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
-#[cfg(feature = "std")]
-use linkme::distributed_slice;
 use vo_common_core::types::ValueKind;
 
 use crate::ffi::{ExternCallContext, ExternResult};
-#[cfg(feature = "std")]
-use crate::ffi::{ExternEntryWithContext, EXTERN_TABLE_WITH_CONTEXT};
 use crate::objects::string;
 
 /// Format a single (value, value_kind) pair to string.
@@ -107,28 +103,6 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-// Register builtins via linkme (std only)
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_PRINT: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_print",
-    func: builtin_print,
-};
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_PRINTLN: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_println",
-    func: builtin_println,
-};
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_ASSERT: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_assert",
-    func: builtin_assert,
-};
-
 fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::{slice, array, string};
     use crate::gc::Gc;
@@ -171,13 +145,6 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, copy_len as i64);
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_COPY: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_copy",
-    func: builtin_copy,
-};
 
 /// append(slice, other...) - append all elements from other slice/string
 /// Works for both slice and string sources since they have identical memory layout.
@@ -253,13 +220,6 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_SLICE_APPEND_SLICE: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_slice_append_slice",
-    func: builtin_slice_append_slice,
-};
-
 /// Interface equality comparison
 /// Args: (left_slot0, left_slot1, right_slot0, right_slot1)
 /// Returns: bool (1 if equal, 0 if not)
@@ -328,13 +288,6 @@ fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_BUILTIN_IFACE_EQ: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_iface_eq",
-    func: builtin_iface_eq,
-};
-
 // ==================== String Conversion Functions ====================
 
 /// int -> string (unicode code point)
@@ -350,13 +303,6 @@ fn conv_int_str(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_CONV_INT_STR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_conv_int_str",
-    func: conv_int_str,
-};
-
 /// []byte -> string (shares underlying array)
 fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
@@ -364,13 +310,6 @@ fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_CONV_BYTES_STR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_conv_bytes_str",
-    func: conv_bytes_str,
-};
 
 /// string -> []byte (must copy)
 fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
@@ -380,13 +319,6 @@ fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_CONV_STR_BYTES: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_conv_str_bytes",
-    func: conv_str_bytes,
-};
-
 /// []rune -> string
 fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
@@ -395,13 +327,6 @@ fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_CONV_RUNES_STR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_conv_runes_str",
-    func: conv_runes_str,
-};
-
 /// string -> []rune
 fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
     let str_ref = call.arg_ref(0);
@@ -409,13 +334,6 @@ fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_CONV_STR_RUNES: ExternEntryWithContext = ExternEntryWithContext {
-    name: "vo_conv_str_runes",
-    func: conv_str_runes,
-};
 
 /// Panic with an error value.
 /// Used by dynamic write in functions without error return value.
@@ -436,13 +354,6 @@ fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
     
     ExternResult::Panic(msg)
 }
-
-#[cfg(feature = "std")]
-#[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
-static __VO_PANIC_WITH_ERROR: ExternEntryWithContext = ExternEntryWithContext {
-    name: "panic_with_error",
-    func: panic_with_error,
-};
 
 /// Register builtin extern functions (for no_std mode).
 /// Builtin functions are defined directly with ExternFnWithContext signature.

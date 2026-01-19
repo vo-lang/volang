@@ -1370,30 +1370,18 @@ impl ExternRegistry {
         loader: &crate::ext_loader::ExtensionLoader,
         extern_defs: &[crate::bytecode::ExternDef],
     ) {
-        let mut registered = 0;
-        let mut skipped = 0;
-        let mut not_found = Vec::new();
         for (id, def) in extern_defs.iter().enumerate() {
-            // Already registered (e.g., from linkme)?
+            // Already registered (e.g., from stdlib or linkme)?
             if self.has(id as u32) {
-                skipped += 1;
                 continue;
             }
             
             // Try to find in extension loader
             if let Some(func) = loader.lookup(&def.name) {
                 self.register(id as u32, func);
-                registered += 1;
             } else if let Some(func) = loader.lookup_with_context(&def.name) {
                 self.register_with_context(id as u32, func);
-                registered += 1;
-            } else {
-                not_found.push(def.name.clone());
             }
-        }
-        eprintln!("[DEBUG] register_from_extension_loader: {} registered, {} skipped, {} not found", registered, skipped, not_found.len());
-        if !not_found.is_empty() {
-            eprintln!("[DEBUG]   Not found: {:?}", &not_found[..not_found.len().min(5)]);
         }
     }
 

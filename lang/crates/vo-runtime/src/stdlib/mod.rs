@@ -2,7 +2,7 @@
 //!
 //! This module provides native implementations for Vo standard library functions.
 //! 
-//! Native functions are implemented using `#[vo_extern_std]` macro which:
+//! Native functions are implemented using `#[vostd_extern]` macro which:
 //! - Validates signature against .vo file declaration
 //! - Auto-registers to EXTERN_TABLE via linkme for runtime lookup (std only)
 
