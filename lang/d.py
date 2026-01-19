@@ -19,6 +19,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Check that we're running from the correct directory (repo root, not lang/)
+_script_dir = Path(__file__).resolve().parent
+_expected_cwd = _script_dir.parent  # repo root
+if Path.cwd().resolve() != _expected_cwd:
+    print(f"Error: d.py must be run from repo root: {_expected_cwd}", file=sys.stderr)
+    print(f"Current directory: {Path.cwd()}", file=sys.stderr)
+    print(f"Run: cd {_expected_cwd} && ./d.py ...", file=sys.stderr)
+    sys.exit(1)
+
 try:
     import yaml
     HAS_YAML = True
@@ -99,7 +108,6 @@ BENCHMARK_DIR = PROJECT_ROOT / 'lang' / 'benchmark'
 RESULTS_DIR = BENCHMARK_DIR / 'results'
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
 VO_BIN_RELEASE = PROJECT_ROOT / 'target' / 'release' / 'vo'
-VIBE_STUDIO_MAIN = PROJECT_ROOT / 'vibe-studio' / 'main.vo'
 STDLIB_DIR = PROJECT_ROOT / 'lang' / 'stdlib'
 CLI_DIR = PROJECT_ROOT / 'lang' / 'cli'
 
@@ -121,23 +129,6 @@ def run_cmd(cmd: list[str], cwd: Path = None, env: dict = None, capture: bool = 
 def command_exists(cmd: str) -> bool:
     return subprocess.run(['command', '-v', cmd], shell=True, capture_output=True).returncode == 0 or \
            subprocess.run(f'command -v {cmd}', shell=True, capture_output=True).returncode == 0
-
-
-def run_vibe_studio():
-    """Run Vibe Studio."""
-    # Build vo-launcher and vogui-egui first
-    print(f"{Colors.CYAN}Building vo-launcher...{Colors.NC}")
-    ret, _, stderr = run_cmd(['cargo', 'build', '-p', 'vo-launcher'])
-    if ret != 0:
-        print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
-        sys.exit(1)
-    
-    # Run vibe-studio
-    print(f"{Colors.CYAN}Running Vibe Studio...{Colors.NC}")
-    subprocess.run(
-        [str(VO_BIN_DEBUG), 'main.vo'],
-        cwd=PROJECT_ROOT / 'vibe-studio'
-    )
 
 
 # =============================================================================
@@ -848,9 +839,6 @@ def main():
     loc_parser.add_argument('--with-tests', action='store_true',
                             help='Include test files')
 
-    # vibe
-    subparsers.add_parser('vibe', help='Run Vibe Studio')
-
     args = parser.parse_args()
 
     if args.command == 'test':
@@ -874,9 +862,6 @@ def main():
     elif args.command == 'loc':
         stats = LocStats(with_tests=args.with_tests)
         stats.run()
-
-    elif args.command == 'vibe':
-        run_vibe_studio()
 
     else:
         parser.print_help()

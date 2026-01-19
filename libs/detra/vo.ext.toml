@@ -1,3 +1,0 @@
-[extension]
-name = "detra"
-path = "../../target/debug/libdetra.so"
