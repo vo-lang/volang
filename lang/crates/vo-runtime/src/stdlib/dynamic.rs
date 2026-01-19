@@ -4,11 +4,18 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::format;
 
+#[cfg(feature = "std")]
 use linkme::distributed_slice;
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN_TABLE_WITH_CONTEXT};
+use crate::ffi::{ExternCallContext, ExternResult};
+#[cfg(feature = "std")]
+use crate::ffi::{ExternEntryWithContext, EXTERN_TABLE_WITH_CONTEXT};
 use crate::gc::{Gc, GcRef};
 use crate::objects::{array, interface, map, slice, string, struct_ops};
 use crate::slot::SLOT_BYTES;
@@ -351,6 +358,7 @@ fn dyn_error_only(call: &mut ExternCallContext, code: isize, msg: &str) -> Exter
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_get_attr",
@@ -518,6 +526,7 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_GET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_get_index",
@@ -704,6 +713,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_SET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_set_attr",
@@ -908,6 +918,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_set_index",
@@ -1016,6 +1027,7 @@ fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_CALL_PREPARE: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_call_prepare",
@@ -1185,6 +1197,7 @@ fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_REPACK_ARGS: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_repack_args",
@@ -1315,6 +1328,7 @@ fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_CALL_CLOSURE: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_call_closure",
@@ -1350,6 +1364,7 @@ fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_TYPE_ASSERT_ERROR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_type_assert_error",
@@ -1362,27 +1377,62 @@ static __VO_DYN_TYPE_ASSERT_ERROR: ExternEntryWithContext = ExternEntryWithConte
 // These extern entries use Vo package naming convention (dyn_FuncName)
 // to match the generated extern names from `dyn.FuncName()` calls.
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_PKG_GET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_GetAttr",
     func: dyn_get_attr,
 };
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_PKG_GET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_GetIndex",
     func: dyn_get_index,
 };
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_PKG_SET_ATTR: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_SetAttr",
     func: dyn_set_attr,
 };
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_DYN_PKG_SET_INDEX: ExternEntryWithContext = ExternEntryWithContext {
     name: "dyn_SetIndex",
     func: dyn_set_index,
 };
 
+/// Register dynamic extern functions (for no_std mode).
+/// Note: dynamic functions use ExternCallContext directly, not wrapper functions.
+pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
+    use crate::ffi::ExternFnWithContext;
+    
+    // Dynamic functions take ExternCallContext directly - no wrapper needed
+    const TABLE: &[(&str, ExternFnWithContext)] = &[
+        ("dyn_get_attr", dyn_get_attr),
+        ("dyn_get_index", dyn_get_index),
+        ("dyn_set_attr", dyn_set_attr),
+        ("dyn_set_index", dyn_set_index),
+        ("dyn_call_prepare", dyn_call_prepare),
+        ("dyn_repack_args", dyn_repack_args),
+        ("dyn_call_closure", dyn_call_closure),
+        ("dyn_type_assert_error", dyn_type_assert_error),
+        // Also register dyn package names (dyn.GetAttr, etc.)
+        ("dyn_GetAttr", dyn_get_attr),
+        ("dyn_GetIndex", dyn_get_index),
+        ("dyn_SetAttr", dyn_set_attr),
+        ("dyn_SetIndex", dyn_set_index),
+    ];
+    
+    for (id, def) in externs.iter().enumerate() {
+        for (name, func) in TABLE {
+            if def.name == *name {
+                registry.register_with_context(id as u32, *func);
+                break;
+            }
+        }
+    }
+}

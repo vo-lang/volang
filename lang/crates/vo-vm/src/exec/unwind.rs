@@ -32,6 +32,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;

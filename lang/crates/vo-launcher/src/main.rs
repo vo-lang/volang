@@ -15,6 +15,7 @@ const VERSION: &str = "0.1.0";
 struct LauncherArgs {
     mode: RunMode,
     cache: bool,
+    compile_only: Option<String>,  // Output bytecode to file, don't run
     entry: String,
     program_args: Vec<String>,
 }
@@ -55,6 +56,16 @@ fn main() {
         }
     };
     
+    // If --compile-only, write bytecode and exit
+    if let Some(out_path) = parsed.compile_only {
+        let bytes = output.module.serialize();
+        if let Err(e) = std::fs::write(&out_path, bytes) {
+            eprintln!("vo: failed to write bytecode: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+    
     if let Err(e) = run_module_with_extensions(output, parsed.mode, parsed.program_args) {
         eprintln!("vo: {}", e);
         std::process::exit(1);
@@ -64,6 +75,7 @@ fn main() {
 fn parse_args(args: &[String]) -> LauncherArgs {
     let mut mode = RunMode::Vm;
     let mut cache = false;
+    let mut compile_only = None;
     let mut i = 0;
     
     while i < args.len() {
@@ -81,6 +93,9 @@ fn parse_args(args: &[String]) -> LauncherArgs {
         } else if arg == "--cache" {
             cache = true;
             i += 1;
+        } else if let Some(out) = arg.strip_prefix("--compile-only=") {
+            compile_only = Some(out.to_string());
+            i += 1;
         } else {
             break;
         }
@@ -94,7 +109,7 @@ fn parse_args(args: &[String]) -> LauncherArgs {
     let entry = args[i].clone();
     let program_args: Vec<String> = args[i..].to_vec();
     
-    LauncherArgs { mode, cache, entry, program_args }
+    LauncherArgs { mode, cache, compile_only, entry, program_args }
 }
 
 fn compile_with_cache(entry: &str) -> Result<CompileOutput, vo_launcher::CompileError> {

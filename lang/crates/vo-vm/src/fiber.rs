@@ -1,6 +1,8 @@
 //! Fiber (coroutine) and related structures.
 
 #[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;

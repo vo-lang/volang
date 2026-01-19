@@ -2,19 +2,24 @@
 //!
 //! Provides print and format functions for the fmt standard library package.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+
 use vo_ffi_macro::vo_extern_std;
 
-/// fmt.Print - print values without newline
+/// fmt.Print - print values without newline (std only - no_std version is no-op)
 #[vo_extern_std("fmt", "Print")]
 fn print(s: &str) -> i64 {
-    print!("{}", s);
+    #[cfg(feature = "std")]
+    { print!("{}", s); }
     s.len() as i64
 }
 
-/// fmt.Println - print values with newline
+/// fmt.Println - print values with newline (std only - no_std version is no-op)
 #[vo_extern_std("fmt", "Println")]
 fn println(s: &str) -> i64 {
-    println!("{}", s);
+    #[cfg(feature = "std")]
+    { println!("{}", s); }
     s.len() as i64 + 1
 }
 
@@ -23,3 +28,5 @@ fn println(s: &str) -> i64 {
 fn sprint(s: &str) -> String {
     s.to_string()
 }
+
+crate::stdlib_register!(fmt: Print, Println, Sprint);

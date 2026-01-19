@@ -5,6 +5,9 @@
 //! - Insert during iteration: if resize happens, generation increments, iterator terminates
 //! - Open addressing with linear probing
 
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+
 use core::hash::Hash;
 use core::mem;
 

@@ -17,9 +17,11 @@
 //! ```
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::format;
 
 // Container accessors
 pub mod containers;
@@ -267,6 +269,7 @@ impl ErrorSlot {
     }
 }
 
+#[cfg(feature = "std")]
 use linkme::distributed_slice;
 
 use crate::gc::{Gc, GcRef};
@@ -293,6 +296,34 @@ pub type ExternFn = fn(&mut ExternCall) -> ExternResult;
 /// Extern function with full context (GC + type metadata).
 pub type ExternFnWithContext = fn(&mut ExternCallContext) -> ExternResult;
 
+/// Unified stdlib extern entry for static registration.
+/// This avoids manually distinguishing between ExternFn and ExternFnWithContext.
+#[derive(Clone, Copy)]
+pub enum StdlibEntry {
+    /// Function without GC context.
+    NoCtx(&'static str, ExternFn),
+    /// Function with GC context.
+    WithCtx(&'static str, ExternFnWithContext),
+}
+
+impl StdlibEntry {
+    /// Get the function name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            StdlibEntry::NoCtx(name, _) => name,
+            StdlibEntry::WithCtx(name, _) => name,
+        }
+    }
+    
+    /// Register this entry into the registry.
+    pub fn register(&self, registry: &mut ExternRegistry, id: u32) {
+        match self {
+            StdlibEntry::NoCtx(_, func) => registry.register(id, *func),
+            StdlibEntry::WithCtx(_, func) => registry.register_with_context(id, *func),
+        }
+    }
+}
+
 /// Result of calling a closure from within an extern function.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,8 +335,8 @@ pub enum ClosureCallResult {
 /// Callback type for calling closures from extern functions.
 /// This allows extern functions to call back into the VM to execute closures.
 pub type ClosureCallFn = extern "C" fn(
-    vm: *mut std::ffi::c_void,
-    fiber: *mut std::ffi::c_void,
+    vm: *mut core::ffi::c_void,
+    fiber: *mut core::ffi::c_void,
     closure_ref: u64,
     args: *const u64,
     arg_count: u32,
@@ -313,9 +344,10 @@ pub type ClosureCallFn = extern "C" fn(
     ret_count: u32,
 ) -> ClosureCallResult;
 
-// ==================== Auto-registration via linkme ====================
+// ==================== Auto-registration via linkme (std only) ====================
 
 /// Entry for auto-registered extern functions.
+#[cfg(feature = "std")]
 pub struct ExternEntry {
     /// Function name in format "pkg_FuncName" (e.g., "fmt_Println").
     pub name: &'static str,
@@ -324,6 +356,7 @@ pub struct ExternEntry {
 }
 
 /// Entry for auto-registered extern functions with full context.
+#[cfg(feature = "std")]
 pub struct ExternEntryWithContext {
     /// Function name in format "pkg_FuncName" (e.g., "fmt_Sprint").
     pub name: &'static str,
@@ -332,14 +365,17 @@ pub struct ExternEntryWithContext {
 }
 
 /// Distributed slice for auto-registered extern functions.
+#[cfg(feature = "std")]
 #[distributed_slice]
 pub static EXTERN_TABLE: [ExternEntry] = [..];
 
 /// Distributed slice for auto-registered extern functions with full context.
+#[cfg(feature = "std")]
 #[distributed_slice]
 pub static EXTERN_TABLE_WITH_CONTEXT: [ExternEntryWithContext] = [..];
 
 /// Lookup an extern function by name.
+#[cfg(feature = "std")]
 pub fn lookup_extern(name: &str) -> Option<ExternFn> {
     for entry in EXTERN_TABLE {
         if entry.name == name {
@@ -350,6 +386,7 @@ pub fn lookup_extern(name: &str) -> Option<ExternFn> {
 }
 
 /// Lookup an extern function with full context by name.
+#[cfg(feature = "std")]
 pub fn lookup_extern_with_context(name: &str) -> Option<ExternFnWithContext> {
     for entry in EXTERN_TABLE_WITH_CONTEXT {
         if entry.name == name {
@@ -502,9 +539,9 @@ pub struct ExternCallContext<'a> {
     /// Module reference for deep comparison operations.
     module: &'a Module,
     /// Opaque pointer to VM instance (for closure calls).
-    vm: *mut std::ffi::c_void,
+    vm: *mut core::ffi::c_void,
     /// Opaque pointer to current Fiber (for closure calls).
-    fiber: *mut std::ffi::c_void,
+    fiber: *mut core::ffi::c_void,
     /// Callback to execute closures.
     call_closure_fn: Option<ClosureCallFn>,
     /// Program arguments (set by launcher).
@@ -529,8 +566,8 @@ impl<'a> ExternCallContext<'a> {
         itab_cache: &'a mut ItabCache,
         func_defs: &'a [vo_common_core::bytecode::FunctionDef],
         module: &'a Module,
-        vm: *mut std::ffi::c_void,
-        fiber: *mut std::ffi::c_void,
+        vm: *mut core::ffi::c_void,
+        fiber: *mut core::ffi::c_void,
         call_closure_fn: Option<ClosureCallFn>,
         program_args: &'a [String],
     ) -> Self {
@@ -1286,13 +1323,13 @@ impl<'a> ExternCallContext<'a> {
 
     /// Get the VM pointer for direct closure calls.
     #[inline]
-    pub fn vm_ptr(&self) -> *mut std::ffi::c_void {
+    pub fn vm_ptr(&self) -> *mut core::ffi::c_void {
         self.vm
     }
 
     /// Get the fiber pointer for direct closure calls.
     #[inline]
-    pub fn fiber_ptr(&self) -> *mut std::ffi::c_void {
+    pub fn fiber_ptr(&self) -> *mut core::ffi::c_void {
         self.fiber
     }
 
@@ -1327,6 +1364,7 @@ impl ExternRegistry {
     ///
     /// This resolves extern function names from the module's extern defs
     /// and registers them by ID.
+    #[cfg(feature = "std")]
     pub fn register_from_extension_loader(
         &mut self,
         loader: &crate::ext_loader::ExtensionLoader,
@@ -1395,8 +1433,8 @@ impl ExternRegistry {
         itab_cache: &mut ItabCache,
         func_defs: &[vo_common_core::bytecode::FunctionDef],
         module: &Module,
-        vm: *mut std::ffi::c_void,
-        fiber: *mut std::ffi::c_void,
+        vm: *mut core::ffi::c_void,
+        fiber: *mut core::ffi::c_void,
         call_closure_fn: Option<ClosureCallFn>,
         program_args: &[String],
     ) -> ExternResult {

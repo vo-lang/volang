@@ -1,6 +1,8 @@
 //! Select instructions: SelectBegin, SelectSend, SelectRecv, SelectExec
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;

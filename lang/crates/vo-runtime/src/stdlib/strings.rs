@@ -7,6 +7,11 @@
 //! - Replace: Complex string manipulation
 //! - EqualFold: Unicode case folding
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use vo_ffi_macro::vo_extern_std;
 
 // ==================== Search ====================
@@ -150,3 +155,10 @@ fn equal_fold(s: &str, t: &str) -> bool {
     // Unicode case-insensitive comparison
     s.to_lowercase() == t.to_lowercase()
 }
+
+crate::stdlib_register!(strings:
+    Index, LastIndex, Count, EqualFold,
+    ToLower, ToUpper, ToTitle,
+    Split, SplitN, SplitAfter, SplitAfterN,
+    Fields, Replace,
+);

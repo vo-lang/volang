@@ -213,3 +213,18 @@ fn inf(sign: i64) -> f64 {
 fn nan() -> f64 {
     f64::NAN
 }
+
+// Register all math extern functions using the stdlib_register! macro.
+// The macro automatically handles ExternFn vs ExternFnWithContext based on __STDLIB_* consts.
+crate::stdlib_register!(math:
+    Floor, Ceil, Round, Trunc,
+    Sqrt, Cbrt, Pow, Hypot,
+    Exp, Exp2, Expm1,
+    Log, Log2, Log10, Log1p,
+    Sin, Cos, Tan,
+    Asin, Acos, Atan, Atan2,
+    Sinh, Cosh, Tanh,
+    Asinh, Acosh, Atanh,
+    Mod, Modf, Frexp, Ldexp,
+    FMA, Inf, NaN,
+);

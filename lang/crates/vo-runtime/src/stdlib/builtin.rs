@@ -5,10 +5,18 @@
 //!
 //! print/println receive (value, value_kind) pairs and format based on kind.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::format;
+
+#[cfg(feature = "std")]
 use linkme::distributed_slice;
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallContext, ExternEntryWithContext, ExternResult, EXTERN_TABLE_WITH_CONTEXT};
+use crate::ffi::{ExternCallContext, ExternResult};
+#[cfg(feature = "std")]
+use crate::ffi::{ExternEntryWithContext, EXTERN_TABLE_WITH_CONTEXT};
 use crate::objects::string;
 
 /// Format a single (value, value_kind) pair to string.
@@ -72,14 +80,30 @@ fn format_args(call: &ExternCallContext, start_slot: u16) -> String {
 }
 
 /// vo_print - print values without newline (Go builtin print semantics)
+#[cfg(feature = "std")]
 fn builtin_print(call: &mut ExternCallContext) -> ExternResult {
     print!("{}", format_args(call, 0));
     ExternResult::Ok
 }
 
+/// vo_print - no_std version (no-op, just consume args)
+#[cfg(not(feature = "std"))]
+fn builtin_print(_call: &mut ExternCallContext) -> ExternResult {
+    // In no_std mode, print is a no-op
+    ExternResult::Ok
+}
+
 /// vo_println - print values with newline (Go builtin println semantics)
+#[cfg(feature = "std")]
 fn builtin_println(call: &mut ExternCallContext) -> ExternResult {
     println!("{}", format_args(call, 0));
+    ExternResult::Ok
+}
+
+/// vo_println - no_std version (no-op)
+#[cfg(not(feature = "std"))]
+fn builtin_println(_call: &mut ExternCallContext) -> ExternResult {
+    // In no_std mode, println is a no-op
     ExternResult::Ok
 }
 
@@ -99,19 +123,22 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-// Register builtins via linkme
+// Register builtins via linkme (std only)
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_PRINT: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_print",
     func: builtin_print,
 };
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_PRINTLN: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_println",
     func: builtin_println,
 };
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_ASSERT: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_assert",
@@ -161,6 +188,7 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_COPY: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_copy",
@@ -241,6 +269,7 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_SLICE_APPEND_SLICE: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_slice_append_slice",
@@ -315,6 +344,7 @@ fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_BUILTIN_IFACE_EQ: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_iface_eq",
@@ -336,6 +366,7 @@ fn conv_int_str(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_CONV_INT_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_int_str",
@@ -350,6 +381,7 @@ fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_CONV_BYTES_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_bytes_str",
@@ -364,6 +396,7 @@ fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_CONV_STR_BYTES: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_str_bytes",
@@ -378,6 +411,7 @@ fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_CONV_RUNES_STR: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_runes_str",
@@ -392,6 +426,7 @@ fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_CONV_STR_RUNES: ExternEntryWithContext = ExternEntryWithContext {
     name: "vo_conv_str_runes",
@@ -418,8 +453,40 @@ fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Panic(msg)
 }
 
+#[cfg(feature = "std")]
 #[distributed_slice(EXTERN_TABLE_WITH_CONTEXT)]
 static __VO_PANIC_WITH_ERROR: ExternEntryWithContext = ExternEntryWithContext {
     name: "panic_with_error",
     func: panic_with_error,
 };
+
+/// Register builtin extern functions (for no_std mode).
+/// Builtin functions are defined directly with ExternFnWithContext signature.
+pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
+    use crate::ffi::ExternFnWithContext;
+    
+    // Builtin functions already have ExternFnWithContext signature - use directly
+    const TABLE: &[(&str, ExternFnWithContext)] = &[
+        ("vo_print", builtin_print),
+        ("vo_println", builtin_println),
+        ("vo_assert", builtin_assert),
+        ("vo_copy", builtin_copy),
+        ("vo_slice_append_slice", builtin_slice_append_slice),
+        ("vo_iface_eq", builtin_iface_eq),
+        ("vo_conv_int_str", conv_int_str),
+        ("vo_conv_bytes_str", conv_bytes_str),
+        ("vo_conv_str_bytes", conv_str_bytes),
+        ("vo_conv_runes_str", conv_runes_str),
+        ("vo_conv_str_runes", conv_str_runes),
+        ("panic_with_error", panic_with_error),
+    ];
+    
+    for (id, def) in externs.iter().enumerate() {
+        for (name, func) in TABLE {
+            if def.name == *name {
+                registry.register_with_context(id as u32, *func);
+                break;
+            }
+        }
+    }
+}

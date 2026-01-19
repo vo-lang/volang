@@ -1,7 +1,13 @@
 //! Virtual machine main structure.
 
 #[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::format;
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{array, string};
@@ -123,11 +129,20 @@ impl Vm {
         self.state.program_args = args;
     }
 
+    #[cfg(feature = "std")]
     pub fn load(&mut self, module: Module) {
         self.load_with_extensions(module, None);
     }
+    
+    #[cfg(not(feature = "std"))]
+    pub fn load(&mut self, module: Module) {
+        // In no_std mode, register extern functions via static tables
+        vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
+        self.finish_load(module);
+    }
 
     /// Load a module with optional extension loader for native extensions.
+    #[cfg(feature = "std")]
     pub fn load_with_extensions(
         &mut self,
         module: Module,
@@ -147,6 +162,11 @@ impl Vm {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
         }
         
+        self.finish_load(module);
+    }
+    
+    /// Finish loading a module (shared by load and load_with_extensions).
+    fn finish_load(&mut self, module: Module) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
         self.state.globals = vec![0u64; total_global_slots];
         // Initialize itab_cache from module's compile-time itabs
@@ -745,8 +765,8 @@ impl Vm {
                 Opcode::CallExtern => {
                     let mut extern_panic_msg: Option<String> = None;
                     // Get pointers for closure calling capability
-                    let vm_ptr = self as *mut Vm as *mut std::ffi::c_void;
-                    let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut std::ffi::c_void;
+                    let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
+                    let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = Some(closure_call_trampoline);
                     let result = exec::exec_call_extern(
                         stack,
@@ -1449,8 +1469,8 @@ impl Default for Vm {
 /// Trampoline for calling closures from extern functions.
 /// This allows extern functions like dyn_call_closure to execute closures.
 pub extern "C" fn closure_call_trampoline(
-    vm: *mut std::ffi::c_void,
-    _caller_fiber: *mut std::ffi::c_void,
+    vm: *mut core::ffi::c_void,
+    _caller_fiber: *mut core::ffi::c_void,
     closure_ref: u64,
     args: *const u64,
     arg_count: u32,
@@ -1461,6 +1481,8 @@ pub extern "C" fn closure_call_trampoline(
     use vo_runtime::objects::closure;
     use helpers::build_closure_args;
     
+    // In std mode, catch panics to prevent unwinding across FFI boundary
+    #[cfg(feature = "std")]
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let vm = unsafe { &mut *(vm as *mut Vm) };
         let closure_gcref = closure_ref as GcRef;
@@ -1473,8 +1495,27 @@ pub extern "C" fn closure_call_trampoline(
         vm.execute_closure_sync(func_id, &full_args, ret, ret_count)
     }));
     
-    match result {
+    #[cfg(feature = "std")]
+    return match result {
         Ok(true) => vo_runtime::ffi::ClosureCallResult::Ok,
         _ => vo_runtime::ffi::ClosureCallResult::Panic,
+    };
+    
+    // In no_std mode, no panic catching (panics will abort)
+    #[cfg(not(feature = "std"))]
+    {
+        let vm = unsafe { &mut *(vm as *mut Vm) };
+        let closure_gcref = closure_ref as GcRef;
+        let func_id = closure::func_id(closure_gcref);
+        
+        let module = vm.module().expect("closure_call_trampoline: module not set");
+        let func_def = &module.functions[func_id as usize];
+        let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
+        
+        if vm.execute_closure_sync(func_id, &full_args, ret, ret_count) {
+            vo_runtime::ffi::ClosureCallResult::Ok
+        } else {
+            vo_runtime::ffi::ClosureCallResult::Panic
+        }
     }
 }

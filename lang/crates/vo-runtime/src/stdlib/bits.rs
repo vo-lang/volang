@@ -185,3 +185,13 @@ fn div64(hi: u64, lo: u64, y: u64) -> (u64, u64) {
     let divisor = y as u128;
     ((dividend / divisor) as u64, (dividend % divisor) as u64)
 }
+
+crate::stdlib_register!(math_bits:
+    LeadingZeros, LeadingZeros8, LeadingZeros16, LeadingZeros32, LeadingZeros64,
+    TrailingZeros, TrailingZeros8, TrailingZeros16, TrailingZeros32, TrailingZeros64,
+    OnesCount, OnesCount8, OnesCount16, OnesCount32, OnesCount64,
+    Add, Add32, Add64,
+    Sub, Sub32, Sub64,
+    Mul, Mul32, Mul64,
+    Div, Div32, Div64,
+);

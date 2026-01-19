@@ -779,3 +779,16 @@ tests:
   - file: bug_labeled_break_defer.vo
 
   - file: interface_nil_semantics.vo
+
+# ============================================================
+# no_std mode skips - std-only modules
+# ============================================================
+  - file: os_simple_test.vo
+    skip: [nostd]
+    reason: "os module requires std"
+  - file: os_test.vo
+    skip: [nostd]
+    reason: "os module requires std"
+  - file: stdlib/regexp.vo
+    skip: [nostd]
+    reason: "regexp module requires std"

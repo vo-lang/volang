@@ -3,6 +3,11 @@
 //! Native functions for float parsing/formatting (requires complex algorithms).
 //! Integer parsing/formatting and quote/unquote are implemented in Vo.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::format;
+
 use vo_ffi_macro::vo_extern_std;
 
 // ==================== Float parsing ====================
@@ -85,3 +90,5 @@ fn format_float(f: f64, fmt: u8, prec: i64, bit_size: i64) -> String {
         _ => format!("{}", f),
     }
 }
+
+crate::stdlib_register!(strconv: ParseFloat, FormatFloat);

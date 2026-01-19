@@ -6,6 +6,9 @@
 //! - Split/Fields: Memory allocation optimization
 //! - Replace: Complex byte manipulation
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use vo_ffi_macro::vo_extern_std;
 
 // ==================== Search ====================
@@ -91,3 +94,5 @@ fn replace(s: &[u8], old: &[u8], new: &[u8], n: i64) -> Vec<u8> {
     }
     result
 }
+
+crate::stdlib_register!(bytes: Index, LastIndex, Count, ToLower, ToUpper, Replace);

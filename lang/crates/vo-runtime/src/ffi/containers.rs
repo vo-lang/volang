@@ -3,7 +3,12 @@
 //! This module provides ergonomic APIs for working with Vo container types
 //! (slice, map, array, string, bytes) from Rust.
 
-use std::marker::PhantomData;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use core::marker::PhantomData;
 use crate::gc::GcRef;
 use crate::objects::{slice, map, string};
 use super::ExternCallContext;

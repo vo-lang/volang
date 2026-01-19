@@ -3,7 +3,7 @@
 Vo Development Tool - Unified test/bench/loc script
 
 Usage:
-    ./d.py test [vm|jit|gc] [-v] [file.vo]
+    ./d.py test [vm|jit|gc|nostd] [-v] [file.vo]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
 """
@@ -238,6 +238,11 @@ def get_vo_bin(release: bool = False, arch: str = '64') -> Path:
         return PROJECT_ROOT / 'target' / TARGET_32 / profile / 'vo'
     return PROJECT_ROOT / 'target' / profile / 'vo'
 
+
+def get_vo_vm_runner_bin() -> Path:
+    """Get the path to vo-vm-runner binary (bytecode runner with no_std deps)."""
+    return PROJECT_ROOT / 'target' / 'debug' / 'vo-vm-runner'
+
 # Legacy paths for backward compatibility
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
 VO_BIN_RELEASE = PROJECT_ROOT / 'target' / 'release' / 'vo'
@@ -280,6 +285,9 @@ class TestRunner:
         self.jit_passed = 0
         self.jit_failed = 0
         self.jit_skipped = 0
+        self.nostd_passed = 0
+        self.nostd_failed = 0
+        self.nostd_skipped = 0
         self.failed_list: list[str] = []
         # CLI cache path (different structure for 32-bit due to extension paths)
         if arch == '32':
@@ -426,12 +434,23 @@ class TestRunner:
         print(f"{Colors.BOLD}Running Vo integration tests...{Colors.NC}\n")
 
         is_gc_mode = (mode == 'gc')
+        is_nostd_mode = (mode == 'nostd')
         run_vm = mode in ('vm', 'both', 'gc')
         # JIT not supported on 32-bit
         run_jit = mode in ('jit', 'both', 'gc') and self.arch != '32'
+        run_nostd = is_nostd_mode
         
         if self.arch == '32' and mode in ('jit', 'both'):
             print(f"{Colors.YELLOW}Note: JIT not supported on 32-bit, running VM tests only{Colors.NC}\n")
+        
+        # Build vo-vm-runner for nostd mode (vo-vm/vo-runtime compiled with no_std)
+        if run_nostd:
+            print(f"{Colors.DIM}Building vo-vm-runner (no_std deps)...{Colors.NC}")
+            build_cmd = ['cargo', 'build', '-q', '-p', 'vo-vm-runner']
+            code, _, stderr = run_cmd(build_cmd)
+            if code != 0:
+                print(f"{Colors.RED}vo-vm-runner build failed:{Colors.NC}\n{stderr}")
+                sys.exit(1)
 
         test_files = sorted(TEST_DIR.rglob('*.vo'))
         for path in test_files:
@@ -473,7 +492,15 @@ class TestRunner:
                 else:
                     self._run_test(rel_file, 'jit', gc_debug)
 
-        if not is_gc_mode:
+            if run_nostd:
+                if self.should_skip(rel_file, 'nostd'):
+                    self.nostd_skipped += 1
+                    if self.verbose:
+                        print(f"  {Colors.YELLOW}⊘{Colors.NC} {rel_file} [nostd skipped]")
+                else:
+                    self._run_nostd_test(rel_file)
+
+        if not is_gc_mode and not is_nostd_mode:
             # Run proj_* directory tests
             for proj_dir in sorted(TEST_DIR.glob('proj_*')):
                 if not proj_dir.is_dir():
@@ -637,22 +664,90 @@ class TestRunner:
         if self.verbose:
             print(output)
 
+    def _run_nostd_test(self, file: str):
+        """Run nostd test: compile with vo-launcher, run with vo-vm-runner (no_std deps)."""
+        path = TEST_DIR / file
+        
+        # Step 1: Compile to bytecode using vo-launcher --compile-only (no --cache)
+        bytecode_path = path.with_suffix('.vob')
+        compile_cmd = [str(self.vo_bin), f'--compile-only={bytecode_path}', str(path)]
+        
+        if self.verbose:
+            print(f"{Colors.DIM}Compiling: {' '.join(compile_cmd)}{Colors.NC}")
+        
+        start_time = time.time()
+        code, stdout, stderr = run_cmd(compile_cmd)
+        
+        if code != 0:
+            elapsed = time.time() - start_time
+            output = stdout + stderr
+            time_color = Colors.DIM
+            self._record_fail('nostd', f"{file} [nostd] [compile failed]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [nostd] {time_color}({elapsed:.2f}s){Colors.NC}")
+            if self.verbose:
+                print(output)
+            return
+        
+        # Step 2: Run bytecode with vo-vm-runner
+        vo_vm_bin = get_vo_vm_runner_bin()
+        run_cmd_list = [str(vo_vm_bin), str(bytecode_path)]
+        
+        if self.verbose:
+            print(f"{Colors.DIM}Running: {' '.join(run_cmd_list)}{Colors.NC}")
+        
+        code, stdout, stderr = run_cmd(run_cmd_list)
+        elapsed = time.time() - start_time
+        output = stdout + stderr
+        
+        # Clean up bytecode file
+        try:
+            bytecode_path.unlink()
+        except:
+            pass
+        
+        has_vo_error = ('[VO:PANIC:' in output or 'Runtime error:' in output)
+        has_rust_panic = 'panicked at' in output
+        has_ok = '[VO:OK]' in output
+        
+        time_color = Colors.YELLOW if elapsed > 1.0 else (Colors.DIM + Colors.YELLOW if elapsed > 0.1 else Colors.DIM)
+        if has_ok and not has_vo_error and not has_rust_panic:
+            self._record_pass('nostd', f"{file} [nostd]")
+            print(f"  {Colors.GREEN}✓{Colors.NC} {file} [nostd] {time_color}({elapsed:.2f}s){Colors.NC}")
+        elif has_rust_panic:
+            panic_line = next((l for l in output.split('\n') if 'panicked at' in l), '')[:60]
+            self._record_fail('nostd', f"{file} [nostd] [RUST PANIC: {panic_line}]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [nostd] {time_color}({elapsed:.2f}s){Colors.NC}")
+        elif has_vo_error:
+            msg = next((l for l in output.split('\n') if '[VO:PANIC:' in l or 'Runtime error:' in l), '')[:60]
+            self._record_fail('nostd', f"{file} [nostd] {msg}")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [nostd] {time_color}({elapsed:.2f}s){Colors.NC}")
+        else:
+            self._record_fail('nostd', f"{file} [nostd] [no [VO:OK] marker]")
+            print(f"  {Colors.RED}✗{Colors.NC} {file} [nostd] {time_color}({elapsed:.2f}s){Colors.NC}")
+        
+        if self.verbose:
+            print(output)
+
     def _record_pass(self, mode: str, msg: str):
         if mode == 'vm':
             self.vm_passed += 1
+        elif mode == 'nostd':
+            self.nostd_passed += 1
         else:
             self.jit_passed += 1
 
     def _record_fail(self, mode: str, msg: str):
         if mode == 'vm':
             self.vm_failed += 1
+        elif mode == 'nostd':
+            self.nostd_failed += 1
         else:
             self.jit_failed += 1
         self.failed_list.append(msg)
 
     def _print_results(self):
-        total_passed = self.vm_passed + self.jit_passed
-        total_failed = self.vm_failed + self.jit_failed
+        total_passed = self.vm_passed + self.jit_passed + self.nostd_passed
+        total_failed = self.vm_failed + self.jit_failed + self.nostd_failed
 
         print()
         if self.failed_list:
@@ -664,8 +759,9 @@ class TestRunner:
         print(f"{Colors.CYAN}╔══════════════════════════════════════════════════════════╗{Colors.NC}")
         print(f"{Colors.CYAN}║{Colors.NC}{Colors.BOLD}                   Vo Test Results                        {Colors.NC}{Colors.CYAN}║{Colors.NC}")
         print(f"{Colors.CYAN}╠══════════════════════════════════════════════════════════╣{Colors.NC}")
-        print(f"{Colors.CYAN}║{Colors.NC}  VM:  {Colors.GREEN}{self.vm_passed:3d} passed{Colors.NC}  {Colors.RED}{self.vm_failed:3d} failed{Colors.NC}  {Colors.YELLOW}{self.vm_skipped:3d} skipped{Colors.NC}                {Colors.CYAN}║{Colors.NC}")
-        print(f"{Colors.CYAN}║{Colors.NC}  JIT: {Colors.GREEN}{self.jit_passed:3d} passed{Colors.NC}  {Colors.RED}{self.jit_failed:3d} failed{Colors.NC}  {Colors.YELLOW}{self.jit_skipped:3d} skipped{Colors.NC}                {Colors.CYAN}║{Colors.NC}")
+        print(f"{Colors.CYAN}║{Colors.NC}  VM:    {Colors.GREEN}{self.vm_passed:3d} passed{Colors.NC}  {Colors.RED}{self.vm_failed:3d} failed{Colors.NC}  {Colors.YELLOW}{self.vm_skipped:3d} skipped{Colors.NC}              {Colors.CYAN}║{Colors.NC}")
+        print(f"{Colors.CYAN}║{Colors.NC}  JIT:   {Colors.GREEN}{self.jit_passed:3d} passed{Colors.NC}  {Colors.RED}{self.jit_failed:3d} failed{Colors.NC}  {Colors.YELLOW}{self.jit_skipped:3d} skipped{Colors.NC}              {Colors.CYAN}║{Colors.NC}")
+        print(f"{Colors.CYAN}║{Colors.NC}  NOSTD: {Colors.GREEN}{self.nostd_passed:3d} passed{Colors.NC}  {Colors.RED}{self.nostd_failed:3d} failed{Colors.NC}  {Colors.YELLOW}{self.nostd_skipped:3d} skipped{Colors.NC}              {Colors.CYAN}║{Colors.NC}")
         print(f"{Colors.CYAN}╠══════════════════════════════════════════════════════════╣{Colors.NC}")
         print(f"{Colors.CYAN}║{Colors.NC}  Total: {Colors.GREEN}{total_passed:3d} passed{Colors.NC}  {Colors.RED}{total_failed:3d} failed{Colors.NC}                           {Colors.CYAN}║{Colors.NC}")
         print(f"{Colors.CYAN}╚══════════════════════════════════════════════════════════╝{Colors.NC}")
@@ -1073,7 +1169,7 @@ def main():
     # test
     test_parser = subparsers.add_parser('test', help='Run integration tests')
     test_parser.add_argument('mode', nargs='?', default='both',
-                             help='vm, jit, gc, or both (default)')
+                             help='vm, jit, gc, nostd, or both (default)')
     test_parser.add_argument('-v', '--verbose', action='store_true',
                              help='Verbose output')
     test_parser.add_argument('file', nargs='?', help='Single test file')

@@ -94,6 +94,32 @@ pub fn vo_extern_std(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Attribute macro for stdlib extern functions that require std.
+///
+/// In std mode: works like `vo_extern_std`.
+/// In no_std mode: generates a panic stub that says "requires std".
+///
+/// Use this for os, regexp, and other std-only modules.
+///
+/// # Example
+///
+/// ```ignore
+/// #[vo_extern_std_only("os", "ReadFile")]
+/// fn read_file(path: &str) -> (Vec<u8>, ErrorSlot) {
+///     // ... std-only implementation
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn vo_extern_std_only(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+    let func = parse_macro_input!(item as ItemFn);
+    
+    match vo_extern_std_only_impl(args, func) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
 /// Attribute macro for builtin functions called directly by runtime.
 ///
 /// Unlike `vo_extern_std`, this macro skips Vo signature validation.
@@ -143,6 +169,30 @@ pub fn vo_extern_ctx(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
     
     match vo_extern_ctx_impl(args, func) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Context-based extern function that requires std.
+///
+/// In std mode: works like `vo_extern_ctx`.
+/// In no_std mode: generates a panic stub.
+///
+/// # Example
+///
+/// ```ignore
+/// #[vo_extern_ctx_std_only("os", "fileRead")]
+/// fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
+///     // ... std-only implementation
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn vo_extern_ctx_std_only(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
+    let func = parse_macro_input!(item as ItemFn);
+    
+    match vo_extern_ctx_std_only_impl(args, func) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -303,36 +353,75 @@ fn vo_extern_ctx_impl(
     // Generate slot constants as inline mod (to be injected into function body)
     let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
     
-    Ok(if is_runtime_core() {
-        quote! {
-            #(#fn_attrs)*
-            #fn_vis #fn_sig {
-                #slot_mod
-                #fn_body
-            }
-
-            #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
-            #[doc(hidden)]
-            static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
-                name: #lookup_name,
-                func: #fn_name,
-            };
+    // vo_extern_ctx is for stdlib context-based functions - no linkme needed (always static)
+    let _ = entry_name; // suppress unused warning
+    
+    // Generate StdlibEntry const
+    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
+    
+    Ok(quote! {
+        #(#fn_attrs)*
+        #fn_vis #fn_sig {
+            #slot_mod
+            #fn_body
         }
-    } else {
-        quote! {
-            #(#fn_attrs)*
-            #fn_vis #fn_sig {
-                #slot_mod
-                #fn_body
-            }
+        
+        #[doc(hidden)]
+        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
+    })
+}
 
-            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-            #[doc(hidden)]
-            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                name: #lookup_name,
-                func: #fn_name,
-            };
+/// Implementation for #[vo_extern_ctx_std_only] - std-only context functions with no_std panic stub.
+fn vo_extern_ctx_std_only_impl(
+    args: Punctuated<Expr, Token![,]>,
+    func: ItemFn,
+) -> syn::Result<TokenStream2> {
+    let (pkg_path, func_name) = parse_extern_args(&args)?;
+    
+    let fn_name = &func.sig.ident;
+    let fn_vis = &func.vis;
+    let fn_sig = &func.sig;
+    let fn_attrs = &func.attrs;
+    let fn_body = &func.block;
+    
+    // Generate names
+    let lookup_name = format!(
+        "{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
+    
+    // Generate slot constants
+    let slot_mod = generate_inline_slot_mod(&pkg_path, &func_name);
+    
+    // Generate panic message for no_std
+    let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
+    
+    Ok(quote! {
+        #[cfg(feature = "std")]
+        #(#fn_attrs)*
+        #fn_vis #fn_sig {
+            #slot_mod
+            #fn_body
         }
+        
+        #[cfg(feature = "std")]
+        #[doc(hidden)]
+        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
+        
+        #[cfg(not(feature = "std"))]
+        #[doc(hidden)]
+        pub fn #fn_name(_call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
+            crate::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
+        }
+        
+        #[cfg(not(feature = "std"))]
+        #[doc(hidden)]
+        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
     })
 }
 
@@ -939,6 +1028,7 @@ fn generate_wrapper(
     // Generate wrapper
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
+    // vo_extern_std is for stdlib, which is always statically linked - no linkme needed
     Ok(generate_extern_entry(
         &wrapper_name,
         &entry_name,
@@ -947,10 +1037,59 @@ fn generate_wrapper(
         &call_expr,
         &ret_writes,
         needs_gc,
+        false, // use_linkme = false for stdlib
     ))
 }
 
+/// Implementation for #[vo_extern_std_only] - std-only functions with no_std panic stub.
+fn vo_extern_std_only_impl(
+    args: Punctuated<Expr, Token![,]>,
+    func: ItemFn,
+) -> syn::Result<TokenStream2> {
+    let (pkg_path, func_name) = parse_extern_args(&args)?;
+    
+    // Generate names
+    let lookup_name = format!(
+        "{}_{}",
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    let wrapper_name = format_ident!("__vo_{}_{}", 
+        pkg_path.replace('/', "_").replace('.', "_"),
+        func_name
+    );
+    let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
+    
+    // Get the full std implementation via generate_wrapper
+    let std_impl = generate_wrapper(&func, &pkg_path, &func_name)?;
+    
+    // Generate no_std panic stub
+    let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
+    
+    Ok(quote! {
+        #[cfg(feature = "std")]
+        #func
+        
+        #[cfg(feature = "std")]
+        #std_impl
+        
+        #[cfg(not(feature = "std"))]
+        #[doc(hidden)]
+        pub fn #wrapper_name(_call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
+            crate::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
+        }
+        
+        #[cfg(not(feature = "std"))]
+        #[doc(hidden)]
+        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
+    })
+}
+
 /// Generate extern entry registration code (shared by generate_wrapper and vo_builtin_impl).
+/// 
+/// - `use_linkme`: if true, generates linkme distributed_slice registration (for vo_extern).
+///   if false, only generates the wrapper function (for vo_extern_std - stdlib is always static).
 fn generate_extern_entry(
     wrapper_name: &syn::Ident,
     entry_name: &syn::Ident,
@@ -959,8 +1098,40 @@ fn generate_extern_entry(
     call_expr: &TokenStream2,
     ret_writes: &TokenStream2,
     needs_gc: bool,
+    use_linkme: bool,
 ) -> TokenStream2 {
     if is_runtime_core() {
+        // Inside vo-runtime crate
+        let linkme_with_ctx: Vec<TokenStream2> = if use_linkme {
+            vec![quote! {
+                #[cfg(feature = "std")]
+                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
+                #[doc(hidden)]
+                static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
+                    name: #lookup_name,
+                    func: #wrapper_name,
+                };
+            }]
+        } else {
+            vec![]
+        };
+        let linkme_no_ctx: Vec<TokenStream2> = if use_linkme {
+            vec![quote! {
+                #[cfg(feature = "std")]
+                #[crate::distributed_slice(crate::EXTERN_TABLE)]
+                #[doc(hidden)]
+                static #entry_name: crate::ffi::ExternEntry = crate::ffi::ExternEntry {
+                    name: #lookup_name,
+                    func: #wrapper_name,
+                };
+            }]
+        } else {
+            vec![]
+        };
+        
+        // Generate StdlibEntry const name from lookup_name (e.g., "math_Floor" -> __STDLIB_math_Floor)
+        let stdlib_entry_name = format_ident!("__STDLIB_{}", lookup_name);
+        
         if needs_gc {
             quote! {
                 #[doc(hidden)]
@@ -970,13 +1141,12 @@ fn generate_extern_entry(
                     #ret_writes
                     crate::ffi::ExternResult::Ok
                 }
-
-                #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
+                
                 #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
-                    name: #lookup_name,
-                    func: #wrapper_name,
-                };
+                pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+                    crate::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
+                
+                #(#linkme_with_ctx)*
             }
         } else {
             quote! {
@@ -987,16 +1157,43 @@ fn generate_extern_entry(
                     #ret_writes
                     crate::ffi::ExternResult::Ok
                 }
-
-                #[crate::distributed_slice(crate::EXTERN_TABLE)]
+                
                 #[doc(hidden)]
-                static #entry_name: crate::ffi::ExternEntry = crate::ffi::ExternEntry {
-                    name: #lookup_name,
-                    func: #wrapper_name,
-                };
+                pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
+                    crate::ffi::StdlibEntry::NoCtx(#lookup_name, #wrapper_name);
+                
+                #(#linkme_no_ctx)*
             }
         }
     } else {
+        // Outside vo-runtime (user code)
+        let linkme_with_ctx: Vec<TokenStream2> = if use_linkme {
+            vec![quote! {
+                #[cfg(feature = "std")]
+                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
+                #[doc(hidden)]
+                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
+                    name: #lookup_name,
+                    func: #wrapper_name,
+                };
+            }]
+        } else {
+            vec![]
+        };
+        let linkme_no_ctx: Vec<TokenStream2> = if use_linkme {
+            vec![quote! {
+                #[cfg(feature = "std")]
+                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
+                #[doc(hidden)]
+                static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
+                    name: #lookup_name,
+                    func: #wrapper_name,
+                };
+            }]
+        } else {
+            vec![]
+        };
+        
         if needs_gc {
             quote! {
                 #[doc(hidden)]
@@ -1006,13 +1203,7 @@ fn generate_extern_entry(
                     #ret_writes
                     vo_runtime::ffi::ExternResult::Ok
                 }
-
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
-                #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
-                    name: #lookup_name,
-                    func: #wrapper_name,
-                };
+                #(#linkme_with_ctx)*
             }
         } else {
             quote! {
@@ -1023,13 +1214,7 @@ fn generate_extern_entry(
                     #ret_writes
                     vo_runtime::ffi::ExternResult::Ok
                 }
-
-                #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
-                #[doc(hidden)]
-                static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
-                    name: #lookup_name,
-                    func: #wrapper_name,
-                };
+                #(#linkme_no_ctx)*
             }
         }
     }
@@ -1081,6 +1266,7 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     let call_expr = quote! { #fn_name(#(#arg_names),*) };
     
+    // vo_builtin is for internal runtime functions - no linkme needed
     let entry = generate_extern_entry(
         &wrapper_name,
         &entry_name,
@@ -1089,6 +1275,7 @@ fn vo_builtin_impl(name: String, func: ItemFn) -> syn::Result<TokenStream2> {
         &call_expr,
         &ret_writes,
         needs_gc,
+        false, // use_linkme = false for builtins
     );
     
     Ok(quote! {

@@ -1,5 +1,8 @@
 //! Stack and memory access helpers.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::{slice, string};
 use vo_runtime::slot::{Slot, slot_to_ptr, slot_to_usize};

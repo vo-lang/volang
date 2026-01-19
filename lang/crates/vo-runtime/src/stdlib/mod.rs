@@ -4,17 +4,19 @@
 //! 
 //! Native functions are implemented using `#[vo_extern_std]` macro which:
 //! - Validates signature against .vo file declaration
-//! - Auto-registers to EXTERN_TABLE via linkme for runtime lookup
+//! - Auto-registers to EXTERN_TABLE via linkme for runtime lookup (std only)
 
+// All stdlib modules are available in no_std mode.
+// Some functions may be disabled or have simpler implementations.
 pub mod error_helper;
-pub mod fmt;
-pub mod builtin;
 pub mod math;
 pub mod bits;
 pub mod bytes;
 pub mod strings;
 pub mod strconv;
 pub mod unicode;
+pub mod fmt;
+pub mod builtin;
 pub mod regexp;
 pub mod dynamic;
 pub mod os;

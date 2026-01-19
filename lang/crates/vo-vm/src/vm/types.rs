@@ -1,5 +1,10 @@
 //! VM types and state definitions.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use vo_runtime::gc::Gc;
 
 use crate::exec::ExternRegistry;

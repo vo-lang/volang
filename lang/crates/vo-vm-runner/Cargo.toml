@@ -1,0 +1,16 @@
+[package]
+name = "vo-vm-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vo bytecode runner for testing no_std VM compatibility"
+
+[[bin]]
+name = "vo-vm-runner"
+path = "src/main.rs"
+
+[dependencies]
+# Dependencies use no_std (default-features = false) to test no_std compatibility
+vo-vm = { path = "../vo-vm", default-features = false }
+vo-runtime = { path = "../vo-runtime", default-features = false }
+vo-common-core = { path = "../vo-common-core" }

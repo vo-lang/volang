@@ -12,7 +12,7 @@ std = ["vo-runtime/std"]
 jit = ["vo-jit"]
 
 [dependencies]
-vo-runtime = { path = "../vo-runtime" }
+vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-common-core = { path = "../vo-common-core" }
 hashbrown = "0.15"
 fastrand = "2.0"

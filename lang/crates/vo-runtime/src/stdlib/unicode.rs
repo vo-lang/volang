@@ -287,3 +287,9 @@ fn unicode_is_symbol(c: char) -> bool {
         '\u{2B00}'..='\u{2BFF}'    // Misc symbols and arrows
     )
 }
+
+crate::stdlib_register!(unicode:
+    IsLetter, IsDigit, IsSpace, IsUpper, IsLower, IsControl,
+    IsPrint, IsPunct, IsGraphic, IsNumber, IsMark, IsSymbol,
+    ToLower, ToUpper, ToTitle, SimpleFold,
+);

@@ -3,6 +3,8 @@
 //! Uses ExternRegistry from vo-runtime-core for extern function dispatch.
 
 #[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::bytecode::ExternDef;
@@ -29,8 +31,8 @@ pub fn exec_call_extern(
     itab_cache: &mut vo_runtime::itab::ItabCache,
     func_defs: &[vo_common_core::bytecode::FunctionDef],
     module: &Module,
-    vm: *mut std::ffi::c_void,
-    fiber: *mut std::ffi::c_void,
+    vm: *mut core::ffi::c_void,
+    fiber: *mut core::ffi::c_void,
     call_closure_fn: Option<vo_runtime::ffi::ClosureCallFn>,
     fiber_panic_msg: &mut Option<String>,
     program_args: &[String],

@@ -1,5 +1,10 @@
 //! Slice instructions: SliceNew, SliceSlice, SliceAppend
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::format;
+
 use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::slice;

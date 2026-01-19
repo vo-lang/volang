@@ -1,7 +1,7 @@
 //! Channel instructions: ChanNew, ChanSend, ChanRecv, ChanClose
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec, format};
 #[cfg(feature = "std")]
 use std::{boxed::Box, vec::Vec};
 
