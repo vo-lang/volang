@@ -1,0 +1,21 @@
+// Test: defer with println - must use closure wrapper
+// Note: defer println(...) directly is not supported, use closure instead
+package main
+
+func main() {
+    println("Start")
+    
+    // Correct syntax: wrap builtin in closure
+    defer func() { println("First defer (runs last)") }()
+    defer func() { println("Second defer") }()
+    defer func() { println("Third defer (runs first)") }()
+    
+    println("End of main")
+}
+
+// Expected output:
+// Start
+// End of main
+// Third defer (runs first)
+// Second defer
+// First defer (runs last)

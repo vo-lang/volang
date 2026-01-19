@@ -5,143 +5,137 @@ export interface Example {
 
 export const examples: Example[] = [
   {
-    name: 'Hello World',
+    name: 'Error Handling',
     code: `package main
 
-func main() {
-    println("Hello, Vo!")
-}
-`,
-  },
-  {
-    name: 'Variables',
-    code: `package main
+import "errors"
+
+// Vo's elegant error handling: ? operator and fail statement
 
 func main() {
-    // Type inference
-    x := 42
-    name := "Vo"
-    pi := 3.14159
-    
-    println("x =", x)
-    println("name =", name)
-    println("pi =", pi)
-    
-    // Explicit types
-    var count int = 100
-    var active bool = true
-    
-    println("count =", count)
-    println("active =", active)
-}
-`,
-  },
-  {
-    name: 'Functions',
-    code: `package main
-
-func add(a, b int) int {
-    return a + b
-}
-
-func swap(a, b int) (int, int) {
-    return b, a
-}
-
-func main() {
-    sum := add(3, 5)
-    println("3 + 5 =", sum)
-    
-    x, y := swap(10, 20)
-    println("swapped:", x, y)
-}
-`,
-  },
-  {
-    name: 'Loops',
-    code: `package main
-
-func main() {
-    // Classic for loop
-    for i := 0; i < 5; i++ {
-        println("i =", i)
+    result, err := process(10)
+    if err != nil {
+        println("Error:", err)
+    } else {
+        println("Result:", result)
     }
-    
-    // While-style loop
-    n := 1
-    for n < 100 {
-        n *= 2
-    }
-    println("n =", n)
-    
-    // Range over slice
-    nums := []int{10, 20, 30}
-    for i, v := range nums {
-        println("nums[", i, "] =", v)
+
+    _, err = process(-5)
+    if err != nil {
+        println("Caught:", err)
     }
 }
-`,
-  },
-  {
-    name: 'Structs',
-    code: `package main
 
-type Point struct {
-    X, Y int
+func process(n int) (int, error) {
+    validate(n)?  // ? auto-propagates error
+    return n * 2, nil
 }
 
-func (p Point) String() string {
-    return "Point"
-}
-
-func (p *Point) Move(dx, dy int) {
-    p.X += dx
-    p.Y += dy
-}
-
-func main() {
-    p := Point{X: 10, Y: 20}
-    println("Initial:", p.X, p.Y)
-    
-    p.Move(5, -3)
-    println("After move:", p.X, p.Y)
+func validate(n int) error {
+    if n < 0 {
+        fail errors.New("negative not allowed")  // concise error return
+    }
+    return nil
 }
 `,
   },
   {
-    name: 'Interfaces',
+    name: 'Goroutines',
     code: `package main
 
-type Speaker interface {
-    Speak() string
-}
-
-type Dog struct {
-    Name string
-}
-
-func (d Dog) Speak() string {
-    return "Woof!"
-}
-
-type Cat struct {
-    Name string
-}
-
-func (c Cat) Speak() string {
-    return "Meow!"
-}
-
-func greet(s Speaker) {
-    println(s.Speak())
-}
+// Concurrent computation with goroutines and channels
 
 func main() {
-    dog := Dog{Name: "Buddy"}
-    cat := Cat{Name: "Whiskers"}
+    ch := make(chan int, 3)
     
-    greet(dog)
-    greet(cat)
+    // Launch concurrent workers
+    go square(ch, 3)
+    go square(ch, 4)
+    go square(ch, 5)
+    
+    // Collect results
+    sum := 0
+    for i := 0; i < 3; i++ {
+        sum += <-ch
+    }
+    println("3² + 4² + 5² =", sum)  // 50
+}
+
+func square(ch chan int, n int) {
+    ch <- n * n
+}
+`,
+  },
+  {
+    name: 'Errdefer',
+    code: `package main
+
+import "errors"
+
+// errdefer: cleanup only on error, not on success
+
+func main() {
+    err := openAndProcess(true)
+    if err != nil {
+        println("Failed:", err)
+    }
+    
+    println("")
+    
+    err = openAndProcess(false)
+    if err != nil {
+        println("Failed:", err)
+    }
+}
+
+func openAndProcess(shouldFail bool) error {
+    println("Opening resource...")
+    
+    // errdefer runs ONLY if function returns error
+    errdefer println("Cleanup: rolling back!")
+    
+    // defer always runs
+    defer println("Always: closing resource")
+    
+    if shouldFail {
+        fail errors.New("processing failed")
+    }
+    
+    println("Processing succeeded")
+    return nil
+}
+`,
+  },
+  {
+    name: 'Channels',
+    code: `package main
+
+// Channel communication patterns
+
+func main() {
+    // Buffered channel
+    jobs := make(chan int, 5)
+    done := make(chan bool)
+    
+    // Producer
+    go func() {
+        for i := 1; i <= 5; i++ {
+            jobs <- i
+            println("Sent job", i)
+        }
+        close(jobs)
+    }()
+    
+    // Consumer
+    go func() {
+        for job := range jobs {
+            println("Processing job", job)
+        }
+        done <- true
+    }()
+    
+    <-done
+    println("All done!")
 }
 `,
   },
@@ -149,42 +143,108 @@ func main() {
     name: 'Closures',
     code: `package main
 
-func counter() func() int {
-    count := 0
+// Closures capture variables by reference
+
+func main() {
+    counter := makeCounter(10)
+    
+    println(counter())  // 11
+    println(counter())  // 12
+    println(counter())  // 13
+    
+    // Each closure has its own state
+    another := makeCounter(100)
+    println(another())  // 101
+    println(counter())  // 14
+}
+
+func makeCounter(start int) func() int {
+    count := start
     return func() int {
         count++
         return count
     }
 }
+`,
+  },
+  {
+    name: 'Interfaces',
+    code: `package main
+
+// Duck typing with interfaces
+
+type Writer interface {
+    Write(data string)
+}
+
+type Console struct{}
+
+func (c Console) Write(data string) {
+    println("[Console]", data)
+}
+
+type Logger struct {
+    prefix string
+}
+
+func (l Logger) Write(data string) {
+    println(l.prefix, data)
+}
+
+func output(w Writer, msg string) {
+    w.Write(msg)
+}
 
 func main() {
-    c := counter()
+    console := Console{}
+    logger := Logger{prefix: "[LOG]"}
     
-    println(c())  // 1
-    println(c())  // 2
-    println(c())  // 3
-    
-    c2 := counter()
-    println(c2()) // 1 (new counter)
+    output(console, "Hello from console")
+    output(logger, "Hello from logger")
 }
 `,
   },
   {
-    name: 'Fibonacci',
+    name: 'Select',
     code: `package main
 
-func fib(n int) int {
-    if n <= 1 {
-        return n
-    }
-    return fib(n-1) + fib(n-2)
-}
+// Select for multiplexing channels
 
 func main() {
-    for i := 0; i <= 10; i++ {
-        println("fib(", i, ") =", fib(i))
+    ch1 := make(chan string)
+    ch2 := make(chan string)
+    
+    go func() { ch1 <- "from ch1" }()
+    go func() { ch2 <- "from ch2" }()
+    
+    for i := 0; i < 2; i++ {
+        select {
+        case msg := <-ch1:
+            println("Received:", msg)
+        case msg := <-ch2:
+            println("Received:", msg)
+        }
     }
+    println("Done")
+}
+`,
+  },
+  {
+    name: 'Defer',
+    code: `package main
+
+// Defer executes in LIFO order at function exit
+
+func main() {
+    println("Start")
+    
+    defer func() { println("First defer (runs last)") }()
+    defer func() { println("Second defer") }()
+    defer func() { println("Third defer (runs first)") }()
+    
+    println("End of main")
 }
 `,
   },
 ];
+

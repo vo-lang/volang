@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import * as monaco from 'monaco-editor';
   import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+  import { theme } from '../lib/theme';
 
   let { value = $bindable('') }: { value: string } = $props();
 
@@ -17,6 +18,9 @@
 
   // Register Vo language (Go-like syntax)
   function registerVoLanguage() {
+    // ... (keep existing registration code)
+    if (monaco.languages.getLanguages().some(l => l.id === 'vo')) return;
+    
     monaco.languages.register({ id: 'vo' });
 
     monaco.languages.setMonarchTokensProvider('vo', {
@@ -121,15 +125,20 @@
     editor = monaco.editor.create(container, {
       value,
       language: 'vo',
-      theme: 'vs-dark',
+      theme: $theme === 'dark' ? 'vs-dark' : 'vs',
       fontSize: 14,
-      lineHeight: 22,
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      lineHeight: 24,
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
       automaticLayout: true,
       tabSize: 4,
       insertSpaces: true,
       padding: { top: 16 },
+      renderLineHighlight: 'all',
+      smoothScrolling: true,
+      cursorBlinking: 'smooth',
+      cursorSmoothCaretAnimation: 'on',
     });
 
     editor.onDidChangeModelContent(() => {
@@ -139,6 +148,12 @@
     return () => {
       editor.dispose();
     };
+  });
+
+  $effect(() => {
+    if (editor) {
+      monaco.editor.setTheme($theme === 'dark' ? 'vs-dark' : 'vs');
+    }
   });
 
   $effect(() => {
