@@ -9,30 +9,32 @@ description = "WebAssembly bindings for Vo VM - run Vo in browsers"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["std", "compiler"]
-# Standard library support (enables source compilation)
-std = [
+default = ["compiler"]
+# Enable Vo source code compilation (full compiler chain)
+compiler = [
     "vo-common",
     "vo-syntax",
     "vo-analysis",
     "vo-codegen",
+    "vo-module",
     "console_error_panic_hook",
     "web-sys",
+    "include_dir",
 ]
-# Enable Vo source code compilation (requires std)
-compiler = ["std"]
-# Minimal: only bytecode execution, no_std compatible
+# Minimal: only bytecode execution
 # Use: cargo build --no-default-features
 
 [dependencies]
-# Core VM (always required, no_std compatible)
-vo-vm = { path = "../vo-vm" }
+# Core VM (always required, no std for WASM)
+vo-vm = { path = "../vo-vm", default-features = false }
+vo-runtime = { path = "../vo-runtime", default-features = false }
 
-# Optional: std-only dependencies
-vo-common = { path = "../vo-common", optional = true }
+# Optional: compiler chain dependencies
+vo-common = { path = "../vo-common", default-features = false, optional = true }
 vo-syntax = { path = "../vo-syntax", optional = true }
 vo-analysis = { path = "../vo-analysis", optional = true }
 vo-codegen = { path = "../vo-codegen", optional = true }
+vo-module = { path = "../vo-module", optional = true }
 
 # WASM bindings
 wasm-bindgen = "0.2"
@@ -40,6 +42,7 @@ js-sys = "0.3"
 
 # Optional std dependencies
 console_error_panic_hook = { version = "0.1", optional = true }
+include_dir = { version = "0.7", optional = true }
 
 [dependencies.web-sys]
 version = "0.3"

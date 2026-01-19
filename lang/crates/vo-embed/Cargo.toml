@@ -1,12 +1,12 @@
 [package]
-name = "vo-vm-runner"
+name = "vo-embed"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vo bytecode runner for testing no_std VM compatibility"
+description = "Vo runtime for embedded/no_std targets - runs pre-compiled bytecode"
 
 [[bin]]
-name = "vo-vm-runner"
+name = "vo-embed"
 path = "src/main.rs"
 
 [dependencies]

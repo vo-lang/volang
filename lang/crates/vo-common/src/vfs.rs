@@ -1,7 +1,9 @@
 //! Virtual file system abstraction.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Seek};
+use std::io::{self};
+#[cfg(feature = "zip")]
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use vo_common_core::SourceProvider;
@@ -201,6 +203,7 @@ impl SourceProvider for MemoryFs {
 /// 
 /// All files are loaded into memory on creation. Paths are relative to `root`.
 /// Both `FileSystem` and `SourceProvider` traits use the same path resolution.
+#[cfg(feature = "zip")]
 #[derive(Debug, Clone)]
 pub struct ZipFs {
     /// All files in the zip: path relative to zip root -> content
@@ -209,6 +212,7 @@ pub struct ZipFs {
     root: PathBuf,
 }
 
+#[cfg(feature = "zip")]
 impl ZipFs {
     /// Create a ZipFs from a zip file path, using zip root as project root.
     pub fn from_path(path: &Path) -> io::Result<Self> {
@@ -270,6 +274,7 @@ impl ZipFs {
     }
 }
 
+#[cfg(feature = "zip")]
 impl FileSystem for ZipFs {
     fn read_file(&self, path: &Path) -> io::Result<String> {
         let full_path = self.resolve(path);
@@ -353,6 +358,7 @@ impl FileSystem for ZipFs {
     }
 }
 
+#[cfg(feature = "zip")]
 impl SourceProvider for ZipFs {
     fn read_source(&self, path: &str) -> Option<String> {
         let full_path = self.resolve(Path::new(path));
@@ -519,6 +525,7 @@ mod tests {
     }
     
     #[test]
+    #[cfg(feature = "zip")]
     fn test_zip_fs_read_dir() {
         // Create a simple in-memory zip for testing
         let mut zip_buffer = std::io::Cursor::new(Vec::new());

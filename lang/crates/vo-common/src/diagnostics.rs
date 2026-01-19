@@ -14,15 +14,20 @@ use codespan_reporting::diagnostic::{
     Diagnostic as CSDiagnostic, Label as CSLabel, LabelStyle, Severity as CSSeverity,
 };
 use codespan_reporting::files::SimpleFiles;
+#[cfg(feature = "terminal")]
 use codespan_reporting::term::{
     self,
     termcolor::{ColorChoice, StandardStream, WriteColor},
     Config,
 };
+#[cfg(not(feature = "terminal"))]
+use codespan_reporting::term::Config;
 
 use crate::source::SourceMap;
 use crate::span::Span;
-use vo_common_core::{SourceLoc, SourceProvider};
+#[cfg(feature = "terminal")]
+use vo_common_core::SourceProvider;
+use vo_common_core::SourceLoc;
 
 /// Severity level of a diagnostic.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -354,6 +359,7 @@ impl fmt::Debug for DiagnosticSink {
 /// A diagnostic emitter that renders diagnostics to output.
 pub struct DiagnosticEmitter<'a> {
     source_map: &'a SourceMap,
+    #[allow(dead_code)]
     config: Config,
 }
 
@@ -372,12 +378,14 @@ impl<'a> DiagnosticEmitter<'a> {
     }
 
     /// Emits a diagnostic to stderr with colors.
+    #[cfg(feature = "terminal")]
     pub fn emit(&self, diagnostic: &Diagnostic) {
         let writer = StandardStream::stderr(ColorChoice::Auto);
         self.emit_to(&mut writer.lock(), diagnostic);
     }
 
     /// Emits a diagnostic to a writer.
+    #[cfg(feature = "terminal")]
     pub fn emit_to<W: WriteColor>(&self, writer: &mut W, diagnostic: &Diagnostic) {
         let files = self.build_files();
         let cs_diagnostic = self.to_codespan(diagnostic);
@@ -385,14 +393,22 @@ impl<'a> DiagnosticEmitter<'a> {
         let _ = term::emit(writer, &self.config, &files, &cs_diagnostic);
     }
 
-    /// Emits a diagnostic to a string.
+    /// Emits a diagnostic to a string (with formatting but no colors).
+    #[cfg(feature = "terminal")]
     pub fn emit_to_string(&self, diagnostic: &Diagnostic) -> String {
         let mut buffer = termcolor::Buffer::no_color();
         self.emit_to(&mut buffer, diagnostic);
         String::from_utf8_lossy(buffer.as_slice()).into_owned()
     }
 
+    /// Emits a diagnostic to a string (simple format, no terminal features).
+    #[cfg(not(feature = "terminal"))]
+    pub fn emit_to_string(&self, diagnostic: &Diagnostic) -> String {
+        self.format_simple(diagnostic)
+    }
+
     /// Emits all diagnostics from a sink.
+    #[cfg(feature = "terminal")]
     pub fn emit_all(&self, sink: &DiagnosticSink) {
         for diagnostic in sink.iter() {
             self.emit(diagnostic);
@@ -404,6 +420,7 @@ impl<'a> DiagnosticEmitter<'a> {
         let mut output = String::new();
         for diagnostic in sink.iter() {
             output.push_str(&self.emit_to_string(diagnostic));
+            output.push('\n');
         }
         output
     }
@@ -429,6 +446,7 @@ impl<'a> DiagnosticEmitter<'a> {
     }
 
     /// Builds a SimpleFiles structure for codespan-reporting.
+    #[allow(dead_code)]
     fn build_files(&self) -> SimpleFiles<&str, &str> {
         let mut files = SimpleFiles::new();
         for file in self.source_map.files() {
@@ -438,6 +456,7 @@ impl<'a> DiagnosticEmitter<'a> {
     }
 
     /// Converts our diagnostic to codespan-reporting format.
+    #[allow(dead_code)]
     fn to_codespan(&self, diagnostic: &Diagnostic) -> CSDiagnostic<usize> {
         let mut cs_diagnostic = CSDiagnostic::new(diagnostic.severity.into())
             .with_message(&diagnostic.message);
@@ -510,6 +529,7 @@ impl<T, E> DiagnosticResultExt<T> for Result<T, E> {
 /// * `severity` - Error severity string ("error" or "panic")
 /// * `message` - Error message
 /// * `source_provider` - Provider for reading source files (can be NoSource for fallback)
+#[cfg(feature = "terminal")]
 pub fn render_error(
     loc: Option<&SourceLoc>,
     severity: &str,
@@ -535,6 +555,7 @@ pub fn render_error(
 }
 
 /// Render an error with source code context (pretty print).
+#[cfg(feature = "terminal")]
 fn render_error_with_source(loc: &SourceLoc, severity: &str, message: &str, source: &str) {
     // Build a temporary SourceMap with just this file
     let mut source_map = SourceMap::new();

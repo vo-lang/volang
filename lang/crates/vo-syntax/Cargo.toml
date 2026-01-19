@@ -6,7 +6,7 @@ license.workspace = true
 description = "Lexer, AST definitions, and parser for the Vo programming language"
 
 [dependencies]
-vo-common = { path = "../vo-common" }
+vo-common = { path = "../vo-common", default-features = false }
 thiserror = "1.0"
 logos = "0.14"
 num-bigint = "0.4"

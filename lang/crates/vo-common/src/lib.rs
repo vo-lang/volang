@@ -16,7 +16,9 @@ pub mod vfs;
 pub use source::{SourceMap, SourceFile, FileId, SourceLoc};
 pub use span::{Span, Spanned, BytePos};
 pub use diagnostics::{Diagnostic, DiagnosticSink, Severity, Label};
-pub use vfs::{FileSystem, RealFs, MemoryFs, ZipFs, OverlayFs, FileSet};
+pub use vfs::{FileSystem, RealFs, MemoryFs, OverlayFs, FileSet};
+#[cfg(feature = "zip")]
+pub use vfs::ZipFs;
 
 // Re-export from vo-common-core for backwards compatibility
 pub use vo_common_core::ValueKind;

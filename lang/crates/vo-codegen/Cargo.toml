@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-vo-common = { path = "../vo-common" }
+vo-common = { path = "../vo-common", default-features = false }
 vo-common-core = { path = "../vo-common-core" }
-vo-runtime = { path = "../vo-runtime" }
+vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-syntax = { path = "../vo-syntax" }
 vo-analysis = { path = "../vo-analysis" }
-vo-vm = { path = "../vo-vm" }
+vo-vm = { path = "../vo-vm", default-features = false }
 
 [dev-dependencies]

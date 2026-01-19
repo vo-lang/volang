@@ -11,7 +11,7 @@ proc-macro = true
 [dependencies]
 vo-module = { path = "../vo-module" }
 vo-syntax = { path = "../vo-syntax" }
-vo-common = { path = "../vo-common" }
+vo-common = { path = "../vo-common", default-features = false }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

@@ -18,7 +18,7 @@ default = ["jit"]
 jit = ["vo-vm/jit"]
 
 [dependencies]
-vo-common = { path = "../vo-common" }
+vo-common = { path = "../vo-common", features = ["zip"] }
 vo-common-core = { path = "../vo-common-core" }
 vo-analysis = { path = "../vo-analysis" }
 vo-codegen = { path = "../vo-codegen" }

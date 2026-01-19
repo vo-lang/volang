@@ -3,9 +3,10 @@
 Vo Development Tool - Unified test/bench/loc script
 
 Usage:
-    ./d.py test [vm|jit|gc|nostd] [-v] [file.vo]
+    ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
+    ./d.py wasm [--release]     Build vo-web for WASM
 """
 
 import argparse
@@ -200,6 +201,34 @@ def clean_caches(target: str = 'all'):
         print("Nothing to clean.")
 
 
+def build_wasm(release: bool = False):
+    """Build vo-web for WASM target."""
+    profile = 'release' if release else 'debug'
+    target = 'wasm32-unknown-unknown'
+    output_dir = PROJECT_ROOT / 'target' / target / profile
+    
+    print(f"{Colors.BOLD}Building vo-web for WASM ({profile})...{Colors.NC}")
+    
+    build_cmd = ['cargo', 'build', '-p', 'vo-web', '--target', target]
+    if release:
+        build_cmd.append('--release')
+    
+    code, stdout, stderr = run_cmd(build_cmd, capture=False)
+    if code != 0:
+        print(f"{Colors.RED}WASM build failed{Colors.NC}")
+        sys.exit(1)
+    
+    wasm_file = output_dir / 'vo_web.wasm'
+    if wasm_file.exists():
+        size_kb = wasm_file.stat().st_size / 1024
+        print(f"\n{Colors.GREEN}✓ Built:{Colors.NC} {wasm_file}")
+        print(f"  Size: {size_kb:.1f} KB")
+        print(f"\n{Colors.DIM}To generate JS bindings, use wasm-pack:{Colors.NC}")
+        print(f"  wasm-pack build lang/crates/vo-web --target web" + (" --release" if release else ""))
+    else:
+        print(f"{Colors.GREEN}✓ Build completed{Colors.NC}")
+
+
 def ensure_vox_extension_built(arch: str = '64', release: bool = False):
     """Build vo-vox extension if needed."""
     profile = 'release' if release else 'debug'
@@ -239,9 +268,9 @@ def get_vo_bin(release: bool = False, arch: str = '64') -> Path:
     return PROJECT_ROOT / 'target' / profile / 'vo'
 
 
-def get_vo_vm_runner_bin() -> Path:
-    """Get the path to vo-vm-runner binary (bytecode runner with no_std deps)."""
-    return PROJECT_ROOT / 'target' / 'debug' / 'vo-vm-runner'
+def get_vo_embed_bin() -> Path:
+    """Get the path to vo-embed binary (bytecode runner with no_std deps)."""
+    return PROJECT_ROOT / 'target' / 'debug' / 'vo-embed'
 
 # Legacy paths for backward compatibility
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
@@ -406,6 +435,11 @@ class TestRunner:
             libs_marker.touch()
 
     def run(self, mode: str, single_file: Optional[str] = None):
+        # Handle WASM tests separately
+        if mode == 'wasm':
+            self._run_wasm_tests()
+            return
+        
         # Invalidate CLI cache if source files changed
         invalidate_cli_cache_if_needed()
         
@@ -443,13 +477,13 @@ class TestRunner:
         if self.arch == '32' and mode in ('jit', 'both'):
             print(f"{Colors.YELLOW}Note: JIT not supported on 32-bit, running VM tests only{Colors.NC}\n")
         
-        # Build vo-vm-runner for nostd mode (vo-vm/vo-runtime compiled with no_std)
+        # Build vo-embed for nostd mode (vo-vm/vo-runtime compiled with no_std)
         if run_nostd:
-            print(f"{Colors.DIM}Building vo-vm-runner (no_std deps)...{Colors.NC}")
-            build_cmd = ['cargo', 'build', '-q', '-p', 'vo-vm-runner']
+            print(f"{Colors.DIM}Building vo-embed (no_std deps)...{Colors.NC}")
+            build_cmd = ['cargo', 'build', '-q', '-p', 'vo-embed']
             code, _, stderr = run_cmd(build_cmd)
             if code != 0:
-                print(f"{Colors.RED}vo-vm-runner build failed:{Colors.NC}\n{stderr}")
+                print(f"{Colors.RED}vo-embed build failed:{Colors.NC}\n{stderr}")
                 sys.exit(1)
 
         test_files = sorted(TEST_DIR.rglob('*.vo'))
@@ -665,7 +699,7 @@ class TestRunner:
             print(output)
 
     def _run_nostd_test(self, file: str):
-        """Run nostd test: compile with vo-launcher, run with vo-vm-runner (no_std deps)."""
+        """Run nostd test: compile with vo-launcher, run with vo-embed (no_std deps)."""
         path = TEST_DIR / file
         
         # Step 1: Compile to bytecode using vo-launcher --compile-only (no --cache)
@@ -688,8 +722,8 @@ class TestRunner:
                 print(output)
             return
         
-        # Step 2: Run bytecode with vo-vm-runner
-        vo_vm_bin = get_vo_vm_runner_bin()
+        # Step 2: Run bytecode with vo-embed
+        vo_vm_bin = get_vo_embed_bin()
         run_cmd_list = [str(vo_vm_bin), str(bytecode_path)]
         
         if self.verbose:
@@ -727,6 +761,27 @@ class TestRunner:
         
         if self.verbose:
             print(output)
+
+    def _run_wasm_tests(self):
+        """Run WASM tests using vo-web test runner."""
+        print(f"{Colors.BOLD}Running WASM tests (vo-web)...{Colors.NC}\n")
+        
+        # Check if pkg exists, build if not
+        pkg_dir = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'pkg'
+        if not pkg_dir.exists():
+            print(f"{Colors.DIM}Building vo-web WASM (first time)...{Colors.NC}")
+            code, _, stderr = run_cmd(['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--out-dir', 'pkg'])
+            if code != 0:
+                print(f"{Colors.RED}wasm-pack build failed:{Colors.NC}\n{stderr}")
+                sys.exit(1)
+        
+        # Run test runner
+        test_runner = PROJECT_ROOT / 'lang' / 'crates' / 'vo-web' / 'test_runner.mjs'
+        cmd = ['node', str(test_runner)]
+        code, stdout, stderr = run_cmd(cmd, capture=False)
+        
+        if code != 0:
+            sys.exit(1)
 
     def _record_pass(self, mode: str, msg: str):
         if mode == 'vm':
@@ -1169,7 +1224,7 @@ def main():
     # test
     test_parser = subparsers.add_parser('test', help='Run integration tests')
     test_parser.add_argument('mode', nargs='?', default='both',
-                             help='vm, jit, gc, nostd, or both (default)')
+                             help='vm, jit, gc, nostd, wasm, or both (default)')
     test_parser.add_argument('-v', '--verbose', action='store_true',
                              help='Verbose output')
     test_parser.add_argument('file', nargs='?', help='Single test file')
@@ -1195,6 +1250,11 @@ def main():
     clean_parser.add_argument('target', nargs='?', default='all',
                               choices=['all', 'vo', 'rust'],
                               help='all (default), vo (.vo-cache), rust (cargo clean)')
+
+    # wasm
+    wasm_parser = subparsers.add_parser('wasm', help='Build vo-web for WASM')
+    wasm_parser.add_argument('--release', action='store_true',
+                             help='Build in release mode')
 
     args = parser.parse_args()
 
@@ -1222,6 +1282,9 @@ def main():
 
     elif args.command == 'clean':
         clean_caches(args.target)
+
+    elif args.command == 'wasm':
+        build_wasm(release=args.release)
 
     else:
         parser.print_help()

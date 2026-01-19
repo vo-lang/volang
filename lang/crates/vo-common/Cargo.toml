@@ -11,12 +11,14 @@ thiserror = "1.0"
 codespan-reporting = "0.11"
 string-interner = "0.17"
 rustc-hash = "1.1"
-termcolor = "1.4"
+termcolor = { version = "1.4", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
-zip = "2.2"
+zip = { version = "2.2", optional = true }
 
 [features]
-default = []
+default = ["terminal", "zip"]
+terminal = ["termcolor"]
+zip = ["dep:zip"]
 serde = ["dep:serde"]
 
 [dev-dependencies]
