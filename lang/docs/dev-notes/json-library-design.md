@@ -11,13 +11,6 @@ Vo's `~>` operator is naturally suited for JSON operations. JSON is inherently d
 3. **Composable**: Builder API for constructing complex JSON
 4. **Precision-preserving**: `json.Number` for lossless number handling
 
-## Prerequisites
-
-This library relies on **Type Attributes** (`#[...]` syntax) for structured serialization.
-See full spec: [Type Attributes Spec](../spec/type-attributes.md)
-
----
-
 ## Data Carriers
 
 | Scenario | Carrier | Access Method |
@@ -222,50 +215,9 @@ if n.IsInt() {
 balance := obj~>account~>balance~>String()?  // "123456789.123456789"
 ```
 
-### 6. Structured Serialization (Marshal/Unmarshal) - Compiler Auto-generation
+### 6. Structured Serialization (Marshal/Unmarshal)
 
-The **compiler** automatically generates `MarshalJSON`/`UnmarshalJSON` bytecode for types marked with `#[json]` attribute.
-
-#### Type Attribute Syntax
-
-Attribute goes on `type`, because semantic is "generate methods for this type":
-
-```go
-#[json]
-type User struct {
-    Name  string   `json:"name"`
-    Age   int      `json:"age,omitempty"`
-    Tags  []string `json:"tags,omitempty"`
-    Admin bool     `json:"-"`  // ignored field
-}
-
-// Compiler generates MarshalJSON + UnmarshalJSON bytecode for User type
-```
-
-#### Method Generation Control
-
-```go
-#[json]                  // default: generate both Marshal and Unmarshal
-type User struct { ... }
-
-#[json(marshal)]         // only generate MarshalJSON
-type Response struct { ... }
-
-#[json(unmarshal)]       // only generate UnmarshalJSON
-type Request struct { ... }
-
-#[json(marshal, unmarshal)]  // explicit both (same as default)
-type Data struct { ... }
-```
-
-#### Additional Options
-
-```go
-#[json(unmarshal, strict)]      // error on unknown fields during unmarshal
-#[json(snake_case)]             // auto snake_case field naming
-```
-
-#### Interfaces
+Types can implement `Marshaler`/`Unmarshaler` interfaces for custom serialization:
 
 ```go
 // Marshaler is implemented by types that can marshal themselves to JSON.
@@ -279,31 +231,10 @@ type Unmarshaler interface {
 }
 ```
 
-#### Compiler Codegen Flow
-
-1. **Parse phase**: Detect `#[json]` attribute on struct, extract field tags
-2. **Analysis phase**: Store attribute + field tags in StructMeta
-3. **Codegen phase**: For structs with `#[json]`, emit bytecode for:
-   - `MarshalJSON() ([]byte, error)` 
-   - `UnmarshalJSON(data []byte) error`
-
-#### Usage
-
-```go
-// Marshal - compiler-generated MarshalJSON
-user := User{Name: "Alice", Age: 30, Tags: []string{"dev"}}
-data := json.Marshal(&user)?
-// {"name":"Alice","age":30,"tags":["dev"]}
-
-// Unmarshal - compiler-generated UnmarshalJSON
-var user2 User
-json.Unmarshal(data, &user2)?
-```
-
 #### Struct Tag Options
 
 | Tag | Meaning |
-|-----|---------|
+|-----|--------|
 | `json:"name"` | Use "name" as JSON key |
 | `json:"name,omitempty"` | Omit if zero value |
 | `json:"-"` | Ignore this field |
@@ -532,17 +463,24 @@ func main() {
     fmt.Println(string(output))
 }
 
-// 5. Structured serialization - #[json] on type triggers bytecode generation
-#[json]
+// 5. Structured serialization with custom type
 type User struct {
     Name    string `json:"name"`
     Age     int    `json:"age,omitempty"`
     Balance string `json:"balance"`  // Use string for precise numbers
 }
 
+func (u *User) UnmarshalJSON(data []byte) error {
+    obj := json.Parse(data)?
+    u.Name = (obj~>name?).(string)
+    u.Age = obj~>age~>Int()?
+    u.Balance = obj~>balance~>String()?
+    return nil
+}
+
 func processUser(data []byte) (User, error) {
     var user User
-    json.Unmarshal(data, &user)?  // Uses compiler-generated UnmarshalJSON
+    json.Unmarshal(data, &user)?
     return user, nil
 }
 ```
@@ -670,46 +608,7 @@ func writeValue(buf *bytes.Buffer, v any) error {
 }
 ```
 
-### Marshal/Unmarshal - Compiler Auto-generation
-
-**No runtime reflection.** The compiler detects `#[json]` attribute on type and generates bytecode directly.
-
-#### Compiler Flow
-
-1. **Parse**: Detect `#[json]` on type declaration, extract field tags into AST
-2. **Analysis**: Store attribute + field tags in TypeMeta
-3. **Codegen**: Based on attribute args, emit bytecode for:
-   - `#[json]` → both MarshalJSON + UnmarshalJSON
-   - `#[json(marshal)]` → only MarshalJSON
-   - `#[json(unmarshal)]` → only UnmarshalJSON
-
-#### What Compiler Generates (conceptual bytecode)
-
-```go
-// For:
-// #[json]
-// type User struct { Name string `json:"name"`; Age int `json:"age,omitempty"` }
-// 
-// Compiler emits this bytecode:
-
-func (u *User) MarshalJSON() ([]byte, error) {
-    obj := json.Object()
-    obj~>name = u.Name
-    if u.Age != 0 {  // omitempty check
-        obj~>age = u.Age
-    }
-    return json.Stringify(obj)
-}
-
-func (u *User) UnmarshalJSON(data []byte) error {
-    obj := json.Parse(data)?
-    u.Name = (obj~>name?).(string)
-    u.Age = obj~>age~>Int()?
-    return nil
-}
-```
-
-#### json.Marshal/Unmarshal Dispatch
+### Marshal/Unmarshal Dispatch
 
 ```go
 // Marshal checks if v implements Marshaler
@@ -730,31 +629,6 @@ func Unmarshal(data []byte, v any) error {
 }
 ```
 
-#### TypeDef / StructMeta Extension
-
-```rust
-// Type-level attribute (on type declaration)
-pub struct TypeDef {
-    pub name: String,
-    pub attributes: Vec<Attribute>,  // #[json], #[json(marshal)], etc.
-    pub kind: TypeKind,              // Struct, Alias, etc.
-}
-
-pub struct Attribute {
-    pub name: String,       // "json"
-    pub args: Vec<String>,  // ["marshal"], ["unmarshal", "strict"]
-}
-
-// Field-level tags (on struct fields)
-pub struct StructMeta {
-    pub field_names: Vec<String>,
-    pub field_offsets: Vec<u16>,
-    pub slot_types: Vec<SlotType>,
-    pub field_value_metas: Vec<u32>,
-    pub field_tags: Vec<String>,  // `json:"name,omitempty"` etc.
-}
-```
-
 ### Key Design Decisions
 
 **1. Why `dyn.MapObject` instead of custom JSON type?**
@@ -771,22 +645,7 @@ pub struct StructMeta {
 - User decides conversion (Int vs Float64)
 - Similar to Go's `json.Number`
 
-**3. Why compiler auto-generation for struct serialization?**
-
-- No runtime reflection needed
-- Zero overhead at runtime
-- Compile-time type checking
-- No external tools or generated source files
-- Similar to Rust's `#[derive(Serialize)]`
-
-**4. Why `#[json]` on `type` not `struct`?**
-
-- Semantic: "generate methods for this type"
-- Methods are bound to types, not struct literals
-- Allows control: `#[json(marshal)]` vs `#[json(unmarshal)]`
-- Anonymous structs cannot have methods → no `#[json]`
-
-**5. Why `~>` chaining for Number conversion?**
+**3. Why `~>` chaining for Number conversion?**
 
 - `obj~>age~>Int()?` is more Vo-idiomatic than `json.AsInt(obj~>age?)`
 - Leverages existing `~>` method call support

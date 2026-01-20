@@ -174,20 +174,6 @@ dyn.ErrTypeMismatch // type mismatch
 
 ---
 
-## Type Attributes
-
-Trigger compile-time codegen:
-
-```vo
-#[json]
-type Response struct {
-    Code    int    `json:"code"`
-    Message string `json:"message"`
-}
-```
-
----
-
 ## What's Identical to Go
 
 - All basic types (`int`, `string`, `bool`, `float64`, etc.)
