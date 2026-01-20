@@ -3,6 +3,7 @@
   import Output from '../components/Output.svelte';
   import Examples from '../components/Examples.svelte';
   import FileExplorer from '../components/FileExplorer.svelte';
+  import GuiPreview from '../components/GuiPreview.svelte';
   import { runCode, type RunStatus } from '../wasm/vo.ts';
 
   let code = $state(`package main
@@ -58,15 +59,38 @@ func step2() error {
   let stderr = $state('');
   let status: RunStatus = $state('idle');
   let currentFile = $state('');
+  let guiMode = $state(false);
+  let nodeTree: any = $state(null);
+  let consoleCollapsed = $state(false);
 
   async function handleRun() {
     status = 'running';
     stdout = '';
     stderr = '';
+    nodeTree = null;
+    guiMode = false;
 
     try {
       const result = await runCode(code);
-      stdout = result.stdout;
+      let output = result.stdout;
+      
+      // Check for VoGUI output
+      if (output.startsWith('__VOGUI__')) {
+        guiMode = true;
+        const jsonStr = output.slice(9).trim();
+        try {
+          const parsed = JSON.parse(jsonStr);
+          nodeTree = parsed.tree;
+          stdout = '';  // Clear stdout for GUI mode
+        } catch (parseErr) {
+          stderr = 'Failed to parse GUI output: ' + parseErr;
+          status = 'error';
+          return;
+        }
+      } else {
+        stdout = output;
+      }
+      
       stderr = result.stderr;
       status = result.status === 'ok' ? 'success' : 'error';
     } catch (e) {
@@ -79,6 +103,8 @@ func step2() error {
     stdout = '';
     stderr = '';
     status = 'idle';
+    guiMode = false;
+    nodeTree = null;
   }
 
   function handleExampleSelect(example: { code: string }) {
@@ -105,6 +131,9 @@ func step2() error {
           Reset
         </button>
       </div>
+      {#if guiMode}
+        <span class="mode-badge gui">GUI Mode</span>
+      {/if}
       {#if currentFile}
         <span class="current-file">{currentFile}</span>
       {/if}
@@ -112,15 +141,22 @@ func step2() error {
     <Examples onSelect={handleExampleSelect} />
   </div>
 
-  <div class="main-content">
-    <div class="sidebar">
-      <FileExplorer onSelect={handleFileSelect} />
+  <div class="main-area">
+    <div class="editor-row">
+      <div class="sidebar">
+        <FileExplorer onSelect={handleFileSelect} />
+      </div>
+      <div class="editor-panel">
+        <Editor bind:value={code} />
+      </div>
+      {#if guiMode}
+        <div class="gui-panel">
+          <GuiPreview {nodeTree} />
+        </div>
+      {/if}
     </div>
-    <div class="editor-panel">
-      <Editor bind:value={code} />
-    </div>
-    <div class="output-panel">
-      <Output {stdout} {stderr} {status} />
+    <div class="console-panel" class:collapsed={consoleCollapsed && guiMode}>
+      <Output {stdout} {stderr} {status} collapsible={guiMode} bind:collapsed={consoleCollapsed} />
     </div>
   </div>
 </div>
@@ -154,6 +190,19 @@ func step2() error {
     gap: 8px;
   }
 
+  .mode-badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+
+  .mode-badge.gui {
+    background: var(--accent);
+    color: white;
+  }
+
   .current-file {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -163,7 +212,14 @@ func step2() error {
     border-radius: 4px;
   }
 
-  .main-content {
+  .main-area {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .editor-row {
     display: flex;
     flex: 1;
     overflow: hidden;
@@ -180,25 +236,38 @@ func step2() error {
     flex: 1;
     border-right: 1px solid var(--border);
     overflow: hidden;
+    min-width: 300px;
   }
 
-  .output-panel {
+  .gui-panel {
     width: 400px;
     min-width: 300px;
     overflow: hidden;
+    border-left: 1px solid var(--border);
+  }
+
+  .console-panel {
+    border-top: 1px solid var(--border);
+    height: 200px;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .console-panel.collapsed {
+    height: 40px;
   }
 
   @media (max-width: 1200px) {
     .sidebar {
       width: 220px;
     }
-    .output-panel {
+    .gui-panel {
       width: 320px;
     }
   }
 
   @media (max-width: 900px) {
-    .main-content {
+    .editor-row {
       flex-direction: column;
     }
     .sidebar {
@@ -207,11 +276,12 @@ func step2() error {
     .editor-panel {
       border-right: none;
       border-bottom: 1px solid var(--border);
-      height: 50%;
+      flex: 1;
     }
-    .output-panel {
+    .gui-panel {
       width: 100%;
-      height: 50%;
+      height: 200px;
+      border-left: none;
     }
     .toolbar {
       flex-direction: column;

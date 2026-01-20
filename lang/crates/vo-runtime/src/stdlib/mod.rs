@@ -20,3 +20,4 @@ pub mod builtin;
 pub mod regexp;
 pub mod dynamic;
 pub mod os;
+pub mod json;

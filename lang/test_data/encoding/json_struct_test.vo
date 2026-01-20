@@ -1,0 +1,387 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// Basic struct with multiple types
+type Person struct {
+	Name    string
+	Age     int
+	Height  float64
+	Active  bool
+	private int // unexported, should be ignored
+}
+
+// Nested struct
+type Company struct {
+	Name    string
+	CEO     Person
+	Founded int
+}
+
+// Struct with pointer fields
+type Team struct {
+	Name   string
+	Leader *Person
+}
+
+// Struct with special characters
+type Message struct {
+	Content string
+	Author  string
+}
+
+// Empty/zero value struct
+type Empty struct {
+	A int
+	B string
+	C bool
+}
+
+// Embedded struct (anonymous field)
+type Address struct {
+	Street string
+	City   string
+	Zip    int
+}
+
+type Employee struct {
+	Name string
+	Address  // embedded
+	Salary int
+}
+
+// Multiple levels of embedding
+type Base struct {
+	ID int
+}
+
+type Middle struct {
+	Base  // embedded
+	Level string
+}
+
+type Top struct {
+	Middle  // embedded
+	Name   string
+}
+
+// Self-referential struct (for cycle detection)
+type Node struct {
+	Value int
+	Next  *Node
+}
+
+// Tree structure
+type TreeNode struct {
+	Value    int
+	Left     *TreeNode
+	Right    *TreeNode
+}
+
+func main() {
+	testBasicMarshal()
+	testBasicUnmarshal()
+	testZeroValues()
+	testSpecialChars()
+	testNestedStruct()
+	testPointerField()
+	testNilPointerField()
+	testExtraFields()
+	testMissingFields()
+	testEmbeddedStruct()
+	testMultiLevelEmbed()
+	testLinkedList()
+	testTreeStructure()
+	testCyclicReference()
+	fmt.Println("All JSON struct tests passed!")
+}
+
+func testBasicMarshal() {
+	p := &Person{Name: "Alice", Age: 30, Height: 1.75, Active: true}
+	data, err := json.MarshalStruct(p)
+	if err != nil {
+		panic("testBasicMarshal failed: " + err.Error())
+	}
+	expected := `{"name":"Alice","age":30,"height":1.75,"active":true}`
+	if string(data) != expected {
+		panic("testBasicMarshal mismatch: got " + string(data) + ", want " + expected)
+	}
+	fmt.Println("testBasicMarshal: OK")
+}
+
+func testBasicUnmarshal() {
+	data := []byte(`{"name":"Bob","age":25,"height":1.80,"active":false}`)
+	var p Person
+	err := json.UnmarshalStruct(data, &p)
+	if err != nil {
+		panic("testBasicUnmarshal failed: " + err.Error())
+	}
+	if p.Name != "Bob" || p.Age != 25 || p.Height != 1.80 || p.Active != false {
+		panic(fmt.Sprintf("testBasicUnmarshal mismatch: %s %d %f %t", p.Name, p.Age, p.Height, p.Active))
+	}
+	fmt.Println("testBasicUnmarshal: OK")
+}
+
+func testZeroValues() {
+	// Marshal zero values
+	e := &Empty{}
+	data, err := json.MarshalStruct(e)
+	if err != nil {
+		panic("testZeroValues marshal failed: " + err.Error())
+	}
+	expected := `{"a":0,"b":"","c":false}`
+	if string(data) != expected {
+		panic("testZeroValues marshal mismatch: got " + string(data) + ", want " + expected)
+	}
+	
+	// Unmarshal to zero struct
+	var e2 Empty
+	err = json.UnmarshalStruct([]byte(`{}`), &e2)
+	if err != nil {
+		panic("testZeroValues unmarshal failed: " + err.Error())
+	}
+	if e2.A != 0 || e2.B != "" || e2.C != false {
+		panic("testZeroValues unmarshal should keep zero values")
+	}
+	fmt.Println("testZeroValues: OK")
+}
+
+func testSpecialChars() {
+	m := &Message{Content: "Hello\nWorld\t\"quoted\"\\backslash", Author: "Test"}
+	data, err := json.MarshalStruct(m)
+	if err != nil {
+		panic("testSpecialChars marshal failed: " + err.Error())
+	}
+	// Verify escaping works
+	s := string(data)
+	if s[0] != '{' || s[len(s)-1] != '}' {
+		panic("testSpecialChars invalid JSON format")
+	}
+	
+	// Unmarshal back
+	var m2 Message
+	err = json.UnmarshalStruct(data, &m2)
+	if err != nil {
+		panic("testSpecialChars unmarshal failed: " + err.Error())
+	}
+	if m2.Content != m.Content || m2.Author != m.Author {
+		panic("testSpecialChars roundtrip mismatch")
+	}
+	fmt.Println("testSpecialChars: OK")
+}
+
+func testNestedStruct() {
+	c := &Company{
+		Name:    "TechCorp",
+		CEO:     Person{Name: "Jane", Age: 45, Height: 1.65, Active: true},
+		Founded: 2010,
+	}
+	data, err := json.MarshalStruct(c)
+	if err != nil {
+		panic("testNestedStruct marshal failed: " + err.Error())
+	}
+	s := string(data)
+	fmt.Println("testNestedStruct marshal: " + s)
+	
+	// Test unmarshal nested struct
+	var c2 Company
+	err = json.UnmarshalStruct(data, &c2)
+	if err != nil {
+		panic("testNestedStruct unmarshal failed: " + err.Error())
+	}
+	if c2.Name != "TechCorp" || c2.Founded != 2010 || c2.CEO.Name != "Jane" || c2.CEO.Age != 45 {
+		panic(fmt.Sprintf("testNestedStruct unmarshal mismatch: %s %d %s %d", c2.Name, c2.Founded, c2.CEO.Name, c2.CEO.Age))
+	}
+	fmt.Println("testNestedStruct: OK")
+}
+
+func testPointerField() {
+	leader := &Person{Name: "Leader", Age: 50, Height: 1.80, Active: true}
+	t := &Team{Name: "Alpha", Leader: leader}
+	data, err := json.MarshalStruct(t)
+	if err != nil {
+		panic("testPointerField marshal failed: " + err.Error())
+	}
+	s := string(data)
+	fmt.Println("testPointerField marshal: " + s)
+	
+	// Test unmarshal pointer field
+	var t2 Team
+	err = json.UnmarshalStruct(data, &t2)
+	if err != nil {
+		panic("testPointerField unmarshal failed: " + err.Error())
+	}
+	if t2.Name != "Alpha" || t2.Leader == nil || t2.Leader.Name != "Leader" || t2.Leader.Age != 50 {
+		panic("testPointerField unmarshal mismatch")
+	}
+	fmt.Println("testPointerField: OK")
+}
+
+func testNilPointerField() {
+	t := &Team{Name: "Beta", Leader: nil}
+	data, err := json.MarshalStruct(t)
+	if err != nil {
+		panic("testNilPointerField marshal failed: " + err.Error())
+	}
+	expected := `{"name":"Beta","leader":null}`
+	if string(data) != expected {
+		panic("testNilPointerField mismatch: got " + string(data) + ", want " + expected)
+	}
+	fmt.Println("testNilPointerField: OK")
+}
+
+func testExtraFields() {
+	// JSON has extra fields not in struct - should be ignored
+	data := []byte(`{"name":"Extra","age":100,"unknown":"field","another":123}`)
+	var p Person
+	err := json.UnmarshalStruct(data, &p)
+	if err != nil {
+		panic("testExtraFields failed: " + err.Error())
+	}
+	if p.Name != "Extra" || p.Age != 100 {
+		panic("testExtraFields mismatch")
+	}
+	fmt.Println("testExtraFields: OK")
+}
+
+func testMissingFields() {
+	// JSON missing some fields - should use zero values
+	data := []byte(`{"name":"Partial"}`)
+	var p Person
+	err := json.UnmarshalStruct(data, &p)
+	if err != nil {
+		panic("testMissingFields failed: " + err.Error())
+	}
+	if p.Name != "Partial" || p.Age != 0 || p.Height != 0 || p.Active != false {
+		panic("testMissingFields mismatch")
+	}
+	fmt.Println("testMissingFields: OK")
+}
+
+func testEmbeddedStruct() {
+	e := &Employee{
+		Name:    "John",
+		Address: Address{Street: "123 Main St", City: "Boston", Zip: 12345},
+		Salary:  50000,
+	}
+	data, err := json.MarshalStruct(e)
+	if err != nil {
+		panic("testEmbeddedStruct marshal failed: " + err.Error())
+	}
+	s := string(data)
+	// Embedded fields should be flattened (not nested under "Address")
+	fmt.Println("testEmbeddedStruct marshal: " + s)
+	
+	// Test unmarshal embedded struct
+	var e2 Employee
+	err = json.UnmarshalStruct(data, &e2)
+	if err != nil {
+		panic("testEmbeddedStruct unmarshal failed: " + err.Error())
+	}
+	if e2.Name != "John" || e2.Street != "123 Main St" || e2.City != "Boston" || e2.Zip != 12345 || e2.Salary != 50000 {
+		panic(fmt.Sprintf("testEmbeddedStruct unmarshal mismatch: %s %s %s %d %d", e2.Name, e2.Street, e2.City, e2.Zip, e2.Salary))
+	}
+	fmt.Println("testEmbeddedStruct: OK")
+}
+
+func testMultiLevelEmbed() {
+	t := &Top{
+		Middle: Middle{
+			Base:  Base{ID: 100},
+			Level: "middle",
+		},
+		Name: "top",
+	}
+	data, err := json.MarshalStruct(t)
+	if err != nil {
+		panic("testMultiLevelEmbed marshal failed: " + err.Error())
+	}
+	s := string(data)
+	fmt.Println("testMultiLevelEmbed marshal: " + s)
+	
+	// Test unmarshal multi-level embedded
+	var t2 Top
+	err = json.UnmarshalStruct(data, &t2)
+	if err != nil {
+		panic("testMultiLevelEmbed unmarshal failed: " + err.Error())
+	}
+	if t2.ID != 100 || t2.Level != "middle" || t2.Name != "top" {
+		panic(fmt.Sprintf("testMultiLevelEmbed unmarshal mismatch: %d %s %s", t2.ID, t2.Level, t2.Name))
+	}
+	fmt.Println("testMultiLevelEmbed: OK")
+}
+
+func testLinkedList() {
+	// Create linked list: 1 -> 2 -> 3 -> nil
+	n3 := &Node{Value: 3, Next: nil}
+	n2 := &Node{Value: 2, Next: n3}
+	n1 := &Node{Value: 1, Next: n2}
+	
+	data, err := json.MarshalStruct(n1)
+	if err != nil {
+		panic("testLinkedList marshal failed: " + err.Error())
+	}
+	s := string(data)
+	fmt.Println("testLinkedList marshal: " + s)
+	
+	// Test unmarshal linked list
+	var n Node
+	err = json.UnmarshalStruct(data, &n)
+	if err != nil {
+		panic("testLinkedList unmarshal failed: " + err.Error())
+	}
+	if n.Value != 1 || n.Next == nil || n.Next.Value != 2 || n.Next.Next == nil || n.Next.Next.Value != 3 || n.Next.Next.Next != nil {
+		panic("testLinkedList unmarshal mismatch")
+	}
+	fmt.Println("testLinkedList: OK")
+}
+
+func testTreeStructure() {
+	//       1
+	//      / \
+	//     2   3
+	//    /
+	//   4
+	tree := &TreeNode{
+		Value: 1,
+		Left: &TreeNode{
+			Value: 2,
+			Left:  &TreeNode{Value: 4, Left: nil, Right: nil},
+			Right: nil,
+		},
+		Right: &TreeNode{Value: 3, Left: nil, Right: nil},
+	}
+	
+	data, err := json.MarshalStruct(tree)
+	if err != nil {
+		panic("testTreeStructure marshal failed: " + err.Error())
+	}
+	s := string(data)
+	if len(s) < 50 {
+		panic("testTreeStructure: output too short: " + s)
+	}
+	fmt.Println("testTreeStructure: OK - " + s)
+}
+
+func testCyclicReference() {
+	// Create cycle: a -> b -> a
+	a := &Node{Value: 1, Next: nil}
+	b := &Node{Value: 2, Next: a}
+	a.Next = b  // creates cycle
+	
+	// Marshal should either:
+	// 1. Detect cycle and return error, or
+	// 2. Use max depth limit and output null for deep refs
+	data, err := json.MarshalStruct(a)
+	if err != nil {
+		// Cycle detection error is acceptable
+		fmt.Println("testCyclicReference: OK - cycle detected: " + err.Error())
+		return
+	}
+	// If no error, should have some reasonable output (with depth limit)
+	s := string(data)
+	fmt.Println("testCyclicReference: OK - " + s)
+}

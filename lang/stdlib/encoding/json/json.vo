@@ -1,81 +1,94 @@
 package json
 
 import (
-    "errors"
-    "strconv"
+	"errors"
+	"strconv"
 )
 
-// ErrSyntax indicates a JSON syntax error.
-var ErrSyntax = errors.NewCode(errors.CodeJsonSyntax, "json syntax error")
+// Native struct marshal/unmarshal functions (implemented in Rust)
+// These use StructMeta for reflection since Vo doesn't have runtime reflection.
 
-// ErrUnexpectedEOF indicates unexpected end of input.
-var ErrUnexpectedEOF = errors.NewCode(errors.CodeJsonUnexpectedEOF, "unexpected end of JSON input")
+// MarshalStruct marshals a struct or pointer to struct to JSON.
+func MarshalStruct(v any) ([]byte, error)
 
-// ErrInvalidValue indicates an invalid value.
-var ErrInvalidValue = errors.NewCode(errors.CodeJsonInvalidValue, "invalid JSON value")
+// UnmarshalStruct unmarshals JSON into a pointer to struct.
+func UnmarshalStruct(data []byte, v any) error
 
-// ErrTypeMismatch indicates a type mismatch.
-var ErrTypeMismatch = errors.NewCode(errors.CodeJsonTypeMismatch, "JSON type mismatch")
+// writeJsonString appends the JSON-encoded string s to buf.
+// If escapeHTML is true, <, >, & are escaped as \uXXXX.
+func writeJsonString(buf []byte, s string, escapeHTML bool) []byte
 
-// ErrPathNotFound indicates a path was not found.
-var ErrPathNotFound = errors.NewCode(errors.CodeJsonPathNotFound, "JSON path not found")
+// parseJsonString parses a JSON string starting at data[pos].
+// Returns (parsed string, new position, error).
+func parseJsonString(data []byte, pos int) (string, int, error)
 
-// ErrNotObject indicates the value is not an object.
-var ErrNotObject = errors.NewCode(errors.CodeJsonNotObject, "not a JSON object")
+// Error codes
+var (
+	// ErrSyntax indicates a JSON syntax error.
+	ErrSyntax = errors.NewCode(errors.CodeJsonSyntax, "json syntax error")
 
-// ErrNotArray indicates the value is not an array.
-var ErrNotArray = errors.NewCode(errors.CodeJsonNotArray, "not a JSON array")
+	// ErrUnexpectedEOF indicates unexpected end of input.
+	ErrUnexpectedEOF = errors.NewCode(errors.CodeJsonUnexpectedEOF, "unexpected end of JSON input")
 
-// ErrMarshal indicates a serialization error.
-var ErrMarshal = errors.NewCode(errors.CodeJsonMarshal, "JSON marshal error")
+	// ErrInvalidValue indicates an invalid value.
+	ErrInvalidValue = errors.NewCode(errors.CodeJsonInvalidValue, "invalid JSON value")
 
-// ErrUnmarshal indicates a deserialization error.
-var ErrUnmarshal = errors.NewCode(errors.CodeJsonUnmarshal, "JSON unmarshal error")
+	// ErrTypeMismatch indicates a type mismatch.
+	ErrTypeMismatch = errors.NewCode(errors.CodeJsonTypeMismatch, "JSON type mismatch")
+
+	// ErrMarshal indicates a serialization error.
+	ErrMarshal = errors.NewCode(errors.CodeJsonMarshal, "JSON marshal error")
+
+	// ErrUnmarshal indicates a deserialization error.
+	ErrUnmarshal = errors.NewCode(errors.CodeJsonUnmarshal, "JSON unmarshal error")
+)
 
 // Number represents a JSON number literal.
 // It preserves the original string representation for precision.
 type Number string
 
-// String returns the original JSON number literal.
+// String returns the literal text of the number.
 func (n Number) String() string {
-    return string(n)
+	return string(n)
 }
 
-// IsInt returns true if the number is an integer (no decimal point, no exponent).
-func (n Number) IsInt() bool {
-    s := string(n)
-    for i := 0; i < len(s); i++ {
-        c := s[i]
-        if c == '.' || c == 'e' || c == 'E' {
-            return false
-        }
-    }
-    return true
-}
-
-// Int converts to int. Returns error if not representable.
-func (n Number) Int() (int, error) {
-    i, err := strconv.ParseInt(string(n), 10)
-    if err != nil {
-        return 0, errors.Wrap(ErrInvalidValue, "json.Number is not a valid integer")
-    }
-    return i, nil
-}
-
-// Int64 converts to int64. Returns error if not representable.
+// Int64 returns the number as an int64.
 func (n Number) Int64() (int64, error) {
-    i, err := strconv.ParseInt(string(n), 10)
-    if err != nil {
-        return 0, errors.Wrap(ErrInvalidValue, "json.Number is not a valid integer")
-    }
-    return int64(i), nil
+	i, err := strconv.ParseInt(string(n), 10)
+	if err != nil {
+		return 0, errors.Wrap(ErrInvalidValue, "json.Number is not a valid integer")
+	}
+	return int64(i), nil
 }
 
-// Float64 converts to float64. Returns error if not representable.
+// Float64 returns the number as a float64.
 func (n Number) Float64() (float64, error) {
-    f, ok := strconv.ParseFloat(string(n), 64)
-    if !ok {
-        return 0, errors.Wrap(ErrInvalidValue, "json.Number is not a valid float")
-    }
-    return f, nil
+	f, ok := strconv.ParseFloat(string(n), 64)
+	if !ok {
+		return 0, errors.Wrap(ErrInvalidValue, "json.Number is not a valid float")
+	}
+	return f, nil
 }
+
+// RawMessage is a raw encoded JSON value.
+// It implements Marshaler and Unmarshaler and can be used to delay JSON decoding
+// or precompute a JSON encoding.
+type RawMessage []byte
+
+// Delim is a JSON array or object delimiter, one of [ ] { or }.
+type Delim rune
+
+// String returns the delimiter as a string.
+func (d Delim) String() string {
+	return string(d)
+}
+
+// Token is a JSON token returned by Decoder.Token().
+// The token types are:
+//   - Delim: for the four JSON delimiters [ ] { }
+//   - bool: for JSON booleans
+//   - float64: for JSON numbers (when UseNumber is not called)
+//   - Number: for JSON numbers (when UseNumber is called)
+//   - string: for JSON string literals
+//   - nil: for JSON null
+type Token interface{}

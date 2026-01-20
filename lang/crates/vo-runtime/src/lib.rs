@@ -103,4 +103,5 @@ pub fn register_all_stdlib_externs(registry: &mut ExternRegistry, externs: &[byt
     stdlib::dynamic::register_externs(registry, externs);
     stdlib::os::register_externs(registry, externs);
     stdlib::regexp::register_externs(registry, externs);
+    stdlib::json::register_externs(registry, externs);
 }

@@ -1,0 +1,290 @@
+package json
+
+import (
+	"bytes"
+	"dyn"
+	"errors"
+	"io"
+	"strconv"
+)
+
+// Marshal returns the JSON encoding of v.
+// Supports: dyn.MapObject, dyn.SliceObject, map[string]any, []any,
+// string, Number, RawMessage, int, float64, bool, nil.
+func Marshal(v any) ([]byte, error) {
+	buf := make([]byte, 0, 64)
+	buf, err := writeValue(buf, v, true)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// MarshalIndent is like Marshal but applies Indent to format the output.
+func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
+	b, err := Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	dst := &bytes.Buffer{}
+	err = Indent(dst, b, prefix, indent)
+	if err != nil {
+		return nil, err
+	}
+	return dst.Bytes(), nil
+}
+
+// Encoder writes JSON values to an output stream.
+type Encoder struct {
+	w          io.Writer
+	err        error
+	escapeHTML bool
+	indentPre  string
+	indentVal  string
+}
+
+// NewEncoder returns a new encoder that writes to w.
+func NewEncoder(w io.Writer) *Encoder {
+	return &Encoder{w: w, escapeHTML: true}
+}
+
+// Encode writes the JSON encoding of v to the stream,
+// followed by a newline character.
+func (enc *Encoder) Encode(v any) error {
+	if enc.err != nil {
+		return enc.err
+	}
+
+	buf := make([]byte, 0, 64)
+	buf, err := writeValue(buf, v, enc.escapeHTML)
+	if err != nil {
+		enc.err = err
+		return err
+	}
+
+	if enc.indentPre != "" || enc.indentVal != "" {
+		dst := &bytes.Buffer{}
+		err = Indent(dst, buf, enc.indentPre, enc.indentVal)
+		if err != nil {
+			enc.err = err
+			return err
+		}
+		buf = dst.Bytes()
+	}
+
+	buf = append(buf, '\n')
+	_, err = enc.w.Write(buf)
+	enc.err = err
+	return err
+}
+
+// SetIndent instructs the encoder to format each subsequent encoded value.
+func (enc *Encoder) SetIndent(prefix, indent string) {
+	enc.indentPre = prefix
+	enc.indentVal = indent
+}
+
+// SetEscapeHTML specifies whether problematic HTML characters should be
+// escaped inside JSON quoted strings.
+func (enc *Encoder) SetEscapeHTML(on bool) {
+	enc.escapeHTML = on
+}
+
+func writeValue(buf []byte, v any, escapeHTML bool) ([]byte, error) {
+	if v == nil {
+		return append(buf, "null"...), nil
+	}
+	switch val := v.(type) {
+	case dyn.MapObject:
+		return writeObject(buf, map[string]any(val), escapeHTML)
+	case dyn.SliceObject:
+		return writeArray(buf, []any(val), escapeHTML)
+	case map[string]any:
+		return writeObject(buf, val, escapeHTML)
+	case []any:
+		return writeArray(buf, val, escapeHTML)
+	case string:
+		return writeJsonString(buf, val, escapeHTML), nil
+	case Number:
+		return append(buf, string(val)...), nil
+	case RawMessage:
+		if len(val) == 0 {
+			return append(buf, "null"...), nil
+		}
+		return append(buf, val...), nil
+	case int:
+		return strconv.AppendInt(buf, val, 10), nil
+	case int64:
+		return strconv.AppendInt(buf, int(val), 10), nil
+	case float64:
+		return append(buf, strconv.FormatFloat(val, 'g', -1, 64)...), nil
+	case bool:
+		if val {
+			return append(buf, "true"...), nil
+		}
+		return append(buf, "false"...), nil
+	default:
+		return nil, errors.Wrap(ErrMarshal, "unsupported type for JSON serialization")
+	}
+}
+
+func writeObject(buf []byte, obj map[string]any, escapeHTML bool) ([]byte, error) {
+	buf = append(buf, '{')
+	first := true
+	for k, v := range obj {
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = writeJsonString(buf, k, escapeHTML)
+		buf = append(buf, ':')
+		var err error
+		buf, err = writeValue(buf, v, escapeHTML)
+		if err != nil {
+			return nil, err
+		}
+	}
+	buf = append(buf, '}')
+	return buf, nil
+}
+
+func writeArray(buf []byte, arr []any, escapeHTML bool) ([]byte, error) {
+	buf = append(buf, '[')
+	for i := 0; i < len(arr); i++ {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		var err error
+		buf, err = writeValue(buf, arr[i], escapeHTML)
+		if err != nil {
+			return nil, err
+		}
+	}
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+
+// Compact appends to dst the JSON-encoded src with insignificant space removed.
+func Compact(dst *bytes.Buffer, src []byte) error {
+	inString := false
+	escaped := false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if escaped {
+			dst.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if inString {
+			dst.WriteByte(c)
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			dst.WriteByte(c)
+		} else if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			continue
+		} else {
+			dst.WriteByte(c)
+		}
+	}
+	return nil
+}
+
+// HTMLEscape appends to dst the JSON-encoded src with <, >, & escaped.
+func HTMLEscape(dst *bytes.Buffer, src []byte) {
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if c == '<' {
+			dst.WriteString("\\u003c")
+		} else if c == '>' {
+			dst.WriteString("\\u003e")
+		} else if c == '&' {
+			dst.WriteString("\\u0026")
+		} else {
+			dst.WriteByte(c)
+		}
+	}
+}
+
+// Indent appends to dst an indented form of the JSON-encoded src.
+func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
+	inString := false
+	escaped := false
+	depth := 0
+	needIndent := false
+
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+
+		if escaped {
+			dst.WriteByte(c)
+			escaped = false
+			continue
+		}
+
+		if inString {
+			dst.WriteByte(c)
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			continue
+		}
+
+		if needIndent && c != '}' && c != ']' {
+			dst.WriteByte('\n')
+			dst.WriteString(prefix)
+			for j := 0; j < depth; j++ {
+				dst.WriteString(indent)
+			}
+			needIndent = false
+		}
+
+		switch c {
+		case '"':
+			inString = true
+			dst.WriteByte(c)
+		case '{', '[':
+			dst.WriteByte(c)
+			depth++
+			needIndent = true
+		case '}', ']':
+			depth--
+			if needIndent {
+				needIndent = false
+			} else {
+				dst.WriteByte('\n')
+				dst.WriteString(prefix)
+				for j := 0; j < depth; j++ {
+					dst.WriteString(indent)
+				}
+			}
+			dst.WriteByte(c)
+		case ':':
+			dst.WriteByte(c)
+			dst.WriteByte(' ')
+		case ',':
+			dst.WriteByte(c)
+			dst.WriteByte('\n')
+			dst.WriteString(prefix)
+			for j := 0; j < depth; j++ {
+				dst.WriteString(indent)
+			}
+		default:
+			dst.WriteByte(c)
+		}
+	}
+	return nil
+}

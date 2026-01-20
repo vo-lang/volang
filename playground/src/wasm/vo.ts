@@ -15,7 +15,7 @@ async function loadWasm(): Promise<any> {
   if (wasmModule) return wasmModule;
 
   try {
-    const { default: init, compileAndRun, version } = await import('./pkg/vo_web.js');
+    const { default: init, compileAndRun, version } = await import('@vo-web/vo_web.js');
     await init();
     wasmModule = { compileAndRun, version };
     console.log('Vo WASM loaded:', version());

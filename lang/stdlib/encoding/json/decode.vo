@@ -1,0 +1,416 @@
+package json
+
+import (
+	"bytes"
+	"dyn"
+	"errors"
+	"io"
+	"strconv"
+)
+
+// Unmarshal parses the JSON-encoded data and returns the result.
+// The result is one of:
+//   - dyn.MapObject for JSON objects
+//   - dyn.SliceObject for JSON arrays
+//   - string for JSON strings
+//   - float64 for JSON numbers (or Number if UseNumber was called)
+//   - bool for JSON booleans
+//   - nil for JSON null
+func Unmarshal(data []byte) (any, error) {
+	p := &parser{data: data, pos: 0, useNumber: false}
+	p.skipWhitespace()
+	if p.pos >= len(p.data) {
+		return nil, ErrUnexpectedEOF
+	}
+	val, err := p.parseValue()
+	if err != nil {
+		return nil, err
+	}
+	p.skipWhitespace()
+	if p.pos < len(p.data) {
+		return nil, errors.Wrap(ErrSyntax, "unexpected data after JSON value")
+	}
+	return val, nil
+}
+
+// Valid reports whether data is a valid JSON encoding.
+func Valid(data []byte) bool {
+	_, err := Unmarshal(data)
+	return err == nil
+}
+
+// Decoder reads and decodes JSON values from an input stream.
+type Decoder struct {
+	r         io.Reader
+	buf       []byte
+	scanp     int
+	scanned   int64
+	err       error
+	useNumber bool
+}
+
+// NewDecoder returns a new decoder that reads from r.
+func NewDecoder(r io.Reader) *Decoder {
+	return &Decoder{r: r, buf: make([]byte, 0, 512)}
+}
+
+// UseNumber causes the Decoder to unmarshal a number into
+// a Number instead of a float64.
+func (dec *Decoder) UseNumber() {
+	dec.useNumber = true
+}
+
+// Decode reads the next JSON-encoded value from its input.
+func (dec *Decoder) Decode() (any, error) {
+	if dec.err != nil {
+		return nil, dec.err
+	}
+
+	err := dec.readMore()
+	if err != nil && !errors.Is(err, io.EOF) {
+		dec.err = err
+		return nil, err
+	}
+
+	if len(dec.buf) == 0 {
+		return nil, io.EOF
+	}
+
+	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: dec.useNumber}
+	p.skipWhitespace()
+	if p.pos >= len(p.data) {
+		return nil, io.EOF
+	}
+
+	val, err := p.parseValue()
+	if err != nil {
+		return nil, err
+	}
+
+	dec.scanp += p.pos
+	dec.scanned += int64(p.pos)
+	return val, nil
+}
+
+// Buffered returns a reader of the data remaining in the Decoder's buffer.
+func (dec *Decoder) Buffered() io.Reader {
+	return bytes.NewReader(dec.buf[dec.scanp:])
+}
+
+// InputOffset returns the input stream byte offset of the current decoder position.
+func (dec *Decoder) InputOffset() int64 {
+	return dec.scanned
+}
+
+func (dec *Decoder) readMore() error {
+	if dec.scanp > 0 {
+		n := copy(dec.buf, dec.buf[dec.scanp:])
+		dec.buf = dec.buf[:n]
+		dec.scanp = 0
+	}
+
+	if cap(dec.buf)-len(dec.buf) < 512 {
+		newBuf := make([]byte, len(dec.buf), cap(dec.buf)*2+512)
+		copy(newBuf, dec.buf)
+		dec.buf = newBuf
+	}
+
+	n, err := dec.r.Read(dec.buf[len(dec.buf):cap(dec.buf)])
+	dec.buf = dec.buf[:len(dec.buf)+n]
+	return err
+}
+
+// Token returns the next JSON token in the input stream.
+// At the end of the input stream, Token returns nil, io.EOF.
+func (dec *Decoder) Token() (Token, error) {
+	err := dec.readMore()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+
+	for dec.scanp < len(dec.buf) {
+		c := dec.buf[dec.scanp]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			dec.scanp++
+			continue
+		}
+		if c == ':' || c == ',' {
+			dec.scanp++
+			continue
+		}
+
+		switch c {
+		case '[':
+			dec.scanp++
+			return Delim('['), nil
+		case ']':
+			dec.scanp++
+			return Delim(']'), nil
+		case '{':
+			dec.scanp++
+			return Delim('{'), nil
+		case '}':
+			dec.scanp++
+			return Delim('}'), nil
+		case '"':
+			return dec.tokenString()
+		case 't', 'f':
+			return dec.tokenBool()
+		case 'n':
+			return dec.tokenNull()
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			return dec.tokenNumber()
+		default:
+			return nil, errors.Wrap(ErrSyntax, "invalid character")
+		}
+	}
+	return nil, io.EOF
+}
+
+func (dec *Decoder) tokenString() (Token, error) {
+	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	s, err := p.parseString()
+	if err != nil {
+		return nil, err
+	}
+	dec.scanp += p.pos
+	return s, nil
+}
+
+func (dec *Decoder) tokenBool() (Token, error) {
+	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	b, err := p.parseBool()
+	if err != nil {
+		return nil, err
+	}
+	dec.scanp += p.pos
+	return b, nil
+}
+
+func (dec *Decoder) tokenNull() (Token, error) {
+	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	_, err := p.parseNull()
+	if err != nil {
+		return nil, err
+	}
+	dec.scanp += p.pos
+	return nil, nil
+}
+
+func (dec *Decoder) tokenNumber() (Token, error) {
+	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: dec.useNumber}
+	n, err := p.parseNumber()
+	if err != nil {
+		return nil, err
+	}
+	dec.scanp += p.pos
+	return n, nil
+}
+
+// More reports whether there is another element in the current array or object.
+func (dec *Decoder) More() bool {
+	dec.readMore()
+	for i := dec.scanp; i < len(dec.buf); i++ {
+		c := dec.buf[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			continue
+		}
+		return c != ']' && c != '}'
+	}
+	return false
+}
+
+// parser is a simple JSON parser.
+type parser struct {
+	data      []byte
+	pos       int
+	useNumber bool
+}
+
+func (p *parser) parseValue() (any, error) {
+	p.skipWhitespace()
+	if p.pos >= len(p.data) {
+		return nil, ErrUnexpectedEOF
+	}
+	c := p.data[p.pos]
+	if c == '{' {
+		return p.parseObject()
+	}
+	if c == '[' {
+		return p.parseArray()
+	}
+	if c == '"' {
+		return p.parseString()
+	}
+	if c == 't' || c == 'f' {
+		return p.parseBool()
+	}
+	if c == 'n' {
+		return p.parseNull()
+	}
+	if c == '-' || (c >= '0' && c <= '9') {
+		return p.parseNumber()
+	}
+	return nil, errors.Wrap(ErrSyntax, "unexpected character")
+}
+
+func (p *parser) parseObject() (dyn.MapObject, error) {
+	p.pos++
+	obj := make(dyn.MapObject)
+	p.skipWhitespace()
+	if p.pos < len(p.data) && p.data[p.pos] == '}' {
+		p.pos++
+		return obj, nil
+	}
+	for {
+		p.skipWhitespace()
+		if p.pos >= len(p.data) {
+			return nil, ErrUnexpectedEOF
+		}
+		if p.data[p.pos] != '"' {
+			return nil, errors.Wrap(ErrSyntax, "expected string key in object")
+		}
+		key, err := p.parseString()
+		if err != nil {
+			return nil, err
+		}
+		p.skipWhitespace()
+		if p.pos >= len(p.data) || p.data[p.pos] != ':' {
+			return nil, errors.Wrap(ErrSyntax, "expected ':' after object key")
+		}
+		p.pos++
+		val, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		obj[key] = val
+		p.skipWhitespace()
+		if p.pos >= len(p.data) {
+			return nil, ErrUnexpectedEOF
+		}
+		if p.data[p.pos] == '}' {
+			p.pos++
+			return obj, nil
+		}
+		if p.data[p.pos] != ',' {
+			return nil, errors.Wrap(ErrSyntax, "expected ',' or '}' in object")
+		}
+		p.pos++
+	}
+}
+
+func (p *parser) parseArray() (dyn.SliceObject, error) {
+	p.pos++
+	arr := make(dyn.SliceObject, 0)
+	p.skipWhitespace()
+	if p.pos < len(p.data) && p.data[p.pos] == ']' {
+		p.pos++
+		return arr, nil
+	}
+	for {
+		val, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		arr = append(arr, val)
+		p.skipWhitespace()
+		if p.pos >= len(p.data) {
+			return nil, ErrUnexpectedEOF
+		}
+		if p.data[p.pos] == ']' {
+			p.pos++
+			return arr, nil
+		}
+		if p.data[p.pos] != ',' {
+			return nil, errors.Wrap(ErrSyntax, "expected ',' or ']' in array")
+		}
+		p.pos++
+	}
+}
+
+func (p *parser) parseString() (string, error) {
+	s, newPos, err := parseJsonString(p.data, p.pos)
+	p.pos = newPos
+	return s, err
+}
+
+func (p *parser) parseNumber() (any, error) {
+	start := p.pos
+	if p.pos < len(p.data) && p.data[p.pos] == '-' {
+		p.pos++
+	}
+	if p.pos >= len(p.data) {
+		return nil, ErrUnexpectedEOF
+	}
+	if p.data[p.pos] == '0' {
+		p.pos++
+	} else if p.data[p.pos] >= '1' && p.data[p.pos] <= '9' {
+		p.pos++
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	} else {
+		return nil, errors.Wrap(ErrSyntax, "invalid number")
+	}
+	if p.pos < len(p.data) && p.data[p.pos] == '.' {
+		p.pos++
+		if p.pos >= len(p.data) || p.data[p.pos] < '0' || p.data[p.pos] > '9' {
+			return nil, errors.Wrap(ErrSyntax, "invalid number: expected digit after decimal point")
+		}
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	}
+	if p.pos < len(p.data) && (p.data[p.pos] == 'e' || p.data[p.pos] == 'E') {
+		p.pos++
+		if p.pos < len(p.data) && (p.data[p.pos] == '+' || p.data[p.pos] == '-') {
+			p.pos++
+		}
+		if p.pos >= len(p.data) || p.data[p.pos] < '0' || p.data[p.pos] > '9' {
+			return nil, errors.Wrap(ErrSyntax, "invalid number: expected digit in exponent")
+		}
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	}
+	s := string(p.data[start:p.pos])
+	if p.useNumber {
+		return Number(s), nil
+	}
+	f, ok := strconv.ParseFloat(s, 64)
+	if !ok {
+		return nil, errors.Wrap(ErrSyntax, "invalid number")
+	}
+	return f, nil
+}
+
+func (p *parser) parseBool() (bool, error) {
+	if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "true" {
+		p.pos += 4
+		return true, nil
+	}
+	if p.pos+5 <= len(p.data) && string(p.data[p.pos:p.pos+5]) == "false" {
+		p.pos += 5
+		return false, nil
+	}
+	return false, errors.Wrap(ErrSyntax, "expected 'true' or 'false'")
+}
+
+func (p *parser) parseNull() (any, error) {
+	if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "null" {
+		p.pos += 4
+		return nil, nil
+	}
+	return nil, errors.Wrap(ErrSyntax, "expected 'null'")
+}
+
+func (p *parser) skipWhitespace() {
+	for p.pos < len(p.data) {
+		c := p.data[p.pos]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			p.pos++
+		} else {
+			break
+		}
+	}
+}

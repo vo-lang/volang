@@ -1,6 +1,10 @@
 package strings
 
-import "unicode/utf8"
+import (
+    "errors"
+    "io"
+    "unicode/utf8"
+)
 
 // Extern functions (implemented in Rust)
 func Index(s, substr string) int
@@ -16,6 +20,43 @@ func SplitAfterN(s, sep string, n int) []string
 func Fields(s string) []string
 func Replace(s, old, new string, n int) string
 func EqualFold(s, t string) bool
+
+// FieldsFunc splits the string s at each run of Unicode code points c satisfying f(c)
+// and returns an array of slices of s.
+func FieldsFunc(s string, f func(rune) bool) []string {
+    var result []string
+    start := -1
+    for i, c := range s {
+        if f(c) {
+            if start >= 0 {
+                result = append(result, s[start:i])
+                start = -1
+            }
+        } else {
+            if start < 0 {
+                start = i
+            }
+        }
+    }
+    if start >= 0 {
+        result = append(result, s[start:])
+    }
+    return result
+}
+
+// Map returns a copy of the string s with all its characters modified
+// according to the mapping function. If mapping returns a negative value,
+// the character is dropped from the string with no replacement.
+func Map(mapping func(rune) rune, s string) string {
+    var result []byte
+    for _, c := range s {
+        mr := mapping(c)
+        if mr >= 0 {
+            result = utf8.AppendRune(result, mr)
+        }
+    }
+    return string(result)
+}
 
 // Vo-implemented functions
 
@@ -203,6 +244,39 @@ func TrimRight(s, cutset string) string {
     return s[:end]
 }
 
+// TrimFunc returns a slice of the string s with all leading and trailing
+// Unicode code points c satisfying f(c) removed.
+func TrimFunc(s string, f func(rune) bool) string {
+    return TrimRightFunc(TrimLeftFunc(s, f), f)
+}
+
+// TrimLeftFunc returns a slice of the string s with all leading
+// Unicode code points c satisfying f(c) removed.
+func TrimLeftFunc(s string, f func(rune) bool) string {
+    i := 0
+    for _, c := range s {
+        if !f(c) {
+            break
+        }
+        i += utf8.RuneLen(c)
+    }
+    return s[i:]
+}
+
+// TrimRightFunc returns a slice of the string s with all trailing
+// Unicode code points c satisfying f(c) removed.
+func TrimRightFunc(s string, f func(rune) bool) string {
+    end := len(s)
+    for end > 0 {
+        r, size := utf8.DecodeLastRuneInString(s[:end])
+        if !f(r) {
+            break
+        }
+        end -= size
+    }
+    return s[:end]
+}
+
 // TrimPrefix returns s without the provided leading prefix string.
 func TrimPrefix(s, prefix string) string {
     if HasPrefix(s, prefix) {
@@ -276,4 +350,205 @@ func CutSuffix(s, suffix string) (before string, found bool) {
 // Internal helper: check if byte is ASCII whitespace
 func isSpace(c byte) bool {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+}
+
+// ==================== Reader ====================
+
+// Reader implements io.Reader, io.ReaderAt, io.ByteReader, io.ByteScanner,
+// io.RuneReader, io.RuneScanner, io.Seeker, and io.WriterTo by reading from a string.
+// The zero value for Reader operates like a Reader of an empty string.
+type Reader struct {
+    s        string
+    i        int64 // current reading index
+    prevRune int   // index of previous rune; or < 0
+}
+
+// NewReader returns a new Reader reading from s.
+// It is similar to bytes.NewReader but more efficient for strings.
+func NewReader(s string) *Reader {
+    return &Reader{s: s, i: 0, prevRune: -1}
+}
+
+// Len returns the number of bytes of the unread portion of the string.
+func (r *Reader) Len() int {
+    if r.i >= int64(len(r.s)) {
+        return 0
+    }
+    return int(int64(len(r.s)) - r.i)
+}
+
+// Size returns the original length of the underlying string.
+func (r *Reader) Size() int64 {
+    return int64(len(r.s))
+}
+
+// Read implements the io.Reader interface.
+func (r *Reader) Read(b []byte) (int, error) {
+    if r.i >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    r.prevRune = -1
+    n := copy(b, r.s[r.i:])
+    r.i += int64(n)
+    return n, nil
+}
+
+// ReadAt implements the io.ReaderAt interface.
+func (r *Reader) ReadAt(b []byte, off int64) (int, error) {
+    if off < 0 {
+        return 0, errors.New("strings.Reader.ReadAt: negative offset")
+    }
+    if off >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    n := copy(b, r.s[off:])
+    if n < len(b) {
+        return n, io.EOF
+    }
+    return n, nil
+}
+
+// ReadByte implements the io.ByteReader interface.
+func (r *Reader) ReadByte() (byte, error) {
+    r.prevRune = -1
+    if r.i >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    b := r.s[r.i]
+    r.i++
+    return b, nil
+}
+
+// UnreadByte complements ReadByte in implementing the io.ByteScanner interface.
+func (r *Reader) UnreadByte() error {
+    if r.i <= 0 {
+        return errors.New("strings.Reader.UnreadByte: at beginning of string")
+    }
+    r.prevRune = -1
+    r.i--
+    return nil
+}
+
+// ReadRune implements the io.RuneReader interface.
+func (r *Reader) ReadRune() (rune, int, error) {
+    if r.i >= int64(len(r.s)) {
+        r.prevRune = -1
+        return 0, 0, io.EOF
+    }
+    r.prevRune = int(r.i)
+    c := r.s[r.i]
+    if c < utf8.RuneSelf {
+        r.i++
+        return rune(c), 1, nil
+    }
+    ch, size := utf8.DecodeRuneInString(r.s[r.i:])
+    r.i += int64(size)
+    return ch, size, nil
+}
+
+// UnreadRune complements ReadRune in implementing the io.RuneScanner interface.
+func (r *Reader) UnreadRune() error {
+    if r.i <= 0 {
+        return errors.New("strings.Reader.UnreadRune: at beginning of string")
+    }
+    if r.prevRune < 0 {
+        return errors.New("strings.Reader.UnreadRune: previous operation was not ReadRune")
+    }
+    r.i = int64(r.prevRune)
+    r.prevRune = -1
+    return nil
+}
+
+// Seek implements the io.Seeker interface.
+func (r *Reader) Seek(offset int64, whence int) (int64, error) {
+    r.prevRune = -1
+    var abs int64
+    switch whence {
+    case io.SeekStart:
+        abs = offset
+    case io.SeekCurrent:
+        abs = r.i + offset
+    case io.SeekEnd:
+        abs = int64(len(r.s)) + offset
+    default:
+        return 0, errors.New("strings.Reader.Seek: invalid whence")
+    }
+    if abs < 0 {
+        return 0, errors.New("strings.Reader.Seek: negative position")
+    }
+    r.i = abs
+    return abs, nil
+}
+
+// Reset resets the Reader to be reading from s.
+func (r *Reader) Reset(s string) {
+    r.s = s
+    r.i = 0
+    r.prevRune = -1
+}
+
+// ==================== Builder ====================
+
+// Builder is used to efficiently build a string using Write methods.
+// It minimizes memory copying. The zero value is ready to use.
+// Do not copy a non-zero Builder.
+type Builder struct {
+    buf []byte
+}
+
+// String returns the accumulated string.
+func (b *Builder) String() string {
+    return string(b.buf)
+}
+
+// Len returns the number of accumulated bytes; b.Len() == len(b.String()).
+func (b *Builder) Len() int {
+    return len(b.buf)
+}
+
+// Cap returns the capacity of the builder's underlying byte slice.
+func (b *Builder) Cap() int {
+    return cap(b.buf)
+}
+
+// Reset resets the Builder to be empty.
+func (b *Builder) Reset() {
+    b.buf = nil
+}
+
+// Grow grows b's capacity, if necessary, to guarantee space for another n bytes.
+func (b *Builder) Grow(n int) {
+    if n < 0 {
+        panic("strings.Builder.Grow: negative count")
+    }
+    if cap(b.buf)-len(b.buf) < n {
+        newBuf := make([]byte, len(b.buf), 2*cap(b.buf)+n)
+        copy(newBuf, b.buf)
+        b.buf = newBuf
+    }
+}
+
+// Write appends the contents of p to b's buffer.
+func (b *Builder) Write(p []byte) (int, error) {
+    b.buf = append(b.buf, p...)
+    return len(p), nil
+}
+
+// WriteByte appends the byte c to b's buffer.
+func (b *Builder) WriteByte(c byte) error {
+    b.buf = append(b.buf, c)
+    return nil
+}
+
+// WriteRune appends the UTF-8 encoding of Unicode code point r to b's buffer.
+func (b *Builder) WriteRune(r rune) (int, error) {
+    n := len(b.buf)
+    b.buf = utf8.AppendRune(b.buf, r)
+    return len(b.buf) - n, nil
+}
+
+// WriteString appends the contents of s to b's buffer.
+func (b *Builder) WriteString(s string) (int, error) {
+    b.buf = append(b.buf, s...)
+    return len(s), nil
 }

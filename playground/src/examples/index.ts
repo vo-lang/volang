@@ -246,5 +246,53 @@ func main() {
 }
 `,
   },
+  {
+    name: 'GUI Demo',
+    code: `package main
+
+import "encoding/json"
+
+// VoGUI Demo - Declarative UI in Vo
+// This renders a simple counter interface
+
+func main() {
+    // Build the UI tree
+    tree := Column(
+        Text("Hello VoGUI!"),
+        Text("Count: 0"),
+        Row(
+            Button("-", 0),
+            Button("+", 1),
+        ),
+        Text("Click buttons to interact (coming soon)"),
+    )
+    
+    // Output for GUI renderer
+    output := map[string]any{
+        "tree":     tree,
+        "handlers": 2,
+    }
+    data, _ := json.Marshal(output)
+    println("__VOGUI__" + string(data))
+}
+
+// UI Component helpers
+func Column(children ...any) map[string]any {
+    return map[string]any{"Type": "Column", "Children": children}
+}
+
+func Row(children ...any) map[string]any {
+    return map[string]any{"Type": "Row", "Children": children}
+}
+
+func Text(content string) map[string]any {
+    return map[string]any{"Type": "Text", "Props": map[string]any{"content": content}}
+}
+
+func Button(text string, handler int) map[string]any {
+    return map[string]any{"Type": "Button", "Props": map[string]any{"text": text, "onClick": handler}}
+}
+`,
+  },
 ];
 

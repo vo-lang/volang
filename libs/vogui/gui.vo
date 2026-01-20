@@ -1,0 +1,231 @@
+// Package gui provides a declarative UI framework for building web applications.
+//
+// Programming Model:
+//   State (user struct) → View (pure function) → Action (mutation function)
+//
+// Example:
+//
+//   type State struct { Count int }
+//
+//   func view(state any) gui.Node {
+//       s := state.(State)
+//       return gui.Column(
+//           gui.Text("Count: ", s.Count),
+//           gui.Button("+1", gui.On(increment)),
+//       )
+//   }
+//
+//   func increment(s *State) { s.Count++ }
+//
+//   func main() {
+//       gui.Run(gui.App{
+//           Init: func() any { return State{} },
+//           View: view,
+//       })
+//   }
+package gui
+
+import "encoding/json"
+
+// ============ Core Types ============
+
+// Node represents a UI element.
+type Node struct {
+	Type     string
+	Props    map[string]any
+	Children []Node
+}
+
+// Handler represents an event handler binding.
+type Handler struct {
+	ID int
+}
+
+// App defines the application structure.
+type App struct {
+	Init func() any
+	View func(state any) Node
+}
+
+// ============ Internal State ============
+
+var handlers []any
+
+// ============ Layout Components ============
+
+// Column arranges children vertically.
+func Column(children ...Node) Node {
+	return Node{Type: "Column", Children: children}
+}
+
+// Row arranges children horizontally.
+func Row(children ...Node) Node {
+	return Node{Type: "Row", Children: children}
+}
+
+// Spacer fills available space.
+func Spacer() Node {
+	return Node{Type: "Spacer"}
+}
+
+// ============ Display Components ============
+
+// Text displays text content.
+func Text(content ...any) Node {
+	s := ""
+	for i, c := range content {
+		if i > 0 {
+			s += ""
+		}
+		s += toString(c)
+	}
+	return Node{Type: "Text", Props: map[string]any{"content": s}}
+}
+
+// ============ Input Components ============
+
+// Button renders a clickable button.
+func Button(text string, onClick Handler) Node {
+	return Node{
+		Type: "Button",
+		Props: map[string]any{
+			"text":    text,
+			"onClick": onClick.ID,
+		},
+	}
+}
+
+// Input renders a text input field.
+func Input(value string, onChange Handler) Node {
+	return Node{
+		Type: "Input",
+		Props: map[string]any{
+			"value":    value,
+			"onChange": onChange.ID,
+		},
+	}
+}
+
+// Checkbox renders a checkbox.
+func Checkbox(checked bool, onChange Handler) Node {
+	return Node{
+		Type: "Checkbox",
+		Props: map[string]any{
+			"checked":  checked,
+			"onChange": onChange.ID,
+		},
+	}
+}
+
+// ============ Control Flow ============
+
+// If conditionally renders a node.
+func If(cond bool, then Node) Node {
+	if cond {
+		return then
+	}
+	return Node{Type: "Empty"}
+}
+
+// IfElse conditionally renders one of two nodes.
+func IfElse(cond bool, then Node, els Node) Node {
+	if cond {
+		return then
+	}
+	return els
+}
+
+// ============ Styling ============
+
+// Style applies style properties to a node.
+func Style(node Node, props map[string]any) Node {
+	if node.Props == nil {
+		node.Props = make(map[string]any)
+	}
+	node.Props["style"] = props
+	return node
+}
+
+// Padding adds padding to a node.
+func Padding(node Node, value int) Node {
+	if node.Props == nil {
+		node.Props = make(map[string]any)
+	}
+	node.Props["padding"] = value
+	return node
+}
+
+// ============ Event Binding ============
+
+// On wraps an action for event handling.
+// Action signature: func(s *State)
+func On(action any) Handler {
+	id := len(handlers)
+	handlers = append(handlers, action)
+	return Handler{ID: id}
+}
+
+// OnValue wraps an action that receives input value.
+// Action signature: func(s *State, value string)
+func OnValue(action any) Handler {
+	id := len(handlers)
+	handlers = append(handlers, action)
+	return Handler{ID: id}
+}
+
+// ============ App Lifecycle ============
+
+// Run starts the application.
+func Run(app App) {
+	handlers = []any{}
+	state := app.Init()
+	tree := app.View(state)
+	output := map[string]any{
+		"tree":     tree,
+		"handlers": len(handlers),
+	}
+	data, err := json.Marshal(output)
+	if err != nil {
+		println("VoGUI marshal error:", err)
+		return
+	}
+	println("__VOGUI__" + string(data))
+}
+
+// ============ Helpers ============
+
+func toString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case int:
+		return intToString(x)
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		return "<unknown>"
+	}
+}
+
+func intToString(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	s := ""
+	for n > 0 {
+		s = string(rune('0'+n%10)) + s
+		n /= 10
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
+}

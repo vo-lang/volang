@@ -6,7 +6,7 @@ Usage:
     ./d.py test [vm|jit|gc|nostd|wasm] [-v] [file.vo]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
-    ./d.py wasm [--release]     Build vo-web for WASM
+    ./d.py play [--build-only]  Build WASM and start playground
 """
 
 import argparse
@@ -201,18 +201,11 @@ def clean_caches(target: str = 'all'):
         print("Nothing to clean.")
 
 
-def build_wasm(release: bool = False):
-    """Build vo-web for WASM using wasm-pack.
-    
-    Note: Always builds in release mode because wasm-pack 0.13.1 has issues
-    with --dev + --features combination. Release builds are also what
-    `d.py test wasm` uses for consistency.
-    """
-    _ = release  # Always use release for now
-    
+def build_wasm():
+    """Build vo-web for WASM using wasm-pack."""
     print(f"{Colors.BOLD}Building vo-web WASM...{Colors.NC}")
     
-    build_cmd = ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--features', 'compiler']
+    build_cmd = ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'web', '--features', 'compiler']
     
     code, stdout, stderr = run_cmd(build_cmd, capture=False)
     if code != 0:
@@ -227,6 +220,27 @@ def build_wasm(release: bool = False):
         print(f"  WASM size: {size_kb:.1f} KB")
     else:
         print(f"{Colors.GREEN}✓ Build completed{Colors.NC}")
+
+
+def run_playground(build_only: bool = False):
+    """Build WASM and optionally start the playground dev server."""
+    build_wasm()
+    
+    if build_only:
+        return
+    
+    playground_dir = PROJECT_ROOT / 'playground'
+    if not playground_dir.exists():
+        print(f"{Colors.RED}Playground directory not found: {playground_dir}{Colors.NC}")
+        sys.exit(1)
+    
+    print(f"\n{Colors.BOLD}Starting playground...{Colors.NC}")
+    print(f"{Colors.DIM}Press Ctrl+C to stop{Colors.NC}\n")
+    
+    try:
+        subprocess.run(['npm', 'run', 'dev'], cwd=playground_dir, check=True)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
 
 def ensure_vox_extension_built(arch: str = '64', release: bool = False):
@@ -805,7 +819,7 @@ class TestRunner:
         if needs_build:
             print(f"{Colors.DIM}Building vo-web WASM...{Colors.NC}")
             code, _, stderr = run_cmd(
-                ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'nodejs', '--features', 'compiler'],
+                ['wasm-pack', 'build', 'lang/crates/vo-web', '--target', 'web', '--features', 'compiler'],
                 capture=False
             )
             if code != 0:
@@ -1288,10 +1302,10 @@ def main():
                               choices=['all', 'vo', 'rust'],
                               help='all (default), vo (.vo-cache), rust (cargo clean)')
 
-    # wasm
-    wasm_parser = subparsers.add_parser('wasm', help='Build vo-web for WASM')
-    wasm_parser.add_argument('--release', action='store_true',
-                             help='Build in release mode')
+    # play
+    play_parser = subparsers.add_parser('play', help='Build WASM and start playground')
+    play_parser.add_argument('--build-only', action='store_true',
+                             help='Only build WASM, do not start dev server')
 
     args = parser.parse_args()
 
@@ -1320,8 +1334,8 @@ def main():
     elif args.command == 'clean':
         clean_caches(args.target)
 
-    elif args.command == 'wasm':
-        build_wasm(release=args.release)
+    elif args.command == 'play':
+        run_playground(build_only=args.build_only)
 
     else:
         parser.print_help()

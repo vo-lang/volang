@@ -1,7 +1,13 @@
 <script lang="ts">
   import type { RunStatus } from '../wasm/vo.ts';
 
-  let { stdout, stderr, status }: { stdout: string; stderr: string; status: RunStatus } = $props();
+  let { stdout, stderr, status, collapsible = false, collapsed = $bindable(false) }: { 
+    stdout: string; 
+    stderr: string; 
+    status: RunStatus;
+    collapsible?: boolean;
+    collapsed?: boolean;
+  } = $props();
 
   const statusLabels: Record<RunStatus, string> = {
     idle: 'Ready',
@@ -12,9 +18,12 @@
 </script>
 
 <div class="output">
-  <div class="output-header">
+  <div class="output-header" class:clickable={collapsible} role={collapsible ? "button" : undefined} tabindex={collapsible ? 0 : undefined} onclick={() => collapsible && (collapsed = !collapsed)} onkeydown={(e) => collapsible && (e.key === 'Enter' || e.key === ' ') && (collapsed = !collapsed)}>
     <div class="header-left">
-      <span class="output-title">Console Output</span>
+      <span class="output-title">Console</span>
+      {#if collapsible}
+        <button class="collapse-btn">{collapsed ? '▲' : '▼'}</button>
+      {/if}
     </div>
     <div class="header-right">
       <span class="status" class:success={status === 'success'} class:error={status === 'error'} class:running={status === 'running'}>
@@ -23,7 +32,7 @@
       </span>
     </div>
   </div>
-  <div class="output-content">
+  <div class="output-content" class:hidden={collapsed}>
     {#if stdout}
       <div class="log-entry stdout">{stdout}</div>
     {/if}
@@ -62,12 +71,39 @@
     flex-shrink: 0;
   }
 
+  .output-header.clickable {
+    cursor: pointer;
+  }
+
+  .output-header.clickable:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .output-title {
     font-weight: 600;
     font-size: 13px;
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .collapse-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+
+  .output-content.hidden {
+    display: none;
   }
 
   .status {

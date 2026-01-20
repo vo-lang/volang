@@ -5,13 +5,12 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
 import { fileURLToPath } from "url";
-import { createRequire } from "module";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
 
-// Import wasm-pack generated module (CommonJS)
-const voWeb = require("./pkg/vo_web.js");
+// Import wasm-pack generated module (ES module for --target web)
+import init, { compileAndRun, version } from "./pkg/vo_web.js";
+const voWeb = { compileAndRun, version };
 
 const TEST_DIR = join(__dirname, "../../test_data");
 
@@ -85,6 +84,12 @@ async function runTest(filePath) {
 }
 
 async function main() {
+  // Initialize WASM (required for --target web)
+  // Node.js fetch doesn't support file:// URLs, so we read the WASM file manually
+  const wasmPath = join(__dirname, "pkg", "vo_web_bg.wasm");
+  const wasmBytes = readFileSync(wasmPath);
+  await init(wasmBytes);
+  
   const args = process.argv.slice(2);
   
   if (args.length > 0) {

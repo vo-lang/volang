@@ -12,7 +12,9 @@ func LastIndex(s, sep []byte) int
 func Count(s, sep []byte) int
 func ToLower(s []byte) []byte
 func ToUpper(s []byte) []byte
+func ToTitle(s []byte) []byte
 func Replace(s, old, new []byte, n int) []byte
+func EqualFold(s, t []byte) bool
 
 // Split splits s into all subslices separated by sep.
 func Split(s, sep []byte) [][]byte {
@@ -36,11 +38,20 @@ func SplitAfterN(s, sep []byte, n int) [][]byte {
 
 // Fields splits s around each instance of one or more consecutive white space characters.
 func Fields(s []byte) [][]byte {
+    return FieldsFunc(s, func(r rune) bool {
+        return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
+    })
+}
+
+// FieldsFunc interprets s as a sequence of UTF-8-encoded code points.
+// It splits s at each run of code points c satisfying f(c) and returns a slice of subslices of s.
+func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
     var result [][]byte
     start := -1
-    for i := 0; i < len(s); i++ {
-        isWS := s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f'
-        if isWS {
+    i := 0
+    for i < len(s) {
+        r, size := utf8.DecodeRune(s[i:])
+        if f(r) {
             if start >= 0 {
                 result = append(result, s[start:i])
                 start = -1
@@ -50,6 +61,7 @@ func Fields(s []byte) [][]byte {
                 start = i
             }
         }
+        i += size
     }
     if start >= 0 {
         result = append(result, s[start:])
@@ -305,6 +317,40 @@ func TrimRight(b []byte, cutset string) []byte {
     return b[:end]
 }
 
+// TrimFunc returns a subslice of b by slicing off all leading and trailing
+// UTF-8-encoded code points c that satisfy f(c).
+func TrimFunc(b []byte, f func(rune) bool) []byte {
+    return TrimRightFunc(TrimLeftFunc(b, f), f)
+}
+
+// TrimLeftFunc returns a subslice of b by slicing off all leading
+// UTF-8-encoded code points c that satisfy f(c).
+func TrimLeftFunc(b []byte, f func(rune) bool) []byte {
+    i := 0
+    for i < len(b) {
+        r, size := utf8.DecodeRune(b[i:])
+        if !f(r) {
+            break
+        }
+        i += size
+    }
+    return b[i:]
+}
+
+// TrimRightFunc returns a subslice of b by slicing off all trailing
+// UTF-8-encoded code points c that satisfy f(c).
+func TrimRightFunc(b []byte, f func(rune) bool) []byte {
+    end := len(b)
+    for end > 0 {
+        r, size := utf8.DecodeLastRune(b[:end])
+        if !f(r) {
+            break
+        }
+        end -= size
+    }
+    return b[:end]
+}
+
 // TrimPrefix returns b without the provided leading prefix byte slice.
 func TrimPrefix(b, prefix []byte) []byte {
     if HasPrefix(b, prefix) {
@@ -324,6 +370,36 @@ func TrimSuffix(b, suffix []byte) []byte {
 // ReplaceAll returns a copy of b with all occurrences of old replaced by new.
 func ReplaceAll(b, old, new []byte) []byte {
     return Replace(b, old, new, -1)
+}
+
+// Map returns a copy of the byte slice b with all its characters modified
+// according to the mapping function. If mapping returns a negative value,
+// the character is dropped from the byte slice with no replacement.
+func Map(mapping func(rune) rune, b []byte) []byte {
+    result := make([]byte, 0, len(b))
+    i := 0
+    for i < len(b) {
+        r, size := utf8.DecodeRune(b[i:])
+        i += size
+        mr := mapping(r)
+        if mr >= 0 {
+            result = utf8.AppendRune(result, mr)
+        }
+    }
+    return result
+}
+
+// Runes interprets b as a sequence of UTF-8-encoded code points.
+// It returns a slice of runes (Unicode code points) equivalent to b.
+func Runes(b []byte) []rune {
+    var result []rune
+    i := 0
+    for i < len(b) {
+        r, size := utf8.DecodeRune(b[i:])
+        result = append(result, r)
+        i += size
+    }
+    return result
 }
 
 // Join concatenates the elements of s to create a new byte slice.
@@ -748,5 +824,139 @@ func (b *Buffer) ReadString(delim byte) (string, error) {
 // empty reports whether the unread portion of the buffer is empty.
 func (b *Buffer) empty() bool {
     return len(b.buf) <= b.off
+}
+
+// ==================== Reader ====================
+
+// Reader implements io.Reader, io.ReaderAt, io.ByteReader, io.ByteScanner,
+// io.RuneReader, io.RuneScanner, io.Seeker, and io.WriterTo by reading from a byte slice.
+// Unlike a Buffer, a Reader is read-only and supports seeking.
+type Reader struct {
+    s        []byte
+    i        int64 // current reading index
+    prevRune int   // index of previous rune; or < 0
+}
+
+// NewReader returns a new Reader reading from b.
+func NewReader(b []byte) *Reader {
+    return &Reader{s: b, i: 0, prevRune: -1}
+}
+
+// Len returns the number of bytes of the unread portion of the slice.
+func (r *Reader) Len() int {
+    if r.i >= int64(len(r.s)) {
+        return 0
+    }
+    return int(int64(len(r.s)) - r.i)
+}
+
+// Size returns the original length of the underlying byte slice.
+func (r *Reader) Size() int64 {
+    return int64(len(r.s))
+}
+
+// Read implements the io.Reader interface.
+func (r *Reader) Read(b []byte) (int, error) {
+    if r.i >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    r.prevRune = -1
+    n := copy(b, r.s[r.i:])
+    r.i += int64(n)
+    return n, nil
+}
+
+// ReadAt implements the io.ReaderAt interface.
+func (r *Reader) ReadAt(b []byte, off int64) (int, error) {
+    if off < 0 {
+        return 0, errors.New("bytes.Reader.ReadAt: negative offset")
+    }
+    if off >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    n := copy(b, r.s[off:])
+    if n < len(b) {
+        return n, io.EOF
+    }
+    return n, nil
+}
+
+// ReadByte implements the io.ByteReader interface.
+func (r *Reader) ReadByte() (byte, error) {
+    r.prevRune = -1
+    if r.i >= int64(len(r.s)) {
+        return 0, io.EOF
+    }
+    b := r.s[r.i]
+    r.i++
+    return b, nil
+}
+
+// UnreadByte complements ReadByte in implementing the io.ByteScanner interface.
+func (r *Reader) UnreadByte() error {
+    if r.i <= 0 {
+        return errors.New("bytes.Reader.UnreadByte: at beginning of slice")
+    }
+    r.prevRune = -1
+    r.i--
+    return nil
+}
+
+// ReadRune implements the io.RuneReader interface.
+func (r *Reader) ReadRune() (rune, int, error) {
+    if r.i >= int64(len(r.s)) {
+        r.prevRune = -1
+        return 0, 0, io.EOF
+    }
+    r.prevRune = int(r.i)
+    c := r.s[r.i]
+    if c < utf8.RuneSelf {
+        r.i++
+        return rune(c), 1, nil
+    }
+    ch, size := utf8.DecodeRune(r.s[r.i:])
+    r.i += int64(size)
+    return ch, size, nil
+}
+
+// UnreadRune complements ReadRune in implementing the io.RuneScanner interface.
+func (r *Reader) UnreadRune() error {
+    if r.i <= 0 {
+        return errors.New("bytes.Reader.UnreadRune: at beginning of slice")
+    }
+    if r.prevRune < 0 {
+        return errors.New("bytes.Reader.UnreadRune: previous operation was not ReadRune")
+    }
+    r.i = int64(r.prevRune)
+    r.prevRune = -1
+    return nil
+}
+
+// Seek implements the io.Seeker interface.
+func (r *Reader) Seek(offset int64, whence int) (int64, error) {
+    r.prevRune = -1
+    var abs int64
+    switch whence {
+    case io.SeekStart:
+        abs = offset
+    case io.SeekCurrent:
+        abs = r.i + offset
+    case io.SeekEnd:
+        abs = int64(len(r.s)) + offset
+    default:
+        return 0, errors.New("bytes.Reader.Seek: invalid whence")
+    }
+    if abs < 0 {
+        return 0, errors.New("bytes.Reader.Seek: negative position")
+    }
+    r.i = abs
+    return abs, nil
+}
+
+// Reset resets the Reader to be reading from b.
+func (r *Reader) Reset(b []byte) {
+    r.s = b
+    r.i = 0
+    r.prevRune = -1
 }
 

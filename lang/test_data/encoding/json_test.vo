@@ -1,261 +1,298 @@
 package main
 
 import (
-	"fmt"
-    "encoding/json"
+	"bytes"
+	"dyn"
+	"encoding/json"
+	"strings"
 )
 
 func main() {
-    testParseSimple()
-    testParseObject()
-    testParseArray()
-    testParseNested()
-    testStringify()
-    testStringifyIndent()
-    testBuilder()
-    testNumber()
-    testHelpers()
-    fmt.Println("All JSON tests passed!")
+	testUnmarshal()
+	testMarshal()
+	testMarshalIndent()
+	testValid()
+	testDecoder()
+	testEncoder()
+	testNumber()
+	testCompact()
+	testIndent()
+	testEdgeCases()
 }
 
-func testParseSimple() {
-    // String
-    v, err := json.ParseString(`"hello"`)
-    assert(err == nil, "parse string error")
-    assert(v.(string) == "hello", "parse string value")
+func testUnmarshal() {
+	// Simple values
+	v, err := json.Unmarshal([]byte(`"hello"`))
+	assert(err == nil, "unmarshal string")
+	assert(v.(string) == "hello", "string value")
 
-    // Number
-    v, err = json.ParseString(`123`)
-    assert(err == nil, "parse number error")
-    n := v.(json.Number)
-    assert(n.String() == "123", "parse number string")
-    i, err := n.Int()
-    assert(err == nil, "number int error")
-    assert(i == 123, "number int value")
+	v, err = json.Unmarshal([]byte(`123`))
+	assert(err == nil, "unmarshal number")
+	f := v.(float64)
+	assert(f == 123.0, "number value")
 
-    // Bool
-    v, err = json.ParseString(`true`)
-    assert(err == nil, "parse true error")
-    assert(v.(bool) == true, "parse true value")
+	v, err = json.Unmarshal([]byte(`true`))
+	assert(err == nil, "unmarshal bool")
+	assert(v.(bool) == true, "bool value")
 
-    v, err = json.ParseString(`false`)
-    assert(err == nil, "parse false error")
-    assert(v.(bool) == false, "parse false value")
+	v, err = json.Unmarshal([]byte(`false`))
+	assert(err == nil, "unmarshal false")
+	assert(v.(bool) == false, "false value")
 
-    // Null
-    v, err = json.ParseString(`null`)
-    assert(err == nil, "parse null error")
-    assert(v == nil, "parse null value")
+	v, err = json.Unmarshal([]byte(`null`))
+	assert(err == nil, "unmarshal null")
+	assert(v == nil, "null value")
 
-    fmt.Println("  testParseSimple passed")
+	// Object
+	v, err = json.Unmarshal([]byte(`{"name": "test", "value": 42}`))
+	assert(err == nil, "unmarshal object")
+	obj := v.(dyn.MapObject)
+	assert(obj["name"].(string) == "test", "object name")
+	assert(obj["value"].(float64) == 42.0, "object value")
+
+	// Array
+	v, err = json.Unmarshal([]byte(`[1, 2, 3]`))
+	assert(err == nil, "unmarshal array")
+	arr := v.(dyn.SliceObject)
+	assert(len(arr) == 3, "array length")
+	assert(arr[0].(float64) == 1.0, "array[0]")
+
+	// Nested
+	v, err = json.Unmarshal([]byte(`{"items": [{"id": 1}, {"id": 2}]}`))
+	assert(err == nil, "unmarshal nested")
+	obj = v.(dyn.MapObject)
+	items := obj["items"].(dyn.SliceObject)
+	assert(len(items) == 2, "nested array length")
+	assert(items[0].(dyn.MapObject)["id"].(float64) == 1.0, "nested id")
+
+	// Unicode escape
+	v, err = json.Unmarshal([]byte(`"hello\u0020world"`))
+	assert(err == nil, "unmarshal unicode")
+	assert(v.(string) == "hello world", "unicode value")
+
+	// Escape sequences
+	v, err = json.Unmarshal([]byte(`"line1\nline2\ttab"`))
+	assert(err == nil, "unmarshal escapes")
+	assert(v.(string) == "line1\nline2\ttab", "escape value")
+
+	// Empty object/array
+	v, err = json.Unmarshal([]byte(`{}`))
+	assert(err == nil, "unmarshal empty object")
+	assert(len(v.(dyn.MapObject)) == 0, "empty object")
+
+	v, err = json.Unmarshal([]byte(`[]`))
+	assert(err == nil, "unmarshal empty array")
+	assert(len(v.(dyn.SliceObject)) == 0, "empty array")
+
+	// Errors
+	_, err = json.Unmarshal([]byte(`{invalid}`))
+	assert(err != nil, "error on invalid json")
+
+	_, err = json.Unmarshal([]byte(`{"key": }`))
+	assert(err != nil, "error on missing value")
 }
 
-func testParseObject() {
-    v, err := json.ParseString(`{"name": "Alice", "age": 30}`)
-    assert(err == nil, "parse object error")
-    
-    obj, ok := json.AsObject(v)
-    assert(ok, "AsObject failed")
-    
-    name, ok := obj["name"]
-    assert(ok, "name key missing")
-    assert(name.(string) == "Alice", "name value")
-    
-    age, ok := obj["age"]
-    assert(ok, "age key missing")
-    ageNum := age.(json.Number)
-    ageInt, err := ageNum.Int()
-    assert(err == nil, "age int error")
-    assert(ageInt == 30, "age value")
+func testMarshal() {
+	// Simple values
+	b, err := json.Marshal("hello")
+	assert(err == nil, "marshal string")
+	assert(string(b) == `"hello"`, "string json")
 
-    // Empty object
-    v, err = json.ParseString(`{}`)
-    assert(err == nil, "parse empty object error")
-    obj, ok = json.AsObject(v)
-    assert(ok, "AsObject empty failed")
-    assert(len(obj) == 0, "empty object len")
+	b, err = json.Marshal(42)
+	assert(err == nil, "marshal int")
+	assert(string(b) == "42", "int json")
 
-    fmt.Println("  testParseObject passed")
+	b, err = json.Marshal(3.14)
+	assert(err == nil, "marshal float")
+	assert(bytes.HasPrefix(b, []byte("3.14")), "float json")
+
+	b, err = json.Marshal(true)
+	assert(err == nil, "marshal bool")
+	assert(string(b) == "true", "bool json")
+
+	b, err = json.Marshal(nil)
+	assert(err == nil, "marshal nil")
+	assert(string(b) == "null", "nil json")
+
+	// Object
+	obj := map[string]any{"name": "test"}
+	b, err = json.Marshal(obj)
+	assert(err == nil, "marshal object")
+	assert(bytes.Contains(b, []byte(`"name"`)), "object contains key")
+	assert(bytes.Contains(b, []byte(`"test"`)), "object contains value")
+
+	// Array
+	arr := []any{1, 2, 3}
+	b, err = json.Marshal(arr)
+	assert(err == nil, "marshal array")
+	assert(string(b) == "[1,2,3]", "array json")
+
+	// Escape characters
+	b, err = json.Marshal("line1\nline2")
+	assert(err == nil, "marshal newline")
+	assert(string(b) == `"line1\nline2"`, "newline escaped")
+
+	// Number type
+	b, err = json.Marshal(json.Number("12345678901234567890"))
+	assert(err == nil, "marshal Number")
+	assert(string(b) == "12345678901234567890", "Number preserved")
+
+	// RawMessage
+	b, err = json.Marshal(json.RawMessage(`{"pre":"encoded"}`))
+	assert(err == nil, "marshal RawMessage")
+	assert(string(b) == `{"pre":"encoded"}`, "RawMessage preserved")
 }
 
-func testParseArray() {
-    v, err := json.ParseString(`[1, 2, 3]`)
-    assert(err == nil, "parse array error")
-    
-    arr, ok := json.AsArray(v)
-    assert(ok, "AsArray failed")
-    assert(len(arr) == 3, "array len")
-    
-    n0 := arr[0].(json.Number)
-    i0, _ := n0.Int()
-    assert(i0 == 1, "arr[0]")
-    
-    n1 := arr[1].(json.Number)
-    i1, _ := n1.Int()
-    assert(i1 == 2, "arr[1]")
-    
-    n2 := arr[2].(json.Number)
-    i2, _ := n2.Int()
-    assert(i2 == 3, "arr[2]")
-
-    // Empty array
-    v, err = json.ParseString(`[]`)
-    assert(err == nil, "parse empty array error")
-    arr, ok = json.AsArray(v)
-    assert(ok, "AsArray empty failed")
-    assert(len(arr) == 0, "empty array len")
-
-    fmt.Println("  testParseArray passed")
+func testMarshalIndent() {
+	obj := map[string]any{"a": 1, "b": 2}
+	b, err := json.MarshalIndent(obj, "", "  ")
+	assert(err == nil, "marshal indent")
+	assert(bytes.Contains(b, []byte("\n")), "has newlines")
+	assert(bytes.Contains(b, []byte("  ")), "has indent")
 }
 
-func testParseNested() {
-    data := `{
-        "user": {
-            "name": "Bob",
-            "tags": ["admin", "active"]
-        },
-        "count": 42
-    }`
-    v, err := json.ParseString(data)
-    assert(err == nil, "parse nested error")
-    
-    obj, _ := json.AsObject(v)
-    user, _ := obj["user"]
-    userObj, _ := json.AsObject(user)
-    
-    name := userObj["name"].(string)
-    assert(name == "Bob", "nested name")
-    
-    tags, _ := json.AsArray(userObj["tags"])
-    assert(len(tags) == 2, "tags len")
-    assert(tags[0].(string) == "admin", "tags[0]")
-    assert(tags[1].(string) == "active", "tags[1]")
-    
-    count := obj["count"].(json.Number)
-    countInt, _ := count.Int()
-    assert(countInt == 42, "nested count")
+func testValid() {
+	assert(json.Valid([]byte(`{"a": 1}`)) == true, "valid object")
+	assert(json.Valid([]byte(`[1,2,3]`)) == true, "valid array")
+	assert(json.Valid([]byte(`"string"`)) == true, "valid string")
+	assert(json.Valid([]byte(`123`)) == true, "valid number")
+	assert(json.Valid([]byte(`true`)) == true, "valid bool")
+	assert(json.Valid([]byte(`null`)) == true, "valid null")
 
-    fmt.Println("  testParseNested passed")
+	assert(json.Valid([]byte(`{invalid}`)) == false, "invalid object")
+	assert(json.Valid([]byte(`[1,2,]`)) == false, "trailing comma")
+	assert(json.Valid([]byte(`"`)) == false, "unclosed string")
 }
 
-func testStringify() {
-    obj := json.Object()
-    obj["name"] = "Alice"
-    obj["age"] = 30
-    obj["active"] = true
-    
-    data, err := json.Stringify(obj)
-    assert(err == nil, "stringify error")
-    
-    // Parse back to verify
-    v, err := json.Parse(data)
-    assert(err == nil, "reparse error")
-    parsed, _ := json.AsObject(v)
-    assert(parsed["name"].(string) == "Alice", "stringify name")
-    
-    // Stringify array
-    arr := json.Array(1, 2, 3)
-    data, err = json.Stringify(arr)
-    assert(err == nil, "stringify array error")
-    
-    v, _ = json.Parse(data)
-    parsedArr, _ := json.AsArray(v)
-    assert(len(parsedArr) == 3, "stringify array len")
+func testDecoder() {
+	r := strings.NewReader(`{"a":1}{"b":2}`)
+	dec := json.NewDecoder(r)
 
-    // Stringify null
-    data, err = json.Stringify(nil)
-    assert(err == nil, "stringify null error")
-    assert(string(data) == "null", "stringify null value")
+	v, err := dec.Decode()
+	assert(err == nil, "decode first")
+	assert(v.(dyn.MapObject)["a"].(float64) == 1.0, "first value")
 
-    fmt.Println("  testStringify passed")
+	v, err = dec.Decode()
+	assert(err == nil, "decode second")
+	assert(v.(dyn.MapObject)["b"].(float64) == 2.0, "second value")
+
+	// UseNumber
+	r = strings.NewReader(`{"n": 12345678901234567890}`)
+	dec = json.NewDecoder(r)
+	dec.UseNumber()
+	v, err = dec.Decode()
+	assert(err == nil, "decode with UseNumber")
+	n := v.(dyn.MapObject)["n"].(json.Number)
+	assert(string(n) == "12345678901234567890", "number preserved")
+
+	// Token API
+	r = strings.NewReader(`{"key": [1, 2]}`)
+	dec = json.NewDecoder(r)
+	tok, err := dec.Token()
+	assert(err == nil, "token 1")
+	assert(tok.(json.Delim) == '{', "token is {")
+
+	tok, err = dec.Token()
+	assert(err == nil, "token 2")
+	assert(tok.(string) == "key", "token is key")
+
+	tok, err = dec.Token()
+	assert(err == nil, "token 3")
+	assert(tok.(json.Delim) == '[', "token is [")
+
+	// More()
+	assert(dec.More() == true, "more elements")
 }
 
-func testStringifyIndent() {
-    obj := json.Object()
-    obj["name"] = "Test"
-    obj["value"] = 123
-    
-    data, err := json.StringifyIndent(obj, "", "  ")
-    assert(err == nil, "stringify indent error")
-    
-    s := string(data)
-    // Should contain newlines
-    hasNewline := false
-    for i := 0; i < len(s); i++ {
-        if s[i] == '\n' {
-            hasNewline = true
-            break
-        }
-    }
-    assert(hasNewline, "stringify indent should have newlines")
+func testEncoder() {
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
 
-    fmt.Println("  testStringifyIndent passed")
-}
+	err := enc.Encode(map[string]any{"a": 1})
+	assert(err == nil, "encode")
+	assert(bytes.Contains(buf.Bytes(), []byte(`"a"`)), "encoded has key")
 
-func testBuilder() {
-    obj := json.Object()
-    obj["key"] = "value"
-    assert(obj["key"].(string) == "value", "builder object")
-    
-    arr := json.Array("a", "b", "c")
-    assert(len(arr) == 3, "builder array len")
-    assert(arr[0].(string) == "a", "builder array[0]")
-
-    fmt.Println("  testBuilder passed")
+	buf.Reset()
+	enc.SetIndent("", "  ")
+	err = enc.Encode(map[string]any{"b": 2})
+	assert(err == nil, "encode with indent")
+	assert(bytes.Contains(buf.Bytes(), []byte("\n")), "indented has newlines")
 }
 
 func testNumber() {
-    n := json.Number("123")
-    assert(n.String() == "123", "number string")
-    assert(n.IsInt(), "number isint")
-    
-    i, err := n.Int()
-    assert(err == nil, "number int err")
-    assert(i == 123, "number int val")
-    
-    n2 := json.Number("3.14")
-    assert(!n2.IsInt(), "float isint")
-    
-    f, err := n2.Float64()
-    assert(err == nil, "number float64 err")
-    assert(f > 3.13 && f < 3.15, "number float64 val")
-    
-    // Int also works via Float64
-    f2, err := n.Float64()
-    assert(err == nil, "int to float64 err")
-    assert(f2 == 123.0, "int to float64 val")
+	n := json.Number("123")
+	assert(n.String() == "123", "Number.String")
 
-    fmt.Println("  testNumber passed")
+	i, err := n.Int64()
+	assert(err == nil, "Number.Int64")
+	assert(i == 123, "Int64 value")
+
+	f, err := n.Float64()
+	assert(err == nil, "Number.Float64")
+	assert(f == 123.0, "Float64 value")
+
+	// Large number - Float64 handles it
+	n = json.Number("12345678901234567890")
+	f, err = n.Float64()
+	assert(err == nil, "large number Float64")
 }
 
-func testHelpers() {
-    obj := json.Object()
-    obj["foo"] = "bar"
-    obj["empty"] = nil
-    
-    assert(json.Has(obj, "foo"), "has foo")
-    assert(!json.Has(obj, "missing"), "has missing")
-    assert(json.IsNull(obj["empty"]), "isNull")
-    assert(!json.IsNull(obj["foo"]), "isNull foo")
-    
-    length, err := json.Len(obj)
-    assert(err == nil, "len err")
-    assert(length == 2, "len value")
-    
-    keys, err := json.Keys(obj)
-    assert(err == nil, "keys err")
-    assert(len(keys) == 2, "keys len")
-    
-    err = json.Delete(obj, "foo")
-    assert(err == nil, "delete err")
-    assert(!json.Has(obj, "foo"), "deleted foo")
+func testCompact() {
+	src := []byte(`{  "a" : 1 , "b" : [ 1 , 2 ] }`)
+	dst := &bytes.Buffer{}
+	err := json.Compact(dst, src)
+	assert(err == nil, "compact")
+	assert(dst.String() == `{"a":1,"b":[1,2]}`, "compact result")
+}
 
-    fmt.Println("  testHelpers passed")
+func testIndent() {
+	src := []byte(`{"a":1,"b":[1,2]}`)
+	dst := &bytes.Buffer{}
+	err := json.Indent(dst, src, "", "  ")
+	assert(err == nil, "indent")
+	s := dst.String()
+	assert(bytes.Contains([]byte(s), []byte("\n")), "indent has newlines")
+	assert(bytes.Contains([]byte(s), []byte("  ")), "indent has spaces")
+}
+
+func testEdgeCases() {
+	// Deeply nested
+	v, err := json.Unmarshal([]byte(`[[[[1]]]]`))
+	assert(err == nil, "deep array")
+	assert(v.(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(float64) == 1.0, "deep value")
+
+	// Negative number
+	v, err = json.Unmarshal([]byte(`-123`))
+	assert(err == nil, "negative")
+	assert(v.(float64) == -123.0, "negative value")
+
+	// Exponent
+	v, err = json.Unmarshal([]byte(`1.5e10`))
+	assert(err == nil, "exponent")
+	assert(v.(float64) == 1.5e10, "exponent value")
+
+	// Negative exponent
+	v, err = json.Unmarshal([]byte(`1.5e-3`))
+	assert(err == nil, "neg exponent")
+
+	// Unicode in key
+	v, err = json.Unmarshal([]byte(`{"中文": "value"}`))
+	assert(err == nil, "unicode key")
+	assert(v.(dyn.MapObject)["中文"].(string) == "value", "unicode key value")
+
+	// Empty string
+	v, err = json.Unmarshal([]byte(`""`))
+	assert(err == nil, "empty string")
+	assert(v.(string) == "", "empty string value")
+
+	// Whitespace handling
+	v, err = json.Unmarshal([]byte("  \n\t { \"a\" : 1 }  \n"))
+	assert(err == nil, "whitespace")
+	assert(v.(dyn.MapObject)["a"].(float64) == 1.0, "whitespace value")
 }
 
 func assert(cond bool, msg string) {
-    if !cond {
-        fmt.Println("ASSERT FAILED:", msg)
-        panic("assertion failed")
-    }
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
 }
