@@ -69,7 +69,6 @@ fn register_types(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    
     use vo_vm::bytecode::InterfaceMeta;
     
     
@@ -134,6 +133,7 @@ fn register_types(
                         let slot_type_list = info.type_slot_types(field_type);
                         let field_vk = info.type_value_kind(field_type);
                         let field_rttid = ctx.intern_type_key(field_type, info);
+                        let mut tag = field.tag.as_ref().map(|t| t.value.clone());
                         
                         if field.names.is_empty() {
                             // Embedded field: name comes from the type
@@ -145,11 +145,13 @@ fn register_types(
                                 slot_count,
                                 type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
                                 embedded: true,
+                                tag,
                             });
                             offset += slot_count;
                         } else {
-                            // Named field(s)
-                            for name in &field.names {
+                            // Named field(s) - tag is shared among all names
+                            let names_count = field.names.len();
+                            for (i, name) in field.names.iter().enumerate() {
                                 let field_name = project.interner.resolve(name.symbol).unwrap_or("?").to_string();
                                 slot_types.extend(slot_type_list.clone());
                                 fields.push(vo_vm::bytecode::FieldMeta {
@@ -158,6 +160,7 @@ fn register_types(
                                     slot_count,
                                     type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
                                     embedded: false,
+                                    tag: if i == names_count - 1 { tag.take() } else { tag.clone() },
                                 });
                                 offset += slot_count;
                             }

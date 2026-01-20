@@ -238,7 +238,7 @@ fn type_key_to_runtime_type(
             let mut slot_types = if needs_registration { Vec::new() } else { Vec::new() };
             let mut offset = 0u16;
             
-            for &f in s.fields() {
+            for (i, &f) in s.fields().iter().enumerate() {
                 let obj = &tc_objs.lobjs[f];
                 let name = obj.name().to_string();
                 let embedded = obj.entity_type().var_property().embedded;
@@ -248,6 +248,7 @@ fn type_key_to_runtime_type(
                         .map(|pkg| pkg.path().to_string())
                         .unwrap_or_default()
                 };
+                let tag = s.tag(i).cloned();
                 
                 let (typ_value_rttid, field_slot_count) = if let Some(field_type) = obj.typ() {
                     let (rt, vk) = type_key_to_runtime_type(interner, field_type, tc_objs, str_interner, ctx);
@@ -273,6 +274,7 @@ fn type_key_to_runtime_type(
                         slot_count: field_slot_count,
                         type_info: typ_value_rttid,
                         embedded,
+                        tag,
                     });
                     offset += field_slot_count;
                 }

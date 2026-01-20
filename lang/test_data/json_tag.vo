@@ -1,0 +1,43 @@
+package main
+
+import "encoding/json"
+import "fmt"
+
+type Person struct {
+	Name    string `json:"name"`
+	Age     int    `json:"age"`
+	Email   string `json:"email_address"`
+	Secret  string `json:"-"`
+	Country string
+}
+
+func main() {
+	p := Person{
+		Name:    "Alice",
+		Age:     30,
+		Email:   "alice@example.com",
+		Secret:  "password123",
+		Country: "USA",
+	}
+
+	data, err := json.MarshalStruct(p)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(data))
+
+	var p2 Person
+	err = json.UnmarshalStruct([]byte(`{"name":"Bob","age":25,"email_address":"bob@test.com","country":"UK"}`), &p2)
+	if err != nil {
+		panic(err)
+	}
+	
+	assert(p2.Name == "Bob")
+	assert(p2.Age == 25)
+	assert(p2.Email == "bob@test.com")
+	assert(p2.Country == "UK")
+	
+	fmt.Println("Name:", p2.Name)
+	fmt.Println("Email:", p2.Email)
+	fmt.Println("PASS")
+}

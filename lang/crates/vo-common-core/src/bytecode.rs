@@ -76,6 +76,8 @@ pub struct FieldMeta {
     pub type_info: ValueRttid,
     /// Whether this field is embedded (anonymous struct).
     pub embedded: bool,
+    /// The field tag (e.g. `json:"name" toml:"other"`), if any.
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -21,3 +21,4 @@ pub mod regexp;
 pub mod dynamic;
 pub mod os;
 pub mod json;
+pub mod tag;

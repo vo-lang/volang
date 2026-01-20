@@ -5,7 +5,12 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
+use alloc::borrow::Cow;
+#[cfg(not(feature = "std"))]
 use alloc::format;
+
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 use vo_common_core::types::ValueKind;
 use vo_common_core::runtime_type::RuntimeType;
@@ -15,6 +20,7 @@ use crate::gc::GcRef;
 use crate::objects::{interface, string as str_obj};
 use crate::slot::SLOT_BYTES;
 use super::error_helper::write_error_to;
+use super::tag::{get_tag_value, parse_field_options};
 
 use vo_ffi_macro::vostd_extern_ctx_nostd;
 
@@ -80,41 +86,15 @@ fn marshal_struct_value_depth(
         return Err("max depth exceeded (possible cycle)");
     }
     
-    let struct_meta_id = get_struct_meta_id(call, rttid)?;
-    let struct_meta = call.struct_meta(struct_meta_id as usize).ok_or("struct meta not found")?;
-    
     buf.push(b'{');
     let mut first = true;
-    
-    for field in &struct_meta.fields {
-        let field_name = &field.name;
-        // Skip unexported fields (lowercase first char)
-        if field_name.chars().next().map(|c| c.is_lowercase()).unwrap_or(true) { continue; }
-        
-        if field.embedded {
-            // Embedded field: flatten its fields into parent
-            let base = ptr as *const u8;
-            let field_ptr = unsafe { base.add(field.offset as usize * SLOT_BYTES) };
-            marshal_embedded_fields(call, field_ptr as GcRef, field.type_info.rttid(), buf, &mut first, depth)?;
-        } else {
-            if !first { buf.push(b','); }
-            first = false;
-            
-            buf.push(b'"');
-            let json_name = to_json_field_name(field_name);
-            buf.extend_from_slice(json_name.as_bytes());
-            buf.push(b'"');
-            buf.push(b':');
-            
-            marshal_field_value_depth(call, ptr, field.offset as usize, field.type_info.value_kind(), field.type_info.rttid(), buf, depth)?;
-        }
-    }
-    
+    marshal_fields_into(call, ptr, rttid, buf, &mut first, depth)?;
     buf.push(b'}');
     Ok(())
 }
 
-fn marshal_embedded_fields(
+/// Marshal struct fields into buffer, handling embedded fields by flattening.
+fn marshal_fields_into(
     call: &ExternCallContext,
     ptr: GcRef,
     rttid: u32,
@@ -126,20 +106,21 @@ fn marshal_embedded_fields(
     let struct_meta = call.struct_meta(struct_meta_id as usize).ok_or("struct meta not found")?;
     
     for field in &struct_meta.fields {
-        let field_name = &field.name;
-        if field_name.chars().next().map(|c| c.is_lowercase()).unwrap_or(true) { continue; }
+        // Skip unexported fields (lowercase first char)
+        if field.name.chars().next().map(|c| c.is_lowercase()).unwrap_or(true) { continue; }
+        
+        let json_name = get_json_field_name(&field.name, field.tag.as_deref());
+        if json_name == "-" { continue; }
+        
+        let field_ptr = unsafe { (ptr as *const u8).add(field.offset as usize * SLOT_BYTES) };
         
         if field.embedded {
-            // Recursively flatten nested embedded fields
-            let base = ptr as *const u8;
-            let field_ptr = unsafe { base.add(field.offset as usize * SLOT_BYTES) };
-            marshal_embedded_fields(call, field_ptr as GcRef, field.type_info.rttid(), buf, first, depth)?;
+            marshal_fields_into(call, field_ptr as GcRef, field.type_info.rttid(), buf, first, depth)?;
         } else {
             if !*first { buf.push(b','); }
             *first = false;
             
             buf.push(b'"');
-            let json_name = to_json_field_name(field_name);
             buf.extend_from_slice(json_name.as_bytes());
             buf.push(b'"');
             buf.push(b':');
@@ -150,11 +131,22 @@ fn marshal_embedded_fields(
     Ok(())
 }
 
-fn to_json_field_name(name: &str) -> String {
-    let mut chars = name.chars();
+/// Get JSON field name from tag or use default conversion (lowercase first char).
+/// Returns "-" if field should be skipped.
+fn get_json_field_name<'a>(field_name: &'a str, tag: Option<&str>) -> Cow<'a, str> {
+    if let Some(tag) = tag {
+        if let Some(json_value) = get_tag_value(tag, "json") {
+            let (name, _omitempty) = parse_field_options(json_value);
+            if !name.is_empty() {
+                return Cow::Owned(name.to_string());
+            }
+        }
+    }
+    // Default: lowercase first char
+    let mut chars = field_name.chars();
     match chars.next() {
-        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
+        Some(c) if c.is_uppercase() => Cow::Owned(c.to_lowercase().collect::<String>() + chars.as_str()),
+        _ => Cow::Borrowed(field_name),
     }
 }
 
@@ -237,6 +229,10 @@ fn marshal_any_value(slot0: u64, slot1: u64, buf: &mut Vec<u8>) -> Result<(), &'
 }
 
 fn write_json_string(s: &str, buf: &mut Vec<u8>) {
+    write_json_string_impl(s, buf, false);
+}
+
+fn write_json_string_impl(s: &str, buf: &mut Vec<u8>, escape_html: bool) {
     buf.push(b'"');
     for c in s.chars() {
         match c {
@@ -245,6 +241,11 @@ fn write_json_string(s: &str, buf: &mut Vec<u8>) {
             '\n' => buf.extend_from_slice(b"\\n"),
             '\r' => buf.extend_from_slice(b"\\r"),
             '\t' => buf.extend_from_slice(b"\\t"),
+            '\x08' => buf.extend_from_slice(b"\\b"),
+            '\x0c' => buf.extend_from_slice(b"\\f"),
+            '<' if escape_html => buf.extend_from_slice(b"\\u003c"),
+            '>' if escape_html => buf.extend_from_slice(b"\\u003e"),
+            '&' if escape_html => buf.extend_from_slice(b"\\u0026"),
             c if c < ' ' => buf.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes()),
             c => { let mut t = [0u8; 4]; buf.extend_from_slice(c.encode_utf8(&mut t).as_bytes()); }
         }
@@ -343,10 +344,9 @@ fn unmarshal_struct_impl(call: &mut ExternCallContext, ptr: GcRef, rttid: u32, j
         let value = inner[val_start..val_end].trim();
         pos = val_end;
         
-        let field_name = from_json_field_name(key);
-        // Try to find field (including in embedded structs)
-        if let Some((field_ptr, fvk, field_rttid)) = find_field_recursive(call, ptr, struct_meta_id, &field_name)? {
-            unmarshal_field_with_rttid(call, field_ptr, 0, fvk, field_rttid, value)?;
+        // Try to find field by JSON key (including in embedded structs)
+        if let Some((field_ptr, fvk, field_rttid)) = find_field_by_json_key(call, ptr, struct_meta_id, key)? {
+            unmarshal_field_value(call, field_ptr, fvk, field_rttid, value)?;
         }
         
         while pos < bytes.len() && is_ws(bytes[pos]) { pos += 1; }
@@ -355,46 +355,42 @@ fn unmarshal_struct_impl(call: &mut ExternCallContext, ptr: GcRef, rttid: u32, j
     Ok(())
 }
 
-/// Find a field by name, recursively searching embedded structs.
-/// Returns (field_ptr, value_kind, rttid) if found.
-fn find_field_recursive(
+/// Find a field by JSON key, recursively searching embedded structs.
+/// Direct fields take precedence over embedded fields.
+fn find_field_by_json_key(
     call: &ExternCallContext,
     ptr: GcRef,
     struct_meta_id: u32,
-    field_name: &str,
+    json_key: &str,
 ) -> Result<Option<(GcRef, ValueKind, u32)>, &'static str> {
     let struct_meta = call.struct_meta(struct_meta_id as usize).ok_or("meta not found")?;
     
-    // First, check direct fields
+    // Collect embedded fields for later search (direct fields have priority)
+    let mut embedded_fields = Vec::new();
+    
     for field in &struct_meta.fields {
-        if field.embedded { continue; }
-        if &field.name == field_name {
-            let base = ptr as *const u8;
-            let field_ptr = unsafe { base.add(field.offset as usize * SLOT_BYTES) };
-            return Ok(Some((field_ptr as GcRef, field.type_info.value_kind(), field.type_info.rttid())));
+        let field_ptr = unsafe { (ptr as *const u8).add(field.offset as usize * SLOT_BYTES) };
+        
+        if field.embedded {
+            embedded_fields.push((field_ptr as GcRef, field.type_info.rttid()));
+        } else {
+            let field_json_name = get_json_field_name(&field.name, field.tag.as_deref());
+            if field_json_name == "-" { continue; }
+            if field_json_name == json_key {
+                return Ok(Some((field_ptr as GcRef, field.type_info.value_kind(), field.type_info.rttid())));
+            }
         }
     }
     
-    // Then, search in embedded fields
-    for field in &struct_meta.fields {
-        if !field.embedded { continue; }
-        let base = ptr as *const u8;
-        let embed_ptr = unsafe { base.add(field.offset as usize * SLOT_BYTES) };
-        let embed_meta_id = get_struct_meta_id(call, field.type_info.rttid())?;
-        if let Some(result) = find_field_recursive(call, embed_ptr as GcRef, embed_meta_id, field_name)? {
+    // Search in embedded fields
+    for (embed_ptr, embed_rttid) in embedded_fields {
+        let embed_meta_id = get_struct_meta_id(call, embed_rttid)?;
+        if let Some(result) = find_field_by_json_key(call, embed_ptr, embed_meta_id, json_key)? {
             return Ok(Some(result));
         }
     }
     
     Ok(None)
-}
-
-fn from_json_field_name(name: &str) -> String {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }
 
 fn find_val_end(bytes: &[u8], start: usize) -> Result<usize, &'static str> {
@@ -434,9 +430,8 @@ fn find_val_end(bytes: &[u8], start: usize) -> Result<usize, &'static str> {
     }
 }
 
-fn unmarshal_field_with_rttid(call: &mut ExternCallContext, struct_ptr: GcRef, offset: usize, vk: ValueKind, rttid: u32, value: &str) -> Result<(), &'static str> {
-    let base = struct_ptr as *mut u8;
-    let field_ptr = unsafe { base.add(offset * SLOT_BYTES) };
+fn unmarshal_field_value(call: &mut ExternCallContext, field_ptr: GcRef, vk: ValueKind, rttid: u32, value: &str) -> Result<(), &'static str> {
+    let field_ptr = field_ptr as *mut u8;
     match vk {
         ValueKind::Int | ValueKind::Int64 => {
             let val: i64 = value.parse().map_err(|_| "invalid int")?;
@@ -538,25 +533,8 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
         unsafe { core::slice::from_raw_parts(data, len).to_vec() }
     };
     
-    // Write JSON string
-    buf.push(b'"');
-    for c in s.chars() {
-        match c {
-            '"' => buf.extend_from_slice(b"\\\""),
-            '\\' => buf.extend_from_slice(b"\\\\"),
-            '\n' => buf.extend_from_slice(b"\\n"),
-            '\r' => buf.extend_from_slice(b"\\r"),
-            '\t' => buf.extend_from_slice(b"\\t"),
-            '\x08' => buf.extend_from_slice(b"\\b"),
-            '\x0c' => buf.extend_from_slice(b"\\f"),
-            '<' if escape_html => buf.extend_from_slice(b"\\u003c"),
-            '>' if escape_html => buf.extend_from_slice(b"\\u003e"),
-            '&' if escape_html => buf.extend_from_slice(b"\\u0026"),
-            c if c < ' ' => buf.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes()),
-            c => { let mut t = [0u8; 4]; buf.extend_from_slice(c.encode_utf8(&mut t).as_bytes()); }
-        }
-    }
-    buf.push(b'"');
+    // Write JSON string using shared implementation
+    write_json_string_impl(s, &mut buf, escape_html);
     
     // Return new slice
     let result = call.alloc_bytes(&buf);

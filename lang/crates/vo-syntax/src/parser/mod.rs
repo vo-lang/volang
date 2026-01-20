@@ -1640,4 +1640,31 @@ mod tests {
             _ => panic!("expected func decl"),
         }
     }
+
+    #[test]
+    fn test_struct_field_tag() {
+        let file = parse_ok(
+            r#"
+            package main
+            type Person struct {
+                Name string `json:"name"`
+                Age  int    `json:"age"`
+            }
+        "#,
+        );
+        match &file.decls[0] {
+            Decl::Type(t) => {
+                if let crate::ast::TypeExprKind::Struct(s) = &t.ty.kind {
+                    assert_eq!(s.fields.len(), 2);
+                    assert!(s.fields[0].tag.is_some(), "Name field should have tag");
+                    assert_eq!(s.fields[0].tag.as_ref().unwrap().value, r#"json:"name""#);
+                    assert!(s.fields[1].tag.is_some(), "Age field should have tag");
+                    assert_eq!(s.fields[1].tag.as_ref().unwrap().value, r#"json:"age""#);
+                } else {
+                    panic!("expected struct type");
+                }
+            }
+            _ => panic!("expected type decl"),
+        }
+    }
 }

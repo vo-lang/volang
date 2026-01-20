@@ -149,6 +149,16 @@ fn try_load_cache(
     if cached != current {
         return None;
     }
+    
+    // Invalidate cache if compiler binary is newer than cache
+    let cache_mtime = cache_file.metadata().ok()?.modified().ok()?
+        .duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
+    if let Some(exe_mtime) = exe_mtime() {
+        if exe_mtime > cache_mtime {
+            return None;
+        }
+    }
+    
     let bytes = std::fs::read(cache_file).ok()?;
     let module = Module::deserialize(&bytes).ok()?;
     Some(CompileOutput {
@@ -156,6 +166,13 @@ fn try_load_cache(
         source_root: source_root(entry_path),
         extensions: load_extensions(ext_file),
     })
+}
+
+fn exe_mtime() -> Option<u64> {
+    let exe = std::env::current_exe().ok()?;
+    exe.metadata().ok()?.modified().ok()?
+        .duration_since(SystemTime::UNIX_EPOCH).ok()
+        .map(|d| d.as_secs())
 }
 
 fn source_root(entry_path: &Path) -> PathBuf {
