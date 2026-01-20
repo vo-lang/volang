@@ -9,6 +9,7 @@
     "wasm": "cd ../lang/crates/vo-web && wasm-pack build --target web --out-dir ../../../playground/src/wasm/pkg"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "svelte": "^5.0.0",
     "typescript": "^5.6.0",
