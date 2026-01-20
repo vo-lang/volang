@@ -1,0 +1,21 @@
+package main
+
+var currentState any
+
+func myHandler(state any) {
+	println("handler called with:", state)
+}
+
+func invokeHandler(handler any) error {
+	return handler~>(currentState)
+}
+
+func main() {
+	currentState = "hello"
+	err := invokeHandler(myHandler)
+	if err != nil {
+		println("error:", err)
+	} else {
+		println("success")
+	}
+}

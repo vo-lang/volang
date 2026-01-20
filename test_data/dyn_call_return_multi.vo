@@ -1,0 +1,35 @@
+package main
+
+func getData(x int) (string, int) {
+	return "result", x * 2
+}
+
+func callDynamic(fn any, arg int) (string, int, error) {
+	return fn~>(arg)
+}
+
+func callDynamic2(fn any, arg int) (any, any, error) {
+	return fn~>(arg)
+}
+
+func main() {
+	s, n, err := callDynamic(getData, 21)
+	if err != nil {
+		println("error:", err)
+		return
+	}
+	println("s:", s, "n:", n)
+	assert(s == "result")
+	assert(n == 42)
+
+	s2, n2, err2 := callDynamic2(getData, 10)
+	if err2 != nil {
+		println("error2:", err2)
+		return
+	}
+	println("s2:", s2, "n2:", n2)
+	assert(s2.(string) == "result")
+	assert(n2.(int) == 20)
+
+	println("all passed")
+}

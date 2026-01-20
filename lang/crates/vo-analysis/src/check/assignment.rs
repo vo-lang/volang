@@ -72,13 +72,18 @@ impl<'a> DynAccessLhs<'a> {
 
     /// Get element type for position i.
     /// For Assign: infer from LHS expression type
-    /// For Init: always use default_type (any)
+    /// For Init: use declared type if available, otherwise default_type (any)
     fn get_elem_type(&self, i: usize, checker: &mut Checker, default_type: TypeKey) -> TypeKey {
         match self {
             DynAccessLhs::Assign(exprs) => {
                 checker.get_lhs_type_for_dyn(&exprs[i]).unwrap_or(default_type)
             }
-            DynAccessLhs::Init(_) => default_type,
+            DynAccessLhs::Init(objs) => {
+                // For return statements, objs are function return parameters with declared types
+                objs.get(i)
+                    .and_then(|&obj| checker.lobj(obj).typ())
+                    .unwrap_or(default_type)
+            }
         }
     }
 }
@@ -356,7 +361,8 @@ impl Checker {
         let ll = lhs.len();
         
         // Special handling for DynAccess (including TryUnwrap(DynAccess)): generate return type based on lhs types
-        if rhs.len() == 1 && return_pos.is_none() {
+        // Works for both assignment (`v := a~>Method()`) and return (`return a~>Method()`)
+        if rhs.len() == 1 {
             if let Some(extracted) = extract_dyn_access(&rhs[0]) {
                 self.init_vars_dyn_access_with_unwrap(lhs, &rhs[0], extracted.dyn_access, extracted.dyn_access_expr, extracted.has_try_unwrap);
                 return;
