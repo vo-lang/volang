@@ -48,6 +48,10 @@ jobs:
         working-directory: playground
         run: npm run wasm
 
+      - name: Build VoGUI JS
+        working-directory: libs/vogui/js
+        run: npm ci && npm run build
+
       - name: Build Playground
         working-directory: playground
         run: npm run build

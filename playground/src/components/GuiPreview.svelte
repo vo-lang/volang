@@ -6,7 +6,7 @@
     render as voguiRender, 
     setupKeyHandler,
     injectStyles 
-  } from '../../../libs/vogui/js/src/index';
+  } from '../../../libs/vogui/js/dist/index';
 
   interface RenderData {
     type: 'render';
