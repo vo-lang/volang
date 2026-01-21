@@ -1,29 +1,31 @@
 # Vo Programming Language
 
-> **Alpha (2026.1.1)** — 100% pure vibe coding in ~20 days.
+> **Go-like Syntax. Rust Power. Vibe Ready.**
 
-Vo is a statically typed, Go-like programming language implemented in Rust (by AI, under my supervision).
+The scripting language for the Rust world. Statically typed, low ceremony, and built for the AI coding era. **Most Go programs run with minimal changes.**
 
-## Overview
+🎮 **[Try it in the Playground](https://oxfeeefeee.github.io/volang/)**
 
-Vo aims to run Go-like code with a compact toolchain and multiple execution backends.
+## Why Vo?
 
-### Key Features
+Go's appeal is **low ceremony**: it writes like a scripting language but ships like a compiled one. Vo doubles down on this strength—adding flexible execution modes (VM/JIT/AOT) and error handling sugar, while keeping the language simple. Target niche: where you might reach for Go, Python, or Lua.
 
-- **Go-like syntax** with a familiar developer experience
-- **Static typing** with local type inference
-- **Error handling sugar** - `fail`, `errdefer`, and the `?` operator
-- **Concurrency** - goroutines and channels
-- **No generics** (keep the type system simple)
-- **Restricted pointers** - pointers are only allowed for struct types (no `*int`); no pointer arithmetic
+### If you know Go, you already know 95% of Vo
 
-## Execution Backends / Status
+Just remember these 4 differences:
+
+1. **Error Handling**: Use `?` instead of `if err != nil`. Use `errdefer` for error-only cleanup.
+2. **No Generics**: Use `any` (interface{}) and type assertions.
+3. **Restricted Pointers**: Only structs can be pointers (`*User`). No `*int` or `*string`.
+4. **Dynamic Access**: Use `~>` operator for duck-typing (JSON, maps, untyped data).
+
+## Execution Backends
 
 | Backend | Status | Notes |
 |--------|--------|------|
-| VM | 🚧 Functionality is mostly complete | Bytecode interpreter; still under active development/optimization |
-| JIT | 🚧 Functionality is mostly complete | Cranelift-based JIT; still under active development/optimization |
-| WASM | 📋 Planned | Not implemented yet |
+| VM | ✅ Functional | Bytecode interpreter |
+| JIT | ✅ Functional | Cranelift-based JIT |
+| WASM | ✅ Functional | Runs in browser playground |
 | AOT | 📋 Planned | Not implemented yet |
 
 ## Performance (Table 1, reference only)
@@ -44,76 +46,42 @@ Relative time ranking (lower is faster, `1.0x` = fastest):
 | 8 | Ruby | 119.05x |
 | 9 | Python | 132.59x |
 
-## Project Structure
+## Quick Examples
 
-```
-vo/
-├── crates/
-│   ├── vo-syntax/        # lexer/parser/AST
-│   ├── vo-analysis/      # type checking, semantic analysis
-│   ├── vo-codegen/       # bytecode generation
-│   ├── vo-vm/            # bytecode VM
-│   ├── vo-jit/           # JIT (Cranelift)
-│   ├── vo-runtime/       # runtime (GC, builtins)
-│   ├── vo-runtime-native/# runtime symbols (native)
-│   ├── vo-module/        # module/package system
-│   └── vo-cli/           # CLI (vo)
-│
-├── stdlib/               # standard library (selected packages)
-├── test_data/            # integration tests
-├── benchmark/            # benchmarks
-└── docs/                 # specs and design notes
-```
+### Error Handling
 
-## Building
-
-```bash
-cargo build --release
-```
-
-## Usage
-
-```bash
-# VM mode
-cargo run --bin vo -- run program.vo
-
-# JIT mode
-cargo run --bin vo -- run --mode=jit program.vo
-
-# Print bytecode (debugging VM)
-cargo run --bin vo -- run program.vo --codegen
-```
-
-## Development Scripts (`d.py`)
-
-```bash
-# All tests (VM + JIT)
-./d.py test
-
-# VM only
-./d.py test vm
-
-# JIT only
-./d.py test jit
-
-# GC verification tests only (enables VO_GC_DEBUG=1)
-./d.py test gc
-
-# Benchmarks
-./d.py bench
-./d.py bench vo
-./d.py bench score
-
-# Code statistics
-./d.py loc
-./d.py loc --with-tests
-```
-
-## Language Example
+Use `?` to propagate errors, `errdefer` for error-only cleanup:
 
 ```vo
-package main
+func readConfig(path string) (Config, error) {
+    file := open(path)?           // propagate error with ?
+    errdefer file.Close()         // cleanup only if later steps fail
+    
+    data := readAll(file)?
+    config := parse(data)?
+    
+    if config.Version < 1 {
+        fail errors.New("invalid version")
+    }
+    return config, nil
+}
+```
 
+### Dynamic Access (`~>`)
+
+Duck-typing for `any`/interface values, perfect for JSON:
+
+```vo
+func getName(data any) (string, error) {
+    var name string
+    name = data~>users~>[0]~>name?  // access path, auto-cast to string
+    return name, nil
+}
+```
+
+### Familiar Go Syntax
+
+```vo
 type User struct {
     name string
     age  int
@@ -127,31 +95,20 @@ func main() {
     user := User{name: "Alice", age: 30}
     println(user.Greet())
     
-    numbers := []int{1, 2, 3}
-    for i, v := range numbers {
+    for i, v := range []int{1, 2, 3} {
         println(i, v)
     }
 }
 ```
 
-### Error Handling
+## Development
 
-Vo provides simplified error handling with `fail`, `errdefer`, and `?`:
-
-```vo
-func readConfig(path string) (Config, error) {
-    file := open(path)?           // propagate error with ?
-    errdefer file.Close()          // cleanup on error only
-    
-    data := readAll(file)?
-    config := parse(data)?
-    
-    if config.Version < 1 {
-        fail errors.New("invalid version")  // early error return
-    }
-    
-    return config, nil
-}
+```bash
+./d.py test          # All tests (VM + JIT)
+./d.py test vm       # VM only
+./d.py test jit      # JIT only
+./d.py bench         # Benchmarks
+./d.py loc           # Code statistics
 ```
 
 ## License
