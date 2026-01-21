@@ -15,6 +15,8 @@
   let guiMode = $state(false);
   let nodeTree: any = $state(null);
   let consoleCollapsed = $state(false);
+  let guiFullscreen = $state(false);
+  let showTouchControls = $state(true);
 
   type Panel = 'gui' | 'editor' | 'console' | 'files';
   let activePanel = $state<Panel>('gui');
@@ -144,7 +146,7 @@
   };
 </script>
 
-<div class="playground" data-active={activePanel} data-gui={guiMode ? 'true' : 'false'}>
+<div class="playground" data-active={activePanel} data-gui={guiMode ? 'true' : 'false'} data-fullscreen={guiFullscreen ? 'true' : 'false'}>
   <div class="toolbar">
     <div class="toolbar-left">
       <div class="actions">
@@ -189,6 +191,26 @@
       </div>
       <div class="gui-panel panel panel-gui" class:inactive={!guiMode}>
         <GuiPreview {nodeTree} interactive={guiMode} onEvent={guiMode ? onGuiEvent : undefined} />
+        {#if guiMode}
+          <div class="gui-mobile-toolbar">
+            <button 
+              class="gui-toggle-btn" 
+              class:active={guiFullscreen}
+              onclick={() => guiFullscreen = !guiFullscreen}
+              title={guiFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+            >
+              {guiFullscreen ? '⛶' : '⛶'}
+            </button>
+            <button 
+              class="gui-toggle-btn" 
+              class:active={showTouchControls}
+              onclick={() => showTouchControls = !showTouchControls}
+              title={showTouchControls ? 'Hide Controls' : 'Show Controls'}
+            >
+              🎮
+            </button>
+          </div>
+        {/if}
       </div>
     </div>
     <div class="console-panel panel panel-console" class:collapsed={consoleCollapsed && guiMode}>
@@ -196,7 +218,7 @@
     </div>
   </div>
 
-  {#if guiMode}
+  {#if guiMode && showTouchControls}
     <div class="touch-controls">
       <!-- D-Pad (left side) -->
       <div class="dpad">
@@ -306,6 +328,41 @@
 
   .gui-panel.inactive {
     display: none;
+  }
+
+  .gui-mobile-toolbar {
+    display: none;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    gap: 8px;
+    z-index: 10;
+  }
+
+  .gui-toggle-btn {
+    width: 36px;
+    height: 36px;
+    min-height: unset;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .gui-toggle-btn:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .gui-toggle-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
   }
 
   .console-panel {
@@ -531,6 +588,39 @@
 
     .touch-controls {
       display: flex;
+    }
+
+    .gui-panel {
+      position: relative;
+    }
+
+    .gui-mobile-toolbar {
+      display: flex;
+    }
+
+    /* Fullscreen mode for GUI panel on mobile */
+    .playground[data-fullscreen='true'][data-active='gui'] .toolbar,
+    .playground[data-fullscreen='true'][data-active='gui'] .mobile-tabs {
+      display: none;
+    }
+
+    .playground[data-fullscreen='true'][data-active='gui'] .main-area {
+      height: 100%;
+    }
+
+    .playground[data-fullscreen='true'][data-active='gui'] .panel-gui {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 100;
+      border: none;
+    }
+
+    .playground[data-fullscreen='true'] .gui-mobile-toolbar {
+      top: 16px;
+      right: 16px;
     }
   }
 </style>

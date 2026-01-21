@@ -50,7 +50,7 @@
     
     const scaleX = container.width / content.width;
     const scaleY = container.height / content.height;
-    scale = Math.min(scaleX, scaleY, 1); // Never scale up, only down
+    scale = Math.min(scaleX, scaleY); // Scale to fit container
   }
 
   // Recalculate on resize
@@ -104,7 +104,7 @@
       class:hidden={!nodeTree} 
       bind:this={renderEl}
       style:transform="scale({scale})"
-      style:transform-origin="top left"
+      style:transform-origin="center center"
     ></div>
   </div>
 </div>
@@ -151,6 +151,9 @@
     overflow: hidden;
     background: #ffffff;
     position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   :global(.dark) .preview-content {
