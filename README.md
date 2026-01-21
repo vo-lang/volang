@@ -4,7 +4,7 @@
 
 The scripting language for the Rust world. Statically typed, low ceremony, and built for the AI coding era. **Most Go programs run with minimal changes.**
 
-🎮 **[Try it in the Playground](https://oxfeeefeee.github.io/volang/)**
+🎮 **[Try it in the Playground](https://volang.dev)**
 
 ## Why Vo?
 
