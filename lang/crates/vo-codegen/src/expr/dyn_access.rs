@@ -162,7 +162,7 @@ pub fn compile_dyn_access(
         // TODO: optimize to direct static call in the future
         let any_type = info.any_type();
         let any_reg = func.alloc_interface();  // any is interface type
-        crate::stmt::compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+        crate::assign::emit_assign(any_reg, crate::assign::AssignSource::Expr(&dyn_access.base), any_type, ctx, func, info)?;
         compile_dyn_op(&dyn_access.op, any_reg, dst, &ret_types, ctx, func, info)?;
     }
     
@@ -250,7 +250,7 @@ fn compile_dyn_op(
                 if key_slots == 2 && info.is_interface(key_type) {
                     compile_expr_to(index_expr, args_start, ctx, func, info)?;
                 } else {
-                    crate::stmt::compile_iface_assign(args_start, index_expr, any_type, ctx, func, info)?;
+                    crate::assign::emit_assign(args_start, crate::assign::AssignSource::Expr(index_expr), any_type, ctx, func, info)?;
                 }
                 
                 // CallIface: returns (any[2], error[2]) = 4 slots, writes to args_start
@@ -286,7 +286,7 @@ fn compile_dyn_op(
             if key_slots == 2 && info.is_interface(key_type) {
                 compile_expr_to(index_expr, args_start + 2, ctx, func, info)?;
             } else {
-                crate::stmt::compile_iface_assign(args_start + 2, index_expr, any_type, ctx, func, info)?;
+                crate::assign::emit_assign(args_start + 2, crate::assign::AssignSource::Expr(index_expr), any_type, ctx, func, info)?;
             }
             
             // Call: 4 arg slots, 4 ret slots (data[2], error[2])
@@ -349,7 +349,7 @@ fn compile_dyn_op(
                     if info.is_interface(arg_type) {
                         compile_expr_to(arg, val_reg, ctx, func, info)?;
                     } else {
-                        crate::stmt::compile_iface_assign(val_reg, arg, any_type, ctx, func, info)?;
+                        crate::assign::emit_assign(val_reg, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
                     }
                     let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
@@ -547,7 +547,7 @@ fn compile_dyn_closure_call(
     // Compile args as interface ONCE (no second compilation!)
     for (i, arg) in args.iter().enumerate() {
         let arg_dst = repack_args + 4 + (i as u16 * 2);
-        crate::stmt::compile_iface_assign(arg_dst, arg, any_type, ctx, func, info)?;
+        crate::assign::emit_assign(arg_dst, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
     }
     
     // Call dyn_repack_args -> (arg_slots, converted_args...)

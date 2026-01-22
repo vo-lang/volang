@@ -65,7 +65,7 @@ fn compile_ident_as_map_key(
             .ok_or_else(|| CodegenError::Internal(format!("cannot get type for ident: {:?}", ident.symbol)))?;
         let key_slot_types = info.type_slot_types(key_type);
         let iface_reg = func.alloc_temp_typed(&key_slot_types);
-        crate::stmt::emit_iface_assign_from_concrete(iface_reg, src_reg, src_type, key_type, ctx, func, info)?;
+        crate::assign::emit_iface_assign_from_concrete(iface_reg, src_reg, src_type, key_type, ctx, func, info)?;
         Ok(iface_reg)
     } else {
         Ok(src_reg)
@@ -227,14 +227,14 @@ fn compile_struct_lit(
                 
                 let (offset, _slots, field_type) = info.struct_field_offset_with_type(type_key, field_name);
                 
-                // Use compile_value_to to handle interface conversion
-                crate::stmt::compile_value_to(&elem.value, dst + offset, field_type, ctx, func, info)?;
+                // Use emit_assign to handle interface conversion
+                crate::assign::emit_assign(dst + offset, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
             }
         } else {
             // Positional field: use field index
             let (offset, _field_slots, field_type) = info.struct_field_offset_by_index_with_type(type_key, i);
-            // Use compile_value_to to handle interface conversion
-            crate::stmt::compile_value_to(&elem.value, dst + offset, field_type, ctx, func, info)?;
+            // Use emit_assign to handle interface conversion
+            crate::assign::emit_assign(dst + offset, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
         }
     }
     Ok(())

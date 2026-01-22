@@ -100,32 +100,6 @@ fn compute_iface_assert_params(
     }
 }
 
-/// Store a value to a storage location with proper interface conversion.
-/// If lhs_type is interface and src_type is not, converts the value to interface format.
-/// This is the unified helper for all "store to existing variable" operations.
-fn emit_store_with_iface_convert(
-    storage: StorageKind,
-    src_slot: u16,
-    src_type: TypeKey,
-    lhs_type: TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    if info.is_interface(lhs_type) {
-        // Interface assignment: convert value to interface format
-        let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-        emit_value_convert(iface_tmp, src_slot, src_type, lhs_type, ctx, func, info)?;
-        func.emit_storage_store(storage, iface_tmp, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
-    } else {
-        // Non-interface: apply truncation and store directly
-        emit_int_trunc(src_slot, src_type, func, info);
-        let slot_types = info.type_slot_types(src_type);
-        func.emit_storage_store(storage, src_slot, &slot_types);
-    }
-    Ok(())
-}
-
 // =============================================================================
 // StmtCompiler - Unified statement compilation context
 // =============================================================================
@@ -307,7 +281,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         dst: u16,
         target_type: TypeKey,
     ) -> Result<(), CodegenError> {
-        compile_value_to(expr, dst, target_type, self.ctx, self.func, self.info)
+        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(expr), target_type, self.ctx, self.func, self.info)
     }
 
     /// Emit zero initialization for a variable.
@@ -379,25 +353,6 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     }
 }
 
-/// Compile expression to dst with automatic interface conversion.
-/// Standalone version of StmtCompiler::compile_value for use outside StmtCompiler.
-pub fn compile_value_to(
-    expr: &Expr,
-    dst: u16,
-    target_type: TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    if info.is_interface(target_type) {
-        compile_iface_assign(dst, expr, target_type, ctx, func, info)
-    } else {
-        compile_expr_to(expr, dst, ctx, func, info)?;
-        // Apply truncation for narrow integer types (Go semantics)
-        emit_int_trunc(dst, target_type, func, info);
-        Ok(())
-    }
-}
 // Helper functions
 // =============================================================================
 
@@ -562,7 +517,7 @@ fn emit_range_var_store(
     if let Some(storage) = info.storage {
         // Store if: deferred alloc (new heap object), or slot differs (escaped variable)
         if info.deferred_alloc.is_some() || info.slot != storage.slot() {
-            emit_store_with_iface_convert(storage, info.slot, info.src_type, info.lhs_type, ctx, func, type_info)?;
+            crate::assign::emit_store_to_storage(storage, info.slot, info.src_type, info.lhs_type, ctx, func, type_info)?;
         }
     }
     Ok(())
@@ -645,7 +600,7 @@ fn compile_stmt_with_label(
                         let storage = local.storage.clone();
                         let obj_key = info.get_use(name);
                         let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
-                        emit_store_with_iface_convert(storage, tuple.base + offset, elem_type, lhs_type, sc.ctx, sc.func, info)?;
+                        crate::assign::emit_store_to_storage(storage, tuple.base + offset, elem_type, lhs_type, sc.ctx, sc.func, info)?;
                     }
                     offset += elem_slots;
                 }
@@ -686,7 +641,7 @@ fn compile_stmt_with_label(
                         let storage = local.storage.clone();
                         let obj_key = info.get_use(name);
                         let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
-                        emit_store_with_iface_convert(storage, tmp, rhs_type, lhs_type, sc.ctx, sc.func, info)?;
+                        crate::assign::emit_store_to_storage(storage, tmp, rhs_type, lhs_type, sc.ctx, sc.func, info)?;
                     }
                 }
             }
@@ -722,7 +677,7 @@ fn compile_stmt_with_label(
                                 base_reg
                             } else {
                                 let any_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-                                compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+                                crate::assign::emit_assign(any_reg, crate::assign::AssignSource::Expr(&dyn_access.base), any_type, ctx, func, info)?;
                                 any_reg
                             };
 
@@ -744,7 +699,7 @@ fn compile_stmt_with_label(
                                 ]);
                                 let name_idx = ctx.const_string(field_name);
                                 func.emit_op(Opcode::StrNew, args_start, name_idx, 0);
-                                compile_iface_assign(args_start + 1, &assign.rhs[0], any_type, ctx, func, info)?;
+                                crate::assign::emit_assign(args_start + 1, crate::assign::AssignSource::Expr(&assign.rhs[0]), any_type, ctx, func, info)?;
 
                                 let c = crate::type_info::encode_call_args(3, 2);
                                 func.emit_with_flags(Opcode::CallIface, PROTOCOL_METHOD_IDX, iface_reg, args_start, c);
@@ -770,7 +725,7 @@ fn compile_stmt_with_label(
                             func.emit_copy(args_start, any_base_reg, 2);
                             let name_idx = ctx.const_string(field_name);
                             func.emit_op(Opcode::StrNew, args_start + 2, name_idx, 0);
-                            compile_iface_assign(args_start + 3, &assign.rhs[0], any_type, ctx, func, info)?;
+                            crate::assign::emit_assign(args_start + 3, crate::assign::AssignSource::Expr(&assign.rhs[0]), any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_attr");
                             let err_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                             func.emit_with_flags(Opcode::CallExtern, 5, err_reg, extern_id as u16, args_start);
@@ -806,7 +761,7 @@ fn compile_stmt_with_label(
                                 base_reg
                             } else {
                                 let any_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-                                compile_iface_assign(any_reg, &dyn_access.base, any_type, ctx, func, info)?;
+                                crate::assign::emit_assign(any_reg, crate::assign::AssignSource::Expr(&dyn_access.base), any_type, ctx, func, info)?;
                                 any_reg
                             };
 
@@ -823,8 +778,8 @@ fn compile_stmt_with_label(
                                     SlotType::Interface0, SlotType::Interface1,
                                     SlotType::Interface0, SlotType::Interface1,
                                 ]);
-                                compile_iface_assign(args_start, key_expr, any_type, ctx, func, info)?;
-                                compile_iface_assign(args_start + 2, &assign.rhs[0], any_type, ctx, func, info)?;
+                                crate::assign::emit_assign(args_start, crate::assign::AssignSource::Expr(key_expr), any_type, ctx, func, info)?;
+                                crate::assign::emit_assign(args_start + 2, crate::assign::AssignSource::Expr(&assign.rhs[0]), any_type, ctx, func, info)?;
 
                                 let c = crate::type_info::encode_call_args(4, 2);
                                 func.emit_with_flags(Opcode::CallIface, PROTOCOL_METHOD_IDX, iface_reg, args_start, c);
@@ -848,8 +803,8 @@ fn compile_stmt_with_label(
                                 SlotType::Interface0, SlotType::Interface1,  // value
                             ]);
                             func.emit_copy(args_start, any_base_reg, 2);
-                            compile_iface_assign(args_start + 2, key_expr, any_type, ctx, func, info)?;
-                            compile_iface_assign(args_start + 4, &assign.rhs[0], any_type, ctx, func, info)?;
+                            crate::assign::emit_assign(args_start + 2, crate::assign::AssignSource::Expr(key_expr), any_type, ctx, func, info)?;
+                            crate::assign::emit_assign(args_start + 4, crate::assign::AssignSource::Expr(&assign.rhs[0]), any_type, ctx, func, info)?;
                             let extern_id = ctx.get_or_register_extern("dyn_set_index");
                             let err_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
                             func.emit_with_flags(Opcode::CallExtern, 6, err_reg, extern_id as u16, args_start);
@@ -900,7 +855,7 @@ fn compile_stmt_with_label(
                         // Interface assignment: convert value to interface format
                         let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
                         let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-                        emit_value_convert(iface_tmp, tuple.base + offset, elem_type, lhs_type, ctx, func, info)?;
+                        crate::assign::emit_assign(iface_tmp, crate::assign::AssignSource::Slot { slot: tuple.base + offset, type_key: elem_type }, lhs_type, ctx, func, info)?;
                         emit_lvalue_store(&lv, iface_tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
                     } else {
                         // Non-interface: apply truncation and store directly
@@ -955,7 +910,7 @@ fn compile_stmt_with_label(
                         if info.is_interface(lhs_type) {
                             // Convert concrete/interface value to interface format
                             let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-                            emit_value_convert(iface_tmp, *tmp, *rhs_type, lhs_type, ctx, func, info)?;
+                            crate::assign::emit_assign(iface_tmp, crate::assign::AssignSource::Slot { slot: *tmp, type_key: *rhs_type }, lhs_type, ctx, func, info)?;
                             // Store interface value (slot1 may contain GcRef)
                             emit_lvalue_store(&lv, iface_tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
                         } else {
@@ -1048,7 +1003,7 @@ fn compile_stmt_with_label(
                         let temp_slot_types = ret_type.map(|rt| info.type_slot_types(rt)).unwrap_or_else(|| vec![SlotType::Value; slots as usize]);
                         let temp = func.alloc_temp_typed(&temp_slot_types);
                         if let Some(rt) = ret_type {
-                            compile_value_to(result, temp, rt, ctx, func, info)?;
+                            crate::assign::emit_assign(temp, crate::assign::AssignSource::Expr(result), rt, ctx, func, info)?;
                         } else {
                             compile_expr_to(result, temp, ctx, func, info)?;
                         }
@@ -1119,7 +1074,7 @@ fn compile_stmt_with_label(
                             for i in 0..info.tuple_len(tuple_type) {
                                 let elem_type = info.tuple_elem_type(tuple_type, i);
                                 let rt = ret_types[i];
-                                emit_value_convert(ret_start + dst_offset, tuple.base + src_offset, elem_type, rt, ctx, func, info)?;
+                                crate::assign::emit_assign(ret_start + dst_offset, crate::assign::AssignSource::Slot { slot: tuple.base + src_offset, type_key: elem_type }, rt, ctx, func, info)?;
                                 src_offset += info.type_slot_count(elem_type);
                                 dst_offset += info.type_slot_count(rt);
                             }
@@ -1128,7 +1083,7 @@ fn compile_stmt_with_label(
                             let mut offset = 0u16;
                             for (i, result) in ret.values.iter().enumerate() {
                                 let rt = ret_types[i];
-                                compile_value_to(result, ret_start + offset, rt, ctx, func, info)?;
+                                crate::assign::emit_assign(ret_start + offset, crate::assign::AssignSource::Expr(result), rt, ctx, func, info)?;
                                 offset += info.type_slot_count(rt);
                             }
                         }
@@ -1747,7 +1702,7 @@ fn compile_stmt_with_label(
                 let error_type = *ret_types.last().unwrap();
                 let error_slots = info.type_slot_count(error_type);
                 let error_start = ret_start + total_ret_slots - error_slots;
-                compile_value_to(&fail_stmt.error, error_start, error_type, ctx, func, info)?;
+                crate::assign::emit_assign(error_start, crate::assign::AssignSource::Expr(&fail_stmt.error), error_type, ctx, func, info)?;
             }
             
             // flags bit 0 = 1 indicates error return (for errdefer)
@@ -2225,7 +2180,7 @@ fn bind_recv_variables(
         let storage = local.storage.clone();
         let obj_key = info.get_use(first);
         let lhs_type = info.obj_type(obj_key, "recv var must have type");
-        emit_store_with_iface_convert(storage, recv_info.dst_reg, elem_type, lhs_type, ctx, func, info)?;
+        crate::assign::emit_store_to_storage(storage, recv_info.dst_reg, elem_type, lhs_type, ctx, func, info)?;
     }
     
     // Second variable: ok bool (if present)
@@ -2635,7 +2590,7 @@ fn compile_assign_to_interface(
     
     // Interface is always 2 slots
     let tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-    compile_iface_assign(tmp, rhs, iface_type, ctx, func, info)?;
+    crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(rhs), iface_type, ctx, func, info)?;
     // Interface data slot may contain GcRef
     // Interface: slot0=header, slot1=data (may be GcRef)
     emit_lvalue_store(lv, tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
@@ -2706,177 +2661,6 @@ fn compile_compound_assign(
     emit_int_trunc(tmp, lhs_type, func, info);
     emit_lvalue_store(&lv, tmp, ctx, func, &[slot_type]);
     
-    Ok(())
-}
-
-/// Compute const_idx for IfaceAssign instruction.
-/// Handles concrete types (including Named types) correctly.
-fn compute_iface_assign_const(
-    src_type: vo_analysis::objects::TypeKey,
-    src_vk: vo_runtime::ValueKind,
-    iface_meta_id: u32,
-    ctx: &mut CodegenContext,
-    info: &TypeInfoWrapper,
-) -> u16 {
-    if src_vk == vo_runtime::ValueKind::Interface {
-        ctx.register_iface_assign_const_interface(iface_meta_id)
-    } else if src_vk == vo_runtime::ValueKind::Void {
-        ctx.const_int(0)
-    } else {
-        let rttid = ctx.intern_type_key(src_type, info);
-        let base_type = if info.is_pointer(src_type) {
-            info.pointer_base(src_type)
-        } else {
-            src_type
-        };
-        ctx.register_iface_assign_const_concrete(rttid, Some(base_type), iface_meta_id, info.tc_objs())
-    }
-}
-
-/// Compile interface assignment: dst = src where dst is interface type
-/// Handles both concrete->interface and interface->interface
-/// Used for both assignment statements and function call arguments
-pub fn compile_iface_assign(
-    dst_slot: u16,
-    rhs: &vo_syntax::ast::Expr,
-    iface_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    let src_type = info.expr_type(rhs.id);
-    let src_vk = info.type_value_kind(src_type);
-    
-    // Optimization: if src is any (empty interface), just copy - no itab rebuild needed
-    // because any has no methods, itab is always 0
-    if src_vk == vo_runtime::ValueKind::Interface && info.is_empty_interface(src_type) {
-        let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-        func.emit_copy(dst_slot, src_reg, 2);
-        return Ok(());
-    }
-    
-    let iface_meta_id = info.get_or_create_interface_meta_id(iface_type, ctx);
-    let const_idx = compute_iface_assign_const(src_type, src_vk, iface_meta_id, ctx, info);
-    
-    if src_vk.needs_boxing() {
-        // IfaceAssign does ptr_clone internally for Struct/Array, so we just need to
-        // pass a GcRef. The VM ensures value semantics (deep copy).
-        let expr_source = crate::expr::get_expr_source(rhs, ctx, func, info);
-        match expr_source {
-            crate::func::ExprSource::Location(crate::func::StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                // HeapBoxed struct: pass GcRef directly, IfaceAssign will ptr_clone
-                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-            }
-            crate::func::ExprSource::Location(crate::func::StorageKind::HeapArray { gcref_slot, .. }) => {
-                // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
-                // Pass GcRef directly - IfaceAssign will ptr_clone the entire object
-                // including ArrayHeader, preserving len/elem_meta/elem_bytes for GC and dynamic access.
-                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-            }
-            crate::func::ExprSource::Location(crate::func::StorageKind::Global { index, slots: 1 }) if src_vk == vo_runtime::ValueKind::Array => {
-                // Global array: stored as 1 slot GcRef, load and pass directly
-                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_op(Opcode::GlobalGet, gcref_slot, index, 0);
-                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-            }
-            _ => {
-                // Stack value or expression: allocate box and copy data
-                let src_slots = info.type_slot_count(src_type);
-                let src_slot_types = info.type_slot_types(src_type);
-                let meta_idx = ctx.get_or_create_value_meta(src_type, info);
-                
-                let tmp_data = func.alloc_temp_typed(&src_slot_types);
-                compile_expr_to(rhs, tmp_data, ctx, func, info)?;
-                
-                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-                func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
-                
-                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-            }
-        }
-    } else {
-        let src_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
-    }
-    Ok(())
-}
-
-/// Convert value from src_reg to dst with automatic interface conversion.
-/// Handles: concrete->interface, interface->interface, and non-interface copy.
-pub fn emit_value_convert(
-    dst: u16,
-    src_reg: u16,
-    src_type: vo_analysis::objects::TypeKey,
-    target_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    if info.is_interface(target_type) {
-        if info.is_interface(src_type) {
-            // Interface -> interface
-            if info.is_empty_interface(target_type) {
-                // To any: just copy
-                let src_slots = info.type_slot_count(src_type);
-                func.emit_copy(dst, src_reg, src_slots);
-            } else {
-                // Non-empty interface target: rebuild itab
-                let iface_meta_id = info.get_or_create_interface_meta_id(target_type, ctx);
-                let const_idx = ctx.register_iface_assign_const_interface(iface_meta_id);
-                func.emit_with_flags(
-                    Opcode::IfaceAssign,
-                    vo_runtime::ValueKind::Interface as u8,
-                    dst,
-                    src_reg,
-                    const_idx
-                );
-            }
-            Ok(())
-        } else {
-            // Concrete -> interface
-            emit_iface_assign_from_concrete(dst, src_reg, src_type, target_type, ctx, func, info)
-        }
-    } else {
-        // Non-interface: just copy
-        let slots = info.type_slot_count(src_type);
-        func.emit_copy(dst, src_reg, slots);
-        Ok(())
-    }
-}
-
-/// Emit IfaceAssign from concrete type value already in a register.
-/// Used for map index expressions where key is interface type.
-pub fn emit_iface_assign_from_concrete(
-    dst_slot: u16,
-    src_reg: u16,
-    src_type: vo_analysis::objects::TypeKey,
-    iface_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    let src_vk = info.type_value_kind(src_type);
-    let iface_meta_id = info.get_or_create_interface_meta_id(iface_type, ctx);
-    let const_idx = compute_iface_assign_const(src_type, src_vk, iface_meta_id, ctx, info);
-    
-    if src_vk.needs_boxing() {
-        // Struct/Array: allocate box and copy data
-        let src_slots = info.type_slot_count(src_type);
-        let meta_idx = ctx.get_or_create_value_meta(src_type, info);
-        
-        let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
-        func.emit_ptr_set(gcref_slot, 0, src_reg, src_slots);
-        
-        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
-    } else {
-        func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, src_reg, const_idx);
-    }
     Ok(())
 }
 

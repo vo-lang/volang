@@ -175,7 +175,7 @@ pub fn compile_map_key_expr(
         let src_reg = compile_expr(index_expr, ctx, func, info)?;
         let key_slot_types = info.type_slot_types(key_type);
         let iface_reg = func.alloc_temp_typed(&key_slot_types);
-        crate::stmt::emit_iface_assign_from_concrete(
+        crate::assign::emit_iface_assign_from_concrete(
             iface_reg, src_reg, index_type, key_type, ctx, func, info
         )?;
         Ok(iface_reg)
@@ -194,11 +194,7 @@ pub fn compile_elem_to(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    if info.is_interface(target_type) {
-        crate::stmt::compile_iface_assign(dst, elem_expr, target_type, ctx, func, info)
-    } else {
-        compile_expr_to(elem_expr, dst, ctx, func, info)
-    }
+    crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(elem_expr), target_type, ctx, func, info)
 }
 
 /// Get the GcRef slot of an escaped variable without copying.
@@ -283,7 +279,7 @@ pub fn compile_expr_to_type(
     // Check if implicit interface conversion is needed
     if info.is_interface(target_type) && !info.is_interface(src_type) {
         let dst = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]); // interface is 2 slots
-        crate::stmt::compile_iface_assign(dst, expr, target_type, ctx, func, info)?;
+        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(expr), target_type, ctx, func, info)?;
         Ok(dst)
     } else {
         compile_expr(expr, ctx, func, info)
@@ -381,7 +377,7 @@ pub fn compile_expr_to(
                             compile_expr_to(expr, dst_reg, ctx, func, info)
                         } else {
                             let tmp = compile_expr(expr, ctx, func, info)?;
-                            crate::stmt::emit_iface_assign_from_concrete(dst_reg, tmp, expr_type, info.any_type(), ctx, func, info)
+                            crate::assign::emit_iface_assign_from_concrete(dst_reg, tmp, expr_type, info.any_type(), ctx, func, info)
                         }
                     };
                     
@@ -1508,7 +1504,7 @@ fn compile_addr_of(
             if info.is_interface(field_type) {
                 let field_slot_types = info.type_slot_types(field_type);
                 let tmp = func.alloc_temp_typed(&field_slot_types);
-                crate::stmt::compile_value_to(&elem.value, tmp, field_type, ctx, func, info)?;
+                crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
                 func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, true);
             } else {
                 let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();

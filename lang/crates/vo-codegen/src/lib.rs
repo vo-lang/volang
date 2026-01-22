@@ -2,6 +2,7 @@
 //!
 //! This crate compiles type-checked AST to VM bytecode.
 
+mod assign;
 mod context;
 mod embed;
 mod error;
@@ -1204,10 +1205,10 @@ fn compile_package_globals(
                         continue;
                     }
                     
-                    // Special handling for interface: use compile_iface_assign for proper itab setup
+                    // Special handling for interface: use emit_assign for proper itab setup
                     if info.is_interface(tk) {
                         let tmp = init_builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
-                        crate::stmt::compile_iface_assign(tmp, &initializer.rhs, tk, ctx, init_builder, info)?;
+                        crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&initializer.rhs), tk, ctx, init_builder, info)?;
                         emit_global_set(init_builder, global_idx, tmp, 2);
                         continue;
                     }

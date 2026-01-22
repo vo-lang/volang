@@ -48,7 +48,7 @@ fn compile_conversion_impl(
 ) -> Result<(), CodegenError> {
     // Interface conversion
     if info.is_interface(dst_type) {
-        return crate::stmt::compile_iface_assign(dst, src_expr, dst_type, ctx, func, info);
+        return crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(src_expr), dst_type, ctx, func, info);
     }
     
     let src_reg = compile_expr(src_expr, ctx, func, info)?;

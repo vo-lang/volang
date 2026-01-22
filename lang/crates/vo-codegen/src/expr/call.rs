@@ -566,12 +566,11 @@ pub fn compile_args_with_types(
         tuple.for_each_element(info, |elem_slot, elem_type| {
             let pt = param_types[elem_idx];
             let pt_slots = info.type_slot_count(pt);
-            // Note: emit_value_convert is fallible, but for_each_element uses FnMut
+            // Note: emit_assign is fallible, but for_each_element uses FnMut
             // In practice this won't fail for valid code that passed type checking
-            let _ = crate::stmt::emit_value_convert(
+            let _ = crate::assign::emit_assign(
                 args_start + offset,
-                elem_slot,
-                elem_type,
+                crate::assign::AssignSource::Slot { slot: elem_slot, type_key: elem_type },
                 pt,
                 ctx, func, info
             );
@@ -584,7 +583,7 @@ pub fn compile_args_with_types(
         let mut offset = 0u16;
         for (i, arg) in args.iter().enumerate() {
             if let Some(&pt) = param_types.get(i) {
-                crate::stmt::compile_value_to(arg, args_start + offset, pt, ctx, func, info)?;
+                crate::assign::emit_assign(args_start + offset, crate::assign::AssignSource::Expr(arg), pt, ctx, func, info)?;
                 offset += info.type_slot_count(pt);
             } else {
                 let slots = info.expr_slots(arg.id);
@@ -763,7 +762,7 @@ fn pack_variadic_args(
             tuple.for_each_element(info, |src_slot, src_type| {
                 let val_reg = if info.is_interface(elem_type) {
                     let iface_reg = func.alloc_temp_typed(&elem_slot_types);
-                    let _ = crate::stmt::emit_value_convert(iface_reg, src_slot, src_type, elem_type, ctx, func, info);
+                    let _ = crate::assign::emit_assign(iface_reg, crate::assign::AssignSource::Slot { slot: src_slot, type_key: src_type }, elem_type, ctx, func, info);
                     iface_reg
                 } else {
                     src_slot
@@ -773,7 +772,7 @@ fn pack_variadic_args(
         } else {
             let val_reg = if info.is_interface(elem_type) {
                 let iface_reg = func.alloc_temp_typed(&elem_slot_types);
-                crate::stmt::compile_iface_assign(iface_reg, elem, elem_type, ctx, func, info)?;
+                crate::assign::emit_assign(iface_reg, crate::assign::AssignSource::Expr(elem), elem_type, ctx, func, info)?;
                 iface_reg
             } else {
                 compile_expr(elem, ctx, func, info)?

@@ -29,7 +29,7 @@ fn emit_boxed_interface(
     } else {
         // Box to interface using IfaceAssign
         let any_type = info.any_type();
-        crate::stmt::emit_iface_assign_from_concrete(dst_slot, src_slot, src_type, any_type, ctx, func, info)?;
+        crate::assign::emit_iface_assign_from_concrete(dst_slot, src_slot, src_type, any_type, ctx, func, info)?;
     }
     Ok(())
 }
@@ -284,9 +284,9 @@ pub fn compile_builtin_call(
                     if flags == 0 {
                         let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
                         func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                        crate::stmt::compile_value_to(arg, meta_and_elem_reg + 2, elem_type, ctx, func, info)?;
+                        crate::assign::emit_assign(meta_and_elem_reg + 2, crate::assign::AssignSource::Expr(arg), elem_type, ctx, func, info)?;
                     } else {
-                        crate::stmt::compile_value_to(arg, meta_and_elem_reg + 1, elem_type, ctx, func, info)?;
+                        crate::assign::emit_assign(meta_and_elem_reg + 1, crate::assign::AssignSource::Expr(arg), elem_type, ctx, func, info)?;
                     }
                     
                     func.emit_with_flags(Opcode::SliceAppend, flags, append_dst, current_slice, meta_and_elem_reg);
