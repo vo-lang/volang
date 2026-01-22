@@ -2555,45 +2555,21 @@ fn compile_assign(
     
     // Resolve LHS to an LValue
     let lv = resolve_lvalue(lhs, ctx, func, info)?;
-    
-    // Get LHS type for interface check
     let lhs_type = info.expr_type(lhs.id);
     
-    // Handle interface assignment specially
-    if info.is_interface(lhs_type) {
-        return compile_assign_to_interface(&lv, rhs, lhs_type, ctx, func, info);
-    }
-    
-    // Compile RHS to temp, then store to LValue
+    // Compile RHS to temp with automatic type conversion (handles interface boxing)
     let slot_types = info.type_slot_types(lhs_type);
     let tmp = func.alloc_temp_typed(&slot_types);
-    compile_expr_to(rhs, tmp, ctx, func, info)?;
+    crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(rhs), lhs_type, ctx, func, info)?;
     
-    // Apply truncation for narrow integer types (Go semantics)
-    emit_int_trunc(tmp, lhs_type, func, info);
+    // Store to LValue (interface data slot may contain GcRef)
+    let store_slot_types: Vec<vo_runtime::SlotType> = if info.is_interface(lhs_type) {
+        vec![vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]
+    } else {
+        slot_types.iter().map(|s| (*s).into()).collect()
+    };
+    emit_lvalue_store(&lv, tmp, ctx, func, &store_slot_types);
     
-    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types);
-    
-    Ok(())
-}
-
-/// Compile assignment to an interface LValue.
-fn compile_assign_to_interface(
-    lv: &crate::lvalue::LValue,
-    rhs: &vo_syntax::ast::Expr,
-    iface_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    use crate::lvalue::emit_lvalue_store;
-    
-    // Interface is always 2 slots
-    let tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-    crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(rhs), iface_type, ctx, func, info)?;
-    // Interface data slot may contain GcRef
-    // Interface: slot0=header, slot1=data (may be GcRef)
-    emit_lvalue_store(lv, tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
     Ok(())
 }
 
