@@ -101,18 +101,18 @@ fn compute_iface_assert_params(
 }
 
 // =============================================================================
-// StmtCompiler - Unified statement compilation context
+// LocalDefiner - Variable definition helper
 // =============================================================================
 
-/// Statement compiler - unified context for all statement compilation.
+/// Helper for defining local variables with proper storage allocation.
 /// Centralizes type decisions for variable allocation and initialization.
-pub struct StmtCompiler<'a, 'b> {
+pub struct LocalDefiner<'a, 'b> {
     pub ctx: &'a mut CodegenContext,
     pub func: &'a mut FuncBuilder,
     pub info: &'b TypeInfoWrapper<'b>,
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl<'a, 'b> LocalDefiner<'a, 'b> {
     pub fn new(
         ctx: &'a mut CodegenContext,
         func: &'a mut FuncBuilder,
@@ -146,7 +146,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         // Compile init FIRST (for shadowing: `i := i` references outer `i`)
         let init_slot = if let Some(expr) = init {
             let tmp = self.func.alloc_temp_typed(&slot_types);
-            self.compile_value(expr, tmp, type_key)?;
+            crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(expr), type_key, self.ctx, self.func, self.info)?;
             Some(tmp)
         } else {
             None
@@ -271,17 +271,6 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let deferred = DeferredHeapAlloc { gcref_slot, value_slots: slots, meta_idx };
         
         Ok((storage, Some(deferred)))
-    }
-
-    /// Compile expression value with automatic interface conversion.
-    /// This is the single point for handling concrete-to-interface conversion.
-    pub fn compile_value(
-        &mut self,
-        expr: &Expr,
-        dst: u16,
-        target_type: TypeKey,
-    ) -> Result<(), CodegenError> {
-        crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(expr), target_type, self.ctx, self.func, self.info)
     }
 
     /// Emit zero initialization for a variable.
@@ -424,13 +413,13 @@ struct RangeVarInfo {
     deferred_alloc: Option<DeferredHeapAlloc>,
 }
 
-/// Define or lookup a range variable (key or value) using StmtCompiler.
+/// Define or lookup a range variable (key or value) using LocalDefiner.
 /// - If `define` is true: declare new variable with proper escape handling
 /// - If `define` is false: lookup existing variable
 /// - Blank identifier `_` always gets a temp slot (never defined or looked up)
 /// Returns RangeVarInfo with storage info for proper escaped variable handling.
 fn range_var_info(
-    sc: &mut StmtCompiler,
+    sc: &mut LocalDefiner,
     var: Option<&Expr>,
     fallback_type: TypeKey,
     define: bool,
@@ -544,7 +533,7 @@ fn compile_stmt_with_label(
     match &stmt.kind {
         // === Variable declaration ===
         StmtKind::Var(var_decl) => {
-            let mut sc = StmtCompiler::new(ctx, func, info);
+            let mut sc = LocalDefiner::new(ctx, func, info);
             for spec in &var_decl.specs {
                 for (i, name) in spec.names.iter().enumerate() {
                     let type_key = spec.ty.as_ref()
@@ -577,7 +566,7 @@ fn compile_stmt_with_label(
                 // Multi-value: compile expr once, then distribute to variables
                 let tuple = crate::expr::CompiledTuple::compile(&short_var.values[0], ctx, func, info)?;
 
-                let mut sc = StmtCompiler::new(ctx, func, info);
+                let mut sc = LocalDefiner::new(ctx, func, info);
                 let mut offset = 0u16;
                 for (i, name) in short_var.names.iter().enumerate() {
                     let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
@@ -628,7 +617,7 @@ fn compile_stmt_with_label(
                 }
                 
                 // Phase 2: Assign temps to LHS
-                let mut sc = StmtCompiler::new(ctx, func, info);
+                let mut sc = LocalDefiner::new(ctx, func, info);
                 for (i, name) in short_var.names.iter().enumerate() {
                     let Some((tmp, rhs_type)) = rhs_temps[i] else { continue };
                     
@@ -1208,7 +1197,7 @@ fn compile_stmt_with_label(
                     if let Some(init) = init {
                         if let StmtKind::ShortVar(short_var) = &init.kind {
                             // Single pass: handle all vars, special-case Go 1.22 loop vars
-                            let mut sc = StmtCompiler::new(ctx, func, info);
+                            let mut sc = LocalDefiner::new(ctx, func, info);
                             for (i, name) in short_var.names.iter().enumerate() {
                                 let is_blank = info.project.interner.resolve(name.symbol) == Some("_");
                                 if is_blank { continue; }
@@ -1230,7 +1219,7 @@ fn compile_stmt_with_label(
                                     let ctrl_slot = sc.func.alloc_temp_typed(&slot_types);
                                     
                                     if let Some(expr) = init_expr {
-                                        sc.compile_value(expr, ctrl_slot, type_key)?;
+                                        crate::assign::emit_assign(ctrl_slot, crate::assign::AssignSource::Expr(expr), type_key, sc.ctx, sc.func, sc.info)?;
                                     } else {
                                         for j in 0..value_slots {
                                             sc.func.emit_op(Opcode::LoadInt, ctrl_slot + j, 0, 0);
@@ -1323,7 +1312,7 @@ fn compile_stmt_with_label(
                     func.enter_scope();
                     
                     let range_type = info.expr_type(expr.id);
-                    let mut sc = StmtCompiler::new(ctx, func, info);
+                    let mut sc = LocalDefiner::new(ctx, func, info);
                     
                     if info.is_array(range_type) {
                         let es = info.array_elem_slots(range_type);
