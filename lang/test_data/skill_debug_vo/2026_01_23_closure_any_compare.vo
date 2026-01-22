@@ -1,0 +1,11 @@
+package main
+
+func main() {
+	// Closure captures interface and compares
+	var x any = 42
+	check := func(val int) bool {
+		return x == val
+	}
+	println("check(42):", check(42))
+	println("check(43):", check(43))
+}

@@ -1,0 +1,80 @@
+package main
+
+// Test closures capturing interface variables
+
+func main() {
+	// Test 1: Closure captures any variable
+	var a any = 10
+	inc := func() {
+		a = a.(int) + 1
+	}
+	inc()
+	assert(a.(int) == 11, "test1: closure modifies captured any")
+	
+	// Test 2: Closure captures interface and compares
+	var x any = 42
+	check := func(val int) bool {
+		return x == val
+	}
+	assert(check(42), "test2: closure compares captured any")
+	assert(!check(43), "test2b: closure compares captured any")
+	
+	// Test 3: Multiple closures share captured any
+	var counter any = 0
+	inc1 := func() { counter = counter.(int) + 1 }
+	inc2 := func() { counter = counter.(int) + 2 }
+	inc1()
+	inc2()
+	assert(counter.(int) == 3, "test3: multiple closures modify same any")
+	
+	// Test 4: Closure captures slice of interfaces
+	items := []any{1, 2, 3}
+	sum := func() int {
+		total := 0
+		for _, item := range items {
+			total += item.(int)
+		}
+		return total
+	}
+	assert(sum() == 6, "test4: closure with slice of any")
+	
+	// Test 5: Nested closure with interface capture
+	var val any = "hello"
+	outer := func() func() string {
+		return func() string {
+			return val.(string)
+		}
+	}
+	inner := outer()
+	assert(inner() == "hello", "test5: nested closure captures any")
+	
+	// Test 6: Closure modifies captured interface in loop
+	var loopVal any = 0
+	for i := 0; i < 3; i++ {
+		func() {
+			loopVal = loopVal.(int) + 1
+		}()
+	}
+	assert(loopVal.(int) == 3, "test6: closure in loop modifies any")
+	
+	// Test 7: Closure with type assertion panic recovery
+	var badVal any = "not an int"
+	safeAdd := func() (result int, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false
+			}
+		}()
+		result = badVal.(int) + 1
+		ok = true
+		return
+	}
+	_, success := safeAdd()
+	assert(!success, "test7: closure handles type assertion panic")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

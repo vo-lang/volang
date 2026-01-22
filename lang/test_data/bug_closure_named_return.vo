@@ -1,0 +1,67 @@
+package main
+
+// Regression test for closure with multiple named return values
+// Bug: closures with multiple named returns caused VariableNotFound error
+// Root cause: named return variables were not being defined in closure codegen
+
+func main() {
+	// Test 1: Closure with two named returns, no capture
+	fn1 := func() (a int, b bool) {
+		a = 42
+		b = true
+		return
+	}
+	r1, b1 := fn1()
+	assert(r1 == 42, "test1: named return a")
+	assert(b1 == true, "test1: named return b")
+	
+	// Test 2: Closure with two named returns, with capture
+	x := 10
+	fn2 := func() (result int, ok bool) {
+		result = x * 2
+		ok = true
+		return
+	}
+	r2, b2 := fn2()
+	assert(r2 == 20, "test2: named return with capture")
+	assert(b2 == true, "test2: ok with capture")
+	
+	// Test 3: Closure with three named returns
+	fn3 := func() (a int, b string, c bool) {
+		a = 1
+		b = "hello"
+		c = true
+		return
+	}
+	a3, b3, c3 := fn3()
+	assert(a3 == 1, "test3: three named returns - a")
+	assert(b3 == "hello", "test3: three named returns - b")
+	assert(c3 == true, "test3: three named returns - c")
+	
+	// Test 4: Closure with named returns and explicit return values
+	fn4 := func() (a int, b bool) {
+		return 100, false
+	}
+	r4, b4 := fn4()
+	assert(r4 == 100, "test4: explicit return")
+	assert(b4 == false, "test4: explicit return bool")
+	
+	// Test 5: Nested closure with named returns
+	fn5 := func() func() (int, bool) {
+		return func() (result int, ok bool) {
+			result = 999
+			ok = true
+			return
+		}
+	}
+	inner := fn5()
+	r5, b5 := inner()
+	assert(r5 == 999, "test5: nested closure named return")
+	assert(b5 == true, "test5: nested closure bool")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

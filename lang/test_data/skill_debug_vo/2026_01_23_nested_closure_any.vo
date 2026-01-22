@@ -1,0 +1,13 @@
+package main
+
+func main() {
+	// Test 5: Nested closure with interface capture
+	var val any = "hello"
+	outer := func() func() string {
+		return func() string {
+			return val.(string)
+		}
+	}
+	inner := outer()
+	println(inner())
+}

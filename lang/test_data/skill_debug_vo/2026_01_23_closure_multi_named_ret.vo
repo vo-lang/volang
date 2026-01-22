@@ -1,0 +1,15 @@
+package main
+
+func main() {
+	var badVal any = "test"
+	
+	// Two named returns + capture any
+	fn := func() (a int, b bool) {
+		_ = badVal
+		a = 1
+		b = true
+		return
+	}
+	r, o := fn()
+	println(r, o)
+}

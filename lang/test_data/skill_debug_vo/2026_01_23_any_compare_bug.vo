@@ -1,0 +1,38 @@
+package main
+
+import "fmt"
+
+func main() {
+	// Test 1: Single assignment to any - works?
+	var a any = 42
+	fmt.Println("Single assign: a == 42:", a == 42)
+	
+	// Test 2: Multi-assign from function to any
+	var i1, i2 any
+	i1, i2 = getTwo()
+	fmt.Println("Multi-assign: i1 == 42:", i1 == 42, "i2 == 100:", i2 == 100)
+	
+	// Test 3: Type assertion works?
+	fmt.Println("Type assertion: i1.(int):", i1.(int), "i2.(int):", i2.(int))
+	
+	// Test 4: Compare after type assertion
+	v1 := i1.(int)
+	fmt.Println("After assertion: v1 == 42:", v1 == 42)
+	
+	// Test 5: Direct multi-assign (not from function)
+	var j1, j2 any
+	j1, j2 = 42, 100
+	fmt.Println("Direct multi-assign: j1 == 42:", j1 == 42, "j2 == 100:", j2 == 100)
+	
+	// Test 6: What is the actual type in i1?
+	switch v := i1.(type) {
+	case int:
+		fmt.Println("i1 is int:", v)
+	default:
+		fmt.Println("i1 is NOT int, type switch default")
+	}
+}
+
+func getTwo() (int, int) {
+	return 42, 100
+}

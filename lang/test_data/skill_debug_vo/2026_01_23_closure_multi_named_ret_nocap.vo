@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	// Two named returns, no capture
+	fn := func() (a int, b bool) {
+		a = 1
+		b = true
+		return
+	}
+	r, o := fn()
+	println(r, o)
+}

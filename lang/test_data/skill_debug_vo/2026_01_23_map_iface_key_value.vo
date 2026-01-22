@@ -1,0 +1,77 @@
+package main
+
+// Test maps with interface keys and values
+
+func main() {
+	// Test 1: Map with any key
+	m1 := make(map[any]int)
+	m1["str"] = 1
+	m1[42] = 2
+	m1[true] = 3
+	assert(m1["str"] == 1, "test1: string key")
+	assert(m1[42] == 2, "test1: int key")
+	assert(m1[true] == 3, "test1: bool key")
+	
+	// Test 2: Map with any value
+	m2 := make(map[string]any)
+	m2["a"] = 100
+	m2["b"] = "hello"
+	m2["c"] = true
+	assert(m2["a"].(int) == 100, "test2: int value")
+	assert(m2["b"].(string) == "hello", "test2: string value")
+	assert(m2["c"].(bool) == true, "test2: bool value")
+	
+	// Test 3: Map with any key and value
+	m3 := make(map[any]any)
+	m3[1] = "one"
+	m3["two"] = 2
+	assert(m3[1].(string) == "one", "test3: any key any value")
+	assert(m3["two"].(int) == 2, "test3: any key any value 2")
+	
+	// Test 4: Map lookup with comma-ok
+	v, ok := m1["str"]
+	assert(ok, "test4: key exists")
+	assert(v == 1, "test4: value correct")
+	
+	v2, ok2 := m1["nonexistent"]
+	assert(!ok2, "test4: key not exists")
+	assert(v2 == 0, "test4: zero value")
+	
+	// Test 5: Delete with any key
+	delete(m1, "str")
+	_, exists := m1["str"]
+	assert(!exists, "test5: deleted key")
+	
+	// Test 6: Range over map with any key
+	m4 := map[any]int{1: 10, 2: 20, 3: 30}
+	sum := 0
+	for _, v := range m4 {
+		sum += v
+	}
+	assert(sum == 60, "test6: range sum")
+	
+	// Test 7: Map literal with any values
+	m5 := map[string]any{
+		"x": 1,
+		"y": "two",
+		"z": []int{1, 2, 3},
+	}
+	assert(m5["x"].(int) == 1, "test7: literal int")
+	assert(m5["y"].(string) == "two", "test7: literal string")
+	slice := m5["z"].([]int)
+	assert(len(slice) == 3, "test7: literal slice")
+	
+	// Test 8: Struct as map key
+	type Point struct {
+		x, y int
+	}
+	m6 := make(map[Point]string)
+	m6[Point{1, 2}] = "origin"
+	assert(m6[Point{1, 2}] == "origin", "test8: struct key")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

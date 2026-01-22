@@ -1,0 +1,18 @@
+package main
+
+func main() {
+	// Closure with type assertion panic recovery
+	var badVal any = "not an int"
+	safeAdd := func() (result int, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false
+			}
+		}()
+		result = badVal.(int) + 1
+		ok = true
+		return
+	}
+	_, success := safeAdd()
+	println("success:", success)
+}

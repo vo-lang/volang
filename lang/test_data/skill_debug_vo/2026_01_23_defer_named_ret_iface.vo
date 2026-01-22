@@ -1,0 +1,70 @@
+package main
+
+// Test defer with named return values involving interfaces
+
+func main() {
+	// Test 1: Defer modifies named any return
+	r1 := returnAny()
+	assert(r1.(int) == 100, "test1: defer modified any return")
+	
+	// Test 2: Defer with multiple named returns including any
+	a2, b2 := returnMultiAny()
+	assert(a2 == 10, "test2: int return")
+	assert(b2.(string) == "modified", "test2: any return modified by defer")
+	
+	// Test 3: Defer with error return
+	v3, err3 := returnWithError(false)
+	assert(v3 == 42, "test3: value return")
+	assert(err3 == nil, "test3: no error")
+	
+	// Test 4: Named return with panic recovery
+	r4 := recoverReturn()
+	assert(r4 == "recovered", "test4: recover sets named return")
+}
+
+func returnAny() (result any) {
+	result = 50
+	defer func() {
+		result = 100
+	}()
+	return
+}
+
+func returnMultiAny() (a int, b any) {
+	a = 10
+	b = "original"
+	defer func() {
+		b = "modified"
+	}()
+	return
+}
+
+func returnWithError(shouldFail bool) (val int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = nil
+		}
+	}()
+	val = 42
+	if shouldFail {
+		panic("failed")
+	}
+	return
+}
+
+func recoverReturn() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	result = "normal"
+	panic("trigger")
+	return
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

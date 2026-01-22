@@ -1,0 +1,71 @@
+package main
+
+// Test method values with interfaces
+
+type Counter struct {
+	val int
+}
+
+func (c *Counter) Inc() int {
+	c.val++
+	return c.val
+}
+
+func (c *Counter) Add(n int) int {
+	c.val += n
+	return c.val
+}
+
+func (c Counter) Get() int {
+	return c.val
+}
+
+type Adder interface {
+	Add(int) int
+}
+
+func main() {
+	// Test 1: Method value from concrete type
+	c := &Counter{val: 10}
+	inc := c.Inc
+	assert(inc() == 11, "test1: method value call")
+	assert(inc() == 12, "test1: method value call again")
+	
+	// Test 2: Method value with parameter
+	add := c.Add
+	assert(add(5) == 17, "test2: method value with param")
+	
+	// Test 3: Method value from value receiver
+	c2 := Counter{val: 100}
+	get := c2.Get
+	assert(get() == 100, "test3: value receiver method value")
+	
+	// Test 4: Method value stored in interface
+	var fn func() int = c.Inc
+	assert(fn() == 18, "test4: method value in func variable")
+	
+	// Test 5: Method value from interface
+	var adder Adder = c
+	addFn := adder.Add
+	assert(addFn(10) == 28, "test5: method value from interface")
+	
+	// Test 6: Method value in slice
+	fns := []func() int{c.Inc, c.Inc}
+	assert(fns[0]() == 29, "test6: method value in slice")
+	assert(fns[1]() == 30, "test6: method value in slice again")
+	
+	// Test 7: Method value as argument
+	result := applyTwice(c.Inc)
+	assert(result == 32, "test7: method value as argument")
+}
+
+func applyTwice(fn func() int) int {
+	fn()
+	return fn()
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

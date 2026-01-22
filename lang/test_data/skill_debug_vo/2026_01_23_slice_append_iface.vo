@@ -1,0 +1,70 @@
+package main
+
+// Test slice operations with interface elements
+
+func main() {
+	// Test 1: Append interface to slice
+	var s []any
+	s = append(s, 1)
+	s = append(s, "hello")
+	s = append(s, true)
+	assert(len(s) == 3, "test1: append length")
+	assert(s[0].(int) == 1, "test1: first element")
+	assert(s[1].(string) == "hello", "test1: second element")
+	assert(s[2].(bool) == true, "test1: third element")
+	
+	// Test 2: Append slice to slice with ...
+	s2 := []any{4, 5}
+	s = append(s, s2...)
+	assert(len(s) == 5, "test2: append spread length")
+	assert(s[3].(int) == 4, "test2: fourth element")
+	
+	// Test 3: Copy between interface slices
+	dst := make([]any, 3)
+	n := copy(dst, s)
+	assert(n == 3, "test3: copy count")
+	assert(dst[0].(int) == 1, "test3: copied first")
+	
+	// Test 4: Slice of interfaces with comparison
+	items := []any{1, 2, 3}
+	assert(items[0] == 1, "test4: interface slice comparison")
+	assert(items[1] == 2, "test4: interface slice comparison 2")
+	
+	// Test 5: Modifying interface slice element
+	items[0] = "changed"
+	assert(items[0].(string) == "changed", "test5: modified element")
+	
+	// Test 6: Range over interface slice with type assertion
+	nums := []any{10, 20, 30}
+	sum := 0
+	for _, v := range nums {
+		sum += v.(int)
+	}
+	assert(sum == 60, "test6: range sum")
+	
+	// Test 7: Nested interface slices
+	nested := []any{
+		[]any{1, 2},
+		[]any{3, 4},
+	}
+	inner := nested[0].([]any)
+	assert(inner[0].(int) == 1, "test7: nested access")
+	
+	// Test 8: Interface slice as function argument
+	result := sumInts([]any{5, 10, 15})
+	assert(result == 30, "test8: interface slice as arg")
+}
+
+func sumInts(items []any) int {
+	sum := 0
+	for _, v := range items {
+		sum += v.(int)
+	}
+	return sum
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

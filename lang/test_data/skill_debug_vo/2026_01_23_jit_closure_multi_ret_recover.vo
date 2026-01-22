@@ -1,0 +1,21 @@
+package main
+
+// Test: closure with multiple named returns + capture + defer/recover
+func main() {
+	var badVal any = "not an int"
+	
+	fn := func() (result int, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false
+			}
+		}()
+		result = badVal.(int) + 1
+		ok = true
+		return
+	}
+	_, success := fn()
+	println("success:", success)
+	// VM should print: success: false
+	// JIT should also print: success: false
+}

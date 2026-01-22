@@ -1,0 +1,10 @@
+package main
+
+func main() {
+	var a any = 10
+	inc := func() {
+		a = a.(int) + 1
+	}
+	inc()
+	println(a.(int))
+}

@@ -1,0 +1,92 @@
+package main
+
+// Test struct embedding with interface fields
+
+type Inner struct {
+	val int
+}
+
+func (i *Inner) Get() int {
+	return i.val
+}
+
+func (i *Inner) Set(v int) {
+	i.val = v
+}
+
+type Outer struct {
+	*Inner
+	name string
+}
+
+type Container struct {
+	data any
+}
+
+type Wrapper struct {
+	Container
+	id int
+}
+
+func main() {
+	// Test 1: Embedded pointer struct
+	o := &Outer{Inner: &Inner{val: 10}, name: "test"}
+	assert(o.Get() == 10, "test1: embedded method")
+	o.Set(20)
+	assert(o.Get() == 20, "test1: embedded method after set")
+	
+	// Test 2: Container with any field
+	c := Container{data: 42}
+	assert(c.data.(int) == 42, "test2: any field")
+	
+	c.data = "hello"
+	assert(c.data.(string) == "hello", "test2: any field changed")
+	
+	// Test 3: Wrapper with embedded Container
+	w := Wrapper{Container: Container{data: []int{1, 2, 3}}, id: 100}
+	assert(w.id == 100, "test3: wrapper field")
+	slice := w.data.([]int)
+	assert(len(slice) == 3, "test3: embedded any field")
+	
+	// Test 4: Assign struct to any
+	var a any = o
+	outer := a.(*Outer)
+	assert(outer.name == "test", "test4: struct in any")
+	assert(outer.Get() == 20, "test4: embedded method through any")
+	
+	// Test 5: Struct with multiple any fields
+	type Multi struct {
+		a any
+		b any
+		c any
+	}
+	m := Multi{a: 1, b: "two", c: true}
+	assert(m.a.(int) == 1, "test5: multi any a")
+	assert(m.b.(string) == "two", "test5: multi any b")
+	assert(m.c.(bool) == true, "test5: multi any c")
+	
+	// Test 6: Nested struct with any
+	type Level1 struct {
+		val any
+	}
+	type Level2 struct {
+		inner Level1
+	}
+	l2 := Level2{inner: Level1{val: 999}}
+	assert(l2.inner.val.(int) == 999, "test6: nested any")
+	
+	// Test 7: Pointer to struct with any field
+	p := &Container{data: "pointer"}
+	assert(p.data.(string) == "pointer", "test7: pointer to struct with any")
+	
+	// Test 8: Array of structs with any
+	arr := [2]Container{{data: 1}, {data: 2}}
+	assert(arr[0].data.(int) == 1, "test8: array struct any")
+	assert(arr[1].data.(int) == 2, "test8: array struct any 2")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -360,27 +360,34 @@ pub fn compile_expr_to(
                 return compile_short_circuit(expr, &bin.op, &bin.left, &bin.right, dst, ctx, func, info);
             }
             
-            let operand_type = info.expr_type(bin.left.id);
+            let left_type = info.expr_type(bin.left.id);
+            let right_type = info.expr_type(bin.right.id);
             
             // Interface comparison with IfaceEq opcode for proper deep comparison
             // Skip if comparing with nil (use simple EqI for nil checks)
-            if info.is_interface(operand_type) && matches!(bin.op, BinaryOp::Eq | BinaryOp::NotEq) {
-                let check_nil = |e: &Expr| -> bool {
-                    if let ExprKind::Ident(id) = &e.kind {
-                        info.project.interner.resolve(id.symbol) == Some("nil")
-                    } else {
-                        false
-                    }
-                };
-                let left_is_nil = check_nil(&bin.left);
-                let right_is_nil = check_nil(&bin.right);
+            if (info.is_interface(left_type) || info.is_interface(right_type)) 
+                && matches!(bin.op, BinaryOp::Eq | BinaryOp::NotEq) 
+            {
+                let is_nil = |e: &Expr| matches!(&e.kind, ExprKind::Ident(id) if info.project.interner.resolve(id.symbol) == Some("nil"));
                 
                 // Only use IfaceEq for non-nil comparisons (deep comparison needed)
-                if !left_is_nil && !right_is_nil {
+                if !is_nil(&bin.left) && !is_nil(&bin.right) {
                     let left_reg = func.alloc_interfaces(1);
                     let right_reg = func.alloc_interfaces(1);
-                    compile_expr_to(&bin.left, left_reg, ctx, func, info)?;
-                    compile_expr_to(&bin.right, right_reg, ctx, func, info)?;
+                    
+                    // Helper to compile operand, boxing concrete types to interface
+                    let compile_iface_operand = |expr: &Expr, expr_type, dst_reg, ctx: &mut CodegenContext, func: &mut FuncBuilder, info: &TypeInfoWrapper| -> Result<(), CodegenError> {
+                        if info.is_interface(expr_type) {
+                            compile_expr_to(expr, dst_reg, ctx, func, info)
+                        } else {
+                            let tmp = compile_expr(expr, ctx, func, info)?;
+                            crate::stmt::emit_iface_assign_from_concrete(dst_reg, tmp, expr_type, info.any_type(), ctx, func, info)
+                        }
+                    };
+                    
+                    compile_iface_operand(&bin.left, left_type, left_reg, ctx, func, info)?;
+                    compile_iface_operand(&bin.right, right_type, right_reg, ctx, func, info)?;
+                    
                     func.emit_op(Opcode::IfaceEq, dst, left_reg, right_reg);
                     if bin.op == BinaryOp::NotEq {
                         func.emit_op(Opcode::BoolNot, dst, dst, 0);
@@ -389,6 +396,8 @@ pub fn compile_expr_to(
                 }
                 // For nil comparisons, fall through to use EqI (simpler and correct)
             }
+            
+            let operand_type = left_type;
             
             // Array/struct comparison: compare all slots
             if (info.is_array(operand_type) || info.is_struct(operand_type)) 

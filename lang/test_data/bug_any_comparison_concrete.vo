@@ -1,0 +1,76 @@
+package main
+
+// Regression test for interface comparison with concrete types
+// Bug: any == 42 returned false even when any contains int(42)
+// Root cause: concrete operands were not boxed to interface format before IfaceEq
+
+func main() {
+	// Test 1: any == int literal
+	var a any = 42
+	assert(a == 42, "any == int literal")
+	assert(!(a == 43), "any != different int")
+	assert(a != 43, "any != operator")
+	
+	// Test 2: int literal == any (reversed order)
+	assert(42 == a, "int literal == any")
+	assert(43 != a, "int literal != any")
+	
+	// Test 3: any == string literal
+	var s any = "hello"
+	assert(s == "hello", "any == string literal")
+	assert(s != "world", "any != different string")
+	
+	// Test 4: any == bool literal
+	var b any = true
+	assert(b == true, "any == true")
+	assert(b != false, "any != false")
+	
+	// Test 5: any from function return
+	var i1, i2 any
+	i1, i2 = getTwo()
+	assert(i1 == 42, "multi-assign any == int")
+	assert(i2 == 100, "multi-assign any == int")
+	
+	// Test 6: any from direct multi-assign
+	var j1, j2 any
+	j1, j2 = 1, 2
+	assert(j1 == 1, "direct multi-assign any == int")
+	assert(j2 == 2, "direct multi-assign any == int")
+	
+	// Test 7: any with float
+	var f any = 3.14
+	assert(f == 3.14, "any == float literal")
+	
+	// Test 8: comparing two any values
+	var x any = 42
+	var y any = 42
+	var z any = 43
+	assert(x == y, "any == any (same value)")
+	assert(x != z, "any != any (different value)")
+	
+	// Test 9: any containing interface value
+	type Stringer interface {
+		String() string
+	}
+	var st Stringer = &myStr{"test"}
+	var anyVal any = st
+	assert(anyVal != nil, "any containing interface != nil")
+}
+
+func getTwo() (int, int) {
+	return 42, 100
+}
+
+type myStr struct {
+	val string
+}
+
+func (m *myStr) String() string {
+	return m.val
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

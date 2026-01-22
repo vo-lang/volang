@@ -1043,6 +1043,9 @@ fn compile_func_body(
     
     // Define named return variables as locals (zero-initialized)
     // Check if they escape (e.g. captured by defer closure)
+    // IMPORTANT: For panic/recover to work correctly, if ANY named return escapes,
+    // ALL named returns must escape. This is because the VM's heap_ret recovery path
+    // only works when all named returns are heap-allocated (mixed case not supported).
     // Two-pass approach for escaped returns to ensure contiguous GcRef slots:
     // 1. First allocate all slots (so escaped GcRef slots are contiguous)
     // 2. Then emit PtrNew instructions
@@ -1053,12 +1056,18 @@ fn compile_func_body(
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
     
+    // First pass: check if ANY named return escapes
+    let any_escapes = func_decl.sig.results.iter()
+        .filter_map(|r| r.name.as_ref())
+        .any(|name| info.is_escaped(info.get_def(name)));
+    
     for result in &func_decl.sig.results {
         if let Some(name) = &result.name {
             let result_type = info.type_expr_type(result.ty.id);
-            let (slots, slot_types) = info.type_expr_layout(result.ty.id);
+            let (slots, _slot_types) = info.type_expr_layout(result.ty.id);
             let obj_key = info.get_def(name);
-            let escapes = info.is_escaped(obj_key);
+            // Force escape if ANY named return escapes (for correct panic/recover)
+            let escapes = any_escapes || info.is_escaped(obj_key);
             
             let slot = if escapes {
                 // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
@@ -1066,6 +1075,7 @@ fn compile_func_body(
                 escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {
+                let (_, slot_types) = info.type_expr_layout(result.ty.id);
                 builder.define_local_stack(name.symbol, slots, &slot_types)
             };
             builder.register_named_return(slot, slots, escapes);

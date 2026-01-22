@@ -1,0 +1,17 @@
+package main
+
+// Test: closure with defer/recover modifying named return
+func main() {
+	fn := func() (result string) {
+		defer func() {
+			if r := recover(); r != nil {
+				result = "recovered"
+			}
+		}()
+		result = "normal"
+		panic("trigger")
+		return
+	}
+	r := fn()
+	println("result:", r)
+}

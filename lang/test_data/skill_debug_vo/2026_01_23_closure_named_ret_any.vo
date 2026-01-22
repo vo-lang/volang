@@ -1,0 +1,15 @@
+package main
+
+func main() {
+	var badVal any = "test"
+	
+	// Closure with named return capturing any - no defer
+	fn := func() (result int, ok bool) {
+		_ = badVal
+		result = 1
+		ok = true
+		return
+	}
+	r, o := fn()
+	println(r, o)
+}

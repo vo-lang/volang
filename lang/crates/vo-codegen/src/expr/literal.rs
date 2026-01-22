@@ -480,6 +480,50 @@ pub fn compile_func_lit(
         }
     }
     
+    // Define named return variables (same logic as regular functions in lib.rs)
+    // IMPORTANT: For panic/recover to work correctly, if ANY named return escapes,
+    // ALL named returns must escape. This is because the VM's heap_ret recovery path
+    // only works when all named returns are heap-allocated (mixed case not supported).
+    struct EscapedReturn {
+        gcref_slot: u16,
+        slots: u16,
+        result_type: vo_analysis::objects::TypeKey,
+    }
+    let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
+    
+    // First pass: check if ANY named return escapes
+    let any_escapes = func_lit.sig.results.iter()
+        .filter_map(|r| r.name.as_ref())
+        .any(|name| info.is_escaped(info.get_def(name)));
+    
+    for result in &func_lit.sig.results {
+        if let Some(name) = &result.name {
+            let result_type = info.type_expr_type(result.ty.id);
+            let (slots, _slot_types) = info.type_expr_layout(result.ty.id);
+            let obj_key = info.get_def(name);
+            // Force escape if ANY named return escapes (for correct panic/recover)
+            let escapes = any_escapes || info.is_escaped(obj_key);
+            
+            let slot = if escapes {
+                let gcref_slot = closure_builder.define_local_heap_boxed(name.symbol, slots);
+                escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
+                gcref_slot
+            } else {
+                let (_, slot_types) = info.type_expr_layout(result.ty.id);
+                closure_builder.define_local_stack(name.symbol, slots, &slot_types)
+            };
+            closure_builder.register_named_return(slot, slots, escapes);
+        }
+    }
+    
+    // Emit PtrNew for escaped returns
+    for er in escaped_returns {
+        let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
+        let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
+        closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+        closure_builder.emit_with_flags(Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
+    }
+    
     // Compile closure body
     crate::stmt::compile_block(&func_lit.body, ctx, &mut closure_builder, info)?;
     

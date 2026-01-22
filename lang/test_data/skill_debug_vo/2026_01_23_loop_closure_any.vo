@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	// Closure modifies captured interface in loop
+	var loopVal any = 0
+	for i := 0; i < 3; i++ {
+		func() {
+			loopVal = loopVal.(int) + 1
+		}()
+	}
+	println(loopVal.(int))
+}

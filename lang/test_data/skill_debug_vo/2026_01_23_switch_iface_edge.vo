@@ -1,0 +1,115 @@
+package main
+
+// Test switch statements with interface edge cases
+
+func main() {
+	// Test 1: Switch on any with type comparison
+	var a any = 42
+	result1 := ""
+	switch a {
+	case 42:
+		result1 = "forty-two"
+	case 43:
+		result1 = "forty-three"
+	default:
+		result1 = "other"
+	}
+	assert(result1 == "forty-two", "test1: switch any == literal")
+	
+	// Test 2: Switch with multiple cases matching any
+	var b any = "hello"
+	result2 := ""
+	switch b {
+	case "hello", "world":
+		result2 = "greeting"
+	default:
+		result2 = "other"
+	}
+	assert(result2 == "greeting", "test2: switch any multiple cases")
+	
+	// Test 3: Type switch on any
+	var c any = 3.14
+	result3 := ""
+	switch v := c.(type) {
+	case int:
+		result3 = "int"
+	case float64:
+		result3 = "float64"
+		assert(v == 3.14, "test3: type switch value")
+	case string:
+		result3 = "string"
+	default:
+		result3 = "unknown"
+	}
+	assert(result3 == "float64", "test3: type switch")
+	
+	// Test 4: Type switch with nil
+	var d any = nil
+	result4 := ""
+	switch d.(type) {
+	case nil:
+		result4 = "nil"
+	default:
+		result4 = "not nil"
+	}
+	assert(result4 == "nil", "test4: type switch nil")
+	
+	// Test 5: Switch with init statement and any
+	result5 := ""
+	switch e := getAny(); e {
+	case 100:
+		result5 = "hundred"
+	default:
+		result5 = "other"
+	}
+	assert(result5 == "hundred", "test5: switch with init")
+	
+	// Test 6: Type switch with interface type
+	type Stringer interface {
+		String() string
+	}
+	var f any = &myStr{"test"}
+	result6 := ""
+	switch v := f.(type) {
+	case Stringer:
+		result6 = v.String()
+	default:
+		result6 = "no stringer"
+	}
+	assert(result6 == "test", "test6: type switch interface case")
+	
+	// Test 7: Nested switch with any
+	var g any = 1
+	var h any = "a"
+	result7 := ""
+	switch g {
+	case 1:
+		switch h {
+		case "a":
+			result7 = "1a"
+		case "b":
+			result7 = "1b"
+		}
+	case 2:
+		result7 = "2"
+	}
+	assert(result7 == "1a", "test7: nested switch any")
+}
+
+func getAny() any {
+	return 100
+}
+
+type myStr struct {
+	val string
+}
+
+func (m *myStr) String() string {
+	return m.val
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

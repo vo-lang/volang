@@ -1,0 +1,84 @@
+package main
+
+// Regression test for defer/recover with mixed escaped named returns
+// Bug: When only some named returns are captured by defer, panic recovery failed
+// because only captured returns were heap-allocated, but VM requires all or none.
+// Root cause: codegen didn't force all named returns to escape when any escapes.
+
+func main() {
+	// Test 1: Closure with mixed named returns - one captured by defer
+	fn := func() (result int, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false  // only ok is captured
+			}
+		}()
+		result = 42
+		ok = true
+		panic("test panic")
+		return
+	}
+	r1, ok1 := fn()
+	assert(r1 == 42, "test1: result should be 42")
+	assert(!ok1, "test1: ok should be false after recover")
+	
+	// Test 2: Regular function with mixed named returns
+	r2, ok2 := mixedReturns()
+	assert(r2 == 100, "test2: result should be 100")
+	assert(!ok2, "test2: ok should be false after recover")
+	
+	// Test 3: Three named returns, only one captured
+	a3, b3, c3 := threeReturns()
+	assert(a3 == 1, "test3: a should be 1")
+	assert(b3 == "hello", "test3: b should be 'hello'")
+	assert(!c3, "test3: c should be false after recover")
+	
+	// Test 4: All named returns captured (should still work)
+	r4, ok4 := allCaptured()
+	assert(r4 == 999, "test4: result after modify in defer")
+	assert(!ok4, "test4: ok after modify in defer")
+}
+
+func mixedReturns() (result int, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+		}
+	}()
+	result = 100
+	ok = true
+	panic("panic in regular function")
+	return
+}
+
+func threeReturns() (a int, b string, c bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			c = false
+		}
+	}()
+	a = 1
+	b = "hello"
+	c = true
+	panic("panic with three returns")
+	return
+}
+
+func allCaptured() (result int, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = 999
+			ok = false
+		}
+	}()
+	result = 0
+	ok = true
+	panic("all captured")
+	return
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

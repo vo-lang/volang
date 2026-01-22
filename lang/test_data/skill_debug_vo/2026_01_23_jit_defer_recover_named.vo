@@ -1,0 +1,19 @@
+package main
+
+// Minimal test: defer/recover modifying named return
+func main() {
+	r := testRecover()
+	println("result:", r)
+	// Should print "recovered", not "normal"
+}
+
+func testRecover() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	result = "normal"
+	panic("trigger")
+	return
+}

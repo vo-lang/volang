@@ -1,0 +1,65 @@
+package main
+
+// Test compound assignments involving interfaces and type assertions
+
+func main() {
+	// Test 1: Compound assignment with type assertion result as index
+	arr := []int{10, 20, 30, 40}
+	var idx any = 1
+	arr[idx.(int)] += 5
+	assert(arr[1] == 25, "test1: compound assign with assertion index")
+	
+	// Test 2: Compound assignment on map with any key
+	m := make(map[any]int)
+	m["key"] = 10
+	var k any = "key"
+	m[k] += 5
+	assert(m["key"] == 15, "test2: compound assign map with any key")
+	
+	// Test 3: Type assertion result in arithmetic
+	var a any = 10
+	var b any = 20
+	sum := a.(int) + b.(int)
+	assert(sum == 30, "test3: type assertion in arithmetic")
+	
+	// Test 4: Nested type assertions
+	var outer any = []any{1, 2, 3}
+	slice := outer.([]any)
+	val := slice[0].(int)
+	assert(val == 1, "test4: nested type assertion")
+	
+	// Test 5: Type assertion on function return
+	fn := func() any { return 42 }
+	result := fn().(int)
+	assert(result == 42, "test5: type assertion on func return")
+	
+	// Test 6: Multiple compound assignments
+	nums := []int{1, 2, 3}
+	var i any = 0
+	var j any = 1
+	nums[i.(int)] += 10
+	nums[j.(int)] += 20
+	assert(nums[0] == 11, "test6a: multi compound")
+	assert(nums[1] == 22, "test6b: multi compound")
+	
+	// Test 7: Compound assignment with method call result
+	c := &Counter{val: 10}
+	var iface any = c
+	iface.(*Counter).val += 5
+	assert(c.val == 15, "test7: compound on method through interface")
+	
+	// Test 8: String concatenation with interface
+	var s any = "hello"
+	str := s.(string) + " world"
+	assert(str == "hello world", "test8: string concat with assertion")
+}
+
+type Counter struct {
+	val int
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}
