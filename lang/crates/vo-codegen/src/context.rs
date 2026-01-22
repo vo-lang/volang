@@ -30,6 +30,8 @@ enum MethodValueWrapperKey {
     Pointer { recv_type: TypeKey, func_id: u32 },
     /// Interface: captures interface (2 slots), uses CallIface
     Interface { method_idx: u32 },
+    /// Embedded interface: captures boxed outer struct, reads iface from offset, uses CallIface
+    EmbeddedInterface { embed_offset: u16, method_idx: u32 },
 }
 
 /// Get ret_slots for builtin extern functions.
@@ -1167,6 +1169,91 @@ impl CodegenContext {
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + iface_slots + param_slots + ret_slots;
+        let wrapper_func = FunctionDef {
+            name: wrapper_name,
+            param_count: wrapper_param_slots,
+            param_slots: wrapper_param_slots,
+            ret_slots,
+            local_slots,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: true,
+            error_ret_slot: -1,
+            code,
+            slot_types: Vec::new(),
+        };
+        
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(wrapper_func);
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        
+        Ok(wrapper_id)
+    }
+    
+    /// Get or create wrapper function for method value on embedded interface field.
+    /// The wrapper gets boxed outer struct from captures, reads the embedded interface,
+    /// and calls via CallIface.
+    pub fn get_or_create_method_value_wrapper_embedded_iface(
+        &mut self,
+        embed_offset: u16,
+        method_idx: u32,
+        param_slots: u16,
+        ret_slots: u16,
+        method_name: &str,
+    ) -> Result<u32, crate::error::CodegenError> {
+        let cache_key = MethodValueWrapperKey::EmbeddedInterface { embed_offset, method_idx };
+        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
+            return Ok(wrapper_id);
+        }
+        
+        use vo_vm::bytecode::FunctionDef;
+        use vo_vm::instruction::{Instruction, Opcode};
+        
+        // Wrapper layout:
+        // Captures: boxed outer struct (GcRef)
+        // Params: closure_ref(1) + method_params(param_slots)
+        // Wrapper body:
+        // 1. ClosureGet to get boxed outer struct from capture 0
+        // 2. PtrGet to read embedded interface (2 slots) at embed_offset
+        // 3. Copy params after interface
+        // 4. CallIface with method_idx
+        // 5. Return result
+        
+        let wrapper_param_slots = 1 + param_slots;
+        let iface_slots = 2u16;
+        
+        let mut code = Vec::new();
+        
+        // ClosureGet: get boxed outer struct pointer from capture 0
+        let outer_ptr = wrapper_param_slots;
+        code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
+        
+        // PtrGet: read embedded interface (2 slots) from outer struct
+        let iface_reg = outer_ptr + 1;
+        code.push(Instruction::with_flags(Opcode::PtrGet, iface_slots as u8, iface_reg, outer_ptr, embed_offset));
+        
+        // args_start is after interface (for params and return value)
+        let args_start = iface_reg + iface_slots;
+        
+        // Copy params to args_start
+        if param_slots > 0 {
+            let src_start = 1u16; // skip closure ref
+            for i in 0..param_slots {
+                code.push(Instruction::new(Opcode::Copy, args_start + i, src_start + i, 0));
+            }
+        }
+        
+        // CallIface: flags=method_idx, a=iface_reg, b=args_start, c=encode(param_slots, ret_slots)
+        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
+        
+        // Return result
+        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        
+        let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
+        let local_slots = wrapper_param_slots + 1 + iface_slots + param_slots.max(ret_slots);
         let wrapper_func = FunctionDef {
             name: wrapper_name,
             param_count: wrapper_param_slots,

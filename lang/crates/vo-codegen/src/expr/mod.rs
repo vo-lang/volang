@@ -792,32 +792,47 @@ fn compile_method_value(
         &info.project.interner,
     ).ok_or_else(|| CodegenError::Internal(format!("method {} not found on type {:?}", method_name, recv_type)))?;
     
-    let (method_func_id, expects_ptr_recv) = match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
-        _ => return Err(CodegenError::Internal("method value requires static dispatch".to_string())),
-    };
+    // Handle different dispatch types
+    match call_info.dispatch {
+        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+            return compile_method_value_static(
+                sel, recv_type, func_id, expects_ptr_recv, dst, ctx, func, info
+            );
+        }
+        crate::embed::MethodDispatch::EmbeddedInterface { embed_offset, iface_type, method_idx } => {
+            return compile_method_value_embedded_iface(
+                sel, recv_type, embed_offset, iface_type, method_idx, method_name, dst, ctx, func, info
+            );
+        }
+        crate::embed::MethodDispatch::Interface { .. } => {
+            return Err(CodegenError::Internal("unexpected interface dispatch in method value".to_string()));
+        }
+    }
+}
+
+/// Compile method value for static dispatch (direct or promoted method).
+fn compile_method_value_static(
+    sel: &vo_syntax::ast::SelectorExpr,
+    recv_type: vo_analysis::objects::TypeKey,
+    method_func_id: u32,
+    expects_ptr_recv: bool,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let method_name = info.project.interner.resolve(sel.sel.symbol)
+        .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
     
-    // Check if receiver expression is already a pointer type
     let expr_is_ptr = info.is_pointer(recv_type);
     
-    // For method value, we need to create a closure that captures the receiver
-    // and calls the method with it.
-    //
-    // Pointer receiver (*T): capture the pointer directly
-    // Value receiver (T): need to box the value and create wrapper that unboxes
-    
     if expects_ptr_recv {
-        // Pointer receiver method: capture the pointer, wrapper extracts it and calls method
-        // If expr is value type, take its address first
         let ptr_reg = if expr_is_ptr {
             compile_expr(&sel.expr, ctx, func, info)?
         } else {
-            // Value type but method expects pointer - take address
-            // This handles: c.Method where c is T but Method has *T receiver
             compile_addressable_to_ptr(&sel.expr, ctx, func, info)?
         };
         
-        // Get or create wrapper for pointer receiver
         let wrapper_id = ctx.get_or_create_method_value_wrapper_ptr(
             recv_type,
             method_func_id,
@@ -825,25 +840,14 @@ fn compile_method_value(
             info
         )?;
         
-        // Create closure with 1 capture (the pointer)
         func.emit_closure_new(dst, wrapper_id, 1);
-        // Set capture at offset 1 (after ClosureHeader)
         func.emit_ptr_set_with_barrier(dst, 1, ptr_reg, 1, true);
     } else {
-        // Value receiver: need to box the value
-        // The method expects a value, but we need to capture it by reference
-        // so modifications to the original don't affect the captured copy.
-        //
-        // Actually for method value, Go spec says the receiver is evaluated
-        // and copied at the time of creating the method value.
-        // So we box the value and the wrapper needs to unbox it.
-        
         let recv_slots = info.type_slot_count(recv_type);
         let recv_slot_types = info.type_slot_types(recv_type);
         let recv_reg = func.alloc_temp_typed(&recv_slot_types);
         compile_expr_to(&sel.expr, recv_reg, ctx, func, info)?;
         
-        // Box the receiver value
         let meta_idx = ctx.get_or_create_value_meta(recv_type, info);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
@@ -852,7 +856,6 @@ fn compile_method_value(
         func.emit_with_flags(Opcode::PtrNew, recv_slots as u8, boxed_reg, meta_reg, 0);
         func.emit_ptr_set(boxed_reg, 0, recv_reg, recv_slots);
         
-        // Get or create wrapper function that takes boxed receiver
         let wrapper_id = ctx.get_or_create_method_value_wrapper(
             recv_type, 
             method_func_id, 
@@ -860,11 +863,58 @@ fn compile_method_value(
             info
         )?;
         
-        // Create closure with 1 capture (the boxed receiver)
         func.emit_closure_new(dst, wrapper_id, 1);
-        // Set capture at offset 1 (after ClosureHeader)
         func.emit_ptr_set_with_barrier(dst, 1, boxed_reg, 1, true);
     }
+    
+    Ok(())
+}
+
+/// Compile method value for embedded interface dispatch.
+/// The outer struct contains an embedded interface field, and we're taking
+/// a method value from that interface.
+/// 
+/// Simpler approach: extract the embedded interface value at compile time,
+/// then use the existing interface method value machinery.
+fn compile_method_value_embedded_iface(
+    sel: &vo_syntax::ast::SelectorExpr,
+    recv_type: vo_analysis::objects::TypeKey,
+    embed_offset: u16,
+    iface_type: vo_analysis::objects::TypeKey,
+    method_idx: u32,
+    method_name: &str,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    // Compile the receiver expression
+    let recv_slots = info.type_slot_count(recv_type);
+    let recv_slot_types = info.type_slot_types(recv_type);
+    let recv_reg = func.alloc_temp_typed(&recv_slot_types);
+    compile_expr_to(&sel.expr, recv_reg, ctx, func, info)?;
+    
+    // Extract the embedded interface (2 slots) from the receiver at embed_offset
+    let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    func.emit_copy(iface_reg, recv_reg + embed_offset, 2);
+    
+    // Get method signature slots from interface type
+    let (param_slots, ret_slots) = info.get_interface_method_slots(iface_type, method_name)
+        .ok_or_else(|| CodegenError::Internal(format!(
+            "method {} not found on interface {:?}", method_name, iface_type
+        )))?;
+    
+    // Use existing interface method value wrapper
+    let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
+        method_idx,
+        param_slots,
+        ret_slots,
+        method_name,
+    )?;
+    
+    // Create closure with 2 captures (interface slot0 + data)
+    func.emit_closure_new(dst, wrapper_id, 2);
+    func.emit_ptr_set_with_barrier(dst, 1, iface_reg, 2, true);
     
     Ok(())
 }
@@ -945,12 +995,39 @@ fn compile_method_expr(
         "method {} not found on type {:?}", method_name, recv_type
     )))?;
     
-    let method_func_id = match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, .. } => func_id,
+    let (method_func_id, expects_ptr_recv) = match call_info.dispatch {
+        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
         _ => return Err(CodegenError::Internal("method expression requires static dispatch".to_string())),
     };
     
-    func.emit_closure_new(dst, method_func_id, 0);
+    // For promoted methods (embedding path is not empty), generate a wrapper
+    let final_func_id = if !call_info.embed_path.steps.is_empty() {
+        // Get the base type (strip pointer if recv_type is *T)
+        let base_type = if vo_analysis::check::type_info::is_pointer(recv_type, &info.project.tc_objs) {
+            let underlying = vo_analysis::typ::underlying_type(recv_type, &info.project.tc_objs);
+            if let vo_analysis::typ::Type::Pointer(p) = &info.project.tc_objs.types[underlying] {
+                p.base()
+            } else {
+                recv_type
+            }
+        } else {
+            recv_type
+        };
+        
+        crate::wrapper::generate_method_expr_promoted_wrapper(
+            ctx,
+            base_type,
+            &call_info.embed_path,
+            method_func_id,
+            expects_ptr_recv,
+            method_name,
+            &info.project.tc_objs,
+        )
+    } else {
+        method_func_id
+    };
+    
+    func.emit_closure_new(dst, final_func_id, 0);
     Ok(())
 }
 

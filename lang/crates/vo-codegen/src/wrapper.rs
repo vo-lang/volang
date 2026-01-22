@@ -106,17 +106,186 @@ pub fn generate_iface_wrapper(
         }
     }
     
-    // Call original function
-    emit_call(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
-    
-    // Return
-    builder.set_ret_slots(ret_slots);
-    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    // Call and return
+    emit_call_and_return(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
     
     let func_def = builder.build();
     let wrapper_id = ctx.add_function(func_def);
     
     Ok(wrapper_id)
+}
+
+/// Generate a wrapper for method expression on promoted method.
+/// 
+/// Unlike `generate_promoted_wrapper` which receives GcRef (for interface dispatch),
+/// this wrapper receives the outer type's value directly as parameter.
+/// 
+/// For `Derived.GetValue` where Derived embeds Base:
+/// - Receives Derived (N slots) as parameter
+/// - Extracts Base from embedded field
+/// - Calls Base.GetValue
+/// 
+/// For `(*Derived).SetValue`:
+/// - Receives *Derived (1 slot) as parameter
+/// - Navigates to get *Base
+/// - Calls (*Base).SetValue
+pub fn generate_method_expr_promoted_wrapper(
+    ctx: &mut CodegenContext,
+    outer_type: TypeKey,
+    embed_path: &crate::embed::EmbedPathInfo,
+    original_func_id: u32,
+    expects_ptr_recv: bool,
+    method_name: &str,
+    tc_objs: &vo_analysis::objects::TCObjects,
+) -> u32 {
+    let orig_func = &ctx.module().functions[original_func_id as usize];
+    let orig_param_slots = orig_func.param_slots;
+    let ret_slots = orig_func.ret_slots;
+    let orig_recv_slots = orig_func.recv_slots;
+    let forwarded_param_slots = orig_param_slots.saturating_sub(orig_recv_slots);
+    
+    let final_type = embed_path.final_type;
+    let recv_slots_for_call = if expects_ptr_recv {
+        1u16
+    } else {
+        vo_analysis::check::type_info::type_slot_count(final_type, tc_objs)
+    };
+    
+    let wrapper_name = format!("{}$mexpr", method_name);
+    let mut builder = FuncBuilder::new(&wrapper_name);
+    
+    // Check if any step in the path is a pointer
+    let has_pointer_step = embed_path.steps.iter().any(|s| s.is_pointer);
+    
+    // Determine if outer receiver is a pointer type
+    // For (*T).M or when path has pointer steps, outer is pointer (GcRef)
+    // For T.M with no pointer steps, outer is value type
+    let outer_is_pointer = expects_ptr_recv || has_pointer_step;
+    
+    let outer_recv_slots = if outer_is_pointer {
+        1u16
+    } else {
+        vo_analysis::check::type_info::type_slot_count(outer_type, tc_objs)
+    };
+    
+    builder.set_recv_slots(outer_recv_slots);
+    
+    // Define outer receiver parameter based on whether it's pointer or value
+    let outer_recv = if outer_is_pointer {
+        builder.define_param(None, 1, &[SlotType::GcRef])
+    } else {
+        builder.define_param(None, outer_recv_slots, &vec![SlotType::Value; outer_recv_slots as usize])
+    };
+    
+    // Define forwarded params
+    let first_param_slot = define_forwarded_params(&mut builder, forwarded_param_slots);
+    
+    // Allocate args area for call
+    let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
+    let alloc_slots = total_arg_slots.max(ret_slots);
+    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
+    
+    // Emit receiver extraction based on path
+    emit_receiver_through_path(
+        &mut builder,
+        outer_recv,
+        outer_is_pointer,
+        args_start,
+        &embed_path.steps,
+        expects_ptr_recv,
+        recv_slots_for_call,
+    );
+    
+    // Copy forwarded params
+    if let Some(first_param) = first_param_slot {
+        let params_dest = args_start + recv_slots_for_call;
+        builder.emit_copy(params_dest, first_param, forwarded_param_slots);
+    }
+    
+    // Call and return
+    emit_call_and_return(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
+    
+    let func_def = builder.build();
+    ctx.add_function(func_def)
+}
+
+/// Unified receiver extraction through embed path.
+/// 
+/// Used by both promoted wrapper (interface dispatch) and mexpr wrapper (method expression).
+/// 
+/// Parameters:
+/// - `outer_recv`: slot containing the outer receiver
+/// - `outer_is_pointer`: true if outer_recv is a GcRef, false if it's a value
+/// - `args_start`: destination slot for the extracted receiver
+/// - `steps`: embedding path to traverse
+/// - `expects_ptr_recv`: true if the target method expects pointer receiver
+/// - `recv_slots`: number of slots for the receiver value
+fn emit_receiver_through_path(
+    builder: &mut FuncBuilder,
+    outer_recv: u16,
+    outer_is_pointer: bool,
+    args_start: u16,
+    steps: &[crate::embed::EmbedStep],
+    expects_ptr_recv: bool,
+    recv_slots: u16,
+) {
+    if steps.is_empty() {
+        // No embedding path
+        if outer_is_pointer {
+            // Outer is GcRef
+            if expects_ptr_recv {
+                builder.emit_copy(args_start, outer_recv, 1);
+            } else {
+                builder.emit_ptr_get(args_start, outer_recv, 0, recv_slots);
+            }
+        } else {
+            // Outer is value - just copy
+            builder.emit_copy(args_start, outer_recv, recv_slots);
+        }
+        return;
+    }
+    
+    let has_pointer = steps.iter().any(|s| s.is_pointer);
+    let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+    
+    if !outer_is_pointer && !has_pointer {
+        // Value outer, no pointer steps - simple offset extraction
+        builder.emit_copy(args_start, outer_recv + total_offset, recv_slots);
+        return;
+    }
+    
+    if !has_pointer {
+        // No pointer in path but outer is pointer
+        if expects_ptr_recv {
+            builder.emit_copy(args_start, outer_recv, 1);
+        } else {
+            builder.emit_ptr_get(args_start, outer_recv, total_offset, recv_slots);
+        }
+        return;
+    }
+    
+    // Has pointer steps - traverse the chain
+    let mut current_ptr = outer_recv;
+    let mut accumulated_offset: u16 = 0;
+    
+    for (i, step) in steps.iter().enumerate() {
+        accumulated_offset += step.offset;
+        
+        if step.is_pointer {
+            let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+            builder.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
+            current_ptr = temp_ptr;
+            accumulated_offset = 0;
+        }
+        
+        if i == steps.len() - 1 {
+            if expects_ptr_recv {
+                builder.emit_copy(args_start, current_ptr, 1);
+            } else {
+                builder.emit_ptr_get(args_start, current_ptr, accumulated_offset, recv_slots);
+            }
+        }
+    }
 }
 
 /// Generate a wrapper for promoted method that navigates through embedded fields
@@ -176,9 +345,11 @@ pub fn generate_promoted_wrapper(
     let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver loading based on embedding type
-    emit_promoted_receiver(
+    // For promoted wrapper, outer is always GcRef (outer_is_pointer = true)
+    emit_receiver_through_path(
         &mut builder,
         outer_gcref,
+        true,  // outer_is_pointer
         args_start,
         &path_info.steps,
         is_pointer_receiver,
@@ -191,12 +362,8 @@ pub fn generate_promoted_wrapper(
         builder.emit_copy(params_dest, first_param, forwarded_param_slots);
     }
     
-    // Call original method
-    emit_call(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
-    
-    // Return
-    builder.set_ret_slots(ret_slots);
-    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    // Call and return
+    emit_call_and_return(&mut builder, original_func_id, args_start, total_arg_slots, ret_slots);
     
     let func_def = builder.build();
     ctx.add_function(func_def)
@@ -206,81 +373,18 @@ pub fn generate_promoted_wrapper(
 // Helper functions
 // =============================================================================
 
-/// Emit receiver loading for promoted method wrapper.
-/// 
-/// Handles multi-level pointer embedding correctly by traversing each step.
-/// For example, `Top -> *Mid -> *Base` requires:
-/// 1. Read *Mid pointer from Top at step[0].offset
-/// 2. Read *Base pointer from Mid at step[1].offset
-/// 3. Use *Base as receiver (or dereference if value receiver)
-fn emit_promoted_receiver(
-    builder: &mut FuncBuilder,
-    outer_gcref: u16,
-    args_start: u16,
-    steps: &[crate::embed::EmbedStep],
-    is_pointer_receiver: bool,
-    recv_slots: u16,
-) {
-    if steps.is_empty() {
-        // No embedding - just use outer_gcref directly
-        if is_pointer_receiver {
-            builder.emit_copy(args_start, outer_gcref, 1);
-        } else {
-            builder.emit_ptr_get(args_start, outer_gcref, 0, recv_slots);
-        }
-        return;
-    }
-    
-    // Check if we have any pointer steps
-    let has_pointer = steps.iter().any(|s| s.is_pointer);
-    
-    if !has_pointer {
-        // All value embedding - calculate total offset and read directly
-        let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
-        if is_pointer_receiver {
-            // Pointer receiver but no pointer embedding - outer_gcref IS the pointer
-            builder.emit_copy(args_start, outer_gcref, 1);
-        } else {
-            builder.emit_ptr_get(args_start, outer_gcref, total_offset, recv_slots);
-        }
-        return;
-    }
-    
-    // Has pointer embedding - need to traverse the chain
-    let mut current_ptr = outer_gcref;
-    let mut accumulated_offset: u16 = 0;
-    
-    for (i, step) in steps.iter().enumerate() {
-        accumulated_offset += step.offset;
-        
-        if step.is_pointer {
-            // This is a pointer field - read the pointer
-            let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
-            builder.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
-            current_ptr = temp_ptr;
-            accumulated_offset = 0; // Reset offset - we're now in a new object
-        }
-        // If not pointer, just accumulate the offset for the next read
-        
-        // Check if this is the last step
-        if i == steps.len() - 1 {
-            // Final step - emit the receiver
-            if is_pointer_receiver {
-                // Method expects *T - current_ptr is already the pointer we need
-                builder.emit_copy(args_start, current_ptr, 1);
-            } else {
-                // Method expects T - dereference to get value
-                builder.emit_ptr_get(args_start, current_ptr, accumulated_offset, recv_slots);
-            }
-        }
-    }
-}
-
 /// Emit a function call instruction
 fn emit_call(builder: &mut FuncBuilder, func_id: u32, args_start: u16, arg_slots: u16, ret_slots: u16) {
     let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
     builder.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+}
+
+/// Emit call and return - common wrapper epilogue
+fn emit_call_and_return(builder: &mut FuncBuilder, func_id: u32, args_start: u16, arg_slots: u16, ret_slots: u16) {
+    emit_call(builder, func_id, args_start, arg_slots, ret_slots);
+    builder.set_ret_slots(ret_slots);
+    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
 }
 
 /// Generate wrapper for methods coming from embedded interface fields.

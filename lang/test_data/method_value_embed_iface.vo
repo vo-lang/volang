@@ -1,0 +1,72 @@
+// Test: method value on embedded interface field
+package main
+
+import "fmt"
+
+type Reader interface {
+    Read() int
+}
+
+type MyReader struct {
+    data int
+}
+
+func (r MyReader) Read() int {
+    return r.data
+}
+
+type Writer interface {
+    Write(v int)
+}
+
+type MyWriter struct {
+    written int
+}
+
+func (w *MyWriter) Write(v int) {
+    w.written = v
+}
+
+type Wrapper struct {
+    Reader  // embedded interface
+    extra int
+}
+
+type MultiWrapper struct {
+    Reader
+    Writer
+    name string
+}
+
+func main() {
+    // Test 1: Method value on embedded interface method
+    w := Wrapper{Reader: MyReader{data: 42}, extra: 100}
+    fn := w.Read
+    result := fn()
+    assert(result == 42, "method value on embedded interface failed")
+    
+    // Test 2: Capture semantics - changing wrapper shouldn't affect captured method
+    w2 := Wrapper{Reader: MyReader{data: 10}, extra: 200}
+    fn2 := w2.Read
+    w2 = Wrapper{Reader: MyReader{data: 999}, extra: 300}
+    result2 := fn2()
+    assert(result2 == 10, "method value should capture interface at binding time")
+    
+    // Test 3: Method value stored in slice
+    w3 := Wrapper{Reader: MyReader{data: 30}, extra: 0}
+    w4 := Wrapper{Reader: MyReader{data: 40}, extra: 0}
+    funcs := []func() int{w3.Read, w4.Read}
+    assert(funcs[0]() == 30, "funcs[0] failed")
+    assert(funcs[1]() == 40, "funcs[1] failed")
+    
+    // Test 4: Multiple embedded interfaces
+    mw := MultiWrapper{
+        Reader: MyReader{data: 77},
+        Writer: &MyWriter{written: 0},
+        name: "test",
+    }
+    readFn := mw.Read
+    assert(readFn() == 77, "multi wrapper Read failed")
+    
+    fmt.Println("method_value_embed_iface: ok")
+}

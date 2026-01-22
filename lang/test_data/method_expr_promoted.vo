@@ -1,0 +1,82 @@
+// Test: method expressions on promoted methods from embedded types
+package main
+
+import "fmt"
+
+type Base struct {
+    value int
+}
+
+func (b Base) GetValue() int {
+    return b.value
+}
+
+func (b *Base) SetValue(v int) {
+    b.value = v
+}
+
+func (b Base) Add(n int) int {
+    return b.value + n
+}
+
+type Derived struct {
+    Base
+    extra int
+}
+
+func (d Derived) GetExtra() int {
+    return d.extra
+}
+
+func main() {
+    // Test 1: Value receiver method expression on promoted method
+    f1 := Derived.GetValue
+    d := Derived{Base: Base{value: 42}, extra: 100}
+    result := f1(d)
+    assert(result == 42, "Derived.GetValue method expr failed")
+
+    // Test 2: Pointer receiver method expression on promoted method
+    f2 := (*Derived).SetValue
+    dp := &Derived{Base: Base{value: 10}, extra: 200}
+    f2(dp, 99)
+    assert(dp.value == 99, "(*Derived).SetValue method expr failed")
+
+    // Test 3: Method expression on own method (not promoted)
+    f3 := Derived.GetExtra
+    result3 := f3(d)
+    assert(result3 == 100, "Derived.GetExtra method expr failed")
+
+    // Test 4: Promoted method with arguments
+    f4 := Derived.Add
+    result4 := f4(d, 8)
+    assert(result4 == 50, "Derived.Add method expr failed")
+
+    // Test 5: Method expression assigned to interface{} and type asserted back
+    var a any = Derived.GetValue
+    fn, ok := a.(func(Derived) int)
+    assert(ok, "type assertion should succeed")
+    result5 := fn(d)
+    assert(result5 == 42, "method expr from any failed")
+
+    // Test 6: Method expression in map
+    m := make(map[string]func(Derived) int)
+    m["get"] = Derived.GetValue
+    result6 := m["get"](d)
+    assert(result6 == 42, "method expr in map failed")
+
+    // Test 7: Method expression in slice
+    funcs := []func(Derived) int{Derived.GetValue, Derived.GetExtra}
+    assert(funcs[0](d) == 42, "method expr slice[0] failed")
+    assert(funcs[1](d) == 100, "method expr slice[1] failed")
+
+    // Test 8: Embedded struct without extra fields (1-slot outer type)
+    type Simple struct {
+        Base
+    }
+    f8 := Simple.GetValue
+    s := Simple{Base: Base{value: 77}}
+    result8 := f8(s)
+    assert(result8 == 77, "Simple.GetValue method expr failed")
+
+    fmt.Println("method_expr_promoted: ok")
+}
