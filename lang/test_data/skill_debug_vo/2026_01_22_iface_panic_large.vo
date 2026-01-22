@@ -1,0 +1,309 @@
+// Test: Type assertion panic recovery, large struct in interface
+// Focus: panic on failed assertion, large struct boxing
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Type Assertion Panic and Recover
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string { return b.data }
+
+// Test 1: Successful type assertion (no panic)
+func test1() {
+    var a any = &Buffer{data: "test1"}
+    buf := a.(*Buffer)  // Should not panic
+    assert(buf.data == "test1", "test1: assertion should succeed")
+    fmt.Println("Test 1 PASSED: successful assertion without ok")
+}
+
+// Test 2: Failed type assertion with panic and recover
+func test2() {
+    defer func() {
+        r := recover()
+        if r != nil {
+            fmt.Println("Test 2 PASSED: recovered from failed assertion")
+        } else {
+            panic("test2: should have panicked")
+        }
+    }()
+    
+    var a any = "not a buffer"
+    _ = a.(*Buffer)  // Should panic
+    panic("test2: should not reach here")
+}
+
+// Test 3: Successful interface assertion (any -> Reader)
+func test3() {
+    var a any = &Buffer{data: "reader"}
+    r := a.(Reader)  // Should not panic
+    assert(r.Read() == "reader", "test3: Reader assertion")
+    fmt.Println("Test 3 PASSED: successful interface assertion")
+}
+
+// Test 4: Failed interface assertion with recover
+func test4() {
+    defer func() {
+        r := recover()
+        if r != nil {
+            fmt.Println("Test 4 PASSED: recovered from failed interface assertion")
+        } else {
+            panic("test4: should have panicked")
+        }
+    }()
+    
+    var a any = 42  // int doesn't implement Reader
+    _ = a.(Reader)  // Should panic
+    panic("test4: should not reach here")
+}
+
+// ============================================
+// Part 2: Large Struct in Interface
+// ============================================
+
+type LargeStruct struct {
+    a, b, c, d, e, f, g, h int
+    s1, s2, s3, s4 string
+    arr [10]int
+}
+
+func (l LargeStruct) Sum() int {
+    return l.a + l.b + l.c + l.d + l.e + l.f + l.g + l.h
+}
+
+type Summer interface {
+    Sum() int
+}
+
+// Test 5: Large struct assigned to interface
+func test5() {
+    ls := LargeStruct{
+        a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8,
+        s1: "a", s2: "b", s3: "c", s4: "d",
+    }
+    ls.arr[0] = 100
+    
+    var s Summer = ls
+    assert(s.Sum() == 36, "test5: large struct Sum()")
+    fmt.Println("Test 5 PASSED: large struct in interface")
+}
+
+// Test 6: Large struct value semantics in interface
+func test6() {
+    ls := LargeStruct{a: 10, b: 20}
+    var s Summer = ls
+    
+    // Modify original
+    ls.a = 100
+    
+    // Interface should have copy (value semantics)
+    assert(s.Sum() == 30, "test6: interface has copy")
+    fmt.Println("Test 6 PASSED: large struct value semantics")
+}
+
+// Test 7: Type assertion on large struct
+func test7() {
+    ls := LargeStruct{a: 5, b: 10, s1: "hello"}
+    var a any = ls
+    
+    ls2, ok := a.(LargeStruct)
+    assert(ok, "test7: should be LargeStruct")
+    assert(ls2.a == 5, "test7: a")
+    assert(ls2.b == 10, "test7: b")
+    assert(ls2.s1 == "hello", "test7: s1")
+    fmt.Println("Test 7 PASSED: type assertion on large struct")
+}
+
+// ============================================
+// Part 3: Pointer to Large Struct
+// ============================================
+
+func (l *LargeStruct) Inc() {
+    l.a++
+}
+
+type Incrementer interface {
+    Inc()
+}
+
+// Test 8: Pointer to large struct in interface
+func test8() {
+    ls := &LargeStruct{a: 0}
+    var inc Incrementer = ls
+    
+    inc.Inc()
+    inc.Inc()
+    assert(ls.a == 2, "test8: pointer semantics")
+    fmt.Println("Test 8 PASSED: pointer to large struct")
+}
+
+// Test 9: Large struct through multiple interfaces
+func test9() {
+    ls := LargeStruct{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8}
+    
+    var s Summer = ls
+    var a any = s
+    
+    s2, ok := a.(Summer)
+    assert(ok, "test9: should be Summer")
+    assert(s2.Sum() == 36, "test9: Sum through chain")
+    fmt.Println("Test 9 PASSED: large struct through interface chain")
+}
+
+// ============================================
+// Part 4: Interface with Struct Containing Interface
+// ============================================
+
+type Container struct {
+    reader Reader
+    name   string
+}
+
+func (c *Container) GetReader() Reader {
+    return c.reader
+}
+
+type ReaderProvider interface {
+    GetReader() Reader
+}
+
+// Test 10: Struct with interface field implements interface
+func test10() {
+    buf := &Buffer{data: "nested"}
+    c := &Container{reader: buf, name: "container"}
+    
+    var rp ReaderProvider = c
+    r := rp.GetReader()
+    assert(r.Read() == "nested", "test10: nested interface")
+    fmt.Println("Test 10 PASSED: struct with interface field")
+}
+
+// Test 11: Type assertion on struct with interface field
+func test11() {
+    buf := &Buffer{data: "assert"}
+    c := &Container{reader: buf, name: "test"}
+    
+    var a any = c
+    c2, ok := a.(*Container)
+    assert(ok, "test11: should be *Container")
+    assert(c2.reader.Read() == "assert", "test11: reader works")
+    fmt.Println("Test 11 PASSED: assertion on struct with interface")
+}
+
+// ============================================
+// Part 5: Interface Assignment in Expression
+// ============================================
+
+func getAny(v int) any {
+    if v > 0 {
+        return &Buffer{data: "positive"}
+    }
+    return nil
+}
+
+// Test 12: Interface in ternary-like expression
+func test12() {
+    a1 := getAny(1)
+    a2 := getAny(-1)
+    
+    assert(a1 != nil, "test12: positive should not be nil")
+    assert(a2 == nil, "test12: negative should be nil")
+    
+    if a1 != nil {
+        buf, ok := a1.(*Buffer)
+        assert(ok, "test12: should be *Buffer")
+        assert(buf.data == "positive", "test12: data correct")
+    }
+    fmt.Println("Test 12 PASSED: interface in conditional expression")
+}
+
+// Test 13: Interface in compound expression
+func test13() {
+    var r Reader
+    buf := &Buffer{data: "compound"}
+    
+    r = buf  // Simple assignment
+    assert(r.Read() == "compound", "test13: after assignment")
+    fmt.Println("Test 13 PASSED: interface in compound expression")
+}
+
+// ============================================
+// Part 6: Interface Method Chaining
+// ============================================
+
+type Builder interface {
+    SetName(s string) Builder
+    SetValue(v int) Builder
+    Build() string
+}
+
+type MyBuilder struct {
+    name  string
+    value int
+}
+
+func (b *MyBuilder) SetName(s string) Builder {
+    b.name = s
+    return b
+}
+
+func (b *MyBuilder) SetValue(v int) Builder {
+    b.value = v
+    return b
+}
+
+func (b *MyBuilder) Build() string {
+    return fmt.Sprintf("%s:%d", b.name, b.value)
+}
+
+// Test 14: Builder pattern with interface chaining
+func test14() {
+    var b Builder = &MyBuilder{}
+    result := b.SetName("test").SetValue(42).Build()
+    assert(result == "test:42", "test14: builder chain")
+    fmt.Println("Test 14 PASSED: builder pattern chaining")
+}
+
+// Test 15: Builder chain with intermediate type assertion
+func test15() {
+    var b Builder = &MyBuilder{}
+    b = b.SetName("chain")
+    
+    var a any = b
+    b2, ok := a.(Builder)
+    assert(ok, "test15: should be Builder")
+    
+    result := b2.SetValue(100).Build()
+    assert(result == "chain:100", "test15: chain after assertion")
+    fmt.Println("Test 15 PASSED: builder chain with assertion")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_panic_large: ALL 15 TESTS PASSED ===")
+}

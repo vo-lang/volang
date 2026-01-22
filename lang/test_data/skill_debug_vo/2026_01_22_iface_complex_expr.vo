@@ -1,0 +1,303 @@
+// Test: Interface in complex expressions - map access, slice index, method chains
+// Focus: type assertion and interface usage in complex expression contexts
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Interface in Map Access
+// ============================================
+
+type Stringer interface {
+    String() string
+}
+
+type Named struct {
+    name string
+}
+
+func (n Named) String() string { return n.name }
+
+// Test 1: Type assertion on map value
+func test1() {
+    m := make(map[string]any)
+    m["a"] = Named{name: "alice"}
+    m["b"] = Named{name: "bob"}
+    
+    s, ok := m["a"].(Stringer)
+    assert(ok, "test1: should be Stringer")
+    assert(s.String() == "alice", "test1: name should be alice")
+    fmt.Println("Test 1 PASSED: type assertion on map value")
+}
+
+// Test 2: Interface method call on map value (after assertion)
+func test2() {
+    m := make(map[string]Stringer)
+    m["x"] = Named{name: "xavier"}
+    
+    result := m["x"].String()
+    assert(result == "xavier", "test2: method on map value")
+    fmt.Println("Test 2 PASSED: method call on map value")
+}
+
+// Test 3: Map with interface key
+func test3() {
+    m := make(map[Stringer]int)
+    
+    a := Named{name: "a"}
+    b := Named{name: "b"}
+    
+    m[a] = 1
+    m[b] = 2
+    
+    assert(m[a] == 1, "test3: m[a]")
+    assert(m[b] == 2, "test3: m[b]")
+    fmt.Println("Test 3 PASSED: map with interface key")
+}
+
+// ============================================
+// Part 2: Interface in Slice Operations
+// ============================================
+
+// Test 4: Type assertion on slice element
+func test4() {
+    slice := []any{Named{name: "first"}, Named{name: "second"}}
+    
+    s, ok := slice[0].(Stringer)
+    assert(ok, "test4: should be Stringer")
+    assert(s.String() == "first", "test4: first element")
+    fmt.Println("Test 4 PASSED: type assertion on slice element")
+}
+
+// Test 5: Interface method on slice element
+func test5() {
+    slice := []Stringer{Named{name: "one"}, Named{name: "two"}}
+    
+    assert(slice[0].String() == "one", "test5: first")
+    assert(slice[1].String() == "two", "test5: second")
+    fmt.Println("Test 5 PASSED: method on slice element")
+}
+
+// Test 6: Append with type conversion
+func test6() {
+    var slice []Stringer
+    slice = append(slice, Named{name: "appended"})
+    
+    assert(len(slice) == 1, "test6: length")
+    assert(slice[0].String() == "appended", "test6: value")
+    fmt.Println("Test 6 PASSED: append with interface conversion")
+}
+
+// ============================================
+// Part 3: Method Chain on Interface
+// ============================================
+
+type Builder interface {
+    Add(s string) Builder
+    Get() string
+}
+
+type StringBuilder struct {
+    s string
+}
+
+func (sb *StringBuilder) Add(s string) Builder {
+    sb.s += s
+    return sb
+}
+
+func (sb *StringBuilder) Get() string {
+    return sb.s
+}
+
+// Test 7: Method chain returning interface
+func test7() {
+    var b Builder = &StringBuilder{}
+    result := b.Add("hello").Add(" ").Add("world").Get()
+    assert(result == "hello world", "test7: chain result")
+    fmt.Println("Test 7 PASSED: method chain")
+}
+
+// Test 8: Method chain with intermediate type assertion
+func test8() {
+    var b Builder = &StringBuilder{}
+    b = b.Add("part1")
+    
+    // Type assertion on result
+    sb, ok := b.(*StringBuilder)
+    assert(ok, "test8: should be *StringBuilder")
+    assert(sb.s == "part1", "test8: after first add")
+    
+    b = b.Add("part2")
+    assert(sb.s == "part1part2", "test8: after second add")
+    fmt.Println("Test 8 PASSED: chain with assertion")
+}
+
+// ============================================
+// Part 4: Interface in Conditional Expression
+// ============================================
+
+func getStringer(useNamed bool) Stringer {
+    if useNamed {
+        return Named{name: "named"}
+    }
+    return nil
+}
+
+// Test 9: Interface in conditional
+func test9() {
+    s1 := getStringer(true)
+    s2 := getStringer(false)
+    
+    assert(s1 != nil, "test9: s1 not nil")
+    assert(s2 == nil, "test9: s2 is nil")
+    assert(s1.String() == "named", "test9: s1 value")
+    fmt.Println("Test 9 PASSED: interface in conditional")
+}
+
+// Test 10: Interface nil check before method
+func test10() {
+    s := getStringer(false)
+    
+    var result string
+    if s != nil {
+        result = s.String()
+    } else {
+        result = "nil"
+    }
+    
+    assert(result == "nil", "test10: nil case")
+    
+    s = getStringer(true)
+    if s != nil {
+        result = s.String()
+    }
+    assert(result == "named", "test10: non-nil case")
+    fmt.Println("Test 10 PASSED: nil check before method")
+}
+
+// ============================================
+// Part 5: Multiple Interface Return
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string     { return b.data }
+func (b *Buffer) Write(s string) { b.data = s }
+
+func getReaderWriter() (Reader, Writer) {
+    buf := &Buffer{data: "initial"}
+    return buf, buf
+}
+
+// Test 11: Multiple interface return
+func test11() {
+    r, w := getReaderWriter()
+    
+    assert(r.Read() == "initial", "test11: initial read")
+    w.Write("modified")
+    assert(r.Read() == "modified", "test11: after write")
+    fmt.Println("Test 11 PASSED: multiple interface return")
+}
+
+// Test 12: Type assertion on multiple return
+func test12() {
+    r, w := getReaderWriter()
+    
+    buf1, ok1 := r.(*Buffer)
+    buf2, ok2 := w.(*Buffer)
+    
+    assert(ok1, "test12: r should be *Buffer")
+    assert(ok2, "test12: w should be *Buffer")
+    assert(buf1 == buf2, "test12: same buffer")
+    fmt.Println("Test 12 PASSED: assertion on multiple return")
+}
+
+// ============================================
+// Part 6: Interface in Struct Literal
+// ============================================
+
+type Container struct {
+    reader Reader
+    writer Writer
+}
+
+// Test 13: Interface in struct literal
+func test13() {
+    buf := &Buffer{data: "literal"}
+    c := Container{
+        reader: buf,
+        writer: buf,
+    }
+    
+    assert(c.reader.Read() == "literal", "test13: read")
+    c.writer.Write("changed")
+    assert(c.reader.Read() == "changed", "test13: after write")
+    fmt.Println("Test 13 PASSED: interface in struct literal")
+}
+
+// Test 14: Nested struct with interface
+func test14() {
+    type Outer struct {
+        c Container
+        n string
+    }
+    
+    buf := &Buffer{data: "nested"}
+    o := Outer{
+        c: Container{reader: buf, writer: buf},
+        n: "outer",
+    }
+    
+    assert(o.c.reader.Read() == "nested", "test14: nested read")
+    fmt.Println("Test 14 PASSED: nested struct with interface")
+}
+
+// Test 15: Array of containers
+func test15() {
+    buf1 := &Buffer{data: "buf1"}
+    buf2 := &Buffer{data: "buf2"}
+    
+    containers := []Container{
+        {reader: buf1, writer: buf1},
+        {reader: buf2, writer: buf2},
+    }
+    
+    assert(containers[0].reader.Read() == "buf1", "test15: first")
+    assert(containers[1].reader.Read() == "buf2", "test15: second")
+    
+    containers[0].writer.Write("modified1")
+    assert(containers[0].reader.Read() == "modified1", "test15: after modify")
+    fmt.Println("Test 15 PASSED: array of containers")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_complex_expr: ALL 15 TESTS PASSED ===")
+}

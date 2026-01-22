@@ -1,0 +1,337 @@
+// Test: Interface edge cases
+// Focus: nil interface, typed nil, interface in closures, failed assertions
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Nil Interface vs Typed Nil
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type MyReader struct {
+    data string
+}
+
+func (m *MyReader) Read() string {
+    if m == nil {
+        return "nil reader"
+    }
+    return m.data
+}
+
+// Test 1: nil interface is nil
+func test1() {
+    var r Reader
+    assert(r == nil, "test1: nil interface should be nil")
+    fmt.Println("Test 1 PASSED: nil interface == nil")
+}
+
+// Test 2: typed nil is NOT nil interface
+func test2() {
+    var mr *MyReader = nil
+    var r Reader = mr  // typed nil
+    
+    // r is NOT nil because it has type info (*MyReader)
+    assert(r != nil, "test2: typed nil interface should NOT be nil")
+    fmt.Println("Test 2 PASSED: typed nil != nil")
+}
+
+// Test 3: typed nil can still call methods (if method handles nil)
+func test3() {
+    var mr *MyReader = nil
+    var r Reader = mr
+    
+    result := r.Read()  // Should call (*MyReader).Read with nil receiver
+    assert(result == "nil reader", "test3: nil receiver method should work")
+    fmt.Println("Test 3 PASSED: nil receiver method call")
+}
+
+// Test 4: Type assertion on typed nil
+func test4() {
+    var mr *MyReader = nil
+    var r Reader = mr
+    
+    // Assertion to concrete type should succeed (and return nil pointer)
+    m, ok := r.(*MyReader)
+    assert(ok, "test4: typed nil should assert to *MyReader")
+    assert(m == nil, "test4: result should be nil pointer")
+    fmt.Println("Test 4 PASSED: typed nil type assertion")
+}
+
+// Test 5: Type assertion on true nil interface should fail
+func test5() {
+    var r Reader  // true nil
+    
+    _, ok := r.(*MyReader)
+    assert(!ok, "test5: nil interface should not assert to *MyReader")
+    fmt.Println("Test 5 PASSED: nil interface assertion fails")
+}
+
+// ============================================
+// Part 2: Interface Comparison
+// ============================================
+
+type Stringer interface {
+    String() string
+}
+
+type A struct{ val int }
+func (a A) String() string { return "A" }
+
+type B struct{ val int }
+func (b B) String() string { return "B" }
+
+// Test 6: Same concrete value through interface
+func test6() {
+    a1 := A{val: 10}
+    a2 := A{val: 10}
+    
+    var s1 Stringer = a1
+    var s2 Stringer = a2
+    
+    // Go: interfaces are equal if dynamic type and value are equal
+    assert(s1 == s2, "test6: same type and value should be equal")
+    fmt.Println("Test 6 PASSED: interface equality (same type, same value)")
+}
+
+// Test 7: Different concrete types are not equal
+func test7() {
+    a := A{val: 10}
+    b := B{val: 10}
+    
+    var s1 Stringer = a
+    var s2 Stringer = b
+    
+    assert(s1 != s2, "test7: different types should not be equal")
+    fmt.Println("Test 7 PASSED: interface inequality (different types)")
+}
+
+// Test 8: Same type, different values
+func test8() {
+    a1 := A{val: 10}
+    a2 := A{val: 20}
+    
+    var s1 Stringer = a1
+    var s2 Stringer = a2
+    
+    assert(s1 != s2, "test8: same type but different values should not be equal")
+    fmt.Println("Test 8 PASSED: interface inequality (different values)")
+}
+
+// ============================================
+// Part 3: Interface in Closure
+// ============================================
+
+type Counter interface {
+    Inc()
+    Get() int
+}
+
+type SimpleCounter struct {
+    n int
+}
+
+func (c *SimpleCounter) Inc() { c.n++ }
+func (c *SimpleCounter) Get() int { return c.n }
+
+// Test 9: Closure capturing interface
+func test9() {
+    var c Counter = &SimpleCounter{n: 0}
+    
+    inc := func() {
+        c.Inc()
+    }
+    
+    get := func() int {
+        return c.Get()
+    }
+    
+    inc()
+    inc()
+    assert(get() == 2, "test9: closure should access interface")
+    fmt.Println("Test 9 PASSED: closure captures interface")
+}
+
+// Test 10: Closure modifying interface variable
+func test10() {
+    var c Counter = &SimpleCounter{n: 100}
+    
+    replace := func(newC Counter) {
+        c = newC
+    }
+    
+    assert(c.Get() == 100, "test10: initial value")
+    replace(&SimpleCounter{n: 200})
+    assert(c.Get() == 200, "test10: after replace")
+    fmt.Println("Test 10 PASSED: closure modifies interface variable")
+}
+
+// ============================================
+// Part 4: Interface in Struct Field
+// ============================================
+
+type Wrapper struct {
+    reader Reader
+}
+
+// Test 11: nil interface field
+func test11() {
+    w := Wrapper{}  // reader is nil
+    assert(w.reader == nil, "test11: nil interface field")
+    fmt.Println("Test 11 PASSED: nil interface field")
+}
+
+// Test 12: interface field assignment
+func test12() {
+    w := Wrapper{}
+    w.reader = &MyReader{data: "hello"}
+    
+    assert(w.reader != nil, "test12: assigned interface should not be nil")
+    assert(w.reader.Read() == "hello", "test12: interface method call")
+    fmt.Println("Test 12 PASSED: interface field assignment")
+}
+
+// Test 13: typed nil in interface field
+func test13() {
+    var mr *MyReader = nil
+    w := Wrapper{reader: mr}
+    
+    assert(w.reader != nil, "test13: typed nil field should not be nil")
+    assert(w.reader.Read() == "nil reader", "test13: typed nil method")
+    fmt.Println("Test 13 PASSED: typed nil in interface field")
+}
+
+// ============================================
+// Part 5: Interface Slice
+// ============================================
+
+// Test 14: slice of interfaces
+func test14() {
+    var readers []Reader
+    readers = append(readers, &MyReader{data: "first"})
+    readers = append(readers, &MyReader{data: "second"})
+    
+    assert(len(readers) == 2, "test14: length should be 2")
+    assert(readers[0].Read() == "first", "test14: first element")
+    assert(readers[1].Read() == "second", "test14: second element")
+    fmt.Println("Test 14 PASSED: slice of interfaces")
+}
+
+// Test 15: nil element in interface slice
+func test15() {
+    var readers []Reader
+    readers = append(readers, nil)
+    readers = append(readers, &MyReader{data: "valid"})
+    
+    assert(readers[0] == nil, "test15: first element should be nil")
+    assert(readers[1] != nil, "test15: second element should not be nil")
+    fmt.Println("Test 15 PASSED: nil element in interface slice")
+}
+
+// ============================================
+// Part 6: Interface Map
+// ============================================
+
+// Test 16: map with interface value
+func test16() {
+    m := make(map[string]Reader)
+    m["a"] = &MyReader{data: "value_a"}
+    m["b"] = &MyReader{data: "value_b"}
+    
+    assert(m["a"].Read() == "value_a", "test16: map value a")
+    assert(m["b"].Read() == "value_b", "test16: map value b")
+    fmt.Println("Test 16 PASSED: map with interface value")
+}
+
+// Test 17: map with interface key (using Stringer)
+func test17() {
+    m := make(map[Stringer]int)
+    a1 := A{val: 1}
+    a2 := A{val: 2}
+    
+    m[a1] = 100
+    m[a2] = 200
+    
+    assert(m[a1] == 100, "test17: interface key lookup a1")
+    assert(m[a2] == 200, "test17: interface key lookup a2")
+    fmt.Println("Test 17 PASSED: map with interface key")
+}
+
+// ============================================
+// Part 7: Empty Interface Special Cases
+// ============================================
+
+// Test 18: empty interface holds primitives
+func test18() {
+    var a any = 42
+    var b any = "hello"
+    var c any = true
+    
+    i, ok := a.(int)
+    assert(ok && i == 42, "test18: int in any")
+    
+    s, ok := b.(string)
+    assert(ok && s == "hello", "test18: string in any")
+    
+    bo, ok := c.(bool)
+    assert(ok && bo == true, "test18: bool in any")
+    fmt.Println("Test 18 PASSED: primitives in empty interface")
+}
+
+// Test 19: empty interface comparison with primitives
+func test19() {
+    var a any = 42
+    var b any = 42
+    var c any = 43
+    
+    assert(a == b, "test19: same int values should be equal")
+    assert(a != c, "test19: different int values should not be equal")
+    fmt.Println("Test 19 PASSED: empty interface primitive comparison")
+}
+
+// Test 20: reassignment of interface changes type
+func test20() {
+    var a any = 42
+    
+    _, ok := a.(int)
+    assert(ok, "test20: should be int initially")
+    
+    a = "changed"
+    
+    _, ok = a.(int)
+    assert(!ok, "test20: should not be int after reassignment")
+    
+    s, ok := a.(string)
+    assert(ok && s == "changed", "test20: should be string after reassignment")
+    fmt.Println("Test 20 PASSED: interface type change on reassignment")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    test16()
+    test17()
+    test18()
+    test19()
+    test20()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_edge_cases: ALL 20 TESTS PASSED ===")
+}

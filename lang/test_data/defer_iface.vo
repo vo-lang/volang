@@ -1,0 +1,99 @@
+package main
+
+type Closer interface {
+	Close()
+}
+
+type MyFile struct {
+	name   string
+	closed bool
+}
+
+func (f *MyFile) Close() {
+	f.closed = true
+	println("closed:", f.name)
+}
+
+var order []int
+
+type Counter interface {
+	Inc()
+}
+
+type MyCounter struct {
+	val int
+}
+
+func (c *MyCounter) Inc() {
+	c.val++
+	order = append(order, c.val)
+}
+
+func testBasicDeferIface() {
+	var c Closer = &MyFile{name: "test.txt"}
+	defer c.Close()
+	println("before close")
+}
+
+func testDeferIfaceWithReassign() {
+	var c Closer = &MyFile{name: "first.txt"}
+	defer c.Close()  // Should close first.txt, not second.txt
+	c = &MyFile{name: "second.txt"}
+	println("reassigned")
+}
+
+func testDeferIfaceMultiple() {
+	order = nil
+	var c Counter = &MyCounter{}
+	defer c.Inc()  // Should be 3rd (val=3)
+	defer c.Inc()  // Should be 2nd (val=2)
+	defer c.Inc()  // Should be 1st (val=1)
+}
+
+type Writer interface {
+	Write(data string, count int)
+}
+
+type MyWriter struct {
+	result string
+}
+
+func (w *MyWriter) Write(data string, count int) {
+	for i := 0; i < count; i++ {
+		w.result += data
+	}
+}
+
+var writerResult string
+
+func testDeferIfaceWithArgs() *MyWriter {
+	w := &MyWriter{}
+	var wr Writer = w
+	defer wr.Write("hello", 3)
+	defer wr.Write("world", 2)
+	return w
+}
+
+func main() {
+	println("=== testBasicDeferIface ===")
+	testBasicDeferIface()
+	
+	println("=== testDeferIfaceWithReassign ===")
+	testDeferIfaceWithReassign()
+	
+	println("=== testDeferIfaceMultiple ===")
+	testDeferIfaceMultiple()
+	assert(len(order) == 3, "expected 3 increments")
+	assert(order[0] == 1, "first inc should be 1")
+	assert(order[1] == 2, "second inc should be 2")
+	assert(order[2] == 3, "third inc should be 3")
+	
+	println("=== testDeferIfaceWithArgs ===")
+	w := testDeferIfaceWithArgs()
+	// defer executes in LIFO order: Write("world", 2) then Write("hello", 3)
+	// After function returns, w.result should be "worldworldhellohellohello"
+	expected := "worldworldhellohellohello"
+	assert(w.result == expected, "expected: " + expected + ", got: " + w.result)
+	
+	println("PASS")
+}

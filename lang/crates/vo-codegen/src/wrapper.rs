@@ -418,3 +418,42 @@ pub fn generate_embedded_iface_wrapper(
         "$embed_iface", tc_objs, interner,
     )
 }
+
+/// Generate a wrapper for defer on interface method call.
+/// 
+/// The wrapper takes the interface value as first parameter (2 slots),
+/// followed by method arguments, then calls the method via CallIface.
+/// This allows `defer c.Close()` to work correctly with interface values.
+pub fn generate_defer_iface_wrapper(
+    ctx: &mut CodegenContext,
+    iface_type: TypeKey,
+    method_name: &str,
+    method_idx: usize,
+    param_slots: u16,
+    ret_slots: u16,
+) -> u32 {
+    let wrapper_name = format!("{}$defer_iface", method_name);
+    let mut builder = FuncBuilder::new(&wrapper_name);
+    
+    // First parameter: interface value (2 slots)
+    let iface_slot = builder.define_param(None, 2, &[SlotType::Interface0, SlotType::Interface1]);
+    
+    // Forward other parameters
+    let first_param_slot = define_forwarded_params(&mut builder, param_slots);
+    
+    // Allocate args buffer
+    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
+    if let Some(first_param) = first_param_slot {
+        builder.emit_copy(args_start, first_param, param_slots);
+    }
+    
+    // CallIface: flags=method_idx, a=iface_slot, b=args_start, c=(arg_slots<<8)|ret_slots
+    let c = crate::type_info::encode_call_args(param_slots, ret_slots);
+    builder.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
+    
+    // Return (defer wrappers typically don't use return values, but emit for completeness)
+    builder.set_ret_slots(ret_slots);
+    builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
+    
+    ctx.add_function(builder.build())
+}

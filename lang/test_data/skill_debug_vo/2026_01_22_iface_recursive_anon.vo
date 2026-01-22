@@ -1,0 +1,332 @@
+// Test: Recursive structs with interfaces, anonymous structs, interface returning interface
+// Focus: edge cases that might reveal bugs
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Struct with Interface Field (Self-referencing pattern)
+// ============================================
+
+type Node interface {
+    Value() int
+    Next() Node
+}
+
+type ListNode struct {
+    val  int
+    next Node  // Interface field
+}
+
+func (n *ListNode) Value() int { return n.val }
+func (n *ListNode) Next() Node { return n.next }
+
+// Test 1: Chain of nodes through interface
+func test1() {
+    n3 := &ListNode{val: 3, next: nil}
+    n2 := &ListNode{val: 2, next: n3}
+    n1 := &ListNode{val: 1, next: n2}
+    
+    var node Node = n1
+    assert(node.Value() == 1, "test1: first node")
+    node = node.Next()
+    assert(node.Value() == 2, "test1: second node")
+    node = node.Next()
+    assert(node.Value() == 3, "test1: third node")
+    assert(node.Next() == nil, "test1: end of list")
+    fmt.Println("Test 1 PASSED: linked list through interface")
+}
+
+// Test 2: Type assertion on Next()
+func test2() {
+    n2 := &ListNode{val: 20, next: nil}
+    n1 := &ListNode{val: 10, next: n2}
+    
+    var node Node = n1
+    next := node.Next()
+    
+    ln, ok := next.(*ListNode)
+    assert(ok, "test2: should be *ListNode")
+    assert(ln.val == 20, "test2: value should be 20")
+    fmt.Println("Test 2 PASSED: type assertion on interface return")
+}
+
+// ============================================
+// Part 2: Method Returning Interface
+// ============================================
+
+type Creator interface {
+    Create(n int) Creator
+    GetN() int
+}
+
+type Factory struct {
+    n int
+}
+
+func (f *Factory) Create(n int) Creator {
+    return &Factory{n: n}
+}
+
+func (f *Factory) GetN() int {
+    return f.n
+}
+
+// Test 3: Method returns interface of same type
+func test3() {
+    var c Creator = &Factory{n: 0}
+    c2 := c.Create(42)
+    
+    assert(c2.GetN() == 42, "test3: created with n=42")
+    fmt.Println("Test 3 PASSED: method returns interface")
+}
+
+// Test 4: Chain of Create calls
+func test4() {
+    var c Creator = &Factory{n: 0}
+    c = c.Create(1)
+    c = c.Create(2)
+    c = c.Create(3)
+    
+    assert(c.GetN() == 3, "test4: final n should be 3")
+    fmt.Println("Test 4 PASSED: chained Create calls")
+}
+
+// ============================================
+// Part 3: Interface Method with Interface Parameter
+// ============================================
+
+type Processor interface {
+    Process(input Processor) Processor
+    Name() string
+}
+
+type PassThrough struct {
+    name string
+}
+
+func (p *PassThrough) Process(input Processor) Processor {
+    return input
+}
+
+func (p *PassThrough) Name() string {
+    return p.name
+}
+
+type Wrapper struct {
+    name  string
+    inner Processor
+}
+
+func (w *Wrapper) Process(input Processor) Processor {
+    return &Wrapper{name: w.name + "_wrap", inner: input}
+}
+
+func (w *Wrapper) Name() string {
+    return w.name
+}
+
+// Test 5: Interface method with interface parameter
+func test5() {
+    pt := &PassThrough{name: "pt"}
+    var p Processor = pt
+    
+    result := p.Process(pt)
+    assert(result.Name() == "pt", "test5: passthrough returns input")
+    fmt.Println("Test 5 PASSED: interface method with interface param")
+}
+
+// Test 6: Wrapper creates new interface
+func test6() {
+    w := &Wrapper{name: "outer"}
+    pt := &PassThrough{name: "inner"}
+    
+    var p Processor = w
+    result := p.Process(pt)
+    
+    assert(result.Name() == "outer_wrap", "test6: wrapper creates new")
+    fmt.Println("Test 6 PASSED: wrapper creates new interface")
+}
+
+// ============================================
+// Part 5: Interface in Map Value
+// ============================================
+
+type Counter interface {
+    Inc()
+    Get() int
+}
+
+type SimpleCounter struct {
+    n int
+}
+
+func (c *SimpleCounter) Inc() { c.n++ }
+func (c *SimpleCounter) Get() int { return c.n }
+
+// Test 8: Map with interface values
+func test8() {
+    counters := make(map[string]Counter)
+    counters["a"] = &SimpleCounter{n: 0}
+    counters["b"] = &SimpleCounter{n: 10}
+    
+    counters["a"].Inc()
+    counters["a"].Inc()
+    counters["b"].Inc()
+    
+    assert(counters["a"].Get() == 2, "test8: counter a")
+    assert(counters["b"].Get() == 11, "test8: counter b")
+    fmt.Println("Test 8 PASSED: map with interface values")
+}
+
+// Test 9: Replace interface value in map
+func test9() {
+    counters := make(map[string]Counter)
+    counters["x"] = &SimpleCounter{n: 5}
+    
+    assert(counters["x"].Get() == 5, "test9: initial value")
+    
+    counters["x"] = &SimpleCounter{n: 50}
+    assert(counters["x"].Get() == 50, "test9: replaced value")
+    fmt.Println("Test 9 PASSED: replace interface in map")
+}
+
+// ============================================
+// Part 6: Interface in Struct Field with Mutation
+// ============================================
+
+type Container struct {
+    counter Counter
+}
+
+// Test 10: Mutate through interface field
+func test10() {
+    sc := &SimpleCounter{n: 0}
+    c := Container{counter: sc}
+    
+    c.counter.Inc()
+    c.counter.Inc()
+    
+    assert(sc.n == 2, "test10: mutation visible through original")
+    assert(c.counter.Get() == 2, "test10: mutation visible through interface")
+    fmt.Println("Test 10 PASSED: mutation through interface field")
+}
+
+// Test 11: Replace interface field
+func test11() {
+    c := Container{counter: &SimpleCounter{n: 100}}
+    
+    assert(c.counter.Get() == 100, "test11: initial")
+    
+    c.counter = &SimpleCounter{n: 200}
+    assert(c.counter.Get() == 200, "test11: after replace")
+    fmt.Println("Test 11 PASSED: replace interface field")
+}
+
+// ============================================
+// Part 7: Interface Array/Slice
+// ============================================
+
+// Test 12: Array of interfaces
+func test12() {
+    var arr [3]Counter
+    arr[0] = &SimpleCounter{n: 1}
+    arr[1] = &SimpleCounter{n: 2}
+    arr[2] = &SimpleCounter{n: 3}
+    
+    sum := 0
+    for i := 0; i < 3; i++ {
+        sum += arr[i].Get()
+    }
+    assert(sum == 6, "test12: sum should be 6")
+    fmt.Println("Test 12 PASSED: array of interfaces")
+}
+
+// Test 13: Slice modification through interface
+func test13() {
+    counters := []Counter{
+        &SimpleCounter{n: 10},
+        &SimpleCounter{n: 20},
+    }
+    
+    for _, c := range counters {
+        c.Inc()
+    }
+    
+    assert(counters[0].Get() == 11, "test13: first counter")
+    assert(counters[1].Get() == 21, "test13: second counter")
+    fmt.Println("Test 13 PASSED: slice modification through interface")
+}
+
+// ============================================
+// Part 8: Nested Interface Assertion
+// ============================================
+
+type Outer interface {
+    Inner() Inner
+}
+
+type Inner interface {
+    Value() int
+}
+
+type OuterImpl struct {
+    inner Inner
+}
+
+func (o *OuterImpl) Inner() Inner { return o.inner }
+
+type InnerImpl struct {
+    v int
+}
+
+func (i *InnerImpl) Value() int { return i.v }
+
+// Test 14: Nested interface access
+func test14() {
+    inner := &InnerImpl{v: 42}
+    outer := &OuterImpl{inner: inner}
+    
+    var o Outer = outer
+    var i Inner = o.Inner()
+    
+    assert(i.Value() == 42, "test14: nested interface access")
+    fmt.Println("Test 14 PASSED: nested interface access")
+}
+
+// Test 15: Type assertion through nested interfaces
+func test15() {
+    inner := &InnerImpl{v: 99}
+    outer := &OuterImpl{inner: inner}
+    
+    var a any = outer
+    
+    o, ok := a.(Outer)
+    assert(ok, "test15: should be Outer")
+    
+    i := o.Inner()
+    impl, ok := i.(*InnerImpl)
+    assert(ok, "test15: should be *InnerImpl")
+    assert(impl.v == 99, "test15: value should be 99")
+    fmt.Println("Test 15 PASSED: type assertion through nested")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_recursive_anon: ALL TESTS PASSED ===")
+}

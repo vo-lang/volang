@@ -1,0 +1,448 @@
+// Test: Interface in recursive functions, interface methods with error returns
+// Focus: recursion and error handling with interfaces
+package main
+
+import "fmt"
+import "errors"
+
+// ============================================
+// Part 1: Recursive Interface Usage
+// ============================================
+
+type Tree interface {
+    Value() int
+    Left() Tree
+    Right() Tree
+    IsLeaf() bool
+}
+
+type TreeNode struct {
+    val         int
+    left, right Tree
+}
+
+func (t *TreeNode) Value() int   { return t.val }
+func (t *TreeNode) Left() Tree   { return t.left }
+func (t *TreeNode) Right() Tree  { return t.right }
+func (t *TreeNode) IsLeaf() bool { return t.left == nil && t.right == nil }
+
+// Test 1: Build and traverse tree through interface
+func sumTree(t Tree) int {
+    if t == nil {
+        return 0
+    }
+    return t.Value() + sumTree(t.Left()) + sumTree(t.Right())
+}
+
+func test1() {
+    //       5
+    //      / \
+    //     3   7
+    //    / \
+    //   1   4
+    tree := &TreeNode{
+        val: 5,
+        left: &TreeNode{
+            val:   3,
+            left:  &TreeNode{val: 1},
+            right: &TreeNode{val: 4},
+        },
+        right: &TreeNode{val: 7},
+    }
+    
+    var t Tree = tree
+    sum := sumTree(t)
+    assert(sum == 20, "test1: sum should be 20")
+    fmt.Println("Test 1 PASSED: recursive tree traversal")
+}
+
+// Test 2: Count leaves through interface recursion
+func countLeaves(t Tree) int {
+    if t == nil {
+        return 0
+    }
+    if t.IsLeaf() {
+        return 1
+    }
+    return countLeaves(t.Left()) + countLeaves(t.Right())
+}
+
+func test2() {
+    tree := &TreeNode{
+        val: 5,
+        left: &TreeNode{
+            val:   3,
+            left:  &TreeNode{val: 1},
+            right: &TreeNode{val: 4},
+        },
+        right: &TreeNode{val: 7},
+    }
+    
+    leaves := countLeaves(tree)
+    assert(leaves == 3, "test2: should have 3 leaves")
+    fmt.Println("Test 2 PASSED: count leaves recursively")
+}
+
+// ============================================
+// Part 2: Interface Method with Error Return
+// ============================================
+
+type Parser interface {
+    Parse(s string) (int, error)
+}
+
+type SafeParser struct{}
+
+func (p SafeParser) Parse(s string) (int, error) {
+    if s == "" {
+        return 0, errors.New("empty string")
+    }
+    if s == "error" {
+        return 0, errors.New("parse error")
+    }
+    return len(s), nil
+}
+
+// Test 3: Interface method returning error - success case
+func test3() {
+    var p Parser = SafeParser{}
+    n, err := p.Parse("hello")
+    
+    assert(err == nil, "test3: no error expected")
+    assert(n == 5, "test3: length should be 5")
+    fmt.Println("Test 3 PASSED: interface method error return - success")
+}
+
+// Test 4: Interface method returning error - error case
+func test4() {
+    var p Parser = SafeParser{}
+    _, err := p.Parse("")
+    
+    assert(err != nil, "test4: error expected")
+    assert(err.Error() == "empty string", "test4: error message")
+    fmt.Println("Test 4 PASSED: interface method error return - error")
+}
+
+// Test 5: Chain of error handling through interface
+func parseAll(p Parser, inputs []string) (int, error) {
+    total := 0
+    for _, input := range inputs {
+        n, err := p.Parse(input)
+        if err != nil {
+            return 0, err
+        }
+        total += n
+    }
+    return total, nil
+}
+
+func test5() {
+    var p Parser = SafeParser{}
+    
+    // Success case
+    total, err := parseAll(p, []string{"a", "bb", "ccc"})
+    assert(err == nil, "test5: no error")
+    assert(total == 6, "test5: total should be 6")
+    
+    // Error case
+    _, err = parseAll(p, []string{"a", "error", "b"})
+    assert(err != nil, "test5: error expected")
+    fmt.Println("Test 5 PASSED: chain of error handling")
+}
+
+// ============================================
+// Part 3: Interface Taking Interface Parameter
+// ============================================
+
+type Transformer interface {
+    Transform(input Parser) Parser
+}
+
+type PassThrough struct{}
+
+func (pt PassThrough) Transform(input Parser) Parser {
+    return input
+}
+
+type LoggingParser struct {
+    wrapped Parser
+    logged  bool
+}
+
+func (lp *LoggingParser) Parse(s string) (int, error) {
+    lp.logged = true
+    return lp.wrapped.Parse(s)
+}
+
+type WrapTransformer struct{}
+
+func (wt WrapTransformer) Transform(input Parser) Parser {
+    return &LoggingParser{wrapped: input}
+}
+
+// Test 6: Interface method taking interface parameter
+func test6() {
+    var t Transformer = PassThrough{}
+    var p Parser = SafeParser{}
+    
+    result := t.Transform(p)
+    n, err := result.Parse("test")
+    
+    assert(err == nil, "test6: no error")
+    assert(n == 4, "test6: length should be 4")
+    fmt.Println("Test 6 PASSED: interface taking interface param")
+}
+
+// Test 7: Wrapping transformer
+func test7() {
+    var t Transformer = WrapTransformer{}
+    var p Parser = SafeParser{}
+    
+    wrapped := t.Transform(p)
+    n, err := wrapped.Parse("hello")
+    
+    assert(err == nil, "test7: no error")
+    assert(n == 5, "test7: length should be 5")
+    
+    // Check logging
+    lp, ok := wrapped.(*LoggingParser)
+    assert(ok, "test7: should be *LoggingParser")
+    assert(lp.logged, "test7: should have logged")
+    fmt.Println("Test 7 PASSED: wrapping transformer")
+}
+
+// ============================================
+// Part 4: Mutual Recursion with Interfaces
+// ============================================
+
+type EvenChecker interface {
+    IsEven(n int) bool
+}
+
+type OddChecker interface {
+    IsOdd(n int) bool
+}
+
+type Checker struct {
+    even EvenChecker
+}
+
+func (c *Checker) IsOdd(n int) bool {
+    if n == 0 {
+        return false
+    }
+    return c.even.IsEven(n - 1)
+}
+
+type EvenImpl struct {
+    odd OddChecker
+}
+
+func (e *EvenImpl) IsEven(n int) bool {
+    if n == 0 {
+        return true
+    }
+    return e.odd.IsOdd(n - 1)
+}
+
+// Test 8: Mutual recursion through interfaces
+func test8() {
+    checker := &Checker{}
+    evenImpl := &EvenImpl{}
+    
+    checker.even = evenImpl
+    evenImpl.odd = checker
+    
+    assert(evenImpl.IsEven(0), "test8: 0 is even")
+    assert(evenImpl.IsEven(4), "test8: 4 is even")
+    assert(!evenImpl.IsEven(5), "test8: 5 is not even")
+    assert(checker.IsOdd(3), "test8: 3 is odd")
+    assert(!checker.IsOdd(4), "test8: 4 is not odd")
+    fmt.Println("Test 8 PASSED: mutual recursion with interfaces")
+}
+
+// ============================================
+// Part 5: Interface in Recursive Struct
+// ============================================
+
+type Expr interface {
+    Eval() int
+}
+
+type Num struct {
+    n int
+}
+
+func (n Num) Eval() int { return n.n }
+
+type Add struct {
+    left, right Expr
+}
+
+func (a Add) Eval() int { return a.left.Eval() + a.right.Eval() }
+
+type Mul struct {
+    left, right Expr
+}
+
+func (m Mul) Eval() int { return m.left.Eval() * m.right.Eval() }
+
+// Test 9: Expression tree evaluation
+func test9() {
+    // (2 + 3) * 4 = 20
+    expr := Mul{
+        left: Add{
+            left:  Num{n: 2},
+            right: Num{n: 3},
+        },
+        right: Num{n: 4},
+    }
+    
+    var e Expr = expr
+    result := e.Eval()
+    assert(result == 20, "test9: (2+3)*4 = 20")
+    fmt.Println("Test 9 PASSED: expression tree evaluation")
+}
+
+// Test 10: Deep expression tree
+func test10() {
+    // ((1 + 2) + (3 + 4)) + ((5 + 6) + (7 + 8)) = 36
+    expr := Add{
+        left: Add{
+            left:  Add{left: Num{n: 1}, right: Num{n: 2}},
+            right: Add{left: Num{n: 3}, right: Num{n: 4}},
+        },
+        right: Add{
+            left:  Add{left: Num{n: 5}, right: Num{n: 6}},
+            right: Add{left: Num{n: 7}, right: Num{n: 8}},
+        },
+    }
+    
+    result := expr.Eval()
+    assert(result == 36, "test10: deep tree = 36")
+    fmt.Println("Test 10 PASSED: deep expression tree")
+}
+
+// ============================================
+// Part 6: Interface with Optional Error
+// ============================================
+
+type Validator interface {
+    Validate(s string) error
+}
+
+type LengthValidator struct {
+    min, max int
+}
+
+func (v LengthValidator) Validate(s string) error {
+    n := len(s)
+    if n < v.min {
+        return errors.New("too short")
+    }
+    if n > v.max {
+        return errors.New("too long")
+    }
+    return nil
+}
+
+// Test 11: Validator with nil error return
+func test11() {
+    var v Validator = LengthValidator{min: 3, max: 10}
+    
+    err := v.Validate("hello")
+    assert(err == nil, "test11: 'hello' is valid")
+    fmt.Println("Test 11 PASSED: validator nil error")
+}
+
+// Test 12: Validator with error return
+func test12() {
+    var v Validator = LengthValidator{min: 3, max: 10}
+    
+    err := v.Validate("ab")
+    assert(err != nil, "test12: 'ab' is too short")
+    assert(err.Error() == "too short", "test12: error message")
+    
+    err = v.Validate("this is way too long")
+    assert(err != nil, "test12: too long")
+    fmt.Println("Test 12 PASSED: validator with error")
+}
+
+// Test 13: Chain of validators
+func validateAll(validators []Validator, s string) error {
+    for _, v := range validators {
+        if err := v.Validate(s); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+func test13() {
+    validators := []Validator{
+        LengthValidator{min: 1, max: 100},
+        LengthValidator{min: 5, max: 50},
+    }
+    
+    err := validateAll(validators, "hello world")
+    assert(err == nil, "test13: should pass all")
+    
+    err = validateAll(validators, "hi")
+    assert(err != nil, "test13: should fail second")
+    fmt.Println("Test 13 PASSED: chain of validators")
+}
+
+// Test 14: Interface method returning only error
+func test14() {
+    var v Validator = LengthValidator{min: 0, max: 5}
+    
+    // Test that nil error is comparable
+    err := v.Validate("ok")
+    if err != nil {
+        panic("test14: should be nil")
+    }
+    fmt.Println("Test 14 PASSED: nil error comparison")
+}
+
+// Test 15: Multiple interface method calls with error
+func test15() {
+    var p Parser = SafeParser{}
+    
+    results := make([]int, 0)
+    errs := make([]error, 0)
+    
+    inputs := []string{"a", "bb", "", "ccc", "error"}
+    for _, s := range inputs {
+        n, err := p.Parse(s)
+        results = append(results, n)
+        errs = append(errs, err)
+    }
+    
+    assert(results[0] == 1, "test15: first result")
+    assert(results[1] == 2, "test15: second result")
+    assert(errs[2] != nil, "test15: third has error")
+    assert(results[3] == 3, "test15: fourth result")
+    assert(errs[4] != nil, "test15: fifth has error")
+    fmt.Println("Test 15 PASSED: multiple calls with error")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_recursive_error: ALL 15 TESTS PASSED ===")
+}

@@ -1844,6 +1844,7 @@ fn compile_defer_method_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::ExprKind;
+    use crate::embed::MethodDispatch;
     
     let recv_type = info.expr_type(sel.expr.id);
     let method_name = info.project.interner.resolve(sel.sel.symbol)
@@ -1864,36 +1865,92 @@ fn compile_defer_method_call(
         &info.project.interner,
     ).ok_or_else(|| CodegenError::UnsupportedExpr(format!("method {} not found", method_name)))?;
     
-    // Extract func_id from Static dispatch (defer only works with static calls)
-    let (func_id, expects_ptr_recv) = match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
-        _ => return Err(CodegenError::UnsupportedExpr("defer on interface call not supported".to_string())),
-    };
-    
-    let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
-    let actual_recv_type = call_info.actual_recv_type(base_type);
-    let recv_storage = match &sel.expr.kind {
-        ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|l| l.storage),
-        _ => None,
-    };
-    
-    // Get method parameter types (excluding receiver)
+    match &call_info.dispatch {
+        MethodDispatch::Static { func_id, expects_ptr_recv } => {
+            // Static dispatch - compile receiver and args, emit DeferPush
+            let base_type = if call_info.recv_is_pointer { info.pointer_base(recv_type) } else { recv_type };
+            let actual_recv_type = call_info.actual_recv_type(base_type);
+            let recv_storage = match &sel.expr.kind {
+                ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|l| l.storage),
+                _ => None,
+            };
+            
+            let method_type = info.expr_type(call_expr.func.id);
+            let param_types = info.func_param_types(method_type);
+            
+            let recv_slots = if *expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
+            let other_arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
+            let total_arg_slots = recv_slots + other_arg_slots;
+            let args_start = func.alloc_args(total_arg_slots);
+            
+            crate::expr::emit_receiver(
+                &sel.expr, args_start, recv_type, recv_storage,
+                &call_info, actual_recv_type, ctx, func, info
+            )?;
+            
+            crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start + recv_slots, ctx, func, info)?;
+            
+            emit_defer_func(opcode, *func_id, args_start, total_arg_slots, func);
+        }
+        MethodDispatch::Interface { method_idx } => {
+            // Direct interface dispatch - generate wrapper
+            compile_defer_iface_call(
+                call_expr, sel, opcode, recv_type, recv_type, *method_idx, method_name,
+                &call_info.embed_path.steps, false, ctx, func, info
+            )?;
+        }
+        MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
+            // Embedded interface dispatch - extract interface first
+            compile_defer_iface_call(
+                call_expr, sel, opcode, recv_type, *iface_type, *method_idx, method_name,
+                &call_info.embed_path.steps, true, ctx, func, info
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Helper for defer on interface method call.
+/// Generates a wrapper function and emits defer with interface value + args.
+fn compile_defer_iface_call(
+    call_expr: &vo_syntax::ast::CallExpr,
+    sel: &vo_syntax::ast::SelectorExpr,
+    opcode: Opcode,
+    recv_type: vo_analysis::objects::TypeKey,
+    iface_type: vo_analysis::objects::TypeKey,
+    method_idx: u32,
+    method_name: &str,
+    embed_steps: &[crate::embed::EmbedStep],
+    is_embedded: bool,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     let method_type = info.expr_type(call_expr.func.id);
     let param_types = info.func_param_types(method_type);
+    let arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
     
-    let recv_slots = if expects_ptr_recv { 1 } else { info.type_slot_count(actual_recv_type) };
-    let other_arg_slots = crate::expr::call::calc_arg_slots(&call_expr.args, &param_types, info);
-    let total_arg_slots = recv_slots + other_arg_slots;
+    let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+        ctx, iface_type, method_name, method_idx as usize, arg_slots, 0
+    );
+    
+    let total_arg_slots = 2 + arg_slots;
     let args_start = func.alloc_args(total_arg_slots);
     
-    crate::expr::emit_receiver(
-        &sel.expr, args_start, recv_type, recv_storage,
-        &call_info, actual_recv_type, ctx, func, info
-    )?;
+    // Compile interface receiver
+    let iface_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
+    if is_embedded {
+        let recv_is_ptr = info.is_pointer(recv_type);
+        let start = crate::embed::TraverseStart { reg: iface_reg, is_pointer: recv_is_ptr };
+        crate::embed::emit_embed_path_traversal(func, start, embed_steps, false, 2, args_start);
+    } else {
+        func.emit_copy(args_start, iface_reg, 2);
+    }
     
-    crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start + recv_slots, ctx, func, info)?;
+    // Compile other args
+    crate::expr::call::compile_args_with_types(&call_expr.args, &param_types, args_start + 2, ctx, func, info)?;
     
-    emit_defer_func(opcode, func_id, args_start, total_arg_slots, func);
+    emit_defer_func(opcode, wrapper_id, args_start, total_arg_slots, func);
     Ok(())
 }
 

@@ -1,0 +1,337 @@
+// Test: Complex interface itab scenarios
+// Focus: interface->interface with different method orders, chained conversions
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Interfaces with Same Methods, Different Order
+// ============================================
+
+type AB interface {
+    A() int
+    B() int
+}
+
+type BA interface {
+    B() int
+    A() int
+}
+
+type Impl struct {
+    a, b int
+}
+
+func (i Impl) A() int { return i.a }
+func (i Impl) B() int { return i.b }
+
+// Test 1: AB -> BA conversion (different method order)
+func test1() {
+    impl := Impl{a: 10, b: 20}
+    var ab AB = impl
+    var ba BA = ab  // Convert AB -> BA
+    
+    assert(ba.A() == 10, "test1: A() should return 10")
+    assert(ba.B() == 20, "test1: B() should return 20")
+    fmt.Println("Test 1 PASSED: AB -> BA conversion")
+}
+
+// Test 2: BA -> AB conversion
+func test2() {
+    impl := Impl{a: 30, b: 40}
+    var ba BA = impl
+    var ab AB = ba  // Convert BA -> AB
+    
+    assert(ab.A() == 30, "test2: A() should return 30")
+    assert(ab.B() == 40, "test2: B() should return 40")
+    fmt.Println("Test 2 PASSED: BA -> AB conversion")
+}
+
+// ============================================
+// Part 2: Multiple Interface Implementations
+// ============================================
+
+type X interface {
+    X() int
+}
+
+type Y interface {
+    Y() int
+}
+
+type XY interface {
+    X() int
+    Y() int
+}
+
+type YX interface {
+    Y() int
+    X() int
+}
+
+type ImplXY struct {
+    x, y int
+}
+
+func (i ImplXY) X() int { return i.x }
+func (i ImplXY) Y() int { return i.y }
+
+// Test 3: XY -> X conversion
+func test3() {
+    impl := ImplXY{x: 100, y: 200}
+    var xy XY = impl
+    var x X = xy
+    
+    assert(x.X() == 100, "test3: X() should return 100")
+    fmt.Println("Test 3 PASSED: XY -> X")
+}
+
+// Test 4: XY -> Y conversion
+func test4() {
+    impl := ImplXY{x: 100, y: 200}
+    var xy XY = impl
+    var y Y = xy
+    
+    assert(y.Y() == 200, "test4: Y() should return 200")
+    fmt.Println("Test 4 PASSED: XY -> Y")
+}
+
+// Test 5: Chain: concrete -> XY -> YX -> X
+func test5() {
+    impl := ImplXY{x: 50, y: 60}
+    var xy XY = impl
+    var yx YX = xy
+    var x X = yx
+    
+    assert(x.X() == 50, "test5: X() through chain should return 50")
+    fmt.Println("Test 5 PASSED: concrete -> XY -> YX -> X chain")
+}
+
+// ============================================
+// Part 3: Interface with Pointer Receiver Only
+// ============================================
+
+type Incrementer interface {
+    Inc()
+    Get() int
+}
+
+type Counter struct {
+    n int
+}
+
+func (c *Counter) Inc() { c.n++ }
+func (c *Counter) Get() int { return c.n }
+
+// Test 6: Pointer to interface
+func test6() {
+    c := &Counter{n: 0}
+    var inc Incrementer = c
+    
+    inc.Inc()
+    inc.Inc()
+    assert(inc.Get() == 2, "test6: should be 2 after two increments")
+    fmt.Println("Test 6 PASSED: pointer receiver interface")
+}
+
+// Test 7: Interface conversion preserves pointer semantics
+func test7() {
+    c := &Counter{n: 10}
+    var inc Incrementer = c
+    var a any = inc  // Incrementer -> any
+    
+    // Modify through original
+    c.Inc()
+    
+    // Check through any
+    inc2, ok := a.(Incrementer)
+    assert(ok, "test7: should be Incrementer")
+    assert(inc2.Get() == 11, "test7: should see modification")
+    fmt.Println("Test 7 PASSED: interface conversion preserves pointer")
+}
+
+// ============================================
+// Part 4: Empty Interface Intermediate
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Read() string
+    Write(s string)
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string { return b.data }
+func (b *Buffer) Write(s string) { b.data = s }
+
+// Test 8: ReadWriter -> any -> Reader
+func test8() {
+    buf := &Buffer{data: "test8"}
+    var rw ReadWriter = buf
+    var a any = rw           // ReadWriter -> any
+    r, ok := a.(Reader)      // any -> Reader
+    
+    assert(ok, "test8: should be Reader")
+    assert(r.Read() == "test8", "test8: Read() should work")
+    fmt.Println("Test 8 PASSED: ReadWriter -> any -> Reader")
+}
+
+// Test 9: ReadWriter -> any -> Writer
+func test9() {
+    buf := &Buffer{data: ""}
+    var rw ReadWriter = buf
+    var a any = rw
+    w, ok := a.(Writer)
+    
+    assert(ok, "test9: should be Writer")
+    w.Write("test9")
+    assert(buf.data == "test9", "test9: Write() should work")
+    fmt.Println("Test 9 PASSED: ReadWriter -> any -> Writer")
+}
+
+// Test 10: ReadWriter -> any -> ReadWriter
+func test10() {
+    buf := &Buffer{data: "test10"}
+    var rw ReadWriter = buf
+    var a any = rw
+    rw2, ok := a.(ReadWriter)
+    
+    assert(ok, "test10: should be ReadWriter")
+    assert(rw2.Read() == "test10", "test10: Read() should work")
+    rw2.Write("modified")
+    assert(buf.data == "modified", "test10: Write() should work")
+    fmt.Println("Test 10 PASSED: ReadWriter -> any -> ReadWriter")
+}
+
+// ============================================
+// Part 5: Multiple Concrete Types, Same Interface
+// ============================================
+
+type StringReader struct {
+    s string
+}
+
+func (sr *StringReader) Read() string { return sr.s }
+
+type IntReader struct {
+    n int
+}
+
+func (ir *IntReader) Read() string { return fmt.Sprintf("%d", ir.n) }
+
+// Test 11: Different concrete types through same interface chain
+func test11() {
+    sr := &StringReader{s: "hello"}
+    ir := &IntReader{n: 42}
+    
+    var r1 Reader = sr
+    var r2 Reader = ir
+    
+    var a1 any = r1
+    var a2 any = r2
+    
+    r1back, _ := a1.(Reader)
+    r2back, _ := a2.(Reader)
+    
+    assert(r1back.Read() == "hello", "test11: StringReader")
+    assert(r2back.Read() == "42", "test11: IntReader")
+    fmt.Println("Test 11 PASSED: different concrete types same interface")
+}
+
+// ============================================
+// Part 6: Interface in Function Parameters
+// ============================================
+
+func processReader(r Reader) string {
+    return r.Read()
+}
+
+func passThrough(a any) any {
+    return a
+}
+
+// Test 12: Interface through function call
+func test12() {
+    buf := &Buffer{data: "func_test"}
+    var rw ReadWriter = buf
+    
+    // Pass ReadWriter where Reader expected
+    result := processReader(rw)
+    assert(result == "func_test", "test12: ReadWriter as Reader param")
+    fmt.Println("Test 12 PASSED: interface through function parameter")
+}
+
+// Test 13: any passthrough preserves interface
+func test13() {
+    buf := &Buffer{data: "passthrough"}
+    var r Reader = buf
+    
+    a := passThrough(r)
+    r2, ok := a.(Reader)
+    
+    assert(ok, "test13: should still be Reader")
+    assert(r2.Read() == "passthrough", "test13: Read() should work")
+    fmt.Println("Test 13 PASSED: any passthrough preserves interface")
+}
+
+// ============================================
+// Part 7: Interface in Slice Operations
+// ============================================
+
+// Test 14: Append different concrete types to interface slice
+func test14() {
+    var readers []Reader
+    readers = append(readers, &Buffer{data: "buf"})
+    readers = append(readers, &StringReader{s: "str"})
+    readers = append(readers, &IntReader{n: 99})
+    
+    assert(readers[0].Read() == "buf", "test14: Buffer")
+    assert(readers[1].Read() == "str", "test14: StringReader")
+    assert(readers[2].Read() == "99", "test14: IntReader")
+    fmt.Println("Test 14 PASSED: different types in interface slice")
+}
+
+// Test 15: Convert interface slice element
+func test15() {
+    var readers []Reader
+    readers = append(readers, &Buffer{data: "convert"})
+    
+    r := readers[0]
+    var a any = r
+    buf, ok := a.(*Buffer)
+    
+    assert(ok, "test15: should be *Buffer")
+    assert(buf.data == "convert", "test15: data should match")
+    fmt.Println("Test 15 PASSED: interface slice element conversion")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_complex_itab: ALL 15 TESTS PASSED ===")
+}

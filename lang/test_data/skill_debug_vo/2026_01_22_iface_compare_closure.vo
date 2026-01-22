@@ -1,0 +1,266 @@
+// Test: Interface comparison edge cases, interface in closures with mutation
+// Focus: comparing interfaces, closures capturing/mutating interfaces
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Interface Comparison Basics
+// ============================================
+
+type Stringer interface {
+    String() string
+}
+
+type A struct{ v int }
+func (a A) String() string { return fmt.Sprintf("A:%d", a.v) }
+
+type B struct{ v int }
+func (b B) String() string { return fmt.Sprintf("B:%d", b.v) }
+
+// Test 1: Same interface type, same value
+func test1() {
+    var s1 Stringer = A{v: 10}
+    var s2 Stringer = A{v: 10}
+    
+    assert(s1 == s2, "test1: same type and value should be equal")
+    fmt.Println("Test 1 PASSED: same type, same value")
+}
+
+// Test 2: Same interface type, different value
+func test2() {
+    var s1 Stringer = A{v: 10}
+    var s2 Stringer = A{v: 20}
+    
+    assert(s1 != s2, "test2: same type, different value should not be equal")
+    fmt.Println("Test 2 PASSED: same type, different value")
+}
+
+// Test 3: Different interface type
+func test3() {
+    var s1 Stringer = A{v: 10}
+    var s2 Stringer = B{v: 10}
+    
+    assert(s1 != s2, "test3: different types should not be equal")
+    fmt.Println("Test 3 PASSED: different types")
+}
+
+// Test 4: nil interface comparison
+func test4() {
+    var s1 Stringer = nil
+    var s2 Stringer = nil
+    
+    assert(s1 == s2, "test4: nil == nil")
+    assert(s1 == nil, "test4: s1 == nil")
+    fmt.Println("Test 4 PASSED: nil comparison")
+}
+
+// Test 5: typed nil vs nil
+func test5() {
+    var ap *A = nil
+    var s1 Stringer = ap  // typed nil
+    var s2 Stringer = nil // true nil
+    
+    assert(s1 != s2, "test5: typed nil != true nil")
+    assert(s1 != nil, "test5: typed nil != nil literal")
+    fmt.Println("Test 5 PASSED: typed nil vs nil")
+}
+
+// ============================================
+// Part 2: any Comparison
+// ============================================
+
+// Test 6: any with same primitive
+func test6() {
+    var a1 any = 42
+    var a2 any = 42
+    
+    assert(a1 == a2, "test6: same int should be equal")
+    fmt.Println("Test 6 PASSED: any with same primitive")
+}
+
+// Test 7: any with different primitives
+func test7() {
+    var a1 any = 42
+    var a2 any = int64(42)  // different type
+    
+    assert(a1 != a2, "test7: int vs int64 should not be equal")
+    fmt.Println("Test 7 PASSED: any with different primitive types")
+}
+
+// Test 8: any with string
+func test8() {
+    var a1 any = "hello"
+    var a2 any = "hello"
+    var a3 any = "world"
+    
+    assert(a1 == a2, "test8: same string should be equal")
+    assert(a1 != a3, "test8: different strings should not be equal")
+    fmt.Println("Test 8 PASSED: any with string")
+}
+
+// ============================================
+// Part 3: Closure Capturing Interface
+// ============================================
+
+type Counter interface {
+    Inc()
+    Get() int
+}
+
+type SimpleCounter struct {
+    n int
+}
+
+func (c *SimpleCounter) Inc() { c.n++ }
+func (c *SimpleCounter) Get() int { return c.n }
+
+// Test 9: Closure captures interface, calls method
+func test9() {
+    var c Counter = &SimpleCounter{n: 0}
+    
+    inc := func() {
+        c.Inc()
+    }
+    
+    inc()
+    inc()
+    inc()
+    
+    assert(c.Get() == 3, "test9: closure should call Inc 3 times")
+    fmt.Println("Test 9 PASSED: closure captures interface")
+}
+
+// Test 10: Closure modifies interface variable
+func test10() {
+    var c Counter = &SimpleCounter{n: 10}
+    
+    replace := func() {
+        c = &SimpleCounter{n: 100}
+    }
+    
+    assert(c.Get() == 10, "test10: before replace")
+    replace()
+    assert(c.Get() == 100, "test10: after replace")
+    fmt.Println("Test 10 PASSED: closure modifies interface")
+}
+
+// Test 11: Multiple closures sharing interface
+func test11() {
+    var c Counter = &SimpleCounter{n: 0}
+    
+    inc := func() { c.Inc() }
+    get := func() int { return c.Get() }
+    
+    inc()
+    assert(get() == 1, "test11: after first inc")
+    inc()
+    inc()
+    assert(get() == 3, "test11: after three incs")
+    fmt.Println("Test 11 PASSED: multiple closures sharing interface")
+}
+
+// ============================================
+// Part 4: Interface in Nested Closure
+// ============================================
+
+// Test 12: Nested closure accessing outer interface
+func test12() {
+    var c Counter = &SimpleCounter{n: 5}
+    
+    outer := func() func() int {
+        return func() int {
+            return c.Get()
+        }
+    }
+    
+    inner := outer()
+    assert(inner() == 5, "test12: nested closure accesses interface")
+    
+    c.Inc()
+    assert(inner() == 6, "test12: nested closure sees mutation")
+    fmt.Println("Test 12 PASSED: nested closure with interface")
+}
+
+// Test 13: Closure factory returning interface accessor
+func test13() {
+    makeInc := func(c Counter) func() {
+        return func() {
+            c.Inc()
+        }
+    }
+    
+    sc := &SimpleCounter{n: 0}
+    var c Counter = sc
+    inc := makeInc(c)
+    
+    inc()
+    inc()
+    assert(sc.n == 2, "test13: closure factory works")
+    fmt.Println("Test 13 PASSED: closure factory with interface")
+}
+
+// ============================================
+// Part 5: Interface in Loop Closure
+// ============================================
+
+// Test 14: Closure in loop capturing interface
+func test14() {
+    var c Counter = &SimpleCounter{n: 0}
+    
+    funcs := make([]func(), 3)
+    for i := 0; i < 3; i++ {
+        funcs[i] = func() {
+            c.Inc()
+        }
+    }
+    
+    for _, f := range funcs {
+        f()
+    }
+    
+    assert(c.Get() == 3, "test14: all closures share same interface")
+    fmt.Println("Test 14 PASSED: loop closures with interface")
+}
+
+// ============================================
+// Part 6: Interface Comparison After Mutation
+// ============================================
+
+// Test 15: Comparison after mutation through pointer
+func test15() {
+    sc1 := &SimpleCounter{n: 10}
+    sc2 := &SimpleCounter{n: 10}
+    
+    var c1 Counter = sc1
+    var c2 Counter = sc2
+    
+    // Same value, but different pointers - should NOT be equal
+    assert(c1 != c2, "test15: different pointers not equal")
+    
+    // Mutate one
+    sc1.n = 20
+    assert(c1 != c2, "test15: still not equal after mutation")
+    fmt.Println("Test 15 PASSED: pointer comparison semantics")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_compare_closure: ALL 15 TESTS PASSED ===")
+}

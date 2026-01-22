@@ -1,0 +1,312 @@
+// Test: Named types and interface implementation
+// Focus: named types based on primitives, structs, and other named types
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Named Type Based on Primitive
+// ============================================
+
+type MyInt int
+
+func (m MyInt) Double() int {
+    return int(m) * 2
+}
+
+func (m MyInt) String() string {
+    return "MyInt"
+}
+
+type Doubler interface {
+    Double() int
+}
+
+type Stringer interface {
+    String() string
+}
+
+// Test 1: Named primitive type implements interface
+func test1() {
+    var d Doubler
+    var m MyInt = 5
+    d = m
+    assert(d.Double() == 10, "test1: MyInt.Double should return 10")
+    fmt.Println("Test 1 PASSED: named primitive implements Doubler")
+}
+
+// Test 2: Type assertion from any to named primitive type
+func test2() {
+    var a any = MyInt(7)
+    
+    m, ok := a.(MyInt)
+    assert(ok, "test2: should assert to MyInt")
+    assert(int(m) == 7, "test2: value should be 7")
+    fmt.Println("Test 2 PASSED: any -> MyInt assertion")
+}
+
+// Test 3: Type assertion to interface from named primitive
+func test3() {
+    var a any = MyInt(3)
+    
+    d, ok := a.(Doubler)
+    assert(ok, "test3: MyInt implements Doubler")
+    assert(d.Double() == 6, "test3: Double should return 6")
+    fmt.Println("Test 3 PASSED: any -> Doubler (named primitive)")
+}
+
+// Test 4: Named type should NOT be same as underlying type
+func test4() {
+    var a any = MyInt(10)
+    
+    _, ok := a.(int)
+    assert(!ok, "test4: MyInt should NOT be assertable to int")
+    fmt.Println("Test 4 PASSED: MyInt != int in type assertion")
+}
+
+// ============================================
+// Part 2: Named Type Based on Struct
+// ============================================
+
+type Point struct {
+    x, y int
+}
+
+type NamedPoint Point
+
+func (p NamedPoint) Sum() int {
+    return p.x + p.y
+}
+
+type Summer interface {
+    Sum() int
+}
+
+// Test 5: Named struct type implements interface
+func test5() {
+    var s Summer
+    np := NamedPoint{x: 3, y: 4}
+    s = np
+    assert(s.Sum() == 7, "test5: NamedPoint.Sum should return 7")
+    fmt.Println("Test 5 PASSED: named struct implements Summer")
+}
+
+// Test 6: Named struct vs original struct in type assertion
+func test6() {
+    var a any = NamedPoint{x: 1, y: 2}
+    
+    // Should succeed for NamedPoint
+    np, ok := a.(NamedPoint)
+    assert(ok, "test6: should assert to NamedPoint")
+    assert(np.x == 1 && np.y == 2, "test6: values correct")
+    
+    // Should FAIL for Point (different types)
+    _, ok = a.(Point)
+    assert(!ok, "test6: NamedPoint should NOT be assertable to Point")
+    fmt.Println("Test 6 PASSED: NamedPoint != Point")
+}
+
+// ============================================
+// Part 3: Named Type Based on Named Type
+// ============================================
+
+type MyInt2 MyInt
+
+func (m MyInt2) Triple() int {
+    return int(m) * 3
+}
+
+type Tripler interface {
+    Triple() int
+}
+
+// Test 7: Named type of named type
+func test7() {
+    var t Tripler
+    var m MyInt2 = 4
+    t = m
+    assert(t.Triple() == 12, "test7: MyInt2.Triple should return 12")
+    fmt.Println("Test 7 PASSED: named type of named type")
+}
+
+// Test 8: MyInt2 does NOT have MyInt's methods
+func test8() {
+    var a any = MyInt2(5)
+    
+    // MyInt2 should NOT implement Doubler (that's MyInt's method)
+    _, ok := a.(Doubler)
+    assert(!ok, "test8: MyInt2 should NOT implement Doubler")
+    fmt.Println("Test 8 PASSED: MyInt2 doesn't have MyInt's methods")
+}
+
+// Test 9: Chain of type assertions
+func test9() {
+    var a any = MyInt2(6)
+    
+    t, ok := a.(Tripler)
+    assert(ok, "test9: MyInt2 implements Tripler")
+    
+    // Assert back to concrete
+    m2, ok := t.(MyInt2)
+    assert(ok, "test9: should assert back to MyInt2")
+    assert(int(m2) == 6, "test9: value should be 6")
+    fmt.Println("Test 9 PASSED: chain assertion with named types")
+}
+
+// ============================================
+// Part 4: Named Type Based on Slice
+// ============================================
+
+type IntSlice []int
+
+func (s IntSlice) Sum() int {
+    total := 0
+    for _, v := range s {
+        total += v
+    }
+    return total
+}
+
+func (s IntSlice) Len() int {
+    return len(s)
+}
+
+type Lengther interface {
+    Len() int
+}
+
+// Test 10: Named slice type
+func test10() {
+    var s Summer
+    is := IntSlice{1, 2, 3, 4, 5}
+    s = is
+    assert(s.Sum() == 15, "test10: IntSlice.Sum should return 15")
+    fmt.Println("Test 10 PASSED: named slice implements Summer")
+}
+
+// Test 11: Named slice vs plain slice
+func test11() {
+    var a any = IntSlice{10, 20}
+    
+    is, ok := a.(IntSlice)
+    assert(ok, "test11: should assert to IntSlice")
+    assert(len(is) == 2, "test11: length should be 2")
+    
+    // Should FAIL for []int
+    _, ok = a.([]int)
+    assert(!ok, "test11: IntSlice should NOT be assertable to []int")
+    fmt.Println("Test 11 PASSED: IntSlice != []int")
+}
+
+// ============================================
+// Part 5: Named Type Based on Map
+// ============================================
+
+type StringMap map[string]int
+
+func (sm StringMap) Has(key string) bool {
+    _, ok := sm[key]
+    return ok
+}
+
+type Checker interface {
+    Has(key string) bool
+}
+
+// Test 12: Named map type
+func test12() {
+    var c Checker
+    sm := StringMap{"a": 1, "b": 2}
+    c = sm
+    assert(c.Has("a"), "test12: StringMap.Has('a') should be true")
+    assert(!c.Has("c"), "test12: StringMap.Has('c') should be false")
+    fmt.Println("Test 12 PASSED: named map implements Checker")
+}
+
+// Test 13: Named map vs plain map
+func test13() {
+    var a any = StringMap{"x": 10}
+    
+    sm, ok := a.(StringMap)
+    assert(ok, "test13: should assert to StringMap")
+    assert(sm["x"] == 10, "test13: value correct")
+    
+    // Should FAIL for map[string]int
+    _, ok = a.(map[string]int)
+    assert(!ok, "test13: StringMap should NOT be assertable to map[string]int")
+    fmt.Println("Test 13 PASSED: StringMap != map[string]int")
+}
+
+// ============================================
+// Part 6: Pointer to Named Type
+// ============================================
+
+type Counter struct {
+    n int
+}
+
+func (c *Counter) Inc() {
+    c.n++
+}
+
+func (c Counter) Get() int {
+    return c.n
+}
+
+type NamedCounter Counter
+
+func (nc *NamedCounter) Dec() {
+    nc.n--
+}
+
+func (nc NamedCounter) GetVal() int {
+    return nc.n
+}
+
+type Decrementer interface {
+    Dec()
+}
+
+// Test 14: Pointer to named struct
+func test14() {
+    var d Decrementer
+    nc := &NamedCounter{n: 10}
+    d = nc
+    d.Dec()
+    assert(nc.n == 9, "test14: Dec should decrement to 9")
+    fmt.Println("Test 14 PASSED: *NamedCounter implements Decrementer")
+}
+
+// Test 15: NamedCounter doesn't have Counter's methods
+func test15() {
+    var a any = &NamedCounter{n: 5}
+    
+    // Counter has Inc(), but NamedCounter doesn't
+    type Incrementer interface {
+        Inc()
+    }
+    _, ok := a.(Incrementer)
+    assert(!ok, "test15: *NamedCounter should NOT implement Incrementer")
+    fmt.Println("Test 15 PASSED: NamedCounter doesn't have Counter's methods")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== named_type_iface: ALL 15 TESTS PASSED ===")
+}

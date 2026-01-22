@@ -1,0 +1,269 @@
+// Test: Embedded struct method promotion for interface implementation
+// Focus: type assertion, method set, interface assignment with embedded structs
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Basic Embedded Struct Method Promotion
+// ============================================
+
+type Inner struct {
+    val int
+}
+
+func (i Inner) GetVal() int {
+    return i.val
+}
+
+func (i *Inner) SetVal(v int) {
+    i.val = v
+}
+
+type Outer struct {
+    Inner  // embedded
+    extra int
+}
+
+type Getter interface {
+    GetVal() int
+}
+
+type Setter interface {
+    SetVal(v int)
+}
+
+type GetterSetter interface {
+    GetVal() int
+    SetVal(v int)
+}
+
+// Test 1: Outer value should implement Getter (promoted value receiver)
+func test1() {
+    var g Getter
+    o := Outer{Inner: Inner{val: 10}, extra: 20}
+    g = o
+    assert(g.GetVal() == 10, "test1: promoted GetVal() should return 10")
+    fmt.Println("Test 1 PASSED: Outer value implements Getter")
+}
+
+// Test 2: *Outer should implement Getter (promoted value receiver)
+func test2() {
+    var g Getter
+    o := &Outer{Inner: Inner{val: 20}, extra: 30}
+    g = o
+    assert(g.GetVal() == 20, "test2: *Outer GetVal() should return 20")
+    fmt.Println("Test 2 PASSED: *Outer implements Getter")
+}
+
+// Test 3: *Outer should implement Setter (promoted pointer receiver)
+func test3() {
+    var s Setter
+    o := &Outer{Inner: Inner{val: 5}, extra: 10}
+    s = o
+    s.SetVal(100)
+    assert(o.Inner.val == 100, "test3: SetVal should modify inner val to 100")
+    fmt.Println("Test 3 PASSED: *Outer implements Setter")
+}
+
+// Test 4: *Outer should implement GetterSetter (both promoted)
+func test4() {
+    var gs GetterSetter
+    o := &Outer{Inner: Inner{val: 50}, extra: 60}
+    gs = o
+    
+    assert(gs.GetVal() == 50, "test4: GetVal should return 50")
+    gs.SetVal(200)
+    assert(gs.GetVal() == 200, "test4: GetVal after SetVal should return 200")
+    fmt.Println("Test 4 PASSED: *Outer implements GetterSetter")
+}
+
+// ============================================
+// Part 2: Type Assertion with Embedded Methods
+// ============================================
+
+// Test 5: Type assertion from any to Getter (embedded method)
+func test5() {
+    o := Outer{Inner: Inner{val: 42}, extra: 0}
+    var a any = o
+    
+    g, ok := a.(Getter)
+    assert(ok, "test5: Outer should implement Getter")
+    assert(g.GetVal() == 42, "test5: GetVal should return 42")
+    fmt.Println("Test 5 PASSED: any -> Getter assertion")
+}
+
+// Test 6: Type assertion from any to GetterSetter (*Outer)
+func test6() {
+    o := &Outer{Inner: Inner{val: 77}, extra: 0}
+    var a any = o
+    
+    gs, ok := a.(GetterSetter)
+    assert(ok, "test6: *Outer should implement GetterSetter")
+    assert(gs.GetVal() == 77, "test6: GetVal should return 77")
+    gs.SetVal(88)
+    assert(o.Inner.val == 88, "test6: SetVal should modify to 88")
+    fmt.Println("Test 6 PASSED: any -> GetterSetter assertion")
+}
+
+// Test 7: Failed type assertion (Outer value cannot implement Setter)
+func test7() {
+    o := Outer{Inner: Inner{val: 10}, extra: 0}
+    var a any = o
+    
+    _, ok := a.(Setter)
+    assert(!ok, "test7: Outer value should NOT implement Setter (pointer receiver)")
+    fmt.Println("Test 7 PASSED: Outer value does not implement Setter")
+}
+
+// ============================================
+// Part 3: Interface to Interface with Embedded
+// ============================================
+
+// Test 8: GetterSetter -> Getter (interface to interface)
+func test8() {
+    o := &Outer{Inner: Inner{val: 33}, extra: 0}
+    var gs GetterSetter = o
+    var g Getter = gs
+    
+    assert(g.GetVal() == 33, "test8: GetVal through Getter should return 33")
+    fmt.Println("Test 8 PASSED: GetterSetter -> Getter")
+}
+
+// Test 9: Chained - Outer -> GetterSetter -> Getter -> concrete assertion
+func test9() {
+    o := &Outer{Inner: Inner{val: 99}, extra: 11}
+    var gs GetterSetter = o
+    var g Getter = gs
+    
+    // Assert back to concrete type
+    o2, ok := g.(*Outer)
+    assert(ok, "test9: should be able to assert back to *Outer")
+    assert(o2.extra == 11, "test9: extra should be 11")
+    fmt.Println("Test 9 PASSED: chained assertions with embedded")
+}
+
+// ============================================
+// Part 4: Embedded Pointer Type
+// ============================================
+
+type OuterEmbedPtr struct {
+    *Inner  // embedded pointer
+    name string
+}
+
+// Test 10: Embedded pointer - GetVal is promoted
+func test10() {
+    inner := &Inner{val: 55}
+    o := OuterEmbedPtr{Inner: inner, name: "ptr"}
+    
+    var g Getter = o  // Value of OuterEmbedPtr should work
+    assert(g.GetVal() == 55, "test10: embedded pointer GetVal should return 55")
+    fmt.Println("Test 10 PASSED: embedded pointer Getter")
+}
+
+// Test 11: Embedded pointer - SetVal is promoted even to value receiver
+func test11() {
+    inner := &Inner{val: 66}
+    o := OuterEmbedPtr{Inner: inner, name: "ptr"}
+    
+    var s Setter = o  // Value of OuterEmbedPtr should implement Setter
+    s.SetVal(77)
+    assert(inner.val == 77, "test11: embedded pointer SetVal should work")
+    fmt.Println("Test 11 PASSED: embedded pointer Setter")
+}
+
+// Test 12: Embedded pointer - GetterSetter on value
+func test12() {
+    inner := &Inner{val: 88}
+    o := OuterEmbedPtr{Inner: inner, name: "full"}
+    
+    var gs GetterSetter = o  // Value should implement GetterSetter
+    assert(gs.GetVal() == 88, "test12: GetVal should return 88")
+    gs.SetVal(99)
+    assert(inner.val == 99, "test12: SetVal should modify to 99")
+    fmt.Println("Test 12 PASSED: embedded pointer GetterSetter")
+}
+
+// ============================================
+// Part 5: Multiple Embedding Levels
+// ============================================
+
+type Level1 struct {
+    data int
+}
+
+func (l Level1) GetData() int {
+    return l.data
+}
+
+type Level2 struct {
+    Level1
+    tag string
+}
+
+type Level3 struct {
+    Level2
+    id int
+}
+
+type DataGetter interface {
+    GetData() int
+}
+
+// Test 13: Deep embedding - method promoted through multiple levels
+func test13() {
+    l3 := Level3{
+        Level2: Level2{
+            Level1: Level1{data: 123},
+            tag: "test",
+        },
+        id: 1,
+    }
+    
+    var dg DataGetter = l3
+    assert(dg.GetData() == 123, "test13: deep promoted GetData should return 123")
+    fmt.Println("Test 13 PASSED: deep embedding method promotion")
+}
+
+// Test 14: Type assertion through deep embedding
+func test14() {
+    l3 := Level3{
+        Level2: Level2{
+            Level1: Level1{data: 456},
+            tag: "deep",
+        },
+        id: 2,
+    }
+    
+    var a any = l3
+    dg, ok := a.(DataGetter)
+    assert(ok, "test14: Level3 should implement DataGetter")
+    assert(dg.GetData() == 456, "test14: GetData should return 456")
+    
+    // Assert back to concrete
+    l3back, ok := dg.(Level3)
+    assert(ok, "test14: should assert back to Level3")
+    assert(l3back.id == 2, "test14: id should be 2")
+    fmt.Println("Test 14 PASSED: deep embedding type assertion")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    
+    fmt.Println("")
+    fmt.Println("=== embed_method_promotion: ALL 14 TESTS PASSED ===")
+}

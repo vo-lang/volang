@@ -1,0 +1,259 @@
+// Test: Zero-sized struct in interface, interface in defer, direct assertion on return
+// Focus: unusual edge cases
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Zero-sized Struct in Interface
+// ============================================
+
+type Empty struct{}
+
+func (e Empty) Name() string { return "empty" }
+
+type Namer interface {
+    Name() string
+}
+
+// Test 1: Zero-sized struct assigned to interface
+func test1() {
+    var n Namer = Empty{}
+    assert(n.Name() == "empty", "test1: zero-sized struct method")
+    fmt.Println("Test 1 PASSED: zero-sized struct in interface")
+}
+
+// Test 2: Type assertion on zero-sized struct
+func test2() {
+    var a any = Empty{}
+    e, ok := a.(Empty)
+    assert(ok, "test2: should be Empty")
+    assert(e.Name() == "empty", "test2: method works")
+    fmt.Println("Test 2 PASSED: type assertion on zero-sized")
+}
+
+// Test 3: Multiple zero-sized structs are equal
+func test3() {
+    var a1 any = Empty{}
+    var a2 any = Empty{}
+    
+    assert(a1 == a2, "test3: zero-sized structs should be equal")
+    fmt.Println("Test 3 PASSED: zero-sized equality")
+}
+
+// ============================================
+// Part 2: Struct with Only Interface Field
+// ============================================
+
+type OnlyIface struct {
+    n Namer
+}
+
+// Test 4: Struct with only interface field
+func test4() {
+    oi := OnlyIface{n: Empty{}}
+    assert(oi.n.Name() == "empty", "test4: interface field")
+    fmt.Println("Test 4 PASSED: struct with only interface field")
+}
+
+// Test 5: nil interface in struct field
+func test5() {
+    oi := OnlyIface{}
+    assert(oi.n == nil, "test5: nil interface field")
+    fmt.Println("Test 5 PASSED: nil interface in struct field")
+}
+
+// ============================================
+// Part 3: Interface in Defer
+// ============================================
+
+type Closer interface {
+    Close() int
+}
+
+type Resource struct {
+    closed bool
+    code   int
+}
+
+func (r *Resource) Close() int {
+    r.closed = true
+    return r.code
+}
+
+// Test 6: Interface method called in defer (via closure wrapper)
+func test6() {
+    r := &Resource{code: 42}
+    
+    func() {
+        var c Closer = r
+        defer func() { c.Close() }()  // Wrap in closure
+    }()
+    
+    assert(r.closed, "test6: deferred Close() called")
+    fmt.Println("Test 6 PASSED: interface in defer")
+}
+
+// Test 7: Multiple deferred interface calls
+func test7() {
+    var order []int
+    
+    r1 := &Resource{code: 1}
+    r2 := &Resource{code: 2}
+    r3 := &Resource{code: 3}
+    
+    func() {
+        var c1 Closer = r1
+        var c2 Closer = r2
+        var c3 Closer = r3
+        
+        defer func() { order = append(order, c1.Close()) }()
+        defer func() { order = append(order, c2.Close()) }()
+        defer func() { order = append(order, c3.Close()) }()
+    }()
+    
+    // Defers execute in LIFO order
+    assert(len(order) == 3, "test7: all defers executed")
+    assert(order[0] == 3, "test7: first was c3")
+    assert(order[1] == 2, "test7: second was c2")
+    assert(order[2] == 1, "test7: third was c1")
+    fmt.Println("Test 7 PASSED: multiple deferred interface calls")
+}
+
+// ============================================
+// Part 4: Type Assertion on Function Return
+// ============================================
+
+func getAny() any {
+    return &Resource{code: 99}
+}
+
+func getNamer() Namer {
+    return Empty{}
+}
+
+// Test 8: Direct type assertion on function return
+func test8() {
+    r := getAny().(*Resource)
+    assert(r.code == 99, "test8: direct assertion on return")
+    fmt.Println("Test 8 PASSED: direct assertion on function return")
+}
+
+// Test 9: Direct interface assertion on function return
+func test9() {
+    c := getAny().(Closer)
+    code := c.Close()
+    assert(code == 99, "test9: interface assertion on return")
+    fmt.Println("Test 9 PASSED: interface assertion on return")
+}
+
+// Test 10: Type assertion with ok on function return
+func test10() {
+    if r, ok := getAny().(*Resource); ok {
+        assert(r.code == 99, "test10: assertion in if")
+    } else {
+        panic("test10: should succeed")
+    }
+    fmt.Println("Test 10 PASSED: assertion with ok on return")
+}
+
+// ============================================
+// Part 5: Interface Method on Return Value
+// ============================================
+
+// Test 11: Method call on type assertion result
+func test11() {
+    code := getAny().(*Resource).Close()
+    assert(code == 99, "test11: chained method on assertion")
+    fmt.Println("Test 11 PASSED: method on assertion result")
+}
+
+// Test 12: Method call on interface return
+func test12() {
+    name := getNamer().Name()
+    assert(name == "empty", "test12: method on interface return")
+    fmt.Println("Test 12 PASSED: method on interface return")
+}
+
+// ============================================
+// Part 6: Interface in Short-Circuit Evaluation
+// ============================================
+
+func getReader() Namer {
+    return Empty{}
+}
+
+// Test 13: Interface in boolean expression
+func test13() {
+    var n Namer = nil
+    
+    // Short-circuit: n != nil && ... won't evaluate method if nil
+    if n != nil && n.Name() == "test" {
+        panic("test13: should not reach")
+    }
+    
+    n = Empty{}
+    if n != nil && n.Name() == "empty" {
+        fmt.Println("Test 13 PASSED: interface in short-circuit")
+    } else {
+        panic("test13: should have matched")
+    }
+}
+
+// Test 14: nil check before interface method
+func test14() {
+    var n Namer
+    
+    result := "none"
+    if n != nil {
+        result = n.Name()
+    }
+    assert(result == "none", "test14: nil interface")
+    
+    n = Empty{}
+    if n != nil {
+        result = n.Name()
+    }
+    assert(result == "empty", "test14: non-nil interface")
+    fmt.Println("Test 14 PASSED: nil check before method")
+}
+
+// ============================================
+// Part 7: Interface in Range Loop
+// ============================================
+
+// Test 15: Range over slice of interfaces
+func test15() {
+    namers := []Namer{Empty{}, Empty{}, Empty{}}
+    
+    count := 0
+    for _, n := range namers {
+        if n.Name() == "empty" {
+            count++
+        }
+    }
+    
+    assert(count == 3, "test15: all namers returned 'empty'")
+    fmt.Println("Test 15 PASSED: range over interface slice")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_zero_defer: ALL 15 TESTS PASSED ===")
+}

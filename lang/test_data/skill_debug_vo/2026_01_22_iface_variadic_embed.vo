@@ -1,0 +1,282 @@
+// Test: Interface with variadic methods, struct embedding with interface field
+// Focus: edge cases around variadic and embedding
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Interface with Variadic Method
+// ============================================
+
+type Adder interface {
+    Add(nums ...int) int
+}
+
+type SumAdder struct{}
+
+func (s SumAdder) Add(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+// Test 1: Basic variadic interface method
+func test1() {
+    var a Adder = SumAdder{}
+    
+    assert(a.Add() == 0, "test1: Add() with no args")
+    assert(a.Add(1) == 1, "test1: Add(1)")
+    assert(a.Add(1, 2, 3) == 6, "test1: Add(1,2,3)")
+    fmt.Println("Test 1 PASSED: variadic interface method")
+}
+
+// Test 2: Variadic through any and type assertion
+func test2() {
+    var a any = SumAdder{}
+    
+    adder, ok := a.(Adder)
+    assert(ok, "test2: should implement Adder")
+    assert(adder.Add(10, 20, 30) == 60, "test2: Add through assertion")
+    fmt.Println("Test 2 PASSED: variadic through type assertion")
+}
+
+// Test 3: Variadic with slice spread
+func test3() {
+    var a Adder = SumAdder{}
+    nums := []int{5, 10, 15, 20}
+    
+    result := a.Add(nums...)
+    assert(result == 50, "test3: spread slice")
+    fmt.Println("Test 3 PASSED: variadic with slice spread")
+}
+
+// ============================================
+// Part 2: Struct Embedding Interface Field
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string { return b.data }
+
+type EmbeddedReader struct {
+    Reader  // embedded interface
+    extra string
+}
+
+// Test 4: Embedded interface field
+func test4() {
+    buf := &Buffer{data: "embedded"}
+    er := EmbeddedReader{Reader: buf, extra: "x"}
+    
+    assert(er.Read() == "embedded", "test4: promoted Read()")
+    fmt.Println("Test 4 PASSED: embedded interface field")
+}
+
+// Test 5: Embedded interface -> interface assignment
+func test5() {
+    buf := &Buffer{data: "assign"}
+    er := EmbeddedReader{Reader: buf, extra: "y"}
+    
+    var r Reader = er  // EmbeddedReader implements Reader via embedding
+    assert(r.Read() == "assign", "test5: interface via embedding")
+    fmt.Println("Test 5 PASSED: embedded interface to interface")
+}
+
+// Test 6: Type assertion on embedded interface
+func test6() {
+    buf := &Buffer{data: "assert"}
+    er := EmbeddedReader{Reader: buf, extra: "z"}
+    
+    var a any = er
+    r, ok := a.(Reader)
+    assert(ok, "test6: should implement Reader")
+    assert(r.Read() == "assert", "test6: Read() works")
+    fmt.Println("Test 6 PASSED: type assertion with embedded interface")
+}
+
+// ============================================
+// Part 3: Multiple Embedded Interfaces
+// ============================================
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Read() string
+    Write(s string)
+}
+
+type RWBuffer struct {
+    data string
+}
+
+func (b *RWBuffer) Read() string { return b.data }
+func (b *RWBuffer) Write(s string) { b.data = s }
+
+type MultiEmbed struct {
+    Reader
+    Writer
+    name string
+}
+
+// Test 7: Multiple embedded interfaces
+func test7() {
+    r := &Buffer{data: "read"}
+    w := &RWBuffer{data: "write"}
+    
+    me := MultiEmbed{Reader: r, Writer: w, name: "multi"}
+    
+    assert(me.Read() == "read", "test7: Read from embedded Reader")
+    me.Write("new")
+    assert(w.data == "new", "test7: Write through embedded Writer")
+    fmt.Println("Test 7 PASSED: multiple embedded interfaces")
+}
+
+// ============================================
+// Part 4: Embedded Interface with nil
+// ============================================
+
+// Test 8: Embedded interface can be nil
+func test8() {
+    er := EmbeddedReader{Reader: nil, extra: "nil"}
+    
+    assert(er.Reader == nil, "test8: embedded interface is nil")
+    fmt.Println("Test 8 PASSED: nil embedded interface")
+}
+
+// Test 9: Assign to embedded interface
+func test9() {
+    er := EmbeddedReader{extra: "assign"}
+    assert(er.Reader == nil, "test9: initially nil")
+    
+    er.Reader = &Buffer{data: "assigned"}
+    assert(er.Read() == "assigned", "test9: after assignment")
+    fmt.Println("Test 9 PASSED: assign to embedded interface")
+}
+
+// ============================================
+// Part 5: Interface in Conditional
+// ============================================
+
+func getReader(useBuffer bool) Reader {
+    if useBuffer {
+        return &Buffer{data: "buffer"}
+    }
+    return &RWBuffer{data: "rwbuffer"}
+}
+
+// Test 10: Conditional interface return
+func test10() {
+    r1 := getReader(true)
+    r2 := getReader(false)
+    
+    assert(r1.Read() == "buffer", "test10: buffer case")
+    assert(r2.Read() == "rwbuffer", "test10: rwbuffer case")
+    fmt.Println("Test 10 PASSED: conditional interface return")
+}
+
+// Test 11: Type assertion with ok in if condition
+func test11() {
+    var a any = &Buffer{data: "check"}
+    
+    if r, ok := a.(Reader); ok {
+        assert(r.Read() == "check", "test11: inside if")
+    } else {
+        panic("test11: should not reach else")
+    }
+    fmt.Println("Test 11 PASSED: type assertion in if condition")
+}
+
+// Test 12: Type assertion with ok in for condition
+func test12() {
+    items := []any{&Buffer{data: "a"}, 42, &Buffer{data: "b"}, "str"}
+    
+    count := 0
+    for _, item := range items {
+        if r, ok := item.(Reader); ok {
+            _ = r.Read()
+            count++
+        }
+    }
+    assert(count == 2, "test12: should find 2 Readers")
+    fmt.Println("Test 12 PASSED: type assertion in loop")
+}
+
+// ============================================
+// Part 6: Interface Assignment in Various Contexts
+// ============================================
+
+type Counter interface {
+    Inc()
+    Get() int
+}
+
+type SimpleCounter struct {
+    n int
+}
+
+func (c *SimpleCounter) Inc() { c.n++ }
+func (c *SimpleCounter) Get() int { return c.n }
+
+// Test 13: Interface in short variable declaration
+func test13() {
+    var c Counter = &SimpleCounter{n: 0}
+    c.Inc()
+    assert(c.Get() == 1, "test13: short var decl")
+    fmt.Println("Test 13 PASSED: interface in short var decl")
+}
+
+// Test 14: Interface reassignment
+func test14() {
+    var c Counter = &SimpleCounter{n: 10}
+    assert(c.Get() == 10, "test14: first counter")
+    
+    c = &SimpleCounter{n: 20}
+    assert(c.Get() == 20, "test14: second counter")
+    fmt.Println("Test 14 PASSED: interface reassignment")
+}
+
+// Test 15: Interface in multiple assignment
+func test15() {
+    var c1, c2 Counter
+    c1 = &SimpleCounter{n: 1}
+    c2 = &SimpleCounter{n: 2}
+    
+    assert(c1.Get() == 1, "test15: c1")
+    assert(c2.Get() == 2, "test15: c2")
+    
+    c1, c2 = c2, c1  // swap
+    assert(c1.Get() == 2, "test15: c1 after swap")
+    assert(c2.Get() == 1, "test15: c2 after swap")
+    fmt.Println("Test 15 PASSED: interface swap")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_variadic_embed: ALL 15 TESTS PASSED ===")
+}

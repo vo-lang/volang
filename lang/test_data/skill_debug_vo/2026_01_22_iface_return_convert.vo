@@ -1,0 +1,302 @@
+// Test: Interface return value conversions and multi-return scenarios
+// Focus: returning interface from functions, implicit conversions
+package main
+
+import "fmt"
+import "errors"
+
+// ============================================
+// Part 1: Basic Interface Return
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Read() string
+    Write(s string)
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string {
+    return b.data
+}
+
+func (b *Buffer) Write(s string) {
+    b.data = s
+}
+
+// Returns concrete type, assigned to interface
+func makeBuffer(s string) *Buffer {
+    return &Buffer{data: s}
+}
+
+// Test 1: Concrete return assigned to interface
+func test1() {
+    var r Reader = makeBuffer("test1")
+    assert(r.Read() == "test1", "test1: concrete to interface return")
+    fmt.Println("Test 1 PASSED: concrete return to interface")
+}
+
+// ============================================
+// Part 2: Return Interface from Function
+// ============================================
+
+func getReader(s string) Reader {
+    return &Buffer{data: s}
+}
+
+func getReadWriter(s string) ReadWriter {
+    return &Buffer{data: s}
+}
+
+// Test 2: Function returning interface
+func test2() {
+    r := getReader("test2")
+    assert(r.Read() == "test2", "test2: returned Reader")
+    fmt.Println("Test 2 PASSED: function returns Reader")
+}
+
+// Test 3: Return superset interface, assign to subset
+func test3() {
+    rw := getReadWriter("test3")
+    var r Reader = rw  // ReadWriter -> Reader
+    assert(r.Read() == "test3", "test3: ReadWriter to Reader conversion")
+    fmt.Println("Test 3 PASSED: return superset assign to subset")
+}
+
+// ============================================
+// Part 3: Multi-Return with Interface
+// ============================================
+
+func getReaderOrNil(shouldReturn bool, s string) (Reader, bool) {
+    if shouldReturn {
+        return &Buffer{data: s}, true
+    }
+    return nil, false
+}
+
+// Test 4: Multi-return with interface - success case
+func test4() {
+    r, ok := getReaderOrNil(true, "test4")
+    assert(ok, "test4: should return true")
+    assert(r != nil, "test4: reader should not be nil")
+    assert(r.Read() == "test4", "test4: reader value")
+    fmt.Println("Test 4 PASSED: multi-return interface success")
+}
+
+// Test 5: Multi-return with interface - failure case
+func test5() {
+    r, ok := getReaderOrNil(false, "")
+    assert(!ok, "test5: should return false")
+    assert(r == nil, "test5: reader should be nil")
+    fmt.Println("Test 5 PASSED: multi-return interface failure")
+}
+
+// ============================================
+// Part 4: Interface in Error Pattern
+// ============================================
+
+func mayFail(shouldFail bool) (Reader, error) {
+    if shouldFail {
+        return nil, errors.New("intentional failure")
+    }
+    return &Buffer{data: "success"}, nil
+}
+
+// Test 6: Interface with error - success
+func test6() {
+    r, err := mayFail(false)
+    assert(err == nil, "test6: no error expected")
+    assert(r != nil, "test6: reader expected")
+    assert(r.Read() == "success", "test6: reader value")
+    fmt.Println("Test 6 PASSED: interface+error success")
+}
+
+// Test 7: Interface with error - failure
+func test7() {
+    r, err := mayFail(true)
+    assert(err != nil, "test7: error expected")
+    assert(r == nil, "test7: reader should be nil on error")
+    assert(err.Error() == "intentional failure", "test7: error message")
+    fmt.Println("Test 7 PASSED: interface+error failure")
+}
+
+// ============================================
+// Part 5: Chained Interface Returns
+// ============================================
+
+func wrapReader(r Reader) Reader {
+    return r  // pass through
+}
+
+func chainedGet() Reader {
+    buf := makeBuffer("chained")
+    r := getReader(buf.data)
+    return wrapReader(r)
+}
+
+// Test 8: Chained interface returns
+func test8() {
+    r := chainedGet()
+    assert(r.Read() == "chained", "test8: chained return")
+    fmt.Println("Test 8 PASSED: chained interface returns")
+}
+
+// ============================================
+// Part 6: Interface Return from Method
+// ============================================
+
+type ReaderFactory struct {
+    prefix string
+}
+
+func (f *ReaderFactory) MakeReader(s string) Reader {
+    return &Buffer{data: f.prefix + s}
+}
+
+// Test 9: Method returning interface
+func test9() {
+    factory := &ReaderFactory{prefix: "[F]"}
+    r := factory.MakeReader("test9")
+    assert(r.Read() == "[F]test9", "test9: method returns interface")
+    fmt.Println("Test 9 PASSED: method returns interface")
+}
+
+// ============================================
+// Part 7: Interface Return with Type Assertion
+// ============================================
+
+func getAny(s string) any {
+    return &Buffer{data: s}
+}
+
+// Test 10: any return, then type assertion
+func test10() {
+    a := getAny("test10")
+    r, ok := a.(Reader)
+    assert(ok, "test10: should implement Reader")
+    assert(r.Read() == "test10", "test10: Reader method")
+    fmt.Println("Test 10 PASSED: any return with assertion")
+}
+
+// Test 11: any return, concrete type assertion
+func test11() {
+    a := getAny("test11")
+    buf, ok := a.(*Buffer)
+    assert(ok, "test11: should be *Buffer")
+    assert(buf.data == "test11", "test11: buffer data")
+    fmt.Println("Test 11 PASSED: any return concrete assertion")
+}
+
+// ============================================
+// Part 8: Return Interface Slice
+// ============================================
+
+func getReaders(n int) []Reader {
+    result := make([]Reader, n)
+    for i := 0; i < n; i++ {
+        result[i] = &Buffer{data: fmt.Sprintf("item%d", i)}
+    }
+    return result
+}
+
+// Test 12: Return slice of interfaces
+func test12() {
+    readers := getReaders(3)
+    assert(len(readers) == 3, "test12: length should be 3")
+    assert(readers[0].Read() == "item0", "test12: item 0")
+    assert(readers[1].Read() == "item1", "test12: item 1")
+    assert(readers[2].Read() == "item2", "test12: item 2")
+    fmt.Println("Test 12 PASSED: return slice of interfaces")
+}
+
+// ============================================
+// Part 9: Return Interface Map
+// ============================================
+
+func getReaderMap() map[string]Reader {
+    m := make(map[string]Reader)
+    m["a"] = &Buffer{data: "val_a"}
+    m["b"] = &Buffer{data: "val_b"}
+    return m
+}
+
+// Test 13: Return map of interfaces
+func test13() {
+    m := getReaderMap()
+    assert(m["a"].Read() == "val_a", "test13: key a")
+    assert(m["b"].Read() == "val_b", "test13: key b")
+    fmt.Println("Test 13 PASSED: return map of interfaces")
+}
+
+// ============================================
+// Part 10: Conditional Interface Return
+// ============================================
+
+type AltBuffer struct {
+    content string
+}
+
+func (a *AltBuffer) Read() string {
+    return "ALT:" + a.content
+}
+
+func getConditionalReader(useAlt bool, s string) Reader {
+    if useAlt {
+        return &AltBuffer{content: s}
+    }
+    return &Buffer{data: s}
+}
+
+// Test 14: Conditional return different concrete types
+func test14() {
+    r1 := getConditionalReader(false, "normal")
+    r2 := getConditionalReader(true, "alt")
+    
+    assert(r1.Read() == "normal", "test14: normal buffer")
+    assert(r2.Read() == "ALT:alt", "test14: alt buffer")
+    fmt.Println("Test 14 PASSED: conditional interface return")
+}
+
+// Test 15: Type assertion after conditional return
+func test15() {
+    r := getConditionalReader(true, "check")
+    
+    _, okBuf := r.(*Buffer)
+    assert(!okBuf, "test15: should not be *Buffer")
+    
+    alt, okAlt := r.(*AltBuffer)
+    assert(okAlt, "test15: should be *AltBuffer")
+    assert(alt.content == "check", "test15: content correct")
+    fmt.Println("Test 15 PASSED: type assertion after conditional")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    test14()
+    test15()
+    
+    fmt.Println("")
+    fmt.Println("=== iface_return_convert: ALL 15 TESTS PASSED ===")
+}

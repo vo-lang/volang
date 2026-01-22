@@ -1,0 +1,298 @@
+// Test: Method shadowing and interface implementation
+// Focus: when outer struct shadows embedded struct's method
+package main
+
+import "fmt"
+
+// ============================================
+// Part 1: Basic Method Shadowing
+// ============================================
+
+type Base struct {
+    val int
+}
+
+func (b Base) GetVal() int {
+    return b.val
+}
+
+func (b Base) Name() string {
+    return "Base"
+}
+
+type Derived struct {
+    Base
+    extra int
+}
+
+// Shadows Base.Name()
+func (d Derived) Name() string {
+    return "Derived"
+}
+
+type Namer interface {
+    Name() string
+}
+
+type ValGetter interface {
+    GetVal() int
+}
+
+// Test 1: Shadowed method - Derived.Name() should be called
+func test1() {
+    d := Derived{Base: Base{val: 10}, extra: 20}
+    var n Namer = d
+    assert(n.Name() == "Derived", "test1: shadowed Name() should return 'Derived'")
+    fmt.Println("Test 1 PASSED: shadowed method")
+}
+
+// Test 2: Non-shadowed method - promoted from Base
+func test2() {
+    d := Derived{Base: Base{val: 42}, extra: 0}
+    var vg ValGetter = d
+    assert(vg.GetVal() == 42, "test2: promoted GetVal() should return 42")
+    fmt.Println("Test 2 PASSED: non-shadowed promoted method")
+}
+
+// Test 3: Type assertion with shadowed method
+func test3() {
+    d := Derived{Base: Base{val: 10}, extra: 0}
+    var a any = d
+    
+    n, ok := a.(Namer)
+    assert(ok, "test3: Derived implements Namer")
+    assert(n.Name() == "Derived", "test3: shadowed Name() via assertion")
+    fmt.Println("Test 3 PASSED: type assertion with shadow")
+}
+
+// Test 4: Access shadowed and non-shadowed through same interface
+type FullInfo interface {
+    Name() string
+    GetVal() int
+}
+
+func test4() {
+    d := Derived{Base: Base{val: 99}, extra: 0}
+    var fi FullInfo = d
+    
+    assert(fi.Name() == "Derived", "test4: Name should be shadowed")
+    assert(fi.GetVal() == 99, "test4: GetVal should be promoted")
+    fmt.Println("Test 4 PASSED: mixed shadow and promotion")
+}
+
+// ============================================
+// Part 2: Pointer Receiver Shadowing
+// ============================================
+
+type BasePtr struct {
+    count int
+}
+
+func (b *BasePtr) Inc() {
+    b.count++
+}
+
+func (b *BasePtr) Dec() {
+    b.count--
+}
+
+type DerivedPtr struct {
+    *BasePtr
+    factor int
+}
+
+// Shadows BasePtr.Inc() with different behavior
+func (d *DerivedPtr) Inc() {
+    d.count = d.count + d.factor
+}
+
+type Incrementer interface {
+    Inc()
+}
+
+type Decrementer interface {
+    Dec()
+}
+
+// Test 5: Pointer receiver shadowing
+func test5() {
+    base := &BasePtr{count: 10}
+    d := &DerivedPtr{BasePtr: base, factor: 5}
+    
+    var inc Incrementer = d
+    inc.Inc()  // Should use DerivedPtr.Inc, adding factor
+    assert(base.count == 15, "test5: shadowed Inc should add factor")
+    fmt.Println("Test 5 PASSED: pointer receiver shadowing")
+}
+
+// Test 6: Non-shadowed pointer receiver from embedded pointer
+func test6() {
+    base := &BasePtr{count: 100}
+    d := &DerivedPtr{BasePtr: base, factor: 0}
+    
+    var dec Decrementer = d
+    dec.Dec()  // Should use BasePtr.Dec
+    assert(base.count == 99, "test6: promoted Dec should decrement")
+    fmt.Println("Test 6 PASSED: promoted pointer receiver method")
+}
+
+// ============================================
+// Part 3: Type Switch with Shadowed Methods
+// ============================================
+
+func classifyNamer(x any) string {
+    switch v := x.(type) {
+    case Namer:
+        return v.Name()
+    default:
+        return "unknown"
+    }
+}
+
+// Test 7: Type switch uses correct (shadowed) method
+func test7() {
+    d := Derived{Base: Base{val: 0}, extra: 0}
+    result := classifyNamer(d)
+    assert(result == "Derived", "test7: type switch should use Derived.Name")
+    fmt.Println("Test 7 PASSED: type switch with shadowed method")
+}
+
+// Test 8: Base type through type switch
+func test8() {
+    b := Base{val: 0}
+    result := classifyNamer(b)
+    assert(result == "Base", "test8: type switch should use Base.Name")
+    fmt.Println("Test 8 PASSED: base type in type switch")
+}
+
+// ============================================
+// Part 4: Multiple Embedding with Shadowing
+// ============================================
+
+type A struct{}
+func (a A) M() string { return "A" }
+
+type B struct{}
+func (b B) M() string { return "B" }
+
+type AB struct {
+    A
+    B
+}
+
+// AB.M() shadows both A.M() and B.M()
+func (ab AB) M() string { return "AB" }
+
+type Mer interface {
+    M() string
+}
+
+// Test 9: Diamond-like shadowing
+func test9() {
+    ab := AB{}
+    var m Mer = ab
+    assert(m.M() == "AB", "test9: AB.M should shadow both A.M and B.M")
+    fmt.Println("Test 9 PASSED: diamond shadowing")
+}
+
+// Test 10: Type assertion after interface assignment (AB)
+func test10() {
+    ab := AB{}
+    var m Mer = ab
+    
+    ab2, ok := m.(AB)
+    assert(ok, "test10: should assert back to AB")
+    assert(ab2.M() == "AB", "test10: concrete type M should work")
+    fmt.Println("Test 10 PASSED: assertion after shadow interface")
+}
+
+// ============================================
+// Part 5: Interface Embedding with Method Shadowing
+// ============================================
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type MyBuffer struct {
+    data string
+}
+
+func (m *MyBuffer) Read() string {
+    return m.data
+}
+
+func (m *MyBuffer) Write(s string) {
+    m.data = s
+}
+
+type ExtendedBuffer struct {
+    *MyBuffer
+    prefix string
+}
+
+// Shadow Read to add prefix
+func (e *ExtendedBuffer) Read() string {
+    return e.prefix + e.MyBuffer.data
+}
+
+// Test 11: Shadowed method through embedded interface
+func test11() {
+    buf := &MyBuffer{data: "hello"}
+    ext := &ExtendedBuffer{MyBuffer: buf, prefix: "[EXT]"}
+    
+    var r Reader = ext
+    assert(r.Read() == "[EXT]hello", "test11: shadowed Read should add prefix")
+    fmt.Println("Test 11 PASSED: shadowed Read through interface")
+}
+
+// Test 12: Non-shadowed Write still works
+func test12() {
+    buf := &MyBuffer{data: ""}
+    ext := &ExtendedBuffer{MyBuffer: buf, prefix: "[EXT]"}
+    
+    var w Writer = ext
+    w.Write("world")
+    assert(buf.data == "world", "test12: promoted Write should work")
+    fmt.Println("Test 12 PASSED: promoted Write")
+}
+
+// Test 13: ReadWriter with one shadowed, one promoted
+func test13() {
+    buf := &MyBuffer{data: "test"}
+    ext := &ExtendedBuffer{MyBuffer: buf, prefix: ">>"}
+    
+    var rw ReadWriter = ext
+    assert(rw.Read() == ">>test", "test13: shadowed Read")
+    rw.Write("data")
+    assert(rw.Read() == ">>data", "test13: Read after Write")
+    fmt.Println("Test 13 PASSED: ReadWriter mixed shadow/promoted")
+}
+
+func main() {
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    test6()
+    test7()
+    test8()
+    test9()
+    test10()
+    test11()
+    test12()
+    test13()
+    
+    fmt.Println("")
+    fmt.Println("=== method_shadow_iface: ALL 13 TESTS PASSED ===")
+}
