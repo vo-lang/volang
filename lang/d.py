@@ -496,7 +496,7 @@ class TestRunner:
             self._setup_32bit_cli_cache()
 
         if single_file:
-            self._run_single_file(single_file)
+            self._run_single_file(single_file, mode)
             return
 
         print(f"{Colors.BOLD}Running Vo integration tests...{Colors.NC}\n")
@@ -614,7 +614,7 @@ class TestRunner:
 
         self._print_results()
 
-    def _run_single_file(self, file: str):
+    def _run_single_file(self, file: str, mode: str):
         path = Path(file)
         if not path.exists():
             path = TEST_DIR / file
@@ -628,10 +628,29 @@ class TestRunner:
         if self.arch == '32':
             env['QEMU_LD_PREFIX'] = QEMU_ARM_LD_PREFIX
 
-        print(f"Running: {path}")
-        cmd = self._make_vo_cmd('run', str(path))
-        code, stdout, stderr = run_cmd(cmd, env=env, capture=False)
-        sys.exit(code)
+        # Determine which modes to run
+        run_vm = mode in ('vm', 'both')
+        run_jit = mode in ('jit', 'both') and self.arch != '32'
+
+        if run_vm:
+            print(f"Running [vm]: {path}")
+            cmd = self._make_vo_cmd('run', str(path), '--mode=vm')
+            if run_jit:
+                env['VO_JIT_CALL_THRESHOLD'] = '1'
+            code, stdout, stderr = run_cmd(cmd, env=env, capture=False)
+            if code != 0:
+                sys.exit(code)
+
+        if run_jit:
+            print(f"Running [jit]: {path}")
+            jit_env = env.copy()
+            jit_env['VO_JIT_CALL_THRESHOLD'] = '1'
+            cmd = self._make_vo_cmd('run', str(path), '--mode=jit')
+            code, stdout, stderr = run_cmd(cmd, env=jit_env, capture=False)
+            if code != 0:
+                sys.exit(code)
+
+        sys.exit(0)
 
     def _run_should_fail_test(self, file: str):
         """Run a test that must fail at compile/type-check stage."""
