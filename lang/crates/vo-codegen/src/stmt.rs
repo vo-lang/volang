@@ -2280,15 +2280,14 @@ fn compile_type_switch(
         func.enter_scope();
         
         // If assign variable is specified, bind it to the asserted value
+        // For default case (types.is_empty()), single_type is None -> interface type
         if let Some(assign_name) = &type_switch.assign {
-            if !case.types.is_empty() {
-                let single_type = get_single_concrete_type(&case.types)
-                    .map(|te| info.type_expr_type(te.id));
-                emit_type_switch_binding(
-                    assign_name.symbol, single_type, case.span, iface_slot,
-                    ctx, func, info,
-                );
-            }
+            let single_type = get_single_concrete_type(&case.types)
+                .map(|te| info.type_expr_type(te.id));
+            emit_type_switch_binding(
+                assign_name.symbol, single_type, case.span, iface_slot,
+                ctx, func, info,
+            );
         }
         
         // Compile case body

@@ -1,0 +1,58 @@
+// Regression test for bug: type switch default branch variable not bound
+// Bug: Using `switch x := v.(type) { default: _ = x }` caused VariableNotFound error
+// Fix: Always emit variable binding in type switch, including for default case
+package main
+
+import "fmt"
+
+type Foo struct {
+	val int
+}
+
+type Bar struct {
+	name string
+}
+
+func checkType(v any) string {
+	switch x := v.(type) {
+	case Foo:
+		return fmt.Sprintf("Foo:%d", x.val)
+	case Bar:
+		return fmt.Sprintf("Bar:%s", x.name)
+	default:
+		// x should be bound as interface{} in default case
+		_ = x
+		return fmt.Sprintf("other:%T", x)
+	}
+}
+
+func main() {
+	// Test cases matching specific types
+	assert(checkType(Foo{val: 42}) == "Foo:42", "Foo case")
+	assert(checkType(Bar{name: "test"}) == "Bar:test", "Bar case")
+	
+	// Test case hitting default - x is bound as interface{}
+	assert(checkType(123) == "other:int", "default case int")
+	assert(checkType("hello") == "other:string", "default case string")
+	assert(checkType(3.14) == "other:float64", "default case float64")
+	
+	// Test with nil
+	var nilVal any = nil
+	result := checkType(nilVal)
+	assert(result == "other:<nil>", "default case nil, got: "+result)
+	
+	// Test using x in default case - x is bound as interface{}
+	var v any = "test_string"
+	matched := false
+	switch x := v.(type) {
+	case int:
+		_ = x
+	default:
+		matched = true
+		// x is properly bound in default case
+		_ = x
+	}
+	assert(matched, "should hit default case")
+	
+	fmt.Println("bug_type_switch_default_var: ok")
+}
