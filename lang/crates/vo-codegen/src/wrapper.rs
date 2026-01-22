@@ -185,15 +185,8 @@ pub fn generate_method_expr_promoted_wrapper(
     let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver extraction based on path
-    emit_receiver_through_path(
-        &mut builder,
-        outer_recv,
-        outer_is_pointer,
-        args_start,
-        &embed_path.steps,
-        expects_ptr_recv,
-        recv_slots_for_call,
-    );
+    let start = crate::embed::TraverseStart { reg: outer_recv, is_pointer: outer_is_pointer };
+    crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, expects_ptr_recv, recv_slots_for_call, args_start);
     
     // Copy forwarded params
     if let Some(first_param) = first_param_slot {
@@ -206,25 +199,6 @@ pub fn generate_method_expr_promoted_wrapper(
     
     let func_def = builder.build();
     ctx.add_function(func_def)
-}
-
-/// Emit receiver extraction through embed path.
-/// 
-/// Thin wrapper around `embed::emit_embed_path_traversal` for backwards compatibility.
-fn emit_receiver_through_path(
-    builder: &mut FuncBuilder,
-    outer_recv: u16,
-    outer_is_pointer: bool,
-    args_start: u16,
-    steps: &[crate::embed::EmbedStep],
-    expects_ptr_recv: bool,
-    recv_slots: u16,
-) {
-    let start = crate::embed::TraverseStart {
-        reg: outer_recv,
-        is_pointer: outer_is_pointer,
-    };
-    crate::embed::emit_embed_path_traversal(builder, start, steps, expects_ptr_recv, recv_slots, args_start);
 }
 
 /// Generate a wrapper for promoted method that navigates through embedded fields
@@ -285,15 +259,8 @@ pub fn generate_promoted_wrapper(
     
     // Emit receiver loading based on embedding type
     // For promoted wrapper, outer is always GcRef (outer_is_pointer = true)
-    emit_receiver_through_path(
-        &mut builder,
-        outer_gcref,
-        true,  // outer_is_pointer
-        args_start,
-        &path_info.steps,
-        is_pointer_receiver,
-        recv_slots_for_call,
-    );
+    let start = crate::embed::TraverseStart { reg: outer_gcref, is_pointer: true };
+    crate::embed::emit_embed_path_traversal(&mut builder, start, &path_info.steps, is_pointer_receiver, recv_slots_for_call, args_start);
     
     // Copy forwarded params
     if let Some(first_param) = first_param_slot {
@@ -326,28 +293,35 @@ fn emit_call_and_return(builder: &mut FuncBuilder, func_id: u32, args_start: u16
     builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
 }
 
-/// Generate wrapper for methods coming from embedded interface fields.
+/// Receiver type for embedded interface wrapper generation.
+pub enum EmbedIfaceRecvType {
+    /// GcRef to outer struct (for interface dispatch)
+    GcRef,
+    /// Value or pointer based on outer_is_pointer flag (for method expression)
+    ValueOrPointer { outer_type: TypeKey, outer_is_pointer: bool },
+}
+
+/// Generate wrapper for embedded interface method dispatch.
 /// 
-/// When a struct embeds an interface:
-/// ```
-/// type Outer struct { Inner }  // Inner is interface type
-/// ```
-/// calling `outer.Foo()` through interface dispatch needs a wrapper that:
-/// 1. Receives GcRef to Outer
-/// 2. Reads the embedded interface (2 slots: itab, data)
-/// 3. Calls the method on that interface via CallIface
-pub fn generate_embedded_iface_wrapper(
+/// Unified function for both:
+/// - Interface dispatch: receiver is always GcRef
+/// - Method expression: receiver is value or pointer
+/// 
+/// The wrapper:
+/// 1. Receives outer struct (GcRef, value, or pointer)
+/// 2. Extracts embedded interface (2 slots) via path traversal
+/// 3. Calls the method via CallIface
+fn generate_embedded_iface_wrapper_impl(
     ctx: &mut CodegenContext,
-    _outer_type: TypeKey,
-    embed_offset: u16,
+    embed_path: &crate::embed::EmbedPathInfo,
     iface_type: TypeKey,
     method_name: &str,
     method_obj: vo_analysis::objects::ObjKey,
+    recv_type: EmbedIfaceRecvType,
+    wrapper_suffix: &str,
     tc_objs: &vo_analysis::objects::TCObjects,
     interner: &vo_common::SymbolInterner,
 ) -> u32 {
-    let offset = embed_offset;
-    
     // Get interface meta to find method index
     let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, tc_objs, interner);
     let iface_meta = &ctx.module().interface_metas[iface_meta_id as usize];
@@ -355,47 +329,92 @@ pub fn generate_embedded_iface_wrapper(
         .position(|n| n == method_name)
         .expect("method must exist in embedded interface");
     
-    // Get method signature from the interface method obj
-    let method_type = tc_objs.lobjs[method_obj].typ()
-        .expect("interface method must have type");
-    let sig = tc_objs.types[method_type].try_as_signature()
-        .expect("method type must be signature");
-    
-    // Compute param and return slots
+    // Get method signature
+    let method_type = tc_objs.lobjs[method_obj].typ().expect("interface method must have type");
+    let sig = tc_objs.types[method_type].try_as_signature().expect("method type must be signature");
     let param_slots = tuple_slot_count(sig.params(), tc_objs);
     let ret_slots = tuple_slot_count(sig.results(), tc_objs);
     
     // Build wrapper
-    let wrapper_name = format!("{}$embed_iface", method_name);
+    let wrapper_name = format!("{}{}", method_name, wrapper_suffix);
     let mut builder = FuncBuilder::new(&wrapper_name);
     
-    // Receiver: GcRef to outer struct
-    builder.set_recv_slots(1);
-    let outer_gcref = builder.define_param(None, 1, &[SlotType::GcRef]);
+    // Define receiver based on type
+    let (outer_recv, outer_is_pointer) = match recv_type {
+        EmbedIfaceRecvType::GcRef => {
+            builder.set_recv_slots(1);
+            (builder.define_param(None, 1, &[SlotType::GcRef]), true)
+        }
+        EmbedIfaceRecvType::ValueOrPointer { outer_type, outer_is_pointer } => {
+            let slots = if outer_is_pointer { 1 } else {
+                vo_analysis::check::type_info::type_slot_count(outer_type, tc_objs)
+            };
+            builder.set_recv_slots(slots);
+            let recv = if outer_is_pointer {
+                builder.define_param(None, 1, &[SlotType::GcRef])
+            } else {
+                builder.define_param(None, slots, &vec![SlotType::Value; slots as usize])
+            };
+            (recv, outer_is_pointer)
+        }
+    };
     
     // Forward parameters
     let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
-    // Load embedded interface (2 slots) from outer struct
+    // Load embedded interface (2 slots)
     let iface_slot = builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
-    builder.emit_ptr_get(iface_slot, outer_gcref, offset, 2);
+    let start = crate::embed::TraverseStart { reg: outer_recv, is_pointer: outer_is_pointer };
+    crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, false, 2, iface_slot);
     
-    // Allocate args for CallIface (params only, receiver is separate)
+    // Allocate args and copy forwarded params
     let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
-    
-    // Copy forwarded params
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
     
-    // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
+    // CallIface and return
     let c = crate::type_info::encode_call_args(param_slots, ret_slots);
     builder.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
-    
-    // Return
     builder.set_ret_slots(ret_slots);
     builder.emit_op(Opcode::Return, args_start, ret_slots, 0);
     
-    let func_def = builder.build();
-    ctx.add_function(func_def)
+    ctx.add_function(builder.build())
+}
+
+/// Generate wrapper for method expression on embedded interface.
+pub fn generate_method_expr_embedded_iface_wrapper(
+    ctx: &mut CodegenContext,
+    outer_type: TypeKey,
+    embed_path: &crate::embed::EmbedPathInfo,
+    iface_type: TypeKey,
+    method_name: &str,
+    method_obj: vo_analysis::objects::ObjKey,
+    outer_is_pointer: bool,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    interner: &vo_common::SymbolInterner,
+) -> u32 {
+    generate_embedded_iface_wrapper_impl(
+        ctx, embed_path, iface_type, method_name, method_obj,
+        EmbedIfaceRecvType::ValueOrPointer { outer_type, outer_is_pointer },
+        "$mexpr_iface", tc_objs, interner,
+    )
+}
+
+/// Generate wrapper for embedded interface method through interface dispatch.
+pub fn generate_embedded_iface_wrapper(
+    ctx: &mut CodegenContext,
+    _outer_type: TypeKey,
+    embed_path: &crate::embed::EmbedPathInfo,
+    iface_type: TypeKey,
+    method_name: &str,
+    method_obj: vo_analysis::objects::ObjKey,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    interner: &vo_common::SymbolInterner,
+) -> u32 {
+    generate_embedded_iface_wrapper_impl(
+        ctx, embed_path, iface_type, method_name, method_obj,
+        EmbedIfaceRecvType::GcRef,
+        "$embed_iface", tc_objs, interner,
+    )
 }

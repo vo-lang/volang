@@ -1,0 +1,54 @@
+// Test: method expression on embedded interface through pointer embedding
+// Bug: generate_method_expr_embedded_iface_wrapper doesn't handle pointer steps
+package main
+
+import "fmt"
+
+type Reader interface {
+	Read() int
+}
+
+type MyReader struct {
+	data int
+}
+
+func (r MyReader) Read() int {
+	return r.data
+}
+
+// Inner embeds Reader
+type Inner struct {
+	Reader
+}
+
+// Outer embeds *Inner (pointer embedding)
+type Outer struct {
+	padding int  // offset 0
+	*Inner       // offset 1, pointer to Inner which contains Reader
+}
+
+func main() {
+	inner := &Inner{Reader: MyReader{data: 42}}
+	o := Outer{
+		padding: 999,
+		Inner:   inner,
+	}
+
+	// Method expression through pointer embedding
+	// Path: Outer -> *Inner (pointer step!) -> Reader
+	// Bug: wrapper uses simple offset, doesn't dereference the pointer
+	f := Outer.Read
+	result := f(o)
+	assert(result == 42, fmt.Sprintf("Outer.Read should return 42, got %d", result))
+
+	// Also test (*Outer).Read
+	fp := (*Outer).Read
+	op := &Outer{
+		padding: 888,
+		Inner:   &Inner{Reader: MyReader{data: 77}},
+	}
+	result2 := fp(op)
+	assert(result2 == 77, fmt.Sprintf("(*Outer).Read should return 77, got %d", result2))
+
+	fmt.Println("method_expr_embed_iface_ptr_step: ok")
+}

@@ -374,6 +374,38 @@ fn compile_method_call(
     compile_method_call_dispatch(expr, call, sel, &call_info, dst, ctx, func, info)
 }
 
+/// Emit interface method call (common for Interface and EmbeddedInterface dispatch).
+fn emit_interface_call(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    iface_type: vo_analysis::objects::TypeKey,
+    method_idx: u32,
+    iface_slot: u16,
+    method_name: &str,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
+    let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let ret_type = info.expr_type(expr.id);
+    let ret_slots = info.type_slot_count(ret_type);
+    let ret_slot_types = info.type_slot_types(ret_type);
+    let buffer_size = arg_slots.max(ret_slots).max(1);
+    let args_start = alloc_call_buffer(func, buffer_size, ret_slots, &ret_slot_types);
+    
+    compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
+    
+    let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
+    func.emit_with_flags(Opcode::CallIface, method_idx as u8, iface_slot, args_start, c);
+    
+    if ret_slots > 0 && dst != args_start {
+        func.emit_copy(dst, args_start, ret_slots);
+    }
+    Ok(())
+}
+
 /// Dispatch method call based on MethodCallInfo.
 fn compile_method_call_dispatch(
     expr: &Expr,
@@ -392,60 +424,19 @@ fn compile_method_call_dispatch(
     
     match &call_info.dispatch {
         MethodDispatch::Interface { method_idx } => {
-            // Interface dispatch
-            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-            let (param_types, is_variadic) = info.get_interface_method_signature(recv_type, method_name);
-            let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-            let ret_type = info.expr_type(expr.id);
-            let ret_slots = info.type_slot_count(ret_type);
-            // Return values are written to beginning of buffer, use proper types for GC tracking
-            let ret_slot_types = info.type_slot_types(ret_type);
-            let buffer_size = arg_slots.max(ret_slots).max(1);
-            let args_start = alloc_call_buffer(func, buffer_size, ret_slots, &ret_slot_types);
-            
-            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-            
-            let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
-            func.emit_with_flags(Opcode::CallIface, *method_idx as u8, recv_reg, args_start, c);
-            
-            if ret_slots > 0 && dst != args_start {
-                func.emit_copy(dst, args_start, ret_slots);
-            }
-            Ok(())
+            // Interface dispatch - interface is the receiver directly
+            let iface_slot = compile_expr(&sel.expr, ctx, func, info)?;
+            emit_interface_call(expr, call, recv_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
         }
-        MethodDispatch::EmbeddedInterface { embed_offset, iface_type, method_idx } => {
-            // Embedded interface dispatch
+        MethodDispatch::EmbeddedInterface { iface_type, method_idx } => {
+            // Embedded interface dispatch - extract interface first
             let recv_is_ptr = info.is_pointer(recv_type);
-            let iface_slot = func.alloc_interface();  // Interface is 2 slots
+            let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
+            let iface_slot = func.alloc_interface();
+            let start = crate::embed::TraverseStart { reg: recv_reg, is_pointer: recv_is_ptr };
+            call_info.emit_target(func, start, iface_slot);
             
-            if recv_is_ptr || call_info.embed_path.has_pointer_step {
-                // Receiver is a pointer or path contains pointer - use ptr_get
-                let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                func.emit_ptr_get(iface_slot, recv_reg, *embed_offset, 2);
-            } else {
-                // Receiver is a stack value - use copy from stack slot + offset
-                let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-                func.emit_copy(iface_slot, recv_reg + embed_offset, 2);
-            }
-            
-            let (param_types, is_variadic) = info.get_interface_method_signature(*iface_type, method_name);
-            let arg_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-            let ret_type = info.expr_type(expr.id);
-            let ret_slots = info.type_slot_count(ret_type);
-            // Return values are written to beginning of buffer, use proper types for GC tracking
-            let ret_slot_types = info.type_slot_types(ret_type);
-            let buffer_size = arg_slots.max(ret_slots).max(1);
-            let args_start = alloc_call_buffer(func, buffer_size, ret_slots, &ret_slot_types);
-            
-            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-            
-            let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
-            func.emit_with_flags(Opcode::CallIface, *method_idx as u8, iface_slot, args_start, c);
-            
-            if ret_slots > 0 && dst != args_start {
-                func.emit_copy(dst, args_start, ret_slots);
-            }
-            Ok(())
+            emit_interface_call(expr, call, *iface_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
         }
         MethodDispatch::Static { func_id, expects_ptr_recv } => {
             // Static call

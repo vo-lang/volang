@@ -1,0 +1,106 @@
+// Test: method expressions on embedded interface types
+// This tests Type.Method where Type embeds an interface
+package main
+
+import "fmt"
+
+type Reader interface {
+    Read() int
+}
+
+type MyReader struct {
+    data int
+}
+
+func (r MyReader) Read() int {
+    return r.data
+}
+
+// Wrapper embeds Reader interface
+type Wrapper struct {
+    Reader
+    extra int
+}
+
+// DeepWrapper embeds Wrapper which embeds Reader
+type DeepWrapper struct {
+    Wrapper
+    name string
+}
+
+// MixedWrapper embeds both interface and struct
+type Base struct {
+    val int
+}
+
+func (b Base) GetVal() int {
+    return b.val
+}
+
+type MixedWrapper struct {
+    Reader
+    Base
+    id int
+}
+
+func main() {
+    // Test 1: Method expression on embedded interface - Wrapper.Read
+    w := Wrapper{Reader: MyReader{data: 42}, extra: 100}
+    f1 := Wrapper.Read
+    result := f1(w)
+    assert(result == 42, "Wrapper.Read method expr failed")
+
+    // Test 2: Method expression with different instances
+    w2 := Wrapper{Reader: MyReader{data: 99}, extra: 200}
+    result2 := f1(w2)
+    assert(result2 == 99, "Wrapper.Read on different instance failed")
+
+    // Test 3: Deep embedding - method expr on embedded interface through chain
+    dw := DeepWrapper{
+        Wrapper: Wrapper{Reader: MyReader{data: 77}, extra: 10},
+        name: "deep",
+    }
+    f3 := DeepWrapper.Read
+    result3 := f3(dw)
+    assert(result3 == 77, "DeepWrapper.Read method expr failed")
+
+    // Test 4: Mixed wrapper - method from embedded interface
+    mw := MixedWrapper{
+        Reader: MyReader{data: 55},
+        Base: Base{val: 33},
+        id: 1,
+    }
+    f4 := MixedWrapper.Read
+    result4 := f4(mw)
+    assert(result4 == 55, "MixedWrapper.Read method expr failed")
+
+    // Test 5: Mixed wrapper - method from embedded struct
+    f5 := MixedWrapper.GetVal
+    result5 := f5(mw)
+    assert(result5 == 33, "MixedWrapper.GetVal method expr failed")
+
+    // Test 6: Method expression stored in slice
+    funcs := []func(Wrapper) int{Wrapper.Read}
+    result6 := funcs[0](w)
+    assert(result6 == 42, "method expr in slice failed")
+
+    // Test 7: Method expression stored in map
+    m := make(map[string]func(Wrapper) int)
+    m["read"] = Wrapper.Read
+    result7 := m["read"](w)
+    assert(result7 == 42, "method expr in map failed")
+
+    // Test 8: Pointer receiver method expression on embedded interface
+    // (*Wrapper).Read - receives *Wrapper, reads interface from heap
+    f8 := (*Wrapper).Read
+    wp := &Wrapper{Reader: MyReader{data: 88}, extra: 0}
+    result8 := f8(wp)
+    assert(result8 == 88, "(*Wrapper).Read method expr failed")
+
+    // Test 9: Modify through pointer and verify method expr sees change
+    wp.Reader = MyReader{data: 123}
+    result9 := f8(wp)
+    assert(result9 == 123, "(*Wrapper).Read should see modified interface")
+
+    fmt.Println("method_expr_embed_iface: ok")
+}

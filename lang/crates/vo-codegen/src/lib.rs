@@ -748,13 +748,13 @@ fn collect_promoted_methods(
                     
                     let path_info = crate::embed::analyze_embed_path(type_key, &indices, tc_objs);
                     
-                    let func_id = if let Some(embed_iface) = path_info.embedded_iface {
+                    let func_id = if let Some(iface_type) = path_info.embedded_iface_type {
                         // Method from embedded interface
                         wrapper::generate_embedded_iface_wrapper(
                             ctx,
                             type_key,
-                            embed_iface.offset,
-                            embed_iface.iface_type,
+                            &path_info,
+                            iface_type,
                             &method_name,
                             obj_key,
                             tc_objs,

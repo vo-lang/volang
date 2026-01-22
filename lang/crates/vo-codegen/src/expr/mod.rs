@@ -799,9 +799,9 @@ fn compile_method_value(
                 sel, recv_type, func_id, expects_ptr_recv, dst, ctx, func, info
             );
         }
-        crate::embed::MethodDispatch::EmbeddedInterface { embed_offset, iface_type, method_idx } => {
+        crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
             return compile_method_value_embedded_iface(
-                sel, recv_type, embed_offset, iface_type, method_idx, method_name, dst, ctx, func, info
+                sel, recv_type, &call_info, method_name, dst, ctx, func, info
             );
         }
         crate::embed::MethodDispatch::Interface { .. } => {
@@ -870,57 +870,58 @@ fn compile_method_value_static(
     Ok(())
 }
 
+/// Common logic for creating interface method value closure.
+/// Both direct interface and embedded interface method values use this.
+fn emit_iface_method_value_closure(
+    iface_type: vo_analysis::objects::TypeKey,
+    method_idx: u32,
+    method_name: &str,
+    iface_reg: u16,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let (param_slots, ret_slots) = info.get_interface_method_slots(iface_type, method_name)
+        .ok_or_else(|| CodegenError::Internal(format!(
+            "method {} not found on interface {:?}", method_name, iface_type
+        )))?;
+    
+    let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
+        method_idx, param_slots, ret_slots, method_name,
+    )?;
+    
+    func.emit_closure_new(dst, wrapper_id, 2);
+    func.emit_ptr_set_with_barrier(dst, 1, iface_reg, 2, true);
+    Ok(())
+}
+
 /// Compile method value for embedded interface dispatch.
-/// The outer struct contains an embedded interface field, and we're taking
-/// a method value from that interface.
-/// 
-/// Simpler approach: extract the embedded interface value at compile time,
-/// then use the existing interface method value machinery.
 fn compile_method_value_embedded_iface(
     sel: &vo_syntax::ast::SelectorExpr,
     recv_type: vo_analysis::objects::TypeKey,
-    embed_offset: u16,
-    iface_type: vo_analysis::objects::TypeKey,
-    method_idx: u32,
+    call_info: &crate::embed::MethodCallInfo,
     method_name: &str,
     dst: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Compile the receiver expression
-    let recv_slots = info.type_slot_count(recv_type);
-    let recv_slot_types = info.type_slot_types(recv_type);
-    let recv_reg = func.alloc_temp_typed(&recv_slot_types);
-    compile_expr_to(&sel.expr, recv_reg, ctx, func, info)?;
+    let (iface_type, method_idx) = match &call_info.dispatch {
+        crate::embed::MethodDispatch::EmbeddedInterface { iface_type, method_idx } => (*iface_type, *method_idx),
+        _ => return Err(CodegenError::Internal("expected EmbeddedInterface dispatch".to_string())),
+    };
     
-    // Extract the embedded interface (2 slots) from the receiver at embed_offset
+    let recv_is_ptr = info.is_pointer(recv_type);
+    let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
     let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-    func.emit_copy(iface_reg, recv_reg + embed_offset, 2);
+    let start = crate::embed::TraverseStart { reg: recv_reg, is_pointer: recv_is_ptr };
+    call_info.emit_target(func, start, iface_reg);
     
-    // Get method signature slots from interface type
-    let (param_slots, ret_slots) = info.get_interface_method_slots(iface_type, method_name)
-        .ok_or_else(|| CodegenError::Internal(format!(
-            "method {} not found on interface {:?}", method_name, iface_type
-        )))?;
-    
-    // Use existing interface method value wrapper
-    let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
-        method_idx,
-        param_slots,
-        ret_slots,
-        method_name,
-    )?;
-    
-    // Create closure with 2 captures (interface slot0 + data)
-    func.emit_closure_new(dst, wrapper_id, 2);
-    func.emit_ptr_set_with_barrier(dst, 1, iface_reg, 2, true);
-    
-    Ok(())
+    emit_iface_method_value_closure(iface_type, method_idx, method_name, iface_reg, dst, ctx, func, info)
 }
 
 /// Compile interface method value: iface.Method
-/// Creates a closure that captures the interface value and calls via itab dispatch.
 fn compile_interface_method_value(
     sel: &vo_syntax::ast::SelectorExpr,
     recv_type: vo_analysis::objects::TypeKey,
@@ -930,38 +931,14 @@ fn compile_interface_method_value(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Get method index for this interface type
     let method_idx = ctx.get_interface_method_index(
-        recv_type, 
-        method_name, 
-        &info.project.tc_objs, 
-        &info.project.interner
+        recv_type, method_name, &info.project.tc_objs, &info.project.interner
     );
     
-    // Get method signature slots from interface type
-    let (param_slots, ret_slots) = info.get_interface_method_slots(recv_type, method_name)
-        .ok_or_else(|| CodegenError::Internal(format!(
-            "method {} not found on interface {:?}", method_name, recv_type
-        )))?;
-    
-    // Compile interface expression (2 slots: slot0 + data)
     let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
     compile_expr_to(&sel.expr, iface_reg, ctx, func, info)?;
     
-    // Get or create wrapper function that uses CallIface
-    let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
-        method_idx,
-        param_slots,
-        ret_slots,
-        method_name,
-    )?;
-    
-    // Create closure with 2 captures (interface slot0 + data)
-    func.emit_closure_new(dst, wrapper_id, 2);
-    // Set captures at offset 1 (after ClosureHeader)
-    func.emit_ptr_set_with_barrier(dst, 1, iface_reg, 2, true);
-    
-    Ok(())
+    emit_iface_method_value_closure(recv_type, method_idx, method_name, iface_reg, dst, ctx, func, info)
 }
 
 /// Compile method expression (T.M or (*T).M).
@@ -995,41 +972,82 @@ fn compile_method_expr(
         "method {} not found on type {:?}", method_name, recv_type
     )))?;
     
-    let (method_func_id, expects_ptr_recv) = match call_info.dispatch {
-        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => (func_id, expects_ptr_recv),
-        _ => return Err(CodegenError::Internal("method expression requires static dispatch".to_string())),
-    };
-    
-    // For promoted methods (embedding path is not empty), generate a wrapper
-    let final_func_id = if !call_info.embed_path.steps.is_empty() {
-        // Get the base type (strip pointer if recv_type is *T)
-        let base_type = if vo_analysis::check::type_info::is_pointer(recv_type, &info.project.tc_objs) {
-            let underlying = vo_analysis::typ::underlying_type(recv_type, &info.project.tc_objs);
-            if let vo_analysis::typ::Type::Pointer(p) = &info.project.tc_objs.types[underlying] {
-                p.base()
-            } else {
-                recv_type
-            }
+    // Get the base type (strip pointer if recv_type is *T)
+    let base_type = if vo_analysis::check::type_info::is_pointer(recv_type, &info.project.tc_objs) {
+        let underlying = vo_analysis::typ::underlying_type(recv_type, &info.project.tc_objs);
+        if let vo_analysis::typ::Type::Pointer(p) = &info.project.tc_objs.types[underlying] {
+            p.base()
         } else {
             recv_type
-        };
-        
-        crate::wrapper::generate_method_expr_promoted_wrapper(
-            ctx,
-            base_type,
-            &call_info.embed_path,
-            method_func_id,
-            expects_ptr_recv,
-            call_info.recv_is_pointer,
-            method_name,
-            &info.project.tc_objs,
-        )
+        }
     } else {
-        method_func_id
+        recv_type
+    };
+    
+    let final_func_id = match call_info.dispatch {
+        crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
+            // For promoted methods (embedding path is not empty), generate a wrapper
+            if !call_info.embed_path.steps.is_empty() {
+                crate::wrapper::generate_method_expr_promoted_wrapper(
+                    ctx,
+                    base_type,
+                    &call_info.embed_path,
+                    func_id,
+                    expects_ptr_recv,
+                    call_info.recv_is_pointer,
+                    method_name,
+                    &info.project.tc_objs,
+                )
+            } else {
+                func_id
+            }
+        }
+        crate::embed::MethodDispatch::EmbeddedInterface { iface_type, .. } => {
+            // Method expression on embedded interface - generate wrapper
+            // Get the method obj from interface type
+            let method_obj = get_interface_method_obj(iface_type, method_name, &info.project.tc_objs)
+                .ok_or_else(|| CodegenError::Internal(format!(
+                    "method {} not found in embedded interface", method_name
+                )))?;
+            
+            crate::wrapper::generate_method_expr_embedded_iface_wrapper(
+                ctx,
+                base_type,
+                &call_info.embed_path,
+                iface_type,
+                method_name,
+                method_obj,
+                call_info.recv_is_pointer,
+                &info.project.tc_objs,
+                &info.project.interner,
+            )
+        }
+        crate::embed::MethodDispatch::Interface { .. } => {
+            return Err(CodegenError::Internal("method expression on interface type not supported".to_string()));
+        }
     };
     
     func.emit_closure_new(dst, final_func_id, 0);
     Ok(())
+}
+
+/// Get the ObjKey for a method in an interface type by name.
+fn get_interface_method_obj(
+    iface_type: vo_analysis::objects::TypeKey,
+    method_name: &str,
+    tc_objs: &vo_analysis::objects::TCObjects,
+) -> Option<vo_analysis::objects::ObjKey> {
+    let underlying = vo_analysis::typ::underlying_type(iface_type, tc_objs);
+    if let vo_analysis::typ::Type::Interface(iface) = &tc_objs.types[underlying] {
+        let all_methods = iface.all_methods();
+        let methods = all_methods.as_ref().map(|v| v.as_slice()).unwrap_or(iface.methods());
+        for &method in methods {
+            if tc_objs.lobjs[method].name() == method_name {
+                return Some(method);
+            }
+        }
+    }
+    None
 }
 
 fn compile_pkg_qualified_name(

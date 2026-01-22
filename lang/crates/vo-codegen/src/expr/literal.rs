@@ -9,8 +9,6 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
-use super::compile_expr;
-
 /// Compile a map literal key, handling interface key boxing.
 /// Delegates to compile_map_key_expr for Expr, handles Ident specially.
 fn compile_map_lit_key(

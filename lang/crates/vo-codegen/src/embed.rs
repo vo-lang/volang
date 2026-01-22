@@ -37,8 +37,10 @@ pub struct EmbedPathInfo {
     pub total_offset: u16,
     /// True if any step is a pointer type (requires traversal logic)
     pub has_pointer_step: bool,
-    /// If the path ends at an interface field, this contains the interface info
-    pub embedded_iface: Option<EmbeddedIfaceInfo>,
+    /// Number of slots for the final type (2 for interface, computed for structs)
+    pub final_slots: u16,
+    /// If the path ends at an interface field, this is the interface type
+    pub embedded_iface_type: Option<TypeKey>,
 }
 
 /// A single step in an embedding path.
@@ -49,16 +51,6 @@ pub struct EmbedStep {
     /// Offset of this field within its containing struct
     pub offset: u16,
 }
-
-/// Info about an embedded interface at the end of the path.
-#[derive(Debug, Clone, Copy)]
-pub struct EmbeddedIfaceInfo {
-    /// Offset to the interface field
-    pub offset: u16,
-    /// The interface type
-    pub iface_type: TypeKey,
-}
-
 
 /// Analyze an embedding path from indices (as returned by Selection or lookup).
 ///
@@ -99,7 +91,6 @@ fn analyze_embed_path_impl(
 ) -> EmbedPathInfo {
     let mut steps = Vec::new();
     let mut current_type = recv_type;
-    let mut embedded_iface = None;
     
     // Strip pointer from receiver if needed
     if layout::is_pointer(current_type, tc_objs) {
@@ -121,11 +112,15 @@ fn analyze_embed_path_impl(
         if is_interface {
             // For embedded interface, calculate total offset from steps
             let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
-            embedded_iface = Some(EmbeddedIfaceInfo {
-                offset: total_offset,
-                iface_type: field_type,
-            });
-            break;
+            let has_pointer_step = steps.iter().any(|s| s.is_pointer);
+            return EmbedPathInfo {
+                steps,
+                final_type: field_type,
+                total_offset,
+                has_pointer_step,
+                final_slots: 2,  // interface is always 2 slots
+                embedded_iface_type: Some(field_type),
+            };
         }
         
         if is_pointer {
@@ -140,13 +135,15 @@ fn analyze_embed_path_impl(
     
     let total_offset = steps.iter().map(|s| s.offset).sum();
     let has_pointer_step = steps.iter().any(|s| s.is_pointer);
+    let final_slots = layout::type_slot_count(current_type, tc_objs);
     
     EmbedPathInfo {
         steps,
         final_type: current_type,
         total_offset,
         has_pointer_step,
-        embedded_iface,
+        final_slots,
+        embedded_iface_type: None,
     }
 }
 
@@ -167,8 +164,8 @@ pub enum MethodDispatch {
         method_idx: u32,
     },
     /// Embedded interface - load interface from struct field, then dispatch
+    /// Note: offset info is in EmbedPathInfo, not here
     EmbeddedInterface {
-        embed_offset: u16,
         iface_type: TypeKey,
         method_idx: u32,
     },
@@ -201,6 +198,29 @@ impl MethodCallInfo {
         } else {
             self.embed_path.final_type
         }
+    }
+    
+    /// Emit code to extract the target (receiver or interface) for this method call.
+    /// 
+    /// This is the unified entry point for target extraction, handling all dispatch types:
+    /// - Static: extract receiver (value or pointer based on method signature)
+    /// - Interface: copy interface directly (no embedding)
+    /// - EmbeddedInterface: traverse path and extract interface
+    pub fn emit_target(
+        &self,
+        builder: &mut FuncBuilder,
+        start: TraverseStart,
+        dst: u16,
+    ) {
+        let (expects_ptr, slots) = match &self.dispatch {
+            MethodDispatch::Static { expects_ptr_recv, .. } => {
+                (*expects_ptr_recv, self.embed_path.final_slots)
+            }
+            MethodDispatch::EmbeddedInterface { .. } | MethodDispatch::Interface { .. } => {
+                (false, 2)  // interface is always value type, 2 slots
+            }
+        };
+        emit_embed_path_traversal(builder, start, &self.embed_path.steps, expects_ptr, slots, dst);
     }
 }
 
@@ -244,7 +264,8 @@ pub fn resolve_method_call(
                 final_type: recv_type,
                 total_offset: 0,
                 has_pointer_step: false,
-                embedded_iface: None,
+                final_slots: 2,
+                embedded_iface_type: None,
             },
             recv_is_pointer,
         });
@@ -257,12 +278,11 @@ pub fn resolve_method_call(
     let embed_path = analyze_embed_path(base_type, indices, tc_objs);
     
     // Case 2: Embedded interface - method comes from interface field
-    if let Some(embed_iface) = embed_path.embedded_iface {
-        let method_idx = ctx.get_interface_method_index(embed_iface.iface_type, method_name, tc_objs, interner);
+    if let Some(iface_type) = embed_path.embedded_iface_type {
+        let method_idx = ctx.get_interface_method_index(iface_type, method_name, tc_objs, interner);
         return Some(MethodCallInfo {
             dispatch: MethodDispatch::EmbeddedInterface {
-                embed_offset: embed_iface.offset,
-                iface_type: embed_iface.iface_type,
+                iface_type,
                 method_idx,
             },
             embed_path,

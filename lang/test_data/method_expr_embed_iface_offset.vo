@@ -1,0 +1,88 @@
+// Test: method expressions on embedded interface at non-zero offset
+package main
+
+import "fmt"
+
+type Reader interface {
+    Read() int
+}
+
+type Writer interface {
+    Write(v int)
+}
+
+type MyReader struct {
+    data int
+}
+
+func (r MyReader) Read() int {
+    return r.data
+}
+
+type MyWriter struct {
+    written int
+}
+
+func (w *MyWriter) Write(v int) {
+    w.written = v
+}
+
+// WrapperOffset has interface at non-zero offset (after x field)
+type WrapperOffset struct {
+    x int
+    Reader
+    y int
+}
+
+// MultiIface has two embedded interfaces
+type MultiIface struct {
+    Reader
+    Writer
+    name string
+}
+
+// DeepIface: struct -> struct -> interface
+type Inner struct {
+    Reader
+    val int
+}
+
+type DeepIface struct {
+    prefix int
+    Inner
+    suffix int
+}
+
+func main() {
+    // Test 1: Interface at non-zero offset
+    wo := WrapperOffset{x: 10, Reader: MyReader{data: 42}, y: 20}
+    f1 := WrapperOffset.Read
+    result1 := f1(wo)
+    assert(result1 == 42, "WrapperOffset.Read failed")
+
+    // Test 2: Pointer receiver with interface at non-zero offset
+    f2 := (*WrapperOffset).Read
+    wop := &WrapperOffset{x: 1, Reader: MyReader{data: 77}, y: 2}
+    result2 := f2(wop)
+    assert(result2 == 77, "(*WrapperOffset).Read failed")
+
+    // Test 3: Multiple embedded interfaces - first interface
+    mi := MultiIface{Reader: MyReader{data: 55}, Writer: &MyWriter{written: 0}, name: "test"}
+    f3 := MultiIface.Read
+    result3 := f3(mi)
+    assert(result3 == 55, "MultiIface.Read failed")
+
+    // Test 4: Deep embedding with interface
+    di := DeepIface{prefix: 1, Inner: Inner{Reader: MyReader{data: 99}, val: 2}, suffix: 3}
+    f4 := DeepIface.Read
+    result4 := f4(di)
+    assert(result4 == 99, "DeepIface.Read failed")
+
+    // Test 5: Pointer receiver on deep embedding
+    f5 := (*DeepIface).Read
+    dip := &DeepIface{prefix: 10, Inner: Inner{Reader: MyReader{data: 88}, val: 20}, suffix: 30}
+    result5 := f5(dip)
+    assert(result5 == 88, "(*DeepIface).Read failed")
+
+    fmt.Println("method_expr_embed_iface_offset: ok")
+}

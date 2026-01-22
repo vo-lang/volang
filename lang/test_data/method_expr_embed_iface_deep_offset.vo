@@ -1,0 +1,62 @@
+// Test: method expression on deeply embedded interface with non-zero offset
+// Bug: generate_method_expr_embedded_iface_wrapper uses only embed_offset,
+//      ignoring embed_path.steps offset
+package main
+
+import "fmt"
+
+type Reader interface {
+	Read() int
+}
+
+type MyReader struct {
+	data int
+}
+
+func (r MyReader) Read() int {
+	return r.data
+}
+
+// Inner embeds Reader at offset 0
+type Inner struct {
+	Reader
+}
+
+// Outer has padding before Inner, so Inner is at non-zero offset
+type Outer struct {
+	padding1 int  // offset 0
+	padding2 int  // offset 1
+	Inner         // offset 2, Inner.Reader is at offset 0 within Inner
+}
+
+func main() {
+	o := Outer{
+		padding1: 111,
+		padding2: 222,
+		Inner: Inner{
+			Reader: MyReader{data: 42},
+		},
+	}
+
+	// Method expression on deeply embedded interface
+	// Path: Outer -> Inner (offset 2) -> Reader (offset 0)
+	// Bug: only uses Reader's offset (0), ignores Inner's offset (2)
+	// So it reads padding1 (111) instead of the interface
+	f := Outer.Read
+	result := f(o)
+	assert(result == 42, fmt.Sprintf("Outer.Read should return 42, got %d", result))
+
+	// Also test pointer version
+	fp := (*Outer).Read
+	op := &Outer{
+		padding1: 333,
+		padding2: 444,
+		Inner: Inner{
+			Reader: MyReader{data: 99},
+		},
+	}
+	result2 := fp(op)
+	assert(result2 == 99, fmt.Sprintf("(*Outer).Read should return 99, got %d", result2))
+
+	fmt.Println("method_expr_embed_iface_deep_offset: ok")
+}
