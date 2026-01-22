@@ -1,0 +1,43 @@
+// Regression test: Constant folding of MinInt64 / -1 and MinInt64 % -1
+// Previously caused Rust panic "attempt to divide with overflow"
+// Fix: Use checked_div/checked_rem with BigInt fallback in vo-analysis/src/constant.rs
+//
+// Go constant semantics:
+// - Constants are arbitrary precision
+// - MinInt64 / -1 as constant = 9223372036854775808 (overflows int64)
+// - Assigning this to int64 is a compile-time error (correct!)
+// - Runtime MinInt64 / -1 wraps to MinInt64 (two's complement)
+package main
+
+import "fmt"
+
+const (
+    MaxInt64 = 1<<63 - 1
+    MinInt64 = -1 << 63
+)
+
+func main() {
+    // Runtime division: wraps in two's complement
+    minVal := int64(MinInt64)
+    maxVal := int64(MaxInt64)
+    
+    runtimeDiv := minVal / -1
+    assert(runtimeDiv == MinInt64, "runtime MinInt64/-1 should wrap to MinInt64")
+    
+    runtimeMod := minVal % -1
+    assert(runtimeMod == 0, "runtime MinInt64%-1 should be 0")
+    
+    // Normal constant division (no overflow)
+    assert(MaxInt64 / 2 == 4611686018427387903, "MaxInt64/2")
+    assert(MinInt64 / 2 == -4611686018427387904, "MinInt64/2")
+    assert(MaxInt64 % 2 == 1, "MaxInt64%2")
+    assert(MinInt64 % 2 == 0, "MinInt64%2")
+    
+    // Additional edge cases
+    assert(maxVal / 1 == MaxInt64, "MaxInt64/1")
+    assert(minVal / 1 == MinInt64, "MinInt64/1")
+    assert(maxVal % 1 == 0, "MaxInt64%1")
+    assert(minVal % 1 == 0, "MinInt64%1")
+    
+    fmt.Println("const_div_overflow: ok")
+}

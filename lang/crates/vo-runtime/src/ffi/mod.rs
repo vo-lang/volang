@@ -864,8 +864,13 @@ impl<'a> ExternCallContext<'a> {
         
         // Check return compatibility
         if closure_results.len() != expected_results.len() {
-            return Err(format!("return count mismatch: expected {}, got {}", 
-                expected_results.len(), closure_results.len()));
+            return Err(format!(
+                "return count mismatch: dynamic call expects {} return value(s), but function returns {}\n\
+                 note: dynamic access (~>) always adds an error to returns, e.g. func() T becomes (T, error)\n\
+                 hint: with '?', LHS count = function returns (error consumed by '?')\n\
+                 hint: without '?', LHS count = function returns + 1 (last LHS is error)",
+                expected_results.len(), closure_results.len()
+            ));
         }
         
         for (i, (closure, expected)) in closure_results.iter().zip(expected_results).enumerate() {

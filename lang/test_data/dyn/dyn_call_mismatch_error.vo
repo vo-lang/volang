@@ -1,0 +1,39 @@
+// Test: Improved error message for return count mismatch
+package main
+
+import (
+    "fmt"
+    "strings"
+)
+
+type Calculator struct {
+    value int
+}
+
+func (c *Calculator) Add(n int) int {
+    return c.value + n
+}
+
+func main() {
+    c := &Calculator{value: 10}
+    var fn any = c.Add
+    
+    // Call with wrong LHS count - should get detailed error
+    // Add returns 1 value, but we expect 2 values + error (3 total)
+    // This uses 3 LHS variables without ?, so expects 2 return values
+    r1, r2, err := fn~>(5)
+    
+    assert(err != nil, "should have error for return count mismatch")
+    errMsg := err.Error()
+    
+    // Check error message contains helpful hints
+    assert(strings.Contains(errMsg, "return count mismatch"), "should mention mismatch")
+    assert(strings.Contains(errMsg, "hint"), "should have hint")
+    fmt.Println("Error message:", errMsg)
+    
+    // Suppress unused variable warnings
+    _ = r1
+    _ = r2
+    
+    fmt.Println("dyn_call_mismatch_error: ok")
+}

@@ -787,16 +787,21 @@ pub fn binary_op(x: &Value, op: BinaryOp, y: &Value) -> Value {
                 BinaryOp::Div => {
                     if *b == 0 {
                         Value::Unknown
+                    } else if let Some(c) = a.checked_div(*b) {
+                        Value::Int64(c)
                     } else {
-                        // Integer division (truncated, like Go)
-                        Value::Int64(a / b)
+                        // i64::MIN / -1 overflows, use BigInt
+                        make_int(i64_to_big(*a) / i64_to_big(*b))
                     }
                 }
                 BinaryOp::Rem => {
                     if *b == 0 {
                         Value::Unknown
+                    } else if let Some(c) = a.checked_rem(*b) {
+                        Value::Int64(c)
                     } else {
-                        Value::Int64(a % b)
+                        // i64::MIN % -1 overflows, use BigInt (result is 0)
+                        make_int(i64_to_big(*a) % i64_to_big(*b))
                     }
                 }
                 BinaryOp::And => Value::Int64(a & b),
