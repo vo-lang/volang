@@ -1,0 +1,135 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+// Value receiver - both MyVal and *MyVal implement Stringer
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+// Test 1: Struct value to interface
+func test1() {
+	fmt.Println("Test 1: Struct value to interface")
+	var s Stringer = MyVal{msg: "value"}
+	assert(s != nil, "test1: s is nil")
+	assert(s.String() == "value", "test1: wrong value")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Return struct value, assign to interface
+func getVal() MyVal {
+	return MyVal{msg: "returned"}
+}
+
+func test2() {
+	fmt.Println("Test 2: Return struct value, assign to interface")
+	var s Stringer = getVal()
+	assert(s != nil, "test2: s is nil")
+	assert(s.String() == "returned", "test2: wrong value")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Multi-return with struct value to interface
+func getValAndInt() (MyVal, int) {
+	return MyVal{msg: "multi"}, 42
+}
+
+func test3() {
+	fmt.Println("Test 3: Multi-return struct value to interface")
+	var s Stringer
+	var n int
+	s, n = getValAndInt()
+	assert(s != nil, "test3: s is nil")
+	assert(n == 42, "test3: n wrong")
+	assert(s.String() == "multi", "test3: s.String() wrong")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Multi-return struct value to any
+func test4() {
+	fmt.Println("Test 4: Multi-return struct value to any")
+	var a1, a2 any
+	a1, a2 = getValAndInt()
+	assert(a1 != nil, "test4: a1 is nil")
+	assert(a2.(int) == 42, "test4: a2 wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Large struct to interface
+type LargeStruct struct {
+	a, b, c, d, e int
+	msg           string
+}
+
+func (l LargeStruct) String() string {
+	return l.msg
+}
+
+func getLargeAndInt() (LargeStruct, int) {
+	return LargeStruct{a: 1, b: 2, c: 3, d: 4, e: 5, msg: "large"}, 100
+}
+
+func test5() {
+	fmt.Println("Test 5: Large struct to interface in multi-return")
+	var s Stringer
+	var n int
+	s, n = getLargeAndInt()
+	assert(s != nil, "test5: s is nil")
+	assert(n == 100, "test5: n wrong")
+	assert(s.String() == "large", "test5: s.String() wrong")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Nested struct to interface
+type Outer struct {
+	inner MyVal
+}
+
+func (o Outer) String() string {
+	return o.inner.String()
+}
+
+func getOuterAndInt() (Outer, int) {
+	return Outer{inner: MyVal{msg: "nested"}}, 200
+}
+
+func test6() {
+	fmt.Println("Test 6: Nested struct to interface in multi-return")
+	var s Stringer
+	var n int
+	s, n = getOuterAndInt()
+	assert(s != nil, "test6: s is nil")
+	assert(n == 200, "test6: n wrong")
+	assert(s.String() == "nested", "test6: s.String() wrong")
+	fmt.Println("Test 6 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

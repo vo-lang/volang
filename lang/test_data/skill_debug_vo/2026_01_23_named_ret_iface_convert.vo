@@ -1,0 +1,144 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+// Test 1: Named return with interface, return concrete
+func getStringer1() (s Stringer) {
+	s = MyVal{msg: "named1"}
+	return
+}
+
+func test1() {
+	fmt.Println("Test 1: Named return interface, bare return")
+	s := getStringer1()
+	assert(s != nil, "test1: s is nil")
+	assert(s.String() == "named1", "test1: wrong value")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Named return with interface, explicit return concrete
+func getStringer2() (s Stringer) {
+	return MyVal{msg: "named2"}
+}
+
+func test2() {
+	fmt.Println("Test 2: Named return interface, explicit return concrete")
+	s := getStringer2()
+	assert(s != nil, "test2: s is nil")
+	assert(s.String() == "named2", "test2: wrong value")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Named multi-return with interface
+func getStringerAndInt1() (s Stringer, n int) {
+	s = MyVal{msg: "multi1"}
+	n = 42
+	return
+}
+
+func test3() {
+	fmt.Println("Test 3: Named multi-return with interface, bare return")
+	s, n := getStringerAndInt1()
+	assert(s != nil, "test3: s is nil")
+	assert(n == 42, "test3: n wrong")
+	assert(s.String() == "multi1", "test3: s.String() wrong")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Named multi-return with interface, explicit return
+func getStringerAndInt2() (s Stringer, n int) {
+	return MyVal{msg: "multi2"}, 100
+}
+
+func test4() {
+	fmt.Println("Test 4: Named multi-return with interface, explicit return")
+	s, n := getStringerAndInt2()
+	assert(s != nil, "test4: s is nil")
+	assert(n == 100, "test4: n wrong")
+	assert(s.String() == "multi2", "test4: s.String() wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Named return any, return concrete
+func getAny1() (a any) {
+	a = 42
+	return
+}
+
+func test5() {
+	fmt.Println("Test 5: Named return any, bare return")
+	a := getAny1()
+	assert(a != nil, "test5: a is nil")
+	assert(a.(int) == 42, "test5: wrong value")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Named multi-return (any, Stringer)
+func getAnyAndStringer() (a any, s Stringer) {
+	a = 42
+	s = MyVal{msg: "both"}
+	return
+}
+
+func test6() {
+	fmt.Println("Test 6: Named multi-return (any, Stringer)")
+	a, s := getAnyAndStringer()
+	assert(a != nil, "test6: a is nil")
+	assert(s != nil, "test6: s is nil")
+	assert(a.(int) == 42, "test6: a wrong")
+	assert(s.String() == "both", "test6: s wrong")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Named return with defer modifying value
+func getStringerDefer() (s Stringer) {
+	s = MyVal{msg: "before"}
+	defer func() {
+		s = MyVal{msg: "after"}
+	}()
+	return
+}
+
+func test7() {
+	fmt.Println("Test 7: Named return interface modified by defer")
+	s := getStringerDefer()
+	assert(s != nil, "test7: s is nil")
+	assert(s.String() == "after", "test7: defer should modify named return")
+	fmt.Println("Test 7 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

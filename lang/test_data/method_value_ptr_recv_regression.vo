@@ -1,0 +1,63 @@
+// Regression test for method value bugs:
+// 1. Method value from pointer with value receiver (e.g., p.String where p is *T but String has T receiver)
+// 2. Method value wrapper local_slots calculation for multi-value returns
+// 3. Embedded pointer field method value with value receiver
+package main
+
+import "fmt"
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+func (v MyVal) GetMsgAndLen() (string, int) {
+	return v.msg, len(v.msg)
+}
+
+type Base struct {
+	val int
+}
+
+func (b Base) Get() int { return b.val }
+
+type PtrEmbed struct {
+	*Base
+	name string
+}
+
+func main() {
+	// === BUG 1: Method value from pointer with value receiver ===
+	v := &MyVal{msg: "ptr"}
+	fn1 := v.String  // Getting method value from pointer, but method has value receiver
+	result1 := fn1()
+	assert(result1 == "ptr", fmt.Sprintf("BUG1: expected 'ptr', got '%s'", result1))
+	
+	// === BUG 2: Method value wrapper local_slots for multi-value returns ===
+	v2 := MyVal{msg: "test"}
+	fn2 := v2.GetMsgAndLen  // Method returns (string, int) = 2 ret_slots
+	msg, length := fn2()
+	assert(msg == "test", fmt.Sprintf("BUG2: expected 'test', got '%s'", msg))
+	assert(length == 4, fmt.Sprintf("BUG2: expected 4, got %d", length))
+	
+	// === BUG 3: Embedded pointer field method value with value receiver ===
+	pe := PtrEmbed{Base: &Base{val: 123}, name: "embed"}
+	fn3 := pe.Get  // Method on embedded *Base field with value receiver
+	result3 := fn3()
+	assert(result3 == 123, fmt.Sprintf("BUG3: expected 123, got %d", result3))
+	
+	// Verify method value captures correctly and sees mutations
+	pe.Base.val = 456
+	assert(fn3() == 456, fmt.Sprintf("BUG3: expected 456 after mutation, got %d", fn3()))
+	
+	fmt.Println("method_value_ptr_recv_regression: ok")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

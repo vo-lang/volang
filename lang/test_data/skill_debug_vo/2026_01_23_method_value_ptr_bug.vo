@@ -1,0 +1,27 @@
+package main
+
+import "fmt"
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+func main() {
+	fmt.Println("Test: Method value from pointer")
+	v := &MyVal{msg: "ptr"}
+	fn := v.String
+	result := fn()
+	fmt.Println("result:", result)
+	assert(result == "ptr", "wrong result")
+	fmt.Println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

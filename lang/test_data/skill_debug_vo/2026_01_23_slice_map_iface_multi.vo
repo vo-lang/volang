@@ -1,0 +1,150 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+// Test 1: Return slice of interface
+func getStringers() []Stringer {
+	return []Stringer{MyVal{msg: "a"}, MyVal{msg: "b"}}
+}
+
+func test1() {
+	fmt.Println("Test 1: Return slice of interface")
+	ss := getStringers()
+	assert(len(ss) == 2, "test1: wrong length")
+	assert(ss[0].String() == "a", "test1: ss[0] wrong")
+	assert(ss[1].String() == "b", "test1: ss[1] wrong")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Multi-return with slice of interface
+func getStringersAndInt() ([]Stringer, int) {
+	return []Stringer{MyVal{msg: "x"}, MyVal{msg: "y"}}, 42
+}
+
+func test2() {
+	fmt.Println("Test 2: Multi-return ([]Stringer, int)")
+	ss, n := getStringersAndInt()
+	assert(len(ss) == 2, "test2: wrong length")
+	assert(n == 42, "test2: n wrong")
+	assert(ss[0].String() == "x", "test2: ss[0] wrong")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Range over slice of interface
+func test3() {
+	fmt.Println("Test 3: Range over slice of interface")
+	ss := getStringers()
+	result := ""
+	for _, s := range ss {
+		result += s.String()
+	}
+	assert(result == "ab", "test3: wrong result")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Map with interface value
+func getStringerMap() map[string]Stringer {
+	return map[string]Stringer{
+		"first":  MyVal{msg: "one"},
+		"second": MyVal{msg: "two"},
+	}
+}
+
+func test4() {
+	fmt.Println("Test 4: Map with interface value")
+	m := getStringerMap()
+	assert(m["first"].String() == "one", "test4: first wrong")
+	assert(m["second"].String() == "two", "test4: second wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Multi-return with map of interface
+func getStringerMapAndInt() (map[string]Stringer, int) {
+	return map[string]Stringer{"key": MyVal{msg: "val"}}, 100
+}
+
+func test5() {
+	fmt.Println("Test 5: Multi-return (map[string]Stringer, int)")
+	m, n := getStringerMapAndInt()
+	assert(m["key"].String() == "val", "test5: map wrong")
+	assert(n == 100, "test5: n wrong")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Append to slice of interface
+func test6() {
+	fmt.Println("Test 6: Append to slice of interface")
+	var ss []Stringer
+	ss = append(ss, MyVal{msg: "appended"})
+	assert(len(ss) == 1, "test6: wrong length")
+	assert(ss[0].String() == "appended", "test6: wrong value")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Slice of any with mixed types
+func getAnySlice() []any {
+	return []any{42, "hello", MyVal{msg: "mixed"}}
+}
+
+func test7() {
+	fmt.Println("Test 7: Slice of any with mixed types")
+	as := getAnySlice()
+	assert(len(as) == 3, "test7: wrong length")
+	assert(as[0].(int) == 42, "test7: as[0] wrong")
+	assert(as[1].(string) == "hello", "test7: as[1] wrong")
+	assert(as[2].(Stringer).String() == "mixed", "test7: as[2] wrong")
+	fmt.Println("Test 7 PASSED")
+}
+
+// Test 8: Multi-return ([]any, int) assigned to ([]any, any)
+func getAnySliceAndInt() ([]any, int) {
+	return []any{1, 2, 3}, 200
+}
+
+func test8() {
+	fmt.Println("Test 8: Multi-return ([]any, int) to variables")
+	var s []any
+	var a any
+	s, a = getAnySliceAndInt()
+	assert(len(s) == 3, "test8: wrong length")
+	assert(a.(int) == 200, "test8: a wrong")
+	fmt.Println("Test 8 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	test8()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

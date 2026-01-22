@@ -1,0 +1,166 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+func (v MyVal) GetMsgAndLen() (string, int) {
+	return v.msg, len(v.msg)
+}
+
+func (v *MyVal) SetMsg(s string) {
+	v.msg = s
+}
+
+// Test 1: Method value from concrete type
+func test1() {
+	fmt.Println("Test 1: Method value from concrete type")
+	v := MyVal{msg: "hello"}
+	fn := v.String
+	result := fn()
+	assert(result == "hello", "test1: wrong result")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Method value returning multi-value
+func test2() {
+	fmt.Println("Test 2: Method value returning multi-value")
+	v := MyVal{msg: "test"}
+	fn := v.GetMsgAndLen
+	msg, length := fn()
+	assert(msg == "test", "test2: msg wrong")
+	assert(length == 4, "test2: length wrong")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Method value from interface
+func test3() {
+	fmt.Println("Test 3: Method value from interface")
+	var s Stringer = MyVal{msg: "iface"}
+	fn := s.String
+	result := fn()
+	assert(result == "iface", "test3: wrong result")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Method value from pointer
+func test4() {
+	fmt.Println("Test 4: Method value from pointer")
+	v := &MyVal{msg: "ptr"}
+	fn := v.String
+	result := fn()
+	assert(result == "ptr", "test4: wrong result")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Method value with side effects
+func test5() {
+	fmt.Println("Test 5: Method value with side effects (pointer receiver)")
+	v := &MyVal{msg: "before"}
+	fn := v.SetMsg
+	fn("after")
+	assert(v.msg == "after", "test5: side effect didn't work")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Method value assigned to any
+func test6() {
+	fmt.Println("Test 6: Method value assigned to any")
+	v := MyVal{msg: "any"}
+	var a any = v.String
+	fn := a.(func() string)
+	result := fn()
+	assert(result == "any", "test6: wrong result")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Method expression (type.Method)
+func test7() {
+	fmt.Println("Test 7: Method expression")
+	fn := MyVal.String
+	v := MyVal{msg: "expr"}
+	result := fn(v)
+	assert(result == "expr", "test7: wrong result")
+	fmt.Println("Test 7 PASSED")
+}
+
+// Test 8: Method value from struct field
+type Container struct {
+	val MyVal
+}
+
+func test8() {
+	fmt.Println("Test 8: Method value from struct field")
+	c := Container{val: MyVal{msg: "field"}}
+	fn := c.val.String
+	result := fn()
+	assert(result == "field", "test8: wrong result")
+	fmt.Println("Test 8 PASSED")
+}
+
+// Test 9: Return method value from function
+func getStringFn(v MyVal) func() string {
+	return v.String
+}
+
+func test9() {
+	fmt.Println("Test 9: Return method value from function")
+	fn := getStringFn(MyVal{msg: "returned"})
+	result := fn()
+	assert(result == "returned", "test9: wrong result")
+	fmt.Println("Test 9 PASSED")
+}
+
+// Test 10: Multi-return function returning method value
+func getStringFnAndInt(v MyVal) (func() string, int) {
+	return v.String, 42
+}
+
+func test10() {
+	fmt.Println("Test 10: Multi-return with method value")
+	fn, n := getStringFnAndInt(MyVal{msg: "multi"})
+	result := fn()
+	assert(result == "multi", "test10: fn wrong")
+	assert(n == 42, "test10: n wrong")
+	fmt.Println("Test 10 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	test8()
+	fmt.Println("")
+	test9()
+	fmt.Println("")
+	test10()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

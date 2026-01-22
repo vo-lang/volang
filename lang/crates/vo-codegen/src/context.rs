@@ -927,6 +927,46 @@ impl CodegenContext {
     }
 
     // === Method value support ===
+
+    /// Helper: emit Copy instructions to copy params from src to dst
+    fn emit_copy_params(code: &mut Vec<vo_vm::instruction::Instruction>, src_start: u16, dst_start: u16, count: u16) {
+        use vo_vm::instruction::{Instruction, Opcode};
+        for i in 0..count {
+            code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
+        }
+    }
+
+    /// Helper: create and register a wrapper function
+    fn register_wrapper_func(
+        &mut self,
+        name: String,
+        param_slots: u16,
+        ret_slots: u16,
+        local_slots: u16,
+        code: Vec<vo_vm::instruction::Instruction>,
+        cache_key: MethodValueWrapperKey,
+    ) -> u32 {
+        use vo_vm::bytecode::FunctionDef;
+        let wrapper_func = FunctionDef {
+            name,
+            param_count: param_slots,
+            param_slots,
+            ret_slots,
+            local_slots,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: true,
+            error_ret_slot: -1,
+            code,
+            slot_types: Vec::new(),
+        };
+        let wrapper_id = self.module.functions.len() as u32;
+        self.module.functions.push(wrapper_func);
+        self.method_value_wrappers.insert(cache_key, wrapper_id);
+        wrapper_id
+    }
     
     /// Get or create wrapper function for value receiver method value.
     /// The wrapper unboxes the captured receiver and calls the original method.
@@ -958,77 +998,36 @@ impl CodegenContext {
         // 3. Call original method with receiver + params
         // 4. Return result
         
-        use vo_vm::bytecode::FunctionDef;
         use vo_vm::instruction::{Instruction, Opcode};
         
-        // Wrapper params: closure ref + original params (minus receiver)
-        // Original method: recv_slots + other_params = param_slots
-        // Wrapper: closure_ref(1) + other_params = 1 + (param_slots - recv_slots)
-        let wrapper_param_slots = 1 + (param_slots.saturating_sub(recv_slots as u16));
+        // Wrapper params: closure_ref(1) + other_params
+        let other_param_slots = param_slots.saturating_sub(recv_slots as u16);
+        let wrapper_param_slots = 1 + other_param_slots;
         
         let mut code = Vec::new();
+        let recv_reg = wrapper_param_slots;
         
-        // Allocate space for receiver
-        let recv_reg = wrapper_param_slots;  // Start after params
-        
-        // ClosureGet: get boxed receiver from capture 0
-        // dst=recv_reg (temp), capture_idx=0
-        let boxed_reg = recv_reg;
-        code.push(Instruction::new(Opcode::ClosureGet, boxed_reg, 0, 0));
-        
-        // PtrGet: unbox receiver value
-        // For multi-slot values, need PtrGetN
+        // ClosureGet + PtrGet: unbox receiver value
+        code.push(Instruction::new(Opcode::ClosureGet, recv_reg, 0, 0));
         if recv_slots == 1 {
-            code.push(Instruction::new(Opcode::PtrGet, recv_reg, boxed_reg, 0));
+            code.push(Instruction::new(Opcode::PtrGet, recv_reg, recv_reg, 0));
         } else {
-            code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, boxed_reg, 0));
+            code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, recv_reg, 0));
         }
         
-        // Setup call: receiver + other params
-        // Call original method
+        // Copy other params after receiver
         let args_start = recv_reg;
-        // Copy params from slot 1 onwards to after receiver
-        let other_param_slots = param_slots.saturating_sub(recv_slots as u16);
-        if other_param_slots > 0 {
-            // Copy other params to after receiver
-            let src_start = 1u16; // skip closure ref
-            let dst_start = recv_reg + recv_slots as u16;
-            for i in 0..other_param_slots {
-                code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
-            }
-        }
+        Self::emit_copy_params(&mut code, 1, recv_reg + recv_slots as u16, other_param_slots);
         
-        // Call: flags=func_id_high, a=func_id_low, b=args_start, c=encode_call_args
+        // Call and return
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
-        
-        // Return result (already in args_start..args_start+ret_slots)
         code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_{}_{}", method_name, method_func_id);
-        let wrapper_func = FunctionDef {
-            name: wrapper_name,
-            param_count: wrapper_param_slots,
-            param_slots: wrapper_param_slots,
-            ret_slots,
-            // Layout: [closure_ref(1)][other_params][recv][params_copy]
-            // ret goes in recv position, so no extra space needed
-            local_slots: wrapper_param_slots + recv_slots as u16 + other_param_slots,
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: true,
-            error_ret_slot: -1,
-            code,
-            slot_types: Vec::new(),
-        };
-        
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(wrapper_func);
-        self.method_value_wrappers.insert(cache_key, wrapper_id);
-        
+        let local_slots = wrapper_param_slots + param_slots.max(ret_slots);
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1046,69 +1045,36 @@ impl CodegenContext {
             return Ok(wrapper_id);
         }
         
-        // Get method signature info
         let orig_func = &self.module.functions[method_func_id as usize];
         let param_slots = orig_func.param_slots;
         let ret_slots = orig_func.ret_slots;
         let recv_slots = 1u16; // pointer is 1 slot
         
-        use vo_vm::bytecode::FunctionDef;
         use vo_vm::instruction::{Instruction, Opcode};
         
-        // Wrapper params: closure ref + original params (minus receiver)
-        // Original method: recv(1) + other_params
-        // Wrapper: closure_ref(1) + other_params
         let other_param_slots = param_slots.saturating_sub(recv_slots);
         let wrapper_param_slots = 1 + other_param_slots;
         
         let mut code = Vec::new();
+        let ptr_reg = wrapper_param_slots;
         
         // ClosureGet: get pointer from capture 0
-        let ptr_reg = wrapper_param_slots;
         code.push(Instruction::new(Opcode::ClosureGet, ptr_reg, 0, 0));
         
         // Copy other params after receiver
         let args_start = ptr_reg;
-        if other_param_slots > 0 {
-            let src_start = 1u16;
-            let dst_start = ptr_reg + recv_slots;
-            for i in 0..other_param_slots {
-                code.push(Instruction::new(Opcode::Copy, dst_start + i, src_start + i, 0));
-            }
-        }
+        Self::emit_copy_params(&mut code, 1, ptr_reg + recv_slots, other_param_slots);
         
-        // Call original method
+        // Call and return
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
-        
-        // Return
         code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_ptr_{}_{}", method_name, method_func_id);
-        // local_slots must cover: params + temp registers used
-        // Layout: [closure_ref(1)][other_params][ptr_reg(1)][call_args_copy][ret_space]
-        let local_slots = wrapper_param_slots + recv_slots + other_param_slots + ret_slots;
-        let wrapper_func = FunctionDef {
-            name: wrapper_name,
-            param_count: wrapper_param_slots,
-            param_slots: wrapper_param_slots,
-            ret_slots,
-            local_slots,
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: true,
-            error_ret_slot: -1,
-            code,
-            slot_types: Vec::new(),
-        };
-        
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(wrapper_func);
-        self.method_value_wrappers.insert(cache_key, wrapper_id);
-        
+        // Fix: use max(param_slots, ret_slots) for consistency
+        let local_slots = wrapper_param_slots + param_slots.max(ret_slots);
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1126,69 +1092,30 @@ impl CodegenContext {
             return Ok(wrapper_id);
         }
         
-        use vo_vm::bytecode::FunctionDef;
         use vo_vm::instruction::{Instruction, Opcode};
         
-        // Wrapper layout:
-        // Params: closure_ref(1) + method_params(param_slots)
-        // Wrapper body:
-        // 1. ClosureGet to get interface slot0 and data from captures
-        // 2. Copy params after interface
-        // 3. CallIface with method_idx
-        // 4. Return result
-        
         let wrapper_param_slots = 1 + param_slots;
-        let iface_slots = 2u16; // interface is 2 slots
+        let iface_slots = 2u16;
         
         let mut code = Vec::new();
-        
-        // ClosureGet: get interface slot0 from capture 0
         let iface_reg = wrapper_param_slots;
+        
+        // ClosureGet: get interface (2 slots) from captures
         code.push(Instruction::new(Opcode::ClosureGet, iface_reg, 0, 0));
-        // ClosureGet: get interface data from capture 1
         code.push(Instruction::new(Opcode::ClosureGet, iface_reg + 1, 1, 0));
         
-        // args_start is after interface (for params and return value)
+        // Copy params and call
         let args_start = iface_reg + iface_slots;
+        Self::emit_copy_params(&mut code, 1, args_start, param_slots);
         
-        // Copy params to args_start
-        if param_slots > 0 {
-            let src_start = 1u16; // skip closure ref
-            for i in 0..param_slots {
-                code.push(Instruction::new(Opcode::Copy, args_start + i, src_start + i, 0));
-            }
-        }
-        
-        // CallIface: flags=method_idx, a=iface_reg, b=args_start, c=encode(param_slots, ret_slots)
-        // arg_slots for CallIface is just params (not including interface)
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
-        
-        // Return result (result is at args_start after call)
         code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_iface_{}_{}", method_name, method_idx);
-        let local_slots = wrapper_param_slots + iface_slots + param_slots + ret_slots;
-        let wrapper_func = FunctionDef {
-            name: wrapper_name,
-            param_count: wrapper_param_slots,
-            param_slots: wrapper_param_slots,
-            ret_slots,
-            local_slots,
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: true,
-            error_ret_slot: -1,
-            code,
-            slot_types: Vec::new(),
-        };
-        
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(wrapper_func);
-        self.method_value_wrappers.insert(cache_key, wrapper_id);
-        
+        // Fix: use max(param_slots, ret_slots) for consistency
+        let local_slots = wrapper_param_slots + iface_slots + param_slots.max(ret_slots);
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
     
@@ -1208,72 +1135,30 @@ impl CodegenContext {
             return Ok(wrapper_id);
         }
         
-        use vo_vm::bytecode::FunctionDef;
         use vo_vm::instruction::{Instruction, Opcode};
-        
-        // Wrapper layout:
-        // Captures: boxed outer struct (GcRef)
-        // Params: closure_ref(1) + method_params(param_slots)
-        // Wrapper body:
-        // 1. ClosureGet to get boxed outer struct from capture 0
-        // 2. PtrGet to read embedded interface (2 slots) at embed_offset
-        // 3. Copy params after interface
-        // 4. CallIface with method_idx
-        // 5. Return result
         
         let wrapper_param_slots = 1 + param_slots;
         let iface_slots = 2u16;
         
         let mut code = Vec::new();
-        
-        // ClosureGet: get boxed outer struct pointer from capture 0
         let outer_ptr = wrapper_param_slots;
-        code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
-        
-        // PtrGet: read embedded interface (2 slots) from outer struct
         let iface_reg = outer_ptr + 1;
-        code.push(Instruction::with_flags(Opcode::PtrGet, iface_slots as u8, iface_reg, outer_ptr, embed_offset));
-        
-        // args_start is after interface (for params and return value)
         let args_start = iface_reg + iface_slots;
         
-        // Copy params to args_start
-        if param_slots > 0 {
-            let src_start = 1u16; // skip closure ref
-            for i in 0..param_slots {
-                code.push(Instruction::new(Opcode::Copy, args_start + i, src_start + i, 0));
-            }
-        }
+        // ClosureGet + PtrGet: get embedded interface from boxed outer struct
+        code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
+        code.push(Instruction::with_flags(Opcode::PtrGet, iface_slots as u8, iface_reg, outer_ptr, embed_offset));
         
-        // CallIface: flags=method_idx, a=iface_reg, b=args_start, c=encode(param_slots, ret_slots)
+        // Copy params and call
+        Self::emit_copy_params(&mut code, 1, args_start, param_slots);
+        
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(Opcode::CallIface, method_idx as u8, iface_reg, args_start, call_c));
-        
-        // Return result
         code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
         
         let wrapper_name = format!("__method_value_embed_iface_{}_{}", method_name, method_idx);
         let local_slots = wrapper_param_slots + 1 + iface_slots + param_slots.max(ret_slots);
-        let wrapper_func = FunctionDef {
-            name: wrapper_name,
-            param_count: wrapper_param_slots,
-            param_slots: wrapper_param_slots,
-            ret_slots,
-            local_slots,
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: true,
-            error_ret_slot: -1,
-            code,
-            slot_types: Vec::new(),
-        };
-        
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(wrapper_func);
-        self.method_value_wrappers.insert(cache_key, wrapper_id);
-        
+        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)
     }
 

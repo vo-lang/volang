@@ -1,0 +1,137 @@
+package main
+
+import "fmt"
+
+// Custom interface for testing
+type Stringer interface {
+	String() string
+}
+
+type MyStringer struct {
+	msg string
+}
+
+func (s *MyStringer) String() string {
+	return s.msg
+}
+
+// Returns (*MyStringer, int) - concrete type
+func getStringerAndInt() (*MyStringer, int) {
+	return &MyStringer{msg: "test"}, 42
+}
+
+// Returns (Stringer, int) - interface type
+func getIfaceStringerAndInt() (Stringer, int) {
+	return &MyStringer{msg: "iface"}, 100
+}
+
+// Test 1: Assign (*MyStringer, int) to (Stringer, int)
+func test1() {
+	fmt.Println("Test 1: Concrete to interface conversion in multi-return")
+	var s Stringer
+	var n int
+	s, n = getStringerAndInt()
+	assert(s != nil, "test1: s is nil")
+	assert(n == 42, "test1: n wrong")
+	assert(s.String() == "test", "test1: s.String() wrong")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Assign (*MyStringer, int) to (any, any)
+func test2() {
+	fmt.Println("Test 2: Concrete to any conversion in multi-return")
+	var a1, a2 any
+	a1, a2 = getStringerAndInt()
+	assert(a1 != nil, "test2: a1 is nil")
+	assert(a2 != nil, "test2: a2 is nil")
+	assert(a2.(int) == 42, "test2: a2 wrong")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Mixed assignment - one to interface, one to any
+func test3() {
+	fmt.Println("Test 3: Mixed interface/any assignment in multi-return")
+	var s Stringer
+	var a any
+	s, a = getStringerAndInt()
+	assert(s != nil, "test3: s is nil")
+	assert(a != nil, "test3: a is nil")
+	assert(a.(int) == 42, "test3: a wrong")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Reverse order - any first, then concrete
+func test4() {
+	fmt.Println("Test 4: Reverse order any/concrete assignment")
+	var a any
+	var n int
+	a, n = getStringerAndInt()
+	assert(a != nil, "test4: a is nil")
+	assert(n == 42, "test4: n wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Short declaration then re-assignment to different types
+func test5() {
+	fmt.Println("Test 5: Short declaration then re-assignment to different types")
+	s1, n1 := getStringerAndInt()
+	_ = s1
+	_ = n1
+	
+	var s Stringer
+	var a any
+	s, a = getStringerAndInt()
+	assert(s != nil, "test5: s is nil")
+	assert(a.(int) == 42, "test5: a wrong")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Blank identifier with interface conversion
+func test6() {
+	fmt.Println("Test 6: Blank identifier in multi-return with interface conversion")
+	var s Stringer
+	s, _ = getStringerAndInt()
+	assert(s != nil, "test6: s is nil")
+	
+	var a any
+	_, a = getStringerAndInt()
+	assert(a.(int) == 42, "test6: a wrong")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Chained - use result of one call as argument to another
+func passThrough(s Stringer, n int) (Stringer, int) {
+	return s, n
+}
+
+func test7() {
+	fmt.Println("Test 7: Chained call with interface conversion")
+	s, n := passThrough(getStringerAndInt())
+	assert(s != nil, "test7: s is nil")
+	assert(n == 42, "test7: n wrong")
+	fmt.Println("Test 7 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

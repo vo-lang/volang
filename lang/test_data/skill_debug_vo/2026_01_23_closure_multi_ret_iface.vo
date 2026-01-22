@@ -1,0 +1,144 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+// Test 1: Closure returning multi-value with interface conversion
+func test1() {
+	fmt.Println("Test 1: Closure returning (concrete, int), assign to (interface, int)")
+	fn := func() (*MyVal, int) {
+		return &MyVal{msg: "closure1"}, 42
+	}
+	var s Stringer
+	var n int
+	s, n = fn()
+	assert(s != nil, "test1: s is nil")
+	assert(n == 42, "test1: n wrong")
+	assert(s.String() == "closure1", "test1: s.String() wrong")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Closure capturing variable, returning interface
+func test2() {
+	fmt.Println("Test 2: Closure capturing variable, returning interface")
+	captured := "captured"
+	fn := func() (Stringer, int) {
+		return MyVal{msg: captured}, 100
+	}
+	s, n := fn()
+	assert(s != nil, "test2: s is nil")
+	assert(n == 100, "test2: n wrong")
+	assert(s.String() == "captured", "test2: s.String() wrong")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Return closure that returns multi-value
+func makeClosure() func() (Stringer, int) {
+	return func() (Stringer, int) {
+		return MyVal{msg: "made"}, 200
+	}
+}
+
+func test3() {
+	fmt.Println("Test 3: Function returning closure that returns multi-value")
+	fn := makeClosure()
+	s, n := fn()
+	assert(s != nil, "test3: s is nil")
+	assert(n == 200, "test3: n wrong")
+	assert(s.String() == "made", "test3: s.String() wrong")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Closure with named returns
+func test4() {
+	fmt.Println("Test 4: Closure with named returns")
+	fn := func() (s Stringer, n int) {
+		s = MyVal{msg: "named"}
+		n = 300
+		return
+	}
+	s, n := fn()
+	assert(s != nil, "test4: s is nil")
+	assert(n == 300, "test4: n wrong")
+	assert(s.String() == "named", "test4: s.String() wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Nested closure
+func test5() {
+	fmt.Println("Test 5: Nested closure returning multi-value")
+	outer := func() func() (Stringer, int) {
+		return func() (Stringer, int) {
+			return MyVal{msg: "nested"}, 400
+		}
+	}
+	inner := outer()
+	s, n := inner()
+	assert(s != nil, "test5: s is nil")
+	assert(n == 400, "test5: n wrong")
+	assert(s.String() == "nested", "test5: s.String() wrong")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Closure assigned to interface{} (any)
+func test6() {
+	fmt.Println("Test 6: Closure assigned to any")
+	fn := func() (Stringer, int) {
+		return MyVal{msg: "any"}, 500
+	}
+	var a any = fn
+	// Call through type assertion
+	f := a.(func() (Stringer, int))
+	s, n := f()
+	assert(s != nil, "test6: s is nil")
+	assert(n == 500, "test6: n wrong")
+	assert(s.String() == "any", "test6: s.String() wrong")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Immediately invoked closure
+func test7() {
+	fmt.Println("Test 7: Immediately invoked closure")
+	s, n := func() (Stringer, int) {
+		return MyVal{msg: "immediate"}, 600
+	}()
+	assert(s != nil, "test7: s is nil")
+	assert(n == 600, "test7: n wrong")
+	assert(s.String() == "immediate", "test7: s.String() wrong")
+	fmt.Println("Test 7 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

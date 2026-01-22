@@ -1,0 +1,134 @@
+package main
+
+import "fmt"
+
+type Stringer interface {
+	String() string
+}
+
+type MyVal struct {
+	msg string
+}
+
+func (v MyVal) String() string {
+	return v.msg
+}
+
+// Test 1: Variadic with interface type
+func joinStringers(ss ...Stringer) string {
+	result := ""
+	for _, s := range ss {
+		result += s.String()
+	}
+	return result
+}
+
+func test1() {
+	fmt.Println("Test 1: Variadic with interface type")
+	result := joinStringers(MyVal{msg: "a"}, MyVal{msg: "b"}, MyVal{msg: "c"})
+	assert(result == "abc", "test1: wrong result")
+	fmt.Println("Test 1 PASSED")
+}
+
+// Test 2: Variadic with any type
+func joinAny(as ...any) string {
+	result := ""
+	for _, a := range as {
+		if s, ok := a.(Stringer); ok {
+			result += s.String()
+		} else if i, ok := a.(int); ok {
+			result += fmt.Sprint(i)
+		}
+	}
+	return result
+}
+
+func test2() {
+	fmt.Println("Test 2: Variadic with any type")
+	result := joinAny(MyVal{msg: "x"}, 42, MyVal{msg: "y"})
+	assert(result == "x42y", "test2: wrong result")
+	fmt.Println("Test 2 PASSED")
+}
+
+// Test 3: Pass slice to variadic
+func test3() {
+	fmt.Println("Test 3: Pass slice to variadic with ...")
+	ss := []Stringer{MyVal{msg: "1"}, MyVal{msg: "2"}}
+	result := joinStringers(ss...)
+	assert(result == "12", "test3: wrong result")
+	fmt.Println("Test 3 PASSED")
+}
+
+// Test 4: Multi-return where one is variadic result
+func getStringersVariadic(ss ...Stringer) ([]Stringer, int) {
+	return ss, len(ss)
+}
+
+func test4() {
+	fmt.Println("Test 4: Multi-return from variadic function")
+	ss, n := getStringersVariadic(MyVal{msg: "a"}, MyVal{msg: "b"})
+	assert(len(ss) == 2, "test4: wrong length")
+	assert(n == 2, "test4: n wrong")
+	fmt.Println("Test 4 PASSED")
+}
+
+// Test 5: Empty variadic
+func test5() {
+	fmt.Println("Test 5: Empty variadic call")
+	result := joinStringers()
+	assert(result == "", "test5: should be empty")
+	fmt.Println("Test 5 PASSED")
+}
+
+// Test 6: Variadic in closure
+func test6() {
+	fmt.Println("Test 6: Variadic in closure")
+	fn := func(ss ...Stringer) string {
+		result := ""
+		for _, s := range ss {
+			result += s.String()
+		}
+		return result
+	}
+	result := fn(MyVal{msg: "p"}, MyVal{msg: "q"})
+	assert(result == "pq", "test6: wrong result")
+	fmt.Println("Test 6 PASSED")
+}
+
+// Test 7: Variadic with mixed concrete and interface
+func mixedVariadic(first Stringer, rest ...any) (Stringer, []any) {
+	return first, rest
+}
+
+func test7() {
+	fmt.Println("Test 7: Mixed variadic (Stringer, ...any)")
+	s, rest := mixedVariadic(MyVal{msg: "first"}, 1, "two", MyVal{msg: "three"})
+	assert(s.String() == "first", "test7: s wrong")
+	assert(len(rest) == 3, "test7: rest length wrong")
+	assert(rest[0].(int) == 1, "test7: rest[0] wrong")
+	fmt.Println("Test 7 PASSED")
+}
+
+func main() {
+	test1()
+	fmt.Println("")
+	test2()
+	fmt.Println("")
+	test3()
+	fmt.Println("")
+	test4()
+	fmt.Println("")
+	test5()
+	fmt.Println("")
+	test6()
+	fmt.Println("")
+	test7()
+	fmt.Println("")
+	fmt.Println("=== ALL TESTS PASSED ===")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

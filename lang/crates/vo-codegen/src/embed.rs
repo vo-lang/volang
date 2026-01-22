@@ -440,6 +440,140 @@ fn emit_final_receiver(
     }
 }
 
+// =============================================================================
+// High-Level Receiver Extraction API
+// =============================================================================
+
+use crate::type_info::TypeInfoWrapper;
+use crate::context::CodegenContext;
+use crate::error::CodegenError;
+use vo_vm::instruction::Opcode;
+
+/// Result of extracting a method receiver - unified representation
+#[derive(Debug, Clone, Copy)]
+pub enum ReceiverValue {
+    /// Value in register(s), ready to use
+    Value { reg: u16, value_type: TypeKey, slots: u16 },
+    /// Pointer to value in register
+    Pointer { reg: u16, pointee_type: TypeKey },
+}
+
+/// Extract method receiver from expression, handling all cases:
+/// - Direct value/pointer
+/// - Embedded fields (value or pointer)
+/// - Nested embedding with pointer chains
+///
+/// Returns a `ReceiverValue` that can be converted to what the method expects.
+pub fn extract_receiver(
+    expr: &vo_syntax::ast::Expr,
+    recv_type: TypeKey,
+    embed_path: &EmbedPathInfo,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<ReceiverValue, CodegenError> {
+    let expr_is_ptr = info.is_pointer(recv_type);
+    let has_embedding = !embed_path.steps.is_empty();
+    
+    if has_embedding && embed_path.has_pointer_step {
+        // Case 1: Embedded pointer field - traverse path to get pointer
+        let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+        let start = TraverseStart { reg: base_reg, is_pointer: expr_is_ptr };
+        let final_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+        emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
+        Ok(ReceiverValue::Pointer { 
+            reg: final_ptr, 
+            pointee_type: embed_path.final_type 
+        })
+    } else if expr_is_ptr {
+        // Case 2: Simple pointer type
+        let ptr_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+        let base_type = info.pointer_base(recv_type);
+        Ok(ReceiverValue::Pointer { 
+            reg: ptr_reg, 
+            pointee_type: base_type 
+        })
+    } else if has_embedding {
+        // Case 3: Embedded value field (no pointer in path)
+        let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
+        let value_slots = info.type_slot_count(embed_path.final_type);
+        let value_slot_types = info.type_slot_types(embed_path.final_type);
+        let value_reg = func.alloc_temp_typed(&value_slot_types);
+        // Use total_offset since no pointer steps
+        func.emit_copy(value_reg, base_reg + embed_path.total_offset, value_slots);
+        Ok(ReceiverValue::Value { 
+            reg: value_reg, 
+            value_type: embed_path.final_type,
+            slots: value_slots,
+        })
+    } else {
+        // Case 4: Direct value type
+        let recv_slots = info.type_slot_count(recv_type);
+        let recv_slot_types = info.type_slot_types(recv_type);
+        let recv_reg = func.alloc_temp_typed(&recv_slot_types);
+        crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
+        Ok(ReceiverValue::Value { 
+            reg: recv_reg, 
+            value_type: recv_type,
+            slots: recv_slots,
+        })
+    }
+}
+
+/// Convert ReceiverValue to what the method expects (pointer or value).
+/// Returns (register, actual_type) where register contains the prepared receiver.
+pub fn prepare_for_method(
+    recv: ReceiverValue,
+    expects_ptr_recv: bool,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> (u16, TypeKey) {
+    match (recv, expects_ptr_recv) {
+        // Value -> Value: use directly
+        (ReceiverValue::Value { reg, value_type, .. }, false) => {
+            (reg, value_type)
+        }
+        // Value -> Pointer: box the value
+        (ReceiverValue::Value { reg, value_type, slots }, true) => {
+            let meta_idx = ctx.get_or_create_value_meta(value_type, info);
+            let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+            func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+            let boxed_reg = func.alloc_temp_typed(&[SlotType::GcRef]);
+            func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed_reg, meta_reg, 0);
+            func.emit_ptr_set(boxed_reg, 0, reg, slots);
+            (boxed_reg, value_type)
+        }
+        // Pointer -> Value: dereference
+        (ReceiverValue::Pointer { reg, pointee_type }, false) => {
+            let slots = info.type_slot_count(pointee_type);
+            let slot_types = info.type_slot_types(pointee_type);
+            let value_reg = func.alloc_temp_typed(&slot_types);
+            func.emit_ptr_get(value_reg, reg, 0, slots);
+            (value_reg, pointee_type)
+        }
+        // Pointer -> Pointer: use directly
+        (ReceiverValue::Pointer { reg, pointee_type }, true) => {
+            (reg, pointee_type)
+        }
+    }
+}
+
+/// High-level API: Extract receiver and prepare it for method call/value.
+/// Combines `extract_receiver` and `prepare_for_method` into one call.
+pub fn get_method_receiver(
+    expr: &vo_syntax::ast::Expr,
+    recv_type: TypeKey,
+    embed_path: &EmbedPathInfo,
+    expects_ptr_recv: bool,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(u16, TypeKey), CodegenError> {
+    let recv = extract_receiver(expr, recv_type, embed_path, ctx, func, info)?;
+    Ok(prepare_for_method(recv, expects_ptr_recv, ctx, func, info))
+}
+
 #[cfg(test)]
 mod tests {
     // Unit tests would go here
