@@ -780,6 +780,9 @@ tests:
 
   - file: interface_nil_semantics.vo
 
+# Bug fix: Multi-level pointer embedding through interface dispatch (2026-01-22)
+  - file: bug_multi_level_pointer_embed.vo
+
 # ============================================================
 # no_std mode skips - std-only modules
 # ============================================================

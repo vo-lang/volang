@@ -209,73 +209,90 @@ pub fn emit_receiver(
     let recv_is_ptr = info.is_pointer(recv_type);
     let value_slots = info.type_slot_count(actual_recv_type);
     let expects_ptr_recv = call_info.expects_ptr_recv();
-    let embed_offset = call_info.embed_path.total_offset;
-    let pointer_steps = call_info.pointer_steps();
+    let steps = &call_info.embed_path.steps;
+    let has_pointer = steps.iter().any(|s| s.is_pointer);
     
-    if pointer_steps == 0 {
+    if !has_pointer {
         // No pointer embedding - simple case
+        // Calculate total offset for value embedding
+        let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+        
         if expects_ptr_recv {
             super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info)?;
         } else {
             match recv_storage {
                 Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, embed_offset);
+                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, total_offset);
                 }
                 Some(StorageKind::HeapArray { gcref_slot, .. }) => {
                     // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
                     // Skip ArrayHeader to get actual array data
                     const ARRAY_HEADER_SLOTS: u16 = 2;
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, ARRAY_HEADER_SLOTS + embed_offset);
+                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, ARRAY_HEADER_SLOTS + total_offset);
                 }
                 Some(StorageKind::StackValue { slot, .. }) => {
-                    func.emit_copy(args_start, slot + embed_offset, value_slots);
+                    func.emit_copy(args_start, slot + total_offset, value_slots);
                 }
                 _ if recv_is_ptr => {
                     let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, recv_reg, embed_offset);
+                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, recv_reg, total_offset);
                 }
                 _ => {
                     let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-                    func.emit_copy(args_start, recv_reg + embed_offset, value_slots);
+                    func.emit_copy(args_start, recv_reg + total_offset, value_slots);
                 }
             }
         }
     } else {
-        // Pointer embedding: need to traverse pointer chain
-        // First, get the initial pointer from the receiver
-        let mut current_ptr = match recv_storage {
-            Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                let temp = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_ptr_get(temp, gcref_slot, embed_offset, 1);
-                temp
-            }
+        // Pointer embedding: need to traverse pointer chain step by step
+        // Get the initial receiver pointer
+        let initial_ptr = match recv_storage {
+            Some(StorageKind::HeapBoxed { gcref_slot, .. }) => gcref_slot,
             Some(StorageKind::StackValue { slot, .. }) => {
-                // The embedded pointer is directly at slot + embed_offset
-                slot + embed_offset
+                // For stack values, we need to get the address
+                // But if recv_is_ptr, the slot contains the pointer
+                slot
             }
-            _ => {
-                let recv_gcref = compile_expr(sel_expr, ctx, func, info)?;
-                let temp = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_ptr_get(temp, recv_gcref, embed_offset, 1);
-                temp
-            }
+            _ => compile_expr(sel_expr, ctx, func, info)?,
         };
         
-        // Follow the pointer chain for remaining steps
-        // Each step: dereference current pointer and read next pointer at offset 0
-        for _ in 1..pointer_steps {
-            let next_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
-            func.emit_ptr_get(next_ptr, current_ptr, 0, 1);
-            current_ptr = next_ptr;
-        }
+        let mut current_ptr = initial_ptr;
+        let mut accumulated_offset: u16 = 0;
+        let mut is_stack_value = matches!(recv_storage, Some(StorageKind::StackValue { .. })) && !recv_is_ptr;
         
-        // Now current_ptr points to the final embedded type
-        if expects_ptr_recv {
-            // Method expects *T: current_ptr IS the pointer we need
-            func.emit_copy(args_start, current_ptr, 1);
-        } else {
-            // Method expects T: dereference to get value
-            func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, current_ptr, 0);
+        for (i, step) in steps.iter().enumerate() {
+            accumulated_offset += step.offset;
+            
+            if step.is_pointer {
+                // This is a pointer field - read the pointer
+                let temp_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+                if is_stack_value {
+                    // Stack value: pointer is at slot + offset
+                    func.emit_copy(temp_ptr, current_ptr + accumulated_offset, 1);
+                } else {
+                    // Heap value: read pointer from current object
+                    func.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
+                }
+                current_ptr = temp_ptr;
+                accumulated_offset = 0; // Reset offset - we're now in a new heap object
+                is_stack_value = false; // After first pointer deref, we're always on heap
+            }
+            
+            // Check if this is the last step
+            if i == steps.len() - 1 {
+                // Final step - emit the receiver
+                if expects_ptr_recv {
+                    // Method expects *T - current_ptr is already the pointer we need
+                    func.emit_copy(args_start, current_ptr, 1);
+                } else {
+                    // Method expects T - dereference to get value
+                    if is_stack_value {
+                        func.emit_copy(args_start, current_ptr + accumulated_offset, value_slots);
+                    } else {
+                        func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, current_ptr, accumulated_offset);
+                    }
+                }
+            }
         }
     }
     Ok(())

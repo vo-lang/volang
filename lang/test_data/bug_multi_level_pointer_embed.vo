@@ -1,0 +1,111 @@
+package main
+
+// Bug: Multi-level pointer embedding through interface dispatch
+// 
+// When a struct embeds *A which embeds *B, and B has a method M,
+// calling M through interface dispatch on the outer struct would
+// use incorrect offsets, causing memory corruption.
+//
+// Example: Top -> *Mid -> *Base, calling Base.Write through Writer interface
+// on Top would write to wrong memory location.
+//
+// Fixed: wrapper.rs and call.rs now correctly traverse multi-level pointer chains
+// using per-step offsets instead of total_offset.
+
+type Writer interface {
+	Write(int)
+}
+
+type Reader interface {
+	Read() int
+}
+
+type Base struct {
+	data int
+}
+
+func (b *Base) Read() int {
+	return b.data
+}
+
+func (b *Base) Write(v int) {
+	b.data = v
+}
+
+type Mid struct {
+	*Base
+	mul int
+}
+
+func (m *Mid) Read() int {
+	return m.Base.Read() * m.mul
+}
+
+// Write is promoted from Base
+
+type Top struct {
+	*Mid
+	add int
+}
+
+func (t *Top) Read() int {
+	return t.Mid.Read() + t.add
+}
+
+// Write is promoted from Base through Mid
+
+func testMultiLevelPointerEmbed() {
+	b := &Base{data: 5}
+	m := &Mid{Base: b, mul: 2}
+	t := &Top{Mid: m, add: 100}
+	
+	// Direct call should work
+	assert(t.Read() == 110, "t.Read() direct: (5*2)+100 = 110")
+	
+	// Interface call should also work
+	var r Reader = t
+	assert(r.Read() == 110, "r.Read() via interface")
+	
+	// Write through interface - this was the bug
+	var w Writer = t
+	w.Write(10)
+	
+	// Verify write went to correct location
+	assert(b.data == 10, "b.data should be 10 after w.Write(10)")
+	
+	// Read should reflect the change: (10*2)+100 = 120
+	assert(r.Read() == 120, "r.Read() after write: (10*2)+100 = 120")
+}
+
+func testThreeLevelPointerEmbed() {
+	// Even deeper nesting
+	type L1 struct {
+		val int
+	}
+	type L2 struct {
+		*L1
+	}
+	type L3 struct {
+		*L2
+	}
+	type L4 struct {
+		*L3
+	}
+	
+	l1 := &L1{val: 42}
+	l2 := &L2{L1: l1}
+	l3 := &L3{L2: l2}
+	l4 := &L4{L3: l3}
+	
+	// Access through deep embedding
+	assert(l4.val == 42, "l4.val through 3-level pointer embed")
+	
+	l4.val = 100
+	assert(l1.val == 100, "l1.val should be modified through l4.val")
+}
+
+func main() {
+	testMultiLevelPointerEmbed()
+	testThreeLevelPointerEmbed()
+	println("All multi-level pointer embed tests passed!")
+}

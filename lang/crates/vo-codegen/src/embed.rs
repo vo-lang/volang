@@ -17,8 +17,6 @@ use vo_analysis::typ::{self, Type};
 pub struct EmbedPathInfo {
     /// Steps in the embedding path (empty = direct method, no embedding)
     pub steps: Vec<EmbedStep>,
-    /// Total byte offset to reach the final embedded field
-    pub total_offset: u16,
     /// The final type after traversing the path
     pub final_type: TypeKey,
     /// If the path ends at an interface field, this contains the interface info
@@ -30,6 +28,8 @@ pub struct EmbedPathInfo {
 pub struct EmbedStep {
     /// True if this field is a pointer type (*T)
     pub is_pointer: bool,
+    /// Offset of this field within its containing struct
+    pub offset: u16,
 }
 
 /// Info about an embedded interface at the end of the path.
@@ -80,7 +80,6 @@ fn analyze_embed_path_impl(
     tc_objs: &TCObjects,
 ) -> EmbedPathInfo {
     let mut steps = Vec::new();
-    let mut total_offset = 0u16;
     let mut current_type = recv_type;
     let mut embedded_iface = None;
     
@@ -99,11 +98,11 @@ fn analyze_embed_path_impl(
         let is_pointer = layout::is_pointer(field_type, tc_objs);
         let is_interface = layout::is_interface(field_type, tc_objs);
         
-        steps.push(EmbedStep { is_pointer });
-        
-        total_offset += field_offset;
+        steps.push(EmbedStep { is_pointer, offset: field_offset });
         
         if is_interface {
+            // For embedded interface, calculate total offset from steps
+            let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
             embedded_iface = Some(EmbeddedIfaceInfo {
                 offset: total_offset,
                 iface_type: field_type,
@@ -123,7 +122,6 @@ fn analyze_embed_path_impl(
     
     EmbedPathInfo {
         steps,
-        total_offset,
         final_type: current_type,
         embedded_iface,
     }
@@ -165,11 +163,6 @@ pub struct MethodCallInfo {
 }
 
 impl MethodCallInfo {
-    /// Number of pointer dereferences needed in the embedding path
-    pub fn pointer_steps(&self) -> usize {
-        self.embed_path.steps.iter().filter(|s| s.is_pointer).count()
-    }
-    
     /// Whether method expects pointer receiver
     pub fn expects_ptr_recv(&self) -> bool {
         match &self.dispatch {
@@ -225,7 +218,6 @@ pub fn resolve_method_call(
             dispatch: MethodDispatch::Interface { method_idx },
             embed_path: EmbedPathInfo {
                 steps: Vec::new(),
-                total_offset: 0,
                 final_type: recv_type,
                 embedded_iface: None,
             },

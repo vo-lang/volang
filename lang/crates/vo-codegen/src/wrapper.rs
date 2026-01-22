@@ -151,9 +151,7 @@ pub fn generate_promoted_wrapper(
     // Note: embed_indices here does NOT include method index (already stripped by caller)
     // So we pass indices as-is without adding a fake method index
     let path_info = crate::embed::analyze_embed_path_raw(outer_type, embed_indices, tc_objs);
-    let offset = path_info.total_offset;
     let current_type = path_info.final_type;
-    let has_pointer_embed = path_info.steps.iter().any(|s| s.is_pointer);
     
     let recv_slots_for_call = if is_pointer_receiver {
         1u16
@@ -182,8 +180,7 @@ pub fn generate_promoted_wrapper(
         &mut builder,
         outer_gcref,
         args_start,
-        offset,
-        has_pointer_embed,
+        &path_info.steps,
         is_pointer_receiver,
         recv_slots_for_call,
     );
@@ -209,32 +206,72 @@ pub fn generate_promoted_wrapper(
 // Helper functions
 // =============================================================================
 
-/// Emit receiver loading for promoted method wrapper
+/// Emit receiver loading for promoted method wrapper.
+/// 
+/// Handles multi-level pointer embedding correctly by traversing each step.
+/// For example, `Top -> *Mid -> *Base` requires:
+/// 1. Read *Mid pointer from Top at step[0].offset
+/// 2. Read *Base pointer from Mid at step[1].offset
+/// 3. Use *Base as receiver (or dereference if value receiver)
 fn emit_promoted_receiver(
     builder: &mut FuncBuilder,
     outer_gcref: u16,
     args_start: u16,
-    offset: u16,
-    has_pointer_embed: bool,
+    steps: &[crate::embed::EmbedStep],
     is_pointer_receiver: bool,
     recv_slots: u16,
 ) {
-    if has_pointer_embed {
-        // Pointer embedding: read embedded pointer, then dereference if value receiver
-        let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
-        builder.emit_ptr_get(temp_ptr, outer_gcref, offset, 1);
-        
-        if is_pointer_receiver {
-            builder.emit_copy(args_start, temp_ptr, 1);
-        } else {
-            builder.emit_ptr_get(args_start, temp_ptr, 0, recv_slots);
-        }
-    } else {
-        // Value embedding
+    if steps.is_empty() {
+        // No embedding - just use outer_gcref directly
         if is_pointer_receiver {
             builder.emit_copy(args_start, outer_gcref, 1);
         } else {
-            builder.emit_ptr_get(args_start, outer_gcref, offset, recv_slots);
+            builder.emit_ptr_get(args_start, outer_gcref, 0, recv_slots);
+        }
+        return;
+    }
+    
+    // Check if we have any pointer steps
+    let has_pointer = steps.iter().any(|s| s.is_pointer);
+    
+    if !has_pointer {
+        // All value embedding - calculate total offset and read directly
+        let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+        if is_pointer_receiver {
+            // Pointer receiver but no pointer embedding - outer_gcref IS the pointer
+            builder.emit_copy(args_start, outer_gcref, 1);
+        } else {
+            builder.emit_ptr_get(args_start, outer_gcref, total_offset, recv_slots);
+        }
+        return;
+    }
+    
+    // Has pointer embedding - need to traverse the chain
+    let mut current_ptr = outer_gcref;
+    let mut accumulated_offset: u16 = 0;
+    
+    for (i, step) in steps.iter().enumerate() {
+        accumulated_offset += step.offset;
+        
+        if step.is_pointer {
+            // This is a pointer field - read the pointer
+            let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+            builder.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
+            current_ptr = temp_ptr;
+            accumulated_offset = 0; // Reset offset - we're now in a new object
+        }
+        // If not pointer, just accumulate the offset for the next read
+        
+        // Check if this is the last step
+        if i == steps.len() - 1 {
+            // Final step - emit the receiver
+            if is_pointer_receiver {
+                // Method expects *T - current_ptr is already the pointer we need
+                builder.emit_copy(args_start, current_ptr, 1);
+            } else {
+                // Method expects T - dereference to get value
+                builder.emit_ptr_get(args_start, current_ptr, accumulated_offset, recv_slots);
+            }
         }
     }
 }
