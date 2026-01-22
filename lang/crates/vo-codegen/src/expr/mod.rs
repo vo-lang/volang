@@ -184,6 +184,23 @@ pub fn compile_map_key_expr(
     }
 }
 
+/// Compile an element expression to a destination slot, boxing to interface if the target type is interface.
+/// Common pattern for array/slice/map element initialization.
+pub fn compile_elem_to(
+    elem_expr: &Expr,
+    dst: u16,
+    target_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if info.is_interface(target_type) {
+        crate::stmt::compile_iface_assign(dst, elem_expr, target_type, ctx, func, info)
+    } else {
+        compile_expr_to(elem_expr, dst, ctx, func, info)
+    }
+}
+
 /// Get the GcRef slot of an escaped variable without copying.
 fn get_escaped_var_gcref(
     expr: &Expr,

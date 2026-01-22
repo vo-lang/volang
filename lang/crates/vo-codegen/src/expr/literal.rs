@@ -276,6 +276,7 @@ fn compile_array_lit(
     let elem_slots = info.array_elem_slots(type_key);
     let array_len = info.array_len(type_key) as u16;
     let total_slots = array_len * elem_slots;
+    let elem_type = info.array_elem_type(type_key);
     
     // Zero-initialize all slots first (sparse arrays may have gaps)
     for i in 0..total_slots {
@@ -287,7 +288,7 @@ fn compile_array_lit(
     for elem in lit.elems.iter() {
         let index = resolve_elem_index(elem, &mut current_index, info);
         let offset = (index as u16) * elem_slots;
-        super::compile_expr_to(&elem.value, dst + offset, ctx, func, info)?;
+        super::compile_elem_to(&elem.value, dst + offset, elem_type, ctx, func, info)?;
     }
     Ok(())
 }
@@ -331,14 +332,8 @@ fn compile_slice_lit(
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
         let index = resolve_elem_index(elem, &mut current_index, info);
-        // For interface element type, need to convert concrete value to interface
-        let val_reg = if info.is_interface(elem_type) {
-            let iface_reg = func.alloc_temp_typed(&elem_slot_types);
-            crate::stmt::compile_iface_assign(iface_reg, &elem.value, elem_type, ctx, func, info)?;
-            iface_reg
-        } else {
-            compile_expr(&elem.value, ctx, func, info)?
-        };
+        let val_reg = func.alloc_temp_typed(&elem_slot_types);
+        super::compile_elem_to(&elem.value, val_reg, elem_type, ctx, func, info)?;
         let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, index as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
@@ -395,16 +390,10 @@ fn compile_map_lit(
             let key_reg = compile_map_lit_key(key, key_type, ctx, func, info)?;
             func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
             
-            // Compile value - if map value type is interface, need to box
+            // Compile value
             let (_, val_type) = info.map_key_val_types(type_key);
-            let val_reg = if info.is_interface(val_type) {
-                // Value type is interface (e.g., any) - need to box the element
-                let val_reg = func.alloc_temp_typed(&val_slot_types);
-                crate::stmt::compile_iface_assign(val_reg, &elem.value, val_type, ctx, func, info)?;
-                val_reg
-            } else {
-                compile_expr(&elem.value, ctx, func, info)?
-            };
+            let val_reg = func.alloc_temp_typed(&val_slot_types);
+            super::compile_elem_to(&elem.value, val_reg, val_type, ctx, func, info)?;
             
             // MapSet: a=map, b=meta_and_key, c=val
             func.emit_op(Opcode::MapSet, dst, meta_and_key_reg, val_reg);

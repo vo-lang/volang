@@ -1140,7 +1140,7 @@ fn compile_global_array_init(
         let idx_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
         
         for (i, elem) in lit.elems.iter().enumerate() {
-            crate::expr::compile_expr_to(&elem.value, tmp_elem, ctx, func, info)?;
+            crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
             func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
             func.emit_array_set(gcref_slot, idx_reg, tmp_elem, elem_bytes as usize, elem_vk, ctx);
         }

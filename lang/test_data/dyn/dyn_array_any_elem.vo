@@ -1,0 +1,67 @@
+// Test dynamic access on fixed-size array with interface element type [N]any
+// Regression test for bugs:
+// 1. compile_array_lit didn't box interface elements
+// 2. compile_global_array_init didn't box interface elements
+// 3. compile_iface_assign didn't handle global array to interface assignment
+package main
+
+import "fmt"
+
+// Global array of any for regression test
+var globalArr = [3]any{100, "global", true}
+
+func main() {
+    // Fixed-size array of any (interface{})
+    arr := [5]any{10, "hello", true, 3.14, nil}
+    var obj any = arr
+    
+    // Test 1: Access int element
+    v0, err := obj~>[0]
+    assert(err == nil, "index 0 should succeed")
+    assert(v0.(int) == 10, "arr[0] should be 10")
+    
+    // Test 2: Access string element
+    v1 := obj~>[1]?
+    assert(v1.(string) == "hello", "arr[1] should be 'hello'")
+    
+    // Test 3: Access bool element
+    v2 := obj~>[2]?
+    assert(v2.(bool) == true, "arr[2] should be true")
+    
+    // Test 4: Access float element
+    v3 := obj~>[3]?
+    assert(v3.(float64) == 3.14, "arr[3] should be 3.14")
+    
+    // Test 5: Access nil element
+    v4 := obj~>[4]?
+    assert(v4 == nil, "arr[4] should be nil")
+    
+    // Test 6: Array of struct stored as any
+    type Point struct{ X, Y int }
+    arrStruct := [2]any{Point{1, 2}, Point{3, 4}}
+    var objStruct any = arrStruct
+    
+    p0 := objStruct~>[0]?
+    assert(p0.(Point).X == 1, "point X should be 1")
+    assert(p0.(Point).Y == 2, "point Y should be 2")
+    
+    p1 := objStruct~>[1]?
+    assert(p1.(Point).X == 3 && p1.(Point).Y == 4, "second point should be {3,4}")
+    
+    // Test 7: Nested access - array element field
+    name := objStruct~>[0]?~>X?
+    assert(name.(int) == 1, "nested X should be 1")
+    
+    // Test 8: Global array of any - regression test
+    var gobj any = globalArr
+    g0 := gobj~>[0]?
+    assert(g0.(int) == 100, "globalArr[0] should be 100")
+    
+    g1 := gobj~>[1]?
+    assert(g1.(string) == "global", "globalArr[1] should be 'global'")
+    
+    g2 := gobj~>[2]?
+    assert(g2.(bool) == true, "globalArr[2] should be true")
+    
+    fmt.Println("dyn_array_any_elem: ok")
+}

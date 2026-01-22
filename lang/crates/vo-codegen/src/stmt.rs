@@ -2647,6 +2647,12 @@ pub fn compile_iface_assign(
                 // including ArrayHeader, preserving len/elem_meta/elem_bytes for GC and dynamic access.
                 func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
             }
+            crate::func::ExprSource::Location(crate::func::StorageKind::Global { index, slots: 1 }) if src_vk == vo_runtime::ValueKind::Array => {
+                // Global array: stored as 1 slot GcRef, load and pass directly
+                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                func.emit_op(Opcode::GlobalGet, gcref_slot, index, 0);
+                func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst_slot, gcref_slot, const_idx);
+            }
             _ => {
                 // Stack value or expression: allocate box and copy data
                 let src_slots = info.type_slot_count(src_type);
