@@ -135,6 +135,7 @@ pub fn generate_method_expr_promoted_wrapper(
     embed_path: &crate::embed::EmbedPathInfo,
     original_func_id: u32,
     expects_ptr_recv: bool,
+    outer_is_pointer: bool,
     method_name: &str,
     tc_objs: &vo_analysis::objects::TCObjects,
 ) -> u32 {
@@ -154,12 +155,11 @@ pub fn generate_method_expr_promoted_wrapper(
     let wrapper_name = format!("{}$mexpr", method_name);
     let mut builder = FuncBuilder::new(&wrapper_name);
     
-    // Determine if outer receiver is a pointer type
+    // outer_is_pointer is now passed as parameter
     // For (*T).M, outer is pointer (GcRef)
     // For T.M (even if path has pointer steps), outer is value type
     // NOTE: has_pointer_step does NOT mean outer is pointer - it just means the path
     // contains embedded pointer fields that need to be dereferenced
-    let outer_is_pointer = expects_ptr_recv;
     
     let outer_recv_slots = if outer_is_pointer {
         1u16

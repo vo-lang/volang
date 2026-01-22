@@ -1,0 +1,118 @@
+// Comprehensive regression test for method expression with embedding
+// Tests fixes for:
+// 1. outer_is_pointer was incorrectly set to expects_ptr_recv
+// 2. emit_final_receiver ignored offset when expects_ptr_recv && is_pointer
+package main
+
+import "fmt"
+
+// ========== Test 1: T embeds *U, method has value receiver ==========
+type StringWriter struct {
+    buf string
+}
+
+func (w *StringWriter) Write(s string) int {
+    w.buf = w.buf + s
+    return len(s)
+}
+
+func (w *StringWriter) GetBuf() string {
+    return w.buf
+}
+
+type Wrapper struct {
+    *StringWriter
+    name string
+}
+
+func testEmbedPtrValueRecv() {
+    fmt.Println("Test: T embeds *U, value receiver")
+    w := Wrapper{StringWriter: &StringWriter{buf: ""}, name: "wrapper"}
+    f := Wrapper.GetBuf
+    assert(f(w) == "", "initial GetBuf should be empty")
+    w.StringWriter.buf = "modified"
+    assert(f(w) == "modified", "GetBuf should see modification")
+}
+
+// ========== Test 2: (*T) embeds U (at offset > 0), method has *U receiver ==========
+type Inner struct {
+    a int
+    b int
+}
+
+func (i *Inner) SetA(val int) { i.a = val }
+func (i *Inner) SetB(val int) { i.b = val }
+func (i Inner) GetA() int { return i.a }
+func (i Inner) GetB() int { return i.b }
+
+type Outer struct {
+    x int
+    y int
+    Inner
+}
+
+func testPtrRecvAtOffset() {
+    fmt.Println("Test: (*T) embeds U at offset, *U receiver")
+    f := (*Outer).SetA
+    o := &Outer{x: 1, y: 2, Inner: Inner{a: 3, b: 4}}
+    
+    f(o, 100)
+    assert(o.x == 1, "x should be unchanged")
+    assert(o.y == 2, "y should be unchanged")
+    assert(o.a == 100, "a should be 100")
+    assert(o.b == 4, "b should be unchanged")
+    
+    g := (*Outer).SetB
+    g(o, 200)
+    assert(o.a == 100, "a should still be 100")
+    assert(o.b == 200, "b should be 200")
+}
+
+func testValueRecvAtOffset() {
+    fmt.Println("Test: (*T) embeds U at offset, U receiver")
+    h := (*Outer).GetA
+    o := &Outer{x: 10, y: 20, Inner: Inner{a: 42, b: 99}}
+    result := h(o)
+    assert(result == 42, "GetA should return a=42, not x=10")
+}
+
+// ========== Test 3: T.M value receiver at offset ==========
+func testValueExprValueRecv() {
+    fmt.Println("Test: T.M value receiver at offset")
+    f := Outer.GetA
+    o := Outer{x: 5, y: 6, Inner: Inner{a: 7, b: 8}}
+    result := f(o)
+    assert(result == 7, "GetA should return 7")
+}
+
+// ========== Test 4: Deep embedding chain ==========
+type Level0 struct { val int }
+func (l *Level0) Get() int { return l.val }
+func (l *Level0) Set(v int) { l.val = v }
+
+type Level1 struct { Level0 }
+type Level2 struct { padding int; Level1 }
+type Level3 struct { extra int; Level2 }
+
+func testDeepEmbedding() {
+    fmt.Println("Test: deep embedding chain")
+    // Value receiver through deep chain
+    fGet := (*Level3).Get
+    l := &Level3{extra: 1, Level2: Level2{padding: 2, Level1: Level1{Level0: Level0{val: 42}}}}
+    assert(fGet(l) == 42, "deep Get should return 42")
+    
+    // Pointer receiver through deep chain
+    fSet := (*Level3).Set
+    fSet(l, 100)
+    assert(l.val == 100, "deep Set should modify val")
+}
+
+func main() {
+    testEmbedPtrValueRecv()
+    testPtrRecvAtOffset()
+    testValueRecvAtOffset()
+    testValueExprValueRecv()
+    testDeepEmbedding()
+    
+    fmt.Println("method_expr_embed_comprehensive: ok")
+}

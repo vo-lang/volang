@@ -1,12 +1,26 @@
-//! Embedding path analysis for method resolution.
+//! Embedding path analysis and traversal for method resolution.
 //!
-//! This module provides a unified way to analyze embedding paths for:
-//! - Direct method calls (compile_concrete_method)
-//! - Itab building (build_itab)
-//! - Wrapper generation
+//! # Overview
+//! 
+//! When a struct embeds another type, methods are "promoted" and can be called
+//! on the outer type. This module handles:
+//! 
+//! 1. **Path Analysis** - Analyze embedding indices to build `EmbedPathInfo`
+//! 2. **Method Resolution** - Determine dispatch strategy (`MethodDispatch`)
+//! 3. **Code Generation** - Emit instructions to traverse the path (`emit_embed_path_traversal`)
 //!
-//! The key insight is that all method calls through embedding share the same
-//! path analysis logic, whether at compile time or for runtime dispatch.
+//! # Key Types
+//!
+//! - `EmbedPathInfo` - Analyzed path with cached `total_offset` and `has_pointer_step`
+//! - `EmbedStep` - Single step: `{is_pointer, offset}`
+//! - `MethodCallInfo` - Complete info for compiling a method call
+//! - `MethodDispatch` - How to dispatch: Static, Interface, or EmbeddedInterface
+//!
+//! # Path Traversal Logic
+//!
+//! For `Outer.Inner.Method()` where Inner is embedded:
+//! - If no pointer steps: use `total_offset` directly (fast path)
+//! - If has pointer steps: traverse step by step, dereference pointers
 
 use vo_analysis::objects::{TCObjects, TypeKey};
 use vo_analysis::check::type_info as layout;
@@ -19,6 +33,10 @@ pub struct EmbedPathInfo {
     pub steps: Vec<EmbedStep>,
     /// The final type after traversing the path
     pub final_type: TypeKey,
+    /// Sum of all step offsets (valid only when no pointer steps, otherwise use traversal)
+    pub total_offset: u16,
+    /// True if any step is a pointer type (requires traversal logic)
+    pub has_pointer_step: bool,
     /// If the path ends at an interface field, this contains the interface info
     pub embedded_iface: Option<EmbeddedIfaceInfo>,
 }
@@ -120,9 +138,14 @@ fn analyze_embed_path_impl(
         }
     }
     
+    let total_offset = steps.iter().map(|s| s.offset).sum();
+    let has_pointer_step = steps.iter().any(|s| s.is_pointer);
+    
     EmbedPathInfo {
         steps,
         final_type: current_type,
+        total_offset,
+        has_pointer_step,
         embedded_iface,
     }
 }
@@ -219,6 +242,8 @@ pub fn resolve_method_call(
             embed_path: EmbedPathInfo {
                 steps: Vec::new(),
                 final_type: recv_type,
+                total_offset: 0,
+                has_pointer_step: false,
                 embedded_iface: None,
             },
             recv_is_pointer,
@@ -291,17 +316,22 @@ pub struct TraverseStart {
 }
 
 /// Emit instructions to traverse an embed path and extract the receiver.
-/// 
-/// This is the single source of truth for embed path traversal logic.
-/// Both method calls (`call.rs`) and wrapper generation (`wrapper.rs`) use this.
-/// 
-/// Parameters:
-/// - `builder`: FuncBuilder to emit instructions
-/// - `start`: Initial state (register and whether it's a pointer)
-/// - `steps`: Embedding path to traverse
-/// - `expects_ptr_recv`: True if the target method expects pointer receiver
-/// - `recv_slots`: Number of slots for the final receiver value
-/// - `dst`: Destination slot for the extracted receiver
+///
+/// # Logic
+///
+/// 1. Empty path → direct extraction via `emit_final_receiver`
+/// 2. No pointer steps → use total_offset directly (fast path)
+/// 3. Has pointer steps → iterate, dereference at each pointer step
+///
+/// # Final Receiver Extraction (`emit_final_receiver`)
+///
+/// | expects_ptr | is_pointer | offset | Action |
+/// |-------------|------------|--------|--------|
+/// | true        | true       | 0      | Copy pointer |
+/// | true        | true       | >0     | PtrAdd(ptr, offset) |
+/// | true        | false      | any    | Copy stack slot (pointer field) |
+/// | false       | true       | any    | PtrGet(ptr, offset, slots) |
+/// | false       | false      | any    | Copy stack slots |
 pub fn emit_embed_path_traversal(
     builder: &mut FuncBuilder,
     start: TraverseStart,
@@ -353,7 +383,8 @@ pub fn emit_embed_path_traversal(
     }
 }
 
-/// Emit the final receiver extraction.
+/// Extract the final receiver based on pointer state and method expectation.
+/// See `emit_embed_path_traversal` doc for the decision matrix.
 fn emit_final_receiver(
     builder: &mut FuncBuilder,
     reg: u16,
@@ -364,9 +395,17 @@ fn emit_final_receiver(
     dst: u16,
 ) {
     if expects_ptr_recv {
-        // Method expects *T
+        // Method expects *T - need to produce a pointer to the embedded field
         if is_pointer {
-            builder.emit_copy(dst, reg, 1);
+            if offset == 0 {
+                // No offset, just copy the pointer
+                builder.emit_copy(dst, reg, 1);
+            } else {
+                // Need to compute ptr + offset to get pointer to embedded field
+                let offset_reg = builder.alloc_temp_typed(&[SlotType::Value]);
+                builder.emit_op(vo_vm::instruction::Opcode::LoadInt, offset_reg, offset, 0);
+                builder.emit_ptr_add(dst, reg, offset_reg);
+            }
         } else {
             // Stack value - copy the pointer field at offset
             builder.emit_copy(dst, reg + offset, 1);

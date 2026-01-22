@@ -1020,6 +1020,7 @@ fn compile_method_expr(
             &call_info.embed_path,
             method_func_id,
             expects_ptr_recv,
+            call_info.recv_is_pointer,
             method_name,
             &info.project.tc_objs,
         )

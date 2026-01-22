@@ -209,13 +209,11 @@ pub fn emit_receiver(
     let recv_is_ptr = info.is_pointer(recv_type);
     let value_slots = info.type_slot_count(actual_recv_type);
     let expects_ptr_recv = call_info.expects_ptr_recv();
-    let steps = &call_info.embed_path.steps;
-    let has_pointer = steps.iter().any(|s| s.is_pointer);
+    let embed_path = &call_info.embed_path;
     
-    if !has_pointer {
-        // No pointer embedding - simple case
-        // Calculate total offset for value embedding
-        let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+    if !embed_path.has_pointer_step {
+        // No pointer embedding - use cached total_offset
+        let total_offset = embed_path.total_offset;
         
         if expects_ptr_recv {
             super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info)?;
@@ -271,7 +269,7 @@ pub fn emit_receiver(
             reg: initial_reg,
             is_pointer: initial_is_ptr,
         };
-        crate::embed::emit_embed_path_traversal(func, start, steps, expects_ptr_recv, value_slots, args_start);
+        crate::embed::emit_embed_path_traversal(func, start, &embed_path.steps, expects_ptr_recv, value_slots, args_start);
     }
     Ok(())
 }
@@ -417,13 +415,10 @@ fn compile_method_call_dispatch(
         }
         MethodDispatch::EmbeddedInterface { embed_offset, iface_type, method_idx } => {
             // Embedded interface dispatch
-            // Need to handle both stack values and heap pointers correctly
             let recv_is_ptr = info.is_pointer(recv_type);
-            let has_pointer_step = call_info.embed_path.steps.iter().any(|s| s.is_pointer);
-            
             let iface_slot = func.alloc_interface();  // Interface is 2 slots
             
-            if recv_is_ptr || has_pointer_step {
+            if recv_is_ptr || call_info.embed_path.has_pointer_step {
                 // Receiver is a pointer or path contains pointer - use ptr_get
                 let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
                 func.emit_ptr_get(iface_slot, recv_reg, *embed_offset, 2);
