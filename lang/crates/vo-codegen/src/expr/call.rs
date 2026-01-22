@@ -244,66 +244,34 @@ pub fn emit_receiver(
             }
         }
     } else {
-        // Pointer embedding: need to traverse pointer chain step by step
-        // Get the initial receiver pointer
-        let initial_ptr = match recv_storage {
+        // Pointer embedding: use unified traversal logic
+        // First, determine initial state based on storage kind
+        let (initial_reg, initial_is_ptr) = match recv_storage {
             Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
                 if recv_is_ptr {
-                    // When a pointer variable (*T) is captured by closure, the box contains
-                    // the pointer value (1 slot). We need to read the pointer from the box first.
+                    // Pointer variable captured by closure - read pointer from box first
                     let actual_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
                     func.emit_ptr_get(actual_ptr, gcref_slot, 0, 1);
-                    actual_ptr
+                    (actual_ptr, true)
                 } else {
-                    gcref_slot
+                    (gcref_slot, true)
                 }
             }
             Some(StorageKind::StackValue { slot, .. }) => {
-                // For stack values, we need to get the address
-                // But if recv_is_ptr, the slot contains the pointer
-                slot
+                // Stack value: is_ptr depends on whether recv_type is pointer
+                (slot, recv_is_ptr)
             }
-            _ => compile_expr(sel_expr, ctx, func, info)?,
+            _ => {
+                let reg = compile_expr(sel_expr, ctx, func, info)?;
+                (reg, recv_is_ptr)
+            }
         };
         
-        let mut current_ptr = initial_ptr;
-        let mut accumulated_offset: u16 = 0;
-        let mut is_stack_value = matches!(recv_storage, Some(StorageKind::StackValue { .. })) && !recv_is_ptr;
-        
-        for (i, step) in steps.iter().enumerate() {
-            accumulated_offset += step.offset;
-            
-            if step.is_pointer {
-                // This is a pointer field - read the pointer
-                let temp_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
-                if is_stack_value {
-                    // Stack value: pointer is at slot + offset
-                    func.emit_copy(temp_ptr, current_ptr + accumulated_offset, 1);
-                } else {
-                    // Heap value: read pointer from current object
-                    func.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
-                }
-                current_ptr = temp_ptr;
-                accumulated_offset = 0; // Reset offset - we're now in a new heap object
-                is_stack_value = false; // After first pointer deref, we're always on heap
-            }
-            
-            // Check if this is the last step
-            if i == steps.len() - 1 {
-                // Final step - emit the receiver
-                if expects_ptr_recv {
-                    // Method expects *T - current_ptr is already the pointer we need
-                    func.emit_copy(args_start, current_ptr, 1);
-                } else {
-                    // Method expects T - dereference to get value
-                    if is_stack_value {
-                        func.emit_copy(args_start, current_ptr + accumulated_offset, value_slots);
-                    } else {
-                        func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, current_ptr, accumulated_offset);
-                    }
-                }
-            }
-        }
+        let start = crate::embed::TraverseStart {
+            reg: initial_reg,
+            is_pointer: initial_is_ptr,
+        };
+        crate::embed::emit_embed_path_traversal(func, start, steps, expects_ptr_recv, value_slots, args_start);
     }
     Ok(())
 }

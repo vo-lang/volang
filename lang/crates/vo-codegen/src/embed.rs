@@ -274,6 +274,113 @@ pub fn resolve_method_call(
     None
 }
 
+// =============================================================================
+// Unified Embed Path Traversal for Code Generation
+// =============================================================================
+
+use crate::func::FuncBuilder;
+use vo_runtime::SlotType;
+
+/// Initial state for embed path traversal.
+#[derive(Debug, Clone, Copy)]
+pub struct TraverseStart {
+    /// The register containing the initial value
+    pub reg: u16,
+    /// True if reg contains a GcRef, false if it's a stack value
+    pub is_pointer: bool,
+}
+
+/// Emit instructions to traverse an embed path and extract the receiver.
+/// 
+/// This is the single source of truth for embed path traversal logic.
+/// Both method calls (`call.rs`) and wrapper generation (`wrapper.rs`) use this.
+/// 
+/// Parameters:
+/// - `builder`: FuncBuilder to emit instructions
+/// - `start`: Initial state (register and whether it's a pointer)
+/// - `steps`: Embedding path to traverse
+/// - `expects_ptr_recv`: True if the target method expects pointer receiver
+/// - `recv_slots`: Number of slots for the final receiver value
+/// - `dst`: Destination slot for the extracted receiver
+pub fn emit_embed_path_traversal(
+    builder: &mut FuncBuilder,
+    start: TraverseStart,
+    steps: &[EmbedStep],
+    expects_ptr_recv: bool,
+    recv_slots: u16,
+    dst: u16,
+) {
+    // Empty path - no embedding
+    if steps.is_empty() {
+        emit_final_receiver(builder, start.reg, start.is_pointer, 0, expects_ptr_recv, recv_slots, dst);
+        return;
+    }
+    
+    let has_pointer = steps.iter().any(|s| s.is_pointer);
+    let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+    
+    // Fast path: no pointer steps
+    if !has_pointer {
+        emit_final_receiver(builder, start.reg, start.is_pointer, total_offset, expects_ptr_recv, recv_slots, dst);
+        return;
+    }
+    
+    // General case: traverse pointer chain
+    let mut current_is_ptr = start.is_pointer;
+    let mut current_reg = start.reg;
+    let mut accumulated_offset: u16 = 0;
+    
+    for (i, step) in steps.iter().enumerate() {
+        accumulated_offset += step.offset;
+        
+        if step.is_pointer {
+            // Read the pointer field
+            let temp_ptr = builder.alloc_temp_typed(&[SlotType::GcRef]);
+            if current_is_ptr {
+                builder.emit_ptr_get(temp_ptr, current_reg, accumulated_offset, 1);
+            } else {
+                builder.emit_copy(temp_ptr, current_reg + accumulated_offset, 1);
+            }
+            current_reg = temp_ptr;
+            current_is_ptr = true;
+            accumulated_offset = 0;
+        }
+        
+        // Emit final receiver at the last step
+        if i == steps.len() - 1 {
+            emit_final_receiver(builder, current_reg, current_is_ptr, accumulated_offset, expects_ptr_recv, recv_slots, dst);
+        }
+    }
+}
+
+/// Emit the final receiver extraction.
+fn emit_final_receiver(
+    builder: &mut FuncBuilder,
+    reg: u16,
+    is_pointer: bool,
+    offset: u16,
+    expects_ptr_recv: bool,
+    recv_slots: u16,
+    dst: u16,
+) {
+    if expects_ptr_recv {
+        // Method expects *T
+        if is_pointer {
+            builder.emit_copy(dst, reg, 1);
+        } else {
+            // Stack value - copy the pointer field at offset
+            builder.emit_copy(dst, reg + offset, 1);
+        }
+    } else {
+        // Method expects T - dereference to get value
+        if is_pointer {
+            builder.emit_ptr_get(dst, reg, offset, recv_slots);
+        } else {
+            builder.emit_copy(dst, reg + offset, recv_slots);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Unit tests would go here

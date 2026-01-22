@@ -154,13 +154,12 @@ pub fn generate_method_expr_promoted_wrapper(
     let wrapper_name = format!("{}$mexpr", method_name);
     let mut builder = FuncBuilder::new(&wrapper_name);
     
-    // Check if any step in the path is a pointer
-    let has_pointer_step = embed_path.steps.iter().any(|s| s.is_pointer);
-    
     // Determine if outer receiver is a pointer type
-    // For (*T).M or when path has pointer steps, outer is pointer (GcRef)
-    // For T.M with no pointer steps, outer is value type
-    let outer_is_pointer = expects_ptr_recv || has_pointer_step;
+    // For (*T).M, outer is pointer (GcRef)
+    // For T.M (even if path has pointer steps), outer is value type
+    // NOTE: has_pointer_step does NOT mean outer is pointer - it just means the path
+    // contains embedded pointer fields that need to be dereferenced
+    let outer_is_pointer = expects_ptr_recv;
     
     let outer_recv_slots = if outer_is_pointer {
         1u16
@@ -209,17 +208,9 @@ pub fn generate_method_expr_promoted_wrapper(
     ctx.add_function(func_def)
 }
 
-/// Unified receiver extraction through embed path.
+/// Emit receiver extraction through embed path.
 /// 
-/// Used by both promoted wrapper (interface dispatch) and mexpr wrapper (method expression).
-/// 
-/// Parameters:
-/// - `outer_recv`: slot containing the outer receiver
-/// - `outer_is_pointer`: true if outer_recv is a GcRef, false if it's a value
-/// - `args_start`: destination slot for the extracted receiver
-/// - `steps`: embedding path to traverse
-/// - `expects_ptr_recv`: true if the target method expects pointer receiver
-/// - `recv_slots`: number of slots for the receiver value
+/// Thin wrapper around `embed::emit_embed_path_traversal` for backwards compatibility.
 fn emit_receiver_through_path(
     builder: &mut FuncBuilder,
     outer_recv: u16,
@@ -229,63 +220,11 @@ fn emit_receiver_through_path(
     expects_ptr_recv: bool,
     recv_slots: u16,
 ) {
-    if steps.is_empty() {
-        // No embedding path
-        if outer_is_pointer {
-            // Outer is GcRef
-            if expects_ptr_recv {
-                builder.emit_copy(args_start, outer_recv, 1);
-            } else {
-                builder.emit_ptr_get(args_start, outer_recv, 0, recv_slots);
-            }
-        } else {
-            // Outer is value - just copy
-            builder.emit_copy(args_start, outer_recv, recv_slots);
-        }
-        return;
-    }
-    
-    let has_pointer = steps.iter().any(|s| s.is_pointer);
-    let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
-    
-    if !outer_is_pointer && !has_pointer {
-        // Value outer, no pointer steps - simple offset extraction
-        builder.emit_copy(args_start, outer_recv + total_offset, recv_slots);
-        return;
-    }
-    
-    if !has_pointer {
-        // No pointer in path but outer is pointer
-        if expects_ptr_recv {
-            builder.emit_copy(args_start, outer_recv, 1);
-        } else {
-            builder.emit_ptr_get(args_start, outer_recv, total_offset, recv_slots);
-        }
-        return;
-    }
-    
-    // Has pointer steps - traverse the chain
-    let mut current_ptr = outer_recv;
-    let mut accumulated_offset: u16 = 0;
-    
-    for (i, step) in steps.iter().enumerate() {
-        accumulated_offset += step.offset;
-        
-        if step.is_pointer {
-            let temp_ptr = builder.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
-            builder.emit_ptr_get(temp_ptr, current_ptr, accumulated_offset, 1);
-            current_ptr = temp_ptr;
-            accumulated_offset = 0;
-        }
-        
-        if i == steps.len() - 1 {
-            if expects_ptr_recv {
-                builder.emit_copy(args_start, current_ptr, 1);
-            } else {
-                builder.emit_ptr_get(args_start, current_ptr, accumulated_offset, recv_slots);
-            }
-        }
-    }
+    let start = crate::embed::TraverseStart {
+        reg: outer_recv,
+        is_pointer: outer_is_pointer,
+    };
+    crate::embed::emit_embed_path_traversal(builder, start, steps, expects_ptr_recv, recv_slots, args_start);
 }
 
 /// Generate a wrapper for promoted method that navigates through embedded fields

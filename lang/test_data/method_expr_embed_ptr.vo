@@ -1,0 +1,87 @@
+// Test: method expressions on embedded pointer types
+// Regression test for bug: method expression on struct with embedded pointer
+// caused misaligned pointer crash because outer value was incorrectly treated as pointer.
+package main
+
+import "fmt"
+
+type Inner struct {
+    val int
+}
+
+func (i Inner) GetVal() int {
+    return i.val
+}
+
+func (i *Inner) SetVal(v int) {
+    i.val = v
+}
+
+// Outer embeds *Inner (pointer), but Outer itself is a value type
+type Outer struct {
+    *Inner
+    extra int
+}
+
+// Multi-level: A (value) -> *B (pointer) -> C (value)
+type A struct {
+    aVal int
+}
+
+func (a A) GetA() int {
+    return a.aVal
+}
+
+type B struct {
+    A
+    bVal int
+}
+
+type C struct {
+    *B
+    cVal int
+}
+
+// Mixed: value -> pointer -> value chain
+type D struct {
+    C
+    dVal int
+}
+
+func main() {
+    // Test 1: Basic embedded pointer - method expression
+    o := Outer{Inner: &Inner{val: 42}, extra: 100}
+    f1 := Outer.GetVal
+    assert(f1(o) == 42, "Outer.GetVal method expr failed")
+
+    // Test 2: Pointer receiver method expression
+    f2 := (*Outer).SetVal
+    op := &Outer{Inner: &Inner{val: 0}, extra: 0}
+    f2(op, 999)
+    assert(op.Inner.val == 999, "(*Outer).SetVal method expr failed")
+
+    // Test 3: Method value from embedded pointer
+    mv := o.GetVal
+    assert(mv() == 42, "method value from embedded pointer failed")
+
+    // Test 4: Multi-level embedding with pointers
+    b := &B{A: A{aVal: 10}, bVal: 20}
+    c := C{B: b, cVal: 30}
+    f3 := C.GetA
+    assert(f3(c) == 10, "C.GetA method expr failed")
+
+    // Test 5: Mixed value/pointer chain
+    d := D{C: c, dVal: 40}
+    f4 := D.GetA
+    assert(f4(d) == 10, "D.GetA method expr failed")
+
+    // Test 6: Method expression in slice
+    funcs := []func(Outer) int{Outer.GetVal}
+    assert(funcs[0](o) == 42, "method expr in slice failed")
+
+    // Test 7: Modification through pointer reflects in method expr
+    o.Inner.val = 200
+    assert(f1(o) == 200, "method expr should see modified value")
+
+    fmt.Println("method_expr_embed_ptr: ok")
+}
