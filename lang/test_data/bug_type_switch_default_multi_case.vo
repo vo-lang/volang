@@ -1,0 +1,72 @@
+// Regression test for bug: type switch default case variable has wrong type
+// Bug: When type switch has multiple case types, the default case binding variable
+// was incorrectly assigned the LAST case's type instead of the original interface type.
+// This caused crashes when passing the variable to functions expecting any.
+// Fix: Save original interface type before iterating through cases, use that for default.
+package main
+
+import "fmt"
+
+func testDefaultCaseType() {
+	// The bug occurred when:
+	// 1. []any contains different types
+	// 2. Type switch has multiple cases (e.g., case int and case string)
+	// 3. Default case binding variable is used in a function call
+	arr := []any{1.5, true, []int{1, 2}}
+	
+	for _, tc := range arr {
+		switch x := tc.(type) {
+		case int:
+			panic("should not match int")
+		case string:
+			panic("should not match string")
+		default:
+			// x should be any (interface{}), not string (the last case type)
+			result := fmt.Sprintf("%v", x)
+			_ = result
+		}
+	}
+	
+	fmt.Println("testDefaultCaseType: ok")
+}
+
+func testMultiTypeCase() {
+	// Multi-type case should also use original interface type
+	var v any = 3.14
+	
+	switch x := v.(type) {
+	case int, string:
+		panic("should not match")
+	default:
+		result := fmt.Sprintf("default: %v", x)
+		assert(result == "default: 3.14", "multi-type case default failed: "+result)
+	}
+	
+	fmt.Println("testMultiTypeCase: ok")
+}
+
+func testNilCase() {
+	// nil case should use original interface type
+	var v any = nil
+	
+	switch x := v.(type) {
+	case int:
+		panic("should not match int")
+	case string:
+		panic("should not match string")
+	case nil:
+		_ = x // x is any here
+	default:
+		panic("should match nil")
+	}
+	
+	fmt.Println("testNilCase: ok")
+}
+
+func main() {
+	testDefaultCaseType()
+	testMultiTypeCase()
+	testNilCase()
+	
+	fmt.Println("bug_type_switch_default_multi_case: ok")
+}

@@ -815,6 +815,9 @@ impl Checker {
                 let mut seen_types: HashMap<Option<TypeKey>, Span> = HashMap::new();
                 let mut lhs_vars: Vec<crate::objects::ObjKey> = Vec::new();
                 
+                // Save original interface type before case_types calls mutate x.typ
+                let original_xtyp = x.typ;
+                
                 for clause in &tss.cases {
                     // Check each type in this type switch case.
                     let mut t = self.case_types(x, xtype, &clause.types, &mut seen_types);
@@ -828,7 +831,7 @@ impl Checker {
                         // exactly one type, the variable has that type; otherwise, the variable
                         // has the type of the expression in the TypeSwitchGuard."
                         if clause.types.len() != 1 || t.is_none() {
-                            t = x.typ;
+                            t = original_xtyp;
                         }
                         let name = self.resolve_symbol(lhs_ident.symbol).to_string();
                         let okey = self.new_var(lhs_ident.span, Some(self.pkg), name, t);
