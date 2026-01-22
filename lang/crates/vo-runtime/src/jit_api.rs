@@ -23,6 +23,7 @@ use std::ffi::c_void;
 use crate::gc::{Gc, GcRef};
 use crate::slot::slots_for_bytes;
 use crate::itab::ItabCache;
+use crate::objects::interface::AnySlot;
 use vo_common_core::bytecode::Module;
 
 // =============================================================================
@@ -65,11 +66,8 @@ pub struct JitContext {
     /// Pointer to panic flag (set by JIT when panic occurs).
     pub panic_flag: *mut bool,
     
-    /// Panic message slot0 (interface metadata, set by vo_panic for user panics).
-    pub panic_msg_slot0: *mut u64,
-    
-    /// Panic message slot1 (interface data, set by vo_panic for user panics).
-    pub panic_msg_slot1: *mut u64,
+    /// Panic message (interface as AnySlot, set by vo_panic for user panics).
+    pub panic_msg: *mut AnySlot,
     
     /// Opaque pointer to VM instance.
     /// Used by vo_call_vm to execute VM functions.
@@ -269,8 +267,8 @@ pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64)
         let ctx = &mut *ctx;
         *ctx.panic_flag = true;
         // Store panic message in JitContext for VM to read
-        *ctx.panic_msg_slot0 = msg_slot0;
-        *ctx.panic_msg_slot1 = msg_slot1;
+        (*ctx.panic_msg).slot0 = msg_slot0;
+        (*ctx.panic_msg).slot1 = msg_slot1;
     }
 }
 

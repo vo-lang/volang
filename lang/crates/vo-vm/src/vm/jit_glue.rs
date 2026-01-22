@@ -1,6 +1,7 @@
 //! JIT trampolines, context building, and JIT call implementations.
 
 use vo_runtime::jit_api::{JitResult, JitContext};
+use vo_runtime::AnySlot;
 use vo_jit::JitFunc;
 
 use crate::bytecode::Module;
@@ -26,8 +27,7 @@ fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
         "runtime error: nil pointer dereference".to_string()
     );
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    let slot1 = msg as u64;
-    fiber.set_recoverable_panic(slot0, slot1);
+    fiber.set_recoverable_panic(AnySlot::new(slot0, msg as u64));
 }
 
 // =============================================================================
@@ -105,8 +105,7 @@ pub extern "C" fn call_extern_trampoline(
             let gc = unsafe { &mut *ctx.gc };
             let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
             let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-            let slot1 = panic_str as u64;
-            fiber.set_recoverable_panic(slot0, slot1);
+            fiber.set_recoverable_panic(AnySlot::new(slot0, panic_str as u64));
             JitResult::Panic
         }
     }
@@ -146,16 +145,14 @@ pub fn build_jit_ctx(
     module_ptr: *const Module,
     safepoint_flag: *const bool,
     panic_flag: *mut bool,
-    panic_msg_slot0: *mut u64,
-    panic_msg_slot1: *mut u64,
+    panic_msg: *mut AnySlot,
 ) -> JitContext {
     JitContext {
         gc: &mut state.gc as *mut _,
         globals: state.globals.as_mut_ptr(),
         safepoint_flag,
         panic_flag,
-        panic_msg_slot0,
-        panic_msg_slot1,
+        panic_msg,
         vm: vm_ptr,
         fiber: fiber_ptr,
         call_vm_fn: Some(vm_call_trampoline),
@@ -187,8 +184,7 @@ impl Vm {
         let func_table_len = jit_mgr.func_table_len() as u32;
         let safepoint_flag = false;
         let mut panic_flag = false;
-        let mut panic_msg_slot0: u64 = 0;
-        let mut panic_msg_slot1: u64 = 0;
+        let mut panic_msg = AnySlot::default();
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref()
             .map(|m| m as *const _)
@@ -198,7 +194,7 @@ impl Vm {
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
-            &mut panic_msg_slot0, &mut panic_msg_slot1,
+            &mut panic_msg,
         );
         let result = jit_func(&mut ctx, args, ret);
         
@@ -206,8 +202,8 @@ impl Vm {
         if result == JitResult::Panic && panic_flag {
             let fiber = unsafe { &mut *(fiber_ptr as *mut Fiber) };
             // Use actual panic message if vo_panic set it, otherwise use runtime error
-            if panic_msg_slot0 != 0 || panic_msg_slot1 != 0 {
-                fiber.set_recoverable_panic(panic_msg_slot0, panic_msg_slot1);
+            if !panic_msg.is_nil() {
+                fiber.set_recoverable_panic(panic_msg);
             } else {
                 set_jit_runtime_panic(&mut self.state.gc, fiber);
             }
@@ -416,8 +412,7 @@ impl Vm {
         let func_table_len = jit_mgr.func_table_len() as u32;
         let safepoint_flag = false;
         let mut panic_flag = false;
-        let mut panic_msg_slot0: u64 = 0;
-        let mut panic_msg_slot1: u64 = 0;
+        let mut panic_msg = AnySlot::default();
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref()
             .map(|m| m as *const _)
@@ -431,7 +426,7 @@ impl Vm {
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
-            &mut panic_msg_slot0, &mut panic_msg_slot1,
+            &mut panic_msg,
         );
         
         let exit_pc = loop_func(&mut ctx, locals_ptr);
@@ -440,8 +435,8 @@ impl Vm {
             // Set panic state so defer/recover can work
             if panic_flag {
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                if panic_msg_slot0 != 0 || panic_msg_slot1 != 0 {
-                    fiber.set_recoverable_panic(panic_msg_slot0, panic_msg_slot1);
+                if !panic_msg.is_nil() {
+                    fiber.set_recoverable_panic(panic_msg);
                 } else {
                     set_jit_runtime_panic(&mut self.state.gc, fiber);
                 }

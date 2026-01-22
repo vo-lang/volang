@@ -6,6 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
+use vo_runtime::AnySlot;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CallFrame {
@@ -205,9 +206,9 @@ impl Fiber {
         self.panic_state = Some(PanicState::Fatal(msg));
     }
     
-    /// Set a recoverable panic with full interface{} value (2 slots).
-    pub fn set_recoverable_panic(&mut self, slot0: u64, slot1: u64) {
-        self.panic_state = Some(PanicState::Recoverable(slot0, slot1));
+    /// Set a recoverable panic with full interface{} value (AnySlot).
+    pub fn set_recoverable_panic(&mut self, msg: AnySlot) {
+        self.panic_state = Some(PanicState::Recoverable(msg.slot0, msg.slot1));
     }
     
     /// Get panic message for error reporting.

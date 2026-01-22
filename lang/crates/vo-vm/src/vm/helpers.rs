@@ -4,6 +4,7 @@
 use alloc::string::String;
 
 use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::AnySlot;
 use vo_runtime::objects::{slice, string};
 use vo_runtime::slot::{Slot, slot_to_ptr, slot_to_usize};
 
@@ -93,8 +94,7 @@ pub fn runtime_panic(
 ) -> ExecResult {
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    let slot1 = panic_str as u64;
-    fiber.set_recoverable_panic(slot0, slot1);
+    fiber.set_recoverable_panic(AnySlot::new(slot0, panic_str as u64));
     panic_unwind(fiber, stack, module)
 }
 
@@ -124,7 +124,7 @@ pub fn user_panic(
 ) -> ExecResult {
     let slot0 = stack[bp + val_reg as usize];
     let slot1 = stack[bp + val_reg as usize + 1];
-    fiber.set_recoverable_panic(slot0, slot1);
+    fiber.set_recoverable_panic(AnySlot::new(slot0, slot1));
     panic_unwind(fiber, stack, module)
 }
 
