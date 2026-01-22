@@ -1,0 +1,52 @@
+// Regression test for bug: accessing array field through pointer to struct
+// caused misaligned pointer dereference because codegen incorrectly used
+// ArrayGet on inline array data instead of PtrGet with proper offset.
+package main
+
+type ArrayWrapper struct {
+	arr [3]int
+}
+
+type NestedWrapper struct {
+	inner ArrayWrapper
+	value int
+}
+
+func main() {
+	// Test 1: Basic p.arr[i] access
+	w := ArrayWrapper{arr: [3]int{10, 20, 30}}
+	p := &w
+	
+	// Read via pointer
+	assert(p.arr[0] == 10, "p.arr[0] read failed")
+	assert(p.arr[1] == 20, "p.arr[1] read failed")
+	assert(p.arr[2] == 30, "p.arr[2] read failed")
+	
+	// Write via pointer
+	p.arr[0] = 100
+	p.arr[1] = 200
+	p.arr[2] = 300
+	
+	// Verify original struct was modified
+	assert(w.arr[0] == 100, "p.arr[0] write failed")
+	assert(w.arr[1] == 200, "p.arr[1] write failed")
+	assert(w.arr[2] == 300, "p.arr[2] write failed")
+	
+	// Test 2: Dynamic index
+	idx := 1
+	assert(p.arr[idx] == 200, "p.arr[idx] dynamic read failed")
+	p.arr[idx] = 999
+	assert(w.arr[1] == 999, "p.arr[idx] dynamic write failed")
+	
+	// Test 3: Nested struct with array
+	nw := NestedWrapper{
+		inner: ArrayWrapper{arr: [3]int{1, 2, 3}},
+		value: 42,
+	}
+	np := &nw
+	
+	// Access array in nested struct through pointer
+	assert(np.inner.arr[0] == 1, "nested array read failed")
+	np.inner.arr[0] = 111
+	assert(nw.inner.arr[0] == 111, "nested array write failed")
+}

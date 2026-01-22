@@ -66,33 +66,50 @@ pub enum LValue {
     },
 }
 
-/// Recursively try to find the heap struct base and accumulated offset for an expression.
-/// Returns Some if the expression ultimately resolves to a field path on a heap struct.
-/// Used for inline array access: o.arr[i], o.inner.arr[i], etc.
-fn try_get_heap_struct_base(
+/// Recursively try to find the struct base (heap or pointer) and accumulated offset.
+/// Used for inline array access: o.arr[i], o.inner.arr[i], p.arr[i], etc.
+///
+/// Returns:
+/// - `Capture` for captured variables
+/// - `HeapBoxed` for heap-allocated structs  
+/// - `Deref` for pointer types stored on stack
+fn try_get_struct_base(
     expr: &Expr,
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Option<FlattenedBase> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            // Check capture first
             if let Some(cap) = func.lookup_capture(ident.symbol) {
                 return Some(FlattenedBase::Capture { capture_index: cap.index, offset: 0 });
             }
-            // Check HeapBoxed local
             if let Some(local) = func.lookup_local(ident.symbol) {
-                if let StorageKind::HeapBoxed { gcref_slot, .. } = local.storage {
-                    return Some(FlattenedBase::HeapBoxed { gcref_slot, offset: 0 });
+                let expr_type = info.expr_type(expr.id);
+                match local.storage {
+                    StorageKind::HeapBoxed { gcref_slot, .. } => {
+                        return Some(FlattenedBase::HeapBoxed { gcref_slot, offset: 0 });
+                    }
+                    StorageKind::StackValue { slot, .. } | StorageKind::Reference { slot } 
+                        if info.is_pointer(expr_type) => {
+                        return Some(FlattenedBase::Deref { ptr_reg: slot, offset: 0 });
+                    }
+                    _ => {}
                 }
             }
             None
         }
         ExprKind::Selector(sel) => {
-            let mut base = try_get_heap_struct_base(&sel.expr, func, info)?;
-            let struct_type = info.expr_type(sel.expr.id);
+            let recv_type = info.expr_type(sel.expr.id);
+            let struct_type = if info.is_pointer(recv_type) {
+                info.pointer_base(recv_type)
+            } else {
+                recv_type
+            };
+            
             let field_name = info.project.interner.resolve(sel.sel.symbol)?;
             let (field_offset, _) = info.struct_field_offset(struct_type, field_name);
+            
+            let mut base = try_get_struct_base(&sel.expr, func, info)?;
             base.add_offset(field_offset);
             Some(base)
         }
@@ -472,8 +489,8 @@ fn resolve_array_index_lvalue(
                     });
                 }
             }
-            // Check if this is an inline array field of a heap struct
-            if let Some(base) = try_get_heap_struct_base(&idx.expr, func, info) {
+            // Check if this is an inline array field of a struct (heap or pointer)
+            if let Some(base) = try_get_struct_base(&idx.expr, func, info) {
                 return resolve_heap_struct_array_index(idx, index_reg, &base, elem_type, ctx, func, info);
             }
             // Other cases: compile container expression
@@ -506,7 +523,8 @@ fn resolve_heap_struct_array_index(
             (gcref_slot, *offset)
         }
         FlattenedBase::HeapBoxed { gcref_slot, offset } => (*gcref_slot, *offset),
-        _ => unreachable!("try_get_heap_struct_base only returns Capture or HeapBoxed"),
+        FlattenedBase::Deref { ptr_reg, offset } => (*ptr_reg, *offset),
+        _ => unreachable!("try_get_struct_base only returns Capture, HeapBoxed, or Deref"),
     };
     
     // Constant index: compute static offset
