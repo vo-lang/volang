@@ -1,7 +1,7 @@
 //! JIT trampolines, context building, and JIT call implementations.
 
 use vo_runtime::jit_api::{JitResult, JitContext};
-use vo_runtime::AnySlot;
+use vo_runtime::InterfaceSlot;
 use vo_jit::JitFunc;
 
 use crate::bytecode::Module;
@@ -27,7 +27,7 @@ fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
         "runtime error: nil pointer dereference".to_string()
     );
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_panic(AnySlot::new(slot0, msg as u64));
+    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, msg as u64));
 }
 
 // =============================================================================
@@ -95,7 +95,7 @@ pub extern "C" fn call_extern_trampoline(
         ExternResult::Yield => {
             // JIT doesn't support yield (async operations). This is a fatal error.
             let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-            fiber.set_fatal_panic("extern function returned Yield, not supported in JIT".to_string());
+            fiber.set_fatal_panic();
             JitResult::Panic
         }
         ExternResult::Panic(msg) => {
@@ -105,7 +105,7 @@ pub extern "C" fn call_extern_trampoline(
             let gc = unsafe { &mut *ctx.gc };
             let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
             let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-            fiber.set_recoverable_panic(AnySlot::new(slot0, panic_str as u64));
+            fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
             JitResult::Panic
         }
     }
@@ -145,7 +145,7 @@ pub fn build_jit_ctx(
     module_ptr: *const Module,
     safepoint_flag: *const bool,
     panic_flag: *mut bool,
-    panic_msg: *mut AnySlot,
+    panic_msg: *mut InterfaceSlot,
 ) -> JitContext {
     JitContext {
         gc: &mut state.gc as *mut _,
@@ -184,7 +184,7 @@ impl Vm {
         let func_table_len = jit_mgr.func_table_len() as u32;
         let safepoint_flag = false;
         let mut panic_flag = false;
-        let mut panic_msg = AnySlot::default();
+        let mut panic_msg = InterfaceSlot::default();
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref()
             .map(|m| m as *const _)
@@ -282,7 +282,7 @@ impl Vm {
                         self.run_scheduler_round();
                     } else {
                         let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                        fiber.set_fatal_panic("deadlock: channel blocked with no other runnable fibers".to_string());
+                        fiber.set_fatal_panic();
                         break JitResult::Panic;
                     }
                 }
@@ -412,7 +412,7 @@ impl Vm {
         let func_table_len = jit_mgr.func_table_len() as u32;
         let safepoint_flag = false;
         let mut panic_flag = false;
-        let mut panic_msg = AnySlot::default();
+        let mut panic_msg = InterfaceSlot::default();
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = self.module.as_ref()
             .map(|m| m as *const _)

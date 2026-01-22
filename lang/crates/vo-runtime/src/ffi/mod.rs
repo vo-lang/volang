@@ -35,42 +35,8 @@ pub use containers::{
 
 // ==================== Type-Safe Slot Wrappers ====================
 
-// Re-export AnySlot and related types from objects::interface (the canonical location)
-pub use crate::objects::interface::{AnySlot, InterfaceSlot, ErrorSlot};
-
-impl ErrorSlot {
-    /// Check if this error is nil (no error).
-    #[inline]
-    pub fn is_ok(&self) -> bool {
-        self.is_nil()
-    }
-
-    /// Check if this error is non-nil.
-    #[inline]
-    pub fn is_err(&self) -> bool {
-        !self.is_nil()
-    }
-    
-    /// Get error message (if error is a simple string error).
-    #[inline]
-    pub fn message(&self) -> &'static str {
-        if self.is_ok() {
-            return "";
-        }
-        let vk = self.value_kind();
-        if vk == vo_common_core::types::ValueKind::String {
-            string::as_str(self.slot1 as GcRef)
-        } else {
-            "<complex error>"
-        }
-    }
-    
-    /// Create nil error (success).
-    #[inline]
-    pub fn ok() -> Self {
-        Self::nil()
-    }
-}
+// Re-export InterfaceSlot from objects::interface (the canonical location)
+pub use crate::objects::interface::InterfaceSlot;
 
 #[cfg(feature = "std")]
 use linkme::distributed_slice;
@@ -589,22 +555,22 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
-    /// Read argument as AnySlot (2 slots: any/interface type).
+    /// Read argument as InterfaceSlot (2 slots: any/interface type).
     #[inline]
-    pub fn arg_any(&self, n: u16) -> AnySlot {
-        AnySlot {
+    pub fn arg_any(&self, n: u16) -> InterfaceSlot {
+        InterfaceSlot {
             slot0: self.call.arg_u64(n),
             slot1: self.call.arg_u64(n + 1),
         }
     }
 
-    /// Read argument as ErrorSlot (2 slots: error interface type).
+    /// Read argument as InterfaceSlot (2 slots: error interface type).
     #[inline]
-    pub fn arg_error(&self, n: u16) -> ErrorSlot {
+    pub fn arg_error(&self, n: u16) -> InterfaceSlot {
         self.arg_any(n)
     }
 
-    // ==================== AnySlot Convenience Methods ====================
+    // ==================== InterfaceSlot Convenience Methods ====================
 
     /// Read any argument directly as i64.
     #[inline]
@@ -658,23 +624,23 @@ impl<'a> ExternCallContext<'a> {
         self.call.ret_ref(n, ptr);
     }
 
-    /// Write return value as AnySlot (2 slots: any/interface type).
+    /// Write return value as InterfaceSlot (2 slots: any/interface type).
     #[inline]
-    pub fn ret_any(&mut self, n: u16, val: AnySlot) {
+    pub fn ret_any(&mut self, n: u16, val: InterfaceSlot) {
         self.call.ret_u64(n, val.slot0);
         self.call.ret_u64(n + 1, val.slot1);
     }
 
-    /// Write return value as ErrorSlot (2 slots: error interface type).
+    /// Write return value as InterfaceSlot (2 slots: error interface type).
     #[inline]
-    pub fn ret_error(&mut self, n: u16, val: ErrorSlot) {
+    pub fn ret_error(&mut self, n: u16, val: InterfaceSlot) {
         self.ret_any(n, val);
     }
 
     /// Write a nil error (no error).
     #[inline]
     pub fn ret_nil_error(&mut self, n: u16) {
-        self.ret_any(n, ErrorSlot::nil());
+        self.ret_any(n, InterfaceSlot::nil());
     }
 
     /// Allocate a new string.
@@ -691,7 +657,7 @@ impl<'a> ExternCallContext<'a> {
         self.gc.alloc(value_meta, slots)
     }
 
-    /// Box a value into interface format (slot0, slot1).
+    /// Box a value into interface format (InterfaceSlot).
     ///
     /// This is the canonical way to convert any value to interface representation.
     ///
@@ -716,21 +682,21 @@ impl<'a> ExternCallContext<'a> {
     /// * `raw_slots` - Raw slot values to box
     ///
     /// # Returns
-    /// `(slot0, slot1)` in interface format
+    /// `InterfaceSlot` in interface format
     ///
     /// # Boxing Rules
-    /// - **Struct**: Allocate GcRef, copy all slots, return `(pack_slot0(rttid, vk), GcRef)`
-    /// - **Array**: Allocate array with ArrayHeader, copy elements, return `(pack_slot0(rttid, vk), GcRef)`
+    /// - **Struct**: Allocate GcRef, copy all slots, return `InterfaceSlot(pack_slot0(rttid, vk), GcRef)`
+    /// - **Array**: Allocate array with ArrayHeader, copy elements, return `InterfaceSlot(pack_slot0(rttid, vk), GcRef)`
     /// - **Interface**: Return as-is to preserve itab_id
-    /// - **Others**: Return `(pack_slot0(rttid, vk), raw_slots[0])`
-    pub fn box_to_interface(&mut self, rttid: u32, vk: ValueKind, raw_slots: &[u64]) -> (u64, u64) {
+    /// - **Others**: Return `InterfaceSlot(pack_slot0(rttid, vk), raw_slots[0])`
+    pub fn box_to_interface(&mut self, rttid: u32, vk: ValueKind, raw_slots: &[u64]) -> InterfaceSlot {
         use crate::objects::{array, interface};
 
         match vk {
             ValueKind::Struct => {
                 let new_ref = self.alloc_and_copy_slots(raw_slots);
                 let slot0 = interface::pack_slot0(0, rttid, vk);
-                (slot0, new_ref as u64)
+                InterfaceSlot::new(slot0, new_ref as u64)
             }
             ValueKind::Array => {
                 // Array needs proper layout: [GcHeader][ArrayHeader][elements...]
@@ -758,15 +724,15 @@ impl<'a> ExternCallContext<'a> {
                 }
                 
                 let slot0 = interface::pack_slot0(0, rttid, vk);
-                (slot0, new_ref as u64)
+                InterfaceSlot::new(slot0, new_ref as u64)
             }
             ValueKind::Interface => {
                 // Preserve itab_id: return as-is
-                (raw_slots[0], raw_slots.get(1).copied().unwrap_or(0))
+                InterfaceSlot::new(raw_slots[0], raw_slots.get(1).copied().unwrap_or(0))
             }
             _ => {
                 let slot0 = interface::pack_slot0(0, rttid, vk);
-                (slot0, raw_slots.get(0).copied().unwrap_or(0))
+                InterfaceSlot::new(slot0, raw_slots.get(0).copied().unwrap_or(0))
             }
         }
     }

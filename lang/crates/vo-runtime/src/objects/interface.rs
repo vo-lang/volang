@@ -1,4 +1,4 @@
-//! Interface operations and AnySlot type.
+//! Interface operations and InterfaceSlot type.
 //!
 //! Interface is a value type (2 slots on stack):
 //! - Slot 0: [itab_id:32 | rttid:24 | value_kind:8]
@@ -13,31 +13,31 @@ use super::string;
 pub const SLOT_COUNT: usize = 2;
 
 // =============================================================================
-// AnySlot - Core interface value type
+// InterfaceSlot - Core interface value type
 // =============================================================================
 
-/// Represents a Vo `interface{}` (any) value with 2 slots.
+/// Represents a Vo interface value with 2 slots.
 ///
-/// Layout:
+/// All Vo interfaces (`any`, `error`, named interfaces) share this layout:
 /// - slot0: `[itab_id:32 | rttid:24 | value_kind:8]`
 /// - slot1: data (immediate value or GcRef)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AnySlot {
+pub struct InterfaceSlot {
     /// Metadata: `[itab_id:32 | rttid:24 | value_kind:8]`
     pub slot0: u64,
     /// Data: immediate value or GcRef
     pub slot1: u64,
 }
 
-impl AnySlot {
-    /// Create a new AnySlot from raw slot values.
+impl InterfaceSlot {
+    /// Create a new InterfaceSlot from raw slot values.
     #[inline]
     pub fn new(slot0: u64, slot1: u64) -> Self {
         Self { slot0, slot1 }
     }
 
-    /// Create an AnySlot containing an i64 value.
+    /// Create an InterfaceSlot containing an i64 value.
     #[inline]
     pub fn from_i64(val: i64) -> Self {
         Self {
@@ -46,7 +46,7 @@ impl AnySlot {
         }
     }
 
-    /// Create an AnySlot containing a bool value.
+    /// Create an InterfaceSlot containing a bool value.
     #[inline]
     pub fn from_bool(val: bool) -> Self {
         Self {
@@ -55,7 +55,7 @@ impl AnySlot {
         }
     }
 
-    /// Create an AnySlot containing a f64 value.
+    /// Create an InterfaceSlot containing a f64 value.
     #[inline]
     pub fn from_f64(val: f64) -> Self {
         Self {
@@ -64,7 +64,7 @@ impl AnySlot {
         }
     }
 
-    /// Create an AnySlot containing a GcRef (for reference types).
+    /// Create an InterfaceSlot containing a GcRef (for reference types).
     #[inline]
     pub fn from_ref(gc_ref: GcRef, rttid: u32, vk: ValueKind) -> Self {
         Self {
@@ -73,7 +73,7 @@ impl AnySlot {
         }
     }
 
-    /// Create a nil AnySlot.
+    /// Create a nil InterfaceSlot.
     #[inline]
     pub fn nil() -> Self {
         Self { slot0: 0, slot1: 0 }
@@ -183,12 +183,6 @@ impl AnySlot {
         }
     }
 }
-
-/// Type alias for interface types (same layout as AnySlot).
-pub type InterfaceSlot = AnySlot;
-
-/// Type alias for error types (interface with Error() method).
-pub type ErrorSlot = AnySlot;
 
 // =============================================================================
 // Low-level interface slot operations

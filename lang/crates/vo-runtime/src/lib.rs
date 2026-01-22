@@ -43,8 +43,8 @@ pub use vo_common_core::instruction;
 pub use vo_common_core::types as core_types;
 pub use vo_common_core::symbol;
 
-// Re-export AnySlot directly from objects::interface (the canonical location)
-pub use objects::interface::{AnySlot, InterfaceSlot, ErrorSlot};
+// Re-export InterfaceSlot from objects::interface (the canonical location)
+pub use objects::interface::InterfaceSlot;
 
 // Re-exports from ffi (core types always available)
 pub use ffi::{

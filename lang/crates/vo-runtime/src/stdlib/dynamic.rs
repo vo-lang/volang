@@ -282,9 +282,9 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         };
         
         // Box to interface format
-        let (data0, data1) = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
-        call.ret_u64(0, data0);
-        call.ret_u64(1, data1);
+        let boxed = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
+        call.ret_u64(0, boxed.slot0);
+        call.ret_u64(1, boxed.slot1);
         call.ret_nil(2);
         call.ret_nil(3);
         
@@ -353,11 +353,11 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         .collect();
     
     // Box to interface format using unified boxing logic
-    let (data0, data1) = call.box_to_interface(field_result.rttid, field_result.value_kind, &raw_slots);
+    let boxed = call.box_to_interface(field_result.rttid, field_result.value_kind, &raw_slots);
     
     // Return (data, nil)
-    call.ret_u64(0, data0);
-    call.ret_u64(1, data1);
+    call.ret_u64(0, boxed.slot0);
+    call.ret_u64(1, boxed.slot1);
     call.ret_nil(2);
     call.ret_nil(3);
     
@@ -464,9 +464,9 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
                 .collect();
             
             // Box to interface format
-            let (data0, data1) = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
-            call.ret_u64(0, data0);
-            call.ret_u64(1, data1);
+            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
+            call.ret_u64(0, boxed.slot0);
+            call.ret_u64(1, boxed.slot1);
             call.ret_nil(2);
             call.ret_nil(3);
         }
@@ -496,9 +496,9 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             crate::objects::array::get_n(base_ref, idx as usize, &mut raw_slots, elem_bytes);
             
             // Box to interface format
-            let (data0, data1) = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
-            call.ret_u64(0, data0);
-            call.ret_u64(1, data1);
+            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
+            call.ret_u64(0, boxed.slot0);
+            call.ret_u64(1, boxed.slot1);
             call.ret_nil(2);
             call.ret_nil(3);
         }
@@ -510,13 +510,13 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
                 Err(IndexError::BadType) => return dyn_error(call, call.dyn_err().bad_index, "index must be integer"),
                 Err(IndexError::OutOfBounds) => return dyn_error(call, call.dyn_err().out_of_bounds, "string"),
             };
-            let (data0, data1) = call.box_to_interface(
+            let boxed = call.box_to_interface(
                 ValueKind::Uint8 as u32,
                 ValueKind::Uint8,
                 &[bytes[idx as usize] as u64],
             );
-            call.ret_u64(0, data0);
-            call.ret_u64(1, data1);
+            call.ret_u64(0, boxed.slot0);
+            call.ret_u64(1, boxed.slot1);
             call.ret_nil(2);
             call.ret_nil(3);
         }
@@ -561,9 +561,9 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             };
             
             // Box to interface format
-            let (data0, data1) = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
-            call.ret_u64(0, data0);
-            call.ret_u64(1, data1);
+            let boxed = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
+            call.ret_u64(0, boxed.slot0);
+            call.ret_u64(1, boxed.slot1);
             call.ret_nil(2);
             call.ret_nil(3);
         }
@@ -1326,9 +1326,9 @@ fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
         src_off += width;
         
         if is_any {
-            let (result0, result1) = call.box_to_interface(rttid, vk, raw_slots);
-            call.ret_u64(ret_off, result0);
-            call.ret_u64(ret_off + 1, result1);
+            let boxed = call.box_to_interface(rttid, vk, raw_slots);
+            call.ret_u64(ret_off, boxed.slot0);
+            call.ret_u64(ret_off + 1, boxed.slot1);
             ret_off += 2;
         } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
             let new_ref = call.alloc_and_copy_slots(raw_slots);

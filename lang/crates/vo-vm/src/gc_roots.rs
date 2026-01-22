@@ -92,10 +92,9 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Fiber], functions: &[FunctionDef]) {
         }
 
         // Scan panic value (only Recoverable has interface{})
-        // slot0 = packed metadata, slot1 = data (may be GcRef)
-        if let Some(PanicState::Recoverable(slot0, slot1)) = fiber.panic_state {
-            if vo_runtime::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
-                gc.mark_gray(slot1 as GcRef);
+        if let Some(PanicState::Recoverable(val)) = fiber.panic_state {
+            if val.is_ref_type() && val.slot1 != 0 {
+                gc.mark_gray(val.as_ref());
             }
         }
     }

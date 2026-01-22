@@ -39,8 +39,8 @@ pub use vo_ffi_macro::vo_struct;
 pub use vo_runtime::ffi::{
     ExternCall, ExternCallContext, ExternEntry, ExternEntryWithContext, ExternFn,
     ExternFnWithContext, ExternResult, EXTERN_TABLE, EXTERN_TABLE_WITH_CONTEXT,
-    // Type-safe slot wrappers for any/interface/error types
-    AnySlot, InterfaceSlot, ErrorSlot,
+    // Type-safe slot wrapper for interface types
+    InterfaceSlot,
     // Container accessors
     VoSlice, VoSliceCursor, VoMap, VoMapCursor,
     VoArray, VoArrayCursor, VoString, VoBytes,
@@ -111,9 +111,7 @@ pub mod prelude {
     pub use crate::vo_struct;
     pub use crate::ExternResult;
     pub use crate::ExternCallContext;
-    pub use crate::AnySlot;
     pub use crate::InterfaceSlot;
-    pub use crate::ErrorSlot;
     pub use crate::GcRef;
     // Container accessors
     pub use crate::{VoSlice, VoSliceCursor, VoMap, VoMapCursor};

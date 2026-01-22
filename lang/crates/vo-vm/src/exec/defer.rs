@@ -83,8 +83,8 @@ fn push_defer_entry(
 }
 
 /// recover() - only catches recoverable panics.
-/// Returns interface{} (2 slots): slot0 = packed metadata, slot1 = data.
-/// If no panic, returns nil interface (both slots = 0).
+/// Returns interface{} as AnySlot (2 slots).
+/// If no panic, returns nil interface.
 ///
 /// Per Go semantics, recover() only works when called DIRECTLY from a deferred function.
 /// If called from a nested function (e.g., `defer func() { innerRecover() }()`),
@@ -95,6 +95,8 @@ fn push_defer_entry(
 /// would incorrectly trigger panic_unwind when they return.
 #[inline]
 pub fn exec_recover(stack: &mut [u64], bp: usize, fiber: &mut crate::fiber::Fiber, inst: &Instruction) {
+    use vo_runtime::InterfaceSlot;
+    
     if !fiber.is_direct_defer_context() {
         // Not in direct defer context - return nil without consuming panic
         stack[bp + inst.a as usize] = 0;
@@ -103,9 +105,9 @@ pub fn exec_recover(stack: &mut [u64], bp: usize, fiber: &mut crate::fiber::Fibe
     }
 
     let recovered = fiber.take_recoverable_panic();
-    let (slot0, slot1) = recovered.unwrap_or((0, 0));
-    stack[bp + inst.a as usize] = slot0;
-    stack[bp + inst.a as usize + 1] = slot1;
+    let val = recovered.unwrap_or(InterfaceSlot::nil());
+    stack[bp + inst.a as usize] = val.slot0;
+    stack[bp + inst.a as usize + 1] = val.slot1;
     
     // If recover succeeded, switch unwinding mode from Panic to Return
     // so nested calls don't trigger panic_unwind.

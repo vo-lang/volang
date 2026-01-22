@@ -245,7 +245,7 @@ pub fn handle_panic_unwind(
     module: &Module,
 ) -> ExecResult {
     // Fatal panics skip defer execution entirely
-    if matches!(panic_state, Some(PanicState::Fatal(_))) {
+    if matches!(panic_state, Some(PanicState::Fatal)) {
         return ExecResult::Panic;
     }
     

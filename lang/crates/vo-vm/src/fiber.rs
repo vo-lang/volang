@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
-use vo_runtime::AnySlot;
+use vo_runtime::InterfaceSlot;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CallFrame {
@@ -121,29 +121,25 @@ pub enum FiberStatus {
 }
 
 /// Unified panic state for both recoverable and fatal panics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PanicState {
     /// Recoverable panic (user code panic, runtime errors like bounds check).
     /// Can be caught by recover() in a defer.
-    /// Stores full interface{} value: (slot0, slot1) where slot0 is packed metadata.
-    Recoverable(u64, u64),
+    /// Stores full interface{} value as InterfaceSlot.
+    Recoverable(InterfaceSlot),
     /// Fatal panic (internal VM/JIT errors that cannot be recovered).
     /// Examples: blocking operation in JIT, unsupported operation.
-    Fatal(String),
+    Fatal,
 }
 
 impl PanicState {
     /// Extract human-readable message from panic value.
     pub fn message(&self) -> String {
         match self {
-            PanicState::Fatal(msg) => msg.clone(),
-            PanicState::Recoverable(slot0, slot1) => {
-                let vk = vo_runtime::objects::interface::unpack_value_kind(*slot0);
-                if vk == vo_runtime::ValueKind::String {
-                    let str_ref = *slot1 as vo_runtime::gc::GcRef;
-                    if !str_ref.is_null() {
-                        return vo_runtime::objects::string::as_str(str_ref).to_string();
-                    }
+            PanicState::Fatal => "fatal error".to_string(),
+            PanicState::Recoverable(val) => {
+                if val.is_string() && !val.as_ref().is_null() {
+                    return val.as_str().to_string();
                 }
                 "panic".to_string()
             }
@@ -190,10 +186,9 @@ impl Fiber {
     
     /// Check if current panic is recoverable and return the interface{} value if so.
     /// Used by recover() to consume the panic value.
-    /// Returns (slot0, slot1) representing the full interface{}.
-    pub fn take_recoverable_panic(&mut self) -> Option<(u64, u64)> {
+    pub fn take_recoverable_panic(&mut self) -> Option<InterfaceSlot> {
         match self.panic_state.take() {
-            Some(PanicState::Recoverable(slot0, slot1)) => Some((slot0, slot1)),
+            Some(PanicState::Recoverable(val)) => Some(val),
             other => {
                 self.panic_state = other; // Put it back if not recoverable
                 None
@@ -202,13 +197,13 @@ impl Fiber {
     }
     
     /// Set a fatal (non-recoverable) panic.
-    pub fn set_fatal_panic(&mut self, msg: String) {
-        self.panic_state = Some(PanicState::Fatal(msg));
+    pub fn set_fatal_panic(&mut self) {
+        self.panic_state = Some(PanicState::Fatal);
     }
     
-    /// Set a recoverable panic with full interface{} value (AnySlot).
-    pub fn set_recoverable_panic(&mut self, msg: AnySlot) {
-        self.panic_state = Some(PanicState::Recoverable(msg.slot0, msg.slot1));
+    /// Set a recoverable panic with full interface{} value (InterfaceSlot).
+    pub fn set_recoverable_panic(&mut self, msg: InterfaceSlot) {
+        self.panic_state = Some(PanicState::Recoverable(msg));
     }
     
     /// Get panic message for error reporting.

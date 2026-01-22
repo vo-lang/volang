@@ -119,11 +119,11 @@ fn runner_compile_file(ctx: &mut ExternCallContext) -> ExternResult {
     match compile_file(&path) {
         Ok(output) => {
             let id = store_module(output);
-            ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+            ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
             ctx.ret_nil_error(slots::RET_1);
         }
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, 0, &e.to_string());
         }
     }
@@ -137,11 +137,11 @@ fn runner_compile_dir(ctx: &mut ExternCallContext) -> ExternResult {
     match compile_source(&path) {
         Ok(output) => {
             let id = store_module(output);
-            ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+            ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
             ctx.ret_nil_error(slots::RET_1);
         }
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, 0, &e.to_string());
         }
     }
@@ -155,11 +155,11 @@ fn runner_compile_string(ctx: &mut ExternCallContext) -> ExternResult {
     match compile_string(&code) {
         Ok(output) => {
             let id = store_module(output);
-            ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+            ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
             ctx.ret_nil_error(slots::RET_1);
         }
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, 0, &e.to_string());
         }
     }
@@ -296,7 +296,7 @@ fn runner_parse_file(ctx: &mut ExternCallContext) -> ExternResult {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, CODE_IO, &e.to_string());
             return ExternResult::Ok;
         }
@@ -306,13 +306,13 @@ fn runner_parse_file(ctx: &mut ExternCallContext) -> ExternResult {
     
     if diag.has_errors() {
         let msg = diag.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ");
-        ctx.ret_any(slots::RET_0, AnySlot::nil());
+        ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
         write_error_to(ctx, slots::RET_1, CODE_IO, &msg);
         return ExternResult::Ok;
     }
     
     let id = store_ast(ParsedAst { file, interner });
-    ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+    ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
     write_nil_error(ctx, slots::RET_1);
     ExternResult::Ok
 }
@@ -325,13 +325,13 @@ fn runner_parse_string(ctx: &mut ExternCallContext) -> ExternResult {
     
     if diag.has_errors() {
         let msg = diag.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ");
-        ctx.ret_any(slots::RET_0, AnySlot::nil());
+        ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
         write_error_to(ctx, slots::RET_1, CODE_IO, &msg);
         return ExternResult::Ok;
     }
     
     let id = store_ast(ParsedAst { file, interner });
-    ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+    ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
     write_nil_error(ctx, slots::RET_1);
     ExternResult::Ok
 }
@@ -397,7 +397,7 @@ fn runner_load_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
     let _path = ctx.arg_str(slots::ARG_PATH).to_string();
     
     // Text parsing not yet implemented
-    ctx.ret_any(slots::RET_0, AnySlot::nil());
+    ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
     write_error_to(ctx, slots::RET_1, CODE_IO, "bytecode text parsing not yet implemented");
     ExternResult::Ok
 }
@@ -430,7 +430,7 @@ fn runner_load_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, CODE_IO, &e.to_string());
             return ExternResult::Ok;
         }
@@ -444,11 +444,11 @@ fn runner_load_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
                 extensions: Vec::new(),
             };
             let id = store_module(output);
-            ctx.ret_any(slots::RET_0, AnySlot::from_i64(id));
+            ctx.ret_any(slots::RET_0, InterfaceSlot::from_i64(id));
             write_nil_error(ctx, slots::RET_1);
         }
         Err(e) => {
-            ctx.ret_any(slots::RET_0, AnySlot::nil());
+            ctx.ret_any(slots::RET_0, InterfaceSlot::nil());
             write_error_to(ctx, slots::RET_1, CODE_IO, &format!("{:?}", e));
         }
     }
