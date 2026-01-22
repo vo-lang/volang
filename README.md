@@ -1,3 +1,4 @@
+![logo](playground/public/favicon.svg)
 # Vo Programming Language
 
 > **Go-like Syntax. Rust Power. Vibe Ready.**
