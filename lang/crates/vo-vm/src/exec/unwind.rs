@@ -111,12 +111,20 @@ fn compute_include_errdefers(
     // Runtime check: is the error return value non-nil?
     // Error is an interface (2 slots), slot0's low byte is value_kind (0 = Void = nil)
     let bp = frames.last().unwrap().bp;
-    let slot = bp + inst.a as usize + func.error_ret_slot as usize;
     
     let error_slot0 = if (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0 {
-        // heap_returns: slot contains GcRef, dereference to get interface slot0
-        unsafe { *(stack[slot] as GcRef) }
+        // heap_returns: each return value is a GcRef, error is always the last one
+        // inst.a = gcref_start, inst.b = gcref_count
+        let error_gcref_slot = bp + inst.a as usize + inst.b as usize - 1;
+        let gcref = stack[error_gcref_slot] as GcRef;
+        if gcref.is_null() {
+            0 // nil error
+        } else {
+            unsafe { *gcref }
+        }
     } else {
+        // stack returns: use error_ret_slot offset directly
+        let slot = bp + inst.a as usize + func.error_ret_slot as usize;
         stack[slot]
     };
     
