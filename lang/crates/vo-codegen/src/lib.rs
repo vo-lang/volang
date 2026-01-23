@@ -784,8 +784,16 @@ fn collect_promoted_methods(
                         })
                         .unwrap_or(0);
                     
-                    // Check if original method has pointer receiver
-                    let is_pointer_receiver = tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
+                    // Determine is_pointer_receiver for the promoted method:
+                    // - If the embedding path contains a pointer step (e.g., struct embeds *T),
+                    //   then even pointer receiver methods are accessible for the outer value type.
+                    // - Otherwise, use the original method's receiver type.
+                    let original_is_ptr_recv = tc_objs.lobjs[obj_key].entity_type().func_has_ptr_recv();
+                    let is_pointer_receiver = if path_info.has_pointer_step {
+                        false  // Method is always accessible via embedded pointer
+                    } else {
+                        original_is_ptr_recv
+                    };
                     
                     ctx.update_named_type_method_if_absent(
                         named_type_id,
