@@ -461,6 +461,7 @@ pub enum ReceiverValue {
 /// - Direct value/pointer
 /// - Embedded fields (value or pointer)
 /// - Nested embedding with pointer chains
+/// - HeapBoxed variables (escaped to heap)
 ///
 /// Returns a `ReceiverValue` that can be converted to what the method expects.
 pub fn extract_receiver(
@@ -471,6 +472,8 @@ pub fn extract_receiver(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<ReceiverValue, CodegenError> {
+    use crate::func::{ExprSource, StorageKind};
+    
     let expr_is_ptr = info.is_pointer(recv_type);
     let has_embedding = !embed_path.steps.is_empty();
     
@@ -506,16 +509,31 @@ pub fn extract_receiver(
             slots: value_slots,
         })
     } else {
-        // Case 4: Direct value type
-        let recv_slots = info.type_slot_count(recv_type);
-        let recv_slot_types = info.type_slot_types(recv_type);
-        let recv_reg = func.alloc_temp_typed(&recv_slot_types);
-        crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
-        Ok(ReceiverValue::Value { 
-            reg: recv_reg, 
-            value_type: recv_type,
-            slots: recv_slots,
-        })
+        // Case 4: Direct value type - check if already on heap (escaped variable)
+        // For HeapBoxed variables, return the GcRef directly as a Pointer
+        // This avoids copying the value and re-boxing it
+        let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
+        if let ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) = expr_source {
+            // stores_pointer should be false here (we already checked expr_is_ptr == false)
+            // If it's true, we have a logic error - let it panic via debug_assert
+            debug_assert!(!stores_pointer, "HeapBoxed with stores_pointer in non-pointer context");
+            // gcref_slot points to [GcHeader][value data] - use it as pointer
+            Ok(ReceiverValue::Pointer { 
+                reg: gcref_slot, 
+                pointee_type: recv_type 
+            })
+        } else {
+            // Not heap-boxed - compile as value
+            let recv_slots = info.type_slot_count(recv_type);
+            let recv_slot_types = info.type_slot_types(recv_type);
+            let recv_reg = func.alloc_temp_typed(&recv_slot_types);
+            crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
+            Ok(ReceiverValue::Value { 
+                reg: recv_reg, 
+                value_type: recv_type,
+                slots: recv_slots,
+            })
+        }
     }
 }
 
