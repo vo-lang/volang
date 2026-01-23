@@ -14,9 +14,14 @@ use crate::instruction::Instruction;
 pub enum ChanResult {
     Continue,
     Yield,
-    Panic,
     Wake(u32),
     WakeMultiple(Vec<u32>),
+    /// Send on closed channel - panic
+    SendOnClosed,
+    /// Close nil channel - panic
+    CloseNil,
+    /// Close already closed channel - panic
+    CloseClosed,
 }
 
 /// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
@@ -58,7 +63,7 @@ pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instructio
             state.register_sender(fiber_id as u64, value);
             ChanResult::Yield
         }
-        SendResult::Closed => ChanResult::Panic,
+        SendResult::Closed => ChanResult::SendOnClosed,
     }
 }
 
@@ -122,7 +127,13 @@ pub fn exec_chan_cap(stack: &mut [u64], bp: usize, inst: &Instruction) {
 #[inline]
 pub fn exec_chan_close(stack: &[u64], bp: usize, inst: &Instruction) -> ChanResult {
     let ch = stack[bp + inst.a as usize] as GcRef;
+    if ch.is_null() {
+        return ChanResult::CloseNil;
+    }
     let state = channel::get_state(ch);
+    if state.is_closed() {
+        return ChanResult::CloseClosed;
+    }
     state.close();
     let mut wake_ids: Vec<u32> = state.take_waiting_receivers().into_iter().map(|id| id as u32).collect();
     wake_ids.extend(state.take_waiting_senders().into_iter().map(|(id, _)| id as u32));

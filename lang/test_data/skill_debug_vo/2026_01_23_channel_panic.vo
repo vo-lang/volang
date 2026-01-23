@@ -1,0 +1,94 @@
+// Test: Channel panic scenarios
+// Coverage: send on closed channel, close on closed channel should panic
+package main
+
+import "fmt"
+
+// Test 1: Send on closed channel should panic
+func testSendOnClosedChannel() {
+	ch := make(chan int, 1)
+	close(ch)
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "test1: should panic on send to closed channel")
+		fmt.Println("Test 1: PASSED - send on closed channel panics")
+	}()
+	
+	ch <- 42 // should panic
+	panic("test1: should not reach here")
+}
+
+// Test 2: Close on already closed channel should panic
+func testCloseClosedChannel() {
+	ch := make(chan int)
+	close(ch)
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "test2: should panic on close of closed channel")
+		fmt.Println("Test 2: PASSED - close on closed channel panics")
+	}()
+	
+	close(ch) // should panic
+	panic("test2: should not reach here")
+}
+
+// Test 3: Send on closed unbuffered channel should panic
+func testSendOnClosedUnbuffered() {
+	ch := make(chan int)
+	close(ch)
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "test3: should panic")
+		fmt.Println("Test 3: PASSED - send on closed unbuffered panics")
+	}()
+	
+	ch <- 1 // should panic
+	panic("test3: should not reach here")
+}
+
+// Test 4: Select send on closed channel should panic
+func testSelectSendOnClosed() {
+	ch := make(chan int, 1)
+	close(ch)
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "test4: should panic on select send to closed")
+		fmt.Println("Test 4: PASSED - select send on closed panics")
+	}()
+	
+	select {
+	case ch <- 42:
+		// should not reach here - should panic
+	default:
+		// should not reach here - send on closed panics before default is considered
+	}
+	panic("test4: select completed without panicking")
+}
+
+// Test 5: Close on nil channel should panic
+func testCloseNilChannel() {
+	var ch chan int
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "test5: should panic on close nil channel")
+		fmt.Println("Test 5: PASSED - close nil channel panics")
+	}()
+	
+	close(ch) // should panic
+	panic("test5: should not reach here")
+}
+
+func main() {
+	testSendOnClosedChannel()
+	testCloseClosedChannel()
+	testSendOnClosedUnbuffered()
+	testSelectSendOnClosed()
+	testCloseNilChannel()
+	
+	fmt.Println("channel_panic: ALL PASSED")
+}

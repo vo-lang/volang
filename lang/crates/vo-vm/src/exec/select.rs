@@ -128,6 +128,11 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
     match result {
         SelectCheckResult::Send { idx, ch, elem_slots, val_reg } => {
             let chan_state = channel::get_state(ch);
+            // Send on closed channel panics (Go semantics)
+            if chan_state.closed {
+                *select_state = None;
+                return ExecResult::Panic;
+            }
             let val_start = bp + val_reg as usize;
             let value: Box<[u64]> = stack[val_start..val_start + elem_slots].into();
             chan_state.buffer.push_back(value);

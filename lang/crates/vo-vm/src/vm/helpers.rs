@@ -82,6 +82,9 @@ pub const ERR_UNCOMPARABLE_TYPE: &str = "runtime error: comparing uncomparable t
 pub const ERR_NEGATIVE_SHIFT: &str = "runtime error: negative shift amount";
 pub const ERR_NIL_FUNC_CALL: &str = "runtime error: call of nil function";
 pub const ERR_TYPE_ASSERTION: &str = "runtime error: interface conversion: interface is nil, not";
+pub const ERR_SEND_ON_CLOSED: &str = "runtime error: send on closed channel";
+pub const ERR_CLOSE_NIL_CHANNEL: &str = "runtime error: close of nil channel";
+pub const ERR_CLOSE_CLOSED_CHANNEL: &str = "runtime error: close of closed channel";
 
 /// Trigger a recoverable runtime panic with proper unwind mechanism.
 /// Use this for all user-triggerable runtime errors (bounds check, nil access, etc.)

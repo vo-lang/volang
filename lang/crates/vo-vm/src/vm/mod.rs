@@ -19,7 +19,8 @@ pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE};
 
 use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, user_panic,
-    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT, ERR_NIL_FUNC_CALL, ERR_TYPE_ASSERTION};
+    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT, ERR_NIL_FUNC_CALL, ERR_TYPE_ASSERTION,
+    ERR_SEND_ON_CLOSED, ERR_CLOSE_NIL_CHANNEL, ERR_CLOSE_CLOSED_CHANNEL};
 #[cfg(feature = "jit")]
 use helpers::panic_unwind;
 
@@ -233,6 +234,43 @@ impl Vm {
         }
 
         Ok(())
+    }
+    
+    /// Handle ChanResult from channel operations uniformly.
+    fn handle_chan_result(
+        result: exec::ChanResult,
+        gc: &mut vo_runtime::gc::Gc,
+        fiber: &mut Fiber,
+        stack: &mut Vec<u64>,
+        module: &Module,
+        scheduler: &mut Scheduler,
+    ) -> ExecResult {
+        match result {
+            exec::ChanResult::Continue => ExecResult::Continue,
+            exec::ChanResult::Yield => {
+                fiber.current_frame_mut().unwrap().pc -= 1;
+                ExecResult::Block
+            }
+            exec::ChanResult::Wake(id) => {
+                scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
+                ExecResult::Continue
+            }
+            exec::ChanResult::WakeMultiple(ids) => {
+                for id in ids {
+                    scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
+                }
+                ExecResult::Continue
+            }
+            exec::ChanResult::SendOnClosed => {
+                runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+            }
+            exec::ChanResult::CloseNil => {
+                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
+            }
+            exec::ChanResult::CloseClosed => {
+                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_CLOSED_CHANNEL.to_string())
+            }
+        }
     }
     
     /// Run one round of scheduler to let other fibers make progress.
@@ -1161,51 +1199,22 @@ impl Vm {
                     }
                 }
                 Opcode::ChanSend => {
-                    match exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst) {
-                        exec::ChanResult::Continue => ExecResult::Continue,
-                        exec::ChanResult::Yield => {
-                            fiber.current_frame_mut().unwrap().pc -= 1;
-                            ExecResult::Block
-                        }
-                        exec::ChanResult::Panic => ExecResult::Panic,
-                        exec::ChanResult::Wake(id) => {
-                            self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                            ExecResult::Continue
-                        }
-                        exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
-                            ExecResult::Continue
-                        }
-                    }
+                    Self::handle_chan_result(
+                        exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst),
+                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                    )
                 }
                 Opcode::ChanRecv => {
-                    // Allow ChanRecv on trampoline - if it blocks, execute_jit_call will handle it
-                    match exec::exec_chan_recv(stack, bp, fiber_id.to_raw(), &inst) {
-                        exec::ChanResult::Continue => ExecResult::Continue,
-                        exec::ChanResult::Yield => {
-                            fiber.current_frame_mut().unwrap().pc -= 1;
-                            ExecResult::Block
-                        }
-                        exec::ChanResult::Panic => ExecResult::Panic,
-                        exec::ChanResult::Wake(id) => {
-                            self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                            ExecResult::Continue
-                        }
-                        exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
-                            ExecResult::Continue
-                        }
-                    }
+                    Self::handle_chan_result(
+                        exec::exec_chan_recv(stack, bp, fiber_id.to_raw(), &inst),
+                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                    )
                 }
                 Opcode::ChanClose => {
-                    // Allow ChanClose on trampoline - it doesn't block
-                    match exec::exec_chan_close(&stack, bp, &inst) {
-                        exec::ChanResult::WakeMultiple(ids) => {
-                            for id in ids { self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id)); }
-                        }
-                        _ => {}
-                    }
-                    ExecResult::Continue
+                    Self::handle_chan_result(
+                        exec::exec_chan_close(&stack, bp, &inst),
+                        &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                    )
                 }
                 Opcode::ChanLen => {
                     exec::exec_chan_len(stack, bp, &inst);
@@ -1230,7 +1239,12 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::SelectExec => {
-                    exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst)
+                    let result = exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst);
+                    if matches!(result, ExecResult::Panic) {
+                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+                    } else {
+                        result
+                    }
                 }
 
                 // Closure operations

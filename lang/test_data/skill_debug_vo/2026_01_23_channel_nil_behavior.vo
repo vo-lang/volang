@@ -1,0 +1,89 @@
+// Test: nil channel behavior
+// In Go: send/recv on nil channel blocks forever, but should not panic
+package main
+
+import "fmt"
+
+// Test 1: Select with nil send should go to default (not block forever)
+func testSelectNilSendDefault() {
+	var ch chan int
+	
+	result := ""
+	select {
+	case ch <- 42:
+		result = "sent"
+	default:
+		result = "default"
+	}
+	
+	assert(result == "default", "test1: nil send should go to default, got ", result)
+	fmt.Println("Test 1: PASSED - select nil send goes to default")
+}
+
+// Test 2: Select with nil recv should go to default
+func testSelectNilRecvDefault() {
+	var ch chan int
+	
+	result := ""
+	select {
+	case <-ch:
+		result = "recv"
+	default:
+		result = "default"
+	}
+	
+	assert(result == "default", "test2: nil recv should go to default, got ", result)
+	fmt.Println("Test 2: PASSED - select nil recv goes to default")
+}
+
+// Test 3: Select with mix of nil and valid channels
+func testSelectNilMixedChannels() {
+	var nilCh chan int
+	validCh := make(chan int, 1)
+	validCh <- 100
+	
+	result := 0
+	selected := ""
+	select {
+	case nilCh <- 42:
+		selected = "nil"
+	case result = <-validCh:
+		selected = "valid"
+	}
+	
+	assert(selected == "valid", "test3: should select valid channel")
+	assert(result == 100, "test3: should receive 100")
+	fmt.Println("Test 3: PASSED - select prefers valid channel over nil")
+}
+
+// Test 4: Select send on nil and closed channels
+func testSelectNilAndClosed() {
+	var nilCh chan int
+	closedCh := make(chan int, 1)
+	close(closedCh)
+	
+	// closedCh recv is ready (returns zero, false)
+	// nilCh send blocks forever, so shouldn't be selected
+	var result int
+	var ok bool
+	selected := ""
+	select {
+	case nilCh <- 42:
+		selected = "nil"
+	case result, ok = <-closedCh:
+		selected = "closed"
+	}
+	
+	assert(selected == "closed", "test4: should select closed channel recv")
+	assert(result == 0 && !ok, "test4: closed channel returns zero and false")
+	fmt.Println("Test 4: PASSED - select closed recv over nil send")
+}
+
+func main() {
+	testSelectNilSendDefault()
+	testSelectNilRecvDefault()
+	testSelectNilMixedChannels()
+	testSelectNilAndClosed()
+	
+	fmt.Println("channel_nil_behavior: ALL PASSED")
+}
