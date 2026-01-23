@@ -1,0 +1,104 @@
+package main
+
+// Test index expressions with composite literals in various contexts
+
+type Point struct {
+	x, y int
+}
+
+func testArrayIndexComposite() {
+	// Index expression with composite literal array
+	v := ([3]int{10, 20, 30})[1]
+	assert(v == 20, "array index composite: got %d", v)
+}
+
+func testSliceIndexComposite() {
+	// Index expression with composite literal slice
+	v := ([]int{100, 200, 300})[2]
+	assert(v == 300, "slice index composite: got %d", v)
+}
+
+func testMapIndexComposite() {
+	// Index expression with composite literal map
+	// Note: Go requires parentheses for this
+	v := (map[string]int{"a": 1, "b": 2})["b"]
+	assert(v == 2, "map index composite: got %d", v)
+}
+
+func testSliceOfStructIndex() {
+	// Slice of struct with index
+	p := ([]Point{{x: 1, y: 2}, {x: 3, y: 4}})[0]
+	assert(p.x == 1, "slice of struct index: got %d", p.x)
+}
+
+func testNestedIndex() {
+	// Nested array index
+	v := ([][]int{{1, 2}, {3, 4}})[1][0]
+	assert(v == 3, "nested index: got %d", v)
+}
+
+func testSliceExprComposite() {
+	// Slice expression on composite literal
+	s := ([]int{1, 2, 3, 4, 5})[1:4]
+	assert(len(s) == 3, "slice expr len: got %d", len(s))
+	assert(s[0] == 2, "slice expr [0]: got %d", s[0])
+	assert(s[2] == 4, "slice expr [2]: got %d", s[2])
+}
+
+func testIndexInCondition() {
+	// Index in if condition
+	if ([]int{1, 2, 3})[1] == 2 {
+		// ok
+	} else {
+		panic("index in condition failed")
+	}
+}
+
+func testIndexInFor() {
+	sum := 0
+	arr := []int{10, 20, 30}
+	for i := 0; i < len(arr); i++ {
+		sum += arr[i]
+	}
+	assert(sum == 60, "index in for: got %d", sum)
+}
+
+func testMapIndexCommaOk() {
+	m := map[string]int{"a": 1}
+	
+	// Comma-ok form
+	v, ok := m["a"]
+	assert(ok, "should exist")
+	assert(v == 1, "value should be 1")
+	
+	v2, ok2 := m["b"]
+	assert(!ok2, "should not exist")
+	assert(v2 == 0, "default should be 0")
+}
+
+func testChainedIndexMethod() {
+	type Numbers struct {
+		vals []int
+	}
+	
+	n := Numbers{vals: []int{5, 10, 15}}
+	
+	// Method after index
+	v := n.vals[1]
+	assert(v == 10, "chained index: got %d", v)
+}
+
+func main() {
+	testArrayIndexComposite()
+	testSliceIndexComposite()
+	testMapIndexComposite()
+	testSliceOfStructIndex()
+	testNestedIndex()
+	testSliceExprComposite()
+	testIndexInCondition()
+	testIndexInFor()
+	testMapIndexCommaOk()
+	testChainedIndexMethod()
+	
+	println("All index expr composite tests passed!")
+}

@@ -1,0 +1,206 @@
+package main
+
+import "errors"
+
+// Test: Error handling with ? operator edge cases
+
+func mayFail(shouldFail bool) (int, error) {
+	if shouldFail {
+		return 0, errors.New("failed")
+	}
+	return 42, nil
+}
+
+func chainedCalls() (int, error) {
+	a := mayFail(false)?
+	b := mayFail(false)?
+	return a + b, nil
+}
+
+func earlyReturn() (int, error) {
+	_ = mayFail(true)?
+	return 100, nil // Should not reach here
+}
+
+var errdeferResult int
+
+func setErrdeferResult(val int) {
+	errdeferResult = val
+}
+
+func errdeferBasic() (int, error) {
+	errdefer setErrdeferResult(-1)
+	_ = mayFail(true)?
+	return 42, nil
+}
+
+func errdeferNoError() (int, error) {
+	errdefer setErrdeferResult(-999)
+	_ = mayFail(false)?
+	return 42, nil
+}
+
+func nestedQuestion() (int, error) {
+	inner := func() (int, error) {
+		return mayFail(false)?+ 10, nil
+	}
+	return inner()
+}
+
+func questionInLoop() (int, error) {
+	sum := 0
+	for i := 0; i < 3; i++ {
+		val := mayFail(false)?
+		sum += val
+	}
+	return sum, nil
+}
+
+func questionWithBreak() (int, error) {
+	result := 0
+	for i := 0; i < 5; i++ {
+		if i == 3 {
+			break
+		}
+		val := mayFail(false)?
+		result += val
+	}
+	return result, nil
+}
+
+func conditionalQuestion(cond bool) (int, error) {
+	if cond {
+		return mayFail(false)?* 2, nil
+	}
+	return mayFail(false)?, nil
+}
+
+func questionInSwitch(val int) (int, error) {
+	switch val {
+	case 1:
+		return mayFail(false)?+ 100, nil
+	case 2:
+		return mayFail(true)?+ 200, nil
+	default:
+		return mayFail(false)?+ 300, nil
+	}
+}
+
+func returnMultiWithQuestion() (a, b int, err error) {
+	a = mayFail(false)?
+	b = mayFail(false)?
+	return a, b, nil
+}
+
+func questionInExpression() (int, error) {
+	// Multiple ? in same expression
+	return mayFail(false)?+ mayFail(false)?, nil
+}
+
+func questionWithTypeConversion() (float64, error) {
+	i := mayFail(false)?
+	return float64(i), nil
+}
+
+func questionInIf() (int, error) {
+	if mayFail(false)?> 40 {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func main() {
+	// Test 1: Basic chained calls with ?
+	val, err := chainedCalls()
+	assert(err == nil)
+	assert(val == 84)
+
+	// Test 2: Early return with ?
+	val, err = earlyReturn()
+	assert(err != nil)
+	assert(val == 0)
+
+	// Test 3: errdefer runs on error
+	errdeferResult = 0
+	_, err = errdeferBasic()
+	assert(err != nil)
+	assert(errdeferResult == -1)
+
+	// Test 4: errdefer doesn't run on success
+	errdeferResult = 0
+	val, err = errdeferNoError()
+	assert(err == nil)
+	assert(val == 42)
+	assert(errdeferResult == 0) // Should not have run
+
+	// Test 5: Nested function with ?
+	val, err = nestedQuestion()
+	assert(err == nil)
+	assert(val == 52)
+
+	// Test 6: ? in loop
+	val, err = questionInLoop()
+	assert(err == nil)
+	assert(val == 126) // 42 * 3
+
+	// Test 7: ? with break
+	val, err = questionWithBreak()
+	assert(err == nil)
+	assert(val == 126) // 42 * 3
+
+	// Test 8: Conditional with ?
+	val, err = conditionalQuestion(true)
+	assert(err == nil)
+	assert(val == 84)
+
+	val, err = conditionalQuestion(false)
+	assert(err == nil)
+	assert(val == 42)
+
+	// Test 9: ? in switch
+	val, err = questionInSwitch(1)
+	assert(err == nil)
+	assert(val == 142)
+
+	val, err = questionInSwitch(2)
+	assert(err != nil)
+
+	val, err = questionInSwitch(3)
+	assert(err == nil)
+	assert(val == 342)
+
+	// Test 10: Multiple returns with ?
+	a, b, err := returnMultiWithQuestion()
+	assert(err == nil)
+	assert(a == 42)
+	assert(b == 42)
+
+	// Test 11: Multiple ? in expression
+	val, err = questionInExpression()
+	assert(err == nil)
+	assert(val == 84)
+
+	// Test 12: ? with type conversion
+	f, err := questionWithTypeConversion()
+	assert(err == nil)
+	assert(f == 42.0)
+
+	// Test 13: ? in if condition
+	val, err = questionInIf()
+	assert(err == nil)
+	assert(val == 1)
+
+	// Test 14: Direct call with ?
+	directVal := mayFail(false)?
+	assert(directVal == 42)
+
+	// Test 15: ? in closure
+	closureWithQ := func() (int, error) {
+		return mayFail(false)?* 3, nil
+	}
+	val, err = closureWithQ()
+	assert(err == nil)
+	assert(val == 126)
+
+	println("PASS")
+}

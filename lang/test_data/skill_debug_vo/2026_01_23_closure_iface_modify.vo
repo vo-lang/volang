@@ -1,0 +1,235 @@
+package main
+
+import "fmt"
+
+// Test closure capturing and modifying interface values in complex scenarios
+
+type Counter interface {
+	Inc()
+	Get() int
+}
+
+type SimpleCounter struct {
+	val int
+}
+
+func (c *SimpleCounter) Inc() {
+	c.val++
+}
+
+func (c *SimpleCounter) Get() int {
+	return c.val
+}
+
+// Test 1: Closure modifies captured interface through different code paths
+func test1() {
+	fmt.Println("Test 1: closure modifies captured interface via different paths")
+	
+	var c Counter = &SimpleCounter{val: 0}
+	
+	inc := func() {
+		c.Inc()
+	}
+	
+	get := func() int {
+		return c.Get()
+	}
+	
+	assert(get() == 0, "initial should be 0")
+	inc()
+	assert(get() == 1, "after inc should be 1")
+	inc()
+	inc()
+	assert(get() == 3, "after 3 incs should be 3")
+}
+
+// Test 2: Multiple closures capturing same interface
+func test2() {
+	fmt.Println("Test 2: multiple closures capturing same interface")
+	
+	var c Counter = &SimpleCounter{val: 10}
+	
+	closures := []func(){
+		func() { c.Inc() },
+		func() { c.Inc() },
+		func() { c.Inc() },
+	}
+	
+	for _, f := range closures {
+		f()
+	}
+	
+	assert(c.Get() == 13, "after 3 closure calls should be 13")
+}
+
+// Test 3: Nested closures capturing interface
+func test3() {
+	fmt.Println("Test 3: nested closures capturing interface")
+	
+	var c Counter = &SimpleCounter{val: 0}
+	
+	outer := func() func() int {
+		return func() int {
+			c.Inc()
+			return c.Get()
+		}
+	}
+	
+	inner := outer()
+	assert(inner() == 1, "first call should return 1")
+	assert(inner() == 2, "second call should return 2")
+}
+
+// Test 4: Closure captures interface, interface is reassigned
+func test4() {
+	fmt.Println("Test 4: closure captures interface, interface reassigned")
+	
+	var c Counter = &SimpleCounter{val: 100}
+	
+	getVal := func() int {
+		return c.Get()
+	}
+	
+	assert(getVal() == 100, "initial should be 100")
+	
+	// Reassign the interface
+	c = &SimpleCounter{val: 200}
+	
+	assert(getVal() == 200, "after reassign should see 200")
+}
+
+// Test 5: Closure returns interface
+func test5() {
+	fmt.Println("Test 5: closure returns interface")
+	
+	makeCounter := func(initial int) Counter {
+		return &SimpleCounter{val: initial}
+	}
+	
+	c1 := makeCounter(5)
+	c2 := makeCounter(10)
+	
+	assert(c1.Get() == 5, "c1 should be 5")
+	assert(c2.Get() == 10, "c2 should be 10")
+	
+	c1.Inc()
+	assert(c1.Get() == 6, "c1 after inc should be 6")
+	assert(c2.Get() == 10, "c2 should still be 10")
+}
+
+// Test 6: Closure modifies interface in loop
+func test6() {
+	fmt.Println("Test 6: closure modifies interface in loop")
+	
+	var c Counter = &SimpleCounter{val: 0}
+	
+	incrementN := func(n int) {
+		for i := 0; i < n; i++ {
+			c.Inc()
+		}
+	}
+	
+	incrementN(5)
+	assert(c.Get() == 5, "after incrementN(5) should be 5")
+	
+	incrementN(3)
+	assert(c.Get() == 8, "after incrementN(3) should be 8")
+}
+
+// Test 7: Closure captures interface in defer
+func test7() {
+	fmt.Println("Test 7: closure captures interface in defer")
+	
+	var c Counter = &SimpleCounter{val: 0}
+	result := 0
+	
+	func() {
+		defer func() {
+			result = c.Get()
+		}()
+		
+		c.Inc()
+		c.Inc()
+	}()
+	
+	assert(result == 2, "deferred closure should see 2")
+}
+
+// Test 8: Closure captures interface, used in goroutine pattern
+func test8() {
+	fmt.Println("Test 8: closure with interface in channel pattern")
+	
+	var c Counter = &SimpleCounter{val: 0}
+	
+	ch := make(chan int, 1)
+	
+	go func() {
+		c.Inc()
+		ch <- c.Get()
+	}()
+	
+	result := <-ch
+	assert(result == 1, "goroutine should return 1")
+}
+
+// Test 9: Closure captures slice of interfaces
+func test9() {
+	fmt.Println("Test 9: closure captures slice of interfaces")
+	
+	counters := []Counter{
+		&SimpleCounter{val: 1},
+		&SimpleCounter{val: 2},
+		&SimpleCounter{val: 3},
+	}
+	
+	incAll := func() {
+		for _, c := range counters {
+			c.Inc()
+		}
+	}
+	
+	sumAll := func() int {
+		sum := 0
+		for _, c := range counters {
+			sum = sum + c.Get()
+		}
+		return sum
+	}
+	
+	assert(sumAll() == 6, "initial sum should be 6")
+	incAll()
+	assert(sumAll() == 9, "after incAll sum should be 9")
+}
+
+// Test 10: Method value from interface captured in closure
+func test10() {
+	fmt.Println("Test 10: method value from interface in closure")
+	
+	var c Counter = &SimpleCounter{val: 50}
+	
+	incFn := c.Inc
+	getFn := c.Get
+	
+	wrapped := func() int {
+		incFn()
+		return getFn()
+	}
+	
+	assert(wrapped() == 51, "wrapped should return 51")
+	assert(wrapped() == 52, "wrapped again should return 52")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	
+	fmt.Println("closure_iface_modify: ALL TESTS PASSED")
+}

@@ -1,0 +1,200 @@
+package main
+
+import "fmt"
+
+// Test dynamic access (~>) with complex scenarios
+
+type Person struct {
+	Name string
+	Age  int
+}
+
+type Company struct {
+	Name    string
+	CEO     Person
+	Workers []Person
+}
+
+// Test 1: Dynamic access on struct field
+func test1() {
+	fmt.Println("Test 1: dynamic access on struct field")
+	
+	var a any = Person{Name: "Alice", Age: 30}
+	
+	name, err := a~>Name
+	assert(err == nil, "should not error")
+	assert(name.(string) == "Alice", "name should be Alice")
+	
+	age, err := a~>Age
+	assert(err == nil, "should not error")
+	assert(age.(int) == 30, "age should be 30")
+}
+
+// Test 2: Dynamic access on nested struct
+func test2() {
+	fmt.Println("Test 2: dynamic access on nested struct")
+	
+	var a any = Company{
+		Name: "TechCorp",
+		CEO:  Person{Name: "Bob", Age: 45},
+	}
+	
+	ceo, err := a~>CEO
+	assert(err == nil, "should not error")
+	
+	ceoName, err := ceo~>Name
+	assert(err == nil, "should not error")
+	assert(ceoName.(string) == "Bob", "CEO name should be Bob")
+}
+
+// Test 3: Dynamic access with question operator
+func test3() {
+	fmt.Println("Test 3: dynamic access with question operator")
+	
+	getValue := func() (string, error) {
+		var a any = Person{Name: "Charlie", Age: 25}
+		name := a~>Name?
+		return name.(string), nil
+	}
+	
+	name, err := getValue()
+	assert(err == nil, "should not error")
+	assert(name == "Charlie", "name should be Charlie")
+}
+
+// Test 4: Dynamic access on slice element
+func test4() {
+	fmt.Println("Test 4: dynamic access on slice")
+	
+	var a any = []Person{
+		{Name: "D1", Age: 20},
+		{Name: "D2", Age: 21},
+	}
+	
+	elem, err := a~>[0]
+	assert(err == nil, "should not error on index")
+	
+	name, err := elem~>Name
+	assert(err == nil, "should not error on field")
+	assert(name.(string) == "D1", "first name should be D1")
+}
+
+// Test 5: Dynamic access error on invalid field
+func test5() {
+	fmt.Println("Test 5: dynamic access error on invalid field")
+	
+	var a any = Person{Name: "Eve", Age: 35}
+	
+	_, err := a~>InvalidField
+	assert(err != nil, "should error on invalid field")
+}
+
+// Test 6: Dynamic access on map
+func test6() {
+	fmt.Println("Test 6: dynamic access on map")
+	
+	var a any = map[string]int{
+		"one": 1,
+		"two": 2,
+	}
+	
+	val, err := a~>["one"]
+	assert(err == nil, "should not error")
+	assert(val.(int) == 1, "should be 1")
+}
+
+// Test 7: Dynamic method call
+func test7() {
+	fmt.Println("Test 7: dynamic method call")
+	
+	type Greeter struct {
+		name string
+	}
+	
+	// Note: Can't define methods inside function in Go/Vo
+	// Skip this test or use a different approach
+	fmt.Println("  (skipped - methods require top-level type)")
+}
+
+// Test 8: Dynamic access chained
+func test8() {
+	fmt.Println("Test 8: dynamic access chained")
+	
+	var a any = Company{
+		Name: "ChainCorp",
+		CEO:  Person{Name: "Frank", Age: 50},
+	}
+	
+	ceoAge := a~>CEO~>Age?
+	assert(ceoAge.(int) == 50, "CEO age should be 50")
+}
+
+// Test 9: Dynamic access on pointer
+func test9() {
+	fmt.Println("Test 9: dynamic access on pointer")
+	
+	p := &Person{Name: "Grace", Age: 28}
+	var a any = p
+	
+	name, err := a~>Name
+	assert(err == nil, "should not error")
+	assert(name.(string) == "Grace", "name should be Grace")
+}
+
+// Test 10: Dynamic access in loop
+func test10() {
+	fmt.Println("Test 10: dynamic access in loop")
+	
+	people := []any{
+		Person{Name: "H1", Age: 1},
+		Person{Name: "H2", Age: 2},
+		Person{Name: "H3", Age: 3},
+	}
+	
+	totalAge := 0
+	for _, p := range people {
+		age := p~>Age?
+		totalAge += age.(int)
+	}
+	
+	assert(totalAge == 6, "total age should be 6")
+}
+
+// Test 11: Dynamic access with type conversion
+func test11() {
+	fmt.Println("Test 11: dynamic access result type")
+	
+	var a any = Person{Name: "Ivy", Age: 22}
+	
+	// Get as any, then type assert
+	nameAny := a~>Name?
+	name := nameAny.(string)
+	assert(name == "Ivy", "name should be Ivy")
+}
+
+// Test 12: Dynamic access nil check
+func test12() {
+	fmt.Println("Test 12: dynamic access on nil")
+	
+	var a any = nil
+	
+	_, err := a~>Name
+	assert(err != nil, "should error on nil")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("dyn_access_complex: ALL TESTS PASSED")
+}

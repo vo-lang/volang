@@ -1,0 +1,207 @@
+package main
+
+// Test: Switch statements and type conversion edge cases
+
+func main() {
+	// Test 1: Switch with expression
+	x := 5
+	result := 0
+	switch x * 2 {
+	case 10:
+		result = 1
+	case 20:
+		result = 2
+	}
+	assert(result == 1)
+
+	// Test 2: Switch with init statement
+	switch y := 3; y {
+	case 3:
+		result = 10
+	}
+	assert(result == 10)
+
+	// Test 3: Switch with fallthrough
+	z := 1
+	vals := make([]int, 0)
+	switch z {
+	case 1:
+		vals = append(vals, 1)
+		fallthrough
+	case 2:
+		vals = append(vals, 2)
+	case 3:
+		vals = append(vals, 3)
+	}
+	assert(len(vals) == 2)
+	assert(vals[0] == 1)
+	assert(vals[1] == 2)
+
+	// Test 4: Switch with multiple cases
+	w := 5
+	matched := false
+	switch w {
+	case 1, 3, 5, 7, 9:
+		matched = true
+	case 2, 4, 6, 8:
+		matched = false
+	}
+	assert(matched)
+
+	// Test 5: Tagless switch (like if-else chain)
+	a := 10
+	taglessResult := ""
+	switch {
+	case a < 5:
+		taglessResult = "small"
+	case a < 15:
+		taglessResult = "medium"
+	default:
+		taglessResult = "large"
+	}
+	assert(taglessResult == "medium")
+
+	// Test 6: Type conversion int to float
+	intVal := 42
+	floatVal := float64(intVal)
+	assert(floatVal == 42.0)
+
+	// Test 7: Type conversion float to int (truncation)
+	f := 3.7
+	i := int(f)
+	assert(i == 3)
+
+	// Test 8: Type conversion negative float to int
+	f2 := -3.7
+	i2 := int(f2)
+	assert(i2 == -3)
+
+	// Test 9: Type conversion between int types
+	i64 := int64(1000)
+	i32 := int32(i64)
+	assert(i32 == 1000)
+
+	// Test 10: Type conversion with overflow (wraps)
+	bigVal := int64(300)
+	byteVal := int8(bigVal) // Wraps around
+	assert(byteVal == 44)   // 300 % 256 = 44
+
+	// Test 11: String to byte slice
+	s := "hello"
+	bs := []byte(s)
+	assert(len(bs) == 5)
+	assert(bs[0] == 104) // 'h'
+	assert(bs[4] == 111) // 'o'
+
+	// Test 12: Byte slice to string
+	bs2 := []byte{119, 111, 114, 108, 100} // "world"
+	s2 := string(bs2)
+	assert(s2 == "world")
+
+	// Test 13: String to rune slice
+	s3 := "abc"
+	rs := []rune(s3)
+	assert(len(rs) == 3)
+	assert(rs[0] == 97)
+	assert(rs[1] == 98)
+	assert(rs[2] == 99)
+
+	// Test 14: Rune slice to string
+	rs2 := []rune{104, 105} // "hi"
+	s4 := string(rs2)
+	assert(s4 == "hi")
+
+	// Test 15: Int to string (rune conversion)
+	r := rune(65)
+	sr := string(r)
+	assert(sr == "A")
+
+	// Test 16: Switch with break
+	loopCount := 0
+outer:
+	for i := 0; i < 3; i++ {
+		switch i {
+		case 1:
+			break outer
+		default:
+			loopCount++
+		}
+	}
+	assert(loopCount == 1)
+
+	// Test 17: Nested switch
+	outerVal := 1
+	innerVal := 2
+	nestedResult := 0
+	switch outerVal {
+	case 1:
+		switch innerVal {
+		case 2:
+			nestedResult = 12
+		}
+	}
+	assert(nestedResult == 12)
+
+	// Test 18: Switch in loop with continue
+	sum := 0
+	for i := 0; i < 5; i++ {
+		switch i {
+		case 2:
+			continue
+		}
+		sum += i
+	}
+	assert(sum == 8) // 0+1+3+4
+
+	// Test 19: Type conversion in expression
+	a1 := 10
+	a2 := 3
+	div := float64(a1) / float64(a2)
+	assert(div > 3.3 && div < 3.4)
+
+	// Test 20: Uint conversions
+	ui := uint(100)
+	ui64 := uint64(ui)
+	assert(ui64 == 100)
+
+	// Test 21: Boolean in switch (via tagless)
+	boolVal := true
+	boolResult := ""
+	switch {
+	case boolVal:
+		boolResult = "true"
+	case !boolVal:
+		boolResult = "false"
+	}
+	assert(boolResult == "true")
+
+	// Test 22: Switch with function call as tag
+	getVal := func() int { return 42 }
+	funcResult := 0
+	switch getVal() {
+	case 42:
+		funcResult = 1
+	}
+	assert(funcResult == 1)
+
+	// Test 23: Switch default position (first)
+	defaultFirst := 0
+	switch 5 {
+	default:
+		defaultFirst = -1
+	case 5:
+		defaultFirst = 5
+	}
+	assert(defaultFirst == 5)
+
+	// Test 24: Empty switch case
+	emptyCase := 0
+	switch 1 {
+	case 0:
+	case 1:
+		emptyCase = 1
+	}
+	assert(emptyCase == 1)
+
+	println("PASS")
+}

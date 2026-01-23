@@ -1,0 +1,206 @@
+package main
+
+import "fmt"
+
+// Test method receiver conversion edge cases
+
+type Value struct {
+	x int
+}
+
+func (v Value) GetX() int     { return v.x }
+func (v *Value) SetX(x int)   { v.x = x }
+func (v Value) Double() int   { return v.x * 2 }
+func (v *Value) Triple() int  { return v.x * 3 }
+
+type Getter interface {
+	GetX() int
+}
+
+type Setter interface {
+	SetX(x int)
+}
+
+type Doubler interface {
+	Double() int
+}
+
+type Tripler interface {
+	Triple() int
+}
+
+// Test 1: Value receiver method on pointer type implementing interface
+func test1() {
+	fmt.Println("Test 1: value receiver method on pointer type")
+	
+	v := &Value{x: 10}
+	var g Getter = v  // *Value -> Getter (GetX has value receiver)
+	
+	result := g.GetX()
+	assert(result == 10, "GetX should return 10")
+}
+
+// Test 2: Pointer receiver method requires pointer type
+func test2() {
+	fmt.Println("Test 2: pointer receiver method")
+	
+	v := &Value{x: 20}
+	var s Setter = v  // *Value -> Setter (SetX has pointer receiver)
+	
+	s.SetX(30)
+	assert(v.x == 30, "SetX should modify to 30")
+}
+
+// Test 3: Method expression with value receiver
+func test3() {
+	fmt.Println("Test 3: method expression with value receiver")
+	
+	getX := Value.GetX
+	v := Value{x: 40}
+	
+	result := getX(v)
+	assert(result == 40, "method expr GetX should return 40")
+}
+
+// Test 4: Method expression with pointer receiver
+func test4() {
+	fmt.Println("Test 4: method expression with pointer receiver")
+	
+	setX := (*Value).SetX
+	v := &Value{x: 50}
+	
+	setX(v, 60)
+	assert(v.x == 60, "method expr SetX should modify to 60")
+}
+
+// Test 5: Method value from interface
+func test5() {
+	fmt.Println("Test 5: method value from interface")
+	
+	v := &Value{x: 70}
+	var g Getter = v
+	
+	getX := g.GetX  // Method value
+	result := getX()
+	assert(result == 70, "method value should return 70")
+}
+
+// Test 6: Interface with both value and pointer receiver methods
+type FullValue interface {
+	GetX() int
+	SetX(x int)
+	Double() int
+	Triple() int
+}
+
+func test6() {
+	fmt.Println("Test 6: interface with mixed receivers")
+	
+	v := &Value{x: 5}
+	var fv FullValue = v
+	
+	assert(fv.GetX() == 5, "GetX should return 5")
+	assert(fv.Double() == 10, "Double should return 10")
+	assert(fv.Triple() == 15, "Triple should return 15")
+	
+	fv.SetX(10)
+	assert(fv.GetX() == 10, "after SetX, GetX should return 10")
+}
+
+// Test 7: Convert between interfaces with different method sets
+func test7() {
+	fmt.Println("Test 7: convert between interfaces")
+	
+	v := &Value{x: 8}
+	var fv FullValue = v
+	
+	var g Getter = fv  // FullValue -> Getter
+	var d Doubler = fv  // FullValue -> Doubler
+	
+	assert(g.GetX() == 8, "converted Getter should work")
+	assert(d.Double() == 16, "converted Doubler should work")
+}
+
+// Test 8: Slice of interfaces with method calls
+func test8() {
+	fmt.Println("Test 8: slice of interfaces")
+	
+	values := []Getter{
+		&Value{x: 1},
+		&Value{x: 2},
+		&Value{x: 3},
+	}
+	
+	sum := 0
+	for _, g := range values {
+		sum += g.GetX()
+	}
+	assert(sum == 6, "sum should be 6")
+}
+
+// Test 9: Map with interface values
+func test9() {
+	fmt.Println("Test 9: map with interface values")
+	
+	m := map[string]Getter{
+		"a": &Value{x: 10},
+		"b": &Value{x: 20},
+	}
+	
+	assert(m["a"].GetX() == 10, "m[a] should be 10")
+	assert(m["b"].GetX() == 20, "m[b] should be 20")
+}
+
+// Test 10: Interface in struct field with method call
+type Container struct {
+	getter Getter
+}
+
+func test10() {
+	fmt.Println("Test 10: interface in struct field")
+	
+	c := Container{getter: &Value{x: 100}}
+	assert(c.getter.GetX() == 100, "struct field interface should work")
+}
+
+// Test 11: Closure capturing interface
+func test11() {
+	fmt.Println("Test 11: closure capturing interface")
+	
+	var g Getter = &Value{x: 50}
+	
+	getVal := func() int {
+		return g.GetX()
+	}
+	
+	assert(getVal() == 50, "captured interface should work")
+}
+
+// Test 12: Return interface from function
+func test12() {
+	fmt.Println("Test 12: return interface from function")
+	
+	makeGetter := func(x int) Getter {
+		return &Value{x: x}
+	}
+	
+	g := makeGetter(77)
+	assert(g.GetX() == 77, "returned interface should work")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("method_recv_convert: ALL TESTS PASSED")
+}

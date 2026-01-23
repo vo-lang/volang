@@ -1,0 +1,267 @@
+package main
+
+// Test type switch with interface cases and edge scenarios
+
+type Reader interface {
+	Read() string
+}
+
+type Writer interface {
+	Write(s string)
+}
+
+type ReadWriter interface {
+	Reader
+	Writer
+}
+
+type MyReader struct {
+	data string
+}
+
+func (r *MyReader) Read() string {
+	return r.data
+}
+
+type MyWriter struct {
+	buf string
+}
+
+func (w *MyWriter) Write(s string) {
+	w.buf += s
+}
+
+type MyReadWriter struct {
+	data string
+}
+
+func (rw *MyReadWriter) Read() string {
+	return rw.data
+}
+
+func (rw *MyReadWriter) Write(s string) {
+	rw.data += s
+}
+
+func testTypeSwitchInterfaceCase() {
+	var a any
+	
+	// Test with ReadWriter
+	a = &MyReadWriter{data: "test"}
+	
+	switch v := a.(type) {
+	case ReadWriter:
+		assert(v.Read() == "test", "ReadWriter case")
+		v.Write("!")
+		assert(v.Read() == "test!", "after write")
+	case Reader:
+		panic("should not match Reader first")
+	default:
+		panic("should match ReadWriter")
+	}
+}
+
+func testTypeSwitchReaderOnly() {
+	var a any = &MyReader{data: "reader only"}
+	
+	switch v := a.(type) {
+	case ReadWriter:
+		panic("MyReader does not implement Writer")
+	case Reader:
+		assert(v.Read() == "reader only", "Reader case")
+	default:
+		panic("should match Reader")
+	}
+}
+
+func testTypeSwitchNilInterface() {
+	var a any = nil
+	
+	switch v := a.(type) {
+	case nil:
+		assert(v == nil, "nil case")
+	case Reader:
+		panic("should not match Reader")
+	default:
+		panic("should match nil")
+	}
+}
+
+func testTypeSwitchTypedNil() {
+	var r *MyReader = nil
+	var a any = r // typed nil
+	
+	switch v := a.(type) {
+	case nil:
+		panic("typed nil is not nil interface")
+	case *MyReader:
+		assert(v == nil, "should match *MyReader with nil value")
+	default:
+		panic("should match *MyReader")
+	}
+}
+
+func testTypeSwitchMultiCase() {
+	check := func(a any) string {
+		switch a.(type) {
+		case int, int8, int16, int32, int64:
+			return "signed int"
+		case uint, uint8, uint16, uint32, uint64:
+			return "unsigned int"
+		case string:
+			return "string"
+		default:
+			return "other"
+		}
+	}
+	
+	assert(check(42) == "signed int", "int")
+	assert(check(int64(100)) == "signed int", "int64")
+	assert(check(uint(1)) == "unsigned int", "uint")
+	assert(check("hi") == "string", "string")
+	assert(check(3.14) == "other", "float")
+}
+
+func testTypeSwitchWithFallthrough() {
+	// Note: Go doesn't allow fallthrough in type switch
+	// This test just verifies type switch behavior
+	
+	var a any = 42
+	matched := ""
+	
+	switch v := a.(type) {
+	case int:
+		matched = "int"
+		_ = v
+	case string:
+		matched = "string"
+	}
+	
+	assert(matched == "int", "should match int")
+}
+
+func testTypeSwitchInLoop() {
+	items := []any{1, "two", 3.0, true}
+	
+	results := ""
+	for _, item := range items {
+		switch item.(type) {
+		case int:
+			results += "i"
+		case string:
+			results += "s"
+		case float64:
+			results += "f"
+		case bool:
+			results += "b"
+		}
+	}
+	
+	assert(results == "isfb", "loop type switch: got %s", results)
+}
+
+func testTypeSwitchNested() {
+	var outer any = []any{1, "two"}
+	
+	switch v := outer.(type) {
+	case []any:
+		for _, item := range v {
+			switch item.(type) {
+			case int:
+				// ok
+			case string:
+				// ok
+			default:
+				panic("unexpected inner type")
+			}
+		}
+	default:
+		panic("should be []any")
+	}
+}
+
+func testTypeSwitchWithClosure() {
+	var a any = 42
+	
+	f := func() string {
+		switch v := a.(type) {
+		case int:
+			return "int"
+		case string:
+			return "string"
+		default:
+			_ = v
+			return "other"
+		}
+	}
+	
+	assert(f() == "int", "closure type switch")
+	
+	a = "hello"
+	assert(f() == "string", "closure sees update")
+}
+
+func testTypeSwitchInterfaceHierarchy() {
+	var a any = &MyReadWriter{data: "rw"}
+	
+	// Test that more specific interface matches first
+	matched := ""
+	switch a.(type) {
+	case ReadWriter:
+		matched = "ReadWriter"
+	case Reader:
+		matched = "Reader"
+	case Writer:
+		matched = "Writer"
+	}
+	
+	assert(matched == "ReadWriter", "should match ReadWriter first")
+}
+
+func testTypeSwitchDefaultPosition() {
+	// Default in middle
+	var a any = 3.14
+	
+	result := ""
+	switch a.(type) {
+	case int:
+		result = "int"
+	default:
+		result = "default"
+	case string:
+		result = "string"
+	}
+	
+	assert(result == "default", "default in middle should work")
+}
+
+func testTypeSwitchAssignInCase() {
+	var a any = 42
+	var result int
+	
+	switch v := a.(type) {
+	case int:
+		result = v * 2
+	default:
+		result = -1
+	}
+	
+	assert(result == 84, "assign in case: got %d", result)
+}
+
+func main() {
+	testTypeSwitchInterfaceCase()
+	testTypeSwitchReaderOnly()
+	testTypeSwitchNilInterface()
+	testTypeSwitchTypedNil()
+	testTypeSwitchMultiCase()
+	testTypeSwitchWithFallthrough()
+	testTypeSwitchInLoop()
+	testTypeSwitchNested()
+	testTypeSwitchWithClosure()
+	testTypeSwitchInterfaceHierarchy()
+	testTypeSwitchDefaultPosition()
+	testTypeSwitchAssignInCase()
+	
+	println("All type switch interface case edge tests passed!")
+}

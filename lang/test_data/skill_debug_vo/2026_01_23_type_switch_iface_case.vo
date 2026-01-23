@@ -1,0 +1,297 @@
+package main
+
+import "fmt"
+
+// Test type switch with interface cases
+
+type Reader interface {
+	Read() string
+}
+
+type Writer interface {
+	Write(s string)
+}
+
+type ReadWriter interface {
+	Read() string
+	Write(s string)
+}
+
+type Closer interface {
+	Close()
+}
+
+type Buffer struct {
+	data string
+}
+
+func (b *Buffer) Read() string  { return b.data }
+func (b *Buffer) Write(s string) { b.data = s }
+func (b *Buffer) Close()        { b.data = "" }
+
+type File struct {
+	name string
+}
+
+func (f *File) Read() string  { return f.name }
+func (f *File) Write(s string) { f.name = s }
+
+// Test 1: Type switch matching interface type
+func test1() {
+	fmt.Println("Test 1: type switch matching interface")
+	
+	var a any = &Buffer{data: "test"}
+	
+	matched := ""
+	switch v := a.(type) {
+	case Reader:
+		matched = "Reader:" + v.Read()
+	}
+	
+	assert(matched == "Reader:test", "should match Reader")
+}
+
+// Test 2: Type switch preferring concrete type over interface
+func test2() {
+	fmt.Println("Test 2: type switch concrete vs interface")
+	
+	var a any = &Buffer{data: "buf"}
+	
+	matched := ""
+	switch v := a.(type) {
+	case *Buffer:
+		matched = "Buffer:" + v.data
+	case Reader:
+		matched = "Reader:" + v.Read()
+	}
+	
+	assert(matched == "Buffer:buf", "should match *Buffer first")
+}
+
+// Test 3: Type switch with multiple interface cases
+func test3() {
+	fmt.Println("Test 3: multiple interface cases")
+	
+	testCase := func(a any) string {
+		switch v := a.(type) {
+		case ReadWriter:
+			return "ReadWriter:" + v.Read()
+		case Reader:
+			return "Reader:" + v.Read()
+		case Writer:
+			return "Writer"
+		default:
+			return "unknown"
+		}
+	}
+	
+	// Buffer implements ReadWriter
+	result := testCase(&Buffer{data: "multi"})
+	assert(result == "ReadWriter:multi", "Buffer should match ReadWriter")
+}
+
+// Test 4: Type switch on interface variable
+func test4() {
+	fmt.Println("Test 4: type switch on interface variable")
+	
+	var r Reader = &Buffer{data: "iface"}
+	
+	matched := ""
+	switch v := r.(type) {
+	case *Buffer:
+		matched = "Buffer:" + v.data
+	case *File:
+		matched = "File:" + v.name
+	}
+	
+	assert(matched == "Buffer:iface", "should match *Buffer")
+}
+
+// Test 5: Type switch with interface in default case
+func test5() {
+	fmt.Println("Test 5: type switch default case")
+	
+	var a any = 42
+	
+	matched := ""
+	switch a.(type) {
+	case Reader:
+		matched = "Reader"
+	case Writer:
+		matched = "Writer"
+	default:
+		matched = "default"
+	}
+	
+	assert(matched == "default", "int should match default")
+}
+
+// Test 6: Type switch with nil interface
+func test6() {
+	fmt.Println("Test 6: type switch with nil")
+	
+	var a any = nil
+	
+	matched := ""
+	switch a.(type) {
+	case nil:
+		matched = "nil"
+	case Reader:
+		matched = "Reader"
+	default:
+		matched = "default"
+	}
+	
+	assert(matched == "nil", "nil should match nil case")
+}
+
+// Test 7: Type switch extracting interface and calling methods
+func test7() {
+	fmt.Println("Test 7: extract interface and call methods")
+	
+	var a any = &Buffer{data: "extract"}
+	
+	result := ""
+	switch v := a.(type) {
+	case ReadWriter:
+		v.Write("modified")
+		result = v.Read()
+	}
+	
+	assert(result == "modified", "should be able to call interface methods")
+}
+
+// Test 8: Type switch with embedded interface
+type ReadCloser interface {
+	Reader
+	Closer
+}
+
+func test8() {
+	fmt.Println("Test 8: type switch with embedded interface")
+	
+	var a any = &Buffer{data: "embed"}
+	
+	matched := ""
+	switch v := a.(type) {
+	case ReadCloser:
+		matched = "ReadCloser:" + v.Read()
+	case Reader:
+		matched = "Reader"
+	}
+	
+	assert(matched == "ReadCloser:embed", "should match ReadCloser")
+}
+
+// Test 9: Type switch in loop
+func test9() {
+	fmt.Println("Test 9: type switch in loop")
+	
+	items := []any{
+		&Buffer{data: "b1"},
+		&File{name: "f1"},
+		42,
+		"string",
+	}
+	
+	results := []string{}
+	for _, item := range items {
+		switch v := item.(type) {
+		case Reader:
+			results = append(results, "R:"+v.Read())
+		case int:
+			results = append(results, fmt.Sprintf("I:%d", v))
+		case string:
+			results = append(results, "S:"+v)
+		}
+	}
+	
+	assert(len(results) == 4, "should have 4 results")
+	assert(results[0] == "R:b1", "first should be R:b1")
+	assert(results[1] == "R:f1", "second should be R:f1")
+	assert(results[2] == "I:42", "third should be I:42")
+	assert(results[3] == "S:string", "fourth should be S:string")
+}
+
+// Test 10: Nested type switch
+func test10() {
+	fmt.Println("Test 10: nested type switch")
+	
+	outer := func(a any) string {
+		switch v := a.(type) {
+		case Reader:
+			// Inner type switch on the Reader
+			switch v2 := v.(type) {
+			case *Buffer:
+				return "Buffer:" + v2.data
+			case *File:
+				return "File:" + v2.name
+			default:
+				return "OtherReader"
+			}
+		default:
+			return "NotReader"
+		}
+	}
+	
+	assert(outer(&Buffer{data: "nested"}) == "Buffer:nested", "should match nested Buffer")
+	assert(outer(&File{name: "file"}) == "File:file", "should match nested File")
+	assert(outer(42) == "NotReader", "int should not be Reader")
+}
+
+// Test 11: Type switch with fallthrough-like behavior using goto
+func test11() {
+	fmt.Println("Test 11: type switch multiple type case")
+	
+	classify := func(a any) string {
+		switch a.(type) {
+		case *Buffer, *File:
+			return "IOType"
+		case int, int64:
+			return "IntType"
+		default:
+			return "Other"
+		}
+	}
+	
+	assert(classify(&Buffer{}) == "IOType", "Buffer should be IOType")
+	assert(classify(&File{}) == "IOType", "File should be IOType")
+	assert(classify(42) == "IntType", "int should be IntType")
+	assert(classify("str") == "Other", "string should be Other")
+}
+
+// Test 12: Type switch preserving type info across function call
+func test12() {
+	fmt.Println("Test 12: type switch with function call")
+	
+	process := func(r Reader) string {
+		return r.Read()
+	}
+	
+	var a any = &Buffer{data: "call"}
+	
+	result := ""
+	switch v := a.(type) {
+	case Reader:
+		result = process(v)
+	}
+	
+	assert(result == "call", "should pass interface to function")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("type_switch_iface_case: ALL TESTS PASSED")
+}

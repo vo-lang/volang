@@ -1,0 +1,235 @@
+package main
+
+import "fmt"
+
+// Test struct field assignment with interface conversion edge cases
+
+type Reader interface {
+	Read() string
+}
+
+type Writer interface {
+	Write(s string)
+}
+
+type ReadWriter interface {
+	Read() string
+	Write(s string)
+}
+
+type Buffer struct {
+	data string
+}
+
+func (b *Buffer) Read() string  { return b.data }
+func (b *Buffer) Write(s string) { b.data = s }
+
+// Struct with interface fields
+type Container struct {
+	r  Reader
+	w  Writer
+	rw ReadWriter
+}
+
+// Test 1: Initialize struct with interface field from concrete type
+func test1() {
+	fmt.Println("Test 1: struct literal with interface fields")
+	
+	buf := &Buffer{data: "init"}
+	c := Container{
+		r:  buf,
+		w:  buf,
+		rw: buf,
+	}
+	
+	assert(c.r.Read() == "init", "r.Read should return init")
+	c.w.Write("modified")
+	assert(c.r.Read() == "modified", "r should see modification")
+	assert(c.rw.Read() == "modified", "rw should see modification")
+}
+
+// Test 2: Assign interface field from another interface
+func test2() {
+	fmt.Println("Test 2: assign interface field from another interface")
+	
+	buf := &Buffer{data: "test2"}
+	var rw ReadWriter = buf
+	
+	c := Container{}
+	c.r = rw  // ReadWriter -> Reader
+	c.w = rw  // ReadWriter -> Writer
+	c.rw = rw
+	
+	assert(c.r.Read() == "test2", "r should read test2")
+	c.w.Write("new")
+	assert(c.r.Read() == "new", "r should see new")
+}
+
+// Test 3: Struct field assignment in loop
+func test3() {
+	fmt.Println("Test 3: struct field assignment in loop")
+	
+	containers := make([]Container, 3)
+	
+	for i := 0; i < 3; i++ {
+		buf := &Buffer{data: fmt.Sprintf("buf%d", i)}
+		containers[i].r = buf
+		containers[i].w = buf
+		containers[i].rw = buf
+	}
+	
+	assert(containers[0].r.Read() == "buf0", "containers[0] should be buf0")
+	assert(containers[1].r.Read() == "buf1", "containers[1] should be buf1")
+	assert(containers[2].r.Read() == "buf2", "containers[2] should be buf2")
+}
+
+// Test 4: Nested struct with interface fields
+type Outer struct {
+	inner Container
+	name  string
+}
+
+func test4() {
+	fmt.Println("Test 4: nested struct with interface fields")
+	
+	buf := &Buffer{data: "nested"}
+	o := Outer{
+		inner: Container{r: buf, w: buf, rw: buf},
+		name:  "outer",
+	}
+	
+	assert(o.inner.r.Read() == "nested", "nested read should work")
+	o.inner.w.Write("changed")
+	assert(o.inner.r.Read() == "changed", "nested write should work")
+}
+
+// Test 5: Pointer to struct with interface fields
+func test5() {
+	fmt.Println("Test 5: pointer to struct with interface fields")
+	
+	buf := &Buffer{data: "ptr"}
+	c := &Container{r: buf, w: buf, rw: buf}
+	
+	assert(c.r.Read() == "ptr", "pointer struct read should work")
+	c.w.Write("ptr2")
+	assert(c.r.Read() == "ptr2", "pointer struct write should work")
+}
+
+// Test 6: Slice of structs with interface fields
+func test6() {
+	fmt.Println("Test 6: slice of structs with interface fields")
+	
+	containers := []Container{
+		{r: &Buffer{data: "s0"}, w: &Buffer{data: "w0"}, rw: &Buffer{data: "rw0"}},
+		{r: &Buffer{data: "s1"}, w: &Buffer{data: "w1"}, rw: &Buffer{data: "rw1"}},
+	}
+	
+	assert(containers[0].r.Read() == "s0", "slice[0].r should be s0")
+	assert(containers[1].rw.Read() == "rw1", "slice[1].rw should be rw1")
+}
+
+// Test 7: Map with struct values containing interface fields
+func test7() {
+	fmt.Println("Test 7: map with struct values")
+	
+	m := make(map[string]Container)
+	m["a"] = Container{r: &Buffer{data: "ma"}}
+	m["b"] = Container{r: &Buffer{data: "mb"}}
+	
+	assert(m["a"].r.Read() == "ma", "map a should be ma")
+	assert(m["b"].r.Read() == "mb", "map b should be mb")
+}
+
+// Test 8: Return struct with interface fields
+func test8() {
+	fmt.Println("Test 8: return struct with interface fields")
+	
+	makeContainer := func(data string) Container {
+		buf := &Buffer{data: data}
+		return Container{r: buf, w: buf, rw: buf}
+	}
+	
+	c := makeContainer("returned")
+	assert(c.r.Read() == "returned", "returned struct should work")
+}
+
+// Test 9: Pass struct with interface fields to function
+func test9() {
+	fmt.Println("Test 9: pass struct with interface fields")
+	
+	readAll := func(c Container) string {
+		return c.r.Read() + ":" + c.rw.Read()
+	}
+	
+	buf := &Buffer{data: "pass"}
+	c := Container{r: buf, w: buf, rw: buf}
+	
+	result := readAll(c)
+	assert(result == "pass:pass", "passed struct should work")
+}
+
+// Test 10: Modify struct field interface through pointer
+func test10() {
+	fmt.Println("Test 10: modify struct field through pointer")
+	
+	buf1 := &Buffer{data: "one"}
+	buf2 := &Buffer{data: "two"}
+	
+	c := &Container{r: buf1}
+	assert(c.r.Read() == "one", "initial should be one")
+	
+	c.r = buf2
+	assert(c.r.Read() == "two", "after reassign should be two")
+}
+
+// Test 11: Interface field nil assignment
+func test11() {
+	fmt.Println("Test 11: interface field nil assignment")
+	
+	buf := &Buffer{data: "test"}
+	c := Container{r: buf}
+	
+	assert(c.r != nil, "r should not be nil")
+	c.r = nil
+	assert(c.r == nil, "r should be nil after assignment")
+}
+
+// Test 12: Struct embedding with interface fields
+type ExtendedContainer struct {
+	Container
+	extra Reader
+}
+
+func test12() {
+	fmt.Println("Test 12: embedded struct with interface fields")
+	
+	buf := &Buffer{data: "embed"}
+	ec := ExtendedContainer{
+		Container: Container{r: buf, w: buf, rw: buf},
+		extra:     buf,
+	}
+	
+	assert(ec.r.Read() == "embed", "embedded r should work")
+	assert(ec.extra.Read() == "embed", "extra should work")
+	
+	ec.w.Write("changed")
+	assert(ec.r.Read() == "changed", "embedded should see change")
+	assert(ec.extra.Read() == "changed", "extra should see change")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("struct_field_iface_edge: ALL TESTS PASSED")
+}

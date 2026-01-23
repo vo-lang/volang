@@ -1,0 +1,155 @@
+package main
+
+// Test method values from interface types with embedded structs
+
+type Inner struct {
+	val int
+}
+
+func (i *Inner) GetVal() int {
+	return i.val
+}
+
+func (i *Inner) SetVal(v int) {
+	i.val = v
+}
+
+type Outer struct {
+	Inner
+	name string
+}
+
+type Getter interface {
+	GetVal() int
+}
+
+type Setter interface {
+	SetVal(int)
+}
+
+type GetterSetter interface {
+	Getter
+	Setter
+}
+
+func testMethodValueFromInterface() {
+	o := &Outer{Inner: Inner{val: 42}, name: "test"}
+	
+	// Method value from concrete type
+	getVal := o.GetVal
+	assert(getVal() == 42, "method value from concrete should work")
+	
+	// Method value from interface
+	var g Getter = o
+	getValFromIface := g.GetVal
+	assert(getValFromIface() == 42, "method value from interface should work")
+	
+	// Modify via method value
+	var s Setter = o
+	setVal := s.SetVal
+	setVal(100)
+	assert(o.val == 100, "setVal should modify original")
+	assert(getVal() == 100, "method value should see update")
+	assert(getValFromIface() == 100, "iface method value should see update")
+}
+
+func testMethodValueFromEmbeddedInterface() {
+	o := &Outer{Inner: Inner{val: 10}, name: "embed"}
+	
+	var gs GetterSetter = o
+	
+	// Get method values from compound interface
+	get := gs.GetVal
+	set := gs.SetVal
+	
+	assert(get() == 10, "get from compound interface")
+	set(20)
+	assert(get() == 20, "set from compound interface should work")
+	assert(o.val == 20, "original should be updated")
+}
+
+func testMethodValueStoredInMap() {
+	o1 := &Outer{Inner: Inner{val: 1}, name: "o1"}
+	o2 := &Outer{Inner: Inner{val: 2}, name: "o2"}
+	
+	methods := make(map[string]func() int)
+	methods["o1"] = o1.GetVal
+	methods["o2"] = o2.GetVal
+	
+	assert(methods["o1"]() == 1, "method value in map o1")
+	assert(methods["o2"]() == 2, "method value in map o2")
+	
+	o1.val = 100
+	assert(methods["o1"]() == 100, "method value should reflect changes")
+}
+
+func testMethodValueStoredInSlice() {
+	var items []*Outer
+	items = append(items, &Outer{Inner: Inner{val: 10}, name: "a"})
+	items = append(items, &Outer{Inner: Inner{val: 20}, name: "b"})
+	items = append(items, &Outer{Inner: Inner{val: 30}, name: "c"})
+	
+	var getters []func() int
+	for _, item := range items {
+		getters = append(getters, item.GetVal)
+	}
+	
+	sum := 0
+	for _, get := range getters {
+		sum += get()
+	}
+	assert(sum == 60, "sum of method values should be 60, got %d", sum)
+}
+
+func testMethodValuePassedToFunc() {
+	o := &Outer{Inner: Inner{val: 5}, name: "test"}
+	
+	result := applyGetter(o.GetVal)
+	assert(result == 10, "applyGetter should return doubled value")
+}
+
+func applyGetter(get func() int) int {
+	return get() * 2
+}
+
+func testMethodValueAsInterfaceField() {
+	o := &Outer{Inner: Inner{val: 7}, name: "test"}
+	
+	type Container struct {
+		getter func() int
+	}
+	
+	c := Container{getter: o.GetVal}
+	assert(c.getter() == 7, "method value in struct field")
+	
+	o.val = 14
+	assert(c.getter() == 14, "method value in struct should see update")
+}
+
+func testMethodValueNilReceiver() {
+	var o *Outer = nil
+	
+	defer func() {
+		r := recover()
+		assert(r != nil, "should panic on nil receiver method call")
+	}()
+	
+	// This should work - getting the method value
+	get := o.GetVal
+	// This should panic - calling on nil receiver
+	get()
+	
+	panic("should not reach here")
+}
+
+func main() {
+	testMethodValueFromInterface()
+	testMethodValueFromEmbeddedInterface()
+	testMethodValueStoredInMap()
+	testMethodValueStoredInSlice()
+	testMethodValuePassedToFunc()
+	testMethodValueAsInterfaceField()
+	testMethodValueNilReceiver()
+	
+	println("All method value interface embed tests passed!")
+}

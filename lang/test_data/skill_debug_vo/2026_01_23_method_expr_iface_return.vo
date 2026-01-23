@@ -1,0 +1,226 @@
+package main
+
+import "fmt"
+
+// Test method expressions that return interfaces from promoted methods
+
+type Reader interface {
+	Read() string
+}
+
+type Writer interface {
+	Write(s string)
+}
+
+type ReadWriter interface {
+	Read() string
+	Write(s string)
+}
+
+type Inner struct {
+	data string
+}
+
+func (i *Inner) Read() string {
+	return i.data
+}
+
+func (i *Inner) Write(s string) {
+	i.data = s
+}
+
+func (i *Inner) AsReader() Reader {
+	return i
+}
+
+func (i *Inner) AsWriter() Writer {
+	return i
+}
+
+func (i *Inner) AsReadWriter() ReadWriter {
+	return i
+}
+
+type Outer struct {
+	prefix string
+	*Inner
+}
+
+// Test 1: Method expression on promoted method returning interface
+func test1() {
+	fmt.Println("Test 1: method expr on promoted method returning interface")
+	
+	f := (*Outer).AsReader
+	o := &Outer{prefix: "test", Inner: &Inner{data: "hello"}}
+	
+	r := f(o)
+	result := r.Read()
+	assert(result == "hello", "AsReader().Read() should return 'hello'")
+}
+
+// Test 2: Method expression chain - promoted method returning interface then calling method
+func test2() {
+	fmt.Println("Test 2: method value on interface returned from promoted method")
+	
+	o := &Outer{prefix: "p", Inner: &Inner{data: "world"}}
+	r := o.AsReader()
+	
+	// Get method value from interface
+	readFn := r.Read
+	result := readFn()
+	assert(result == "world", "readFn() should return 'world'")
+}
+
+// Test 3: Closure capturing interface returned from promoted method
+func test3() {
+	fmt.Println("Test 3: closure capturing interface from promoted method")
+	
+	o := &Outer{prefix: "x", Inner: &Inner{data: "initial"}}
+	r := o.AsReader()
+	
+	captured := func() string {
+		return r.Read()
+	}
+	
+	assert(captured() == "initial", "captured closure should read 'initial'")
+	
+	// Modify through original
+	o.Inner.data = "modified"
+	assert(captured() == "modified", "captured closure should see modification")
+}
+
+// Test 4: Interface conversion in variadic call (individual args)
+func test4() {
+	fmt.Println("Test 4: interface conversion in variadic call")
+	
+	o1 := &Outer{Inner: &Inner{data: "a"}}
+	o2 := &Outer{Inner: &Inner{data: "b"}}
+	
+	// Pass ReadWriter values to Reader... variadic
+	result := readAll(o1.Inner, o2.Inner)
+	assert(result == "ab", "readAll should concatenate 'ab'")
+}
+
+func readAll(readers ...Reader) string {
+	result := ""
+	for _, r := range readers {
+		result = result + r.Read()
+	}
+	return result
+}
+
+// Test 5: Type switch on interface converted from another interface
+func test5() {
+	fmt.Println("Test 5: type switch on converted interface")
+	
+	o := &Outer{Inner: &Inner{data: "switch"}}
+	var rw ReadWriter = o.Inner
+	var r Reader = rw  // Convert ReadWriter to Reader
+	
+	// Type switch on the converted interface
+	matched := false
+	switch v := r.(type) {
+	case *Inner:
+		assert(v.data == "switch", "type switch should extract *Inner")
+		matched = true
+	}
+	assert(matched, "type switch should match *Inner")
+}
+
+// Test 6: Interface method returning interface, then assign to narrower interface
+func test6() {
+	fmt.Println("Test 6: interface method returning interface chain")
+	
+	o := &Outer{Inner: &Inner{data: "chain"}}
+	rw := o.AsReadWriter()  // Returns ReadWriter
+	
+	// Assign ReadWriter to Reader
+	var r Reader = rw
+	assert(r.Read() == "chain", "chained conversion should work")
+	
+	// Now get Writer from same source
+	var w Writer = rw
+	w.Write("new")
+	assert(r.Read() == "new", "Writer should modify same underlying data")
+}
+
+// Test 7: Method expression on pointer type that embeds pointer, method returns interface
+func test7() {
+	fmt.Println("Test 7: (*Outer).AsReader method expression")
+	
+	// Pointer receiver method expression on *Outer (which embeds *Inner)
+	f := (*Outer).AsReader
+	o := &Outer{prefix: "val", Inner: &Inner{data: "test7"}}
+	
+	r := f(o)
+	assert(r.Read() == "test7", "pointer receiver method expr should work")
+}
+
+// Test 8: Defer with interface returned from promoted method
+func test8() {
+	fmt.Println("Test 8: defer with interface from promoted method")
+	
+	result := ""
+	
+	func() {
+		o := &Outer{Inner: &Inner{data: "defer"}}
+		w := o.AsWriter()
+		
+		defer func() {
+			w.Write("deferred")
+		}()
+		
+		result = o.Inner.data
+	}()
+	
+	// After defer, should be "deferred"
+	// But result was captured before defer ran
+	assert(result == "defer", "result should be 'defer'")
+}
+
+// Test 9: Return interface from promoted method in expression position
+func test9() {
+	fmt.Println("Test 9: interface from promoted method as expression")
+	
+	o := &Outer{Inner: &Inner{data: "expr"}}
+	
+	// Use in expression directly
+	result := o.AsReader().Read()
+	assert(result == "expr", "chained call should work")
+}
+
+// Test 10: Slice of interfaces returned from promoted methods
+func test10() {
+	fmt.Println("Test 10: slice of interfaces from promoted methods")
+	
+	o1 := &Outer{Inner: &Inner{data: "1"}}
+	o2 := &Outer{Inner: &Inner{data: "2"}}
+	o3 := &Outer{Inner: &Inner{data: "3"}}
+	
+	readers := []Reader{
+		o1.AsReader(),
+		o2.AsReader(),
+		o3.AsReader(),
+	}
+	
+	result := ""
+	for _, r := range readers {
+		result = result + r.Read()
+	}
+	assert(result == "123", "should read '123'")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	
+	fmt.Println("method_expr_iface_return: ALL TESTS PASSED")
+}

@@ -1,0 +1,259 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Test error handling with interface conversion and chaining
+
+type Result interface {
+	Value() int
+	IsOK() bool
+}
+
+type OKResult struct {
+	val int
+}
+
+func (r *OKResult) Value() int { return r.val }
+func (r *OKResult) IsOK() bool { return true }
+
+type ErrResult struct {
+	code int
+}
+
+func (r *ErrResult) Value() int { return r.code }
+func (r *ErrResult) IsOK() bool { return false }
+
+// Test 1: Error propagation with interface return
+func test1() {
+	fmt.Println("Test 1: error propagation with interface return")
+	
+	getResult := func(ok bool) (Result, error) {
+		if ok {
+			return &OKResult{val: 42}, nil
+		}
+		return nil, errors.New("failed")
+	}
+	
+	// Success case
+	r, err := getResult(true)
+	assert(err == nil, "should not error")
+	assert(r.Value() == 42, "should return 42")
+	
+	// Error case
+	r2, err2 := getResult(false)
+	assert(err2 != nil, "should error")
+	assert(r2 == nil, "result should be nil")
+}
+
+// Test 2: Question operator with interface return
+func test2() {
+	fmt.Println("Test 2: question operator with interface return")
+	
+	inner := func() (Result, error) {
+		return &OKResult{val: 100}, nil
+	}
+	
+	outer := func() (int, error) {
+		r := inner()?
+		return r.Value(), nil
+	}
+	
+	val, err := outer()
+	assert(err == nil, "should not error")
+	assert(val == 100, "should return 100")
+}
+
+// Test 3: Error chain with interface conversion
+func test3() {
+	fmt.Println("Test 3: error chain with interface conversion")
+	
+	step1 := func() (*OKResult, error) {
+		return &OKResult{val: 10}, nil
+	}
+	
+	step2 := func(r Result) (Result, error) {
+		return &OKResult{val: r.Value() * 2}, nil
+	}
+	
+	chain := func() (int, error) {
+		r1 := step1()?
+		// r1 is *OKResult, implicitly converts to Result
+		r2 := step2(r1)?
+		return r2.Value(), nil
+	}
+	
+	val, err := chain()
+	assert(err == nil, "should not error")
+	assert(val == 20, "should return 20")
+}
+
+// Test 4: Errdefer with interface
+func test4() {
+	fmt.Println("Test 4: errdefer with interface")
+	
+	cleanup := false
+	
+	doWork := func(shouldFail bool) (Result, error) {
+		errdefer func() {
+			cleanup = true
+		}()
+		
+		if shouldFail {
+			fail errors.New("deliberate fail")
+		}
+		return &OKResult{val: 1}, nil
+	}
+	
+	// Success case - errdefer should NOT run
+	cleanup = false
+	_, err := doWork(false)
+	assert(err == nil, "should not error")
+	assert(cleanup == false, "errdefer should not run on success")
+	
+	// Failure case - errdefer should run
+	cleanup = false
+	_, err = doWork(true)
+	assert(err != nil, "should error")
+	assert(cleanup == true, "errdefer should run on failure")
+}
+
+// Test 5: Return interface from errdefer context
+func test5() {
+	fmt.Println("Test 5: interface in errdefer cleanup")
+	
+	var cleaned Result = nil
+	
+	process := func() (Result, error) {
+		r := &OKResult{val: 99}
+		errdefer func() {
+			cleaned = r
+		}()
+		
+		fail errors.New("fail after setup")
+	}
+	
+	_, err := process()
+	assert(err != nil, "should error")
+	assert(cleaned != nil, "cleaned should be set")
+	assert(cleaned.Value() == 99, "cleaned should have value 99")
+}
+
+// Test 6: Multiple returns with interface and error
+func test6() {
+	fmt.Println("Test 6: multiple returns with interface and error")
+	
+	multiReturn := func(x int) (Result, int, error) {
+		if x < 0 {
+			return nil, 0, errors.New("negative")
+		}
+		return &OKResult{val: x}, x * 2, nil
+	}
+	
+	r, doubled, err := multiReturn(5)
+	assert(err == nil, "should not error")
+	assert(r.Value() == 5, "result should be 5")
+	assert(doubled == 10, "doubled should be 10")
+	
+	r2, d2, err2 := multiReturn(-1)
+	assert(err2 != nil, "should error")
+	assert(r2 == nil, "result should be nil")
+	assert(d2 == 0, "doubled should be 0")
+}
+
+// Test 7: Named return with interface and error
+func test7() {
+	fmt.Println("Test 7: named return with interface and error")
+	
+	namedReturn := func(x int) (r Result, err error) {
+		if x > 0 {
+			r = &OKResult{val: x}
+		} else {
+			err = errors.New("non-positive")
+		}
+		return
+	}
+	
+	r, err := namedReturn(7)
+	assert(err == nil, "should not error")
+	assert(r.Value() == 7, "result should be 7")
+	
+	r2, err2 := namedReturn(0)
+	assert(err2 != nil, "should error")
+	assert(r2 == nil, "result should be nil")
+}
+
+// Test 8: Defer modifies named interface return
+func test8() {
+	fmt.Println("Test 8: defer modifies named interface return")
+	
+	withDefer := func() (r Result, err error) {
+		defer func() {
+			if r != nil {
+				// Modify the result
+				r = &OKResult{val: r.Value() + 100}
+			}
+		}()
+		
+		r = &OKResult{val: 1}
+		return
+	}
+	
+	r, err := withDefer()
+	assert(err == nil, "should not error")
+	assert(r.Value() == 101, "defer should modify to 101")
+}
+
+// Test 9: Closure captures error function
+func test9() {
+	fmt.Println("Test 9: closure captures error function")
+	
+	makeGetter := func() func() (Result, error) {
+		return func() (Result, error) {
+			return &OKResult{val: 55}, nil
+		}
+	}
+	
+	getter := makeGetter()
+	r, err := getter()
+	assert(err == nil, "should not error")
+	assert(r.Value() == 55, "should return 55")
+}
+
+// Test 10: Interface nil check with error pattern
+func test10() {
+	fmt.Println("Test 10: interface nil check with error pattern")
+	
+	maybeNil := func(returnNil bool) (Result, error) {
+		if returnNil {
+			return nil, nil  // nil result, no error
+		}
+		return &OKResult{val: 77}, nil
+	}
+	
+	r, err := maybeNil(false)
+	assert(err == nil, "should not error")
+	assert(r != nil, "result should not be nil")
+	assert(r.Value() == 77, "should return 77")
+	
+	r2, err2 := maybeNil(true)
+	assert(err2 == nil, "should not error")
+	assert(r2 == nil, "result should be nil")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	
+	fmt.Println("error_chain_iface: ALL TESTS PASSED")
+}

@@ -1,0 +1,171 @@
+package main
+
+// Test: Type assertions with embedded types and method chaining
+
+type Base struct {
+	val int
+}
+
+func (b *Base) GetVal() int {
+	return b.val
+}
+
+type Middle struct {
+	*Base
+	name string
+}
+
+func (m *Middle) GetName() string {
+	return m.name
+}
+
+type Top struct {
+	*Middle
+	id int
+}
+
+func (t *Top) GetId() int {
+	return t.id
+}
+
+type ValGetter interface {
+	GetVal() int
+}
+
+type NameGetter interface {
+	GetName() string
+}
+
+type IdGetter interface {
+	GetId() int
+}
+
+type AllGetter interface {
+	GetVal() int
+	GetName() string
+	GetId() int
+}
+
+func main() {
+	base := &Base{val: 100}
+	middle := &Middle{Base: base, name: "mid"}
+	top := &Top{Middle: middle, id: 1}
+
+	// Test 1: Type assertion from any to concrete
+	var a any = top
+	t1, ok := a.(*Top)
+	assert(ok)
+	assert(t1.GetVal() == 100)
+	assert(t1.GetName() == "mid")
+	assert(t1.GetId() == 1)
+
+	// Test 2: Type assertion from specific interface to concrete
+	var vg ValGetter = top
+	t2, ok := vg.(*Top)
+	assert(ok)
+	assert(t2.GetId() == 1)
+
+	// Test 3: Failed type assertion (comma-ok form)
+	var a3x any = middle
+	_, ok = a3x.(*Top)
+	assert(!ok)
+
+	// Test 4: Type assertion with immediate method call
+	var a2 any = top
+	val := a2.(*Top).GetVal()
+	assert(val == 100)
+
+	// Test 5: Chain of type assertions
+	var a3 any = top
+	ig, ok := a3.(IdGetter)
+	assert(ok)
+	assert(ig.GetId() == 1)
+	
+	// Then assert to ValGetter (since *Top also implements it)
+	vg2, ok := ig.(ValGetter)
+	assert(ok)
+	assert(vg2.GetVal() == 100)
+
+	// Test 6: Type assertion in expression
+	var a4 any = top
+	sum := a4.(*Top).GetVal() + a4.(*Top).GetId()
+	assert(sum == 101)
+
+	// Test 7: Type assertion with nil
+	var nilTop *Top = nil
+	var a5 any = nilTop
+	t5, ok := a5.(*Top)
+	assert(ok) // typed nil succeeds
+	assert(t5 == nil)
+
+	// Test 8: Type assertion panic
+	var caught bool
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		var a6 any = middle
+		_ = a6.(*Top) // Should panic
+	}()
+	assert(caught)
+
+	// Test 9: Interface to interface assertion
+	var ag AllGetter = top
+	vg3, ok := ag.(ValGetter)
+	assert(ok)
+	assert(vg3.GetVal() == 100)
+
+	// Test 10: Interface to interface with method call
+	var ag2 AllGetter = top
+	val2 := ag2.(ValGetter).GetVal()
+	assert(val2 == 100)
+
+	// Test 11: Type switch with embedded types
+	var a7 any = top
+	matched11 := false
+	switch v := a7.(type) {
+	case *Top:
+		assert(v.GetVal() == 100)
+		matched11 = true
+	}
+	assert(matched11)
+
+	// Test 12: Type switch with interface cases
+	var a8 any = top
+	matched12 := false
+	switch v := a8.(type) {
+	case AllGetter:
+		assert(v.GetVal() == 100)
+		assert(v.GetName() == "mid")
+		assert(v.GetId() == 1)
+		matched12 = true
+	}
+	assert(matched12)
+
+	// Test 13: Nested type assertion in closure
+	check := func(x any) int {
+		if t, ok := x.(*Top); ok {
+			return t.GetVal()
+		}
+		return -1
+	}
+	assert(check(top) == 100)
+	var midAny any = middle
+	assert(check(midAny) == -1)
+
+	// Test 14: Type assertion result used in map
+	var a9 any = top
+	m := make(map[string]ValGetter)
+	m["key"] = a9.(ValGetter)
+	assert(m["key"].GetVal() == 100)
+
+	// Test 15: Multiple type assertions in same expression
+	var a10 any = top
+	var a11 any = middle
+	result := a10.(*Top).GetId() + a11.(*Middle).Base.val
+	assert(result == 101)
+
+	println("PASS")
+}

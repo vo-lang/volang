@@ -498,7 +498,21 @@ fn resolve_array_index_lvalue(
             if let Some(base) = try_get_struct_base(&idx.expr, func, info) {
                 return resolve_heap_struct_array_index(idx, index_reg, &base, elem_type, ctx, func, info);
             }
-            // Other cases: compile container expression
+            // Check if this is a composite literal array (possibly wrapped in Paren)
+            // Composite literals are compiled to stack slots, not GcRef
+            if is_composite_literal(&idx.expr) {
+                let elem_slots = info.type_slot_count(elem_type);
+                let len = info.array_len(container_type) as u16;
+                let slot_types = info.type_slot_types(container_type);
+                let base_slot = func.alloc_temp_typed(&slot_types);
+                crate::expr::compile_expr_to(&idx.expr, base_slot, ctx, func, info)?;
+                return Ok(LValue::Index {
+                    kind: ContainerKind::StackArray { base_slot, elem_slots, len },
+                    container_reg: base_slot,
+                    index_reg,
+                });
+            }
+            // Other cases: compile container expression (heap array)
             let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
             Ok(LValue::Index {
                 kind: ContainerKind::HeapArray { elem_bytes, elem_vk },
@@ -909,5 +923,14 @@ fn resolve_indirect_lvalue(
             slot: result.base_reg + result.offset, 
             slots: result.slots 
         }))
+    }
+}
+
+/// Check if an expression is a composite literal (possibly wrapped in Paren).
+fn is_composite_literal(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::CompositeLit(_) => true,
+        ExprKind::Paren(inner) => is_composite_literal(inner),
+        _ => false,
     }
 }

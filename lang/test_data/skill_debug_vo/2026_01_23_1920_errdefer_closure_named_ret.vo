@@ -1,0 +1,139 @@
+package main
+
+import "errors"
+
+// Test errdefer with closures that modify named return values
+// This is a tricky case because errdefer should only run on error,
+// and closures capture by reference
+
+func testErrdeferClosureModifyNamedRet() (result int, err error) {
+	result = 10
+	errdefer func() {
+		result = 999 // should modify named return on error
+	}()
+	
+	err = doSomethingThatFails()
+	if err != nil {
+		return // errdefer should run, result should be 999
+	}
+	return result, nil
+}
+
+func doSomethingThatFails() error {
+	return errors.New("intentional failure")
+}
+
+func testErrdeferClosureNoError() (result int, err error) {
+	result = 20
+	errdefer func() {
+		result = 888 // should NOT run
+	}()
+	
+	// no error
+	return result, nil // errdefer should NOT run, result should be 20
+}
+
+func testErrdeferMultipleClosures() (result int, err error) {
+	result = 0
+	
+	errdefer func() {
+		result += 1 // runs third (LIFO)
+	}()
+	
+	errdefer func() {
+		result += 10 // runs second
+	}()
+	
+	errdefer func() {
+		result += 100 // runs first
+	}()
+	
+	return 0, errors.New("trigger errdefer")
+	// result should be 111 (100 + 10 + 1)
+}
+
+func testErrdeferWithDeferCombo() (result int, err error) {
+	result = 0
+	
+	defer func() {
+		result += 1 // always runs
+	}()
+	
+	errdefer func() {
+		result += 10 // only on error
+	}()
+	
+	defer func() {
+		result += 100 // always runs
+	}()
+	
+	return 0, errors.New("error")
+	// Order: errdefer(+10), defer(+100), defer(+1)
+	// result should be 111
+}
+
+func testErrdeferWithDeferComboNoError() (result int, err error) {
+	result = 0
+	
+	defer func() {
+		result += 1 // always runs
+	}()
+	
+	errdefer func() {
+		result += 10 // should NOT run
+	}()
+	
+	defer func() {
+		result += 100 // always runs
+	}()
+	
+	return 0, nil
+	// Order: defer(+100), defer(+1)
+	// result should be 101
+}
+
+func testErrdeferCaptureLoopVar() (result int, err error) {
+	result = 0
+	
+	for i := 0; i < 3; i++ {
+		x := i // capture copy
+		errdefer func() {
+			result += x
+		}()
+	}
+	
+	return 0, errors.New("error")
+	// errdefer runs in reverse: x=2, x=1, x=0
+	// result should be 3 (2 + 1 + 0)
+}
+
+func main() {
+	// Test 1: errdefer closure modifies named return on error
+	r1, e1 := testErrdeferClosureModifyNamedRet()
+	assert(e1 != nil, "should have error")
+	assert(r1 == 999, "errdefer should have modified result to 999, got %d", r1)
+	
+	// Test 2: errdefer closure should NOT run without error
+	r2, e2 := testErrdeferClosureNoError()
+	assert(e2 == nil, "should have no error")
+	assert(r2 == 20, "result should be 20, got %d", r2)
+	
+	// Test 3: multiple errdefer closures
+	r3, _ := testErrdeferMultipleClosures()
+	assert(r3 == 111, "result should be 111, got %d", r3)
+	
+	// Test 4: errdefer with defer combo
+	r4, _ := testErrdeferWithDeferCombo()
+	assert(r4 == 111, "result should be 111, got %d", r4)
+	
+	// Test 5: errdefer with defer combo, no error
+	r5, e5 := testErrdeferWithDeferComboNoError()
+	assert(e5 == nil, "should have no error")
+	assert(r5 == 101, "result should be 101, got %d", r5)
+	
+	// Test 6: errdefer capture loop var
+	r6, _ := testErrdeferCaptureLoopVar()
+	assert(r6 == 3, "result should be 3, got %d", r6)
+	
+	println("All errdefer closure named return tests passed!")
+}

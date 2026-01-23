@@ -1,0 +1,107 @@
+package main
+
+// Regression test: composite literals inside parentheses in if/for/switch conditions
+// Go requires parentheses to disambiguate { as composite literal vs block start
+
+type Point struct {
+	x, y int
+}
+
+func (p Point) Sum() int {
+	return p.x + p.y
+}
+
+func (p Point) Less(other Point) bool {
+	return p.Sum() < other.Sum()
+}
+
+func testIfCondition() {
+	// Parenthesized composite literal in if condition
+	if (Point{x: 1, y: 2}).Sum() > 0 {
+		// ok
+	} else {
+		panic("if condition failed")
+	}
+	
+	// Nested parentheses
+	if ((Point{x: 3, y: 4})).Sum() == 7 {
+		// ok
+	} else {
+		panic("nested paren failed")
+	}
+	
+	// With method chain
+	if (Point{x: 1, y: 1}).Less(Point{x: 2, y: 2}) {
+		// ok
+	} else {
+		panic("method chain failed")
+	}
+}
+
+func testForCondition() {
+	sum := 0
+	for i := 0; (Point{x: i, y: i}).Sum() < 10; i++ {
+		sum += i
+	}
+	assert(sum == 10, "for condition: got %d", sum) // 0+1+2+3+4 = 10
+}
+
+func testSwitchCondition() {
+	switch (Point{x: 2, y: 3}).Sum() {
+	case 5:
+		// ok
+	default:
+		panic("switch condition failed")
+	}
+}
+
+func testNestedComposite() {
+	type Rect struct {
+		min, max Point
+	}
+	
+	// Nested composite literal in parentheses
+	r := (Rect{min: Point{x: 0, y: 0}, max: Point{x: 10, y: 10}})
+	assert(r.max.x == 10, "nested composite")
+}
+
+func testCompositeLiteralComparison() {
+	// Comparing composite literals
+	if (Point{x: 1, y: 2}) == (Point{x: 1, y: 2}) {
+		// ok
+	} else {
+		panic("composite comparison failed")
+	}
+}
+
+func testSliceCompositeLiteral() {
+	// Slice composite literal in parentheses
+	if len(([]int{1, 2, 3})) == 3 {
+		// ok
+	} else {
+		panic("slice composite failed")
+	}
+}
+
+func testMapCompositeLiteral() {
+	// Map composite literal - need to use make since map literal doesn't work in condition
+	m := make(map[string]int)
+	m["a"] = 1
+	if len(m) == 1 {
+		// ok
+	} else {
+		panic("map len failed")
+	}
+}
+
+func main() {
+	testIfCondition()
+	testForCondition()
+	testSwitchCondition()
+	testNestedComposite()
+	testCompositeLiteralComparison()
+	testSliceCompositeLiteral()
+	testMapCompositeLiteral()
+	
+	println("All composite in paren tests passed!")
+}

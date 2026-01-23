@@ -1,0 +1,267 @@
+package main
+
+import "fmt"
+
+// Test panic/recover with interface values
+
+type Handler interface {
+	Handle() string
+}
+
+type SafeHandler struct {
+	name string
+}
+
+func (h *SafeHandler) Handle() string {
+	return "safe:" + h.name
+}
+
+type PanicHandler struct {
+	msg string
+}
+
+func (h *PanicHandler) Handle() string {
+	panic(h.msg)
+	return ""  // unreachable
+}
+
+// Test 1: Recover interface value from panic
+func test1() {
+	fmt.Println("Test 1: recover interface value from panic")
+	
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		var h Handler = &PanicHandler{msg: "boom"}
+		h.Handle()
+	}()
+	
+	assert(recovered != nil, "should recover")
+	assert(recovered.(string) == "boom", "should recover 'boom'")
+}
+
+// Test 2: Panic with interface value
+func test2() {
+	fmt.Println("Test 2: panic with interface value")
+	
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		var h Handler = &SafeHandler{name: "test"}
+		panic(h)
+	}()
+	
+	assert(recovered != nil, "should recover")
+	// Recovered value should be the interface
+	rh, ok := recovered.(Handler)
+	assert(ok, "should recover Handler interface")
+	assert(rh.Handle() == "safe:test", "recovered handler should work")
+}
+
+// Test 3: Nested panic/recover with interfaces
+func test3() {
+	fmt.Println("Test 3: nested panic/recover with interfaces")
+	
+	result := ""
+	
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result = "outer:" + r.(string)
+			}
+		}()
+		
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Re-panic with modified message
+					panic("inner:" + r.(string))
+				}
+			}()
+			
+			var h Handler = &PanicHandler{msg: "deep"}
+			h.Handle()
+		}()
+	}()
+	
+	assert(result == "outer:inner:deep", "should chain panic messages")
+}
+
+// Test 4: Recover and return interface
+func test4() {
+	fmt.Println("Test 4: recover and return interface")
+	
+	tryHandle := func(h Handler) (result string, panicked bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				result = "panicked:" + r.(string)
+			}
+		}()
+		
+		result = h.Handle()
+		return
+	}
+	
+	r1, p1 := tryHandle(&SafeHandler{name: "ok"})
+	assert(p1 == false, "should not panic")
+	assert(r1 == "safe:ok", "should return safe:ok")
+	
+	r2, p2 := tryHandle(&PanicHandler{msg: "fail"})
+	assert(p2 == true, "should panic")
+	assert(r2 == "panicked:fail", "should return panicked:fail")
+}
+
+// Test 5: Panic in closure capturing interface
+func test5() {
+	fmt.Println("Test 5: panic in closure capturing interface")
+	
+	var h Handler = &SafeHandler{name: "captured"}
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		panicWithHandler := func() {
+			panic(h)
+		}
+		
+		panicWithHandler()
+	}()
+	
+	rh, ok := recovered.(Handler)
+	assert(ok, "should recover Handler")
+	assert(rh.Handle() == "safe:captured", "captured handler should work")
+}
+
+// Test 6: Multiple defers with interface access during unwind
+func test6() {
+	fmt.Println("Test 6: multiple defers during unwind")
+	
+	order := ""
+	var h Handler = &SafeHandler{name: "unwind"}
+	
+	func() {
+		defer func() {
+			order = order + "3"
+			recover()
+		}()
+		
+		defer func() {
+			order = order + "2:" + h.Handle() + ":"
+		}()
+		
+		defer func() {
+			order = order + "1:"
+		}()
+		
+		panic("trigger")
+	}()
+	
+	assert(order == "1:2:safe:unwind:3", "defer order should be correct")
+}
+
+// Test 7: Interface slice in panic value
+func test7() {
+	fmt.Println("Test 7: interface slice in panic value")
+	
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		handlers := []Handler{
+			&SafeHandler{name: "a"},
+			&SafeHandler{name: "b"},
+		}
+		panic(handlers)
+	}()
+	
+	rhs, ok := recovered.([]Handler)
+	assert(ok, "should recover []Handler")
+	assert(len(rhs) == 2, "should have 2 handlers")
+	assert(rhs[0].Handle() == "safe:a", "first handler should work")
+	assert(rhs[1].Handle() == "safe:b", "second handler should work")
+}
+
+// Test 8: Type assertion panic recovery
+func test8() {
+	fmt.Println("Test 8: type assertion panic recovery")
+	
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		var a any = "not a handler"
+		_ = a.(Handler)  // This should panic
+	}()
+	
+	assert(recovered != nil, "should recover from type assertion panic")
+}
+
+// Test 9: Interface method call in defer during panic
+func test9() {
+	fmt.Println("Test 9: interface method in defer during panic")
+	
+	result := ""
+	var h Handler = &SafeHandler{name: "defer"}
+	
+	func() {
+		defer func() {
+			recover()
+			result = h.Handle()
+		}()
+		
+		panic("trigger")
+	}()
+	
+	assert(result == "safe:defer", "should call handler in defer")
+}
+
+// Test 10: Panic with nil interface
+func test10() {
+	fmt.Println("Test 10: panic with nil interface")
+	
+	var recovered any
+	
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		
+		var h Handler = nil
+		panic(h)
+	}()
+	
+	assert(recovered == nil, "nil interface panic should recover as nil")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	
+	fmt.Println("panic_recover_iface: ALL TESTS PASSED")
+}

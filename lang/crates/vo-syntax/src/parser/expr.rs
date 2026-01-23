@@ -51,6 +51,17 @@ impl<'a> Parser<'a> {
         Ok(exprs)
     }
 
+    /// Parse an expression with composite literals always allowed.
+    /// Used inside parentheses, brackets, and other contexts where the
+    /// ambiguity with block statements doesn't exist.
+    fn parse_expr_allowing_composite_lit(&mut self) -> ParseResult<Expr> {
+        let saved = self.allow_composite_lit;
+        self.allow_composite_lit = true;
+        let result = self.parse_expr();
+        self.allow_composite_lit = saved;
+        result
+    }
+
     fn parse_expr_prec(&mut self, min_prec: Precedence) -> ParseResult<Expr> {
         let mut left = self.parse_prefix_expr()?;
         
@@ -112,7 +123,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 self.advance();
-                let inner = self.parse_expr()?;
+                let inner = self.parse_expr_allowing_composite_lit()?;
                 self.expect(TokenKind::RParen)?;
                 let span = Span::new(start, self.current.span.start);
                 Ok(self.make_expr(ExprKind::Paren(Box::new(inner)), span))
@@ -416,7 +427,7 @@ impl<'a> Parser<'a> {
         }
         
         loop {
-            args.push(self.parse_expr()?);
+            args.push(self.parse_expr_allowing_composite_lit()?);
             
             if self.eat(TokenKind::Ellipsis) {
                 spread = true;
@@ -475,11 +486,12 @@ impl<'a> Parser<'a> {
     fn parse_index_or_slice(&mut self, expr: Expr, start: vo_common::span::BytePos) -> ParseResult<Expr> {
         // Syntax: a[i] | a[low:high] | a[low:high:max]
         // Three-index form requires high and max; low can be omitted.
+        // Inside brackets, composite literals are always allowed.
         
         let low = if self.at(TokenKind::Colon) {
             None
         } else {
-            Some(self.parse_expr()?)
+            Some(self.parse_expr_allowing_composite_lit()?)
         };
         
         if self.eat(TokenKind::Colon) {
@@ -487,7 +499,7 @@ impl<'a> Parser<'a> {
             let high = if self.at(TokenKind::Colon) || self.at(TokenKind::RBracket) {
                 None
             } else {
-                Some(self.parse_expr()?)
+                Some(self.parse_expr_allowing_composite_lit()?)
             };
             
             let max = if self.eat(TokenKind::Colon) {
@@ -500,7 +512,7 @@ impl<'a> Parser<'a> {
                     self.error("final index required in 3-index slice");
                     return Err(());
                 }
-                Some(self.parse_expr()?)
+                Some(self.parse_expr_allowing_composite_lit()?)
             } else {
                 None
             };
@@ -550,7 +562,7 @@ impl<'a> Parser<'a> {
         let op = if self.at(TokenKind::LBracket) {
             // a~>[key]
             self.advance();
-            let index = self.parse_expr()?;
+            let index = self.parse_expr_allowing_composite_lit()?;
             self.expect(TokenKind::RBracket)?;
             DynAccessOp::Index(index)
         } else if self.at(TokenKind::LParen) {

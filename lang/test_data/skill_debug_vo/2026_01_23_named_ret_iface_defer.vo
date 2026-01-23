@@ -1,0 +1,255 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Test named return with interface and defer interactions
+
+type Value interface {
+	Get() int
+}
+
+type IntVal struct {
+	x int
+}
+
+func (v *IntVal) Get() int { return v.x }
+
+// Test 1: Named return interface modified by defer
+func test1() {
+	fmt.Println("Test 1: named return interface modified by defer")
+	
+	f := func() (v Value) {
+		defer func() {
+			v = &IntVal{x: 100}
+		}()
+		return &IntVal{x: 1}
+	}
+	
+	result := f()
+	assert(result.Get() == 100, "defer should modify named return to 100")
+}
+
+// Test 2: Named return interface not modified (nil)
+func test2() {
+	fmt.Println("Test 2: named return interface nil")
+	
+	f := func() (v Value) {
+		return
+	}
+	
+	result := f()
+	assert(result == nil, "should return nil")
+}
+
+// Test 3: Named return interface with conditional defer
+func test3() {
+	fmt.Println("Test 3: named return with conditional defer")
+	
+	f := func(modify bool) (v Value) {
+		defer func() {
+			if modify && v != nil {
+				v = &IntVal{x: v.Get() * 2}
+			}
+		}()
+		return &IntVal{x: 10}
+	}
+	
+	r1 := f(true)
+	r2 := f(false)
+	
+	assert(r1.Get() == 20, "modified should be 20")
+	assert(r2.Get() == 10, "unmodified should be 10")
+}
+
+// Test 4: Multiple named returns with interface
+func test4() {
+	fmt.Println("Test 4: multiple named returns with interface")
+	
+	f := func() (v Value, n int) {
+		defer func() {
+			n = n + 100
+		}()
+		return &IntVal{x: 5}, 10
+	}
+	
+	v, n := f()
+	assert(v.Get() == 5, "v should be 5")
+	assert(n == 110, "n should be 110")
+}
+
+// Test 5: Named return interface with error
+func test5() {
+	fmt.Println("Test 5: named return interface with error")
+	
+	f := func(shouldFail bool) (v Value, err error) {
+		defer func() {
+			if err != nil {
+				v = nil
+			}
+		}()
+		
+		if shouldFail {
+			err = errors.New("failed")
+			return
+		}
+		v = &IntVal{x: 42}
+		return
+	}
+	
+	v1, err1 := f(false)
+	assert(err1 == nil, "should not error")
+	assert(v1.Get() == 42, "v1 should be 42")
+	
+	v2, err2 := f(true)
+	assert(err2 != nil, "should error")
+	assert(v2 == nil, "v2 should be nil")
+}
+
+// Test 6: Named return interface assigned from type assertion
+func test6() {
+	fmt.Println("Test 6: named return from type assertion")
+	
+	f := func(a any) (v Value) {
+		defer func() {
+			if v != nil {
+				v = &IntVal{x: v.Get() + 1}
+			}
+		}()
+		
+		v, _ = a.(Value)
+		return
+	}
+	
+	r1 := f(&IntVal{x: 10})
+	r2 := f("not a value")
+	
+	assert(r1.Get() == 11, "r1 should be 11")
+	assert(r2 == nil, "r2 should be nil")
+}
+
+// Test 7: Named return interface in closure
+func test7() {
+	fmt.Println("Test 7: named return interface in closure")
+	
+	makeGetter := func(x int) func() Value {
+		return func() Value {
+			var v Value = &IntVal{x: x}
+			return &IntVal{x: v.Get() * 3}
+		}
+	}
+	
+	getter := makeGetter(7)
+	result := getter()
+	assert(result.Get() == 21, "should be 21")
+}
+
+// Test 8: Named return interface with panic recovery
+func test8() {
+	fmt.Println("Test 8: named return with panic recovery")
+	
+	f := func(shouldPanic bool) (v Value) {
+		defer func() {
+			if r := recover(); r != nil {
+				v = &IntVal{x: -1}
+			}
+		}()
+		
+		if shouldPanic {
+			panic("test panic")
+		}
+		return &IntVal{x: 99}
+	}
+	
+	r1 := f(false)
+	r2 := f(true)
+	
+	assert(r1.Get() == 99, "r1 should be 99")
+	assert(r2.Get() == -1, "r2 should be -1 (recovered)")
+}
+
+// Test 9: Named return interface slice
+func test9() {
+	fmt.Println("Test 9: named return interface slice")
+	
+	f := func() (vs []Value) {
+		defer func() {
+			vs = append(vs, &IntVal{x: 100})
+		}()
+		return []Value{&IntVal{x: 1}, &IntVal{x: 2}}
+	}
+	
+	result := f()
+	assert(len(result) == 3, "should have 3 elements")
+	assert(result[0].Get() == 1, "first should be 1")
+	assert(result[2].Get() == 100, "last should be 100")
+}
+
+// Test 10: Named return map with interface values
+func test10() {
+	fmt.Println("Test 10: named return map with interface")
+	
+	f := func() (m map[string]Value) {
+		defer func() {
+			m["added"] = &IntVal{x: 999}
+		}()
+		return map[string]Value{"initial": &IntVal{x: 1}}
+	}
+	
+	result := f()
+	assert(result["initial"].Get() == 1, "initial should be 1")
+	assert(result["added"].Get() == 999, "added should be 999")
+}
+
+// Test 11: Bare return with named interface
+func test11() {
+	fmt.Println("Test 11: bare return with named interface")
+	
+	f := func() (v Value) {
+		v = &IntVal{x: 77}
+		defer func() {
+			v = &IntVal{x: v.Get() + 11}
+		}()
+		return
+	}
+	
+	result := f()
+	assert(result.Get() == 88, "should be 88")
+}
+
+// Test 12: Named return interface reassigned multiple times
+func test12() {
+	fmt.Println("Test 12: named return reassigned multiple times")
+	
+	f := func() (v Value) {
+		defer func() {
+			v = &IntVal{x: v.Get() + 1}
+		}()
+		defer func() {
+			v = &IntVal{x: v.Get() * 2}
+		}()
+		return &IntVal{x: 5}
+	}
+	
+	result := f()
+	assert(result.Get() == 11, "should be 11")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("named_ret_iface_defer: ALL TESTS PASSED")
+}

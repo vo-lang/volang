@@ -1,0 +1,247 @@
+package main
+
+import "fmt"
+
+// Test complex expressions involving interface conversions
+
+type Adder interface {
+	Add(x int) int
+}
+
+type Multiplier interface {
+	Multiply(x int) int
+}
+
+type Calculator interface {
+	Add(x int) int
+	Multiply(x int) int
+}
+
+type Calc struct {
+	val int
+}
+
+func (c *Calc) Add(x int) int      { c.val += x; return c.val }
+func (c *Calc) Multiply(x int) int { c.val *= x; return c.val }
+
+// Test 1: Chain method calls on interface
+func test1() {
+	fmt.Println("Test 1: chain method calls on interface")
+	
+	var calc Calculator = &Calc{val: 10}
+	
+	// Chain: 10 + 5 = 15, then 15 * 2 = 30
+	result := calc.Multiply(2)
+	_ = result  // Use calc.Add first
+	
+	calc2 := &Calc{val: 10}
+	var c Calculator = calc2
+	r1 := c.Add(5)    // 15
+	r2 := c.Multiply(2) // 30
+	
+	assert(r1 == 15, "Add should return 15")
+	assert(r2 == 30, "Multiply should return 30")
+}
+
+// Test 2: Interface in ternary-like expression
+func test2() {
+	fmt.Println("Test 2: interface in conditional expression")
+	
+	getCalc := func(useNew bool) Calculator {
+		if useNew {
+			return &Calc{val: 100}
+		}
+		return &Calc{val: 200}
+	}
+	
+	c1 := getCalc(true)
+	c2 := getCalc(false)
+	
+	assert(c1.Add(0) == 100, "new calc should be 100")
+	assert(c2.Add(0) == 200, "old calc should be 200")
+}
+
+// Test 3: Interface in slice literal
+func test3() {
+	fmt.Println("Test 3: interface in slice literal")
+	
+	calcs := []Calculator{
+		&Calc{val: 1},
+		&Calc{val: 2},
+		&Calc{val: 3},
+	}
+	
+	sum := 0
+	for _, c := range calcs {
+		sum += c.Add(0)
+	}
+	assert(sum == 6, "sum should be 6")
+}
+
+// Test 4: Interface conversion in function argument
+func test4() {
+	fmt.Println("Test 4: interface conversion in function argument")
+	
+	useAdder := func(a Adder) int {
+		return a.Add(10)
+	}
+	
+	var calc Calculator = &Calc{val: 5}
+	result := useAdder(calc)  // Calculator -> Adder
+	
+	assert(result == 15, "result should be 15")
+}
+
+// Test 5: Multiple interface conversions in one expression
+func test5() {
+	fmt.Println("Test 5: multiple interface conversions")
+	
+	processAll := func(a Adder, m Multiplier) int {
+		return a.Add(1) + m.Multiply(2)
+	}
+	
+	calc := &Calc{val: 10}
+	var c Calculator = calc
+	
+	// Both a and m point to same underlying calc
+	// First Add: 10 + 1 = 11
+	// Then Multiply: 11 * 2 = 22
+	// Result: 11 + 22 = 33
+	result := processAll(c, c)
+	assert(result == 33, "result should be 33")
+}
+
+// Test 6: Interface in map value expression
+func test6() {
+	fmt.Println("Test 6: interface in map expression")
+	
+	m := map[string]Calculator{
+		"a": &Calc{val: 1},
+		"b": &Calc{val: 2},
+	}
+	
+	// Access and call method
+	resultA := m["a"].Add(10)
+	resultB := m["b"].Multiply(5)
+	
+	assert(resultA == 11, "a.Add(10) should be 11")
+	assert(resultB == 10, "b.Multiply(5) should be 10")
+}
+
+// Test 7: Interface returned from type assertion
+func test7() {
+	fmt.Println("Test 7: interface from type assertion")
+	
+	var a any = &Calc{val: 50}
+	
+	// Type assert to Calculator
+	c, ok := a.(Calculator)
+	assert(ok, "type assertion should succeed")
+	
+	result := c.Add(10)
+	assert(result == 60, "Add(10) should return 60")
+}
+
+// Test 8: Nested interface method calls
+func test8() {
+	fmt.Println("Test 8: nested interface method calls")
+	
+	getCalc := func() Calculator {
+		return &Calc{val: 5}
+	}
+	
+	// Nested call
+	result := getCalc().Add(getCalc().Multiply(2))
+	// First getCalc().Multiply(2): 5 * 2 = 10
+	// Second getCalc().Add(10): 5 + 10 = 15
+	assert(result == 15, "nested call should return 15")
+}
+
+// Test 9: Interface in range variable
+func test9() {
+	fmt.Println("Test 9: interface in range variable")
+	
+	calcs := []Calculator{
+		&Calc{val: 10},
+		&Calc{val: 20},
+		&Calc{val: 30},
+	}
+	
+	results := []int{}
+	for _, c := range calcs {
+		results = append(results, c.Add(1))
+	}
+	
+	assert(results[0] == 11, "results[0] should be 11")
+	assert(results[1] == 21, "results[1] should be 21")
+	assert(results[2] == 31, "results[2] should be 31")
+}
+
+// Test 10: Interface comparison in expression
+func test10() {
+	fmt.Println("Test 10: interface comparison")
+	
+	var c1 Calculator = &Calc{val: 1}
+	var c2 Calculator = &Calc{val: 1}
+	var c3 Calculator = c1
+	
+	// Different underlying pointers
+	assert(c1 != c2, "c1 and c2 should be different")
+	// Same reference
+	assert(c1 == c3, "c1 and c3 should be same")
+}
+
+// Test 11: Interface nil check in expression
+func test11() {
+	fmt.Println("Test 11: interface nil check")
+	
+	getCalc := func(returnNil bool) Calculator {
+		if returnNil {
+			return nil
+		}
+		return &Calc{val: 42}
+	}
+	
+	c1 := getCalc(true)
+	c2 := getCalc(false)
+	
+	assert(c1 == nil, "c1 should be nil")
+	assert(c2 != nil, "c2 should not be nil")
+	
+	if c2 != nil {
+		assert(c2.Add(0) == 42, "c2.Add(0) should be 42")
+	}
+}
+
+// Test 12: Interface in closure return
+func test12() {
+	fmt.Println("Test 12: interface in closure return")
+	
+	makeGetter := func(val int) func() Calculator {
+		return func() Calculator {
+			return &Calc{val: val}
+		}
+	}
+	
+	getter := makeGetter(100)
+	c := getter()
+	
+	assert(c.Add(1) == 101, "closure returned calc should work")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("complex_expr_iface: ALL TESTS PASSED")
+}

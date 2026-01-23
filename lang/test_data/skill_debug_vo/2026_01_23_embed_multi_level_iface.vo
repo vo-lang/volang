@@ -1,0 +1,293 @@
+package main
+
+import "fmt"
+
+// Test multi-level embedding with interface promotion and method shadowing
+
+type Stringer interface {
+	String() string
+}
+
+type Formatter interface {
+	String() string
+	Format(prefix string) string
+}
+
+// Level 0 - base type
+type Base struct {
+	name string
+}
+
+func (b *Base) String() string {
+	return "Base:" + b.name
+}
+
+func (b *Base) Format(prefix string) string {
+	return prefix + b.name
+}
+
+// Level 1 - embeds Base
+type Level1 struct {
+	*Base
+	l1Data int
+}
+
+// Level 2 - embeds Level1
+type Level2 struct {
+	Level1
+	l2Data string
+}
+
+// Level 3 - embeds *Level2
+type Level3 struct {
+	*Level2
+	l3Data bool
+}
+
+// Test 1: Interface assignment through 3 levels of embedding
+func test1() {
+	fmt.Println("Test 1: interface through 3-level embedding")
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{
+				Base:   &Base{name: "deep"},
+				l1Data: 1,
+			},
+			l2Data: "two",
+		},
+		l3Data: true,
+	}
+	
+	// Assign to Stringer interface
+	var s Stringer = l3
+	result := s.String()
+	assert(result == "Base:deep", "String() through 3 levels should work")
+}
+
+// Test 2: Interface assignment to Formatter through 3 levels
+func test2() {
+	fmt.Println("Test 2: Formatter interface through 3-level embedding")
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{
+				Base:   &Base{name: "format"},
+				l1Data: 2,
+			},
+			l2Data: "data",
+		},
+		l3Data: false,
+	}
+	
+	var f Formatter = l3
+	assert(f.String() == "Base:format", "String() should work")
+	assert(f.Format(">>") == ">>format", "Format() should work")
+}
+
+// Test 3: Method expression through deep embedding
+func test3() {
+	fmt.Println("Test 3: method expression through deep embedding")
+	
+	stringFn := (*Level3).String
+	formatFn := (*Level3).Format
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{
+				Base:   &Base{name: "expr"},
+				l1Data: 3,
+			},
+			l2Data: "x",
+		},
+		l3Data: true,
+	}
+	
+	assert(stringFn(l3) == "Base:expr", "method expression String() should work")
+	assert(formatFn(l3, "==") == "==expr", "method expression Format() should work")
+}
+
+// Test 4: Type assertion from interface to embedded type
+func test4() {
+	fmt.Println("Test 4: type assertion from interface")
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{
+				Base:   &Base{name: "assert"},
+				l1Data: 4,
+			},
+			l2Data: "y",
+		},
+		l3Data: true,
+	}
+	
+	var s Stringer = l3
+	
+	// Type assert to *Level3
+	extracted, ok := s.(*Level3)
+	assert(ok, "type assertion should succeed")
+	assert(extracted.l3Data == true, "should access l3Data")
+	assert(extracted.l2Data == "y", "should access l2Data")
+	assert(extracted.l1Data == 4, "should access l1Data")
+	assert(extracted.name == "assert", "should access name")
+}
+
+// Test 5: Slice of interfaces with different embedding levels
+func test5() {
+	fmt.Println("Test 5: slice of interfaces with different levels")
+	
+	base := &Base{name: "b"}
+	l1 := &Level1{Base: &Base{name: "l1"}, l1Data: 1}
+	l2 := &Level2{Level1: Level1{Base: &Base{name: "l2"}, l1Data: 2}, l2Data: "two"}
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{Base: &Base{name: "l3"}, l1Data: 3},
+			l2Data: "three",
+		},
+		l3Data: true,
+	}
+	
+	stringers := []Stringer{base, l1, l2, l3}
+	
+	expected := []string{"Base:b", "Base:l1", "Base:l2", "Base:l3"}
+	for i, s := range stringers {
+		result := s.String()
+		assert(result == expected[i], "stringer["+fmt.Sprint(i)+"] should match")
+	}
+}
+
+// Test 6: Interface conversion through embedding chain
+func test6() {
+	fmt.Println("Test 6: interface conversion through chain")
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{Base: &Base{name: "conv"}, l1Data: 6},
+			l2Data: "six",
+		},
+		l3Data: false,
+	}
+	
+	// Formatter -> Stringer conversion
+	var f Formatter = l3
+	var s Stringer = f
+	
+	assert(s.String() == "Base:conv", "converted interface should work")
+}
+
+// Test 7: Method value from deeply embedded type
+func test7() {
+	fmt.Println("Test 7: method value from deep embedding")
+	
+	l3 := &Level3{
+		Level2: &Level2{
+			Level1: Level1{Base: &Base{name: "val"}, l1Data: 7},
+			l2Data: "seven",
+		},
+		l3Data: true,
+	}
+	
+	// Get method value directly
+	stringFn := l3.String
+	formatFn := l3.Format
+	
+	assert(stringFn() == "Base:val", "method value String() should work")
+	assert(formatFn("--") == "--val", "method value Format() should work")
+}
+
+// Test 8: Interface in map with embedded types
+func test8() {
+	fmt.Println("Test 8: interface in map")
+	
+	m := make(map[string]Stringer)
+	
+	m["base"] = &Base{name: "mb"}
+	m["l1"] = &Level1{Base: &Base{name: "m1"}, l1Data: 1}
+	m["l2"] = &Level2{Level1: Level1{Base: &Base{name: "m2"}, l1Data: 2}, l2Data: "two"}
+	
+	assert(m["base"].String() == "Base:mb", "map base should work")
+	assert(m["l1"].String() == "Base:m1", "map l1 should work")
+	assert(m["l2"].String() == "Base:m2", "map l2 should work")
+}
+
+// Test 9: Return interface from function with embedded type
+func test9() {
+	fmt.Println("Test 9: return interface from function")
+	
+	makeStringer := func(level int) Stringer {
+		switch level {
+		case 0:
+			return &Base{name: "r0"}
+		case 1:
+			return &Level1{Base: &Base{name: "r1"}, l1Data: 1}
+		case 2:
+			return &Level2{Level1: Level1{Base: &Base{name: "r2"}, l1Data: 2}, l2Data: "x"}
+		default:
+			return &Level3{
+				Level2: &Level2{
+					Level1: Level1{Base: &Base{name: "r3"}, l1Data: 3},
+					l2Data: "y",
+				},
+				l3Data: true,
+			}
+		}
+	}
+	
+	assert(makeStringer(0).String() == "Base:r0", "level 0 should work")
+	assert(makeStringer(1).String() == "Base:r1", "level 1 should work")
+	assert(makeStringer(2).String() == "Base:r2", "level 2 should work")
+	assert(makeStringer(3).String() == "Base:r3", "level 3 should work")
+}
+
+// Test 10: Type switch with multiple embedding levels
+func test10() {
+	fmt.Println("Test 10: type switch with embedding levels")
+	
+	items := []Stringer{
+		&Base{name: "t0"},
+		&Level1{Base: &Base{name: "t1"}, l1Data: 1},
+		&Level2{Level1: Level1{Base: &Base{name: "t2"}, l1Data: 2}, l2Data: "x"},
+		&Level3{
+			Level2: &Level2{
+				Level1: Level1{Base: &Base{name: "t3"}, l1Data: 3},
+				l2Data: "y",
+			},
+			l3Data: true,
+		},
+	}
+	
+	levels := []int{0, 0, 0, 0}
+	for i, item := range items {
+		switch item.(type) {
+		case *Base:
+			levels[i] = 0
+		case *Level1:
+			levels[i] = 1
+		case *Level2:
+			levels[i] = 2
+		case *Level3:
+			levels[i] = 3
+		}
+	}
+	
+	assert(levels[0] == 0, "item 0 should be Base")
+	assert(levels[1] == 1, "item 1 should be Level1")
+	assert(levels[2] == 2, "item 2 should be Level2")
+	assert(levels[3] == 3, "item 3 should be Level3")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	
+	fmt.Println("embed_multi_level_iface: ALL TESTS PASSED")
+}

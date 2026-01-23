@@ -1,0 +1,123 @@
+package main
+
+// Test: Method promotion through multiple levels of pointer embedding
+// and interface assignment with promoted methods
+
+type Inner struct {
+	val int
+}
+
+func (i *Inner) GetVal() int {
+	return i.val
+}
+
+func (i *Inner) SetVal(v int) {
+	i.val = v
+}
+
+type Middle struct {
+	*Inner
+	name string
+}
+
+func (m *Middle) GetName() string {
+	return m.name
+}
+
+type Outer struct {
+	*Middle
+	id int
+}
+
+type Getter interface {
+	GetVal() int
+}
+
+type NameGetter interface {
+	GetName() string
+}
+
+type Combined interface {
+	GetVal() int
+	GetName() string
+}
+
+func main() {
+	// Test 1: Basic promotion through pointer embedding
+	inner := &Inner{val: 42}
+	middle := &Middle{Inner: inner, name: "test"}
+	outer := &Outer{Middle: middle, id: 1}
+
+	// Direct method call through promotion
+	assert(outer.GetVal() == 42)
+	assert(outer.GetName() == "test")
+
+	// Test 2: Modify through promoted method
+	outer.SetVal(100)
+	assert(outer.GetVal() == 100)
+	assert(inner.val == 100) // Should modify the original
+
+	// Test 3: Interface assignment with single-level promoted method
+	var g Getter = outer
+	assert(g.GetVal() == 100)
+
+	// Test 4: Interface assignment with different promoted method
+	var ng NameGetter = outer
+	assert(ng.GetName() == "test")
+
+	// Test 5: Combined interface with methods from different levels
+	var c Combined = outer
+	assert(c.GetVal() == 100)
+	assert(c.GetName() == "test")
+
+	// Test 6: Method value from promoted method
+	getValFn := outer.GetVal
+	assert(getValFn() == 100)
+
+	// Test 7: Method expression on promoted method
+	getValExpr := (*Outer).GetVal
+	assert(getValExpr(outer) == 100)
+
+	// Test 8: nil embedded pointer behavior
+	outerNil := &Outer{Middle: nil, id: 2}
+	var caught bool
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = outerNil.GetVal() // Should panic - nil Middle
+	}()
+	assert(caught)
+
+	// Test 9: Partial nil - Middle exists but Inner is nil
+	middleNilInner := &Middle{Inner: nil, name: "partial"}
+	outerPartial := &Outer{Middle: middleNilInner, id: 3}
+	assert(outerPartial.GetName() == "partial") // This should work
+	
+	caught = false
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = outerPartial.GetVal() // Should panic - nil Inner
+	}()
+	assert(caught)
+
+	// Test 10: Type assertion from interface to concrete
+	var g2 Getter = outer
+	outer2, ok := g2.(*Outer)
+	assert(ok)
+	assert(outer2.id == 1)
+
+	// Test 11: Assign new inner and check method still works
+	newInner := &Inner{val: 999}
+	outer.Middle.Inner = newInner
+	assert(outer.GetVal() == 999)
+	assert(g.GetVal() == 999) // Interface should see the change
+
+	println("PASS")
+}

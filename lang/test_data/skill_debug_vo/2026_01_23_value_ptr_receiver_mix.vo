@@ -1,0 +1,189 @@
+package main
+
+// Test: Value vs pointer receiver with embedding and interface satisfaction
+
+type Counter struct {
+	count int
+}
+
+// Value receiver - can be called on both value and pointer
+func (c Counter) Get() int {
+	return c.count
+}
+
+// Pointer receiver - modifies the receiver
+func (c *Counter) Inc() {
+	c.count++
+}
+
+func (c *Counter) Add(n int) {
+	c.count += n
+}
+
+// Value receiver that returns new value
+func (c Counter) Plus(n int) Counter {
+	return Counter{count: c.count + n}
+}
+
+type Getter interface {
+	Get() int
+}
+
+type Incrementer interface {
+	Inc()
+}
+
+type FullCounter interface {
+	Get() int
+	Inc()
+	Add(int)
+}
+
+type Holder struct {
+	Counter // embedded by value
+}
+
+type PtrHolder struct {
+	*Counter // embedded by pointer
+}
+
+func main() {
+	// Test 1: Value receiver on value
+	c1 := Counter{count: 10}
+	assert(c1.Get() == 10)
+
+	// Test 2: Value receiver on pointer
+	c2 := &Counter{count: 20}
+	assert(c2.Get() == 20)
+
+	// Test 3: Pointer receiver on pointer
+	c2.Inc()
+	assert(c2.Get() == 21)
+
+	// Test 4: Pointer receiver on addressable value
+	c1.Inc() // Go allows this, takes address automatically
+	assert(c1.Get() == 11)
+
+	// Test 5: Holder (value embed) - value receiver
+	h := Holder{Counter: Counter{count: 100}}
+	assert(h.Get() == 100)
+
+	// Test 6: Holder (value embed) - pointer receiver on addressable
+	h.Inc()
+	assert(h.Get() == 101)
+
+	// Test 7: PtrHolder (pointer embed) - both receivers
+	ph := PtrHolder{Counter: &Counter{count: 200}}
+	assert(ph.Get() == 200)
+	ph.Inc()
+	assert(ph.Get() == 201)
+
+	// Test 8: Interface satisfaction - Getter (value receiver)
+	var g Getter = c2
+	assert(g.Get() == 21)
+
+	// Test 9: Interface satisfaction - Getter with value (addressable)
+	var g2 Getter = &c1
+	assert(g2.Get() == 11)
+
+	// Test 10: Interface satisfaction - Incrementer requires pointer
+	var inc Incrementer = c2
+	inc.Inc()
+	assert(c2.Get() == 22)
+
+	// Test 11: FullCounter interface
+	var fc FullCounter = c2
+	assert(fc.Get() == 22)
+	fc.Inc()
+	assert(fc.Get() == 23)
+	fc.Add(10)
+	assert(fc.Get() == 33)
+
+	// Test 12: Holder as Getter (value receiver through value embed)
+	var hg Getter = &h
+	assert(hg.Get() == 101)
+
+	// Test 13: Holder as FullCounter (needs addressable for pointer methods)
+	var hfc FullCounter = &h
+	hfc.Inc()
+	assert(h.Get() == 102)
+
+	// Test 14: PtrHolder as FullCounter
+	var phfc FullCounter = &ph
+	phfc.Add(100)
+	assert(ph.Get() == 301)
+
+	// Test 15: Method value from value receiver
+	getFn := c1.Get
+	assert(getFn() == 11)
+
+	// Test 16: Method value from pointer receiver
+	incFn := c2.Inc
+	incFn()
+	assert(c2.Get() == 34)
+
+	// Test 17: Method value from embedded (value embed)
+	hGetFn := h.Get
+	assert(hGetFn() == 102)
+
+	// Test 18: Method value from embedded (pointer embed)
+	phIncFn := ph.Inc
+	phIncFn()
+	assert(ph.Get() == 302)
+
+	// Test 19: Method expression - value receiver
+	getExpr := Counter.Get
+	assert(getExpr(c1) == 11)
+
+	// Test 20: Method expression - pointer receiver
+	incExpr := (*Counter).Inc
+	incExpr(c2)
+	assert(c2.Get() == 35)
+
+	// Test 21: Plus method (value receiver returning new value)
+	c3 := c1.Plus(5)
+	assert(c3.Get() == 16)
+	assert(c1.Get() == 11) // Original unchanged
+
+	// Test 22: Chain Plus calls
+	c4 := c1.Plus(1).Plus(2).Plus(3)
+	assert(c4.Get() == 17)
+
+	// Test 23: nil pointer with value receiver - should work
+	var nilC *Counter = nil
+	// Note: In Go, calling value receiver on nil pointer panics
+	// Let me test the expected behavior
+	var caught bool
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = nilC.Get()
+	}()
+	assert(caught)
+
+	// Test 24: Closure capturing method value
+	capturedInc := func() {
+		c2.Inc()
+	}
+	capturedInc()
+	assert(c2.Get() == 36)
+
+	// Test 25: Slice of interfaces with promoted methods
+	h1 := &Holder{Counter: Counter{count: 1}}
+	h2 := &Holder{Counter: Counter{count: 2}}
+	h3 := &Holder{Counter: Counter{count: 3}}
+	var getters []Getter
+	getters = append(getters, h1)
+	getters = append(getters, h2)
+	getters = append(getters, h3)
+	sum := 0
+	for _, g := range getters {
+		sum += g.Get()
+	}
+	assert(sum == 6)
+
+	println("PASS")
+}

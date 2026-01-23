@@ -1,0 +1,145 @@
+package main
+
+// Test: Method expressions on embedded interface types
+// and closure capturing of promoted methods
+
+type Reader interface {
+	Read() int
+}
+
+type Writer interface {
+	Write(int)
+}
+
+type ReadWriter interface {
+	Reader
+	Writer
+}
+
+type MyReader struct {
+	data int
+}
+
+func (r *MyReader) Read() int {
+	return r.data
+}
+
+type MyWriter struct {
+	buf int
+}
+
+func (w *MyWriter) Write(v int) {
+	w.buf = v
+}
+
+type Wrapper struct {
+	Reader
+	name string
+}
+
+type DeepWrapper struct {
+	Wrapper
+	id int
+}
+
+func main() {
+	// Test 1: Method expression on struct with embedded interface
+	r := &MyReader{data: 42}
+	w := Wrapper{Reader: r, name: "wrap1"}
+	
+	// Method expression: should get the Read method from embedded Reader
+	readFn := Wrapper.Read
+	assert(readFn(w) == 42)
+
+	// Test 2: Method value from embedded interface
+	readMethod := w.Read
+	assert(readMethod() == 42)
+
+	// Test 3: Closure capturing method value from embedded interface
+	captured := func() int {
+		return w.Read()
+	}
+	assert(captured() == 42)
+
+	// Test 4: Modify underlying and check closure sees change
+	r.data = 100
+	assert(captured() == 100)
+
+	// Test 5: Deep wrapper - method expression through multiple levels
+	dw := DeepWrapper{Wrapper: w, id: 1}
+	deepReadFn := DeepWrapper.Read
+	assert(deepReadFn(dw) == 100)
+
+	// Test 6: Method value from deep wrapper
+	deepReadMethod := dw.Read
+	assert(deepReadMethod() == 100)
+
+	// Test 7: Closure capturing from deep wrapper
+	deepCaptured := func() int {
+		return dw.Read()
+	}
+	assert(deepCaptured() == 100)
+
+	// Test 8: Reassign embedded interface
+	r2 := &MyReader{data: 999}
+	dw.Wrapper.Reader = r2
+	assert(dw.Read() == 999)
+	// Note: deepReadMethod still points to old r
+	assert(deepReadMethod() == 100)
+
+	// Test 9: Interface assignment from wrapper
+	var reader Reader = dw
+	assert(reader.Read() == 999)
+
+	// Test 10: Method expression with pointer receiver wrapper
+	pw := &Wrapper{Reader: &MyReader{data: 50}, name: "ptr"}
+	ptrReadFn := (*Wrapper).Read
+	assert(ptrReadFn(pw) == 50)
+
+	// Test 11: nil embedded interface
+	nilWrapper := Wrapper{Reader: nil, name: "nil"}
+	var caught bool
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = nilWrapper.Read()
+	}()
+	assert(caught)
+
+	// Test 12: Method expression call on nil embedded
+	caught = false
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		_ = readFn(nilWrapper)
+	}()
+	assert(caught)
+
+	// Test 13: Slice of wrappers with method expressions
+	wrappers := []Wrapper{
+		{Reader: &MyReader{data: 1}, name: "a"},
+		{Reader: &MyReader{data: 2}, name: "b"},
+		{Reader: &MyReader{data: 3}, name: "c"},
+	}
+	sum := 0
+	for _, wr := range wrappers {
+		sum += readFn(wr)
+	}
+	assert(sum == 6)
+
+	// Test 14: Map with wrapper values
+	wrapperMap := map[string]Wrapper{
+		"x": {Reader: &MyReader{data: 10}, name: "x"},
+		"y": {Reader: &MyReader{data: 20}, name: "y"},
+	}
+	assert(wrapperMap["x"].Read() == 10)
+	assert(readFn(wrapperMap["y"]) == 20)
+
+	println("PASS")
+}

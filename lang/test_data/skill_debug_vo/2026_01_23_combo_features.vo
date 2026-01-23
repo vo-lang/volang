@@ -1,0 +1,267 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Test unusual combinations of language features
+
+type Stringer interface {
+	String() string
+}
+
+type Node struct {
+	val   int
+	left  *Node
+	right *Node
+}
+
+func (n *Node) String() string {
+	if n == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("Node(%d)", n.val)
+}
+
+// Test 1: Recursive struct with interface method in defer
+func test1() {
+	fmt.Println("Test 1: recursive struct with interface in defer")
+	
+	result := ""
+	
+	process := func(n *Node) {
+		defer func() {
+			var s Stringer = n
+			result = s.String()
+		}()
+	}
+	
+	process(&Node{val: 42})
+	assert(result == "Node(42)", "should be Node(42)")
+}
+
+// Test 2: Closure capturing recursive struct
+func test2() {
+	fmt.Println("Test 2: closure capturing recursive struct")
+	
+	root := &Node{
+		val:  1,
+		left: &Node{val: 2},
+		right: &Node{val: 3},
+	}
+	
+	sum := func() int {
+		total := root.val
+		if root.left != nil {
+			total += root.left.val
+		}
+		if root.right != nil {
+			total += root.right.val
+		}
+		return total
+	}
+	
+	assert(sum() == 6, "sum should be 6")
+}
+
+// Test 3: Interface slice with nil elements
+func test3() {
+	fmt.Println("Test 3: interface slice with nil elements")
+	
+	nodes := []Stringer{
+		&Node{val: 1},
+		nil,
+		&Node{val: 3},
+	}
+	
+	results := []string{}
+	for _, n := range nodes {
+		if n == nil {
+			results = append(results, "nil")
+		} else {
+			results = append(results, n.String())
+		}
+	}
+	
+	assert(results[0] == "Node(1)", "first should be Node(1)")
+	assert(results[1] == "nil", "second should be nil")
+	assert(results[2] == "Node(3)", "third should be Node(3)")
+}
+
+// Test 4: Map with interface key
+func test4() {
+	fmt.Println("Test 4: map with interface key")
+	
+	m := make(map[Stringer]int)
+	
+	n1 := &Node{val: 1}
+	n2 := &Node{val: 2}
+	
+	m[n1] = 100
+	m[n2] = 200
+	
+	assert(m[n1] == 100, "n1 should map to 100")
+	assert(m[n2] == 200, "n2 should map to 200")
+}
+
+// Test 5: Channel of interface
+func test5() {
+	fmt.Println("Test 5: channel of interface")
+	
+	ch := make(chan Stringer, 2)
+	
+	ch <- &Node{val: 10}
+	ch <- &Node{val: 20}
+	
+	n1 := <-ch
+	n2 := <-ch
+	
+	assert(n1.String() == "Node(10)", "first should be Node(10)")
+	assert(n2.String() == "Node(20)", "second should be Node(20)")
+}
+
+// Test 6: Goroutine with interface
+func test6() {
+	fmt.Println("Test 6: goroutine with interface")
+	
+	ch := make(chan string, 1)
+	
+	go func() {
+		var s Stringer = &Node{val: 99}
+		ch <- s.String()
+	}()
+	
+	result := <-ch
+	assert(result == "Node(99)", "should be Node(99)")
+}
+
+// Test 7: Select with interface channels
+func test7() {
+	fmt.Println("Test 7: select with interface channels")
+	
+	ch1 := make(chan Stringer, 1)
+	ch2 := make(chan Stringer, 1)
+	
+	ch1 <- &Node{val: 1}
+	
+	var result Stringer
+	select {
+	case result = <-ch1:
+		// got from ch1
+	case result = <-ch2:
+		// got from ch2
+	}
+	
+	assert(result.String() == "Node(1)", "should get from ch1")
+}
+
+// Test 8: Type switch in defer
+func test8() {
+	fmt.Println("Test 8: type switch in defer")
+	
+	result := ""
+	
+	func() {
+		var a any = &Node{val: 88}
+		defer func() {
+			switch v := a.(type) {
+			case *Node:
+				result = v.String()
+			default:
+				result = "unknown"
+			}
+		}()
+	}()
+	
+	assert(result == "Node(88)", "should be Node(88)")
+}
+
+// Test 9: Nested closures with interface
+func test9() {
+	fmt.Println("Test 9: nested closures with interface")
+	
+	var s Stringer = &Node{val: 5}
+	
+	outer := func() func() string {
+		return func() string {
+			return s.String()
+		}
+	}
+	
+	inner := outer()
+	assert(inner() == "Node(5)", "nested closure should work")
+}
+
+// Test 10: Interface in struct with method returning interface
+type Container struct {
+	item Stringer
+}
+
+func (c *Container) Get() Stringer {
+	return c.item
+}
+
+func test10() {
+	fmt.Println("Test 10: struct method returning interface")
+	
+	c := &Container{item: &Node{val: 77}}
+	
+	s := c.Get()
+	assert(s.String() == "Node(77)", "should be Node(77)")
+}
+
+// Test 11: Range over map with interface values
+func test11() {
+	fmt.Println("Test 11: range over map with interface values")
+	
+	m := map[string]Stringer{
+		"a": &Node{val: 1},
+		"b": &Node{val: 2},
+	}
+	
+	total := 0
+	for _, v := range m {
+		n := v.(*Node)
+		total += n.val
+	}
+	
+	assert(total == 3, "total should be 3")
+}
+
+// Test 12: Interface in error return
+func test12() {
+	fmt.Println("Test 12: interface with error return")
+	
+	getNode := func(exists bool) (Stringer, error) {
+		if exists {
+			return &Node{val: 123}, nil
+		}
+		return nil, errors.New("not found")
+	}
+	
+	s, err := getNode(true)
+	assert(err == nil, "should not error")
+	assert(s.String() == "Node(123)", "should be Node(123)")
+	
+	s2, err2 := getNode(false)
+	assert(err2 != nil, "should error")
+	assert(s2 == nil, "should be nil")
+}
+
+func main() {
+	test1()
+	test2()
+	test3()
+	test4()
+	test5()
+	test6()
+	test7()
+	test8()
+	test9()
+	test10()
+	test11()
+	test12()
+	
+	fmt.Println("combo_features: ALL TESTS PASSED")
+}

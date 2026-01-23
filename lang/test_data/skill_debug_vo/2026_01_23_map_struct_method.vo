@@ -1,0 +1,167 @@
+package main
+
+// Test: Maps with struct values and methods, interface values in maps
+
+type Counter struct {
+	count int
+}
+
+func (c *Counter) Inc() {
+	c.count++
+}
+
+func (c Counter) Get() int {
+	return c.count
+}
+
+type Adder interface {
+	Add(int)
+}
+
+type IntAdder struct {
+	val int
+}
+
+func (a *IntAdder) Add(n int) {
+	a.val += n
+}
+
+func main() {
+	// Test 1: Map with struct values - value semantics
+	m1 := make(map[string]Counter)
+	m1["a"] = Counter{count: 10}
+	
+	// Get value, modify, put back
+	c := m1["a"]
+	c.count = 20
+	m1["a"] = c
+	assert(m1["a"].count == 20)
+
+	// Test 2: Map with struct pointer values
+	m2 := make(map[string]*Counter)
+	m2["x"] = &Counter{count: 100}
+	m2["x"].Inc()
+	assert(m2["x"].count == 101)
+
+	// Test 3: Map with interface values
+	m3 := make(map[string]Adder)
+	m3["adder"] = &IntAdder{val: 5}
+	m3["adder"].Add(10)
+	
+	// Type assert to check value
+	ia := m3["adder"].(*IntAdder)
+	assert(ia.val == 15)
+
+	// Test 4: Map with any values
+	m4 := make(map[string]any)
+	m4["int"] = 42
+	m4["str"] = "hello"
+	m4["struct"] = Counter{count: 99}
+	
+	assert(m4["int"].(int) == 42)
+	assert(m4["str"].(string) == "hello")
+	assert(m4["struct"].(Counter).count == 99)
+
+	// Test 5: Map iteration with struct values
+	m5 := make(map[int]Counter)
+	m5[1] = Counter{count: 10}
+	m5[2] = Counter{count: 20}
+	m5[3] = Counter{count: 30}
+	
+	sum := 0
+	for _, c := range m5 {
+		sum += c.Get()
+	}
+	assert(sum == 60)
+
+	// Test 6: Delete from map and re-add
+	m6 := make(map[string]int)
+	m6["key"] = 100
+	delete(m6, "key")
+	_, ok := m6["key"]
+	assert(!ok)
+	
+	m6["key"] = 200
+	assert(m6["key"] == 200)
+
+	// Test 7: Map as function parameter
+	addToMap := func(m map[string]int, k string, v int) {
+		m[k] = v
+	}
+	m7 := make(map[string]int)
+	addToMap(m7, "foo", 42)
+	assert(m7["foo"] == 42)
+
+	// Test 8: Map returned from function
+	makeMap := func() map[string]int {
+		m := make(map[string]int)
+		m["a"] = 1
+		m["b"] = 2
+		return m
+	}
+	m8 := makeMap()
+	assert(m8["a"] == 1)
+	assert(m8["b"] == 2)
+
+	// Test 9: Nested maps
+	m9 := make(map[string]map[string]int)
+	m9["outer"] = make(map[string]int)
+	m9["outer"]["inner"] = 999
+	assert(m9["outer"]["inner"] == 999)
+
+	// Test 10: Map with struct key
+	type Point struct {
+		x, y int
+	}
+	m10 := make(map[Point]string)
+	m10[Point{1, 2}] = "one-two"
+	m10[Point{3, 4}] = "three-four"
+	assert(m10[Point{1, 2}] == "one-two")
+	assert(m10[Point{3, 4}] == "three-four")
+
+	// Test 11: Map length changes
+	m11 := make(map[int]int)
+	assert(len(m11) == 0)
+	m11[1] = 1
+	assert(len(m11) == 1)
+	m11[2] = 2
+	m11[3] = 3
+	assert(len(m11) == 3)
+	delete(m11, 2)
+	assert(len(m11) == 2)
+
+	// Test 12: Map with closure as value
+	m12 := make(map[string]func() int)
+	m12["fn1"] = func() int { return 10 }
+	m12["fn2"] = func() int { return 20 }
+	assert(m12["fn1"]() == 10)
+	assert(m12["fn2"]() == 20)
+
+	// Test 13: Modify struct in map via pointer method
+	m13 := make(map[string]*Counter)
+	m13["c1"] = &Counter{count: 0}
+	for i := 0; i < 5; i++ {
+		m13["c1"].Inc()
+	}
+	assert(m13["c1"].count == 5)
+
+	// Test 14: Map with slice values
+	m14 := make(map[string][]int)
+	m14["nums"] = []int{1, 2, 3}
+	m14["nums"] = append(m14["nums"], 4, 5)
+	assert(len(m14["nums"]) == 5)
+	assert(m14["nums"][4] == 5)
+
+	// Test 15: Check for key existence
+	m15 := make(map[string]int)
+	m15["exists"] = 0 // zero value
+	
+	val, ok := m15["exists"]
+	assert(ok)
+	assert(val == 0)
+	
+	_, ok = m15["notexists"]
+	assert(!ok)
+
+	println("PASS")
+}

@@ -1,0 +1,215 @@
+package main
+
+// Test: For-range with various modifications and edge cases
+
+func main() {
+	// Test 1: Range over slice, modify element (no effect on original)
+	slice1 := []int{1, 2, 3}
+	for _, v := range slice1 {
+		v = v * 2 // This doesn't modify slice1
+		_ = v
+	}
+	assert(slice1[0] == 1)
+	assert(slice1[1] == 2)
+	assert(slice1[2] == 3)
+
+	// Test 2: Range over slice with index, modify via index
+	slice2 := []int{1, 2, 3}
+	for i := range slice2 {
+		slice2[i] = slice2[i] * 2
+	}
+	assert(slice2[0] == 2)
+	assert(slice2[1] == 4)
+	assert(slice2[2] == 6)
+
+	// Test 3: Range over slice of struct pointers
+	type Num struct{ v int }
+	n1, n2, n3 := Num{1}, Num{2}, Num{3}
+	ptrSlice := []*Num{&n1, &n2, &n3}
+	for _, p := range ptrSlice {
+		p.v = p.v * 10
+	}
+	assert(n1.v == 10)
+	assert(n2.v == 20)
+	assert(n3.v == 30)
+
+	// Test 4: Range over slice of structs
+	type Item struct {
+		val int
+	}
+	items := []Item{{val: 1}, {val: 2}, {val: 3}}
+	for i := range items {
+		items[i].val *= 2
+	}
+	assert(items[0].val == 2)
+	assert(items[1].val == 4)
+	assert(items[2].val == 6)
+
+	// Test 5: Range with continue
+	slice5 := []int{1, 2, 3, 4, 5}
+	sum := 0
+	for _, v := range slice5 {
+		if v%2 == 0 {
+			continue
+		}
+		sum += v
+	}
+	assert(sum == 9) // 1+3+5
+
+	// Test 6: Range with break
+	slice6 := []int{1, 2, 3, 4, 5}
+	count := 0
+	for _, v := range slice6 {
+		if v == 3 {
+			break
+		}
+		count++
+	}
+	assert(count == 2)
+
+	// Test 7: Nested range
+	matrix := [][]int{{1, 2}, {3, 4}, {5, 6}}
+	total := 0
+	for _, row := range matrix {
+		for _, v := range row {
+			total += v
+		}
+	}
+	assert(total == 21)
+
+	// Test 8: Range over string
+	s := "abc"
+	runeSum := 0
+	for _, r := range s {
+		runeSum += int(r)
+	}
+	assert(runeSum == 294) // 97+98+99
+
+	// Test 9: Range over map
+	m := make(map[string]int)
+	m["a"] = 1
+	m["b"] = 2
+	m["c"] = 3
+	mapSum := 0
+	for _, v := range m {
+		mapSum += v
+	}
+	assert(mapSum == 6)
+
+	// Test 10: Range over channel
+	ch := make(chan int, 3)
+	ch <- 10
+	ch <- 20
+	ch <- 30
+	close(ch)
+	chanSum := 0
+	for v := range ch {
+		chanSum += v
+	}
+	assert(chanSum == 60)
+
+	// Test 11: Range with blank identifier for value
+	slice11 := []int{1, 2, 3, 4, 5}
+	lastIndex := -1
+	for i := range slice11 {
+		lastIndex = i
+	}
+	assert(lastIndex == 4)
+
+	// Test 12: Range over nil slice
+	var nilSlice []int
+	nilCount := 0
+	for range nilSlice {
+		nilCount++
+	}
+	assert(nilCount == 0)
+
+	// Test 13: Range over empty slice
+	emptySlice := []int{}
+	emptyCount := 0
+	for range emptySlice {
+		emptyCount++
+	}
+	assert(emptyCount == 0)
+
+	// Test 14: Range with labeled break
+outer:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if i == 1 && j == 1 {
+				break outer
+			}
+		}
+	}
+	// Should reach here
+
+	// Test 15: Range with labeled continue
+	outerCount := 0
+outer2:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if j == 1 {
+				outerCount++
+				continue outer2
+			}
+		}
+	}
+	assert(outerCount == 3)
+
+	// Test 16: Range over array (not slice)
+	arr := [3]int{10, 20, 30}
+	arrSum := 0
+	for _, v := range arr {
+		arrSum += v
+	}
+	assert(arrSum == 60)
+
+	// Test 17: Append during range (should not see new elements)
+	slice17 := []int{1, 2, 3}
+	var collected []int
+	for _, v := range slice17 {
+		collected = append(collected, v)
+		if v == 1 {
+			slice17 = append(slice17, 100) // This doesn't affect the range
+		}
+	}
+	assert(len(collected) == 3)
+	assert(collected[0] == 1)
+	assert(collected[1] == 2)
+	assert(collected[2] == 3)
+
+	// Test 18: Range over integer (Go 1.22+)
+	intSum := 0
+	for i := range 5 {
+		intSum += i
+	}
+	assert(intSum == 10) // 0+1+2+3+4
+
+	// Test 19: Closure in range capturing index
+	var funcs []func() int
+	for i := range 3 {
+		i := i // capture
+		funcs = append(funcs, func() int { return i })
+	}
+	assert(funcs[0]() == 0)
+	assert(funcs[1]() == 1)
+	assert(funcs[2]() == 2)
+
+	// Test 20: Range with defer
+	deferResults := make([]int, 0)
+	func() {
+		for i := range 3 {
+			i := i
+			defer func() {
+				deferResults = append(deferResults, i)
+			}()
+		}
+	}()
+	// Defers run in LIFO order
+	assert(len(deferResults) == 3)
+	assert(deferResults[0] == 2)
+	assert(deferResults[1] == 1)
+	assert(deferResults[2] == 0)
+
+	println("PASS")
+}
