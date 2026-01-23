@@ -1,0 +1,106 @@
+// Test: multi-return values used directly in various contexts
+package main
+
+import (
+    "errors"
+    "fmt"
+)
+
+func pair() (int, int) {
+    return 10, 20
+}
+
+func triple() (int, int, int) {
+    return 1, 2, 3
+}
+
+func withError() (int, error) {
+    return 42, nil
+}
+
+func withErrorFail() (int, error) {
+    return 0, errors.New("failed")
+}
+
+func anyPair() (any, any) {
+    return "hello", 123
+}
+
+func main() {
+    // Test 1: Multi-return as function argument
+    sum1 := add(pair())
+    assert(sum1 == 30, "add(pair()) should be 30")
+
+    // Test 2: Multi-return in short var decl
+    a, b := pair()
+    assert(a == 10 && b == 20, "pair() assignment")
+
+    // Test 3: Multi-return with type conversion
+    x, y := pair()
+    fx := float64(x)
+    fy := float64(y)
+    assert(fx == 10.0 && fy == 20.0, "float conversion")
+
+    // Test 4: Multi-return in if init
+    if v, err := withError(); err == nil {
+        assert(v == 42, "withError value should be 42")
+    }
+
+    // Test 5: Multi-return assigned then used in for
+    i5, j5 := pair()
+    sum5 := 0
+    for ; i5 <= j5; i5++ {
+        sum5 += i5
+    }
+    // i goes 10, 11, ..., 20 (11 iterations)
+    assert(sum5 == 165, "for multi-return sum should be 165")
+
+    // Test 6: Multi-return discarding some values
+    v6, _ := pair()
+    assert(v6 == 10, "first of pair should be 10")
+
+    _, v7 := pair()
+    assert(v7 == 20, "second of pair should be 20")
+
+    // Test 7: Multi-return with any types
+    a7, b7 := anyPair()
+    assert(a7.(string) == "hello", "first any should be hello")
+    assert(b7.(int) == 123, "second any should be 123")
+
+    // Test 8: Chained function calls with multi-return
+    result8 := sumTriple(triple())
+    assert(result8 == 6, "sumTriple(triple()) should be 6")
+
+    // Test 9: Multi-return in switch init
+    v9, err9 := withError()
+    assert(err9 == nil, "should not have error")
+    assert(v9 == 42, "v9 should be 42")
+
+    // Test 10: Multi-return error propagation
+    v10, err10 := withErrorFail()
+    assert(v10 == 0, "failed should return 0")
+    assert(err10 != nil, "should have error")
+
+    // Test 11: Multi-return stored separately then to slice
+    r1, r2 := pair()
+    results := []any{r1, r2}
+    assert(results[0].(int) == 10, "results[0] should be 10")
+    assert(results[1].(int) == 20, "results[1] should be 20")
+
+    // Test 12: Multi-return in closure
+    f := func() (int, int) {
+        return pair()
+    }
+    c1, c2 := f()
+    assert(c1 == 10 && c2 == 20, "closure multi-return")
+
+    fmt.Println("multi_ret_direct_use: ok")
+}
+
+func add(a, b int) int {
+    return a + b
+}
+
+func sumTriple(a, b, c int) int {
+    return a + b + c
+}

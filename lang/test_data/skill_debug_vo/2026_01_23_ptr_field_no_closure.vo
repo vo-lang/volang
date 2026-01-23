@@ -1,0 +1,16 @@
+// Test pointer field access without closure (no escape)
+package main
+
+import "fmt"
+
+func main() {
+    type Box struct {
+        val int
+    }
+    box := &Box{val: 42}
+    assert(box.val == 42, "initial val")
+    box.val = 100
+    assert(box.val == 100, "modified val")
+    
+    fmt.Println("ok")
+}

@@ -1,0 +1,20 @@
+// Testing test 8 only - closure capturing pointer
+package main
+
+import "fmt"
+
+func main() {
+    // Test 8: Closure capturing pointer
+    type Box struct {
+        val int
+    }
+    box := &Box{val: 42}
+    getBox := func() int {
+        return box.val
+    }
+    assert(getBox() == 42, "pointer capture")
+    box.val = 100
+    assert(getBox() == 100, "pointer capture after modify")
+    
+    fmt.Println("ok")
+}

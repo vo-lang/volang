@@ -1,0 +1,119 @@
+// Test: for-range over []any and related edge cases
+package main
+
+import "fmt"
+
+func main() {
+    // Test 1: Range over []any with mixed types
+    anySlice := []any{1, "hello", 3.14, true}
+    count := 0
+    for i, v := range anySlice {
+        count++
+        switch i {
+        case 0:
+            n, ok := v.(int)
+            assert(ok, "index 0 should be int")
+            assert(n == 1, "index 0 should be 1")
+        case 1:
+            s, ok := v.(string)
+            assert(ok, "index 1 should be string")
+            assert(s == "hello", "index 1 should be hello")
+        case 2:
+            f, ok := v.(float64)
+            assert(ok, "index 2 should be float64")
+            assert(f == 3.14, "index 2 should be 3.14")
+        case 3:
+            b, ok := v.(bool)
+            assert(ok, "index 3 should be bool")
+            assert(b == true, "index 3 should be true")
+        }
+    }
+    assert(count == 4, "should iterate 4 times")
+
+    // Test 2: Modify []any element during iteration (value semantics)
+    modSlice := []any{10, 20, 30}
+    for i := range modSlice {
+        modSlice[i] = i * 100
+    }
+    assert(modSlice[0].(int) == 0, "modSlice[0] should be 0")
+    assert(modSlice[1].(int) == 100, "modSlice[1] should be 100")
+    assert(modSlice[2].(int) == 200, "modSlice[2] should be 200")
+
+    // Test 3: Range over []any with struct values
+    type Point struct {
+        X, Y int
+    }
+    pointSlice := []any{Point{1, 2}, Point{3, 4}}
+    for _, v := range pointSlice {
+        p, ok := v.(Point)
+        assert(ok, "should be Point")
+        assert(p.X > 0 && p.Y > 0, "point should have positive coords")
+    }
+
+    // Test 4: Range over []any with nil elements
+    nilSlice := []any{nil, 1, nil, "test"}
+    nilCount := 0
+    for _, v := range nilSlice {
+        if v == nil {
+            nilCount++
+        }
+    }
+    assert(nilCount == 2, "should have 2 nil elements")
+
+    // Test 5: Range over []any assigned from function return
+    anySlice2 := getAnySlice()
+    sum := 0
+    for _, v := range anySlice2 {
+        if n, ok := v.(int); ok {
+            sum += n
+        }
+    }
+    assert(sum == 6, "sum should be 6")
+
+    // Test 6: Nested range over [][]any
+    nested := [][]any{
+        {1, 2},
+        {3, 4},
+    }
+    total := 0
+    for _, inner := range nested {
+        for _, v := range inner {
+            total += v.(int)
+        }
+    }
+    assert(total == 10, "nested total should be 10")
+
+    // Test 7: Range with blank identifier over []any
+    blankSlice := []any{1, 2, 3}
+    blankCount := 0
+    for range blankSlice {
+        blankCount++
+    }
+    assert(blankCount == 3, "blank range should count 3")
+
+    // Test 8: Range over map[string]any
+    anyMap := map[string]any{
+        "int":    42,
+        "string": "hello",
+        "bool":   true,
+    }
+    mapCount := 0
+    for k, v := range anyMap {
+        mapCount++
+        switch k {
+        case "int":
+            assert(v.(int) == 42, "int value should be 42")
+        case "string":
+            assert(v.(string) == "hello", "string value should be hello")
+        case "bool":
+            assert(v.(bool) == true, "bool value should be true")
+        }
+    }
+    assert(mapCount == 3, "should iterate map 3 times")
+
+    fmt.Println("range_any_slice: ok")
+}
+
+func getAnySlice() []any {
+    return []any{1, 2, 3}
+}

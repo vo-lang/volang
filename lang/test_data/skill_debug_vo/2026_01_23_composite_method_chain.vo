@@ -1,0 +1,94 @@
+// Test: composite literal method calls and chaining
+package main
+
+import "fmt"
+
+type Point struct {
+    X, Y int
+}
+
+func (p Point) Add(other Point) Point {
+    return Point{p.X + other.X, p.Y + other.Y}
+}
+
+func (p *Point) Scale(factor int) *Point {
+    p.X *= factor
+    p.Y *= factor
+    return p
+}
+
+func (p Point) Sum() int {
+    return p.X + p.Y
+}
+
+type Builder struct {
+    value int
+}
+
+func (b Builder) Add(n int) Builder {
+    return Builder{b.value + n}
+}
+
+func (b Builder) Mul(n int) Builder {
+    return Builder{b.value * n}
+}
+
+func (b Builder) Get() int {
+    return b.value
+}
+
+func main() {
+    // Test 1: Method call on composite literal
+    sum1 := Point{1, 2}.Sum()
+    assert(sum1 == 3, "Point{1,2}.Sum() should be 3")
+
+    // Test 2: Chained method calls on composite literal
+    p2 := Point{1, 2}.Add(Point{3, 4})
+    assert(p2.X == 4, "Add result X should be 4")
+    assert(p2.Y == 6, "Add result Y should be 6")
+
+    // Test 3: Method returning same type allows chaining
+    result3 := Builder{1}.Add(2).Mul(3).Add(4).Get()
+    assert(result3 == 13, "Builder chain should be 13")
+
+    // Test 4: Address of composite literal for pointer receiver
+    p4 := (&Point{2, 3}).Scale(2)
+    assert(p4.X == 4, "Scaled X should be 4")
+    assert(p4.Y == 6, "Scaled Y should be 6")
+
+    // Test 5: Composite literal in expression context
+    sum5 := Point{5, 5}.Add(Point{10, 10}).Sum()
+    assert(sum5 == 30, "Chained Add then Sum should be 30")
+
+    // Test 6: Nested composite literal method call
+    type Rect struct {
+        TopLeft, BottomRight Point
+    }
+    r := Rect{Point{0, 0}, Point{10, 10}}
+    assert(r.TopLeft.Sum() == 0, "TopLeft sum should be 0")
+    assert(r.BottomRight.Sum() == 20, "BottomRight sum should be 20")
+
+    // Test 7: Composite literal as function argument
+    sum7 := addPoints(Point{1, 1}, Point{2, 2})
+    assert(sum7 == 6, "addPoints should return 6")
+
+    // Test 8: Method on composite literal of named slice type
+    type IntSlice []int
+    is := IntSlice{1, 2, 3}
+    assert(len(is) == 3, "IntSlice length should be 3")
+
+    // Test 9: Method on zero value composite literal
+    zero := Point{}.Sum()
+    assert(zero == 0, "Zero point sum should be 0")
+
+    // Test 10: Composite literal with partial fields
+    partial := Point{X: 5}
+    assert(partial.X == 5, "Partial X should be 5")
+    assert(partial.Y == 0, "Partial Y should be 0")
+
+    fmt.Println("composite_method_chain: ok")
+}
+
+func addPoints(a, b Point) int {
+    return a.Add(b).Sum()
+}

@@ -1,0 +1,24 @@
+// Minimal: HeapBoxed pointer field assignment
+// box escapes because it's captured by closure
+// then we modify box.val from outside the closure
+package main
+
+import "fmt"
+
+func main() {
+    type Box struct {
+        val int
+    }
+    
+    box := &Box{val: 42}
+    
+    // Capture box to force it to escape
+    _ = func() int { return box.val }
+    
+    // This is the bug: writing to box.val when box is HeapBoxed
+    box.val = 100
+    
+    assert(box.val == 100, "heapboxed ptr field assignment")
+    
+    fmt.Println("ok")
+}

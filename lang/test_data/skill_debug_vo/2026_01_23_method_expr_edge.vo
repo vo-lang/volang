@@ -1,0 +1,117 @@
+// Test: method expressions and method values edge cases
+package main
+
+import "fmt"
+
+type Counter struct {
+    value int
+}
+
+func (c Counter) Get() int {
+    return c.value
+}
+
+func (c *Counter) Inc() {
+    c.value++
+}
+
+func (c *Counter) Add(n int) int {
+    c.value += n
+    return c.value
+}
+
+type Embedded struct {
+    Counter
+    name string
+}
+
+func (e Embedded) Name() string {
+    return e.name
+}
+
+type DeepEmbed struct {
+    Embedded
+    id int
+}
+
+func main() {
+    // Test 1: Method expression on value receiver
+    getMethod := Counter.Get
+    c1 := Counter{value: 42}
+    result1 := getMethod(c1)
+    assert(result1 == 42, "method expr value receiver")
+
+    // Test 2: Method expression on pointer receiver
+    incMethod := (*Counter).Inc
+    c2 := &Counter{value: 10}
+    incMethod(c2)
+    assert(c2.value == 11, "method expr pointer receiver")
+
+    // Test 3: Method value from instance
+    c3 := Counter{value: 100}
+    getValue := c3.Get
+    result3 := getValue()
+    assert(result3 == 100, "method value from value")
+
+    // Test 4: Method value from pointer
+    c4 := &Counter{value: 200}
+    addValue := c4.Add
+    result4 := addValue(50)
+    assert(result4 == 250, "method value from pointer")
+    assert(c4.value == 250, "pointer should be modified")
+
+    // Test 5: Method expression on embedded type
+    e1 := Embedded{Counter: Counter{value: 5}, name: "test"}
+    embeddedGet := Embedded.Get
+    result5 := embeddedGet(e1)
+    assert(result5 == 5, "method expr embedded")
+
+    // Test 6: Method value from embedded
+    e2 := Embedded{Counter: Counter{value: 15}, name: "test2"}
+    embeddedGetValue := e2.Get
+    result6 := embeddedGetValue()
+    assert(result6 == 15, "method value embedded")
+
+    // Test 7: Deep embedded method expression
+    d1 := DeepEmbed{Embedded: Embedded{Counter: Counter{value: 25}, name: "deep"}, id: 1}
+    deepGet := DeepEmbed.Get
+    result7 := deepGet(d1)
+    assert(result7 == 25, "deep embedded method expr")
+
+    // Test 8: Method value modifying through embedding
+    e3 := &Embedded{Counter: Counter{value: 30}, name: "mod"}
+    incEmbedded := e3.Inc
+    incEmbedded()
+    assert(e3.Counter.value == 31, "embedded pointer method value")
+
+    // Test 9: Method expression stored in map
+    methods := make(map[string]func(Counter) int)
+    methods["get"] = Counter.Get
+    c9 := Counter{value: 99}
+    result9 := methods["get"](c9)
+    assert(result9 == 99, "method expr in map")
+
+    // Test 10: Method value stored in slice
+    c10 := Counter{value: 77}
+    funcs := []func() int{c10.Get}
+    result10 := funcs[0]()
+    assert(result10 == 77, "method value in slice")
+
+    // Test 11: Chained method expression calls
+    c11 := &Counter{value: 0}
+    addMethod := (*Counter).Add
+    r11a := addMethod(c11, 10)
+    r11b := addMethod(c11, 20)
+    assert(r11a == 10, "first add should be 10")
+    assert(r11b == 30, "second add should be 30")
+    assert(c11.value == 30, "final value should be 30")
+
+    // Test 12: Method expression with interface satisfaction
+    var getter interface{ Get() int }
+    c12 := Counter{value: 123}
+    getter = c12
+    result12 := getter.Get()
+    assert(result12 == 123, "interface method call")
+
+    fmt.Println("method_expr_edge: ok")
+}

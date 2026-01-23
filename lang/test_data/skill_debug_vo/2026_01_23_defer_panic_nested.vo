@@ -1,0 +1,206 @@
+// Test: nested defer and panic/recover interactions
+package main
+
+import "fmt"
+
+var trace []string
+
+func log(s string) {
+    trace = append(trace, s)
+}
+
+func reset() {
+    trace = []string{}
+}
+
+// Test 1: Basic defer order
+func deferOrderHelper() {
+    defer log("first")
+    defer log("second")
+    defer log("third")
+    log("main")
+}
+
+func testDeferOrder() {
+    reset()
+    deferOrderHelper()
+    
+    assert(len(trace) == 4, "should have 4 entries")
+    assert(trace[0] == "main", "first should be main")
+    assert(trace[1] == "third", "second should be third")
+    assert(trace[2] == "second", "third should be second")
+    assert(trace[3] == "first", "fourth should be first")
+}
+
+// Test 2: Defer in nested function calls
+func outer() {
+    log("outer-start")
+    defer log("outer-defer")
+    inner()
+    log("outer-end")
+}
+
+func inner() {
+    log("inner-start")
+    defer log("inner-defer")
+    log("inner-end")
+}
+
+func testNestedDefer() {
+    reset()
+    outer()
+    
+    expected := []string{"outer-start", "inner-start", "inner-end", "inner-defer", "outer-end", "outer-defer"}
+    assert(len(trace) == len(expected), "should have 6 entries")
+    for i, s := range expected {
+        assert(trace[i] == s, "mismatch at", i)
+    }
+}
+
+// Test 3: Panic recovered in defer
+func panicRecover() (result string) {
+    defer func() {
+        if r := recover(); r != nil {
+            result = "recovered"
+        }
+    }()
+    panic("test panic")
+    return "" // unreachable
+}
+
+func testPanicRecover() {
+    r := panicRecover()
+    assert(r == "recovered", "should recover")
+}
+
+// Test 4: Multiple defers with panic
+func multiDeferPanic() (result []string) {
+    defer func() {
+        result = append(result, "first-defer")
+        if r := recover(); r != nil {
+            result = append(result, "recovered")
+        }
+    }()
+    defer func() {
+        result = append(result, "second-defer")
+    }()
+    defer func() {
+        result = append(result, "third-defer")
+    }()
+    panic("test")
+    return nil // unreachable
+}
+
+func testMultiDeferPanic() {
+    r := multiDeferPanic()
+    assert(len(r) == 4, "should have 4 entries, got", len(r))
+    assert(r[0] == "third-defer", "first should be third-defer")
+    assert(r[1] == "second-defer", "second should be second-defer")
+    assert(r[2] == "first-defer", "third should be first-defer")
+    assert(r[3] == "recovered", "fourth should be recovered")
+}
+
+// Test 5: Nested panic - inner recovered
+func nestedPanicInner() (result string) {
+    defer func() {
+        result = "outer-defer"
+    }()
+    
+    func() {
+        defer func() {
+            if r := recover(); r != nil {
+                result = "inner-recovered"
+            }
+        }()
+        panic("inner")
+    }()
+    
+    return result
+}
+
+func testNestedPanicInner() {
+    r := nestedPanicInner()
+    assert(r == "outer-defer", "should be outer-defer, got", r)
+}
+
+// Test 6: Defer modifying named return
+func deferModifyReturn() (n int) {
+    defer func() {
+        n = n * 2
+    }()
+    return 5
+}
+
+func testDeferModifyReturn() {
+    r := deferModifyReturn()
+    assert(r == 10, "defer should modify return to 10, got", r)
+}
+
+// Test 7: Defer with closure capturing loop var
+func deferLoopCapture() (result []int) {
+    for i := 0; i < 3; i++ {
+        i := i // shadow
+        defer func() {
+            result = append(result, i)
+        }()
+    }
+    return
+}
+
+func testDeferLoopCapture() {
+    r := deferLoopCapture()
+    assert(len(r) == 3, "should have 3 elements")
+    // Defers run in reverse order: 2, 1, 0
+    assert(r[0] == 2, "first should be 2")
+    assert(r[1] == 1, "second should be 1")
+    assert(r[2] == 0, "third should be 0")
+}
+
+// Test 8: Recover returns nil when no panic
+func recoverNoPanic() any {
+    defer func() {
+        recover()
+    }()
+    return recover() // This recover is not in deferred context
+}
+
+func testRecoverNoPanic() {
+    r := recoverNoPanic()
+    assert(r == nil, "recover outside defer should be nil")
+}
+
+func main() {
+    fmt.Println("Test 1: defer order")
+    testDeferOrder()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 2: nested defer")
+    testNestedDefer()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 3: panic recover")
+    testPanicRecover()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 4: multi defer panic")
+    testMultiDeferPanic()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 5: nested panic inner")
+    testNestedPanicInner()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 6: defer modify return")
+    testDeferModifyReturn()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 7: defer loop capture")
+    testDeferLoopCapture()
+    fmt.Println("PASSED")
+
+    fmt.Println("Test 8: recover no panic")
+    testRecoverNoPanic()
+    fmt.Println("PASSED")
+
+    fmt.Println("defer_panic_nested: ALL PASSED")
+}

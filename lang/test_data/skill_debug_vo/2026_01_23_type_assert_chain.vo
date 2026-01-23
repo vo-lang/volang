@@ -1,0 +1,116 @@
+// Test: type assertion chains and edge cases
+package main
+
+import "fmt"
+
+type Reader interface {
+    Read() string
+}
+
+type Writer interface {
+    Write(s string)
+}
+
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+type Buffer struct {
+    data string
+}
+
+func (b *Buffer) Read() string {
+    return b.data
+}
+
+func (b *Buffer) Write(s string) {
+    b.data = s
+}
+
+func main() {
+    // Test 1: Basic type assertion
+    var i any = 42
+    n, ok := i.(int)
+    assert(ok, "int assertion should succeed")
+    assert(n == 42, "value should be 42")
+
+    // Test 2: Failed type assertion with ok
+    var s any = "hello"
+    n2, ok2 := s.(int)
+    assert(!ok2, "int assertion on string should fail")
+    assert(n2 == 0, "failed assertion should return zero value")
+
+    // Test 3: Interface to interface assertion
+    var rw ReadWriter = &Buffer{data: "test"}
+    r, ok3 := rw.(Reader)
+    assert(ok3, "ReadWriter to Reader should succeed")
+    assert(r.Read() == "test", "Read should return test")
+
+    // Test 4: Concrete type assertion from interface
+    buf, ok4 := rw.(*Buffer)
+    assert(ok4, "ReadWriter to *Buffer should succeed")
+    assert(buf.data == "test", "data should be test")
+
+    // Test 5: Type assertion in expression
+    var a any = 10
+    result5 := a.(int) + 5
+    assert(result5 == 15, "assertion in expr should work")
+
+    // Test 6: Chained type assertions
+    var nested any = []any{1, "two", 3.0}
+    slice, ok6 := nested.([]any)
+    assert(ok6, "should be []any")
+    first, ok6a := slice[0].(int)
+    assert(ok6a && first == 1, "first should be int 1")
+    second, ok6b := slice[1].(string)
+    assert(ok6b && second == "two", "second should be string two")
+
+    // Test 7: Type assertion on nil interface
+    var nilAny any
+    _, ok7 := nilAny.(int)
+    assert(!ok7, "nil interface assertion should fail")
+
+    // Test 8: Type assertion to any
+    var concrete int = 100
+    var iface any = concrete
+    back, ok8 := iface.(any)
+    assert(ok8, "any to any should succeed")
+    assert(back.(int) == 100, "value should be preserved")
+
+    // Test 9: Type assertion on struct value
+    type Point struct{ X, Y int }
+    var p any = Point{1, 2}
+    pt, ok9 := p.(Point)
+    assert(ok9, "should be Point")
+    assert(pt.X == 1 && pt.Y == 2, "point values")
+
+    // Test 10: Type assertion result used directly
+    var m any = map[string]int{"a": 1}
+    val := m.(map[string]int)["a"]
+    assert(val == 1, "map access after assertion")
+
+    // Test 11: Type assertion in function call
+    var fn any = func(x int) int { return x * 2 }
+    result11 := fn.(func(int) int)(21)
+    assert(result11 == 42, "func assertion and call")
+
+    // Test 12: Multiple assertions on same value
+    var multi any = "hello"
+    _, isInt := multi.(int)
+    _, isFloat := multi.(float64)
+    str, isStr := multi.(string)
+    assert(!isInt && !isFloat && isStr, "only string should match")
+    assert(str == "hello", "string value")
+
+    // Test 13: Type assertion on method result
+    buf2 := &Buffer{data: "from method"}
+    var r2 Reader = buf2
+    readResult := r2.Read()
+    var readAny any = readResult
+    strResult, ok13 := readAny.(string)
+    assert(ok13, "method result should be string")
+    assert(strResult == "from method", "method result value")
+
+    fmt.Println("type_assert_chain: ok")
+}

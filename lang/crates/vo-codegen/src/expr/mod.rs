@@ -698,7 +698,17 @@ pub fn traverse_indirect_field(
     // HeapBoxed/Reference: GcRef slot acts as pointer, skip loading entire struct
     let base_source = get_expr_source(&sel.expr, ctx, func, info);
     let (mut current_reg, mut is_ptr, mut accumulated_offset) = match &base_source {
-        ExprSource::Location(crate::func::StorageKind::HeapBoxed { gcref_slot, .. }) |
+        ExprSource::Location(crate::func::StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) => {
+            if *stores_pointer {
+                // HeapBoxed stores a pointer - read pointer first, then access fields
+                let ptr_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+                func.emit_ptr_get(ptr_reg, *gcref_slot, 0, 1);
+                (ptr_reg, true, 0u16)
+            } else {
+                // HeapBoxed stores value directly - gcref_slot acts as pointer to data
+                (*gcref_slot, true, 0u16)
+            }
+        }
         ExprSource::Location(crate::func::StorageKind::Reference { slot: gcref_slot }) => {
             (*gcref_slot, true, 0u16)
         }

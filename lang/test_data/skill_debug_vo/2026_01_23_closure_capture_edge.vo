@@ -1,0 +1,152 @@
+// Test: closure capture edge cases
+package main
+
+import "fmt"
+
+func main() {
+    // Test 1: Capture by value in loop (common bug pattern)
+    var funcs []func() int
+    for i := 0; i < 3; i++ {
+        i := i // shadow to capture current value
+        funcs = append(funcs, func() int {
+            return i
+        })
+    }
+    assert(funcs[0]() == 0, "capture loop 0")
+    assert(funcs[1]() == 1, "capture loop 1")
+    assert(funcs[2]() == 2, "capture loop 2")
+
+    // Test 2: Capture and modify
+    x := 10
+    inc := func() {
+        x++
+    }
+    get := func() int {
+        return x
+    }
+    inc()
+    assert(get() == 11, "capture and modify")
+    inc()
+    assert(get() == 12, "capture and modify 2")
+
+    // Test 3: Nested closures
+    outer := 1
+    f1 := func() func() int {
+        inner := 2
+        return func() int {
+            return outer + inner
+        }
+    }
+    nested := f1()
+    assert(nested() == 3, "nested closure")
+    outer = 10
+    assert(nested() == 12, "nested capture outer changed")
+
+    // Test 4: Closure capturing struct field
+    type Counter struct {
+        value int
+    }
+    c := Counter{value: 100}
+    getVal := func() int {
+        return c.value
+    }
+    setVal := func(v int) {
+        c.value = v
+    }
+    assert(getVal() == 100, "struct field capture get")
+    setVal(200)
+    assert(getVal() == 200, "struct field capture set")
+
+    // Test 5: Closure capturing slice
+    slice := []int{1, 2, 3}
+    sumSlice := func() int {
+        sum := 0
+        for _, v := range slice {
+            sum += v
+        }
+        return sum
+    }
+    assert(sumSlice() == 6, "slice capture sum")
+    slice = append(slice, 4)
+    assert(sumSlice() == 10, "slice capture after append")
+
+    // Test 6: Closure capturing map
+    m := map[string]int{"a": 1}
+    getMap := func(key string) int {
+        return m[key]
+    }
+    assert(getMap("a") == 1, "map capture get")
+    m["a"] = 100
+    assert(getMap("a") == 100, "map capture after modify")
+
+    // Test 7: Closure in defer
+    var result []int
+    func() {
+        for i := 0; i < 3; i++ {
+            i := i
+            defer func() {
+                result = append(result, i)
+            }()
+        }
+    }()
+    assert(len(result) == 3, "defer closure len")
+    assert(result[0] == 2, "defer closure reverse 0")
+    assert(result[1] == 1, "defer closure reverse 1")
+    assert(result[2] == 0, "defer closure reverse 2")
+
+    // Test 8: Closure capturing pointer
+    type Box struct {
+        val int
+    }
+    box := &Box{val: 42}
+    getBox := func() int {
+        return box.val
+    }
+    assert(getBox() == 42, "pointer capture")
+    box.val = 100
+    assert(getBox() == 100, "pointer capture after modify")
+
+    // Test 9: Multiple closures sharing capture
+    shared := 0
+    add := func(n int) { shared += n }
+    sub := func(n int) { shared -= n }
+    getShared := func() int { return shared }
+    
+    add(10)
+    assert(getShared() == 10, "shared add")
+    sub(3)
+    assert(getShared() == 7, "shared sub")
+
+    // Test 10: Closure returning closure
+    makeAdder := func(base int) func(int) int {
+        return func(x int) int {
+            return base + x
+        }
+    }
+    add5 := makeAdder(5)
+    add10 := makeAdder(10)
+    assert(add5(3) == 8, "adder 5+3")
+    assert(add10(3) == 13, "adder 10+3")
+
+    // Test 11: Closure capturing named return
+    func() (n int) {
+        defer func() {
+            n = n * 2
+        }()
+        n = 5
+        return
+    }()
+    // Can't easily check named return from outside, test in separate function
+
+    // Test 12: Recursive closure
+    var fib func(int) int
+    fib = func(n int) int {
+        if n <= 1 {
+            return n
+        }
+        return fib(n-1) + fib(n-2)
+    }
+    assert(fib(10) == 55, "recursive closure fib(10)")
+
+    fmt.Println("closure_capture_edge: ok")
+}

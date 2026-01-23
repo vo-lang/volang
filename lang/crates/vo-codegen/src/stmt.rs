@@ -264,10 +264,11 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         type_key: TypeKey,
         slots: u16,
     ) -> Result<(StorageKind, Option<DeferredHeapAlloc>), CodegenError> {
-        let gcref_slot = self.func.define_local_heap_boxed(sym, slots);
+        let stores_pointer = self.info.is_pointer(type_key);
+        let gcref_slot = self.func.define_local_heap_boxed(sym, slots, stores_pointer);
         let meta_idx = self.ctx.get_or_create_value_meta(type_key, self.info);
         
-        let storage = StorageKind::HeapBoxed { gcref_slot, value_slots: slots };
+        let storage = StorageKind::HeapBoxed { gcref_slot, value_slots: slots, stores_pointer };
         let deferred = DeferredHeapAlloc { gcref_slot, value_slots: slots, meta_idx };
         
         Ok((storage, Some(deferred)))
@@ -1255,11 +1256,12 @@ fn compile_stmt_with_label(
                     func.enter_scope();
                     
                     // Create heap objects and rebind loop vars; collect gcref_slots for sync
-                    let gcref_slots: Vec<u16> = loop_var_info.iter().map(|&(sym, ctrl_slot, value_slots, meta_idx, _)| {
+                    let gcref_slots: Vec<u16> = loop_var_info.iter().map(|&(sym, ctrl_slot, value_slots, meta_idx, type_key)| {
                         let gcref_slot = func.alloc_gcref();
                         let deferred = DeferredHeapAlloc { gcref_slot, value_slots, meta_idx };
                         deferred.emit_with_copy(func, ctrl_slot);
-                        func.define_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots });
+                        let stores_pointer = info.is_pointer(type_key);
+                        func.define_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots, stores_pointer });
                         gcref_slot
                     }).collect();
                     
@@ -2235,7 +2237,8 @@ fn emit_type_switch_binding(
     
     // Box if captured by closure
     if needs_boxing {
-        let gcref_slot = func.define_local_heap_boxed(name, slots);
+        let stores_pointer = info.is_pointer(type_key);
+        let gcref_slot = func.define_local_heap_boxed(name, slots, stores_pointer);
         let meta_idx = ctx.get_or_create_value_meta(type_key, info);
         let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);

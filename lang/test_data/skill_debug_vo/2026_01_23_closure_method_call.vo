@@ -1,0 +1,37 @@
+// Test: closure capturing pointer with method call
+package main
+
+import "fmt"
+
+type Counter struct {
+    val int
+}
+
+func (c Counter) Get() int {
+    return c.val
+}
+
+func (c Counter) Add(n int) int {
+    return c.val + n
+}
+
+func main() {
+    ptr := &Counter{val: 10}
+    
+    // Closure captures pointer, calls method with value receiver
+    getClosure := func() int {
+        return ptr.Get()
+    }
+    
+    assert(getClosure() == 10, "method call on captured pointer")
+    
+    ptr.val = 20
+    assert(getClosure() == 20, "method call after modify")
+    
+    addClosure := func(n int) int {
+        return ptr.Add(n)
+    }
+    assert(addClosure(5) == 25, "method with arg on captured pointer")
+    
+    fmt.Println("ok")
+}

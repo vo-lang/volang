@@ -1,0 +1,21 @@
+// Simple test: read escaped pointer variable
+package main
+
+import "fmt"
+
+func main() {
+    type Box struct {
+        val int
+    }
+    
+    box := &Box{val: 42}
+    
+    // Capture to force escape
+    _ = func() *Box { return box }
+    
+    // Just read box (not field), should emit PtrGet from HeapBoxed
+    var b *Box = box
+    _ = b
+    
+    fmt.Println("ok")
+}

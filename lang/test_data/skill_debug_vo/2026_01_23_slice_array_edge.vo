@@ -1,0 +1,107 @@
+// Test: slice and array edge cases
+package main
+
+import "fmt"
+
+func main() {
+    // Test 1: Slice of empty array
+    var emptyArr [0]int
+    emptySlice := emptyArr[:]
+    assert(len(emptySlice) == 0, "empty slice len")
+    assert(cap(emptySlice) == 0, "empty slice cap")
+
+    // Test 2: Reslice to zero length
+    arr := [5]int{1, 2, 3, 4, 5}
+    zeroSlice := arr[0:0]
+    assert(len(zeroSlice) == 0, "zero len")
+    assert(cap(zeroSlice) == 5, "full cap")
+
+    // Test 3: Reslice extending capacity
+    extended := zeroSlice[0:3]
+    assert(len(extended) == 3, "extended len")
+    assert(extended[0] == 1, "extended[0]")
+
+    // Test 4: Three-index slice
+    s := []int{1, 2, 3, 4, 5}
+    s2 := s[1:3:4]
+    assert(len(s2) == 2, "three-index len")
+    assert(cap(s2) == 3, "three-index cap")
+    assert(s2[0] == 2, "three-index [0]")
+
+    // Test 5: Copy overlapping slices
+    overlap := []int{1, 2, 3, 4, 5}
+    copy(overlap[1:], overlap[0:4])
+    assert(overlap[1] == 1, "overlap copy [1]")
+    assert(overlap[2] == 2, "overlap copy [2]")
+    assert(overlap[4] == 4, "overlap copy [4]")
+
+    // Test 6: Copy to larger destination
+    src := []int{1, 2, 3}
+    dst := make([]int, 5)
+    n := copy(dst, src)
+    assert(n == 3, "copy count")
+    assert(dst[0] == 1 && dst[1] == 2 && dst[2] == 3, "copy values")
+    assert(dst[3] == 0 && dst[4] == 0, "untouched zeros")
+
+    // Test 7: Append growing capacity
+    growing := make([]int, 0, 2)
+    growing = append(growing, 1)
+    assert(cap(growing) == 2, "no grow yet")
+    growing = append(growing, 2)
+    assert(cap(growing) == 2, "still no grow")
+    growing = append(growing, 3)
+    assert(cap(growing) > 2, "should have grown")
+    assert(len(growing) == 3, "len after grow")
+
+    // Test 8: Append spread
+    a := []int{1, 2}
+    b := []int{3, 4, 5}
+    c := append(a, b...)
+    assert(len(c) == 5, "spread append len")
+    assert(c[4] == 5, "spread append last")
+
+    // Test 9: Nil slice append
+    var nilSlice []int
+    result := append(nilSlice, 42)
+    assert(len(result) == 1, "nil append len")
+    assert(result[0] == 42, "nil append value")
+
+    // Test 10: Array element access via index
+    arr10 := [3]int{10, 20, 30}
+    assert(arr10[1] == 20, "array access")
+    arr10[1] = 25
+    assert(arr10[1] == 25, "array modify")
+
+    // Test 11: Slice of slice
+    outer := [][]int{{1, 2}, {3, 4}, {5, 6}}
+    assert(outer[1][0] == 3, "nested slice access")
+    outer[1][0] = 30
+    assert(outer[1][0] == 30, "nested slice modify")
+
+    // Test 12: Make with different sizes
+    s12a := make([]int, 3)
+    s12b := make([]int, 3, 10)
+    assert(len(s12a) == 3 && cap(s12a) == 3, "make len=cap")
+    assert(len(s12b) == 3 && cap(s12b) == 10, "make len!=cap")
+
+    // Test 13: Slice aliasing
+    original := []int{1, 2, 3}
+    alias := original
+    alias[0] = 100
+    assert(original[0] == 100, "alias modifies original")
+
+    // Test 14: Array value semantics
+    arrOrig := [3]int{1, 2, 3}
+    arrCopy := arrOrig
+    arrCopy[0] = 100
+    assert(arrOrig[0] == 1, "array copy is independent")
+    assert(arrCopy[0] == 100, "array copy modified")
+
+    // Test 15: Append to self
+    self := []int{1, 2, 3}
+    self = append(self, self...)
+    assert(len(self) == 6, "self append len")
+    assert(self[0] == 1 && self[3] == 1, "self append values")
+
+    fmt.Println("slice_array_edge: ok")
+}

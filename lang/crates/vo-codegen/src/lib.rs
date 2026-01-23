@@ -1008,7 +1008,7 @@ fn compile_func_body(
     
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {
-        if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots) {
+        if let Some((gcref_slot, param_slot)) = builder.box_escaped_param(sym, slots, info.is_pointer(type_key)) {
             let meta_idx = ctx.get_or_create_value_meta(type_key, info);
             let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
             builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
@@ -1072,7 +1072,7 @@ fn compile_func_body(
             
             let slot = if escapes {
                 // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
-                let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots);
+                let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
                 escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {

@@ -1,0 +1,120 @@
+// Test: map edge cases
+package main
+
+import "fmt"
+
+type Key struct {
+    a, b int
+}
+
+func main() {
+    // Test 1: Struct as map key
+    m1 := make(map[Key]string)
+    m1[Key{1, 2}] = "one-two"
+    m1[Key{3, 4}] = "three-four"
+    assert(m1[Key{1, 2}] == "one-two", "struct key lookup")
+    assert(m1[Key{3, 4}] == "three-four", "struct key lookup 2")
+
+    // Test 2: Map with ok idiom
+    v, ok := m1[Key{1, 2}]
+    assert(ok, "key exists")
+    assert(v == "one-two", "value correct")
+    
+    v2, ok2 := m1[Key{5, 6}]
+    assert(!ok2, "key not exists")
+    assert(v2 == "", "zero value for missing")
+
+    // Test 3: Delete from map
+    delete(m1, Key{1, 2})
+    _, ok3 := m1[Key{1, 2}]
+    assert(!ok3, "deleted key not found")
+
+    // Test 4: Range over map
+    m4 := map[int]int{1: 10, 2: 20, 3: 30}
+    sum := 0
+    count := 0
+    for k, v := range m4 {
+        sum += k + v
+        count++
+    }
+    assert(count == 3, "range count")
+    assert(sum == 66, "range sum") // (1+10) + (2+20) + (3+30) = 66
+
+    // Test 5: Map of slices
+    m5 := make(map[string][]int)
+    m5["a"] = []int{1, 2, 3}
+    m5["b"] = []int{4, 5}
+    assert(len(m5["a"]) == 3, "slice in map len")
+    assert(m5["a"][0] == 1, "slice in map access")
+    m5["a"] = append(m5["a"], 4)
+    assert(len(m5["a"]) == 4, "appended slice len")
+
+    // Test 6: Map of maps
+    m6 := make(map[string]map[string]int)
+    m6["outer"] = make(map[string]int)
+    m6["outer"]["inner"] = 42
+    assert(m6["outer"]["inner"] == 42, "nested map access")
+
+    // Test 7: Empty map iteration
+    m7 := make(map[int]int)
+    iterCount := 0
+    for range m7 {
+        iterCount++
+    }
+    assert(iterCount == 0, "empty map iter count")
+
+    // Test 8: Map literal with expressions
+    x := 10
+    m8 := map[int]int{
+        x:     x * 2,
+        x + 1: x + 11,
+    }
+    assert(m8[10] == 20, "expr key 10")
+    assert(m8[11] == 21, "expr key 11")
+
+    // Test 9: Overwrite existing key
+    m9 := map[string]int{"a": 1}
+    m9["a"] = 100
+    assert(m9["a"] == 100, "overwritten value")
+    assert(len(m9) == 1, "len after overwrite")
+
+    // Test 10: String keys with special chars
+    m10 := make(map[string]int)
+    m10["hello world"] = 1
+    m10["with\ttab"] = 2
+    m10["with\nnewline"] = 3
+    assert(m10["hello world"] == 1, "space key")
+    assert(m10["with\ttab"] == 2, "tab key")
+    assert(m10["with\nnewline"] == 3, "newline key")
+
+    // Test 11: Boolean keys
+    m11 := map[bool]string{true: "yes", false: "no"}
+    assert(m11[true] == "yes", "true key")
+    assert(m11[false] == "no", "false key")
+
+    // Test 12: Float keys (careful with precision)
+    m12 := map[float64]string{1.5: "one-half", 2.5: "two-half"}
+    assert(m12[1.5] == "one-half", "float key")
+
+    // Test 13: Interface value in map
+    m13 := make(map[string]any)
+    m13["int"] = 42
+    m13["string"] = "hello"
+    m13["slice"] = []int{1, 2, 3}
+    assert(m13["int"].(int) == 42, "any int value")
+    assert(m13["string"].(string) == "hello", "any string value")
+    assert(len(m13["slice"].([]int)) == 3, "any slice value")
+
+    // Test 14: Delete non-existent key (should be no-op)
+    m14 := map[int]int{1: 1}
+    delete(m14, 999) // should not panic
+    assert(len(m14) == 1, "delete non-existent no change")
+
+    // Test 15: Map assignment creates alias
+    m15a := map[int]int{1: 10}
+    m15b := m15a
+    m15b[1] = 100
+    assert(m15a[1] == 100, "map alias shared")
+
+    fmt.Println("map_edge_cases: ok")
+}

@@ -447,7 +447,7 @@ pub fn compile_func_lit(
     
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, _slot_types) in escaped_params {
-        if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots) {
+        if let Some((gcref_slot, param_slot)) = closure_builder.box_escaped_param(sym, slots, info.is_pointer(type_key)) {
             let meta_idx = ctx.get_or_create_value_meta(type_key, info);
             let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
             closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
@@ -505,7 +505,7 @@ pub fn compile_func_lit(
             let escapes = any_escapes || info.is_escaped(obj_key);
             
             let slot = if escapes {
-                let gcref_slot = closure_builder.define_local_heap_boxed(name.symbol, slots);
+                let gcref_slot = closure_builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
                 escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {

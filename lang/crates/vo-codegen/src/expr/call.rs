@@ -245,8 +245,8 @@ pub fn emit_receiver(
         // Pointer embedding: use unified traversal logic
         // First, determine initial state based on storage kind
         let (initial_reg, initial_is_ptr) = match recv_storage {
-            Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                if recv_is_ptr {
+            Some(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) => {
+                if stores_pointer {
                     // Pointer variable captured by closure - read pointer from box first
                     let actual_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
                     func.emit_ptr_get(actual_ptr, gcref_slot, 0, 1);

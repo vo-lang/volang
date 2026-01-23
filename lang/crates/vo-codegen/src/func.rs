@@ -27,7 +27,9 @@ pub enum StorageKind {
     
     /// Heap-boxed struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access)
     /// Layout: [GcHeader][data...]
-    HeapBoxed { gcref_slot: u16, value_slots: u16 },
+    /// When stores_pointer is true, HeapBoxed stores a pointer (single GcRef) that needs
+    /// to be dereferenced before field access. When false, it stores the value directly.
+    HeapBoxed { gcref_slot: u16, value_slots: u16, stores_pointer: bool },
     
     /// Heap-allocated array (1 slot GcRef, ArrayGet/ArraySet access)
     /// Layout: [GcHeader][ArrayHeader][elems...]
@@ -219,7 +221,7 @@ impl FuncBuilder {
     /// Box an escaped parameter: allocate heap storage and copy the stack param value into it.
     /// Returns (gcref_slot, param_slot) for the caller to emit PtrNew + PtrSet.
     /// The local storage is updated to HeapBoxed.
-    pub fn box_escaped_param(&mut self, sym: Symbol, value_slots: u16) -> Option<(u16, u16)> {
+    pub fn box_escaped_param(&mut self, sym: Symbol, value_slots: u16, stores_pointer: bool) -> Option<(u16, u16)> {
         let local = self.locals.get(&sym)?;
         let param_slot = match local.storage {
             StorageKind::StackValue { slot, .. } => slot,
@@ -231,7 +233,7 @@ impl FuncBuilder {
             sym,
             LocalVar {
                 symbol: sym,
-                storage: StorageKind::HeapBoxed { gcref_slot, value_slots },
+                storage: StorageKind::HeapBoxed { gcref_slot, value_slots, stores_pointer },
             },
         );
         self.slot_types.push(SlotType::GcRef);
@@ -285,9 +287,10 @@ impl FuncBuilder {
     }
 
     /// Heap allocation for struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access).
-    pub fn define_local_heap_boxed(&mut self, sym: Symbol, value_slots: u16) -> u16 {
+    /// If stores_pointer is true, the HeapBoxed stores a pointer that needs dereferencing.
+    pub fn define_local_heap_boxed(&mut self, sym: Symbol, value_slots: u16, stores_pointer: bool) -> u16 {
         let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
-        self.bind_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots });
+        self.bind_local(sym, StorageKind::HeapBoxed { gcref_slot, value_slots, stores_pointer });
         gcref_slot
     }
 
@@ -512,7 +515,7 @@ impl FuncBuilder {
                     self.emit_slot_get(dst + i * elem_slots, base_slot, idx_reg, elem_slots);
                 }
             }
-            StorageKind::HeapBoxed { gcref_slot, value_slots } => {
+            StorageKind::HeapBoxed { gcref_slot, value_slots, .. } => {
                 self.emit_ptr_get(dst, gcref_slot, 0, value_slots);
             }
             StorageKind::HeapArray { gcref_slot, .. } => {
