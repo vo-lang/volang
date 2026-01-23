@@ -1,0 +1,75 @@
+// Test: Select on closed channel should be ready
+// Regression test for bug: select incorrectly chose default over closed channel
+package main
+
+import "fmt"
+
+func main() {
+	// Test 1: Select on closed channel with default
+	ch := make(chan int)
+	close(ch)
+	
+	var v int
+	var ok bool
+	selected := false
+	
+	select {
+	case v, ok = <-ch:
+		selected = true
+	default:
+		panic("BUG: default selected instead of closed channel")
+	}
+	
+	assert(selected, "closed channel case should be selected")
+	assert(v == 0, "value from closed channel should be zero")
+	assert(!ok, "ok should be false for closed channel")
+	fmt.Println("Test 1: PASSED - closed channel selected over default")
+	
+	// Test 2: Closed channel with buffered data
+	ch2 := make(chan int, 2)
+	ch2 <- 10
+	ch2 <- 20
+	close(ch2)
+	
+	// First recv gets buffered value
+	select {
+	case v, ok = <-ch2:
+		assert(v == 10 && ok, "first value should be 10")
+	default:
+		panic("should get buffered value")
+	}
+	
+	// Second recv gets buffered value
+	select {
+	case v, ok = <-ch2:
+		assert(v == 20 && ok, "second value should be 20")
+	default:
+		panic("should get buffered value")
+	}
+	
+	// Third recv: empty closed channel
+	select {
+	case v, ok = <-ch2:
+		assert(v == 0 && !ok, "closed empty channel: zero and false")
+	default:
+		panic("should select closed channel")
+	}
+	fmt.Println("Test 2: PASSED - closed channel with buffer")
+	
+	// Test 3: Multiple channels, one closed
+	ch3 := make(chan int)
+	ch4 := make(chan int)
+	close(ch3)
+	
+	select {
+	case v, ok = <-ch3:
+		assert(v == 0 && !ok, "closed channel selected")
+	case <-ch4:
+		panic("ch4 should not be selected (would block)")
+	default:
+		panic("should not reach default")
+	}
+	fmt.Println("Test 3: PASSED - closed channel among multiple")
+	
+	fmt.Println("select_closed_channel: ALL PASSED")
+}

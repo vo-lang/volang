@@ -1,0 +1,243 @@
+// Test: Channel edge cases
+// Coverage: Buffered/unbuffered, closed channel, select edge cases
+package main
+
+import "fmt"
+
+// Test 1: Buffered channel basic
+func testBufferedBasic() {
+	ch := make(chan int, 3)
+	ch <- 1
+	ch <- 2
+	ch <- 3
+	
+	assert(<-ch == 1, "test1: first")
+	assert(<-ch == 2, "test1: second")
+	assert(<-ch == 3, "test1: third")
+}
+
+// Test 2: Channel with struct values
+func testChannelStruct() {
+	type Data struct {
+		id   int
+		name string
+	}
+	
+	ch := make(chan Data, 2)
+	ch <- Data{1, "one"}
+	ch <- Data{2, "two"}
+	
+	d1 := <-ch
+	d2 := <-ch
+	
+	assert(d1.id == 1 && d1.name == "one", "test2: first struct")
+	assert(d2.id == 2 && d2.name == "two", "test2: second struct")
+}
+
+// Test 3: Receive from closed channel
+func testClosedChannelRecv() {
+	ch := make(chan int, 2)
+	ch <- 10
+	ch <- 20
+	close(ch)
+	
+	v1 := <-ch
+	v2 := <-ch
+	v3, ok := <-ch
+	
+	assert(v1 == 10, "test3: first value")
+	assert(v2 == 20, "test3: second value")
+	assert(v3 == 0 && !ok, "test3: closed channel returns zero, false")
+}
+
+// Test 4: Select with default
+func testSelectDefault() {
+	ch := make(chan int) // unbuffered, will block
+	
+	result := -1
+	select {
+	case v := <-ch:
+		result = v
+	default:
+		result = 0
+	}
+	
+	assert(result == 0, "test4: default case")
+}
+
+// Test 5: Select with multiple ready channels
+func testSelectMultiReady() {
+	ch1 := make(chan int, 1)
+	ch2 := make(chan int, 1)
+	
+	ch1 <- 1
+	ch2 <- 2
+	
+	// Both channels ready - one will be selected (implementation defined)
+	var results []int
+	for i := 0; i < 2; i++ {
+		select {
+		case v := <-ch1:
+			results = append(results, v)
+		case v := <-ch2:
+			results = append(results, v)
+		}
+	}
+	
+	assert(len(results) == 2, "test5: got both values")
+	// Check that we got both 1 and 2 (order undefined)
+	sum := results[0] + results[1]
+	assert(sum == 3, "test5: sum is 3")
+}
+
+// Test 6: Select send
+func testSelectSend() {
+	ch := make(chan int, 1)
+	
+	select {
+	case ch <- 42:
+		// sent successfully
+	default:
+		panic("test6: should have sent")
+	}
+	
+	assert(<-ch == 42, "test6: received sent value")
+}
+
+// Test 7: Range over channel
+func testRangeChannel() {
+	ch := make(chan int, 3)
+	ch <- 1
+	ch <- 2
+	ch <- 3
+	close(ch)
+	
+	var results []int
+	for v := range ch {
+		results = append(results, v)
+	}
+	
+	assert(len(results) == 3, "test7: got all values")
+	assert(results[0] == 1 && results[1] == 2 && results[2] == 3, "test7: values correct")
+}
+
+// Test 8: Nil channel in select
+func testSelectNilChannel() {
+	var nilCh chan int
+	ch := make(chan int, 1)
+	ch <- 99
+	
+	result := -1
+	select {
+	case v := <-nilCh:
+		// nil channel blocks forever, never selected
+		result = v
+	case v := <-ch:
+		result = v
+	}
+	
+	assert(result == 99, "test8: non-nil channel selected")
+}
+
+// Test 9: Channel of interface
+func testChannelInterface() {
+	ch := make(chan any, 2)
+	ch <- 42
+	ch <- "hello"
+	
+	v1 := <-ch
+	v2 := <-ch
+	
+	assert(v1.(int) == 42, "test9: int value")
+	assert(v2.(string) == "hello", "test9: string value")
+}
+
+// Test 10: Directional channel conversion
+func sendOnly(ch chan<- int, v int) {
+	ch <- v
+}
+
+func recvOnly(ch <-chan int) int {
+	return <-ch
+}
+
+func testDirectionalChannel() {
+	ch := make(chan int, 1)
+	sendOnly(ch, 100)
+	v := recvOnly(ch)
+	assert(v == 100, "test10: directional conversion")
+}
+
+// Test 11: Select with closed channel
+func testSelectClosedChannel() {
+	ch := make(chan int)
+	close(ch)
+	
+	var result int
+	var ok bool
+	select {
+	case result, ok = <-ch:
+		// closed channel is always ready to receive
+	default:
+		panic("test11: should not reach default")
+	}
+	
+	assert(result == 0 && !ok, "test11: closed channel ready")
+}
+
+// Test 12: Len and cap on channel
+func testChannelLenCap() {
+	ch := make(chan int, 5)
+	
+	assert(len(ch) == 0, "test12: empty len")
+	assert(cap(ch) == 5, "test12: cap")
+	
+	ch <- 1
+	ch <- 2
+	
+	assert(len(ch) == 2, "test12: len after send")
+	assert(cap(ch) == 5, "test12: cap unchanged")
+	
+	<-ch
+	assert(len(ch) == 1, "test12: len after recv")
+}
+
+func main() {
+	testBufferedBasic()
+	fmt.Println("Test 1: PASSED")
+	
+	testChannelStruct()
+	fmt.Println("Test 2: PASSED")
+	
+	testClosedChannelRecv()
+	fmt.Println("Test 3: PASSED")
+	
+	testSelectDefault()
+	fmt.Println("Test 4: PASSED")
+	
+	testSelectMultiReady()
+	fmt.Println("Test 5: PASSED")
+	
+	testSelectSend()
+	fmt.Println("Test 6: PASSED")
+	
+	testRangeChannel()
+	fmt.Println("Test 7: PASSED")
+	
+	testSelectNilChannel()
+	fmt.Println("Test 8: PASSED")
+	
+	testChannelInterface()
+	fmt.Println("Test 9: PASSED")
+	
+	testDirectionalChannel()
+	fmt.Println("Test 10: PASSED")
+	
+	testSelectClosedChannel()
+	fmt.Println("Test 11: PASSED")
+	
+	testChannelLenCap()
+	fmt.Println("Test 12: PASSED")
+	
+	fmt.Println("channel_edge: ALL PASSED")
+}

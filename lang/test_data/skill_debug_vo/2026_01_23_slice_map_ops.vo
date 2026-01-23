@@ -1,0 +1,220 @@
+// Test: Slice and map operations edge cases
+// Coverage: Three-index slice, nil slice/map ops, copy edge cases
+package main
+
+import "fmt"
+
+// Test 1: Three-index slice
+func testThreeIndexSlice() {
+	arr := [10]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	s := arr[2:5:7] // len=3, cap=5
+	
+	assert(len(s) == 3, "test1: len should be 3")
+	assert(cap(s) == 5, "test1: cap should be 5")
+	assert(s[0] == 2, "test1: s[0]")
+	assert(s[2] == 4, "test1: s[2]")
+}
+
+// Test 2: Slice from slice with three-index
+func testSliceOfSliceThreeIndex() {
+	s1 := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	s2 := s1[1:4:6] // s1[1:4] with cap limited to 6-1=5
+	
+	assert(len(s2) == 3, "test2: len")
+	assert(cap(s2) == 5, "test2: cap")
+	
+	// s2 can be extended up to cap
+	s3 := s2[:5]
+	assert(len(s3) == 5, "test2: extended len")
+	assert(s3[4] == 5, "test2: extended value")
+}
+
+// Test 3: Append to nil slice
+func testAppendNilSlice() {
+	var s []int
+	s = append(s, 1, 2, 3)
+	
+	assert(len(s) == 3, "test3: len after append")
+	assert(s[0] == 1 && s[1] == 2 && s[2] == 3, "test3: values")
+}
+
+// Test 4: Copy with overlapping slices
+func testCopyOverlap() {
+	s := []int{1, 2, 3, 4, 5}
+	copy(s[1:], s[:4]) // copy [1,2,3,4] to positions [1,2,3,4]
+	
+	// After copy: [1, 1, 2, 3, 4]
+	assert(s[0] == 1, "test4: s[0]")
+	assert(s[1] == 1, "test4: s[1]")
+	assert(s[2] == 2, "test4: s[2]")
+	assert(s[3] == 3, "test4: s[3]")
+	assert(s[4] == 4, "test4: s[4]")
+}
+
+// Test 5: Copy reverse direction
+func testCopyReverseOverlap() {
+	s := []int{1, 2, 3, 4, 5}
+	copy(s[:4], s[1:]) // copy [2,3,4,5] to positions [0,1,2,3]
+	
+	// After copy: [2, 3, 4, 5, 5]
+	assert(s[0] == 2, "test5: s[0]")
+	assert(s[1] == 3, "test5: s[1]")
+	assert(s[2] == 4, "test5: s[2]")
+	assert(s[3] == 5, "test5: s[3]")
+	assert(s[4] == 5, "test5: s[4]")
+}
+
+// Test 6: Map with nil key operations
+func testMapNilKey() {
+	// Interface can be nil as map key
+	m := make(map[any]string)
+	m[nil] = "nil value"
+	m[1] = "one"
+	
+	assert(m[nil] == "nil value", "test6: nil key")
+	assert(m[1] == "one", "test6: int key")
+	
+	delete(m, nil)
+	_, ok := m[nil]
+	assert(!ok, "test6: nil deleted")
+}
+
+// Test 7: Map iteration and modification (delete during iteration)
+func testMapDeleteDuringIteration() {
+	m := map[int]int{1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+	count := 0
+	
+	for k := range m {
+		if k%2 == 0 {
+			delete(m, k)
+		}
+		count++
+	}
+	
+	// After iteration, only odd keys remain
+	assert(m[1] == 1, "test7: 1 remains")
+	assert(m[3] == 3, "test7: 3 remains")
+	assert(m[5] == 5, "test7: 5 remains")
+	_, ok2 := m[2]
+	assert(!ok2, "test7: 2 deleted")
+	_, ok4 := m[4]
+	assert(!ok4, "test7: 4 deleted")
+}
+
+// Test 8: Slice append causing reallocation
+func testAppendRealloc() {
+	s := make([]int, 0, 2)
+	s = append(s, 1, 2) // fills capacity
+	
+	oldCap := cap(s)
+	s = append(s, 3) // should reallocate
+	newCap := cap(s)
+	
+	// After realloc, capacity should increase
+	assert(len(s) == 3, "test8: len")
+	assert(s[0] == 1 && s[1] == 2 && s[2] == 3, "test8: values")
+	assert(newCap > oldCap, "test8: cap increased")
+}
+
+// Test 9: Slice with struct elements
+func testSliceStructAppend() {
+	type Point struct {
+		x, y int
+	}
+	
+	var points []Point
+	points = append(points, Point{1, 2})
+	points = append(points, Point{3, 4})
+	
+	assert(len(points) == 2, "test9: len")
+	assert(points[0].x == 1 && points[0].y == 2, "test9: first point")
+	assert(points[1].x == 3 && points[1].y == 4, "test9: second point")
+	
+	// Modify through index
+	points[0].x = 10
+	assert(points[0].x == 10, "test9: modified")
+}
+
+// Test 10: Map with struct key
+func testMapStructKey() {
+	type Key struct {
+		a, b int
+	}
+	
+	m := make(map[Key]string)
+	m[Key{1, 2}] = "one-two"
+	m[Key{3, 4}] = "three-four"
+	
+	assert(m[Key{1, 2}] == "one-two", "test10: lookup 1")
+	assert(m[Key{3, 4}] == "three-four", "test10: lookup 2")
+	
+	_, ok := m[Key{5, 6}]
+	assert(!ok, "test10: missing key")
+}
+
+// Test 11: Append slice spread
+func testAppendSpread() {
+	s1 := []int{1, 2, 3}
+	s2 := []int{4, 5, 6}
+	
+	s3 := append(s1, s2...)
+	
+	assert(len(s3) == 6, "test11: len")
+	for i := 0; i < 6; i++ {
+		assert(s3[i] == i+1, "test11: value")
+	}
+}
+
+// Test 12: Make with zero len and cap
+func testMakeZero() {
+	s1 := make([]int, 0)
+	s2 := make([]int, 0, 10)
+	
+	assert(len(s1) == 0, "test12: s1 len")
+	assert(cap(s1) == 0, "test12: s1 cap")
+	assert(len(s2) == 0, "test12: s2 len")
+	assert(cap(s2) == 10, "test12: s2 cap")
+	
+	m := make(map[int]int)
+	assert(len(m) == 0, "test12: map len")
+}
+
+func main() {
+	testThreeIndexSlice()
+	fmt.Println("Test 1: PASSED")
+	
+	testSliceOfSliceThreeIndex()
+	fmt.Println("Test 2: PASSED")
+	
+	testAppendNilSlice()
+	fmt.Println("Test 3: PASSED")
+	
+	testCopyOverlap()
+	fmt.Println("Test 4: PASSED")
+	
+	testCopyReverseOverlap()
+	fmt.Println("Test 5: PASSED")
+	
+	testMapNilKey()
+	fmt.Println("Test 6: PASSED")
+	
+	testMapDeleteDuringIteration()
+	fmt.Println("Test 7: PASSED")
+	
+	testAppendRealloc()
+	fmt.Println("Test 8: PASSED")
+	
+	testSliceStructAppend()
+	fmt.Println("Test 9: PASSED")
+	
+	testMapStructKey()
+	fmt.Println("Test 10: PASSED")
+	
+	testAppendSpread()
+	fmt.Println("Test 11: PASSED")
+	
+	testMakeZero()
+	fmt.Println("Test 12: PASSED")
+	
+	fmt.Println("slice_map_ops: ALL PASSED")
+}

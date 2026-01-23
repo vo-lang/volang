@@ -1,0 +1,196 @@
+// Test: Method value in defer and closure scenarios
+// Coverage: Defer with method value, method value capture in closure
+package main
+
+import "fmt"
+
+var log []string
+
+func appendLog(s string) {
+	log = append(log, s)
+}
+
+type Counter struct {
+	val int
+}
+
+func (c *Counter) Inc() {
+	c.val++
+	appendLog("inc to " + itoa(c.val))
+}
+
+func (c *Counter) Add(n int) {
+	c.val += n
+	appendLog("add " + itoa(n) + " to " + itoa(c.val))
+}
+
+func (c Counter) Get() int {
+	return c.val
+}
+
+// Test 1: Defer with method value
+func testDeferMethodValue() {
+	c := &Counter{val: 0}
+	defer c.Inc() // method value evaluated at defer time
+	c.val = 10
+	appendLog("body: " + itoa(c.val))
+}
+
+// Test 2: Method value stored in variable, then defer
+func testDeferMethodValueVar() {
+	c := &Counter{val: 0}
+	inc := c.Inc // capture method value
+	c.val = 100  // change receiver after capture
+	defer inc()  // should use original receiver binding
+	appendLog("body")
+}
+
+// Test 3: Closure capturing method value
+func testClosureMethodValue() func() {
+	c := &Counter{val: 5}
+	inc := c.Inc
+	return func() {
+		inc()
+		inc()
+	}
+}
+
+// Test 4: Method value with arguments in defer
+func testDeferMethodValueArg() {
+	c := &Counter{val: 0}
+	defer c.Add(5) // arg evaluated at defer time
+	c.val = 10
+	appendLog("body: " + itoa(c.val))
+}
+
+// Test 5: Multiple defers with method values
+func testMultiDeferMethodValue() {
+	c := &Counter{val: 0}
+	defer c.Inc()
+	defer c.Add(10)
+	defer c.Inc()
+	appendLog("body")
+}
+
+// Test 6: Method value from local variable modified later
+func testMethodValueLocalModify() {
+	c := Counter{val: 0}
+	get := c.Get // value receiver - copies c
+	c.val = 999
+	result := get()
+	appendLog("get returned: " + itoa(result))
+}
+
+// Test 7: Method value from pointer, pointer reassigned
+func testMethodValuePtrReassign() {
+	c1 := &Counter{val: 1}
+	c2 := &Counter{val: 2}
+	inc := c1.Inc // bound to c1
+	c1 = c2       // reassign pointer
+	inc()         // should still increment original c1
+	appendLog("c1.val: " + itoa(c1.val))
+	appendLog("c2.val: " + itoa(c2.val))
+}
+
+// Test 8: Defer method value with panic/recover
+func testDeferMethodValueRecover() {
+	c := &Counter{val: 0}
+	defer func() {
+		if r := recover(); r != nil {
+			appendLog("recovered")
+		}
+	}()
+	defer c.Inc()
+	panic("test")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	s := ""
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	for n > 0 {
+		s = string('0'+rune(n%10)) + s
+		n = n / 10
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
+}
+
+func main() {
+	// Test 1
+	log = []string{}
+	testDeferMethodValue()
+	assert(len(log) == 2, "test1: should have 2 entries")
+	assert(log[0] == "body: 10", "test1: body first")
+	assert(log[1] == "inc to 11", "test1: defer inc after")
+	fmt.Println("Test 1: PASSED")
+	
+	// Test 2: Method value captures receiver at creation time
+	log = []string{}
+	testDeferMethodValueVar()
+	assert(len(log) == 2, "test2: should have 2 entries")
+	assert(log[0] == "body", "test2: body first")
+	assert(log[1] == "inc to 101", "test2: method value uses captured receiver")
+	fmt.Println("Test 2: PASSED")
+	
+	// Test 3
+	log = []string{}
+	fn := testClosureMethodValue()
+	fn()
+	assert(len(log) == 2, "test3: should have 2 entries")
+	assert(log[0] == "inc to 6", "test3: first inc")
+	assert(log[1] == "inc to 7", "test3: second inc")
+	fmt.Println("Test 3: PASSED")
+	
+	// Test 4
+	log = []string{}
+	testDeferMethodValueArg()
+	assert(len(log) == 2, "test4: should have 2 entries")
+	assert(log[0] == "body: 10", "test4: body first")
+	assert(log[1] == "add 5 to 15", "test4: defer add")
+	fmt.Println("Test 4: PASSED")
+	
+	// Test 5
+	log = []string{}
+	testMultiDeferMethodValue()
+	assert(len(log) == 4, "test5: should have 4 entries")
+	assert(log[0] == "body", "test5: body")
+	assert(log[1] == "inc to 1", "test5: first inc (LIFO)")
+	assert(log[2] == "add 10 to 11", "test5: add")
+	assert(log[3] == "inc to 12", "test5: last inc")
+	fmt.Println("Test 5: PASSED")
+	
+	// Test 6: Value receiver copies at method value creation
+	log = []string{}
+	testMethodValueLocalModify()
+	assert(len(log) == 1, "test6: should have 1 entry")
+	assert(log[0] == "get returned: 0", "test6: value receiver sees original")
+	fmt.Println("Test 6: PASSED")
+	
+	// Test 7
+	log = []string{}
+	testMethodValuePtrReassign()
+	assert(len(log) == 3, "test7: should have 3 entries")
+	assert(log[0] == "inc to 2", "test7: inc original receiver")
+	assert(log[1] == "c1.val: 2", "test7: c1 now points to c2")
+	assert(log[2] == "c2.val: 2", "test7: c2 unchanged")
+	fmt.Println("Test 7: PASSED")
+	
+	// Test 8
+	log = []string{}
+	testDeferMethodValueRecover()
+	assert(len(log) == 2, "test8: should have 2 entries")
+	assert(log[0] == "inc to 1", "test8: method value defer ran")
+	assert(log[1] == "recovered", "test8: recovered")
+	fmt.Println("Test 8: PASSED")
+	
+	fmt.Println("method_value_defer: ALL PASSED")
+}

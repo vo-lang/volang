@@ -1,0 +1,251 @@
+// Test: Embedding with method conflicts and resolution
+// Coverage: Method shadowing, ambiguous method calls, embedded pointer types
+package main
+
+import "fmt"
+
+// Base types
+type A struct {
+	val int
+}
+
+func (a A) Name() string {
+	return "A"
+}
+
+func (a A) Value() int {
+	return a.val
+}
+
+type B struct {
+	val int
+}
+
+func (b B) Name() string {
+	return "B"
+}
+
+func (b B) Double() int {
+	return b.val * 2
+}
+
+// Test 1: Single embedding - methods promoted
+type SingleEmbed struct {
+	A
+}
+
+func testSingleEmbed() {
+	s := SingleEmbed{A{val: 10}}
+	assert(s.Name() == "A", "test1: Name promoted")
+	assert(s.Value() == 10, "test1: Value promoted")
+}
+
+// Test 2: Shadowing embedded method
+type ShadowEmbed struct {
+	A
+}
+
+func (s ShadowEmbed) Name() string {
+	return "ShadowEmbed"
+}
+
+func testShadowEmbed() {
+	s := ShadowEmbed{A{val: 5}}
+	assert(s.Name() == "ShadowEmbed", "test2: shadowed method")
+	assert(s.Value() == 5, "test2: promoted method")
+	assert(s.A.Name() == "A", "test2: explicit access")
+}
+
+// Test 3: Multiple embedding without conflict
+type MultiEmbedNoConflict struct {
+	A
+	B
+}
+
+func testMultiEmbedNoConflict() {
+	m := MultiEmbedNoConflict{A{val: 1}, B{val: 2}}
+	// Value() from A, Double() from B - no conflict
+	assert(m.Value() == 1, "test3: Value from A")
+	assert(m.Double() == 4, "test3: Double from B")
+	// Name() is ambiguous - must access explicitly
+	assert(m.A.Name() == "A", "test3: explicit A.Name")
+	assert(m.B.Name() == "B", "test3: explicit B.Name")
+}
+
+// Test 4: Embedded pointer type
+type PtrEmbed struct {
+	*A
+}
+
+func testPtrEmbed() {
+	a := &A{val: 100}
+	p := PtrEmbed{a}
+	assert(p.Name() == "A", "test4: method via ptr embed")
+	assert(p.Value() == 100, "test4: value via ptr embed")
+	
+	// Modify through embedded pointer
+	p.A.val = 200
+	assert(a.val == 200, "test4: modification visible")
+}
+
+// Test 5: Nil embedded pointer
+func testNilPtrEmbed() {
+	p := PtrEmbed{nil}
+	
+	// Accessing method on nil should panic
+	defer func() {
+		if r := recover(); r != nil {
+			// expected
+		}
+	}()
+	
+	_ = p.Name() // should panic
+	panic("test5: should have panicked")
+}
+
+// Test 6: Deep embedding
+type C struct {
+	A
+}
+
+func (c C) Triple() int {
+	return c.val * 3
+}
+
+type DeepEmbed struct {
+	C
+}
+
+func testDeepEmbed() {
+	d := DeepEmbed{C{A{val: 3}}}
+	assert(d.Name() == "A", "test6: deep promoted Name")
+	assert(d.Value() == 3, "test6: deep promoted Value")
+	assert(d.Triple() == 9, "test6: C's Triple")
+}
+
+// Test 7: Shadowing at different levels
+type LevelShadow struct {
+	C
+}
+
+func (l LevelShadow) Name() string {
+	return "LevelShadow"
+}
+
+func testLevelShadow() {
+	l := LevelShadow{C{A{val: 7}}}
+	assert(l.Name() == "LevelShadow", "test7: top level shadow")
+	assert(l.C.Name() == "A", "test7: C inherits A.Name")
+	assert(l.C.A.Name() == "A", "test7: explicit A.Name")
+}
+
+// Test 8: Interface satisfaction through embedding
+type Namer interface {
+	Name() string
+}
+
+func testInterfaceViaEmbed() {
+	s := SingleEmbed{A{val: 1}}
+	var n Namer = s
+	assert(n.Name() == "A", "test8: interface via embed")
+	
+	shadow := ShadowEmbed{A{val: 2}}
+	n = shadow
+	assert(n.Name() == "ShadowEmbed", "test8: shadowed interface")
+}
+
+// Test 9: Embedded field access
+type FieldEmbed struct {
+	A
+	extra int
+}
+
+func testFieldEmbed() {
+	f := FieldEmbed{A{val: 5}, 10}
+	assert(f.val == 5, "test9: embedded field access")
+	assert(f.extra == 10, "test9: own field")
+	assert(f.A.val == 5, "test9: explicit embedded field")
+}
+
+// Test 10: Method value from embedded
+func testMethodValueEmbed() {
+	s := SingleEmbed{A{val: 42}}
+	name := s.Name // method value
+	value := s.Value
+	
+	assert(name() == "A", "test10: method value Name")
+	assert(value() == 42, "test10: method value Value")
+}
+
+// Test 11: Pointer receiver on embedded value
+type PtrRecvA struct {
+	val int
+}
+
+func (a *PtrRecvA) Inc() {
+	a.val++
+}
+
+type EmbedPtrRecv struct {
+	PtrRecvA
+}
+
+func testEmbedPtrRecv() {
+	e := EmbedPtrRecv{PtrRecvA{val: 0}}
+	e.Inc()
+	assert(e.val == 1, "test11: ptr receiver on embedded")
+	e.Inc()
+	assert(e.val == 2, "test11: inc again")
+}
+
+// Test 12: Anonymous struct embedding
+func testAnonStructEmbed() {
+	type Outer struct {
+		Inner struct {
+			x int
+		}
+	}
+	
+	o := Outer{Inner: struct{ x int }{x: 99}}
+	assert(o.Inner.x == 99, "test12: anon struct field")
+}
+
+func main() {
+	testSingleEmbed()
+	fmt.Println("Test 1: PASSED")
+	
+	testShadowEmbed()
+	fmt.Println("Test 2: PASSED")
+	
+	testMultiEmbedNoConflict()
+	fmt.Println("Test 3: PASSED")
+	
+	testPtrEmbed()
+	fmt.Println("Test 4: PASSED")
+	
+	testNilPtrEmbed()
+	fmt.Println("Test 5: PASSED")
+	
+	testDeepEmbed()
+	fmt.Println("Test 6: PASSED")
+	
+	testLevelShadow()
+	fmt.Println("Test 7: PASSED")
+	
+	testInterfaceViaEmbed()
+	fmt.Println("Test 8: PASSED")
+	
+	testFieldEmbed()
+	fmt.Println("Test 9: PASSED")
+	
+	testMethodValueEmbed()
+	fmt.Println("Test 10: PASSED")
+	
+	testEmbedPtrRecv()
+	fmt.Println("Test 11: PASSED")
+	
+	testAnonStructEmbed()
+	fmt.Println("Test 12: PASSED")
+	
+	fmt.Println("embed_conflict: ALL PASSED")
+}

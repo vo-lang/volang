@@ -1,0 +1,191 @@
+// Test: Nested type assertions and chained operations
+// Coverage: Type assertion on type assertion result, method calls on asserted values
+package main
+
+import "fmt"
+
+type Inner struct {
+	val int
+}
+
+func (i Inner) Double() int {
+	return i.val * 2
+}
+
+func (i *Inner) Triple() int {
+	return i.val * 3
+}
+
+type Outer struct {
+	inner any
+}
+
+func (o Outer) GetInner() any {
+	return o.inner
+}
+
+// Test 1: Nested type assertion
+func testNestedAssertion() {
+	var outer any = Outer{inner: Inner{val: 5}}
+	
+	// outer.(Outer).inner.(Inner)
+	result := outer.(Outer).inner.(Inner).val
+	assert(result == 5, "test1: nested assertion should get 5")
+}
+
+// Test 2: Method call on type assertion result
+func testMethodOnAssertion() {
+	var a any = Inner{val: 7}
+	
+	result := a.(Inner).Double()
+	assert(result == 14, "test2: method on assertion should return 14")
+}
+
+// Test 3: Type assertion with ok check, chained
+func testAssertionOkChain() {
+	var outer any = Outer{inner: Inner{val: 3}}
+	
+	if o, ok := outer.(Outer); ok {
+		if i, ok2 := o.inner.(Inner); ok2 {
+			assert(i.val == 3, "test3: chained ok assertions")
+		} else {
+			panic("test3: inner assertion failed")
+		}
+	} else {
+		panic("test3: outer assertion failed")
+	}
+}
+
+// Test 4: Type assertion to pointer type
+func testAssertionPointer() {
+	inner := &Inner{val: 10}
+	var a any = inner
+	
+	result := a.(*Inner).Triple()
+	assert(result == 30, "test4: pointer assertion triple")
+}
+
+// Test 5: Type assertion result assigned to interface
+func testAssertionToInterface() {
+	type Doubler interface {
+		Double() int
+	}
+	
+	var a any = Inner{val: 4}
+	var d Doubler = a.(Inner) // Inner implements Doubler
+	
+	result := d.Double()
+	assert(result == 8, "test5: assertion to interface")
+}
+
+// Test 6: Nested assertion with method chain
+func testNestedAssertionMethodChain() {
+	var outer any = Outer{inner: Inner{val: 6}}
+	
+	// outer.(Outer).GetInner().(Inner).Double()
+	result := outer.(Outer).GetInner().(Inner).Double()
+	assert(result == 12, "test6: nested assertion method chain")
+}
+
+// Test 7: Type assertion in function argument
+func useInner(i Inner) int {
+	return i.val + 100
+}
+
+func testAssertionAsArg() {
+	var a any = Inner{val: 7}
+	
+	result := useInner(a.(Inner))
+	assert(result == 107, "test7: assertion as arg")
+}
+
+// Test 8: Type assertion with modification
+func testAssertionModify() {
+	inner := Inner{val: 1}
+	var a any = &inner
+	
+	a.(*Inner).val = 99
+	assert(inner.val == 99, "test8: assertion modify")
+}
+
+// Test 9: Failed assertion with recover
+func testFailedAssertion() {
+	var a any = "not an inner"
+	
+	defer func() {
+		if r := recover(); r != nil {
+			// expected panic
+		}
+	}()
+	
+	_ = a.(Inner) // should panic
+	panic("test9: should have panicked")
+}
+
+// Test 10: Type assertion ok returns false
+func testAssertionOkFalse() {
+	var a any = "string"
+	
+	_, ok := a.(Inner)
+	assert(!ok, "test10: ok should be false")
+}
+
+// Test 11: nil interface assertion
+func testNilAssertion() {
+	var a any = nil
+	
+	_, ok := a.(Inner)
+	assert(!ok, "test11: nil assertion ok should be false")
+}
+
+// Test 12: Type assertion chain with different types
+func testAssertionChainTypes() {
+	type Wrapper struct {
+		data any
+	}
+	
+	var w any = Wrapper{data: Outer{inner: Inner{val: 42}}}
+	
+	result := w.(Wrapper).data.(Outer).inner.(Inner).val
+	assert(result == 42, "test12: chain different types")
+}
+
+func main() {
+	testNestedAssertion()
+	fmt.Println("Test 1: PASSED")
+	
+	testMethodOnAssertion()
+	fmt.Println("Test 2: PASSED")
+	
+	testAssertionOkChain()
+	fmt.Println("Test 3: PASSED")
+	
+	testAssertionPointer()
+	fmt.Println("Test 4: PASSED")
+	
+	testAssertionToInterface()
+	fmt.Println("Test 5: PASSED")
+	
+	testNestedAssertionMethodChain()
+	fmt.Println("Test 6: PASSED")
+	
+	testAssertionAsArg()
+	fmt.Println("Test 7: PASSED")
+	
+	testAssertionModify()
+	fmt.Println("Test 8: PASSED")
+	
+	testFailedAssertion()
+	fmt.Println("Test 9: PASSED")
+	
+	testAssertionOkFalse()
+	fmt.Println("Test 10: PASSED")
+	
+	testNilAssertion()
+	fmt.Println("Test 11: PASSED")
+	
+	testAssertionChainTypes()
+	fmt.Println("Test 12: PASSED")
+	
+	fmt.Println("nested_type_assert: ALL PASSED")
+}

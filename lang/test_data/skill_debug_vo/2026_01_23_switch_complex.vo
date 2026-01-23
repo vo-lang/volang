@@ -1,0 +1,265 @@
+// Test: Complex switch statement scenarios
+// Coverage: Switch with init, tagless switch, fallthrough, type switch edge cases
+package main
+
+import "fmt"
+
+// Test 1: Switch with init statement and shadowing
+func testSwitchInitShadow() int {
+	x := 100
+	switch x := 1; x {
+	case 1:
+		return x // should be 1, not 100
+	default:
+		return -1
+	}
+}
+
+// Test 2: Tagless switch (like if-else chain)
+func testTaglessSwitch(n int) string {
+	switch {
+	case n < 0:
+		return "negative"
+	case n == 0:
+		return "zero"
+	case n < 10:
+		return "small"
+	case n < 100:
+		return "medium"
+	default:
+		return "large"
+	}
+}
+
+// Test 3: Switch with multiple cases
+func testMultiCase(c byte) string {
+	switch c {
+	case 'a', 'e', 'i', 'o', 'u':
+		return "vowel"
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return "digit"
+	default:
+		return "other"
+	}
+}
+
+// Test 4: Switch with fallthrough
+func testFallthrough(n int) []string {
+	var result []string
+	switch n {
+	case 1:
+		result = append(result, "one")
+		fallthrough
+	case 2:
+		result = append(result, "two")
+		fallthrough
+	case 3:
+		result = append(result, "three")
+	default:
+		result = append(result, "default")
+	}
+	return result
+}
+
+// Test 5: Type switch with multiple types in case
+func testTypeSwitchMulti(v any) string {
+	switch v.(type) {
+	case int, int8, int16, int32, int64:
+		return "signed int"
+	case uint, uint8, uint16, uint32, uint64:
+		return "unsigned int"
+	case float32, float64:
+		return "float"
+	case string:
+		return "string"
+	default:
+		return "other"
+	}
+}
+
+// Test 6: Type switch with variable binding
+func testTypeSwitchBind(v any) string {
+	switch x := v.(type) {
+	case int:
+		return fmt.Sprintf("int: %d", x)
+	case string:
+		return "string: " + x
+	case []int:
+		return fmt.Sprintf("slice len: %d", len(x))
+	default:
+		return "unknown"
+	}
+}
+
+// Test 7: Switch with complex expressions
+func getValue() int {
+	return 42
+}
+
+func testSwitchComplexExpr() string {
+	switch getValue() * 2 {
+	case 84:
+		return "correct"
+	default:
+		return "wrong"
+	}
+}
+
+// Test 8: Switch default not last
+func testDefaultNotLast(n int) string {
+	switch n {
+	default:
+		return "default"
+	case 1:
+		return "one"
+	case 2:
+		return "two"
+	}
+}
+
+// Test 9: Empty switch body
+func testEmptySwitch(n int) string {
+	switch n {
+	case 1:
+		// empty case
+	case 2:
+		return "two"
+	}
+	return "fallout"
+}
+
+// Test 10: Nested switch
+func testNestedSwitch(a, b int) string {
+	switch a {
+	case 1:
+		switch b {
+		case 1:
+			return "1-1"
+		case 2:
+			return "1-2"
+		default:
+			return "1-other"
+		}
+	case 2:
+		switch b {
+		case 1:
+			return "2-1"
+		default:
+			return "2-other"
+		}
+	default:
+		return "other"
+	}
+}
+
+// Test 11: Type switch with nil
+func testTypeSwitchNil(v any) string {
+	switch v.(type) {
+	case nil:
+		return "nil"
+	case int:
+		return "int"
+	default:
+		return "other"
+	}
+}
+
+// Test 12: Switch with break
+func testSwitchBreak(n int) string {
+	result := "before"
+	switch n {
+	case 1:
+		result = "case1"
+		if true {
+			break
+		}
+		result = "after-break" // unreachable
+	case 2:
+		result = "case2"
+	}
+	return result
+}
+
+func main() {
+	// Test 1
+	r1 := testSwitchInitShadow()
+	assert(r1 == 1, "test1: should be 1")
+	fmt.Println("Test 1: PASSED")
+	
+	// Test 2
+	assert(testTaglessSwitch(-5) == "negative", "test2: negative")
+	assert(testTaglessSwitch(0) == "zero", "test2: zero")
+	assert(testTaglessSwitch(5) == "small", "test2: small")
+	assert(testTaglessSwitch(50) == "medium", "test2: medium")
+	assert(testTaglessSwitch(500) == "large", "test2: large")
+	fmt.Println("Test 2: PASSED")
+	
+	// Test 3
+	assert(testMultiCase('a') == "vowel", "test3: a is vowel")
+	assert(testMultiCase('e') == "vowel", "test3: e is vowel")
+	assert(testMultiCase('5') == "digit", "test3: 5 is digit")
+	assert(testMultiCase('x') == "other", "test3: x is other")
+	fmt.Println("Test 3: PASSED")
+	
+	// Test 4
+	r4_1 := testFallthrough(1)
+	assert(len(r4_1) == 3, "test4: fallthrough from 1")
+	assert(r4_1[0] == "one" && r4_1[1] == "two" && r4_1[2] == "three", "test4: values")
+	r4_2 := testFallthrough(2)
+	assert(len(r4_2) == 2, "test4: fallthrough from 2")
+	r4_3 := testFallthrough(3)
+	assert(len(r4_3) == 1, "test4: no fallthrough from 3")
+	r4_d := testFallthrough(99)
+	assert(len(r4_d) == 1 && r4_d[0] == "default", "test4: default")
+	fmt.Println("Test 4: PASSED")
+	
+	// Test 5
+	assert(testTypeSwitchMulti(42) == "signed int", "test5: int")
+	assert(testTypeSwitchMulti(int8(1)) == "signed int", "test5: int8")
+	assert(testTypeSwitchMulti(uint(1)) == "unsigned int", "test5: uint")
+	assert(testTypeSwitchMulti(3.14) == "float", "test5: float")
+	assert(testTypeSwitchMulti("hi") == "string", "test5: string")
+	assert(testTypeSwitchMulti(true) == "other", "test5: bool is other")
+	fmt.Println("Test 5: PASSED")
+	
+	// Test 6
+	assert(testTypeSwitchBind(123) == "int: 123", "test6: int")
+	assert(testTypeSwitchBind("hello") == "string: hello", "test6: string")
+	assert(testTypeSwitchBind([]int{1, 2, 3}) == "slice len: 3", "test6: slice")
+	fmt.Println("Test 6: PASSED")
+	
+	// Test 7
+	assert(testSwitchComplexExpr() == "correct", "test7: complex expr")
+	fmt.Println("Test 7: PASSED")
+	
+	// Test 8
+	assert(testDefaultNotLast(1) == "one", "test8: one")
+	assert(testDefaultNotLast(2) == "two", "test8: two")
+	assert(testDefaultNotLast(99) == "default", "test8: default")
+	fmt.Println("Test 8: PASSED")
+	
+	// Test 9
+	assert(testEmptySwitch(1) == "fallout", "test9: empty case falls out")
+	assert(testEmptySwitch(2) == "two", "test9: case 2")
+	fmt.Println("Test 9: PASSED")
+	
+	// Test 10
+	assert(testNestedSwitch(1, 1) == "1-1", "test10: 1-1")
+	assert(testNestedSwitch(1, 2) == "1-2", "test10: 1-2")
+	assert(testNestedSwitch(1, 99) == "1-other", "test10: 1-other")
+	assert(testNestedSwitch(2, 1) == "2-1", "test10: 2-1")
+	assert(testNestedSwitch(99, 99) == "other", "test10: other")
+	fmt.Println("Test 10: PASSED")
+	
+	// Test 11
+	assert(testTypeSwitchNil(nil) == "nil", "test11: nil")
+	assert(testTypeSwitchNil(42) == "int", "test11: int")
+	fmt.Println("Test 11: PASSED")
+	
+	// Test 12
+	assert(testSwitchBreak(1) == "case1", "test12: break")
+	assert(testSwitchBreak(2) == "case2", "test12: no break")
+	fmt.Println("Test 12: PASSED")
+	
+	fmt.Println("switch_complex: ALL PASSED")
+}

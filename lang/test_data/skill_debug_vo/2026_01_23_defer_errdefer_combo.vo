@@ -1,0 +1,217 @@
+// Test: defer and errdefer interaction in complex scenarios
+// Coverage: Both defer and errdefer in same function, nested calls, panic interaction
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var log []string
+
+func appendLog(s string) {
+	log = append(log, s)
+}
+
+// Test 1: Both defer and errdefer, no error
+func testBothNoError() error {
+	defer appendLog("defer1")
+	errdefer appendLog("errdefer1")
+	defer appendLog("defer2")
+	errdefer appendLog("errdefer2")
+	appendLog("body")
+	return nil
+}
+
+// Test 2: Both defer and errdefer, with error
+func testBothWithError() error {
+	defer appendLog("defer1")
+	errdefer appendLog("errdefer1")
+	defer appendLog("defer2")
+	errdefer appendLog("errdefer2")
+	appendLog("body")
+	fail errors.New("test error")
+}
+
+// Test 3: errdefer with closure capturing error
+func testErrdeferClosure() (err error) {
+	errdefer func() {
+		appendLog("errdefer sees: " + err.Error())
+	}()
+	defer appendLog("defer")
+	err = errors.New("captured error")
+	fail err
+}
+
+// Test 4: Nested function with errdefer
+func inner() error {
+	errdefer appendLog("inner errdefer")
+	defer appendLog("inner defer")
+	fail errors.New("inner error")
+}
+
+func testNestedErrdefer() error {
+	errdefer appendLog("outer errdefer")
+	defer appendLog("outer defer")
+	
+	err := inner()
+	if err != nil {
+		appendLog("caught inner error")
+		fail err
+	}
+	return nil
+}
+
+// Test 5: errdefer with named return and modification
+func testErrdeferNamedReturn() (result int, err error) {
+	errdefer func() {
+		result = -1 // set error result
+		appendLog("errdefer modified result")
+	}()
+	defer func() {
+		appendLog("defer sees result: " + itoa(result))
+	}()
+	
+	result = 42
+	fail errors.New("fail after setting result")
+}
+
+// Test 6: errdefer not triggered on success
+func testErrdeferNotTriggered() (result int, err error) {
+	errdefer func() {
+		result = -999
+		appendLog("errdefer should not run")
+	}()
+	defer appendLog("defer runs")
+	result = 100
+	return result, nil
+}
+
+// Test 7: errdefer with panic inside
+func testErrdeferPanic() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			appendLog("recovered: " + r.(string))
+		}
+	}()
+	
+	errdefer func() {
+		appendLog("errdefer before panic")
+		panic("panic in errdefer")
+	}()
+	
+	fail errors.New("trigger errdefer")
+}
+
+// Test 8: Multiple errdefer order
+func testMultipleErrdeferOrder() error {
+	errdefer appendLog("errdefer1")
+	errdefer appendLog("errdefer2")
+	errdefer appendLog("errdefer3")
+	fail errors.New("error")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	s := ""
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	for n > 0 {
+		s = string('0'+rune(n%10)) + s
+		n = n / 10
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
+}
+
+func main() {
+	// Test 1: No error - errdefer should NOT run
+	log = []string{}
+	err1 := testBothNoError()
+	assert(err1 == nil, "test1: should return nil")
+	assert(len(log) == 3, "test1: should have 3 entries (body + 2 defers)")
+	assert(log[0] == "body", "test1: body first")
+	assert(log[1] == "defer2", "test1: defer2 second (LIFO)")
+	assert(log[2] == "defer1", "test1: defer1 third")
+	fmt.Println("Test 1: PASSED")
+	
+	// Test 2: With error - both defer and errdefer run
+	log = []string{}
+	err2 := testBothWithError()
+	assert(err2 != nil, "test2: should return error")
+	// Expected order: body, defer2, errdefer2, defer1, errdefer1
+	assert(len(log) == 5, "test2: should have 5 entries")
+	assert(log[0] == "body", "test2: body first")
+	assert(log[1] == "defer2", "test2: defer2")
+	assert(log[2] == "errdefer2", "test2: errdefer2")
+	assert(log[3] == "defer1", "test2: defer1")
+	assert(log[4] == "errdefer1", "test2: errdefer1")
+	fmt.Println("Test 2: PASSED")
+	
+	// Test 3: errdefer closure capturing error
+	log = []string{}
+	err3 := testErrdeferClosure()
+	assert(err3 != nil, "test3: should return error")
+	assert(len(log) == 2, "test3: should have 2 entries")
+	assert(log[0] == "defer", "test3: defer first")
+	assert(log[1] == "errdefer sees: captured error", "test3: errdefer sees error")
+	fmt.Println("Test 3: PASSED")
+	
+	// Test 4: Nested function errdefer
+	log = []string{}
+	err4 := testNestedErrdefer()
+	assert(err4 != nil, "test4: should return error")
+	// inner: defer, errdefer; then outer catches, outer: defer, errdefer
+	assert(len(log) == 5, "test4: should have 5 entries")
+	assert(log[0] == "inner defer", "test4: inner defer")
+	assert(log[1] == "inner errdefer", "test4: inner errdefer")
+	assert(log[2] == "caught inner error", "test4: caught")
+	assert(log[3] == "outer defer", "test4: outer defer")
+	assert(log[4] == "outer errdefer", "test4: outer errdefer")
+	fmt.Println("Test 4: PASSED")
+	
+	// Test 5: errdefer modifying named return
+	log = []string{}
+	r5, err5 := testErrdeferNamedReturn()
+	assert(err5 != nil, "test5: should return error")
+	assert(r5 == -1, "test5: result should be -1")
+	assert(len(log) == 2, "test5: should have 2 entries")
+	fmt.Println("Test 5: PASSED")
+	
+	// Test 6: errdefer not triggered on success
+	log = []string{}
+	r6, err6 := testErrdeferNotTriggered()
+	assert(err6 == nil, "test6: should return nil")
+	assert(r6 == 100, "test6: result should be 100")
+	assert(len(log) == 1, "test6: should have 1 entry (only defer)")
+	assert(log[0] == "defer runs", "test6: only defer runs")
+	fmt.Println("Test 6: PASSED")
+	
+	// Test 7: errdefer with panic
+	log = []string{}
+	err7 := testErrdeferPanic()
+	assert(err7 != nil, "test7: should return error")
+	assert(len(log) == 2, "test7: should have 2 entries")
+	assert(log[0] == "errdefer before panic", "test7: errdefer ran")
+	assert(log[1] == "recovered: panic in errdefer", "test7: panic recovered")
+	fmt.Println("Test 7: PASSED")
+	
+	// Test 8: Multiple errdefer order (LIFO)
+	log = []string{}
+	err8 := testMultipleErrdeferOrder()
+	assert(err8 != nil, "test8: should return error")
+	assert(len(log) == 3, "test8: should have 3 entries")
+	assert(log[0] == "errdefer3", "test8: errdefer3 first (LIFO)")
+	assert(log[1] == "errdefer2", "test8: errdefer2 second")
+	assert(log[2] == "errdefer1", "test8: errdefer1 third")
+	fmt.Println("Test 8: PASSED")
+	
+	fmt.Println("defer_errdefer_combo: ALL PASSED")
+}

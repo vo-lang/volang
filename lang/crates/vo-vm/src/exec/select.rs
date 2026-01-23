@@ -84,7 +84,8 @@ fn check_ready_case(stack: &[u64], bp: usize, state: &SelectState) -> SelectChec
                 }
             }
             SelectCaseKind::Recv => {
-                if !chan_state.buffer.is_empty() || !chan_state.waiting_senders.is_empty() {
+                // A closed channel is always ready to receive (returns zero value and ok=false)
+                if !chan_state.buffer.is_empty() || !chan_state.waiting_senders.is_empty() || chan_state.closed {
                     ready_cases.push(SelectCheckResult::Recv {
                         idx, ch, elem_slots: case.elem_slots as usize, val_reg: case.val_reg, has_ok: case.has_ok,
                     });
@@ -137,24 +138,32 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
         }
         SelectCheckResult::Recv { idx, ch, elem_slots, val_reg, has_ok } => {
             let chan_state = channel::get_state(ch);
-            let value = if let Some(val) = chan_state.buffer.pop_front() {
-                val
+            let dst_start = bp + val_reg as usize;
+            
+            let (value, ok) = if let Some(val) = chan_state.buffer.pop_front() {
+                (Some(val), true)
             } else if let Some((_, val)) = chan_state.waiting_senders.pop_front() {
-                val
+                (Some(val), true)
+            } else if chan_state.closed {
+                (None, false)
             } else {
                 // Shouldn't happen - we checked in phase 1
                 *select_state = None;
                 return ExecResult::Yield;
             };
             
-            let dst_start = bp + val_reg as usize;
-            for (i, &v) in value.iter().enumerate() {
-                if i < elem_slots {
+            // Copy value to stack (or zero-fill for closed channel)
+            if let Some(val) = value {
+                for (i, &v) in val.iter().enumerate().take(elem_slots) {
                     stack[dst_start + i] = v;
+                }
+            } else {
+                for i in 0..elem_slots {
+                    stack[dst_start + i] = 0;
                 }
             }
             if has_ok {
-                stack[dst_start + elem_slots] = 1;
+                stack[dst_start + elem_slots] = ok as u64;
             }
             
             stack[bp + inst.a as usize] = idx as u64;
