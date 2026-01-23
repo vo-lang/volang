@@ -1,0 +1,121 @@
+// Test: Interface slice with append and different underlying types
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type IntStringer int
+
+func (i IntStringer) String() string {
+	return "int"
+}
+
+type StrStringer string
+
+func (s StrStringer) String() string {
+	return string(s)
+}
+
+type StructStringer struct {
+	val string
+}
+
+func (s StructStringer) String() string {
+	return s.val
+}
+
+type PtrStringer struct {
+	val string
+}
+
+func (p *PtrStringer) String() string {
+	if p == nil {
+		return "<nil>"
+	}
+	return p.val
+}
+
+func main() {
+	// Append different types to interface slice
+	var slice []Stringer
+	slice = append(slice, IntStringer(42))
+	slice = append(slice, StrStringer("hello"))
+	slice = append(slice, StructStringer{val: "struct"})
+	slice = append(slice, &PtrStringer{val: "ptr"})
+	
+	assert(len(slice) == 4, "slice len")
+	assert(slice[0].String() == "int", "slice[0]")
+	assert(slice[1].String() == "hello", "slice[1]")
+	assert(slice[2].String() == "struct", "slice[2]")
+	assert(slice[3].String() == "ptr", "slice[3]")
+	
+	// Append multiple at once
+	slice2 := []Stringer{IntStringer(1)}
+	slice2 = append(slice2, StrStringer("a"), StructStringer{val: "b"})
+	assert(len(slice2) == 3, "slice2 len")
+	
+	// Append slice to slice
+	slice3 := []Stringer{IntStringer(100)}
+	slice4 := []Stringer{StrStringer("x"), StrStringer("y")}
+	slice3 = append(slice3, slice4...)
+	assert(len(slice3) == 3, "slice3 len")
+	assert(slice3[2].String() == "y", "slice3[2]")
+	
+	// Append nil pointer (typed nil)
+	var nilPtr *PtrStringer
+	slice5 := []Stringer{IntStringer(1)}
+	slice5 = append(slice5, nilPtr)
+	assert(len(slice5) == 2, "slice5 len")
+	assert(slice5[1].String() == "<nil>", "slice5 nil ptr")
+	
+	// Iterate and collect strings
+	result := ""
+	for _, s := range slice {
+		result += s.String() + ","
+	}
+	assert(result == "int,hello,struct,ptr,", "iteration result: "+result)
+	
+	// Modify through pointer in slice
+	ptrElem := &PtrStringer{val: "original"}
+	slice6 := []Stringer{ptrElem}
+	ptrElem.val = "modified"
+	assert(slice6[0].String() == "modified", "ptr modification")
+	
+	// Type assertion on slice element
+	if is, ok := slice[0].(IntStringer); ok {
+		assert(int(is) == 42, "type assert IntStringer")
+	} else {
+		panic("type assert failed")
+	}
+	
+	// Append any slice to interface slice (not directly possible, need loop)
+	anySlice := []any{IntStringer(1), StrStringer("z")}
+	slice7 := make([]Stringer, 0, len(anySlice))
+	for _, a := range anySlice {
+		slice7 = append(slice7, a.(Stringer))
+	}
+	assert(len(slice7) == 2, "slice7 len")
+	assert(slice7[1].String() == "z", "slice7[1]")
+	
+	// Empty interface slice operations
+	var empty []Stringer
+	empty = append(empty, IntStringer(999))
+	assert(len(empty) == 1, "empty append")
+	assert(empty[0].String() == "int", "empty[0]")
+	
+	// Copy interface slice
+	src := []Stringer{IntStringer(1), IntStringer(2)}
+	dst := make([]Stringer, 2)
+	copy(dst, src)
+	assert(dst[0].String() == "int", "copy dst[0]")
+	assert(dst[1].String() == "int", "copy dst[1]")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -1,0 +1,106 @@
+// Regression test: switch on any/interface type must match case values correctly
+// Bug: switch b { case "hello": } didn't match when b was any containing "hello"
+// Fix: Use IfaceEq for interface tag comparison in switch statement codegen
+package main
+
+type Comparer interface {
+	Compare(int) int
+}
+
+type MyInt int
+
+func (m MyInt) Compare(other int) int {
+	if int(m) < other {
+		return -1
+	}
+	if int(m) > other {
+		return 1
+	}
+	return 0
+}
+
+type Point struct {
+	x, y int
+}
+
+func main() {
+	// Switch on any containing string
+	var s any = "hello"
+	switch s {
+	case "world":
+		panic("should not match world")
+	case "hello":
+		// expected
+	default:
+		panic("switch any string: should match hello case")
+	}
+	
+	// Switch on any containing int
+	var i any = 42
+	switch i {
+	case 41:
+		panic("should not match 41")
+	case 42:
+		// expected
+	case 43:
+		panic("should not match 43")
+	default:
+		panic("switch any int: should match 42 case")
+	}
+	
+	// Switch on any containing bool
+	var b any = true
+	switch b {
+	case false:
+		panic("should not match false")
+	case true:
+		// expected
+	default:
+		panic("switch any bool: should match true case")
+	}
+	
+	// Switch on any with multiple cases
+	var x any = "test"
+	switch x {
+	case "a", "b", "test", "c":
+		// expected - should match "test"
+	default:
+		panic("switch any multi case: should match")
+	}
+	
+	// Switch on interface method result (non-any interface)
+	var c Comparer = MyInt(5)
+	switch c.Compare(5) {
+	case -1:
+		panic("should not be -1")
+	case 0:
+		// expected
+	case 1:
+		panic("should not be 1")
+	}
+	
+	// Switch on any containing struct (comparable)
+	var p any = Point{1, 2}
+	switch p {
+	case Point{0, 0}:
+		panic("should not match origin")
+	case Point{1, 2}:
+		// expected
+	default:
+		panic("switch any struct: should match")
+	}
+	
+	// Verify == comparison also works (sanity check)
+	assert(s == "hello", "any string equality")
+	assert(i == 42, "any int equality")
+	assert(b == true, "any bool equality")
+	assert(p == Point{1, 2}, "any struct equality")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

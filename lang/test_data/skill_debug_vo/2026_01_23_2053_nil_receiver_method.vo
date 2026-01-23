@@ -1,0 +1,101 @@
+// Test: Method calls on nil pointer receivers
+package main
+
+type Counter struct {
+	val int
+}
+
+func (c *Counter) IsNil() bool {
+	return c == nil
+}
+
+func (c *Counter) SafeGet() int {
+	if c == nil {
+		return -1
+	}
+	return c.val
+}
+
+func (c *Counter) SafeIncrement() int {
+	if c == nil {
+		return 0
+	}
+	c.val++
+	return c.val
+}
+
+type Stringer interface {
+	String() string
+}
+
+type NilSafeString struct {
+	s string
+}
+
+func (n *NilSafeString) String() string {
+	if n == nil {
+		return "<nil>"
+	}
+	return n.s
+}
+
+func main() {
+	// Direct nil pointer method call
+	var c *Counter
+	assert(c.IsNil(), "nil pointer IsNil")
+	assert(c.SafeGet() == -1, "nil pointer SafeGet")
+	assert(c.SafeIncrement() == 0, "nil pointer SafeIncrement")
+	
+	// Non-nil pointer method call
+	c2 := &Counter{val: 10}
+	assert(!c2.IsNil(), "non-nil IsNil")
+	assert(c2.SafeGet() == 10, "non-nil SafeGet")
+	assert(c2.SafeIncrement() == 11, "non-nil SafeIncrement")
+	
+	// Nil pointer through interface
+	var s Stringer = (*NilSafeString)(nil)
+	result := s.String()
+	assert(result == "<nil>", "nil through interface: got '"+result+"'")
+	
+	// Check that interface itself is not nil
+	assert(s != nil, "typed nil interface should not be nil")
+	
+	// Non-nil through interface
+	s2 := &NilSafeString{s: "hello"}
+	var si Stringer = s2
+	assert(si.String() == "hello", "non-nil through interface")
+	
+	// Nil pointer in struct field
+	type Holder struct {
+		counter *Counter
+	}
+	h := Holder{counter: nil}
+	assert(h.counter.IsNil(), "nil field method")
+	assert(h.counter.SafeGet() == -1, "nil field SafeGet")
+	
+	// Nil pointer in slice
+	counters := []*Counter{nil, &Counter{val: 5}, nil}
+	assert(counters[0].IsNil(), "slice nil elem method")
+	assert(!counters[1].IsNil(), "slice non-nil elem method")
+	assert(counters[2].SafeGet() == -1, "slice nil elem SafeGet")
+	
+	// Nil pointer in map value
+	m := map[string]*Counter{
+		"nil": nil,
+		"five": &Counter{val: 5},
+	}
+	assert(m["nil"].IsNil(), "map nil value method")
+	assert(m["five"].SafeGet() == 5, "map non-nil value method")
+	
+	// Method value from nil pointer
+	fn := c.SafeGet
+	assert(fn() == -1, "method value from nil")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

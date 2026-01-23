@@ -1,0 +1,115 @@
+// Test: Method expression on type alias
+package main
+
+type MyInt int
+
+func (m MyInt) Double() int {
+	return int(m) * 2
+}
+
+func (m MyInt) Add(other MyInt) MyInt {
+	return m + other
+}
+
+type MySlice []int
+
+func (s MySlice) Sum() int {
+	total := 0
+	for _, v := range s {
+		total += v
+	}
+	return total
+}
+
+func (s MySlice) First() int {
+	if len(s) == 0 {
+		return -1
+	}
+	return s[0]
+}
+
+type MyFunc func(int) int
+
+func (f MyFunc) Apply(x int) int {
+	return f(x)
+}
+
+func (f MyFunc) Compose(g MyFunc) MyFunc {
+	return func(x int) int {
+		return f(g(x))
+	}
+}
+
+func main() {
+	// Method expression on named int type
+	doubleFn := MyInt.Double
+	result := doubleFn(MyInt(21))
+	assert(result == 42, "MyInt.Double")
+	
+	// Method expression with parameter
+	addFn := MyInt.Add
+	result2 := addFn(MyInt(10), MyInt(5))
+	assert(result2 == 15, "MyInt.Add")
+	
+	// Method expression on named slice type
+	sumFn := MySlice.Sum
+	result3 := sumFn(MySlice{1, 2, 3, 4})
+	assert(result3 == 10, "MySlice.Sum")
+	
+	firstFn := MySlice.First
+	result4 := firstFn(MySlice{100, 200})
+	assert(result4 == 100, "MySlice.First")
+	
+	// Method expression on named func type
+	applyFn := MyFunc.Apply
+	double := MyFunc(func(x int) int { return x * 2 })
+	result5 := applyFn(double, 5)
+	assert(result5 == 10, "MyFunc.Apply")
+	
+	// Method expression returning same type
+	composeFn := MyFunc.Compose
+	addOne := MyFunc(func(x int) int { return x + 1 })
+	composed := composeFn(double, addOne)
+	result6 := composed(3)  // double(addOne(3)) = double(4) = 8
+	assert(result6 == 8, "MyFunc.Compose")
+	
+	// Store method expression in map
+	methodMap := map[string]func(MyInt) int{
+		"double": MyInt.Double,
+	}
+	result7 := methodMap["double"](MyInt(50))
+	assert(result7 == 100, "method from map")
+	
+	// Store method expression in slice
+	methods := []func(MySlice) int{MySlice.Sum, MySlice.First}
+	s := MySlice{5, 10, 15}
+	assert(methods[0](s) == 30, "method from slice 0")
+	assert(methods[1](s) == 5, "method from slice 1")
+	
+	// Method expression in closure
+	makeCaller := func() func(MyInt) int {
+		return MyInt.Double
+	}
+	caller := makeCaller()
+	assert(caller(MyInt(7)) == 14, "method from closure")
+	
+	// Chain method expressions
+	result8 := MyInt.Double(MyInt.Add(MyInt(3), MyInt(4)))
+	assert(result8 == 14, "chained method expr")
+	
+	// Method value vs method expression comparison
+	val := MyInt(10)
+	methodValue := val.Double
+	methodExpr := MyInt.Double
+	
+	assert(methodValue() == 20, "method value")
+	assert(methodExpr(val) == 20, "method expr same val")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

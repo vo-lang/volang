@@ -1,0 +1,167 @@
+// Test: Defer with panic/recover modifying named return values
+package main
+
+func recoverAndSet() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = -1
+		}
+	}()
+	
+	result = 10
+	panic("test panic")
+	return  // unreachable but needed for compiler
+}
+
+func recoverAndAdd() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result += 100
+		}
+	}()
+	
+	result = 5
+	panic("add panic")
+	return
+}
+
+func recoverMultipleReturns() (a int, b string) {
+	defer func() {
+		if r := recover(); r != nil {
+			a = -999
+			b = "recovered"
+		}
+	}()
+	
+	a = 1
+	b = "original"
+	panic("multi panic")
+	return
+}
+
+func recoverWithDefer() (result int) {
+	defer func() {
+		result += 1000
+	}()
+	
+	defer func() {
+		if r := recover(); r != nil {
+			result = 10
+		}
+	}()
+	
+	result = 1
+	panic("with defer")
+	return
+}
+
+func recoverNoPanic() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = -1
+		}
+	}()
+	
+	result = 42
+	return
+}
+
+func nestedRecover() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result += 1
+		}
+	}()
+	
+	result = 0
+	
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result += 10
+			}
+		}()
+		panic("inner")
+	}()
+	
+	return
+}
+
+func recoverWithClosure() (result int) {
+	x := 5
+	defer func() {
+		if r := recover(); r != nil {
+			result = x * 10
+		}
+	}()
+	
+	x = 7
+	result = 1
+	panic("closure")
+	return
+}
+
+func main() {
+	// Basic recover and set
+	r1 := recoverAndSet()
+	assert(r1 == -1, "recoverAndSet: got "+itoa(r1))
+	
+	// Recover and add to existing value
+	r2 := recoverAndAdd()
+	assert(r2 == 105, "recoverAndAdd: got "+itoa(r2))
+	
+	// Multiple return values
+	a3, b3 := recoverMultipleReturns()
+	assert(a3 == -999, "recoverMulti a: got "+itoa(a3))
+	assert(b3 == "recovered", "recoverMulti b: got "+b3)
+	
+	// Recover with additional defer
+	r4 := recoverWithDefer()
+	// Order: panic -> recover sets to 10 -> other defer adds 1000
+	assert(r4 == 1010, "recoverWithDefer: got "+itoa(r4))
+	
+	// No panic case
+	r5 := recoverNoPanic()
+	assert(r5 == 42, "recoverNoPanic: got "+itoa(r5))
+	
+	// Nested recover
+	r6 := nestedRecover()
+	// Inner panic is caught by inner recover (+10), outer recover not triggered
+	assert(r6 == 10, "nestedRecover: got "+itoa(r6))
+	
+	// Recover with closure capture
+	r7 := recoverWithClosure()
+	// x was modified to 7 before panic, closure sees x=7
+	assert(r7 == 70, "recoverWithClosure: got "+itoa(r7))
+	
+	println("PASSED")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -1,0 +1,86 @@
+// Test: Method expression combined with type assertion
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type Greeter interface {
+	Greet() string
+}
+
+type Person struct {
+	name string
+}
+
+func (p Person) String() string {
+	return "Person:" + p.name
+}
+
+func (p Person) Greet() string {
+	return "Hello, " + p.name
+}
+
+func (p *Person) PtrMethod() string {
+	return "Ptr:" + p.name
+}
+
+func main() {
+	var s Stringer = Person{name: "Alice"}
+	
+	// Method expression on type assertion result
+	// Person.String is func(Person) string
+	fn := Person.String
+	result := fn(s.(Person))
+	assert(result == "Person:Alice", "method expr on type assert")
+	
+	// Direct method expression call with type assertion
+	result2 := Person.Greet(s.(Person))
+	assert(result2 == "Hello, Alice", "direct method expr call with type assert")
+	
+	// Pointer method expression with type assertion
+	var s2 Stringer = &Person{name: "Bob"}
+	fn2 := (*Person).PtrMethod
+	result3 := fn2(s2.(*Person))
+	assert(result3 == "Ptr:Bob", "ptr method expr on type assert")
+	
+	// Method expression stored in map
+	methodMap := map[string]func(Person) string{
+		"string": Person.String,
+		"greet":  Person.Greet,
+	}
+	result4 := methodMap["string"](s.(Person))
+	assert(result4 == "Person:Alice", "method expr from map")
+	
+	// Method expression in slice
+	methods := []func(Person) string{Person.String, Person.Greet}
+	result5 := methods[1](s.(Person))
+	assert(result5 == "Hello, Alice", "method expr from slice")
+	
+	// Chained type assertions with method expression
+	var any1 any = s
+	result6 := Person.String(any1.(Stringer).(Person))
+	assert(result6 == "Person:Alice", "chained type assert method expr")
+	
+	// Method value vs method expression
+	p := Person{name: "Charlie"}
+	methodValue := p.String  // Bound to p
+	methodExpr := Person.String  // Not bound
+	
+	assert(methodValue() == "Person:Charlie", "method value")
+	assert(methodExpr(p) == "Person:Charlie", "method expr")
+	
+	// Change p, method value should still use original
+	// Actually in Go/Vo, value receiver methods copy the receiver
+	p.name = "David"
+	assert(methodValue() == "Person:Charlie", "method value captures receiver")
+	assert(methodExpr(p) == "Person:David", "method expr uses current value")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -1,0 +1,131 @@
+// Test: Composite literal with function call results as field values
+package main
+
+func getInt() int {
+	return 42
+}
+
+func getString() string {
+	return "hello"
+}
+
+func getBool() bool {
+	return true
+}
+
+func getPair() (int, string) {
+	return 100, "pair"
+}
+
+func getPtr() *Point {
+	return &Point{x: 99, y: 88}
+}
+
+type Point struct {
+	x, y int
+}
+
+type Config struct {
+	id      int
+	name    string
+	enabled bool
+}
+
+type Container struct {
+	point *Point
+	value int
+}
+
+type Nested struct {
+	config Config
+	extra  string
+}
+
+func main() {
+	// Simple function call as field value
+	c := Config{
+		id:      getInt(),
+		name:    getString(),
+		enabled: getBool(),
+	}
+	assert(c.id == 42, "config id")
+	assert(c.name == "hello", "config name")
+	assert(c.enabled == true, "config enabled")
+	
+	// Function returning pointer
+	cont := Container{
+		point: getPtr(),
+		value: getInt(),
+	}
+	assert(cont.point.x == 99, "container point x")
+	assert(cont.value == 42, "container value")
+	
+	// Nested struct with function calls
+	n := Nested{
+		config: Config{
+			id:      getInt(),
+			name:    getString(),
+			enabled: getBool(),
+		},
+		extra: getString(),
+	}
+	assert(n.config.id == 42, "nested config id")
+	assert(n.extra == "hello", "nested extra")
+	
+	// Pointer to struct with function call fields
+	cp := &Config{
+		id:      getInt(),
+		name:    getString(),
+		enabled: getBool(),
+	}
+	assert(cp.id == 42, "ptr config id")
+	
+	// Slice literal with function calls
+	configs := []Config{
+		{id: getInt(), name: getString(), enabled: getBool()},
+		{id: getInt(), name: "static", enabled: false},
+	}
+	assert(configs[0].id == 42, "slice 0 id")
+	assert(configs[1].name == "static", "slice 1 name")
+	
+	// Map literal with function call in value
+	m := map[string]Config{
+		"first": {id: getInt(), name: getString(), enabled: true},
+	}
+	assert(m["first"].id == 42, "map first id")
+	
+	// Function call in array literal
+	arr := [2]int{getInt(), getInt()}
+	assert(arr[0] == 42, "array 0")
+	assert(arr[1] == 42, "array 1")
+	
+	// Chained function calls
+	type Wrapper struct {
+		inner *Container
+	}
+	w := Wrapper{
+		inner: &Container{
+			point: getPtr(),
+			value: getInt(),
+		},
+	}
+	assert(w.inner.point.y == 88, "chained inner point y")
+	
+	// Expression in field value
+	c2 := Config{
+		id:      getInt() * 2,
+		name:    getString() + "!",
+		enabled: !getBool(),
+	}
+	assert(c2.id == 84, "expr id")
+	assert(c2.name == "hello!", "expr name")
+	assert(c2.enabled == false, "expr enabled")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

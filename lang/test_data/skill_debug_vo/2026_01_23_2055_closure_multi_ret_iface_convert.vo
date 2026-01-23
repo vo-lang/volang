@@ -1,0 +1,108 @@
+// Test: Closure returning multiple values with interface conversion
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type MyString string
+
+func (s MyString) String() string {
+	return string(s)
+}
+
+type Result struct {
+	val int
+}
+
+func (r Result) String() string {
+	return "Result"
+}
+
+func main() {
+	// Closure returning (Stringer, error) with concrete type
+	fn1 := func() (Stringer, error) {
+		return MyString("hello"), nil
+	}
+	s1, e1 := fn1()
+	assert(e1 == nil, "fn1 error")
+	assert(s1.String() == "hello", "fn1 result")
+	
+	// Closure returning (any, any) with mixed types
+	fn2 := func() (any, any) {
+		return 42, "world"
+	}
+	a2, b2 := fn2()
+	assert(a2.(int) == 42, "fn2 first")
+	assert(b2.(string) == "world", "fn2 second")
+	
+	// Closure returning (Stringer, int) with struct
+	fn3 := func() (Stringer, int) {
+		return Result{val: 100}, 200
+	}
+	s3, i3 := fn3()
+	assert(s3.String() == "Result", "fn3 stringer")
+	assert(i3 == 200, "fn3 int")
+	
+	// Closure capturing and returning interface
+	captured := MyString("captured")
+	fn4 := func() Stringer {
+		return captured
+	}
+	assert(fn4().String() == "captured", "fn4 captured")
+	
+	// Closure returning (any, error) with different concrete types
+	makeReturner := func(useString bool) func() (any, error) {
+		if useString {
+			return func() (any, error) {
+				return "string value", nil
+			}
+		}
+		return func() (any, error) {
+			return 123, nil
+		}
+	}
+	
+	strFn := makeReturner(true)
+	intFn := makeReturner(false)
+	
+	sv, se := strFn()
+	assert(se == nil, "strFn error")
+	assert(sv.(string) == "string value", "strFn value")
+	
+	iv, ie := intFn()
+	assert(ie == nil, "intFn error")
+	assert(iv.(int) == 123, "intFn value")
+	
+	// Closure returning slice of interface
+	fn5 := func() []Stringer {
+		return []Stringer{MyString("a"), MyString("b"), Result{val: 1}}
+	}
+	slice5 := fn5()
+	assert(len(slice5) == 3, "fn5 len")
+	assert(slice5[0].String() == "a", "fn5[0]")
+	assert(slice5[2].String() == "Result", "fn5[2]")
+	
+	// Nested closure returning interface
+	fn6 := func() func() Stringer {
+		return func() Stringer {
+			return MyString("nested")
+		}
+	}
+	assert(fn6()().String() == "nested", "fn6 nested")
+	
+	// Closure with named return and interface conversion
+	fn7 := func() (result Stringer) {
+		result = MyString("named")
+		return
+	}
+	assert(fn7().String() == "named", "fn7 named return")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

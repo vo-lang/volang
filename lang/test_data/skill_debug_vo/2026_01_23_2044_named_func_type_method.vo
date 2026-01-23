@@ -1,0 +1,79 @@
+// Test: Named function type with methods
+package main
+
+type Handler func(int) int
+
+func (h Handler) Apply(x int) int {
+	return h(x)
+}
+
+func (h Handler) Compose(other Handler) Handler {
+	return func(x int) int {
+		return h(other(x))
+	}
+}
+
+type Processor func(string) string
+
+func (p Processor) Process(s string) string {
+	return p(s)
+}
+
+func main() {
+	// Basic named func type with method
+	var h Handler = func(x int) int { return x * 2 }
+	result := h.Apply(5)
+	assert(result == 10, "handler apply")
+	
+	// Compose handlers
+	double := Handler(func(x int) int { return x * 2 })
+	addOne := Handler(func(x int) int { return x + 1 })
+	
+	composed := double.Compose(addOne)
+	result2 := composed(3)  // double(addOne(3)) = double(4) = 8
+	assert(result2 == 8, "composed handler")
+	
+	// Method on composed result
+	result3 := composed.Apply(5)  // composed(5) = double(6) = 12
+	assert(result3 == 12, "composed apply")
+	
+	// Named func type stored in interface
+	var any1 any = h
+	h2 := any1.(Handler)
+	result4 := h2.Apply(7)
+	assert(result4 == 14, "handler from any")
+	
+	// Named func type in struct field
+	type Container struct {
+		h Handler
+	}
+	c := Container{h: double}
+	result5 := c.h.Apply(10)
+	assert(result5 == 20, "handler in struct")
+	
+	// Named func type in slice
+	handlers := []Handler{double, addOne}
+	result6 := handlers[0].Apply(3)
+	assert(result6 == 6, "handler in slice")
+	
+	// Named func type in map
+	handlerMap := map[string]Handler{
+		"double": double,
+		"addOne": addOne,
+	}
+	result7 := handlerMap["addOne"].Apply(10)
+	assert(result7 == 11, "handler in map")
+	
+	// Processor type
+	upper := Processor(func(s string) string { return s + "!" })
+	result8 := upper.Process("hello")
+	assert(result8 == "hello!", "processor")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

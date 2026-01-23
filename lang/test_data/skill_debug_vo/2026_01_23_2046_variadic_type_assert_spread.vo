@@ -1,0 +1,80 @@
+// Test: Variadic function with spread from type assertion result
+package main
+
+func sum(nums ...int) int {
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+func joinStrings(strs ...string) string {
+	result := ""
+	for i, s := range strs {
+		if i > 0 {
+			result += ","
+		}
+		result += s
+	}
+	return result
+}
+
+func acceptAny(args ...any) int {
+	return len(args)
+}
+
+func main() {
+	// Type assertion to slice, then spread
+	var anySlice any = []int{1, 2, 3, 4, 5}
+	result := sum(anySlice.([]int)...)
+	assert(result == 15, "spread from type assert slice")
+	
+	// Type assertion from any to string slice, spread
+	var anyStrSlice any = []string{"a", "b", "c"}
+	result2 := joinStrings(anyStrSlice.([]string)...)
+	assert(result2 == "a,b,c", "spread from type assert string slice")
+	
+	// Type assertion in struct field
+	type Holder struct {
+		data any
+	}
+	h := Holder{data: []int{10, 20, 30}}
+	result3 := sum(h.data.([]int)...)
+	assert(result3 == 60, "spread from struct field type assert")
+	
+	// Type assertion from map value
+	m := map[string]any{
+		"nums": []int{100, 200},
+	}
+	result4 := sum(m["nums"].([]int)...)
+	assert(result4 == 300, "spread from map value type assert")
+	
+	// Type assertion with ok form, then spread
+	var maybeSlice any = []int{1, 2}
+	if slice, ok := maybeSlice.([]int); ok {
+		result5 := sum(slice...)
+		assert(result5 == 3, "spread from ok type assert")
+	}
+	
+	// Spread any slice to variadic any
+	var anySlice2 any = []any{1, "hello", true}
+	result6 := acceptAny(anySlice2.([]any)...)
+	assert(result6 == 3, "spread any slice to variadic any")
+	
+	// Nested type assertion then spread
+	var outer any = []any{[]int{1, 2}, []int{3, 4}}
+	outerSlice := outer.([]any)
+	result7 := sum(outerSlice[0].([]int)...)
+	assert(result7 == 3, "nested type assert spread")
+	result8 := sum(outerSlice[1].([]int)...)
+	assert(result8 == 7, "nested type assert spread 2")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

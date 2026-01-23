@@ -1,0 +1,117 @@
+// Test: Multi-return function call used directly as argument to another function
+package main
+
+func pair() (int, int) {
+	return 10, 20
+}
+
+func triple() (int, int, int) {
+	return 1, 2, 3
+}
+
+func pairWithError() (int, error) {
+	return 42, nil
+}
+
+func add(a, b int) int {
+	return a + b
+}
+
+func sum3(a, b, c int) int {
+	return a + b + c
+}
+
+func process(val int, err error) int {
+	if err != nil {
+		return -1
+	}
+	return val * 2
+}
+
+func takePair(a, b int) string {
+	return itoa(a) + "," + itoa(b)
+}
+
+type Calculator struct{}
+
+func (c Calculator) Compute() (int, int) {
+	return 100, 200
+}
+
+func main() {
+	// Multi-return directly as args to function
+	result := add(pair())
+	assert(result == 30, "add(pair())")
+	
+	// Triple return as args
+	result2 := sum3(triple())
+	assert(result2 == 6, "sum3(triple())")
+	
+	// Multi-return with error
+	result3 := process(pairWithError())
+	assert(result3 == 84, "process(pairWithError())")
+	
+	// Multi-return used in println (variadic)
+	// This is tricky - println accepts ...any
+	
+	// Multi-return as args to function returning string
+	result4 := takePair(pair())
+	assert(result4 == "10,20", "takePair(pair())")
+	
+	// Nested multi-return calls via closure
+	getValues := func() (int, int) {
+		return pair()
+	}
+	result5 := add(getValues())
+	assert(result5 == 30, "add(getValues())")
+	
+	// Multi-return from method
+	calc := Calculator{}
+	result6 := add(calc.Compute())
+	assert(result6 == 300, "add(method())")
+	
+	// Multi-return from closure
+	getClosure := func() func() (int, int) {
+		return func() (int, int) { return 5, 15 }
+	}
+	result7 := add(getClosure()())
+	assert(result7 == 20, "add(closure())")
+	
+	// Multi-return in conditional expression context
+	if add(pair()) == 30 {
+		// ok
+	} else {
+		panic("conditional multi-return failed")
+	}
+	
+	println("PASSED")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -122,7 +122,7 @@ pub(crate) fn compile_type_switch(
     func.enter_breakable(label);
     
     // Collect case jumps and info for variable binding
-    let mut case_jumps: Vec<(usize, usize)> = Vec::new(); // (case_idx, jump_pc)
+    let mut case_jumps: Vec<(usize, usize)> = Vec::new(); // (jump_pc, case_idx)
     let mut end_jumps: Vec<usize> = Vec::new();
     let mut default_case_idx: Option<usize> = None;
     
@@ -151,7 +151,7 @@ pub(crate) fn compile_type_switch(
                 func.emit_op(Opcode::EqI, ok_slot, vk_slot, ok_slot);
                 
                 // Jump to case body if ok is true (interface is nil)
-                case_jumps.push((case_idx, func.emit_jump(Opcode::JumpIf, ok_slot)));
+                case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
             } else {
                 // Type case - check each type
                 for type_opt in &case.types {
@@ -175,7 +175,7 @@ pub(crate) fn compile_type_switch(
                         func.emit_with_flags(Opcode::IfaceAssert, flags, result_reg, iface_slot, target_id as u16);
                         
                         // Jump to case body if ok is true
-                        case_jumps.push((case_idx, func.emit_jump(Opcode::JumpIf, ok_slot)));
+                        case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
                     }
                 }
             }
@@ -220,7 +220,7 @@ pub(crate) fn compile_type_switch(
     let end_pc = func.current_pc();
     
     // Patch case jumps
-    for (case_idx, jump_pc) in &case_jumps {
+    for (jump_pc, case_idx) in &case_jumps {
         if *case_idx < case_body_starts.len() {
             func.patch_jump(*jump_pc, case_body_starts[*case_idx]);
         }
@@ -246,6 +246,42 @@ pub(crate) fn compile_type_switch(
     func.exit_scope();
     
     Ok(())
+}
+
+/// Emit comparison for switch case: tag vs case_val.
+/// Returns the slot containing the comparison result (bool).
+fn emit_switch_case_comparison(
+    tag: u16,
+    tag_type: TypeKey,
+    case_expr: &vo_syntax::ast::Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let case_val = crate::expr::compile_expr(case_expr, ctx, func, info)?;
+    let cmp_result = func.alloc_temp_typed(&[SlotType::Value]);
+    
+    if info.is_interface(tag_type) {
+        // Interface comparison: box case value to interface and use IfaceEq
+        let case_type = info.expr_type(case_expr.id);
+        let case_iface = if info.is_interface(case_type) {
+            case_val
+        } else {
+            // Box concrete case value to interface for comparison
+            let iface_slot = func.alloc_interfaces(1);
+            crate::assign::emit_iface_assign_from_concrete(
+                iface_slot, case_val, case_type, info.any_type(), ctx, func, info
+            )?;
+            iface_slot
+        };
+        func.emit_op(Opcode::IfaceEq, cmp_result, tag, case_iface);
+    } else if info.is_string(tag_type) {
+        func.emit_op(Opcode::StrEq, cmp_result, tag, case_val);
+    } else {
+        func.emit_op(Opcode::EqI, cmp_result, tag, case_val);
+    }
+    
+    Ok(cmp_result)
 }
 
 /// Compile switch statement with optional label (for break support).
@@ -280,10 +316,8 @@ pub(crate) fn compile_switch(
     let mut end_jumps: Vec<usize> = Vec::new();
     let mut default_case_idx: Option<usize> = None;
     
-    // Precompute tag comparison type (hoist out of loop)
-    let is_string_tag = switch_stmt.tag.as_ref()
-        .map(|t| info.is_string(info.expr_type(t.id)))
-        .unwrap_or(false);
+    // Get tag type for comparison dispatch
+    let tag_type = switch_stmt.tag.as_ref().map(|t| info.expr_type(t.id));
     
     // Generate comparison and conditional jumps for each case
     // NOTE: Default case jump is emitted AFTER all other cases are checked,
@@ -293,18 +327,12 @@ pub(crate) fn compile_switch(
             default_case_idx = Some(case_idx);
         } else {
             for case_expr in &case.exprs {
-                let case_val = crate::expr::compile_expr(case_expr, ctx, func, info)?;
-                let cmp_result = func.alloc_temp_typed(&[SlotType::Value]);
-                
-                if let Some(tag) = tag_reg {
-                    if is_string_tag {
-                        func.emit_op(Opcode::StrEq, cmp_result, tag, case_val);
-                    } else {
-                        func.emit_op(Opcode::EqI, cmp_result, tag, case_val);
-                    }
+                let cmp_result = if let (Some(tag), Some(tt)) = (tag_reg, tag_type) {
+                    emit_switch_case_comparison(tag, tt, case_expr, ctx, func, info)?
                 } else {
-                    func.emit_op(Opcode::Copy, cmp_result, case_val, 0);
-                }
+                    // Tagless switch: case expression is the condition itself
+                    crate::expr::compile_expr(case_expr, ctx, func, info)?
+                };
                 
                 case_jumps.push((func.emit_jump(Opcode::JumpIf, cmp_result), case_idx));
             }

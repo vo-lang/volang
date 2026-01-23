@@ -1,0 +1,99 @@
+// Test: Composite literal with embedded interface field
+package main
+
+type Reader interface {
+	Read() string
+}
+
+type StringReader struct {
+	data string
+}
+
+func (s StringReader) Read() string {
+	return s.data
+}
+
+// Struct with embedded interface
+type Wrapper struct {
+	Reader
+	name string
+}
+
+// Struct with multiple embedded interfaces
+type MultiEmbed struct {
+	Reader
+	prefix string
+}
+
+func main() {
+	// Initialize embedded interface in composite literal
+	w := Wrapper{
+		Reader: StringReader{data: "hello"},
+		name:   "wrapper1",
+	}
+	assert(w.Read() == "hello", "embedded interface read")
+	assert(w.name == "wrapper1", "wrapper name")
+	
+	// Pointer to struct with embedded interface
+	wp := &Wrapper{
+		Reader: StringReader{data: "world"},
+		name:   "wrapper2",
+	}
+	assert(wp.Read() == "world", "ptr embedded interface read")
+	
+	// Nested initialization
+	type Outer struct {
+		inner Wrapper
+	}
+	o := Outer{
+		inner: Wrapper{
+			Reader: StringReader{data: "nested"},
+			name:   "inner",
+		},
+	}
+	assert(o.inner.Read() == "nested", "nested embedded read")
+	
+	// Slice of structs with embedded interface
+	wrappers := []Wrapper{
+		{Reader: StringReader{data: "a"}, name: "w1"},
+		{Reader: StringReader{data: "b"}, name: "w2"},
+	}
+	assert(wrappers[0].Read() == "a", "slice elem 0 read")
+	assert(wrappers[1].Read() == "b", "slice elem 1 read")
+	
+	// Map with embedded interface struct
+	wrapperMap := map[string]Wrapper{
+		"first":  {Reader: StringReader{data: "x"}, name: "m1"},
+		"second": {Reader: StringReader{data: "y"}, name: "m2"},
+	}
+	assert(wrapperMap["first"].Read() == "x", "map first read")
+	assert(wrapperMap["second"].Read() == "y", "map second read")
+	
+	// Initialize with nil interface
+	wNil := Wrapper{
+		Reader: nil,
+		name:   "nilreader",
+	}
+	assert(wNil.Reader == nil, "nil embedded interface")
+	assert(wNil.name == "nilreader", "nil wrapper name")
+	
+	// Reassign embedded interface
+	wNil.Reader = StringReader{data: "reassigned"}
+	assert(wNil.Read() == "reassigned", "reassigned embedded read")
+	
+	// MultiEmbed
+	me := MultiEmbed{
+		Reader: StringReader{data: "multi"},
+		prefix: "pre",
+	}
+	assert(me.Read() == "multi", "multi embed read")
+	assert(me.prefix == "pre", "multi embed prefix")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

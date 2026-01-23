@@ -1,0 +1,90 @@
+// Test: Select statement with composite literals in send/receive
+package main
+
+type Msg struct {
+	id   int
+	data string
+}
+
+func main() {
+	ch := make(chan Msg, 2)
+	
+	// Send composite literal in select
+	select {
+	case ch <- Msg{id: 1, data: "first"}:
+		// ok
+	default:
+		panic("should not hit default")
+	}
+	
+	// Receive into composite literal field (via variable)
+	var received Msg
+	select {
+	case received = <-ch:
+		assert(received.id == 1, "received id")
+		assert(received.data == "first", "received data")
+	default:
+		panic("should not hit default on receive")
+	}
+	
+	// Send pointer to composite literal
+	ptrCh := make(chan *Msg, 1)
+	select {
+	case ptrCh <- &Msg{id: 2, data: "second"}:
+		// ok
+	default:
+		panic("ptr send failed")
+	}
+	
+	var receivedPtr *Msg
+	select {
+	case receivedPtr = <-ptrCh:
+		assert(receivedPtr.id == 2, "ptr received id")
+	default:
+		panic("ptr receive failed")
+	}
+	
+	// Send slice literal
+	sliceCh := make(chan []int, 1)
+	select {
+	case sliceCh <- []int{1, 2, 3}:
+		// ok
+	default:
+		panic("slice send failed")
+	}
+	
+	var receivedSlice []int
+	select {
+	case receivedSlice = <-sliceCh:
+		assert(len(receivedSlice) == 3, "slice len")
+		assert(receivedSlice[2] == 3, "slice elem")
+	default:
+		panic("slice receive failed")
+	}
+	
+	// Send map literal
+	mapCh := make(chan map[string]int, 1)
+	select {
+	case mapCh <- map[string]int{"a": 1, "b": 2}:
+		// ok
+	default:
+		panic("map send failed")
+	}
+	
+	var receivedMap map[string]int
+	select {
+	case receivedMap = <-mapCh:
+		assert(receivedMap["a"] == 1, "map a")
+		assert(receivedMap["b"] == 2, "map b")
+	default:
+		panic("map receive failed")
+	}
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

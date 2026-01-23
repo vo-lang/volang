@@ -1,0 +1,103 @@
+// Test: Dynamic access (~>) edge cases
+package main
+
+type Inner struct {
+	val int
+}
+
+type Outer struct {
+	inner Inner
+	ptr   *Inner
+	slice []Inner
+	m     map[string]Inner
+}
+
+func main() {
+	// Basic struct field access via any
+	var a any = Outer{
+		inner: Inner{val: 42},
+		ptr:   &Inner{val: 100},
+		slice: []Inner{{val: 1}, {val: 2}},
+		m:     map[string]Inner{"key": {val: 200}},
+	}
+	
+	// Access nested struct field
+	v1, err1 := a~>inner
+	assert(err1 == nil, "inner access error")
+	v1Inner, err1b := v1~>val
+	assert(err1b == nil, "inner.val access error")
+	assert(v1Inner.(int) == 42, "inner.val value")
+	
+	// Access pointer field
+	v2, err2 := a~>ptr
+	assert(err2 == nil, "ptr access error")
+	v2Val, err2b := v2~>val
+	assert(err2b == nil, "ptr.val access error")
+	assert(v2Val.(int) == 100, "ptr.val value")
+	
+	// Access slice field
+	v3, err3 := a~>slice
+	assert(err3 == nil, "slice access error")
+	v3Elem, err3b := v3~>[0]
+	assert(err3b == nil, "slice[0] access error")
+	v3Val, err3c := v3Elem~>val
+	assert(err3c == nil, "slice[0].val access error")
+	assert(v3Val.(int) == 1, "slice[0].val value")
+	
+	// Access map field
+	v4, err4 := a~>m
+	assert(err4 == nil, "map access error")
+	v4Elem, err4b := v4~>["key"]
+	assert(err4b == nil, "map[key] access error")
+	v4Val, err4c := v4Elem~>val
+	assert(err4c == nil, "map[key].val access error")
+	assert(v4Val.(int) == 200, "map[key].val value")
+	
+	// Chained access with ? operator
+	var b any = Outer{inner: Inner{val: 999}}
+	innerVal := b~>inner~>val?
+	assert(innerVal.(int) == 999, "chained access")
+	
+	// Access non-existent field should return error
+	_, errBad := a~>nonexistent
+	assert(errBad != nil, "nonexistent field should error")
+	
+	// Access on nil any
+	var nilAny any
+	_, errNil := nilAny~>field
+	assert(errNil != nil, "nil any access should error")
+	
+	// Access slice index out of bounds
+	v5, _ := a~>slice
+	_, errOob := v5~>[999]
+	assert(errOob != nil, "slice oob should error")
+	
+	// Access map with missing key
+	v6, _ := a~>m
+	_, errMiss := v6~>["missing"]
+	assert(errMiss != nil, "missing map key should error")
+	
+	// Dynamic method call
+	type Greeter struct {
+		name string
+	}
+	var g any = Greeter{name: "Alice"}
+	// Note: ~> method call syntax
+	// greet, errGreet := g~>String()  // would need String method
+	
+	// Access through interface
+	type Stringer interface {
+		String() string
+	}
+	type MyStr string
+	var s any = MyStr("hello")
+	// Dynamic conversion/assertion would need special handling
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

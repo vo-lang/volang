@@ -1,0 +1,80 @@
+// Test: Type assertion result used immediately in method chain
+package main
+
+type Builder interface {
+	Build() string
+}
+
+type StringHolder interface {
+	Get() string
+}
+
+type Impl struct {
+	val string
+}
+
+func (i *Impl) Build() string {
+	return "built:" + i.val
+}
+
+func (i *Impl) Get() string {
+	return i.val
+}
+
+func (i *Impl) Chain() *Impl {
+	i.val = i.val + "!"
+	return i
+}
+
+func main() {
+	var b Builder = &Impl{val: "test"}
+	
+	// Type assertion then method call
+	result := b.(*Impl).Get()
+	assert(result == "test", "type assert then method")
+	
+	// Type assertion then chain of methods
+	result2 := b.(*Impl).Chain().Chain().Get()
+	assert(result2 == "test!!", "type assert chain")
+	
+	// Type assertion with ok, then method call
+	if impl, ok := b.(*Impl); ok {
+		result3 := impl.Chain().Get()
+		assert(result3 == "test!!!", "type assert ok chain")
+	}
+	
+	// Type assertion on interface to interface
+	var any1 any = b
+	b2 := any1.(Builder)
+	result4 := b2.Build()
+	assert(result4 == "built:test!!!", "any to iface then method")
+	
+	// Type assertion chain: any -> Builder -> *Impl
+	var any2 any = &Impl{val: "x"}
+	result5 := any2.(Builder).(*Impl).Get()
+	assert(result5 == "x", "double type assert chain")
+	
+	// Method call on type assertion in expression
+	var any3 any = &Impl{val: "expr"}
+	if any3.(Builder).Build() == "built:expr" {
+		// ok
+	} else {
+		panic("expr type assert method failed")
+	}
+	
+	// Type assertion in function argument
+	var any4 any = &Impl{val: "arg"}
+	checkBuild(any4.(Builder))
+	
+	println("PASSED")
+}
+
+func checkBuild(b Builder) {
+	assert(b.Build() == "built:arg", "func arg type assert")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

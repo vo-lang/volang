@@ -1,0 +1,57 @@
+// Test: Method value obtained from interface field of struct
+package main
+
+type Stringer interface {
+	String() string
+}
+
+type MyStr string
+
+func (s MyStr) String() string {
+	return string(s)
+}
+
+type Container struct {
+	Val Stringer
+}
+
+func main() {
+	c := Container{Val: MyStr("hello")}
+	
+	// Get method value from interface field
+	fn := c.Val.String
+	result := fn()
+	assert(result == "hello", "method value from interface field")
+	
+	// Method value from interface field through pointer
+	cp := &Container{Val: MyStr("world")}
+	fn2 := cp.Val.String
+	result2 := fn2()
+	assert(result2 == "world", "method value from ptr->interface field")
+	
+	// Store interface field in local, then get method value
+	local := c.Val
+	fn3 := local.String
+	result3 := fn3()
+	assert(result3 == "hello", "method value from local interface")
+	
+	// Method value from interface in slice
+	slice := []Stringer{MyStr("a"), MyStr("b")}
+	fn4 := slice[1].String
+	result4 := fn4()
+	assert(result4 == "b", "method value from slice element interface")
+	
+	// Method value from interface in map
+	m := map[string]Stringer{"key": MyStr("mapval")}
+	fn5 := m["key"].String
+	result5 := fn5()
+	assert(result5 == "mapval", "method value from map value interface")
+	
+	println("PASSED")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

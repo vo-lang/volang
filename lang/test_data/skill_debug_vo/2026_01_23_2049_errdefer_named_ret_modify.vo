@@ -1,0 +1,149 @@
+// Test: errdefer with closure that modifies named return values
+package main
+
+import "errors"
+
+func withErrdefer() (result int, err error) {
+	result = 10
+	
+	errdefer func() {
+		result = -1  // Should run on error
+	}()
+	
+	err = errors.New("test error")
+	return
+}
+
+func withErrdeferNoError() (result int, err error) {
+	result = 20
+	
+	errdefer func() {
+		result = -1  // Should NOT run when no error
+	}()
+	
+	return
+}
+
+func withErrdeferChain() (result int, err error) {
+	result = 0
+	
+	errdefer func() {
+		result += 100
+	}()
+	
+	errdefer func() {
+		result += 10
+	}()
+	
+	err = errors.New("chain error")
+	return
+}
+
+func withErrdeferAndDefer() (result int, err error) {
+	result = 0
+	
+	defer func() {
+		result += 1000  // Always runs
+	}()
+	
+	errdefer func() {
+		result += 100  // Only on error
+	}()
+	
+	err = errors.New("mixed error")
+	return
+}
+
+func withErrdeferAndDeferNoError() (result int, err error) {
+	result = 0
+	
+	defer func() {
+		result += 1000  // Always runs
+	}()
+	
+	errdefer func() {
+		result += 100  // Should NOT run
+	}()
+	
+	return
+}
+
+func withErrdeferCapture() (result int, err error) {
+	x := 5
+	result = x
+	
+	errdefer func() {
+		result = x * 10  // Capture x
+	}()
+	
+	x = 7  // Modify x after errdefer
+	err = errors.New("capture error")
+	return
+}
+
+func main() {
+	// Basic errdefer
+	r1, e1 := withErrdefer()
+	assert(r1 == -1, "errdefer should modify result on error")
+	assert(e1 != nil, "should have error")
+	
+	// errdefer without error
+	r2, e2 := withErrdeferNoError()
+	assert(r2 == 20, "errdefer should NOT modify when no error")
+	assert(e2 == nil, "should have no error")
+	
+	// errdefer chain (LIFO order)
+	r3, e3 := withErrdeferChain()
+	// errdefers run in LIFO: +10 first, then +100
+	assert(r3 == 110, "errdefer chain: got "+itoa(r3))
+	assert(e3 != nil, "should have error")
+	
+	// Mixed defer and errdefer with error
+	r4, e4 := withErrdeferAndDefer()
+	// defer always runs (+1000), errdefer runs on error (+100)
+	assert(r4 == 1100, "mixed defer/errdefer with error: got "+itoa(r4))
+	assert(e4 != nil, "should have error")
+	
+	// Mixed defer and errdefer without error
+	r5, e5 := withErrdeferAndDeferNoError()
+	// defer always runs (+1000), errdefer should NOT run
+	assert(r5 == 1000, "mixed defer/errdefer no error: got "+itoa(r5))
+	assert(e5 == nil, "should have no error")
+	
+	// errdefer with capture
+	r6, e6 := withErrdeferCapture()
+	// errdefer captures x by reference, so sees x=7
+	assert(r6 == 70, "errdefer capture: got "+itoa(r6))
+	assert(e6 != nil, "should have error")
+	
+	println("PASSED")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

@@ -1,0 +1,111 @@
+// Test: Map with interface keys - comparison semantics
+package main
+
+type Equaler interface {
+	Equal(other Equaler) bool
+}
+
+func main() {
+	// Map with any key - same underlying values
+	m := make(map[any]int)
+	m[1] = 100
+	m["hello"] = 200
+	m[true] = 300
+	
+	assert(m[1] == 100, "int key lookup")
+	assert(m["hello"] == 200, "string key lookup")
+	assert(m[true] == 300, "bool key lookup")
+	
+	// Same value, different variable
+	key1 := 1
+	assert(m[key1] == 100, "int key from var")
+	
+	// Struct as any key
+	type Point struct {
+		x, y int
+	}
+	m[Point{1, 2}] = 400
+	assert(m[Point{1, 2}] == 400, "struct key lookup")
+	
+	// Different struct instance, same value
+	p1 := Point{3, 4}
+	m[p1] = 500
+	p2 := Point{3, 4}
+	assert(m[p2] == 500, "struct key same value different instance")
+	
+	// Array as any key
+	m[[2]int{1, 2}] = 600
+	assert(m[[2]int{1, 2}] == 600, "array key lookup")
+	
+	// Pointer as any key (reference equality)
+	ptr1 := &Point{5, 6}
+	m[ptr1] = 700
+	assert(m[ptr1] == 700, "pointer key lookup same ptr")
+	
+	// Different pointer, same value - should be different key
+	ptr2 := &Point{5, 6}
+	_, ok := m[ptr2]
+	assert(!ok, "different pointer should be different key")
+	
+	// nil interface key
+	var nilAny any
+	m[nilAny] = 800
+	assert(m[nil] == 800, "nil key lookup")
+	
+	// Overwrite with same key
+	m[1] = 999
+	assert(m[1] == 999, "overwrite int key")
+	
+	// Delete and re-add
+	delete(m, 1)
+	_, ok2 := m[1]
+	assert(!ok2, "deleted key should not exist")
+	m[1] = 111
+	assert(m[1] == 111, "re-added key")
+	
+	// String comparison
+	s1 := "test"
+	s2 := "te" + "st"
+	m[s1] = 1000
+	assert(m[s2] == 1000, "string key value equality")
+	
+	// Float as key (be careful with NaN)
+	m[3.14] = 1100
+	assert(m[3.14] == 1100, "float key")
+	
+	// Check length
+	// We have: "hello", true, Point{1,2}, Point{3,4}, [2]int{1,2}, ptr1, nil, 1, "test", 3.14
+	// That's 10 keys
+	assert(len(m) == 10, "map length should be 10, got "+itoa(len(m)))
+	
+	println("PASSED")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}
