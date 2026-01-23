@@ -1,0 +1,210 @@
+package main
+
+// Test statement edge cases
+
+// 1. Labeled statements and goto/break/continue
+func testLabeledBreak() {
+	sum := 0
+outer:
+	for i := 0; i < 5; i++ {
+		for j := 0; j < 5; j++ {
+			if j == 2 {
+				break outer
+			}
+			sum++
+		}
+	}
+	assert(sum == 2, "labeled break: %d", sum) // 0,0 and 0,1
+}
+
+func testLabeledContinue() {
+	sum := 0
+outer:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if j == 1 {
+				continue outer
+			}
+			sum++
+		}
+	}
+	assert(sum == 3, "labeled continue: %d", sum) // each outer iteration adds 1 (j=0)
+}
+
+// 2. Empty statements
+func testEmptyStatements() {
+	; ; ;  // Multiple empty statements
+	for i := 0; i < 1; i++ {
+		;  // Empty in loop
+	}
+	if true {
+		;  // Empty in if
+	}
+}
+
+// 3. Expression statements
+func testExprStatements() {
+	f := func() int { return 42 }
+	f()  // Call as statement, discard result
+	
+	ch := make(chan int, 1)
+	ch <- 1
+	<-ch  // Receive as statement, discard result
+}
+
+// 4. Inc/Dec statements
+func testIncDec() {
+	x := 0
+	x++
+	assert(x == 1, "inc")
+	x--
+	assert(x == 0, "dec")
+	
+	// On slice element
+	arr := []int{10}
+	arr[0]++
+	assert(arr[0] == 11, "slice elem inc")
+	
+	// On map value - not allowed in Go, skip
+}
+
+// 5. Assignment operators
+func testAssignOps() {
+	x := 10
+	x += 5
+	assert(x == 15, "+=")
+	x -= 3
+	assert(x == 12, "-=")
+	x *= 2
+	assert(x == 24, "*=")
+	x /= 4
+	assert(x == 6, "/=")
+	x %= 4
+	assert(x == 2, "%=")
+	
+	// Bitwise
+	y := 0b1100
+	y &= 0b1010
+	assert(y == 0b1000, "&=")
+	y |= 0b0011
+	assert(y == 0b1011, "|=")
+	y ^= 0b0001
+	assert(y == 0b1010, "^=")
+	
+	// Shift
+	z := 1
+	z <<= 3
+	assert(z == 8, "<<=")
+	z >>= 1
+	assert(z == 4, ">>=")
+}
+
+// 6. Multiple assignment
+func testMultipleAssign() {
+	a, b, c := 1, 2, 3
+	a, b, c = c, a, b  // Rotate
+	assert(a == 3 && b == 1 && c == 2, "rotate assign")
+	
+	// With function return
+	swap := func(x, y int) (int, int) { return y, x }
+	a, b = swap(a, b)
+	assert(a == 1 && b == 3, "swap assign")
+}
+
+// 7. Short declaration in if/for/switch
+func testShortDeclInStmts() {
+	// If with init
+	if x := 10; x > 5 {
+		assert(x == 10, "if init")
+	}
+	
+	// For with init
+	for i := 0; i < 1; i++ {
+		assert(i == 0, "for init")
+	}
+	
+	// Switch with init
+	switch x := 5; x {
+	case 5:
+		// ok
+	default:
+		panic("switch init failed")
+	}
+}
+
+// 8. Fallthrough in switch
+func testFallthrough() {
+	x := 1
+	result := 0
+	switch x {
+	case 1:
+		result = 10
+		fallthrough
+	case 2:
+		result += 20
+	case 3:
+		result = 30
+	}
+	assert(result == 30, "fallthrough: %d", result)
+}
+
+// 9. Type switch
+func testTypeSwitch() {
+	check := func(v any) string {
+		switch v.(type) {
+		case int:
+			return "int"
+		case string:
+			return "string"
+		case bool:
+			return "bool"
+		default:
+			return "unknown"
+		}
+	}
+	
+	assert(check(42) == "int", "type switch int")
+	assert(check("hi") == "string", "type switch string")
+	assert(check(true) == "bool", "type switch bool")
+	assert(check(3.14) == "unknown", "type switch unknown")
+}
+
+// 10. Select with default
+func testSelectDefault() {
+	ch := make(chan int, 1)
+	
+	// Non-blocking receive with default
+	select {
+	case <-ch:
+		panic("should not receive")
+	default:
+		// ok - channel is empty
+	}
+	
+	// Non-blocking send
+	select {
+	case ch <- 42:
+		// ok - channel has buffer
+	default:
+		panic("should be able to send")
+	}
+	
+	v := <-ch
+	assert(v == 42, "select send value")
+}
+
+func main() {
+	testLabeledBreak()
+	testLabeledContinue()
+	testEmptyStatements()
+	testExprStatements()
+	testIncDec()
+	testAssignOps()
+	testMultipleAssign()
+	testShortDeclInStmts()
+	testFallthrough()
+	testTypeSwitch()
+	testSelectDefault()
+	
+	println("All statement edge tests passed!")
+}

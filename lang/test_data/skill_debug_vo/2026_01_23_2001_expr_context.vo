@@ -1,0 +1,165 @@
+package main
+
+// Test expressions in various statement contexts
+
+type Point struct{ x, y int }
+
+func (p Point) Sum() int { return p.x + p.y }
+
+// 1. Composite literal in switch
+func testSwitchComposite() {
+	switch (Point{x: 1, y: 2}).Sum() {
+	case 3:
+		// ok
+	default:
+		panic("switch composite failed")
+	}
+	
+	// Switch with init and composite
+	switch p := (Point{x: 5, y: 5}); p.Sum() {
+	case 10:
+		// ok
+	default:
+		panic("switch init composite failed")
+	}
+}
+
+// 2. Composite literal in for loop
+func testForComposite() {
+	// For condition
+	sum := 0
+	for i := 0; (Point{x: i, y: 0}).Sum() < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "for condition composite: %d", sum) // 0+1+2+3+4
+	
+	// For post statement - can't use composite literal there easily
+	// but we can use it in the body
+	for i := 0; i < 3; i++ {
+		p := Point{x: i, y: i}
+		assert(p.Sum() == i*2, "for body composite")
+	}
+}
+
+// 3. Composite literal with method chain
+func testCompositeMethodChain() {
+	// Method on composite literal
+	v := (Point{x: 10, y: 20}).Sum()
+	assert(v == 30, "method on composite")
+	
+	// Nested in function call
+	max := func(a, b int) int {
+		if a > b { return a }
+		return b
+	}
+	
+	m := max((Point{x: 5, y: 3}).Sum(), (Point{x: 2, y: 2}).Sum())
+	assert(m == 8, "composite in function call")
+}
+
+// 4. Index on composite literal slice
+func testCompositeSliceIndex() {
+	// Direct index
+	v := ([]int{10, 20, 30})[1]
+	assert(v == 20, "slice index: %d", v)
+	
+	// With struct
+	p := ([]Point{{x: 1, y: 2}, {x: 3, y: 4}})[0]
+	assert(p.Sum() == 3, "struct slice index")
+	
+	// Nested index
+	v2 := ([][]int{{1, 2}, {3, 4}})[1][0]
+	assert(v2 == 3, "nested index")
+}
+
+// 5. Composite literal in return
+func returnComposite() Point {
+	return Point{x: 100, y: 200}
+}
+
+func testReturnComposite() {
+	p := returnComposite()
+	assert(p.Sum() == 300, "return composite")
+}
+
+// 6. Composite literal in channel send
+func testChannelComposite() {
+	ch := make(chan Point, 1)
+	ch <- Point{x: 7, y: 8}
+	p := <-ch
+	assert(p.Sum() == 15, "channel composite")
+}
+
+// 7. Composite literal in map key (struct key)
+func testMapCompositeKey() {
+	m := make(map[Point]string)
+	m[Point{x: 1, y: 2}] = "one-two"
+	
+	v, ok := m[Point{x: 1, y: 2}]
+	assert(ok && v == "one-two", "map composite key")
+}
+
+// 8. Composite literal comparison
+func testCompositeComparison() {
+	// Direct comparison
+	if (Point{x: 1, y: 2}) == (Point{x: 1, y: 2}) {
+		// ok
+	} else {
+		panic("composite comparison failed")
+	}
+	
+	// Not equal
+	if (Point{x: 1, y: 2}) != (Point{x: 3, y: 4}) {
+		// ok
+	} else {
+		panic("composite not equal failed")
+	}
+}
+
+// 9. Composite literal with spread
+func testCompositeSpread() {
+	sum := func(nums ...int) int {
+		total := 0
+		for _, n := range nums {
+			total += n
+		}
+		return total
+	}
+	
+	// Spread composite literal slice
+	s := sum(([]int{1, 2, 3, 4, 5})...)
+	assert(s == 15, "composite spread")
+}
+
+// 10. Array composite literal in various contexts
+func testArrayComposite() {
+	// Array index
+	v := ([3]int{100, 200, 300})[2]
+	assert(v == 300, "array index")
+	
+	// Array length
+	l := len([5]int{1, 2, 3, 4, 5})
+	assert(l == 5, "array len")
+	
+	// Array in condition
+	if ([2]bool{true, false})[0] {
+		// ok
+	} else {
+		panic("array bool index")
+	}
+}
+
+func main() {
+	testSwitchComposite()
+	testForComposite()
+	testCompositeMethodChain()
+	testCompositeSliceIndex()
+	testReturnComposite()
+	testChannelComposite()
+	testMapCompositeKey()
+	testCompositeComparison()
+	testCompositeSpread()
+	testArrayComposite()
+	
+	println("All expression context tests passed!")
+}

@@ -829,6 +829,8 @@ pub enum ExprKind {
     TryUnwrap(Box<Expr>),
     /// A dynamic access expression (using ~>).
     DynAccess(Box<DynAccessExpr>),
+    /// Ellipsis expression for array length inference: [...]T{...}
+    Ellipsis,
 }
 
 /// An integer literal.
@@ -1335,6 +1337,7 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
                 }
             }
         }
+        ExprKind::Ellipsis => {}
     }
 }
 

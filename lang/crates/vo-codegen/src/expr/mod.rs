@@ -446,6 +446,11 @@ pub fn compile_expr_to(
         ExprKind::FuncLit(func_lit) => {
             literal::compile_func_lit(expr, func_lit, dst, ctx, func, info)?;
         }
+
+        // === Ellipsis (only valid in array type [...]T) ===
+        ExprKind::Ellipsis => {
+            return Err(CodegenError::Internal("Ellipsis expression should not be compiled directly".to_string()));
+        }
     }
 
     Ok(())

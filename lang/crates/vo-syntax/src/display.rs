@@ -153,6 +153,9 @@ pub fn fmt_expr(expr: &Expr, f: &mut fmt::Formatter<'_>, interner: &SymbolIntern
                 }
             }
         }
+        ExprKind::Ellipsis => {
+            f.write_str("...")
+        }
     }
 }
 

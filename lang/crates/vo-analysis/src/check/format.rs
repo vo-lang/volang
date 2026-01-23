@@ -160,6 +160,9 @@ fn write_expr(buf: &mut String, expr: &Expr, interner: &SymbolInterner) {
                 }
             }
         }
+        ExprKind::Ellipsis => {
+            buf.push_str("...");
+        }
     }
 }
 

@@ -1469,6 +1469,11 @@ impl Checker {
                 x.mode = OperandMode::Value;
                 x.typ = Some(self.new_t_tuple(vec![any_var, err_var]));
             }
+            ExprKind::Ellipsis => {
+                // Ellipsis is only valid as array length in [...]T{...} composite literals
+                self.invalid_op(e.span, "use of [...] array outside of literal");
+                x.mode = OperandMode::Invalid;
+            }
         }
         
         // Ensure x.expr points to the current expression (not a sub-expression)

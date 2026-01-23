@@ -323,7 +323,13 @@ impl Checker {
     // =========================================================================
 
     /// Evaluates an array length expression and returns the length.
+    /// Returns None for `[...]T` syntax where length is inferred from composite literal.
     fn array_len(&mut self, e: &Expr) -> Option<u64> {
+        // Handle [...]T syntax - length will be inferred from composite literal
+        if matches!(e.kind, vo_syntax::ast::ExprKind::Ellipsis) {
+            return None;
+        }
+        
         let mut x = Operand::new();
         self.expr(&mut x, e);
         if let OperandMode::Constant(v) = &x.mode {

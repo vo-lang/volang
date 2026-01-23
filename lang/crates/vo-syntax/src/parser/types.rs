@@ -31,6 +31,14 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let elem = self.parse_type()?;
                     TypeExprKind::Slice(Box::new(elem))
+                } else if self.at(TokenKind::Ellipsis) {
+                    // Array type with inferred length: [...]T
+                    let ellipsis_span = self.current.span;
+                    self.advance();
+                    self.expect(TokenKind::RBracket)?;
+                    let elem = self.parse_type()?;
+                    let len = Expr { id: self.alloc_expr_id(), kind: ExprKind::Ellipsis, span: ellipsis_span };
+                    TypeExprKind::Array(Box::new(ArrayType { len, elem }))
                 } else {
                     // Array type: [N]T
                     let len = self.parse_expr()?;

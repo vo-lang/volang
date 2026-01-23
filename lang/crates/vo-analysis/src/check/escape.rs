@@ -425,7 +425,7 @@ impl<'a> EscapeAnalyzer<'a> {
                     }
                 }
             }
-            ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::RuneLit(_) | ExprKind::StringLit(_) | ExprKind::TypeAsExpr(_) => {}
+            ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::RuneLit(_) | ExprKind::StringLit(_) | ExprKind::TypeAsExpr(_) | ExprKind::Ellipsis => {}
         }
     }
 

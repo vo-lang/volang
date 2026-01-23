@@ -762,6 +762,9 @@ impl<'a> AstPrinter<'a> {
                     }
                 }
             }
+            ExprKind::Ellipsis => {
+                write!(self.output, "...").unwrap();
+            }
         }
     }
 

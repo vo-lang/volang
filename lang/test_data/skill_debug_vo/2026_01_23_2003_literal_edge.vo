@@ -1,0 +1,218 @@
+package main
+
+// Test literal and constant edge cases
+
+// 1. Numeric literals
+func testNumericLiterals() {
+	// Binary
+	b := 0b1010
+	assert(b == 10, "binary")
+	
+	// Octal
+	o := 0o17
+	assert(o == 15, "octal")
+	
+	// Hex
+	h := 0xFF
+	assert(h == 255, "hex")
+	
+	// Underscores in numbers
+	big := 1_000_000
+	assert(big == 1000000, "underscores")
+	
+	// Float literals
+	f1 := 3.14
+	f2 := .5
+	f3 := 2.
+	assert(f1 > 3.0 && f2 == 0.5 && f3 == 2.0, "floats")
+	
+	// Scientific notation
+	e1 := 1e10
+	e2 := 1.5e-3
+	assert(e1 == 10000000000.0, "scientific")
+	assert(e2 < 0.002 && e2 > 0.001, "scientific neg exp")
+}
+
+// 2. String literals
+func testStringLiterals() {
+	// Escape sequences
+	s1 := "hello\nworld"
+	assert(len(s1) == 11, "newline escape")
+	
+	s2 := "tab\there"
+	assert(len(s2) == 8, "tab escape")
+	
+	s3 := "quote\"here"
+	assert(len(s3) == 10, "quote escape")
+	
+	// Raw strings
+	r1 := `raw\nstring`
+	assert(len(r1) == 11, "raw string no escape")
+	
+	// Unicode escape
+	u1 := "\u4e2d\u6587"  // 中文
+	assert(len([]rune(u1)) == 2, "unicode escape")
+}
+
+// 3. Rune literals
+func testRuneLiterals() {
+	r1 := 'a'
+	assert(r1 == 97, "ascii rune")
+	
+	r2 := '中'
+	assert(r2 == 0x4e2d, "unicode rune")
+	
+	r3 := '\n'
+	assert(r3 == 10, "newline rune")
+	
+	r4 := '\''
+	assert(r4 == 39, "quote rune")
+	
+	r5 := '\\'
+	assert(r5 == 92, "backslash rune")
+}
+
+// 4. Composite literal with expressions
+func testCompositeLitExpr() {
+	x, y := 10, 20
+	
+	type Point struct{ a, b int }
+	
+	// Field values from expressions
+	p := Point{a: x + 1, b: y * 2}
+	assert(p.a == 11 && p.b == 40, "composite expr fields")
+	
+	// Array with expressions
+	arr := [3]int{x, x + y, x * y}
+	assert(arr[0] == 10 && arr[1] == 30 && arr[2] == 200, "array expr")
+	
+	// Slice with expressions
+	sl := []int{x, y, x + y}
+	assert(sl[2] == 30, "slice expr")
+	
+	// Map with expressions
+	m := map[int]int{x: y, y: x}
+	assert(m[10] == 20 && m[20] == 10, "map expr")
+}
+
+// 5. Nested composite literals
+func testNestedComposite() {
+	type Inner struct{ v int }
+	type Outer struct{ i Inner }
+	
+	// Nested struct
+	o := Outer{i: Inner{v: 42}}
+	assert(o.i.v == 42, "nested struct")
+	
+	// Slice of slices
+	ss := [][]int{{1, 2}, {3, 4, 5}}
+	assert(len(ss) == 2 && len(ss[1]) == 3, "slice of slice")
+	
+	// Map of slices
+	ms := map[string][]int{"a": {1, 2}, "b": {3}}
+	assert(len(ms["a"]) == 2, "map of slice")
+	
+	// Slice of maps
+	sm := []map[string]int{{"x": 1}, {"y": 2}}
+	assert(sm[0]["x"] == 1, "slice of map")
+}
+
+// 6. Zero values in composite literals
+func testZeroValues() {
+	type Data struct {
+		i int
+		s string
+		b bool
+		f float64
+	}
+	
+	// Partial init - rest should be zero
+	d := Data{i: 42}
+	assert(d.i == 42, "partial init int")
+	assert(d.s == "", "partial init string zero")
+	assert(d.b == false, "partial init bool zero")
+	assert(d.f == 0.0, "partial init float zero")
+	
+	// Empty struct literal
+	d2 := Data{}
+	assert(d2.i == 0 && d2.s == "" && d2.b == false, "empty struct literal")
+}
+
+// 7. Keyed vs unkeyed elements
+func testKeyedElements() {
+	// Unkeyed (positional)
+	type P struct{ x, y int }
+	p1 := P{1, 2}
+	assert(p1.x == 1 && p1.y == 2, "unkeyed struct")
+	
+	// Keyed (can be out of order)
+	p2 := P{y: 20, x: 10}
+	assert(p2.x == 10 && p2.y == 20, "keyed struct order")
+	
+	// Array with keyed elements
+	arr := [5]int{1: 10, 3: 30}
+	assert(arr[0] == 0 && arr[1] == 10 && arr[3] == 30, "keyed array")
+}
+
+// 8. Slice/Array literal with length inference
+func testLengthInference() {
+	// Array with ... length
+	arr := [...]int{1, 2, 3, 4, 5}
+	assert(len(arr) == 5, "inferred array length")
+	
+	// With keyed elements
+	arr2 := [...]int{2: 100, 5: 500}
+	assert(len(arr2) == 6, "inferred with keys") // indices 0-5
+	assert(arr2[2] == 100 && arr2[5] == 500, "keyed values")
+}
+
+// 9. Function literal in composite
+func testFuncInComposite() {
+	type Handler struct {
+		fn func(int) int
+	}
+	
+	h := Handler{
+		fn: func(x int) int { return x * 2 },
+	}
+	
+	assert(h.fn(21) == 42, "func in composite")
+	
+	// Slice of functions
+	fns := []func(int) int{
+		func(x int) int { return x + 1 },
+		func(x int) int { return x * 2 },
+	}
+	assert(fns[0](10) == 11 && fns[1](10) == 20, "slice of funcs")
+}
+
+// 10. Interface in composite
+func testIfaceInComposite() {
+	type Container struct {
+		data any
+	}
+	
+	c1 := Container{data: 42}
+	c2 := Container{data: "hello"}
+	
+	v1, ok1 := c1.data.(int)
+	assert(ok1 && v1 == 42, "iface int in composite")
+	
+	v2, ok2 := c2.data.(string)
+	assert(ok2 && v2 == "hello", "iface string in composite")
+}
+
+func main() {
+	testNumericLiterals()
+	testStringLiterals()
+	testRuneLiterals()
+	testCompositeLitExpr()
+	testNestedComposite()
+	testZeroValues()
+	testKeyedElements()
+	testLengthInference()
+	testFuncInComposite()
+	testIfaceInComposite()
+	
+	println("All literal edge tests passed!")
+}
