@@ -109,6 +109,35 @@ fn format_error_chain(ptr: GcRef, field_offsets: [u16; 4], ctx: &ExternCallConte
     format!("{}: {}", msg, cause_msg)
 }
 
+/// Convert ValueKind to Go type name string for %T verb.
+fn value_kind_to_type_name(vk: ValueKind) -> String {
+    match vk {
+        ValueKind::Void => "<nil>".to_string(),
+        ValueKind::Bool => "bool".to_string(),
+        ValueKind::Int => "int".to_string(),
+        ValueKind::Int8 => "int8".to_string(),
+        ValueKind::Int16 => "int16".to_string(),
+        ValueKind::Int32 => "int32".to_string(),
+        ValueKind::Int64 => "int64".to_string(),
+        ValueKind::Uint => "uint".to_string(),
+        ValueKind::Uint8 => "uint8".to_string(),
+        ValueKind::Uint16 => "uint16".to_string(),
+        ValueKind::Uint32 => "uint32".to_string(),
+        ValueKind::Uint64 => "uint64".to_string(),
+        ValueKind::Float32 => "float32".to_string(),
+        ValueKind::Float64 => "float64".to_string(),
+        ValueKind::String => "string".to_string(),
+        ValueKind::Slice => "[]...".to_string(),
+        ValueKind::Map => "map[...]...".to_string(),
+        ValueKind::Channel => "chan ...".to_string(),
+        ValueKind::Closure => "func(...)".to_string(),
+        ValueKind::Pointer => "*...".to_string(),
+        ValueKind::Array => "[...]...".to_string(),
+        ValueKind::Struct => "struct{...}".to_string(),
+        ValueKind::Interface => "interface{}".to_string(),
+    }
+}
+
 /// Format a slice value for %v output.
 fn format_slice_value(slice_ref: GcRef) -> String {
     if slice_ref.is_null() {
@@ -281,6 +310,7 @@ fn format_with_verb(verb: char, slot0: u64, slot1: u64, call: Option<&ExternCall
                 _ => format!("%!q({})", format_interface(slot0, slot1)),
             }
         }
+        'T' => value_kind_to_type_name(vk),
         _ => format!("%!{}({})", verb, format_interface(slot0, slot1)),
     }
 }
