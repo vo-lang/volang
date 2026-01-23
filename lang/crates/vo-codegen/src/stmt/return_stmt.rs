@@ -11,11 +11,82 @@ use crate::type_info::TypeInfoWrapper;
 
 /// Emit Return with heap_returns flag for escaped named returns.
 /// VM reads per-ref slot counts from FunctionDef.heap_ret_slots.
-fn emit_heap_returns(func: &mut FuncBuilder, named_return_slots: &[(u16, u16, bool)]) {
+fn emit_heap_returns(func: &mut FuncBuilder, named_return_slots: &[(u16, u16, bool)], is_error_return: bool) {
     use vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS;
     let gcref_count = named_return_slots.len() as u16;
     let gcref_start = named_return_slots[0].0;
-    func.emit_with_flags(Opcode::Return, RETURN_FLAG_HEAP_RETURNS, gcref_start, gcref_count, 0);
+    let flags = RETURN_FLAG_HEAP_RETURNS | if is_error_return { 1 } else { 0 };
+    func.emit_with_flags(Opcode::Return, flags, gcref_start, gcref_count, 0);
+}
+
+/// Emit error return: zero values for all non-error returns, plus the error value.
+/// Handles escaped named returns correctly for errdefer semantics.
+/// 
+/// - `error_slot`: the slot containing the error value to return (2 slots: interface)
+/// - Returns true if handled (caller should not emit additional return)
+pub fn emit_error_return(
+    error_slot: u16,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) {
+    let named_return_slots: Vec<_> = func.named_return_slots().to_vec();
+    let all_escaped = !named_return_slots.is_empty() 
+        && named_return_slots.iter().all(|(_, _, escaped)| *escaped);
+    
+    if all_escaped {
+        // Escaped named returns: store zero values to heap, copy error, use heap_returns
+        let ret_types: Vec<_> = func.return_types().to_vec();
+        
+        for (i, &(gcref_slot, slots, _)) in named_return_slots.iter().enumerate() {
+            let is_last = i == named_return_slots.len() - 1;
+            if is_last && !ret_types.is_empty() && info.is_error_type(ret_types[i]) {
+                // This is the error return - store the propagated error
+                if slots == 1 {
+                    func.emit_op(Opcode::PtrSet, gcref_slot, 0, error_slot);
+                } else {
+                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, gcref_slot, 0, error_slot);
+                }
+            } else {
+                // Non-error return - store zero
+                let temp = func.alloc_temp_typed(&vec![SlotType::Value; slots as usize]);
+                for j in 0..slots {
+                    func.emit_op(Opcode::LoadInt, temp + j, 0, 0);
+                }
+                if slots == 1 {
+                    func.emit_op(Opcode::PtrSet, gcref_slot, 0, temp);
+                } else {
+                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, gcref_slot, 0, temp);
+                }
+            }
+        }
+        
+        emit_heap_returns(func, &named_return_slots, true);
+    } else {
+        // Standard path: allocate stack space, fill with zeros, copy error
+        let ret_types: Vec<_> = func.return_types().to_vec();
+        let mut total_ret_slots = 0u16;
+        for ret_type in &ret_types {
+            total_ret_slots += info.type_slot_count(*ret_type);
+        }
+        
+        let mut ret_slot_types = Vec::new();
+        for ret_type in &ret_types {
+            ret_slot_types.extend(info.type_slot_types(*ret_type));
+        }
+        let ret_start = func.alloc_temp_typed(&ret_slot_types);
+        for i in 0..total_ret_slots {
+            func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
+        }
+        
+        if !ret_types.is_empty() {
+            let ret_error_slots = info.type_slot_count(*ret_types.last().unwrap());
+            let ret_error_start = ret_start + total_ret_slots - ret_error_slots;
+            func.emit_copy(ret_error_start, error_slot, ret_error_slots);
+        }
+        
+        // flags bit 0 = 1 indicates error return (for errdefer)
+        func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+    }
 }
 
 /// Compile return statement
@@ -36,7 +107,7 @@ pub(super) fn compile_return(
             let all_escaped = named_return_slots.iter().all(|(_, _, escaped)| *escaped);
             
             if all_escaped {
-                emit_heap_returns(func, &named_return_slots);
+                emit_heap_returns(func, &named_return_slots, false);
             } else {
                 // Mixed or non-escaped: copy to return area as before
                 let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s, _)| *s).sum();
@@ -100,7 +171,7 @@ pub(super) fn compile_return(
                 }
             }
             
-            emit_heap_returns(func, &named_return_slots);
+            emit_heap_returns(func, &named_return_slots, false);
         } else {
             // Get function's return types (clone to avoid borrow issues)
             let ret_types: Vec<_> = func.return_types().to_vec();
@@ -185,40 +256,11 @@ pub(super) fn compile_fail(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // Fail returns zero values for all non-error returns, plus the error value
-    // This is equivalent to: return <zero-values>, err
+    // Compile error expression to temp slot (error is always 2 slots: interface)
+    let error_slot = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::Value]);
+    let error_expr_type = info.expr_type(fail_stmt.error.id);
+    crate::assign::emit_assign(error_slot, crate::assign::AssignSource::Expr(&fail_stmt.error), error_expr_type, ctx, func, info)?;
     
-    // Get function's return types
-    let ret_types: Vec<_> = func.return_types().to_vec();
-    
-    // Calculate total return slots needed
-    let mut total_ret_slots = 0u16;
-    for ret_type in &ret_types {
-        total_ret_slots += info.type_slot_count(*ret_type);
-    }
-    
-    // Allocate space for return values
-    let mut fail_ret_slot_types = Vec::new();
-    for ret_type in &ret_types {
-        fail_ret_slot_types.extend(info.type_slot_types(*ret_type));
-    }
-    let ret_start = func.alloc_temp_typed(&fail_ret_slot_types);
-    
-    // Initialize all slots to zero/nil first
-    for i in 0..total_ret_slots {
-        func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-    }
-    
-    // Compile the error expression into the last return slot(s)
-    // The error is the last return value
-    if !ret_types.is_empty() {
-        let error_type = *ret_types.last().unwrap();
-        let error_slots = info.type_slot_count(error_type);
-        let error_start = ret_start + total_ret_slots - error_slots;
-        crate::assign::emit_assign(error_start, crate::assign::AssignSource::Expr(&fail_stmt.error), error_type, ctx, func, info)?;
-    }
-    
-    // flags bit 0 = 1 indicates error return (for errdefer)
-    func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+    emit_error_return(error_slot, func, info);
     Ok(())
 }

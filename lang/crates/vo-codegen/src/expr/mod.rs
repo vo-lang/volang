@@ -527,29 +527,8 @@ fn compile_try_unwrap(
     
     // Check if function returns error - determines propagate vs panic behavior
     if func.has_error_return(info) {
-        // Propagate mode: return zero values with error
-        let ret_types: Vec<_> = func.return_types().to_vec();
-        let mut total_ret_slots = 0u16;
-        for ret_type in &ret_types {
-            total_ret_slots += info.type_slot_count(*ret_type);
-        }
-        
-        let mut ret_slot_types = Vec::new();
-        for ret_type in &ret_types {
-            ret_slot_types.extend(info.type_slot_types(*ret_type));
-        }
-        let ret_start = func.alloc_temp_typed(&ret_slot_types);
-        for i in 0..total_ret_slots {
-            func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-        }
-        
-        if !ret_types.is_empty() {
-            let ret_error_slots = info.type_slot_count(*ret_types.last().unwrap());
-            let ret_error_start = ret_start + total_ret_slots - ret_error_slots;
-            func.emit_copy(ret_error_start, error_start, ret_error_slots);
-        }
-        
-        func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+        // Use shared emit_error_return which handles escaped named returns correctly
+        crate::stmt::emit_error_return(error_start, func, info);
     } else {
         // Panic mode: panic with error directly
         let panic_extern = ctx.get_or_register_extern("panic_with_error");
