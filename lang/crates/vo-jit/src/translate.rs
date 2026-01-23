@@ -49,7 +49,8 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         LeF => { cmp_f(e, inst, FloatCC::LessThanOrEqual); Ok(Completed) }
         GtF => { cmp_f(e, inst, FloatCC::GreaterThan); Ok(Completed) }
         GeF => { cmp_f(e, inst, FloatCC::GreaterThanOrEqual); Ok(Completed) }
-        Not | BoolNot => { not(e, inst); Ok(Completed) }
+        Not => { bitwise_not(e, inst); Ok(Completed) }
+        BoolNot => { bool_not(e, inst); Ok(Completed) }
         And => { and(e, inst); Ok(Completed) }
         Or => { or(e, inst); Ok(Completed) }
         Xor => { xor(e, inst); Ok(Completed) }
@@ -300,7 +301,13 @@ fn cmp_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: FloatCC) {
     e.write_var(inst.a, r);
 }
 
-fn not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+fn bitwise_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let a = e.read_var(inst.b);
+    let r = e.builder().ins().bnot(a);
+    e.write_var(inst.a, r);
+}
+
+fn bool_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let zero = e.builder().ins().iconst(types::I64, 0);
     let cmp = e.builder().ins().icmp(IntCC::Equal, a, zero);

@@ -196,21 +196,22 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn jump_if(&mut self, inst: &Instruction) {
-        let cond = self.builder.use_var(self.vars[inst.a as usize]);
-        let offset = inst.imm32();
-        let target = (self.current_pc as i32 + offset) as usize;
-        let target_block = self.blocks[&target];
-        let fall_through = self.builder.create_block();
-        
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let cmp = self.builder.ins().icmp(IntCC::NotEqual, cond, zero);
-        self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
-        
-        self.builder.switch_to_block(fall_through);
-        self.builder.seal_block(fall_through);
+        self.conditional_jump(inst, IntCC::NotEqual);
     }
 
     fn jump_if_not(&mut self, inst: &Instruction) {
+        self.conditional_jump(inst, IntCC::Equal);
+    }
+
+    /// Sync value to both SSA variable and locals_slot (for var_addr access after calls)
+    fn sync_var(&mut self, slot: u16, val: Value) {
+        self.builder.def_var(self.vars[slot as usize], val);
+        if let Some(locals_slot) = self.locals_slot {
+            self.builder.ins().stack_store(val, locals_slot, (slot as i32) * 8);
+        }
+    }
+
+    fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
         let cond = self.builder.use_var(self.vars[inst.a as usize]);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
@@ -218,7 +219,7 @@ impl<'a> FunctionCompiler<'a> {
         let fall_through = self.builder.create_block();
         
         let zero = self.builder.ins().iconst(types::I64, 0);
-        let cmp = self.builder.ins().icmp(IntCC::Equal, cond, zero);
+        let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
         self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
         
         self.builder.switch_to_block(fall_through);
@@ -330,9 +331,10 @@ impl<'a> FunctionCompiler<'a> {
         self.check_call_result(result);
         
         // Only load call_ret_slots back to caller's variables
+        // Must use write_var to sync to locals_slot for var_addr access
         for i in 0..call_ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+            self.sync_var((arg_start + i) as u16, val);
         }
     }
 
@@ -379,9 +381,10 @@ impl<'a> FunctionCompiler<'a> {
         
         self.check_call_result(result);
         
+        // Must use write_var to sync to locals_slot for var_addr access
         for i in 0..copy_back_slots {
             let val = self.builder.ins().stack_load(types::I64, slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[dst + i], val);
+            self.sync_var((dst + i) as u16, val);
         }
     }
 
@@ -428,10 +431,11 @@ impl<'a> FunctionCompiler<'a> {
         
         self.check_call_result(result);
         
+        // Must use write_var to sync to locals_slot for var_addr access
         for i in 0..ret_slots {
             if arg_start + i < self.vars.len() {
                 let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-                self.builder.def_var(self.vars[arg_start + i], val);
+                self.sync_var((arg_start + i) as u16, val);
             }
         }
     }
@@ -482,9 +486,10 @@ impl<'a> FunctionCompiler<'a> {
         
         self.check_call_result(result);
         
+        // Must use write_var to sync to locals_slot for var_addr access
         for i in 0..ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.builder.def_var(self.vars[arg_start + i], val);
+            self.sync_var((arg_start + i) as u16, val);
         }
     }
 

@@ -258,14 +258,81 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
             regs.push(inst.b);
             regs.push(inst.c);
         }
-        // SliceSet reads slice, index, and value
+        // SliceSet reads slice, index, and value (possibly multi-slot)
         Opcode::SliceSet => {
-            regs.push(inst.a);
+            regs.push(inst.a);  // slice
+            regs.push(inst.b);  // index
+            // Value may be multi-slot
+            let elem_bytes = match inst.flags {
+                0 => 64, // Dynamic - assume max for safety
+                0x81 | 0x82 | 0x84 | 0x44 => 8,
+                f => f as usize,
+            };
+            let elem_slots = (elem_bytes + 7) / 8;
+            for i in 0..elem_slots {
+                regs.push(inst.c + i as u16);
+            }
+        }
+        // CopyN reads n slots starting from b
+        Opcode::CopyN => {
+            let n = inst.flags as u16;
+            for i in 0..n {
+                regs.push(inst.b + i);
+            }
+        }
+        // IfaceAssign reads source (1 or 2 slots depending on vk)
+        Opcode::IfaceAssign => {
+            let vk = inst.flags;
+            if vk == 16 {
+                // Interface source: 2 slots
+                regs.push(inst.b);
+                regs.push(inst.b + 1);
+            } else {
+                // Concrete source: 1 slot
+                regs.push(inst.b);
+            }
+        }
+        // PtrGetN reads pointer
+        Opcode::PtrGetN => {
             regs.push(inst.b);
-            regs.push(inst.c);
+        }
+        // PtrSetN reads pointer and n value slots
+        Opcode::PtrSetN => {
+            regs.push(inst.a);  // pointer
+            let n = inst.flags as u16;
+            for i in 0..n {
+                regs.push(inst.c + i);
+            }
         }
         // Call reads arguments
         Opcode::Call => {
+            let arg_start = inst.b;
+            let arg_slots = (inst.c >> 8) as u16;
+            for i in 0..arg_slots {
+                regs.push(arg_start + i);
+            }
+        }
+        // CallClosure reads closure ref and arguments
+        Opcode::CallClosure => {
+            regs.push(inst.a);  // closure ref
+            let arg_start = inst.b;
+            let arg_slots = (inst.c >> 8) as u16;
+            for i in 0..arg_slots {
+                regs.push(arg_start + i);
+            }
+        }
+        // CallExtern reads arguments (a=dst, b=extern_id, c=arg_start, flags=arg_count)
+        Opcode::CallExtern => {
+            let arg_start = inst.c as u16;
+            let arg_count = inst.flags as u16;
+            for i in 0..arg_count {
+                regs.push(arg_start + i);
+            }
+        }
+        Opcode::CallIface => {
+            // CallIface: a=iface_slot (2 slots), b=args_start
+            regs.push(inst.a);
+            regs.push(inst.a + 1);
             let arg_start = inst.b;
             let arg_slots = (inst.c >> 8) as u16;
             for i in 0..arg_slots {
@@ -310,6 +377,60 @@ fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
                 regs.push(ret_start + i);
             }
         }
+        // CallClosure: ret_slots in low byte of c, returns start at arg_start (b)
+        Opcode::CallClosure => {
+            let ret_start = inst.b;
+            let ret_slots = (inst.c & 0xFF) as u16;
+            for i in 0..ret_slots {
+                regs.push(ret_start + i);
+            }
+        }
+        // CallExtern: a=dst, returns written to dst
+        Opcode::CallExtern => {
+            // Need vo_module to get ret_slots, but we don't have it here
+            // For safety, assume it writes to inst.a (single slot minimum)
+            regs.push(inst.a);
+        }
+        Opcode::CallIface => {
+            // CallIface: ret_slots in low byte of c, args start at b
+            let ret_start = inst.b;
+            let ret_slots = (inst.c & 0xFF) as u16;
+            for i in 0..ret_slots {
+                regs.push(ret_start + i);
+            }
+        }
+        Opcode::CopyN => {
+            // CopyN: a=dst, flags=n
+            let n = inst.flags as u16;
+            for i in 0..n {
+                regs.push(inst.a + i);
+            }
+        }
+        Opcode::IfaceAssign => {
+            // IfaceAssign always writes 2 slots (slot0 and slot1)
+            regs.push(inst.a);
+            regs.push(inst.a + 1);
+        }
+        Opcode::PtrGetN => {
+            // PtrGetN: a=dst, flags=n
+            let n = inst.flags as u16;
+            for i in 0..n {
+                regs.push(inst.a + i);
+            }
+        }
+        Opcode::SliceGet => {
+            // SliceGet: when elem_bytes > 8, writes multiple slots
+            // flags encodes elem info: 0=dynamic, 1-8=direct, >8=multi-slot
+            let elem_bytes = match inst.flags {
+                0 => 64, // Dynamic - assume max for safety
+                0x81 | 0x82 | 0x84 | 0x44 => 8, // Small types fit in 1 slot
+                f => f as usize,
+            };
+            let elem_slots = (elem_bytes + 7) / 8;
+            for i in 0..elem_slots {
+                regs.push(inst.a + i as u16);
+            }
+        }
         _ => {}
     }
     
@@ -332,6 +453,7 @@ mod tests {
             heap_ret_gcref_start: 0,
             heap_ret_slots: vec![],
             is_closure: false,
+            error_ret_slot: -1,
             code,
             slot_types: vec![],
         }
@@ -473,5 +595,127 @@ mod tests {
         let loop_info = &loops[0];
         assert!(loop_info.is_infinite(), "Should be infinite loop");
         assert!(!loop_info.is_simple(), "Infinite loop is not simple");
+    }
+
+    // =========================================================================
+    // Tests for get_read_regs and get_write_regs_multi
+    // =========================================================================
+
+    fn slice_set(slice: u16, idx: u16, val: u16, elem_bytes: u8) -> Instruction {
+        Instruction { op: Opcode::SliceSet as u8, flags: elem_bytes, a: slice, b: idx, c: val }
+    }
+
+    fn slice_get(dst: u16, slice: u16, idx: u16, elem_bytes: u8) -> Instruction {
+        Instruction { op: Opcode::SliceGet as u8, flags: elem_bytes, a: dst, b: slice, c: idx }
+    }
+
+    fn copy_n(dst: u16, src: u16, n: u8) -> Instruction {
+        Instruction { op: Opcode::CopyN as u8, flags: n, a: dst, b: src, c: 0 }
+    }
+
+    fn iface_assign(dst: u16, src: u16, vk: u8) -> Instruction {
+        Instruction { op: Opcode::IfaceAssign as u8, flags: vk, a: dst, b: src, c: 0 }
+    }
+
+    fn call_extern(dst: u16, extern_id: u16, arg_start: u16, arg_count: u8) -> Instruction {
+        Instruction { op: Opcode::CallExtern as u8, flags: arg_count, a: dst, b: extern_id, c: arg_start }
+    }
+
+    fn call_iface(iface_slot: u16, arg_start: u16, arg_slots: u8, ret_slots: u8, method_idx: u8) -> Instruction {
+        let c = ((arg_slots as u16) << 8) | (ret_slots as u16);
+        Instruction { op: Opcode::CallIface as u8, flags: method_idx, a: iface_slot, b: arg_start, c }
+    }
+
+    #[test]
+    fn test_get_read_regs_slice_set() {
+        // SliceSet: a=slice, b=idx, c=val_start, flags=elem_bytes
+        // Single slot element
+        let inst = slice_set(10, 11, 12, 8);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10, 11, 12], "SliceSet should read slice, idx, val");
+
+        // Multi-slot element (16 bytes = 2 slots)
+        let inst = slice_set(10, 11, 12, 16);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10, 11, 12, 13], "SliceSet with 16 bytes should read 2 value slots");
+    }
+
+    #[test]
+    fn test_get_read_regs_copy_n() {
+        let inst = copy_n(5, 10, 3);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10, 11, 12], "CopyN should read n slots from src");
+    }
+
+    #[test]
+    fn test_get_read_regs_iface_assign() {
+        // Concrete source (vk != 16)
+        let inst = iface_assign(5, 10, 1);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10], "IfaceAssign with concrete source reads 1 slot");
+
+        // Interface source (vk == 16)
+        let inst = iface_assign(5, 10, 16);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10, 11], "IfaceAssign with interface source reads 2 slots");
+    }
+
+    #[test]
+    fn test_get_read_regs_call_extern() {
+        // CallExtern: a=dst, b=extern_id, c=arg_start, flags=arg_count
+        let inst = call_extern(0, 5, 10, 3);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![10, 11, 12], "CallExtern should read arg_count args from arg_start");
+    }
+
+    #[test]
+    fn test_get_read_regs_call_iface() {
+        // CallIface: a=iface_slot (2 slots), b=arg_start, c=(arg_slots<<8|ret_slots)
+        let inst = call_iface(5, 10, 2, 1, 0);
+        let regs = get_read_regs(&inst);
+        assert_eq!(regs, vec![5, 6, 10, 11], "CallIface should read iface (2 slots) + args");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_slice_get() {
+        // Single slot element
+        let inst = slice_get(10, 5, 6, 8);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10], "SliceGet with 8 bytes writes 1 slot");
+
+        // Multi-slot element (16 bytes = 2 slots)
+        let inst = slice_get(10, 5, 6, 16);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10, 11], "SliceGet with 16 bytes writes 2 slots");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_copy_n() {
+        let inst = copy_n(10, 5, 3);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10, 11, 12], "CopyN should write n slots to dst");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_iface_assign() {
+        let inst = iface_assign(10, 5, 1);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10, 11], "IfaceAssign always writes 2 slots");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_call_extern() {
+        // CallExtern: writes to dst (a), but we don't know ret_slots without vo_module
+        let inst = call_extern(10, 5, 20, 3);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10], "CallExtern writes at least 1 slot to dst");
+    }
+
+    #[test]
+    fn test_get_write_regs_multi_call_iface() {
+        // CallIface: ret_slots in low byte of c, returns start at arg_start (b)
+        let inst = call_iface(5, 10, 2, 3, 0);
+        let regs = get_write_regs_multi(&inst);
+        assert_eq!(regs, vec![10, 11, 12], "CallIface should write ret_slots to arg_start");
     }
 }

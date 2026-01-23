@@ -223,15 +223,15 @@ func test13() {
 // Test 14: Boolean operations
 // ============================================================================
 func test14() {
-	assert(true && true == true, "test14: && tt")
-	assert(true && false == false, "test14: && tf")
-	assert(false && true == false, "test14: && ft")
-	assert(false && false == false, "test14: && ff")
+	assert((true && true) == true, "test14: && tt")
+	assert((true && false) == false, "test14: && tf")
+	assert((false && true) == false, "test14: && ft")
+	assert((false && false) == false, "test14: && ff")
 	
-	assert(true || true == true, "test14: || tt")
-	assert(true || false == true, "test14: || tf")
-	assert(false || true == true, "test14: || ft")
-	assert(false || false == false, "test14: || ff")
+	assert((true || true) == true, "test14: || tt")
+	assert((true || false) == true, "test14: || tf")
+	assert((false || true) == true, "test14: || ft")
+	assert((false || false) == false, "test14: || ff")
 	
 	fmt.Println("Test 14 PASSED: boolean operations")
 }

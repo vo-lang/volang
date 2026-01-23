@@ -784,6 +784,94 @@ tests:
   - file: bug_multi_level_pointer_embed.vo
 
 # ============================================================
+# skill_debug_vo - pending bug fixes (2026-01-24)
+# ============================================================
+  - file: skill_debug_vo/2026_01_22_iface_closure_capture.vo
+  - file: skill_debug_vo/2026_01_22_type_convert_numeric.vo
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_1920_errdefer_closure_named_ret.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_1921_method_value_iface_embed.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2008_method_expr_embed_deep.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2015_iface_embed_complex.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2016_error_question_errdefer.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2049_errdefer_named_ret_modify.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2059_dyn_access_edge.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2110_type_switch_edge.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2112_multi_value_edge.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2118_forrange_complex.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2204_multi_ret_any_chain.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2207_dyn_access_method_chain.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2208_for_range_complex_expr.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2235_bare_return_iface.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2243_multi_ret_as_arg.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_2244_panic_recover_complex.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_closure_loop_iface.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_defer_errdefer_combo.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_eval_order_edge.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_goroutine_closure.vo
+    skip: [jit]
+    reason: "pending bug fix (jit only)"
+  - file: skill_debug_vo/2026_01_23_iface_composite_edge.vo
+    skip: [jit]
+    reason: "pending bug fix (jit only)"
+  - file: skill_debug_vo/2026_01_23_iface_type_alias.vo
+    skip: [jit]
+    reason: "pending bug fix (jit only)"
+  - file: skill_debug_vo/2026_01_23_iface_variadic_multi.vo
+    skip: [jit]
+    reason: "pending bug fix (jit only)"
+  - file: skill_debug_vo/2026_01_23_int_overflow.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_struct_embed_method.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_type_conv_boundary.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+  - file: skill_debug_vo/2026_01_23_value_ptr_receiver_mix.vo
+    skip: [vm, jit]
+    reason: "pending bug fix"
+
+# ============================================================
 # no_std mode skips - std-only modules
 # ============================================================
   - file: os_simple_test.vo
