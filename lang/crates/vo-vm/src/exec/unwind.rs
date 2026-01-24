@@ -319,9 +319,9 @@ fn handle_panic_defer_returned(
     
     // Check if recover() was called (panic_state is None means recovered)
     if panic_state.is_none() {
-        // Recovered! Switch to Return mode
+        // Recovered! Use transition_to_return which handles errdefer filtering.
         if !state.pending.is_empty() {
-            state.kind = UnwindingKind::Return { return_kind: saved_return_kind, caller_ret_reg, caller_ret_count };
+            state.transition_to_return(saved_return_kind, caller_ret_reg, caller_ret_count);
             return execute_next_defer(state, stack, frames, module);
         }
         
@@ -331,9 +331,9 @@ fn handle_panic_defer_returned(
         return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
     }
     
-    // Still panicking - continue with next defer or unwind to parent
+    // Still panicking - use transition_to_panic (keeps errdefers)
     if !state.pending.is_empty() {
-        state.kind = UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count };
+        state.transition_to_panic(saved_return_kind, caller_ret_reg, caller_ret_count);
         return execute_next_defer(state, stack, frames, module);
     }
     
@@ -364,7 +364,7 @@ fn handle_panic_during_unwinding(
     
     // Continue with remaining defers in Panic mode
     if !state.pending.is_empty() {
-        state.kind = UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count };
+        state.transition_to_panic(saved_return_kind, caller_ret_reg, caller_ret_count);
         return execute_next_defer(state, stack, frames, module);
     }
     

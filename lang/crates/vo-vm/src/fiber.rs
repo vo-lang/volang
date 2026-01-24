@@ -72,6 +72,24 @@ pub enum UnwindingKind {
     },
 }
 
+/// Defines return semantics - whether this is a normal or error return.
+/// This is the single source of truth for errdefer behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnSemantics {
+    /// Normal return: errdefers don't run, preserve named return values.
+    Normal,
+    /// Error return (fail stmt, non-nil error, or unrecovered panic): errdefers run.
+    Error,
+}
+
+impl ReturnSemantics {
+    /// Whether errdefers should be included in defer execution.
+    #[inline]
+    pub fn should_run_errdefers(&self) -> bool {
+        matches!(self, ReturnSemantics::Error)
+    }
+}
+
 /// Unified state for defer execution during return or panic unwinding.
 ///
 /// Lifecycle:
@@ -93,6 +111,43 @@ pub struct UnwindingState {
     /// The generation of the currently executing defer.
     /// Used with Fiber.panic_generation to check if recover() should work.
     pub current_defer_generation: u64,
+}
+
+impl UnwindingState {
+    /// Transition to Return mode. This is the ONLY place where errdefers are filtered out.
+    /// Call this when:
+    /// - Panic is recovered (panic -> normal return)
+    /// - Continuing with defers after initial return collection
+    pub fn transition_to_return(
+        &mut self,
+        return_kind: PendingReturnKind,
+        caller_ret_reg: u16,
+        caller_ret_count: usize,
+    ) {
+        // Filter out errdefers - function is returning normally (not with an error)
+        self.pending.retain(|d| !d.is_errdefer);
+        self.kind = UnwindingKind::Return {
+            return_kind,
+            caller_ret_reg,
+            caller_ret_count,
+        };
+    }
+    
+    /// Transition to Panic mode. Keeps all defers including errdefers.
+    /// Call this when continuing panic unwinding.
+    pub fn transition_to_panic(
+        &mut self,
+        saved_return_kind: PendingReturnKind,
+        caller_ret_reg: u16,
+        caller_ret_count: usize,
+    ) {
+        // Keep errdefers - panic unwinding is an error path
+        self.kind = UnwindingKind::Panic {
+            saved_return_kind,
+            caller_ret_reg,
+            caller_ret_count,
+        };
+    }
 }
 
 
@@ -251,15 +306,16 @@ impl Fiber {
     
     /// Switch unwinding mode from Panic to Return after successful recover().
     /// This prevents nested calls within the defer function from triggering panic_unwind.
+    /// Delegates to UnwindingState::transition_to_return which handles errdefer filtering.
     pub fn switch_panic_to_return_mode(&mut self) {
         let Some(ref mut state) = self.unwinding else { return };
         let UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count } = &mut state.kind else { return };
         
-        state.kind = UnwindingKind::Return {
-            return_kind: core::mem::take(saved_return_kind),
-            caller_ret_reg: *caller_ret_reg,
-            caller_ret_count: *caller_ret_count,
-        };
+        // Use transition method - it handles errdefer filtering
+        let return_kind = core::mem::take(saved_return_kind);
+        let reg = *caller_ret_reg;
+        let count = *caller_ret_count;
+        state.transition_to_return(return_kind, reg, count);
     }
     
     /// Get the effective generation for registering a new defer.

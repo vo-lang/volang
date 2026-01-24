@@ -1,0 +1,227 @@
+package main
+
+import "errors"
+
+// Test closure and defer interaction edge cases
+
+// Test 1: Closure capturing loop variable with defer
+func closureLoopDefer() (result int) {
+	for i := 0; i < 3; i++ {
+		defer func(n int) {
+			result += n
+		}(i)
+	}
+	return 0
+}
+
+func testClosureLoopDefer() {
+	r := closureLoopDefer()
+	// LIFO: 2 + 1 + 0 = 3
+	assert(r == 3, "closure loop defer")
+}
+
+// Test 2: Nested closure with defer modifying outer variable
+func nestedClosureDefer() (result int) {
+	result = 1
+	
+	f := func() {
+		defer func() {
+			result *= 2
+		}()
+		result += 10
+	}
+	
+	f()
+	return result
+}
+
+func testNestedClosureDefer() {
+	r := nestedClosureDefer()
+	// result = 1, f() adds 10 -> 11, defer multiplies by 2 -> 22
+	assert(r == 22, "nested closure defer")
+}
+
+// Test 3: Closure returning closure with defer
+func closureReturningClosure() func() int {
+	x := 10
+	return func() int {
+		defer func() {
+			x += 5
+		}()
+		return x
+	}
+}
+
+func testClosureReturningClosure() {
+	f := closureReturningClosure()
+	r1 := f()
+	r2 := f()
+	// First call: returns 10, defer adds 5 (x = 15)
+	// Second call: returns 15, defer adds 5 (x = 20)
+	assert(r1 == 10, "closure returning closure r1")
+	assert(r2 == 15, "closure returning closure r2")
+}
+
+// Test 4: Multiple closures sharing captured variable
+func multiClosureShared() (result int) {
+	shared := 0
+	
+	f1 := func() {
+		defer func() {
+			shared += 1
+		}()
+	}
+	
+	f2 := func() {
+		defer func() {
+			shared += 10
+		}()
+	}
+	
+	f1()
+	f2()
+	f1()
+	
+	return shared
+}
+
+func testMultiClosureShared() {
+	r := multiClosureShared()
+	// f1: shared = 1
+	// f2: shared = 11
+	// f1: shared = 12
+	assert(r == 12, "multi closure shared")
+}
+
+// Test 5: Closure with errdefer and error return
+func closureErrdefer() func() (int, error) {
+	counter := 0
+	return func() (result int, err error) {
+		counter++
+		result = counter
+		
+		errdefer func() {
+			counter = -1
+		}()
+		
+		if counter == 2 {
+			fail errors.New("error on second call")
+		}
+		return result, nil
+	}
+}
+
+func testClosureErrdefer() {
+	f := closureErrdefer()
+	
+	r1, err1 := f()
+	assert(err1 == nil, "closure errdefer err1")
+	assert(r1 == 1, "closure errdefer r1")
+	
+	r2, err2 := f()
+	assert(err2 != nil, "closure errdefer err2")
+	// errdefer ran, counter is now -1
+	// But r2 was set before errdefer
+	assert(r2 == 2, "closure errdefer r2")
+	
+	// Third call, counter was reset to -1, so now it's 0
+	r3, err3 := f()
+	assert(err3 == nil, "closure errdefer err3")
+	assert(r3 == 0, "closure errdefer r3")
+}
+
+// Test 6: Recursive closure with defer
+func recursiveClosureDefer() int {
+	sum := 0
+	var f func(int)
+	f = func(n int) {
+		defer func() {
+			sum += n
+		}()
+		if n > 0 {
+			f(n - 1)
+		}
+	}
+	f(3)
+	return sum
+}
+
+func testRecursiveClosureDefer() {
+	r := recursiveClosureDefer()
+	// f(3): defer adds 3, calls f(2)
+	// f(2): defer adds 2, calls f(1)
+	// f(1): defer adds 1, calls f(0)
+	// f(0): defer adds 0
+	// Order: 0, 1, 2, 3 = 6
+	assert(r == 6, "recursive closure defer")
+}
+
+// Test 7: Closure capturing pointer
+func closureCapturePtr() int {
+	type Counter struct {
+		val int
+	}
+	c := &Counter{val: 10}
+	
+	f := func() {
+		defer func() {
+			c.val *= 2
+		}()
+		c.val += 5
+	}
+	
+	f()
+	return c.val
+}
+
+func testClosureCapturePtr() {
+	r := closureCapturePtr()
+	// c.val = 10, f adds 5 -> 15, defer multiplies -> 30
+	assert(r == 30, "closure capture ptr")
+}
+
+// Test 8: Defer in goroutine closure
+func deferInGoroutine() int {
+	result := make(chan int, 1)
+	
+	go func() {
+		defer func() {
+			result <- 42
+		}()
+	}()
+	
+	return <-result
+}
+
+func testDeferInGoroutine() {
+	r := deferInGoroutine()
+	assert(r == 42, "defer in goroutine")
+}
+
+func main() {
+	testClosureLoopDefer()
+	println("Test 1: PASSED - closure loop defer")
+	
+	testNestedClosureDefer()
+	println("Test 2: PASSED - nested closure defer")
+	
+	testClosureReturningClosure()
+	println("Test 3: PASSED - closure returning closure")
+	
+	testMultiClosureShared()
+	println("Test 4: PASSED - multi closure shared")
+	
+	testClosureErrdefer()
+	println("Test 5: PASSED - closure errdefer")
+	
+	testRecursiveClosureDefer()
+	println("Test 6: PASSED - recursive closure defer")
+	
+	testClosureCapturePtr()
+	println("Test 7: PASSED - closure capture ptr")
+	
+	testDeferInGoroutine()
+	println("Test 8: PASSED - defer in goroutine")
+	
+	println("ALL PASSED")
+}

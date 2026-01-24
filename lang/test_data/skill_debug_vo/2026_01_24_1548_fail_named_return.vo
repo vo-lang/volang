@@ -1,0 +1,67 @@
+package main
+
+import "errors"
+
+// Minimal test: fail statement should preserve named return value
+
+func failPreservesNamed() (result int, err error) {
+	result = 42
+	fail errors.New("test error")
+}
+
+func testFailPreservesNamed() {
+	r, err := failPreservesNamed()
+	println("result:", r, "err:", err)
+	assert(err != nil, "should have error")
+	assert(r == 42, "fail should preserve named return")
+}
+
+// With errdefer
+func failWithErrdefer() (result int, err error) {
+	result = 100
+	
+	errdefer func() {
+		println("errdefer ran")
+	}()
+	
+	fail errors.New("test error")
+}
+
+func testFailWithErrdefer() {
+	r, err := failWithErrdefer()
+	println("result:", r, "err:", err)
+	assert(err != nil, "should have error")
+	assert(r == 100, "fail with errdefer should preserve named return")
+}
+
+// With errdefer that modifies result
+func failErrdeferModify() (result int, err error) {
+	result = 50
+	
+	errdefer func() {
+		result = 999
+	}()
+	
+	fail errors.New("test error")
+}
+
+func testFailErrdeferModify() {
+	r, err := failErrdeferModify()
+	println("result:", r, "err:", err)
+	assert(err != nil, "should have error")
+	// errdefer modifies result
+	assert(r == 999, "errdefer should modify named return")
+}
+
+func main() {
+	testFailPreservesNamed()
+	println("Test 1: PASSED")
+	
+	testFailWithErrdefer()
+	println("Test 2: PASSED")
+	
+	testFailErrdeferModify()
+	println("Test 3: PASSED")
+	
+	println("ALL PASSED")
+}

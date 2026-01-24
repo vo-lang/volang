@@ -1,4 +1,11 @@
 //! Return and fail statement compilation.
+//!
+//! # Architecture
+//!
+//! Return value handling follows these principles:
+//! 1. **Named returns are preserved**: fail/error returns read current values, not zero
+//! 2. **Escaped vs non-escaped**: escaped use heap (PtrGet), non-escaped use stack (Copy)
+//! 3. **Error position**: error value replaces the last return slot (if it's error type)
 
 use vo_runtime::SlotType;
 use vo_vm::instruction::Opcode;
@@ -8,6 +15,10 @@ use crate::error::CodegenError;
 use crate::expr::{compile_expr_to, get_expr_source};
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
+
+// ============================================================================
+// Helper functions for unified return value handling
+// ============================================================================
 
 /// Emit Return with heap_returns flag for escaped named returns.
 /// VM reads per-ref slot counts from FunctionDef.heap_ret_slots.
@@ -19,11 +30,78 @@ fn emit_heap_returns(func: &mut FuncBuilder, named_return_slots: &[(u16, u16, bo
     func.emit_with_flags(Opcode::Return, flags, gcref_start, gcref_count, 0);
 }
 
-/// Emit error return: zero values for all non-error returns, plus the error value.
+/// Read a single named return value to destination slot.
+/// Handles both escaped (heap) and non-escaped (stack) cases.
+#[inline]
+fn emit_read_named_return(func: &mut FuncBuilder, dst: u16, src_slot: u16, slots: u16, escaped: bool) {
+    if escaped {
+        // Escaped: read from heap via GcRef
+        if slots == 1 {
+            func.emit_op(Opcode::PtrGet, dst, src_slot, 0);
+        } else {
+            func.emit_with_flags(Opcode::PtrGetN, slots as u8, dst, src_slot, 0);
+        }
+    } else {
+        // Non-escaped: copy from stack
+        func.emit_copy(dst, src_slot, slots);
+    }
+}
+
+/// Write a value to a named return slot.
+/// Handles both escaped (heap) and non-escaped (stack) cases.
+#[inline]
+fn emit_write_named_return(func: &mut FuncBuilder, dst_slot: u16, src: u16, slots: u16, escaped: bool) {
+    if escaped {
+        // Escaped: write to heap via GcRef
+        if slots == 1 {
+            func.emit_op(Opcode::PtrSet, dst_slot, 0, src);
+        } else {
+            func.emit_with_flags(Opcode::PtrSetN, slots as u8, dst_slot, 0, src);
+        }
+    } else {
+        // Non-escaped: copy to stack
+        func.emit_copy(dst_slot, src, slots);
+    }
+}
+
+/// Read all named return values to a contiguous destination area.
+/// Returns the total slots written.
+/// 
+/// If `error_override` is Some, that value is used for the last slot (if it's error type).
+fn emit_read_all_named_returns(
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    dst_start: u16,
+    named_return_slots: &[(u16, u16, bool)],
+    ret_types: &[vo_analysis::objects::TypeKey],
+    error_override: Option<u16>,
+) -> u16 {
+    let mut offset = 0u16;
+    for (i, &(slot, slots, escaped)) in named_return_slots.iter().enumerate() {
+        let is_last = i == named_return_slots.len() - 1;
+        let is_error_slot = is_last && !ret_types.is_empty() && info.is_error_type(ret_types[i]);
+        
+        if is_error_slot {
+            if let Some(error_slot) = error_override {
+                // Use the provided error value
+                func.emit_copy(dst_start + offset, error_slot, slots);
+            } else {
+                // Read from named return
+                emit_read_named_return(func, dst_start + offset, slot, slots, escaped);
+            }
+        } else {
+            // Non-error: read from named return
+            emit_read_named_return(func, dst_start + offset, slot, slots, escaped);
+        }
+        offset += slots;
+    }
+    offset
+}
+
+/// Emit error return: preserve named return values + error value.
 /// Handles escaped named returns correctly for errdefer semantics.
 /// 
 /// - `error_slot`: the slot containing the error value to return (2 slots: interface)
-/// - Returns true if handled (caller should not emit additional return)
 pub fn emit_error_return(
     error_slot: u16,
     func: &mut FuncBuilder,
@@ -34,40 +112,39 @@ pub fn emit_error_return(
         && named_return_slots.iter().all(|(_, _, escaped)| *escaped);
     
     if all_escaped {
-        // Escaped named returns: store zero values to heap, copy error, use heap_returns
+        // Escaped named returns: preserve existing values, store error, use heap_returns
         let ret_types: Vec<_> = func.return_types().to_vec();
         
-        for (i, &(gcref_slot, slots, _)) in named_return_slots.iter().enumerate() {
+        for (i, &(gcref_slot, slots, escaped)) in named_return_slots.iter().enumerate() {
             let is_last = i == named_return_slots.len() - 1;
             if is_last && !ret_types.is_empty() && info.is_error_type(ret_types[i]) {
                 // This is the error return - store the propagated error
-                if slots == 1 {
-                    func.emit_op(Opcode::PtrSet, gcref_slot, 0, error_slot);
-                } else {
-                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, gcref_slot, 0, error_slot);
-                }
-            } else {
-                // Non-error return - store zero
-                let temp = func.alloc_temp_typed(&vec![SlotType::Value; slots as usize]);
-                for j in 0..slots {
-                    func.emit_op(Opcode::LoadInt, temp + j, 0, 0);
-                }
-                if slots == 1 {
-                    func.emit_op(Opcode::PtrSet, gcref_slot, 0, temp);
-                } else {
-                    func.emit_with_flags(Opcode::PtrSetN, slots as u8, gcref_slot, 0, temp);
-                }
+                emit_write_named_return(func, gcref_slot, error_slot, slots, escaped);
             }
+            // Non-error returns: keep their current heap values (already set by user code)
         }
         
         emit_heap_returns(func, &named_return_slots, true);
-    } else {
-        // Standard path: allocate stack space, fill with zeros, copy error
+    } else if !named_return_slots.is_empty() {
+        // Named returns (non-escaped): read current values, copy error to last slot
         let ret_types: Vec<_> = func.return_types().to_vec();
-        let mut total_ret_slots = 0u16;
+        let total_ret_slots: u16 = ret_types.iter().map(|rt| info.type_slot_count(*rt)).sum();
+        
+        let mut ret_slot_types = Vec::new();
         for ret_type in &ret_types {
-            total_ret_slots += info.type_slot_count(*ret_type);
+            ret_slot_types.extend(info.type_slot_types(*ret_type));
         }
+        let ret_start = func.alloc_temp_typed(&ret_slot_types);
+        
+        // Use unified helper to read all named returns with error override
+        emit_read_all_named_returns(func, info, ret_start, &named_return_slots, &ret_types, Some(error_slot));
+        
+        // flags bit 0 = 1 indicates error return (for errdefer)
+        func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+    } else {
+        // No named returns: zero values + error (original behavior)
+        let ret_types: Vec<_> = func.return_types().to_vec();
+        let total_ret_slots: u16 = ret_types.iter().map(|rt| info.type_slot_count(*rt)).sum();
         
         let mut ret_slot_types = Vec::new();
         for ret_type in &ret_types {
@@ -109,29 +186,23 @@ pub(super) fn compile_return(
             if all_escaped {
                 emit_heap_returns(func, &named_return_slots, false);
             } else {
-                // Mixed or non-escaped: copy to return area as before
+                // Mixed or non-escaped: use helper to read all named returns
                 let total_ret_slots: u16 = named_return_slots.iter().map(|(_, s, _)| *s).sum();
-                // Build slot types from named return variables
                 let mut ret_slot_types = Vec::new();
                 for (_, slots, _) in &named_return_slots {
                     for _ in 0..*slots {
-                        ret_slot_types.push(SlotType::Value);  // Conservative: named returns are already properly typed at definition
+                        ret_slot_types.push(SlotType::Value);
                     }
                 }
                 let ret_start = func.alloc_temp_typed(&ret_slot_types);
-                let mut offset = 0u16;
+                
+                // Read all named returns (no error override for normal return)
                 for &(slot, slots, escaped) in &named_return_slots {
-                    if escaped {
-                        // Escaped variable: slot is GcRef, need PtrGet to read value
-                        if slots == 1 {
-                            func.emit_op(Opcode::PtrGet, ret_start + offset, slot, 0);
-                        } else {
-                            func.emit_with_flags(Opcode::PtrGetN, slots as u8, ret_start + offset, slot, 0);
-                        }
-                    } else {
-                        func.emit_copy(ret_start + offset, slot, slots);
-                    }
-                    offset += slots;
+                    let offset = ret_start + named_return_slots.iter()
+                        .take_while(|&&(s, _, _)| s != slot)
+                        .map(|(_, s, _)| *s)
+                        .sum::<u16>();
+                    emit_read_named_return(func, offset, slot, slots, escaped);
                 }
                 func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);
             }

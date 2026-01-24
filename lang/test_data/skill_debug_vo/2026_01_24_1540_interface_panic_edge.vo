@@ -1,0 +1,183 @@
+package main
+
+// Test interface-related panic/recover edge cases
+
+type Stringer interface {
+	String() string
+}
+
+type MyString struct {
+	val string
+}
+
+func (m MyString) String() string {
+	return m.val
+}
+
+// Test 1: Panic with struct implementing interface
+func panicStructIface() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(Stringer); ok {
+				result = s.String()
+			}
+		}
+	}()
+	panic(MyString{val: "hello"})
+}
+
+func testPanicStructIface() {
+	r := panicStructIface()
+	assert(r == "hello", "panic struct iface")
+}
+
+// Test 2: Type switch on recovered value
+func panicTypeSwitch() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch v := r.(type) {
+			case int:
+				result = v
+			case string:
+				result = len(v)
+			default:
+				result = -1
+			}
+		}
+	}()
+	panic(42)
+}
+
+func testPanicTypeSwitch() {
+	r := panicTypeSwitch()
+	assert(r == 42, "panic type switch")
+}
+
+// Test 3: Panic with pointer value
+func panicPointer() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if p, ok := r.(*MyString); ok {
+				result = len(p.val)
+			}
+		}
+	}()
+	panic(&MyString{val: "test"})
+}
+
+func testPanicPointer() {
+	r := panicPointer()
+	assert(r == 4, "panic pointer")
+}
+
+// Test 4: Panic with slice
+func panicSlice() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.([]int); ok {
+				result = len(s)
+			}
+		}
+	}()
+	panic([]int{1, 2, 3})
+}
+
+func testPanicSlice() {
+	r := panicSlice()
+	assert(r == 3, "panic slice")
+}
+
+// Test 5: Panic with map
+func panicMap() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if m, ok := r.(map[string]int); ok {
+				result = m["key"]
+			}
+		}
+	}()
+	panic(map[string]int{"key": 100})
+}
+
+func testPanicMap() {
+	r := panicMap()
+	assert(r == 100, "panic map")
+}
+
+// Test 6: Panic with channel
+func panicChan() (result bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(chan int); ok {
+				result = true
+			}
+		}
+	}()
+	panic(make(chan int))
+}
+
+func testPanicChan() {
+	r := panicChan()
+	assert(r, "panic chan")
+}
+
+// Test 7: Panic with func
+func panicFunc() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if f, ok := r.(func() int); ok {
+				result = f()
+			}
+		}
+	}()
+	panic(func() int { return 77 })
+}
+
+func testPanicFunc() {
+	r := panicFunc()
+	assert(r == 77, "panic func")
+}
+
+// Test 8: Nil interface panic
+func panicNilIface() (result bool) {
+	defer func() {
+		r := recover()
+		// panic(nil) - recover returns nil
+		result = r == nil
+	}()
+	var x Stringer = nil
+	panic(x)
+}
+
+func testPanicNilIface() {
+	r := panicNilIface()
+	assert(r, "panic nil iface")
+}
+
+func main() {
+	testPanicStructIface()
+	println("Test 1: PASSED - panic struct iface")
+	
+	testPanicTypeSwitch()
+	println("Test 2: PASSED - panic type switch")
+	
+	testPanicPointer()
+	println("Test 3: PASSED - panic pointer")
+	
+	testPanicSlice()
+	println("Test 4: PASSED - panic slice")
+	
+	testPanicMap()
+	println("Test 5: PASSED - panic map")
+	
+	testPanicChan()
+	println("Test 6: PASSED - panic chan")
+	
+	testPanicFunc()
+	println("Test 7: PASSED - panic func")
+	
+	testPanicNilIface()
+	println("Test 8: PASSED - panic nil iface")
+	
+	println("ALL PASSED")
+}

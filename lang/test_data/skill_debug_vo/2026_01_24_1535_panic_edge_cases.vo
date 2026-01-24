@@ -1,0 +1,190 @@
+package main
+
+// Test various panic/recover edge cases that might reveal bugs
+
+// Test 1: Panic with nil value, then recover
+func panicNilRecover() any {
+	defer func() {
+		recover()
+	}()
+	panic(nil)
+}
+
+func testPanicNilRecover() {
+	r := panicNilRecover()
+	// panic(nil) should return normally after recover
+	assert(r == nil, "panic nil recover")
+}
+
+// Test 2: Double recover in same defer
+func doubleRecoverSameDefer() (int, any) {
+	defer func() {
+		r1 := recover()
+		r2 := recover()
+		_ = r1
+		_ = r2
+	}()
+	panic("test")
+}
+
+func testDoubleRecoverSameDefer() {
+	r, _ := doubleRecoverSameDefer()
+	// Second recover should return nil
+	assert(r == 0, "double recover same defer")
+}
+
+// Test 3: Recover in non-direct call should not work
+func helperRecover() any {
+	return recover()
+}
+
+func recoverViaHelper() any {
+	var result any
+	defer func() {
+		result = helperRecover()
+	}()
+	panic("test")
+}
+
+func testRecoverViaHelper() {
+	defer func() {
+		if r := recover(); r != nil {
+			// This should catch the panic since helper didn't
+		}
+	}()
+	
+	r := recoverViaHelper()
+	assert(r == nil, "recover via helper should be nil")
+}
+
+// Test 4: Nested defer registering new defer that recovers
+func nestedDeferRecover() (result int) {
+	defer func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result = 100
+			}
+		}()
+	}()
+	panic("test")
+}
+
+func testNestedDeferRecover() {
+	r := nestedDeferRecover()
+	// Inner defer should catch the panic
+	assert(r == 100, "nested defer recover")
+}
+
+// Test 5: Panic during defer, then recover
+func panicDuringDefer() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = 999
+		}
+	}()
+	
+	defer func() {
+		panic("defer panic")
+	}()
+	
+	return 1
+}
+
+func testPanicDuringDefer() {
+	r := panicDuringDefer()
+	assert(r == 999, "panic during defer")
+}
+
+// Test 6: Multiple panics - each recovered
+func multiplePanicsRecovered() (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result += 100
+		}
+	}()
+	
+	defer func() {
+		if r := recover(); r != nil {
+			result += 10
+			panic("second panic")
+		}
+	}()
+	
+	panic("first panic")
+}
+
+func testMultiplePanicsRecovered() {
+	r := multiplePanicsRecovered()
+	// First defer catches "first panic", adds 10, panics again
+	// Second defer catches "second panic", adds 100
+	assert(r == 110, "multiple panics recovered")
+}
+
+// Test 7: Recover with type assertion
+func recoverTypeAssert() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(string); ok {
+				result = s
+			}
+		}
+	}()
+	panic("typed panic")
+}
+
+func testRecoverTypeAssert() {
+	r := recoverTypeAssert()
+	assert(r == "typed panic", "recover type assert")
+}
+
+// Test 8: Closure capturing recover result
+func closureRecoverCapture() (result any) {
+	var captured any
+	
+	defer func() {
+		captured = recover()
+	}()
+	
+	defer func() {
+		result = captured
+	}()
+	
+	panic("test")
+}
+
+func testClosureRecoverCapture() {
+	// This tests execution order and capture semantics
+	r := closureRecoverCapture()
+	// First defer (LIFO): sets result = captured (nil at this point)
+	// Second defer: sets captured = panic value
+	// So result should be nil because first defer runs before second
+	assert(r == nil, "closure recover capture")
+}
+
+func main() {
+	testPanicNilRecover()
+	println("Test 1: PASSED - panic nil recover")
+	
+	testDoubleRecoverSameDefer()
+	println("Test 2: PASSED - double recover same defer")
+	
+	testRecoverViaHelper()
+	println("Test 3: PASSED - recover via helper")
+	
+	testNestedDeferRecover()
+	println("Test 4: PASSED - nested defer recover")
+	
+	testPanicDuringDefer()
+	println("Test 5: PASSED - panic during defer")
+	
+	testMultiplePanicsRecovered()
+	println("Test 6: PASSED - multiple panics recovered")
+	
+	testRecoverTypeAssert()
+	println("Test 7: PASSED - recover type assert")
+	
+	testClosureRecoverCapture()
+	println("Test 8: PASSED - closure recover capture")
+	
+	println("ALL PASSED")
+}

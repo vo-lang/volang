@@ -1,0 +1,212 @@
+package main
+
+// Test: recover() must be called directly in a defer function to work.
+// Calling recover() through another function should NOT catch the panic.
+
+// Helper function that calls recover
+func callRecover() any {
+	return recover()
+}
+
+// Test 1: recover called through helper function should NOT work
+func testRecoverThroughHelper() {
+	recovered := false
+	var outerRecover any
+	
+	func() {
+		defer func() {
+			outerRecover = recover()
+		}()
+		
+		func() {
+			defer func() {
+				// This should NOT catch the panic because recover is called indirectly
+				r := callRecover()
+				if r != nil {
+					recovered = true
+				}
+			}()
+			panic("test")
+		}()
+	}()
+	
+	// In Go, recover() called through helper does NOT work
+	assert(!recovered, "recover through helper should not work")
+	assert(outerRecover != nil, "outer recover should catch")
+}
+
+// Test 2: Direct recover in defer SHOULD work
+func testRecoverDirect() {
+	recovered := false
+	
+	func() {
+		defer func() {
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		panic("test")
+	}()
+	
+	assert(recovered, "direct recover should work")
+}
+
+// Test 3: recover in closure assigned to variable, called in defer
+func testRecoverClosureVar() {
+	var outerRecover any
+	
+	func() {
+		defer func() {
+			outerRecover = recover()
+		}()
+		
+		func() {
+			f := func() any {
+				return recover()
+			}
+			defer func() {
+				// f() here should NOT catch the panic
+				_ = f()
+			}()
+			panic("test")
+		}()
+	}()
+	
+	assert(outerRecover != nil, "closure var recover - outer should catch")
+}
+
+// Test 4: Multiple nested defers with recover at different levels
+func testNestedDeferRecoverLevels() {
+	level1 := false
+	level2 := false
+	level3 := false
+	
+	func() {
+		defer func() {
+			if recover() != nil {
+				level1 = true
+			}
+		}()
+		
+		func() {
+			defer func() {
+				if recover() != nil {
+					level2 = true
+				}
+			}()
+			
+			func() {
+				defer func() {
+					if recover() != nil {
+						level3 = true
+					}
+				}()
+				panic("deep panic")
+			}()
+		}()
+	}()
+	
+	// Only the innermost direct recover should catch
+	assert(level3, "level 3 should catch")
+	assert(!level2, "level 2 should not catch")
+	assert(!level1, "level 1 should not catch")
+}
+
+// Test 5: recover in defer that itself has a defer
+func testRecoverDeferInDefer() {
+	innerDeferred := false
+	recovered := false
+	
+	func() {
+		defer func() {
+			defer func() {
+				innerDeferred = true
+			}()
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		panic("test")
+	}()
+	
+	assert(recovered, "outer defer should recover")
+	assert(innerDeferred, "inner defer of outer defer should run")
+}
+
+// Test 6: Named return + defer + recover + errdefer interaction
+func complexNamedReturn() (result int, err error) {
+	result = 1
+	
+	errdefer func() {
+		result = -1
+	}()
+	
+	defer func() {
+		if r := recover(); r != nil {
+			result = 999
+		}
+	}()
+	
+	result = 2
+	panic("test")
+}
+
+func testComplexNamedReturn() {
+	r, err := complexNamedReturn()
+	assert(err == nil, "no error")
+	assert(r == 999, "complex named return should be 999")
+}
+
+// Test 7: Closure capturing named return, modified by both defer and recover
+func captureNamedReturn() (result int) {
+	result = 10
+	
+	f := func() {
+		result += 100
+	}
+	
+	defer func() {
+		f()
+	}()
+	
+	defer func() {
+		if recover() != nil {
+			result *= 2
+		}
+	}()
+	
+	panic("test")
+}
+
+func testCaptureNamedReturn() {
+	r := captureNamedReturn()
+	// Initial: 10
+	// First defer (LIFO - recover): 10 * 2 = 20
+	// Second defer (LIFO - f()): 20 + 100 = 120
+	assert(r == 120, "capture named return")
+}
+
+func main() {
+	testRecoverThroughHelper()
+	println("Test 1: PASSED - recover through helper")
+	
+	testRecoverDirect()
+	println("Test 2: PASSED - direct recover")
+	
+	testRecoverClosureVar()
+	println("Test 3: PASSED - closure var recover")
+	
+	testNestedDeferRecoverLevels()
+	println("Test 4: PASSED - nested defer recover levels")
+	
+	testRecoverDeferInDefer()
+	println("Test 5: PASSED - recover defer in defer")
+	
+	testComplexNamedReturn()
+	println("Test 6: PASSED - complex named return")
+	
+	testCaptureNamedReturn()
+	println("Test 7: PASSED - capture named return")
+	
+	println("ALL PASSED")
+}
