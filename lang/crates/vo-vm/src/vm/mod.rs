@@ -1239,11 +1239,16 @@ impl Vm {
                     ExecResult::Continue
                 }
                 Opcode::SelectExec => {
-                    let result = exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst);
-                    if matches!(result, ExecResult::Panic) {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
-                    } else {
-                        result
+                    match exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst) {
+                        exec::SelectResult::Continue => ExecResult::Continue,
+                        exec::SelectResult::Block => {
+                            // Rewind PC so SelectExec is re-executed after other fibers run
+                            frame.pc -= 1;
+                            ExecResult::Block
+                        }
+                        exec::SelectResult::SendOnClosed => {
+                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+                        }
                     }
                 }
 

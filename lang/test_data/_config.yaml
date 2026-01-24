@@ -810,8 +810,7 @@ tests:
     # Bug fixed: UnwindingKind::Panic now preserves PendingReturnKind for recover()
   - file: skill_debug_vo/2026_01_23_eval_order_edge.vo
   - file: skill_debug_vo/2026_01_23_goroutine_closure.vo
-    skip: [jit]
-    reason: "pending bug fix (jit only)"
+    # Bug fixed: SelectExec Yield now rewinds PC before blocking
   - file: skill_debug_vo/2026_01_23_iface_composite_edge.vo
   - file: skill_debug_vo/2026_01_23_iface_type_alias.vo
   - file: skill_debug_vo/2026_01_23_iface_variadic_multi.vo

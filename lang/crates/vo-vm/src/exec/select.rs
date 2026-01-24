@@ -10,7 +10,16 @@ use vo_runtime::objects::channel;
 
 use crate::fiber::{SelectCase, SelectCaseKind, SelectState};
 use crate::instruction::Instruction;
-use crate::vm::ExecResult;
+
+/// Result of select execution (analogous to ChanResult)
+pub enum SelectResult {
+    /// Select completed successfully
+    Continue,
+    /// No case ready, need to block and retry
+    Block,
+    /// Send on closed channel - panic
+    SendOnClosed,
+}
 
 #[inline]
 pub fn exec_select_begin(select_state: &mut Option<SelectState>, inst: &Instruction) {
@@ -111,14 +120,14 @@ fn check_ready_case(stack: &[u64], bp: usize, state: &SelectState) -> SelectChec
     }
 }
 
-pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<SelectState>, inst: &Instruction) -> ExecResult {
+pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<SelectState>, inst: &Instruction) -> SelectResult {
     let state = select_state.as_mut().expect("no active select");
 
     // If woken by another goroutine, use that index
     if let Some(idx) = state.woken_index.take() {
         stack[bp + inst.a as usize] = idx as u64;
         *select_state = None;
-        return ExecResult::Continue;
+        return SelectResult::Continue;
     }
 
     // Phase 1: Check which case can proceed (no mutation)
@@ -131,7 +140,7 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
             // Send on closed channel panics (Go semantics)
             if chan_state.closed {
                 *select_state = None;
-                return ExecResult::Panic;
+                return SelectResult::SendOnClosed;
             }
             let val_start = bp + val_reg as usize;
             let value: Box<[u64]> = stack[val_start..val_start + elem_slots].into();
@@ -139,7 +148,7 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
             
             stack[bp + inst.a as usize] = idx as u64;
             *select_state = None;
-            ExecResult::Continue
+            SelectResult::Continue
         }
         SelectCheckResult::Recv { idx, ch, elem_slots, val_reg, has_ok } => {
             let chan_state = channel::get_state(ch);
@@ -152,9 +161,8 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
             } else if chan_state.closed {
                 (None, false)
             } else {
-                // Shouldn't happen - we checked in phase 1
-                *select_state = None;
-                return ExecResult::Yield;
+                // Shouldn't happen - we checked in phase 1, but handle gracefully
+                return SelectResult::Block;
             };
             
             // Copy value to stack (or zero-fill for closed channel)
@@ -173,15 +181,15 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
             
             stack[bp + inst.a as usize] = idx as u64;
             *select_state = None;
-            ExecResult::Continue
+            SelectResult::Continue
         }
         SelectCheckResult::Default => {
             stack[bp + inst.a as usize] = u64::MAX;
             *select_state = None;
-            ExecResult::Continue
+            SelectResult::Continue
         }
         SelectCheckResult::None => {
-            ExecResult::Yield
+            SelectResult::Block
         }
     }
 }
