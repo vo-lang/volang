@@ -333,6 +333,20 @@ pub struct TraverseStart {
     pub reg: u16,
     /// True if reg contains a GcRef, false if it's a stack value
     pub is_pointer: bool,
+    /// Base offset to add before any path traversal (e.g., ArrayHeader skip)
+    pub base_offset: u16,
+}
+
+impl TraverseStart {
+    /// Create a TraverseStart with no base offset (most common case)
+    pub fn new(reg: u16, is_pointer: bool) -> Self {
+        Self { reg, is_pointer, base_offset: 0 }
+    }
+    
+    /// Create a TraverseStart with a base offset (e.g., for HeapArray)
+    pub fn with_base_offset(reg: u16, is_pointer: bool, base_offset: u16) -> Self {
+        Self { reg, is_pointer, base_offset }
+    }
 }
 
 /// Emit instructions to traverse an embed path and extract the receiver.
@@ -360,14 +374,17 @@ pub fn emit_embed_path_traversal(
     recv_slots: u16,
     dst: u16,
 ) {
+    // Include base_offset in calculations
+    let base_offset = start.base_offset;
+    
     // Empty path - no embedding
     if steps.is_empty() {
-        emit_final_receiver(builder, start.reg, start.is_pointer, 0, expects_ptr_recv, recv_slots, dst);
+        emit_final_receiver(builder, start.reg, start.is_pointer, base_offset, expects_ptr_recv, recv_slots, dst);
         return;
     }
     
     let has_pointer = steps.iter().any(|s| s.is_pointer);
-    let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
+    let total_offset: u16 = base_offset + steps.iter().map(|s| s.offset).sum::<u16>();
     
     // Fast path: no pointer steps
     if !has_pointer {
@@ -378,7 +395,7 @@ pub fn emit_embed_path_traversal(
     // General case: traverse pointer chain
     let mut current_is_ptr = start.is_pointer;
     let mut current_reg = start.reg;
-    let mut accumulated_offset: u16 = 0;
+    let mut accumulated_offset: u16 = base_offset;
     
     for (i, step) in steps.iter().enumerate() {
         accumulated_offset += step.offset;
@@ -485,7 +502,7 @@ pub fn extract_receiver(
     // Case 1: Embedded pointer field - always traverse to get pointer
     if has_embedding && embed_path.has_pointer_step {
         let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
-        let start = TraverseStart { reg: base_reg, is_pointer: expr_is_ptr };
+        let start = TraverseStart::new(base_reg, expr_is_ptr);
         let final_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
         emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
         return Ok(ReceiverValue::Pointer { 
@@ -512,7 +529,7 @@ pub fn extract_receiver(
         if has_embedding && need_pointer {
             // HeapBoxed with embed path, need pointer - traverse to get embedded field address
             let final_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
-            let start = TraverseStart { reg: gcref_slot, is_pointer: true };
+            let start = TraverseStart::new(gcref_slot, true);
             emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
             return Ok(ReceiverValue::Pointer { 
                 reg: final_ptr, 

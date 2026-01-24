@@ -283,7 +283,7 @@ fn compile_defer_iface_call(
     let iface_reg = crate::expr::compile_expr(&sel.expr, ctx, func, info)?;
     if is_embedded {
         let recv_is_ptr = info.is_pointer(recv_type);
-        let start = crate::embed::TraverseStart { reg: iface_reg, is_pointer: recv_is_ptr };
+        let start = crate::embed::TraverseStart::new(iface_reg, recv_is_ptr);
         crate::embed::emit_embed_path_traversal(func, start, embed_steps, false, 2, args_start);
     } else {
         func.emit_copy(args_start, iface_reg, 2);

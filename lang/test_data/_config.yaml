@@ -816,8 +816,6 @@ tests:
   - file: skill_debug_vo/2026_01_23_iface_variadic_multi.vo
   - file: skill_debug_vo/2026_01_23_int_overflow.vo
   - file: skill_debug_vo/2026_01_23_struct_embed_method.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
   - file: skill_debug_vo/2026_01_23_type_conv_boundary.vo
     skip: [vm, jit]
     reason: "pending bug fix"

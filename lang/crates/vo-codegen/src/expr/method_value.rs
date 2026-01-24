@@ -198,7 +198,7 @@ fn compile_method_value_embedded_iface(
     let recv_is_ptr = info.is_pointer(recv_type);
     let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
     let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
-    let start = crate::embed::TraverseStart { reg: recv_reg, is_pointer: recv_is_ptr };
+    let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
     call_info.emit_target(func, start, iface_reg);
     
     emit_iface_method_value_closure(iface_type, method_idx, method_name, iface_reg, dst, ctx, func, info)

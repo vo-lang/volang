@@ -208,7 +208,7 @@ pub fn generate_method_expr_promoted_wrapper(
     let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver extraction based on path
-    let start = crate::embed::TraverseStart { reg: outer_recv, is_pointer: outer_is_pointer };
+    let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
     crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, expects_ptr_recv, recv_slots_for_call, args_start);
     
     // Copy forwarded params
@@ -282,7 +282,7 @@ pub fn generate_promoted_wrapper(
     
     // Emit receiver loading based on embedding type
     // For promoted wrapper, outer is always GcRef (outer_is_pointer = true)
-    let start = crate::embed::TraverseStart { reg: outer_gcref, is_pointer: true };
+    let start = crate::embed::TraverseStart::new(outer_gcref, true);
     crate::embed::emit_embed_path_traversal(&mut builder, start, &path_info.steps, is_pointer_receiver, recv_slots_for_call, args_start);
     
     // Copy forwarded params
@@ -373,7 +373,7 @@ fn generate_embedded_iface_wrapper_impl(
     
     // Load embedded interface (2 slots)
     let iface_slot = builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
-    let start = crate::embed::TraverseStart { reg: outer_recv, is_pointer: outer_is_pointer };
+    let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
     crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, false, 2, iface_slot);
     
     // Allocate args and copy forwarded params

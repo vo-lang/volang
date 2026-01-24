@@ -193,6 +193,9 @@ pub fn compile_closure_call_from_reg(
 // =============================================================================
 
 /// Emit code to pass receiver to method.
+/// 
+/// Unified logic: extract initial register from storage, then delegate to emit_embed_path_traversal.
+/// Special case: when expects_ptr_recv=true and storage=None, use compile_expr_to_ptr for auto-addressing.
 pub fn emit_receiver(
     sel_expr: &Expr,
     args_start: u16,
@@ -208,67 +211,46 @@ pub fn emit_receiver(
     let value_slots = info.type_slot_count(actual_recv_type);
     let expects_ptr_recv = call_info.expects_ptr_recv();
     let embed_path = &call_info.embed_path;
+    let total_offset = embed_path.total_offset;
     
-    if !embed_path.has_pointer_step {
-        // No pointer embedding - use cached total_offset
-        let total_offset = embed_path.total_offset;
-        
-        if expects_ptr_recv {
-            super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info)?;
-        } else {
-            match recv_storage {
-                Some(StorageKind::HeapBoxed { gcref_slot, .. }) => {
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, total_offset);
-                }
-                Some(StorageKind::HeapArray { gcref_slot, .. }) => {
-                    // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
-                    // Skip ArrayHeader to get actual array data
-                    const ARRAY_HEADER_SLOTS: u16 = 2;
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, gcref_slot, ARRAY_HEADER_SLOTS + total_offset);
-                }
-                Some(StorageKind::StackValue { slot, .. }) => {
-                    func.emit_copy(args_start, slot + total_offset, value_slots);
-                }
-                _ if recv_is_ptr => {
-                    let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-                    func.emit_with_flags(Opcode::PtrGetN, value_slots as u8, args_start, recv_reg, total_offset);
-                }
-                _ => {
-                    let recv_reg = compile_expr(sel_expr, ctx, func, info)?;
-                    func.emit_copy(args_start, recv_reg + total_offset, value_slots);
-                }
+    // Special case: expression needing pointer with no embedding path - use compile_expr_to_ptr
+    // This handles auto-addressing (escaping stack values to heap when pointer needed)
+    // Only applies when there's no embed path to traverse (no pointer steps, zero offset)
+    if recv_storage.is_none() && expects_ptr_recv && total_offset == 0 && !embed_path.has_pointer_step {
+        return super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info);
+    }
+    
+    // Determine initial register, pointer state, and base offset from storage
+    let start = match recv_storage {
+        Some(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) => {
+            if stores_pointer {
+                // Pointer variable captured by closure - read pointer from box first
+                let actual_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+                func.emit_ptr_get(actual_ptr, gcref_slot, 0, 1);
+                crate::embed::TraverseStart::new(actual_ptr, true)
+            } else {
+                crate::embed::TraverseStart::new(gcref_slot, true)
             }
         }
-    } else {
-        // Pointer embedding: use unified traversal logic
-        // First, determine initial state based on storage kind
-        let (initial_reg, initial_is_ptr) = match recv_storage {
-            Some(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) => {
-                if stores_pointer {
-                    // Pointer variable captured by closure - read pointer from box first
-                    let actual_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
-                    func.emit_ptr_get(actual_ptr, gcref_slot, 0, 1);
-                    (actual_ptr, true)
-                } else {
-                    (gcref_slot, true)
-                }
-            }
-            Some(StorageKind::StackValue { slot, .. }) => {
-                // Stack value: is_ptr depends on whether recv_type is pointer
-                (slot, recv_is_ptr)
-            }
-            _ => {
-                let reg = compile_expr(sel_expr, ctx, func, info)?;
-                (reg, recv_is_ptr)
-            }
-        };
-        
-        let start = crate::embed::TraverseStart {
-            reg: initial_reg,
-            is_pointer: initial_is_ptr,
-        };
-        crate::embed::emit_embed_path_traversal(func, start, &embed_path.steps, expects_ptr_recv, value_slots, args_start);
-    }
+        Some(StorageKind::HeapArray { gcref_slot, .. }) => {
+            // HeapArray layout: [GcHeader][ArrayHeader(2 slots)][elems...]
+            // Use base_offset to skip ArrayHeader
+            const ARRAY_HEADER_SLOTS: u16 = 2;
+            crate::embed::TraverseStart::with_base_offset(gcref_slot, true, ARRAY_HEADER_SLOTS)
+        }
+        Some(StorageKind::StackValue { slot, .. }) => {
+            crate::embed::TraverseStart::new(slot, recv_is_ptr)
+        }
+        _ => {
+            // Expression result - compile and use
+            let reg = compile_expr(sel_expr, ctx, func, info)?;
+            crate::embed::TraverseStart::new(reg, recv_is_ptr)
+        }
+    };
+    
+    // Delegate to unified traversal logic
+    crate::embed::emit_embed_path_traversal(func, start, &embed_path.steps, expects_ptr_recv, value_slots, args_start);
+    
     Ok(())
 }
 
@@ -437,7 +419,7 @@ fn compile_method_call_dispatch(
             let recv_is_ptr = info.is_pointer(recv_type);
             let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
             let iface_slot = func.alloc_interface();
-            let start = crate::embed::TraverseStart { reg: recv_reg, is_pointer: recv_is_ptr };
+            let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
             call_info.emit_target(func, start, iface_slot);
             
             emit_interface_call(expr, call, *iface_type, *method_idx, iface_slot, method_name, dst, ctx, func, info)
