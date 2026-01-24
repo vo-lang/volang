@@ -224,6 +224,10 @@ fn compile_stmt_with_label(
                 func.emit_op(Opcode::SubI, tmp, tmp, one);
             }
             
+            // Truncate for narrow integer types (Go semantics: wrap on overflow)
+            let expr_type = info.expr_type(inc_dec.expr.id);
+            crate::expr::emit_int_trunc(tmp, expr_type, func, info);
+            
             // Inc/dec on integers - no GC refs
             emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value]);
         }
