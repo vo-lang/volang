@@ -181,9 +181,9 @@ func testTypeSwitchClosureCapture() {
 }
 
 // Test 5: Type switch with defer using bound variable
-func testTypeSwitchDefer() string {
+// Uses named return so defer can modify return value (Go semantics)
+func testTypeSwitchDefer() (result string) {
 	var v any = "deferred"
-	result := ""
 	
 	switch x := v.(type) {
 	case string:
@@ -195,7 +195,7 @@ func testTypeSwitchDefer() string {
 		result = "other"
 	}
 	
-	return result
+	return
 }
 
 // Test 6: Type switch with multiple cases, bound var has different types

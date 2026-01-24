@@ -794,17 +794,8 @@ tests:
   - file: skill_debug_vo/2026_01_23_2015_iface_embed_complex.vo
   - file: skill_debug_vo/2026_01_23_2016_error_question_errdefer.vo
   - file: skill_debug_vo/2026_01_23_2049_errdefer_named_ret_modify.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
   - file: skill_debug_vo/2026_01_23_2059_dyn_access_edge.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
-  - file: skill_debug_vo/2026_01_23_2110_type_switch_edge.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
   - file: skill_debug_vo/2026_01_23_2112_multi_value_edge.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
   - file: skill_debug_vo/2026_01_23_2118_forrange_complex.vo
     skip: [vm, jit]
     reason: "pending bug fix"
