@@ -1,0 +1,298 @@
+package main
+
+// Test 1: Closure returning closure, inner closure captures outer's named return
+func closureReturnClosure() (result int) {
+	result = 0
+	
+	outer := func() func() int {
+		result = 10
+		return func() int {
+			result += 5
+			return result
+		}
+	}
+	
+	inner := outer()
+	v := inner()
+	result = v
+	return
+}
+
+func testClosureReturnClosure() {
+	r := closureReturnClosure()
+	println("result:", r)
+	// outer sets result=10, inner adds 5, returns 15, result=15
+	assert(r == 15, "expected 15")
+}
+
+// Test 2: Closure assigned to interface, then called
+type Callable interface {
+	Call() int
+}
+
+type FuncWrapper struct {
+	f func() int
+}
+
+func (w FuncWrapper) Call() int {
+	return w.f()
+}
+
+func closureToInterface() (result int) {
+	result = 0
+	
+	f := func() int {
+		result = 42
+		return result
+	}
+	
+	var c Callable = FuncWrapper{f: f}
+	v := c.Call()
+	return v
+}
+
+func testClosureToInterface() {
+	r := closureToInterface()
+	println("result:", r)
+	assert(r == 42, "expected 42")
+}
+
+// Test 3: Recursive closure with named return
+func recursiveClosure() (result int) {
+	result = 0
+	
+	var fib func(n int) int
+	fib = func(n int) int {
+		if n <= 1 {
+			return n
+		}
+		return fib(n-1) + fib(n-2)
+	}
+	
+	result = fib(10)
+	return
+}
+
+func testRecursiveClosure() {
+	r := recursiveClosure()
+	println("result:", r)
+	assert(r == 55, "fib(10) should be 55")
+}
+
+// Test 4: Multiple closures sharing same captured variable
+func multipleClosuresSharedCapture() (result int) {
+	result = 0
+	shared := 0
+	
+	inc := func() {
+		shared += 1
+	}
+	
+	dec := func() {
+		shared -= 1
+	}
+	
+	get := func() int {
+		return shared
+	}
+	
+	inc()
+	inc()
+	inc()
+	dec()
+	result = get()
+	return
+}
+
+func testMultipleClosuresSharedCapture() {
+	r := multipleClosuresSharedCapture()
+	println("result:", r)
+	assert(r == 2, "expected 2 (3 incs, 1 dec)")
+}
+
+// Test 5: Closure in slice, iterate and call
+func closureSliceIterate() (result int) {
+	result = 0
+	
+	var funcs []func() int
+	for i := 0; i < 3; i++ {
+		j := i
+		funcs = append(funcs, func() int {
+			return j * 10
+		})
+	}
+	
+	for _, f := range funcs {
+		result += f()
+	}
+	return
+}
+
+func testClosureSliceIterate() {
+	r := closureSliceIterate()
+	println("result:", r)
+	// 0*10 + 1*10 + 2*10 = 30
+	assert(r == 30, "expected 30")
+}
+
+// Test 6: Closure as map value
+func closureMapValue() (result int) {
+	result = 0
+	
+	ops := make(map[string]func(int, int) int)
+	ops["add"] = func(a, b int) int { return a + b }
+	ops["sub"] = func(a, b int) int { return a - b }
+	ops["mul"] = func(a, b int) int { return a * b }
+	
+	result = ops["add"](10, 5)
+	result = ops["mul"](result, 2)
+	result = ops["sub"](result, 10)
+	return
+}
+
+func testClosureMapValue() {
+	r := closureMapValue()
+	println("result:", r)
+	// (10+5)*2-10 = 20
+	assert(r == 20, "expected 20")
+}
+
+// Test 7: Closure returning error with named return
+func closureReturningError() (result int, err error) {
+	result = 0
+	
+	f := func(shouldFail bool) error {
+		if shouldFail {
+			result = -1
+			return &simpleError{"closure error"}
+		}
+		result = 100
+		return nil
+	}
+	
+	err = f(false)
+	if err != nil {
+		return
+	}
+	
+	// result should be 100 now
+	return result, nil
+}
+
+type simpleError struct {
+	msg string
+}
+
+func (e *simpleError) Error() string { return e.msg }
+func (e *simpleError) Code() int { return 0 }
+func (e *simpleError) Unwrap() error { return nil }
+func (e *simpleError) Data() any { return nil }
+
+func testClosureReturningError() {
+	r, err := closureReturningError()
+	println("result:", r, "err:", err)
+	assert(err == nil, "should not have error")
+	assert(r == 100, "expected 100")
+}
+
+// Test 8: Closure with defer modifying captured variable
+func closureWithDefer() (result int) {
+	result = 0
+	
+	f := func() {
+		defer func() {
+			result += 100
+		}()
+		result = 10
+	}
+	
+	f()
+	return
+}
+
+func testClosureWithDefer() {
+	r := closureWithDefer()
+	println("result:", r)
+	// f sets result=10, defer adds 100
+	assert(r == 110, "expected 110")
+}
+
+// Test 9: Immediately invoked closure with complex capture
+func iifeComplexCapture() (result int) {
+	result = 0
+	a := 1
+	b := 2
+	
+	result = func(x int) int {
+		return a + b + x + result
+	}(10)
+	
+	return
+}
+
+func testIifeComplexCapture() {
+	r := iifeComplexCapture()
+	println("result:", r)
+	// result starts at 0, a=1, b=2, x=10
+	// returns 1+2+10+0 = 13
+	assert(r == 13, "expected 13")
+}
+
+// Test 10: Closure capturing pointer field
+type Container struct {
+	value int
+}
+
+func closureCapturePointerField() (result int) {
+	c := &Container{value: 10}
+	
+	f := func() {
+		c.value += 5
+	}
+	
+	f()
+	f()
+	result = c.value
+	return
+}
+
+func testClosureCapturePointerField() {
+	r := closureCapturePointerField()
+	println("result:", r)
+	// 10 + 5 + 5 = 20
+	assert(r == 20, "expected 20")
+}
+
+func main() {
+	testClosureReturnClosure()
+	println("Test 1: PASSED - closure return closure")
+	
+	testClosureToInterface()
+	println("Test 2: PASSED - closure to interface")
+	
+	testRecursiveClosure()
+	println("Test 3: PASSED - recursive closure")
+	
+	testMultipleClosuresSharedCapture()
+	println("Test 4: PASSED - multiple closures shared capture")
+	
+	testClosureSliceIterate()
+	println("Test 5: PASSED - closure slice iterate")
+	
+	testClosureMapValue()
+	println("Test 6: PASSED - closure map value")
+	
+	testClosureReturningError()
+	println("Test 7: PASSED - closure returning error")
+	
+	testClosureWithDefer()
+	println("Test 8: PASSED - closure with defer")
+	
+	testIifeComplexCapture()
+	println("Test 9: PASSED - iife complex capture")
+	
+	testClosureCapturePointerField()
+	println("Test 10: PASSED - closure capture pointer field")
+	
+	println("ALL PASSED")
+}

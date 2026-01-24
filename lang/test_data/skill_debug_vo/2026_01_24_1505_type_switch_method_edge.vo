@@ -1,0 +1,334 @@
+package main
+
+// Test 1: Type switch with method call on switched value
+type Speaker interface {
+	Speak() string
+}
+
+type Dog struct {
+	name string
+}
+
+func (d Dog) Speak() string {
+	return "woof from " + d.name
+}
+
+type Cat struct {
+	name string
+}
+
+func (c Cat) Speak() string {
+	return "meow from " + c.name
+}
+
+func typeSwitchMethodCall(s Speaker) string {
+	switch v := s.(type) {
+	case Dog:
+		return "Dog: " + v.Speak()
+	case Cat:
+		return "Cat: " + v.Speak()
+	default:
+		return "unknown"
+	}
+}
+
+func testTypeSwitchMethodCall() {
+	d := Dog{name: "Rex"}
+	c := Cat{name: "Whiskers"}
+	
+	r1 := typeSwitchMethodCall(d)
+	println("result:", r1)
+	assert(r1 == "Dog: woof from Rex", "dog speak")
+	
+	r2 := typeSwitchMethodCall(c)
+	println("result:", r2)
+	assert(r2 == "Cat: meow from Whiskers", "cat speak")
+}
+
+// Test 2: Type switch with nil case
+func typeSwitchNilCase(v any) string {
+	switch v.(type) {
+	case nil:
+		return "nil"
+	case int:
+		return "int"
+	case string:
+		return "string"
+	default:
+		return "other"
+	}
+}
+
+func testTypeSwitchNilCase() {
+	r1 := typeSwitchNilCase(nil)
+	println("result:", r1)
+	assert(r1 == "nil", "nil case")
+	
+	r2 := typeSwitchNilCase(42)
+	println("result:", r2)
+	assert(r2 == "int", "int case")
+	
+	r3 := typeSwitchNilCase("hello")
+	println("result:", r3)
+	assert(r3 == "string", "string case")
+}
+
+// Test 3: Type switch with multiple types in one case
+func typeSwitchMultiType(v any) string {
+	switch v.(type) {
+	case int, int8, int16, int32, int64:
+		return "signed int"
+	case uint, uint8, uint16, uint32, uint64:
+		return "unsigned int"
+	case string:
+		return "string"
+	default:
+		return "other"
+	}
+}
+
+func testTypeSwitchMultiType() {
+	r1 := typeSwitchMultiType(int(42))
+	println("result:", r1)
+	assert(r1 == "signed int", "int case")
+	
+	r2 := typeSwitchMultiType(int32(42))
+	println("result:", r2)
+	assert(r2 == "signed int", "int32 case")
+	
+	r3 := typeSwitchMultiType(uint(42))
+	println("result:", r3)
+	assert(r3 == "unsigned int", "uint case")
+}
+
+// Test 4: Nested type switch
+func nestedTypeSwitch(outer any, inner any) string {
+	switch o := outer.(type) {
+	case int:
+		switch inner.(type) {
+		case int:
+			return "int-int"
+		case string:
+			return "int-string"
+		default:
+			_ = o
+			return "int-other"
+		}
+	case string:
+		switch inner.(type) {
+		case int:
+			return "string-int"
+		case string:
+			return "string-string"
+		default:
+			return "string-other"
+		}
+	default:
+		return "other-any"
+	}
+}
+
+func testNestedTypeSwitch() {
+	r1 := nestedTypeSwitch(1, 2)
+	println("result:", r1)
+	assert(r1 == "int-int", "int-int case")
+	
+	r2 := nestedTypeSwitch(1, "hello")
+	println("result:", r2)
+	assert(r2 == "int-string", "int-string case")
+	
+	r3 := nestedTypeSwitch("a", "b")
+	println("result:", r3)
+	assert(r3 == "string-string", "string-string case")
+}
+
+// Test 5: Type switch with interface case
+type Reader interface {
+	Read() int
+}
+
+type MyReader struct {
+	value int
+}
+
+func (r MyReader) Read() int {
+	return r.value
+}
+
+func typeSwitchInterfaceCase(v any) int {
+	switch x := v.(type) {
+	case Reader:
+		return x.Read()
+	case int:
+		return x
+	default:
+		return -1
+	}
+}
+
+func testTypeSwitchInterfaceCase() {
+	r1 := typeSwitchInterfaceCase(MyReader{value: 42})
+	println("result:", r1)
+	assert(r1 == 42, "reader case")
+	
+	r2 := typeSwitchInterfaceCase(100)
+	println("result:", r2)
+	assert(r2 == 100, "int case")
+	
+	r3 := typeSwitchInterfaceCase("hello")
+	println("result:", r3)
+	assert(r3 == -1, "default case")
+}
+
+// Test 6: Type switch assigning to existing variable
+func typeSwitchAssignExisting(v any) int {
+	var result int
+	switch x := v.(type) {
+	case int:
+		result = x * 2
+	case string:
+		result = len(x)
+	default:
+		result = -1
+	}
+	return result
+}
+
+func testTypeSwitchAssignExisting() {
+	r1 := typeSwitchAssignExisting(21)
+	println("result:", r1)
+	assert(r1 == 42, "int case")
+	
+	r2 := typeSwitchAssignExisting("hello")
+	println("result:", r2)
+	assert(r2 == 5, "string case")
+}
+
+// Test 7: Type switch in loop
+func typeSwitchInLoop(values []any) int {
+	sum := 0
+	for _, v := range values {
+		switch x := v.(type) {
+		case int:
+			sum += x
+		case string:
+			sum += len(x)
+		}
+	}
+	return sum
+}
+
+func testTypeSwitchInLoop() {
+	values := []any{1, "ab", 3, "cdef", 5}
+	r := typeSwitchInLoop(values)
+	println("result:", r)
+	// 1 + 2 + 3 + 4 + 5 = 15
+	assert(r == 15, "sum should be 15")
+}
+
+// Test 8: Type switch with break
+func typeSwitchWithBreak(v any) string {
+outer:
+	for i := 0; i < 3; i++ {
+		switch v.(type) {
+		case int:
+			if i == 1 {
+				break outer
+			}
+		case string:
+			return "string"
+		}
+	}
+	return "done"
+}
+
+func testTypeSwitchWithBreak() {
+	r1 := typeSwitchWithBreak(42)
+	println("result:", r1)
+	assert(r1 == "done", "break outer")
+	
+	r2 := typeSwitchWithBreak("hello")
+	println("result:", r2)
+	assert(r2 == "string", "string case")
+}
+
+// Test 9: Type switch with pointer type
+type Point struct {
+	x, y int
+}
+
+func typeSwitchPointer(v any) int {
+	switch p := v.(type) {
+	case *Point:
+		return p.x + p.y
+	case Point:
+		return p.x * p.y
+	default:
+		return -1
+	}
+}
+
+func testTypeSwitchPointer() {
+	p1 := &Point{x: 3, y: 4}
+	r1 := typeSwitchPointer(p1)
+	println("result:", r1)
+	assert(r1 == 7, "pointer case: 3+4=7")
+	
+	p2 := Point{x: 3, y: 4}
+	r2 := typeSwitchPointer(p2)
+	println("result:", r2)
+	assert(r2 == 12, "value case: 3*4=12")
+}
+
+// Test 10: Type switch shadowing outer variable
+func typeSwitchShadow(v any) int {
+	x := 100
+	switch x := v.(type) {
+	case int:
+		return x  // shadowed x is the switched value
+	default:
+		_ = x
+		return -1
+	}
+	// x here is still 100, but unreachable
+}
+
+func testTypeSwitchShadow() {
+	r := typeSwitchShadow(42)
+	println("result:", r)
+	assert(r == 42, "should return switched value, not 100")
+}
+
+func main() {
+	testTypeSwitchMethodCall()
+	println("Test 1: PASSED - type switch method call")
+	
+	testTypeSwitchNilCase()
+	println("Test 2: PASSED - type switch nil case")
+	
+	testTypeSwitchMultiType()
+	println("Test 3: PASSED - type switch multi type")
+	
+	testNestedTypeSwitch()
+	println("Test 4: PASSED - nested type switch")
+	
+	testTypeSwitchInterfaceCase()
+	println("Test 5: PASSED - type switch interface case")
+	
+	testTypeSwitchAssignExisting()
+	println("Test 6: PASSED - type switch assign existing")
+	
+	testTypeSwitchInLoop()
+	println("Test 7: PASSED - type switch in loop")
+	
+	testTypeSwitchWithBreak()
+	println("Test 8: PASSED - type switch with break")
+	
+	testTypeSwitchPointer()
+	println("Test 9: PASSED - type switch pointer")
+	
+	testTypeSwitchShadow()
+	println("Test 10: PASSED - type switch shadow")
+	
+	println("ALL PASSED")
+}

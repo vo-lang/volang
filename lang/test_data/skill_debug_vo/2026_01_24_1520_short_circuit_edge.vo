@@ -1,0 +1,256 @@
+package main
+
+// Test short-circuit evaluation edge cases
+
+var sideEffectCounter = 0
+
+func sideEffect(result bool) bool {
+	sideEffectCounter++
+	return result
+}
+
+func resetCounter() {
+	sideEffectCounter = 0
+}
+
+// Test 1: && short-circuit - second not evaluated if first is false
+func testAndShortCircuit() {
+	resetCounter()
+	
+	result := sideEffect(false) && sideEffect(true)
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == false, "result should be false")
+	assert(sideEffectCounter == 1, "only first should be evaluated")
+}
+
+// Test 2: || short-circuit - second not evaluated if first is true
+func testOrShortCircuit() {
+	resetCounter()
+	
+	result := sideEffect(true) || sideEffect(false)
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == true, "result should be true")
+	assert(sideEffectCounter == 1, "only first should be evaluated")
+}
+
+// Test 3: Nested short-circuit
+func testNestedShortCircuit() {
+	resetCounter()
+	
+	// (false && X) || (true && X)
+	// First false, skip second part of first &&
+	// Then true, evaluate second part
+	result := (sideEffect(false) && sideEffect(true)) || (sideEffect(true) && sideEffect(true))
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == true, "result should be true")
+	// Evaluations: false (skip), true, true
+	assert(sideEffectCounter == 3, "three evaluations")
+}
+
+// Test 4: Short-circuit in if condition
+func testShortCircuitInIf() {
+	resetCounter()
+	
+	if sideEffect(true) || sideEffect(false) {
+		println("branch taken")
+	}
+	assert(sideEffectCounter == 1, "only first evaluated in if")
+}
+
+// Test 5: Short-circuit with function calls that have side effects
+var order = ""
+
+func recordA() bool {
+	order += "A"
+	return true
+}
+
+func recordB() bool {
+	order += "B"
+	return false
+}
+
+func recordC() bool {
+	order += "C"
+	return true
+}
+
+func testShortCircuitOrder() {
+	order = ""
+	
+	// A() && B() && C()
+	// A returns true, continue
+	// B returns false, stop
+	// C not evaluated
+	result := recordA() && recordB() && recordC()
+	println("result:", result, "order:", order)
+	assert(result == false, "result false")
+	assert(order == "AB", "order should be AB")
+}
+
+// Test 6: Short-circuit with nil check pattern
+func testNilCheckPattern() {
+	var ptr *Point
+	
+	// Safe nil check pattern
+	result := ptr != nil && ptr.x > 0
+	println("nil check result:", result)
+	assert(result == false, "nil check pattern")
+	
+	ptr = &Point{x: 10, y: 20}
+	result = ptr != nil && ptr.x > 0
+	println("non-nil check result:", result)
+	assert(result == true, "non-nil check pattern")
+}
+
+type Point struct {
+	x, y int
+}
+
+// Test 7: Short-circuit in for loop condition
+func testShortCircuitInFor() {
+	resetCounter()
+	
+	i := 0
+	for i < 3 && sideEffect(true) {
+		i++
+	}
+	println("iterations:", i, "counter:", sideEffectCounter)
+	assert(i == 3, "should iterate 3 times")
+	assert(sideEffectCounter == 3, "side effect called each iteration")
+}
+
+// Test 8: Short-circuit with method calls
+type Validator struct {
+	name string
+}
+
+func (v Validator) IsValid() bool {
+	sideEffectCounter++
+	return v.name != ""
+}
+
+func testShortCircuitMethodCall() {
+	resetCounter()
+	
+	v1 := Validator{name: ""}
+	v2 := Validator{name: "valid"}
+	
+	// v1.IsValid() is false, v2.IsValid() not called
+	result := v1.IsValid() && v2.IsValid()
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == false, "result false")
+	assert(sideEffectCounter == 1, "only first validator checked")
+}
+
+// Test 9: Complex nested with mixed operators
+func testComplexNested() {
+	order = ""
+	
+	// (A || B) && (B || C)
+	// A true, skip B in first group
+	// B false, C true in second group
+	result := (recordA() || recordB()) && (recordB() || recordC())
+	println("result:", result, "order:", order)
+	assert(result == true, "result true")
+	assert(order == "ABC", "order should be ABC")
+}
+
+// Test 10: Short-circuit with assignment expressions
+func testShortCircuitWithAssignment() {
+	var x int
+	
+	getValue := func() int {
+		x = 42
+		return x
+	}
+	
+	// false && getValue() - getValue not called
+	result := false && getValue() > 0
+	println("result:", result, "x:", x)
+	assert(result == false, "result false")
+	assert(x == 0, "x should not be modified")
+	
+	// true || getValue() - getValue not called
+	x = 0
+	result = true || getValue() > 0
+	println("result:", result, "x:", x)
+	assert(result == true, "result true")
+	assert(x == 0, "x should not be modified")
+}
+
+// Test 11: Short-circuit in return statement
+func shortCircuitReturn(a, b bool) bool {
+	return a && sideEffect(b)
+}
+
+func testShortCircuitInReturn() {
+	resetCounter()
+	
+	result := shortCircuitReturn(false, true)
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == false, "result false")
+	assert(sideEffectCounter == 0, "side effect not called when first is false")
+	
+	resetCounter()
+	result = shortCircuitReturn(true, true)
+	println("result:", result, "counter:", sideEffectCounter)
+	assert(result == true, "result true")
+	assert(sideEffectCounter == 1, "side effect called when first is true")
+}
+
+// Test 12: Short-circuit with closure capture
+func testShortCircuitClosure() {
+	captured := 0
+	
+	check := func() bool {
+		captured++
+		return true
+	}
+	
+	// false && check() - check not called
+	result := false && check()
+	println("result:", result, "captured:", captured)
+	assert(result == false, "result false")
+	assert(captured == 0, "closure not called")
+}
+
+func main() {
+	testAndShortCircuit()
+	println("Test 1: PASSED - && short-circuit")
+	
+	testOrShortCircuit()
+	println("Test 2: PASSED - || short-circuit")
+	
+	testNestedShortCircuit()
+	println("Test 3: PASSED - nested short-circuit")
+	
+	testShortCircuitInIf()
+	println("Test 4: PASSED - short-circuit in if")
+	
+	testShortCircuitOrder()
+	println("Test 5: PASSED - short-circuit order")
+	
+	testNilCheckPattern()
+	println("Test 6: PASSED - nil check pattern")
+	
+	testShortCircuitInFor()
+	println("Test 7: PASSED - short-circuit in for")
+	
+	testShortCircuitMethodCall()
+	println("Test 8: PASSED - short-circuit method call")
+	
+	testComplexNested()
+	println("Test 9: PASSED - complex nested")
+	
+	testShortCircuitWithAssignment()
+	println("Test 10: PASSED - short-circuit with assignment")
+	
+	testShortCircuitInReturn()
+	println("Test 11: PASSED - short-circuit in return")
+	
+	testShortCircuitClosure()
+	println("Test 12: PASSED - short-circuit closure")
+	
+	println("ALL PASSED")
+}

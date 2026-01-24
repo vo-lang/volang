@@ -1,0 +1,248 @@
+package main
+
+// Test multi-value assignment edge cases
+
+// Test 1: Multi-value from function call to existing variables
+func getTwo() (int, int) {
+	return 10, 20
+}
+
+func testMultiValueExisting() {
+	var a, b int
+	a, b = getTwo()
+	println("a:", a, "b:", b)
+	assert(a == 10 && b == 20, "multi-value to existing")
+}
+
+// Test 2: Multi-value with blank identifier
+func getThree() (int, int, int) {
+	return 1, 2, 3
+}
+
+func testMultiValueBlank() {
+	a, _, c := getThree()
+	println("a:", a, "c:", c)
+	assert(a == 1 && c == 3, "multi-value with blank")
+}
+
+// Test 3: Multi-value swap
+func testMultiValueSwap() {
+	a, b := 1, 2
+	a, b = b, a
+	println("after swap a:", a, "b:", b)
+	assert(a == 2 && b == 1, "swap")
+}
+
+// Test 4: Multi-value with map access
+func testMultiValueMap() {
+	m := map[string]int{"a": 1, "b": 2}
+	
+	v, ok := m["a"]
+	println("v:", v, "ok:", ok)
+	assert(v == 1 && ok, "map access existing")
+	
+	v, ok = m["c"]
+	println("v:", v, "ok:", ok)
+	assert(v == 0 && !ok, "map access missing")
+}
+
+// Test 5: Multi-value with type assertion
+func testMultiValueTypeAssert() {
+	var i any = 42
+	
+	v, ok := i.(int)
+	println("v:", v, "ok:", ok)
+	assert(v == 42 && ok, "type assert success")
+	
+	s, ok := i.(string)
+	println("s:", s, "ok:", ok)
+	assert(s == "" && !ok, "type assert fail")
+}
+
+// Test 6: Multi-value from channel receive
+func testMultiValueChannel() {
+	ch := make(chan int, 1)
+	ch <- 42
+	
+	v, ok := <-ch
+	println("v:", v, "ok:", ok)
+	assert(v == 42 && ok, "channel recv open")
+	
+	close(ch)
+	v, ok = <-ch
+	println("v:", v, "ok:", ok)
+	assert(v == 0 && !ok, "channel recv closed")
+}
+
+// Test 7: Multi-value in for loop init
+func testMultiValueForInit() {
+	sum := 0
+	for i, j := 0, 10; i < j; i, j = i+1, j-1 {
+		sum += i + j
+	}
+	println("sum:", sum)
+	// i=0,j=10: 10; i=1,j=9: 10; i=2,j=8: 10; i=3,j=7: 10; i=4,j=6: 10
+	assert(sum == 50, "for loop multi-value")
+}
+
+// Test 8: Multi-value with interface conversion
+func getTwoAny() (any, any) {
+	return 1, "hello"
+}
+
+func testMultiValueInterface() {
+	a, b := getTwoAny()
+	println("a:", a, "b:", b)
+	
+	ai, ok := a.(int)
+	assert(ok && ai == 1, "first is int")
+	
+	bs, ok := b.(string)
+	assert(ok && bs == "hello", "second is string")
+}
+
+// Test 9: Multi-value assignment with side effects
+var evalOrder = ""
+
+func getFirst() int {
+	evalOrder += "F"
+	return 1
+}
+
+func getSecond() int {
+	evalOrder += "S"
+	return 2
+}
+
+func testMultiValueEvalOrder() {
+	evalOrder = ""
+	a, b := getFirst(), getSecond()
+	println("order:", evalOrder, "a:", a, "b:", b)
+	assert(evalOrder == "FS", "eval order left to right")
+	assert(a == 1 && b == 2, "values correct")
+}
+
+// Test 10: Multi-value to struct fields via intermediate
+type Pair struct {
+	x, y int
+}
+
+func testMultiValueToStruct() {
+	p := Pair{}
+	x, y := getTwo()
+	p.x, p.y = x, y
+	println("p.x:", p.x, "p.y:", p.y)
+	assert(p.x == 10 && p.y == 20, "to struct fields")
+}
+
+// Test 11: Multi-value with slice index
+func testMultiValueSliceIndex() {
+	s := []int{0, 0}
+	s[0], s[1] = getTwo()
+	println("s[0]:", s[0], "s[1]:", s[1])
+	assert(s[0] == 10 && s[1] == 20, "to slice index")
+}
+
+// Test 12: Multi-value with map index
+func testMultiValueMapIndex() {
+	m := make(map[string]int)
+	a, b := getTwo()
+	m["a"], m["b"] = a, b
+	println("m[a]:", m["a"], "m[b]:", m["b"])
+	assert(m["a"] == 10 && m["b"] == 20, "to map index")
+}
+
+// Test 13: Multi-value nested function call
+func outer() (int, int) {
+	return inner()
+}
+
+func inner() (int, int) {
+	return 100, 200
+}
+
+func testMultiValueNested() {
+	a, b := outer()
+	println("a:", a, "b:", b)
+	assert(a == 100 && b == 200, "nested multi-value")
+}
+
+// Test 14: Multi-value with pointer dereference
+func testMultiValuePointerDeref() {
+	p := &Pair{x: 0, y: 0}
+	p.x, p.y = getTwo()
+	println("p.x:", p.x, "p.y:", p.y)
+	assert(p.x == 10 && p.y == 20, "pointer deref")
+}
+
+// Test 15: Multi-value with named return
+func namedMultiReturn() (a int, b int) {
+	a, b = 5, 10
+	return
+}
+
+func testMultiValueNamedReturn() {
+	x, y := namedMultiReturn()
+	println("x:", x, "y:", y)
+	assert(x == 5 && y == 10, "named return")
+}
+
+// Test 16: Triple assignment rotation
+func testTripleRotation() {
+	a, b, c := 1, 2, 3
+	a, b, c = c, a, b
+	println("a:", a, "b:", b, "c:", c)
+	assert(a == 3 && b == 1 && c == 2, "triple rotation")
+}
+
+func main() {
+	testMultiValueExisting()
+	println("Test 1: PASSED - multi-value existing")
+	
+	testMultiValueBlank()
+	println("Test 2: PASSED - multi-value blank")
+	
+	testMultiValueSwap()
+	println("Test 3: PASSED - multi-value swap")
+	
+	testMultiValueMap()
+	println("Test 4: PASSED - multi-value map")
+	
+	testMultiValueTypeAssert()
+	println("Test 5: PASSED - multi-value type assert")
+	
+	testMultiValueChannel()
+	println("Test 6: PASSED - multi-value channel")
+	
+	testMultiValueForInit()
+	println("Test 7: PASSED - multi-value for init")
+	
+	testMultiValueInterface()
+	println("Test 8: PASSED - multi-value interface")
+	
+	testMultiValueEvalOrder()
+	println("Test 9: PASSED - multi-value eval order")
+	
+	testMultiValueToStruct()
+	println("Test 10: PASSED - multi-value to struct")
+	
+	testMultiValueSliceIndex()
+	println("Test 11: PASSED - multi-value slice index")
+	
+	testMultiValueMapIndex()
+	println("Test 12: PASSED - multi-value map index")
+	
+	testMultiValueNested()
+	println("Test 13: PASSED - multi-value nested")
+	
+	testMultiValuePointerDeref()
+	println("Test 14: PASSED - multi-value pointer deref")
+	
+	testMultiValueNamedReturn()
+	println("Test 15: PASSED - multi-value named return")
+	
+	testTripleRotation()
+	println("Test 16: PASSED - triple rotation")
+	
+	println("ALL PASSED")
+}

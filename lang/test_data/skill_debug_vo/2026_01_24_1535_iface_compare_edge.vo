@@ -1,0 +1,282 @@
+package main
+
+// Test interface comparison edge cases
+
+type Stringer interface {
+	String() string
+}
+
+type MyInt int
+
+func (m MyInt) String() string {
+	return "MyInt"
+}
+
+type MyString string
+
+func (m MyString) String() string {
+	return string(m)
+}
+
+// Test 1: Same concrete type, same value
+func testSameTypeSameValue() {
+	var a, b Stringer
+	a = MyInt(42)
+	b = MyInt(42)
+	
+	result := a == b
+	println("same type same value:", result)
+	assert(result, "same type same value should be equal")
+}
+
+// Test 2: Same concrete type, different value
+func testSameTypeDiffValue() {
+	var a, b Stringer
+	a = MyInt(42)
+	b = MyInt(43)
+	
+	result := a == b
+	println("same type diff value:", result)
+	assert(!result, "same type diff value should not be equal")
+}
+
+// Test 3: Different concrete type
+func testDiffType() {
+	var a, b Stringer
+	a = MyInt(42)
+	b = MyString("hello")
+	
+	result := a == b
+	println("diff type:", result)
+	assert(!result, "diff type should not be equal")
+}
+
+// Test 4: Both nil
+func testBothNil() {
+	var a, b Stringer
+	
+	result := a == b
+	println("both nil:", result)
+	assert(result, "both nil should be equal")
+}
+
+// Test 5: One nil
+func testOneNil() {
+	var a Stringer
+	var b Stringer = MyInt(42)
+	
+	result := a == b
+	println("one nil:", result)
+	assert(!result, "one nil should not be equal")
+	
+	result = b == a
+	println("reversed one nil:", result)
+	assert(!result, "reversed one nil should not be equal")
+}
+
+// Test 6: Compare with nil literal
+func testCompareNilLiteral() {
+	var a Stringer
+	
+	result := a == nil
+	println("nil interface == nil:", result)
+	assert(result, "nil interface should equal nil")
+	
+	a = MyInt(0)
+	result = a == nil
+	println("non-nil interface == nil:", result)
+	assert(!result, "non-nil interface should not equal nil")
+}
+
+// Test 7: Typed nil (pointer in interface)
+type MyStruct struct {
+	value int
+}
+
+func (m *MyStruct) String() string {
+	if m == nil {
+		return "nil"
+	}
+	return "MyStruct"
+}
+
+func testTypedNil() {
+	var p *MyStruct = nil
+	var s Stringer = p  // typed nil
+	
+	result := s == nil
+	println("typed nil == nil:", result)
+	// In Go, typed nil is NOT equal to nil interface
+	assert(!result, "typed nil should NOT equal nil")
+}
+
+// Test 8: any comparison
+func testAnyComparison() {
+	var a, b any
+	a = 42
+	b = 42
+	
+	result := a == b
+	println("any same:", result)
+	assert(result, "any same should be equal")
+	
+	a = 42
+	b = "42"
+	result = a == b
+	println("any diff type:", result)
+	assert(!result, "any diff type should not be equal")
+}
+
+// Test 9: Compare interface to concrete
+func testIfaceToConcreteCompare() {
+	var s Stringer = MyInt(42)
+	var m MyInt = 42
+	
+	// In Go, you can't directly compare interface to concrete
+	// Need to use type assertion
+	v, ok := s.(MyInt)
+	result := ok && v == m
+	println("iface to concrete:", result)
+	assert(result, "should be equal after assertion")
+}
+
+// Test 10: Struct in interface comparison
+type Point struct {
+	x, y int
+}
+
+func (p Point) String() string {
+	return "Point"
+}
+
+func testStructInInterface() {
+	var a, b Stringer
+	a = Point{x: 1, y: 2}
+	b = Point{x: 1, y: 2}
+	
+	result := a == b
+	println("struct same:", result)
+	assert(result, "struct same should be equal")
+	
+	b = Point{x: 1, y: 3}
+	result = a == b
+	println("struct diff:", result)
+	assert(!result, "struct diff should not be equal")
+}
+
+// Test 11: String in interface comparison
+func testStringInInterface() {
+	var a, b any
+	a = "hello"
+	b = "hello"
+	
+	result := a == b
+	println("string same:", result)
+	assert(result, "string same should be equal")
+	
+	b = "world"
+	result = a == b
+	println("string diff:", result)
+	assert(!result, "string diff should not be equal")
+}
+
+// Test 12: Slice comparison (should panic or not be comparable)
+// Note: slices are not comparable in Go, so we skip this test
+
+// Test 13: Interface in map key
+func testInterfaceMapKey() {
+	m := make(map[any]int)
+	m[42] = 1
+	m["hello"] = 2
+	m[Point{x: 1, y: 2}] = 3
+	
+	v1 := m[42]
+	v2 := m["hello"]
+	v3 := m[Point{x: 1, y: 2}]
+	
+	println("map[42]:", v1, "map[hello]:", v2, "map[Point]:", v3)
+	assert(v1 == 1, "map[42]")
+	assert(v2 == 2, "map[hello]")
+	assert(v3 == 3, "map[Point]")
+}
+
+// Test 14: Interface inequality
+func testInterfaceInequality() {
+	var a, b Stringer
+	a = MyInt(10)
+	b = MyInt(20)
+	
+	result := a != b
+	println("inequality:", result)
+	assert(result, "should be not equal")
+}
+
+// Test 15: Compare across different interface types
+type Printer interface {
+	Print()
+}
+
+type Both struct{}
+
+func (b Both) String() string { return "Both" }
+func (b Both) Print()         {}
+
+func testCrossInterfaceCompare() {
+	var s Stringer = Both{}
+	var p Printer = Both{}
+	
+	// Compare through any
+	var as any = s
+	var ap any = p
+	
+	result := as == ap
+	println("cross interface:", result)
+	// Both contain the same concrete value (Both{})
+	assert(result, "same concrete value should be equal")
+}
+
+func main() {
+	testSameTypeSameValue()
+	println("Test 1: PASSED - same type same value")
+	
+	testSameTypeDiffValue()
+	println("Test 2: PASSED - same type diff value")
+	
+	testDiffType()
+	println("Test 3: PASSED - diff type")
+	
+	testBothNil()
+	println("Test 4: PASSED - both nil")
+	
+	testOneNil()
+	println("Test 5: PASSED - one nil")
+	
+	testCompareNilLiteral()
+	println("Test 6: PASSED - compare nil literal")
+	
+	testTypedNil()
+	println("Test 7: PASSED - typed nil")
+	
+	testAnyComparison()
+	println("Test 8: PASSED - any comparison")
+	
+	testIfaceToConcreteCompare()
+	println("Test 9: PASSED - iface to concrete")
+	
+	testStructInInterface()
+	println("Test 10: PASSED - struct in interface")
+	
+	testStringInInterface()
+	println("Test 11: PASSED - string in interface")
+	
+	testInterfaceMapKey()
+	println("Test 13: PASSED - interface map key")
+	
+	testInterfaceInequality()
+	println("Test 14: PASSED - interface inequality")
+	
+	testCrossInterfaceCompare()
+	println("Test 15: PASSED - cross interface compare")
+	
+	println("ALL PASSED")
+}

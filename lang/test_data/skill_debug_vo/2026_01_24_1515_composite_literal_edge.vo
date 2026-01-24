@@ -1,0 +1,279 @@
+package main
+
+// Test 1: Composite literal with immediate field access
+type Point struct {
+	x, y int
+}
+
+func testCompositeLiteralFieldAccess() {
+	// Access field directly from composite literal
+	x := Point{x: 10, y: 20}.x
+	y := Point{x: 10, y: 20}.y
+	println("x:", x, "y:", y)
+	assert(x == 10, "x should be 10")
+	assert(y == 20, "y should be 20")
+}
+
+// Test 2: Composite literal with immediate method call
+func (p Point) Sum() int {
+	return p.x + p.y
+}
+
+func (p *Point) Double() {
+	p.x *= 2
+	p.y *= 2
+}
+
+func testCompositeLiteralMethodCall() {
+	sum := Point{x: 3, y: 4}.Sum()
+	println("sum:", sum)
+	assert(sum == 7, "sum should be 7")
+}
+
+// Test 3: Composite literal pointer with method call
+func testCompositeLiteralPtrMethod() {
+	p := &Point{x: 5, y: 10}
+	p.Double()
+	println("doubled:", p.x, p.y)
+	assert(p.x == 10, "x should be 10")
+	assert(p.y == 20, "y should be 20")
+}
+
+// Test 4: Nested composite literal
+type Rect struct {
+	topLeft     Point
+	bottomRight Point
+}
+
+func (r Rect) Area() int {
+	return (r.bottomRight.x - r.topLeft.x) * (r.bottomRight.y - r.topLeft.y)
+}
+
+func testNestedCompositeLiteral() {
+	area := Rect{
+		topLeft:     Point{x: 0, y: 0},
+		bottomRight: Point{x: 10, y: 5},
+	}.Area()
+	println("area:", area)
+	assert(area == 50, "area should be 50")
+}
+
+// Test 5: Composite literal in slice
+func testCompositeLiteralInSlice() {
+	points := []Point{
+		{x: 1, y: 2},
+		{x: 3, y: 4},
+		{x: 5, y: 6},
+	}
+	
+	sum := 0
+	for _, p := range points {
+		sum += p.Sum()
+	}
+	println("total sum:", sum)
+	// (1+2) + (3+4) + (5+6) = 3 + 7 + 11 = 21
+	assert(sum == 21, "sum should be 21")
+}
+
+// Test 6: Composite literal in map
+func testCompositeLiteralInMap() {
+	points := map[string]Point{
+		"origin": {x: 0, y: 0},
+		"unit":   {x: 1, y: 1},
+	}
+	
+	origin := points["origin"]
+	unit := points["unit"]
+	println("origin:", origin.x, origin.y, "unit:", unit.x, unit.y)
+	assert(origin.x == 0 && origin.y == 0, "origin")
+	assert(unit.x == 1 && unit.y == 1, "unit")
+}
+
+// Test 7: Composite literal with spread in variadic
+func sumPoints(points ...Point) int {
+	sum := 0
+	for _, p := range points {
+		sum += p.Sum()
+	}
+	return sum
+}
+
+func testCompositeLiteralVariadic() {
+	r := sumPoints(
+		Point{x: 1, y: 1},
+		Point{x: 2, y: 2},
+		Point{x: 3, y: 3},
+	)
+	println("sum:", r)
+	// 2 + 4 + 6 = 12
+	assert(r == 12, "sum should be 12")
+}
+
+// Test 8: Composite literal with type conversion
+type NamedPoint Point
+
+func (np NamedPoint) Name() string {
+	return "NamedPoint"
+}
+
+func testCompositeLiteralTypeConversion() {
+	np := NamedPoint(Point{x: 5, y: 5})
+	name := np.Name()
+	println("name:", name, "x:", np.x, "y:", np.y)
+	assert(name == "NamedPoint", "name")
+	assert(np.x == 5 && np.y == 5, "coords")
+}
+
+// Test 9: Composite literal assigned to interface
+type Shape interface {
+	Area() int
+}
+
+type Square struct {
+	side int
+}
+
+func (s Square) Area() int {
+	return s.side * s.side
+}
+
+func testCompositeLiteralToInterface() {
+	var s Shape = Square{side: 5}
+	area := s.Area()
+	println("area:", area)
+	assert(area == 25, "area should be 25")
+}
+
+// Test 10: Composite literal with function field
+type Calculator struct {
+	op func(int, int) int
+}
+
+func testCompositeLiteralFuncField() {
+	add := Calculator{
+		op: func(a, b int) int { return a + b },
+	}
+	
+	mul := Calculator{
+		op: func(a, b int) int { return a * b },
+	}
+	
+	r1 := add.op(3, 4)
+	r2 := mul.op(3, 4)
+	println("add:", r1, "mul:", r2)
+	assert(r1 == 7, "add should be 7")
+	assert(r2 == 12, "mul should be 12")
+}
+
+// Test 11: Array composite literal
+func testArrayCompositeLiteral() {
+	arr := [3]int{10, 20, 30}
+	sum := 0
+	for _, v := range arr {
+		sum += v
+	}
+	println("sum:", sum)
+	assert(sum == 60, "sum should be 60")
+}
+
+// Test 12: Sparse array composite literal
+func testSparseArrayCompositeLiteral() {
+	arr := [5]int{0: 1, 2: 3, 4: 5}
+	println("arr:", arr[0], arr[1], arr[2], arr[3], arr[4])
+	assert(arr[0] == 1, "arr[0]")
+	assert(arr[1] == 0, "arr[1] zero")
+	assert(arr[2] == 3, "arr[2]")
+	assert(arr[3] == 0, "arr[3] zero")
+	assert(arr[4] == 5, "arr[4]")
+}
+
+// Test 13: Composite literal in return statement
+func makePoint(x, y int) Point {
+	return Point{x: x, y: y}
+}
+
+func testCompositeLiteralReturn() {
+	p := makePoint(7, 8)
+	println("point:", p.x, p.y)
+	assert(p.x == 7 && p.y == 8, "point coords")
+}
+
+// Test 14: Composite literal in if condition (via method)
+func testCompositeLiteralInCondition() {
+	p := Point{x: 3, y: 4}
+	passed := false
+	if p.Sum() == 7 {
+		println("condition true")
+		passed = true
+	}
+	assert(passed, "condition should be true")
+}
+
+// Test 15: Composite literal with embedded struct
+type Named struct {
+	name string
+}
+
+type NamedPoint2 struct {
+	Named
+	Point
+}
+
+func testCompositeLiteralEmbed() {
+	np := NamedPoint2{
+		Named: Named{name: "origin"},
+		Point: Point{x: 0, y: 0},
+	}
+	println("name:", np.name, "x:", np.x, "y:", np.y)
+	assert(np.name == "origin", "name")
+	assert(np.x == 0 && np.y == 0, "coords")
+}
+
+func main() {
+	testCompositeLiteralFieldAccess()
+	println("Test 1: PASSED - field access")
+	
+	testCompositeLiteralMethodCall()
+	println("Test 2: PASSED - method call")
+	
+	testCompositeLiteralPtrMethod()
+	println("Test 3: PASSED - ptr method")
+	
+	testNestedCompositeLiteral()
+	println("Test 4: PASSED - nested")
+	
+	testCompositeLiteralInSlice()
+	println("Test 5: PASSED - in slice")
+	
+	testCompositeLiteralInMap()
+	println("Test 6: PASSED - in map")
+	
+	testCompositeLiteralVariadic()
+	println("Test 7: PASSED - variadic")
+	
+	testCompositeLiteralTypeConversion()
+	println("Test 8: PASSED - type conversion")
+	
+	testCompositeLiteralToInterface()
+	println("Test 9: PASSED - to interface")
+	
+	testCompositeLiteralFuncField()
+	println("Test 10: PASSED - func field")
+	
+	testArrayCompositeLiteral()
+	println("Test 11: PASSED - array")
+	
+	testSparseArrayCompositeLiteral()
+	println("Test 12: PASSED - sparse array")
+	
+	testCompositeLiteralReturn()
+	println("Test 13: PASSED - return")
+	
+	testCompositeLiteralInCondition()
+	println("Test 14: PASSED - in condition")
+	
+	testCompositeLiteralEmbed()
+	println("Test 15: PASSED - embed")
+	
+	println("ALL PASSED")
+}

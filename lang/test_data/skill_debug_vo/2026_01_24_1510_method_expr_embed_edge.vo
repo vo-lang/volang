@@ -1,0 +1,319 @@
+package main
+
+// Test 1: Method expression on embedded struct
+type Inner struct {
+	value int
+}
+
+func (i Inner) GetValue() int {
+	return i.value
+}
+
+func (i *Inner) SetValue(v int) {
+	i.value = v
+}
+
+type Outer struct {
+	Inner
+	name string
+}
+
+func testMethodExprEmbedded() {
+	o := Outer{Inner: Inner{value: 10}, name: "test"}
+	
+	// Method expression on embedded type through outer type
+	getValue := Outer.GetValue
+	r := getValue(o)
+	println("getValue:", r)
+	assert(r == 10, "getValue should return 10")
+	
+	// Pointer method expression
+	setValue := (*Outer).SetValue
+	setValue(&o, 20)
+	println("after setValue:", o.value)
+	assert(o.value == 20, "setValue should set to 20")
+}
+
+// Test 2: Multiple level embedding
+type Level1 struct {
+	a int
+}
+
+func (l Level1) GetA() int { return l.a }
+
+type Level2 struct {
+	Level1
+	b int
+}
+
+func (l Level2) GetB() int { return l.b }
+
+type Level3 struct {
+	Level2
+	c int
+}
+
+func (l Level3) GetC() int { return l.c }
+
+func testMultiLevelEmbed() {
+	l := Level3{
+		Level2: Level2{
+			Level1: Level1{a: 1},
+			b: 2,
+		},
+		c: 3,
+	}
+	
+	// Direct method call
+	assert(l.GetA() == 1, "GetA")
+	assert(l.GetB() == 2, "GetB")
+	assert(l.GetC() == 3, "GetC")
+	
+	// Method expressions at different levels
+	getA := Level3.GetA
+	getB := Level3.GetB
+	getC := Level3.GetC
+	
+	println("getA:", getA(l), "getB:", getB(l), "getC:", getC(l))
+	assert(getA(l) == 1, "method expr GetA")
+	assert(getB(l) == 2, "method expr GetB")
+	assert(getC(l) == 3, "method expr GetC")
+}
+
+// Test 3: Method expression with pointer receiver on embedded
+type Base struct {
+	count int
+}
+
+func (b *Base) Inc() {
+	b.count++
+}
+
+func (b Base) Get() int {
+	return b.count
+}
+
+type Derived struct {
+	*Base
+}
+
+func testPtrEmbedMethodExpr() {
+	d := Derived{Base: &Base{count: 0}}
+	
+	// Method expression with pointer receiver through pointer embed
+	inc := (*Derived).Inc
+	inc(&d)
+	inc(&d)
+	
+	get := Derived.Get
+	r := get(d)
+	println("count:", r)
+	assert(r == 2, "count should be 2")
+}
+
+// Test 4: Method expression assigned to interface
+type Counter interface {
+	Inc()
+	Get() int
+}
+
+type SimpleCounter struct {
+	n int
+}
+
+func (c *SimpleCounter) Inc() {
+	c.n++
+}
+
+func (c *SimpleCounter) Get() int {
+	return c.n
+}
+
+func testMethodExprToInterface() {
+	c := &SimpleCounter{n: 0}
+	
+	// Get method as value
+	incMethod := c.Inc
+	getMethod := c.Get
+	
+	incMethod()
+	incMethod()
+	incMethod()
+	
+	r := getMethod()
+	println("counter:", r)
+	assert(r == 3, "counter should be 3")
+}
+
+// Test 5: Method expression with interface receiver
+type Stringer interface {
+	String() string
+}
+
+func useStringer(s Stringer) string {
+	// Get method expression from interface
+	stringMethod := s.String
+	return stringMethod()
+}
+
+type MyString struct {
+	s string
+}
+
+func (m MyString) String() string {
+	return "MyString: " + m.s
+}
+
+func testMethodExprOnInterface() {
+	ms := MyString{s: "hello"}
+	r := useStringer(ms)
+	println("result:", r)
+	assert(r == "MyString: hello", "string method")
+}
+
+// Test 6: Method expression stored in struct field
+type Handler struct {
+	handle func(int) int
+}
+
+type Multiplier struct {
+	factor int
+}
+
+func (m Multiplier) Multiply(x int) int {
+	return x * m.factor
+}
+
+func testMethodExprInStructField() {
+	mul := Multiplier{factor: 3}
+	h := Handler{handle: mul.Multiply}
+	
+	r := h.handle(10)
+	println("result:", r)
+	assert(r == 30, "10 * 3 = 30")
+}
+
+// Test 7: Method expression in closure
+func testMethodExprInClosure() {
+	counter := &SimpleCounter{n: 5}
+	f := func() func() int {
+		return counter.Get
+	}
+	
+	getter := f()
+	r := getter()
+	println("result:", r)
+	assert(r == 5, "should get 5")
+}
+
+// Test 8: Method expression on type alias
+type IntSlice []int
+
+func (is IntSlice) Sum() int {
+	sum := 0
+	for _, v := range is {
+		sum += v
+	}
+	return sum
+}
+
+func testMethodExprTypeAlias() {
+	is := IntSlice{1, 2, 3, 4, 5}
+	
+	sumMethod := IntSlice.Sum
+	r := sumMethod(is)
+	println("sum:", r)
+	assert(r == 15, "sum should be 15")
+}
+
+// Test 9: Method expression with variadic
+type Logger struct {
+	prefix string
+}
+
+func (l Logger) Log(args ...any) string {
+	result := l.prefix + ":"
+	for _, arg := range args {
+		switch v := arg.(type) {
+		case int:
+			result += " int"
+			_ = v
+		case string:
+			result += " string"
+		default:
+			result += " other"
+		}
+	}
+	return result
+}
+
+func testMethodExprVariadic() {
+	log := Logger{prefix: "INFO"}
+	
+	logMethod := Logger.Log
+	r := logMethod(log, 1, "hello", 3.14)
+	println("log:", r)
+	assert(r == "INFO: int string other", "variadic log")
+}
+
+// Test 10: Chain of method expressions
+type Builder struct {
+	value string
+}
+
+func (b Builder) Append(s string) Builder {
+	return Builder{value: b.value + s}
+}
+
+func (b Builder) Build() string {
+	return b.value
+}
+
+func testMethodExprChain() {
+	b := Builder{value: ""}
+	
+	append := Builder.Append
+	build := Builder.Build
+	
+	b = append(b, "Hello")
+	b = append(b, " ")
+	b = append(b, "World")
+	
+	r := build(b)
+	println("result:", r)
+	assert(r == "Hello World", "chain result")
+}
+
+func main() {
+	testMethodExprEmbedded()
+	println("Test 1: PASSED - method expr embedded")
+	
+	testMultiLevelEmbed()
+	println("Test 2: PASSED - multi level embed")
+	
+	testPtrEmbedMethodExpr()
+	println("Test 3: PASSED - ptr embed method expr")
+	
+	testMethodExprToInterface()
+	println("Test 4: PASSED - method expr to interface")
+	
+	testMethodExprOnInterface()
+	println("Test 5: PASSED - method expr on interface")
+	
+	testMethodExprInStructField()
+	println("Test 6: PASSED - method expr in struct field")
+	
+	testMethodExprInClosure()
+	println("Test 7: PASSED - method expr in closure")
+	
+	testMethodExprTypeAlias()
+	println("Test 8: PASSED - method expr type alias")
+	
+	testMethodExprVariadic()
+	println("Test 9: PASSED - method expr variadic")
+	
+	testMethodExprChain()
+	println("Test 10: PASSED - method expr chain")
+	
+	println("ALL PASSED")
+}
