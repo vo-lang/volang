@@ -20,7 +20,8 @@ func testLoopCaptureAny() {
 	assert(funcs[2]().(int) == 2, "test1: func[2] should return 2")
 }
 
-// Test 2: Closure capturing without shadow (should capture last value)
+// Test 2: Closure capturing loop variable (Go 1.22 semantics - per-iteration copy)
+// Unlike Go 1.21, loop variables are now copied per iteration, so explicit shadow is unnecessary
 func testLoopCaptureNoShadow() {
 	var funcs []func() int
 	
@@ -30,10 +31,10 @@ func testLoopCaptureNoShadow() {
 		})
 	}
 	
-	// All should return 3 (loop end value)
-	assert(funcs[0]() == 3, "test2: func[0] should return 3")
-	assert(funcs[1]() == 3, "test2: func[1] should return 3")
-	assert(funcs[2]() == 3, "test2: func[2] should return 3")
+	// Go 1.22: Each iteration gets fresh copy, same as with explicit shadow
+	assert(funcs[0]() == 0, "test2: func[0] should return 0")
+	assert(funcs[1]() == 1, "test2: func[1] should return 1")
+	assert(funcs[2]() == 2, "test2: func[2] should return 2")
 }
 
 // Test 3: Closure modifying captured loop variable

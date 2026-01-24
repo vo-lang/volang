@@ -32,8 +32,9 @@ pub struct DeferEntry {
 }
 
 /// How return values are stored while defers execute.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum PendingReturnKind {
+    #[default]
     /// No return values (void function or recovered panic without named returns).
     None,
     /// Return values copied from stack before frame was popped.
@@ -61,13 +62,11 @@ pub enum UnwindingKind {
         caller_ret_count: usize,
     },
     /// Panic unwinding - execute defers, check for recover().
-    /// If function has heap-allocated named returns, stores info to return them after recovery.
+    /// Preserves return values so they can be restored if recover() succeeds.
     Panic {
-        /// Heap return info for recovery (reuses PendingReturnKind::Heap format).
-        /// None if no heap returns or ret_slots is 0.
-        heap_gcrefs: Option<Vec<u64>>,
-        /// Slot count for each GcRef (parallel array).
-        slots_per_ref: Vec<usize>,
+        /// Saved return values from the original return (before panic).
+        /// Used to restore return values when recover() succeeds.
+        saved_return_kind: PendingReturnKind,
         caller_ret_reg: u16,
         caller_ret_count: usize,
     },
@@ -254,14 +253,10 @@ impl Fiber {
     /// This prevents nested calls within the defer function from triggering panic_unwind.
     pub fn switch_panic_to_return_mode(&mut self) {
         let Some(ref mut state) = self.unwinding else { return };
-        let UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count, .. } = &mut state.kind else { return };
+        let UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count } = &mut state.kind else { return };
         
-        let return_kind = match heap_gcrefs.take() {
-            Some(gcrefs) => PendingReturnKind::Heap { gcrefs, slots_per_ref: core::mem::take(slots_per_ref) },
-            None => PendingReturnKind::None,
-        };
         state.kind = UnwindingKind::Return {
-            return_kind,
+            return_kind: core::mem::take(saved_return_kind),
             caller_ret_reg: *caller_ret_reg,
             caller_ret_count: *caller_ret_count,
         };

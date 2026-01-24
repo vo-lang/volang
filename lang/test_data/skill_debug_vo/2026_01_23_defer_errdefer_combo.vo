@@ -146,13 +146,14 @@ func main() {
 	log = []string{}
 	err2 := testBothWithError()
 	assert(err2 != nil, "test2: should return error")
-	// Expected order: body, defer2, errdefer2, defer1, errdefer1
+	// Registration order: defer1, errdefer1, defer2, errdefer2
+	// LIFO execution: errdefer2, defer2, errdefer1, defer1
 	assert(len(log) == 5, "test2: should have 5 entries")
 	assert(log[0] == "body", "test2: body first")
-	assert(log[1] == "defer2", "test2: defer2")
-	assert(log[2] == "errdefer2", "test2: errdefer2")
-	assert(log[3] == "defer1", "test2: defer1")
-	assert(log[4] == "errdefer1", "test2: errdefer1")
+	assert(log[1] == "errdefer2", "test2: errdefer2 (LIFO)")
+	assert(log[2] == "defer2", "test2: defer2")
+	assert(log[3] == "errdefer1", "test2: errdefer1")
+	assert(log[4] == "defer1", "test2: defer1")
 	fmt.Println("Test 2: PASSED")
 	
 	// Test 3: errdefer closure capturing error

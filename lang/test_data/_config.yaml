@@ -805,11 +805,9 @@ tests:
   - file: skill_debug_vo/2026_01_23_2244_panic_recover_complex.vo
     # Bug fixed: nested defer recover now correctly matches Go semantics
   - file: skill_debug_vo/2026_01_23_closure_loop_iface.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
+    # Fixed: Test expectations updated to match Go 1.22 per-iteration loop variable semantics
   - file: skill_debug_vo/2026_01_23_defer_errdefer_combo.vo
-    skip: [vm, jit]
-    reason: "pending bug fix"
+    # Bug fixed: UnwindingKind::Panic now preserves PendingReturnKind for recover()
   - file: skill_debug_vo/2026_01_23_eval_order_edge.vo
     skip: [vm, jit]
     reason: "pending bug fix"

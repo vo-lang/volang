@@ -83,9 +83,15 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
                         }
                     }
                 }
-                crate::fiber::UnwindingKind::Panic { heap_gcrefs, .. } => {
-                    if let Some(gcrefs) = heap_gcrefs {
-                        scan_gcrefs(gc, gcrefs);
+                crate::fiber::UnwindingKind::Panic { saved_return_kind, .. } => {
+                    match saved_return_kind {
+                        crate::fiber::PendingReturnKind::None => {}
+                        crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
+                            scan_slots_by_types(gc, vals, slot_types);
+                        }
+                        crate::fiber::PendingReturnKind::Heap { gcrefs, .. } => {
+                            scan_gcrefs(gc, gcrefs);
+                        }
                     }
                 }
             }

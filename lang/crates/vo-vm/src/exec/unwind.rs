@@ -258,22 +258,9 @@ fn handle_return_defer_returned(
     }
     
     // All defers complete - finalize return
-    let (ret_vals, caller_ret_reg, caller_ret_count) = match &mut state.kind {
-        UnwindingKind::Return { return_kind, caller_ret_reg, caller_ret_count } => {
-            let vals = match return_kind {
-                // No saved returns (e.g., after recover) - return zeros
-                PendingReturnKind::None => vec![0u64; *caller_ret_count],
-                PendingReturnKind::Stack { vals, .. } => core::mem::take(vals),
-                PendingReturnKind::Heap { gcrefs, slots_per_ref } => {
-                    read_heap_gcrefs(gcrefs, slots_per_ref)
-                }
-            };
-            (vals, *caller_ret_reg, *caller_ret_count)
-        }
-        UnwindingKind::Panic { .. } => unreachable!(),
-    };
+    let (return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
     *unwinding = None;
-    
+    let ret_vals = pending_return_to_values(return_kind, caller_ret_count);
     write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count)
 }
 
@@ -328,34 +315,25 @@ fn handle_panic_defer_returned(
     pop_frame(stack, frames);
     
     // Extract return info (handles both Panic and Return modes for edge cases)
-    let (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count) = extract_return_info_mut(&mut state.kind);
+    let (saved_return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
     
     // Check if recover() was called (panic_state is None means recovered)
     if panic_state.is_none() {
         // Recovered! Switch to Return mode
         if !state.pending.is_empty() {
-            let return_kind = match heap_gcrefs {
-                Some(gcrefs) => PendingReturnKind::Heap { gcrefs, slots_per_ref },
-                None => PendingReturnKind::None,
-            };
-            state.kind = UnwindingKind::Return { return_kind, caller_ret_reg, caller_ret_count };
+            state.kind = UnwindingKind::Return { return_kind: saved_return_kind, caller_ret_reg, caller_ret_count };
             return execute_next_defer(state, stack, frames, module);
         }
         
         // No more defers - return to caller with appropriate values
         *unwinding = None;
-        if let Some(gcrefs) = heap_gcrefs {
-            let ret_vals = read_heap_gcrefs(&gcrefs, &slots_per_ref);
-            return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
-        }
-        // No named returns - write zeros for all return slots
-        let zeros = vec![0u64; caller_ret_count];
-        return write_return_values(stack, frames, &zeros, caller_ret_reg, caller_ret_count);
+        let ret_vals = pending_return_to_values(saved_return_kind, caller_ret_count);
+        return write_return_values(stack, frames, &ret_vals, caller_ret_reg, caller_ret_count);
     }
     
     // Still panicking - continue with next defer or unwind to parent
     if !state.pending.is_empty() {
-        state.kind = UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count };
+        state.kind = UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count };
         return execute_next_defer(state, stack, frames, module);
     }
     
@@ -375,17 +353,10 @@ fn handle_panic_during_unwinding(
     let state = unwinding.as_mut().unwrap();
     
     // Extract return info from current state
-    let (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count) = extract_return_info_mut(&mut state.kind);
+    let (saved_return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
     
-    // Unwind all frames until defer boundary, collecting defers from each
-    while frames.len() > state.target_depth + 1 {
-        let current_frame_depth = frames.len();
-        collect_and_prepend_nested_defers(defer_stack, &mut state.pending, current_frame_depth, true);
-        pop_frame(stack, frames);
-    }
-    
-    // Pop the defer frame itself
-    if frames.len() == state.target_depth + 1 {
+    // Unwind all frames back to defer boundary (including the defer frame itself)
+    while frames.len() > state.target_depth {
         let current_frame_depth = frames.len();
         collect_and_prepend_nested_defers(defer_stack, &mut state.pending, current_frame_depth, true);
         pop_frame(stack, frames);
@@ -393,7 +364,7 @@ fn handle_panic_during_unwinding(
     
     // Continue with remaining defers in Panic mode
     if !state.pending.is_empty() {
-        state.kind = UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count };
+        state.kind = UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count };
         return execute_next_defer(state, stack, frames, module);
     }
     
@@ -419,8 +390,8 @@ fn start_panic_unwind(
         let pending = collect_defers(defer_stack, frame_depth, true);
         
         if !pending.is_empty() {
-            let (heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count) = 
-                extract_frame_return_info(stack, frames, module);
+            let (saved_return_kind, caller_ret_reg, caller_ret_count) = 
+                extract_frame_return_kind(stack, frames, module);
             
             pop_frame(stack, frames);
             
@@ -430,7 +401,7 @@ fn start_panic_unwind(
             *unwinding = Some(UnwindingState {
                 pending,
                 target_depth: frames.len(),
-                kind: UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count },
+                kind: UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count },
                 current_defer_generation: first_defer.registered_at_generation,
             });
             
@@ -445,41 +416,44 @@ fn start_panic_unwind(
 // Helper functions
 // ============================================================================
 
-/// Extract return info from UnwindingKind (mutable, takes ownership of heap_gcrefs).
-fn extract_return_info_mut(kind: &mut UnwindingKind) -> (Option<Vec<u64>>, Vec<usize>, u16, usize) {
+/// Extract return info from UnwindingKind (mutable, takes ownership).
+fn extract_return_kind_mut(kind: &mut UnwindingKind) -> (PendingReturnKind, u16, usize) {
     match kind {
         UnwindingKind::Return { return_kind, caller_ret_reg, caller_ret_count } => {
-            let heap_gcrefs = match return_kind {
-                PendingReturnKind::Heap { gcrefs, .. } => Some(core::mem::take(gcrefs)),
-                _ => None,
-            };
-            let slots = match return_kind {
-                PendingReturnKind::Heap { slots_per_ref, .. } => core::mem::take(slots_per_ref),
-                _ => vec![],
-            };
-            (heap_gcrefs, slots, *caller_ret_reg, *caller_ret_count)
+            (core::mem::take(return_kind), *caller_ret_reg, *caller_ret_count)
         }
-        UnwindingKind::Panic { heap_gcrefs, slots_per_ref, caller_ret_reg, caller_ret_count } => {
-            (heap_gcrefs.take(), core::mem::take(slots_per_ref), *caller_ret_reg, *caller_ret_count)
+        UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count } => {
+            (core::mem::take(saved_return_kind), *caller_ret_reg, *caller_ret_count)
         }
     }
 }
 
+/// Convert PendingReturnKind to return values.
+#[inline]
+fn pending_return_to_values(kind: PendingReturnKind, caller_ret_count: usize) -> Vec<u64> {
+    match kind {
+        PendingReturnKind::None => vec![0u64; caller_ret_count],
+        PendingReturnKind::Stack { vals, .. } => vals,
+        PendingReturnKind::Heap { gcrefs, slots_per_ref } => read_heap_gcrefs(&gcrefs, &slots_per_ref),
+    }
+}
+
 /// Extract return info from the current frame for panic recovery.
-fn extract_frame_return_info(
+/// For fresh panic, we only have heap returns info (if any).
+fn extract_frame_return_kind(
     stack: &[u64],
     frames: &[CallFrame],
     module: &Module,
-) -> (Option<Vec<u64>>, Vec<usize>, u16, usize) {
+) -> (PendingReturnKind, u16, usize) {
     let Some(frame) = frames.last() else {
-        return (None, vec![], 0, 0);
+        return (PendingReturnKind::None, 0, 0);
     };
     let Some(func) = module.functions.get(frame.func_id as usize) else {
-        return (None, vec![], frame.ret_reg, frame.ret_count as usize);
+        return (PendingReturnKind::None, frame.ret_reg, frame.ret_count as usize);
     };
     
     if func.heap_ret_gcref_count == 0 {
-        return (None, vec![], frame.ret_reg, frame.ret_count as usize);
+        return (PendingReturnKind::None, frame.ret_reg, frame.ret_count as usize);
     }
     
     let gcref_count = func.heap_ret_gcref_count as usize;
@@ -490,7 +464,7 @@ fn extract_frame_return_info(
     
     let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
     
-    (Some(gcrefs), slots_per_ref, frame.ret_reg, frame.ret_count as usize)
+    (PendingReturnKind::Heap { gcrefs, slots_per_ref }, frame.ret_reg, frame.ret_count as usize)
 }
 
 /// Pop frame from call stack.
