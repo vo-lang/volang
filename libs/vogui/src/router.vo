@@ -12,13 +12,13 @@ type Route struct {
 
 // Navigate changes the current URL and re-renders the app.
 func Navigate(path string) {
-	gui_navigate(path)
+	navigate(path)
 	updatePath(path)
 }
 
 // GetCurrentPath returns the current browser URL path.
 func GetCurrentPath() string {
-	return gui_getCurrentPath()
+	return getCurrentPath()
 }
 
 // matchRoute checks if url matches pattern and extracts parameters.
@@ -60,5 +60,5 @@ func splitPath(path string) []string {
 
 // ============ Externs ============
 
-func gui_navigate(path string)
-func gui_getCurrentPath() string
+func navigate(path string)
+func getCurrentPath() string

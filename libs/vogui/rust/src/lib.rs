@@ -16,8 +16,8 @@ use vo_vm::bytecode::{Module, ExternDef};
 
 use include_dir::{include_dir, Dir};
 
-// Embed gui package directory at compile time
-static GUI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/..");
+// Embed gui package source directory at compile time (only contains .vo files)
+static GUI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../src");
 
 // Re-export for library users
 pub use vo_common::vfs::{MemoryFs, FileSystem};
@@ -148,16 +148,10 @@ fn run_gui_module(module: Module) -> GuiResult {
     // Create VM
     let mut vm = Vm::new();
     
-    // Get extern defs before loading
-    let externs = module.externs.clone();
+    // Register GUI extern functions BEFORE loading (load validates all externs are registered)
+    register_gui_externs(&mut vm.state.extern_registry, &module.externs);
     
     vm.load(module);
-    
-    // Register GUI extern functions
-    register_gui_externs(&mut vm.state.extern_registry, &externs);
-
-    // Register standard library externs (CRITICAL FIX)
-    vo_runtime::register_all_stdlib_externs(&mut vm.state.extern_registry, &externs);
     
     // Run until completion (Run() returns after registering handler)
     if let Err(e) = vm.run() {
@@ -252,7 +246,9 @@ pub fn handle_event(handler_id: i32, payload: &str) -> GuiResult {
 // =============================================================================
 
 pub fn register_gui_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+    web_sys::console::log_1(&format!("[VoGUI-Rust] register_gui_externs called, {} externs", externs.len()).into());
     for (id, def) in externs.iter().enumerate() {
+        web_sys::console::log_1(&format!("[VoGUI-Rust] Checking extern [{}]: '{}'", id, def.name).into());
         match def.name.as_str() {
             "gui_registerEventHandler" => {
                 web_sys::console::log_1(&"[VoGUI-Rust] Registering gui_registerEventHandler".into());

@@ -16,3 +16,5 @@ license = "MIT"
 [profile.release]
 opt-level = "s"
 lto = true
+strip = true
+debug = false
