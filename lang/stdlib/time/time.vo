@@ -1,0 +1,39 @@
+package time
+
+import "time/internal/timesys"
+
+type Duration int64
+
+const (
+	Nanosecond Duration = 1
+	Microsecond         = 1000 * Nanosecond
+	Millisecond         = 1000 * Microsecond
+	Second              = 1000 * Millisecond
+	Minute              = 60 * Second
+	Hour                = 60 * Minute
+)
+
+type Time struct {
+	unixNano int64
+	monoNano int64
+}
+
+func Now() Time {
+	return Time{unixNano: timesys.NowUnixNano(), monoNano: timesys.NowMonoNano()}
+}
+
+func (t Time) UnixNano() int64 { return t.unixNano }
+func (t Time) MonoNano() int64 { return t.monoNano }
+
+func Since(t Time) Duration {
+	return Duration(timesys.NowMonoNano() - t.monoNano)
+}
+
+func Sleep(d Duration) {
+	timesys.SleepNano(int64(d))
+}
+
+func (d Duration) Nanoseconds() int64 { return int64(d) }
+func (d Duration) Microseconds() int64 { return int64(d / Microsecond) }
+func (d Duration) Milliseconds() int64 { return int64(d / Millisecond) }
+func (d Duration) Seconds() int64 { return int64(d / Second) }

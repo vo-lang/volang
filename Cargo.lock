@@ -1506,6 +1506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-stdlib-native"
+version = "0.1.0"
+dependencies = [
+ "vo-runtime",
+]
+
+[[package]]
 name = "vo-syntax"
 version = "0.1.0"
 dependencies = [
@@ -1528,6 +1535,8 @@ dependencies = [
  "vo-common-core",
  "vo-jit",
  "vo-runtime",
+ "vo-stdlib-native",
+ "vo-web-runtime-wasm",
 ]
 
 [[package]]
@@ -1560,6 +1569,16 @@ dependencies = [
  "vo-vm",
  "wasm-bindgen",
  "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
+name = "vo-web-runtime-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "vo-runtime",
+ "wasm-bindgen",
  "web-sys",
 ]
 

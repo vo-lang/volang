@@ -7,13 +7,16 @@ description = "Vo language virtual machine"
 
 [features]
 default = ["std"]
-std = ["vo-runtime/std"]
+std = ["vo-runtime/std", "dep:vo-stdlib-native"]
+wasm-platform = ["dep:vo-web-runtime-wasm"]
 # Enable JIT compilation support
 jit = ["vo-jit"]
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-common-core = { path = "../vo-common-core" }
+vo-stdlib-native = { path = "../vo-stdlib-native", optional = true }
+vo-web-runtime-wasm = { path = "../vo-web/runtime-wasm", optional = true }
 hashbrown = "0.15"
 fastrand = "2.0"
 

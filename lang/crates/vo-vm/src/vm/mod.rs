@@ -9,6 +9,12 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+#[cfg(feature = "std")]
+use std::string::String;
+
+#[cfg(feature = "std")]
+use std::vec::Vec;
+
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{array, string};
 
@@ -49,6 +55,25 @@ pub struct Vm {
     pub module: Option<Module>,
     pub scheduler: Scheduler,
     pub state: VmState,
+}
+
+fn validate_externs_registered(registry: &vo_runtime::ExternRegistry, externs: &[vo_runtime::bytecode::ExternDef]) {
+    let mut missing: Vec<(usize, &str)> = Vec::new();
+    for (id, def) in externs.iter().enumerate() {
+        if !registry.has(id as u32) {
+            missing.push((id, def.name.as_str()));
+        }
+    }
+
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut msg = String::from("unresolved extern functions:\n");
+    for (id, name) in missing {
+        msg.push_str(&format!("  - [{}] {}\n", id, name));
+    }
+    panic!("{}", msg);
 }
 
 impl Vm {
@@ -137,8 +162,14 @@ impl Vm {
     
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) {
-        // In no_std mode, register extern functions via static tables
         vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
+
+        #[cfg(all(target_arch = "wasm32", feature = "wasm-platform"))]
+        {
+            vo_web_runtime_wasm::time::register_externs(&mut self.state.extern_registry, &module.externs);
+        }
+
+        validate_externs_registered(&self.state.extern_registry, &module.externs);
         self.finish_load(module);
     }
 
@@ -149,13 +180,24 @@ impl Vm {
         module: Module,
         ext_loader: Option<&vo_runtime::ext_loader::ExtensionLoader>,
     ) {
-        // Register stdlib extern functions
         vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
+
+        #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
+        {
+            vo_stdlib_native::time::register_externs(&mut self.state.extern_registry, &module.externs);
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "wasm-platform"))]
+        {
+            vo_web_runtime_wasm::time::register_externs(&mut self.state.extern_registry, &module.externs);
+        }
         
         // Register extern functions from extension loader (if provided)
         if let Some(loader) = ext_loader {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
         }
+
+        validate_externs_registered(&self.state.extern_registry, &module.externs);
         
         self.finish_load(module);
     }

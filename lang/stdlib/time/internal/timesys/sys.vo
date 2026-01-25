@@ -1,0 +1,5 @@
+package timesys
+
+func NowUnixNano() int64
+func NowMonoNano() int64
+func SleepNano(d int64)

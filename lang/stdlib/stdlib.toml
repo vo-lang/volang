@@ -28,7 +28,7 @@ dyn = { path = "dyn" }
 [packages.std]
 io = { path = "io" }
 os = { path = "os" }
-# time = { path = "time" }
+time = { path = "time" }
 # "math/rand" = { path = "math/rand" }
 # path = { path = "path" }
 # "path/filepath" = { path = "path/filepath" }

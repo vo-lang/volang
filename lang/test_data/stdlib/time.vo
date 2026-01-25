@@ -1,0 +1,12 @@
+package main
+
+import "time"
+
+func main() {
+	assert(time.Now().UnixNano() > 0)
+
+	start := time.Now()
+	time.Sleep(time.Duration(10) * time.Millisecond)
+	d := time.Since(start)
+	assert(d > 0)
+}
