@@ -6,10 +6,10 @@ use alloc::string::ToString;
 
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallContext, ExternResult};
-use crate::gc::GcRef;
-use crate::objects::interface;
-use super::error_helper::write_error_to;
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::gc::GcRef;
+use vo_runtime::objects::interface;
+use vo_runtime::builtins::error_helper::write_error_to;
 use super::serde::{marshal_struct_value, marshal_any_value, unmarshal_struct, get_pointed_type_rttid, FormatWriter as _};
 use super::serde_toml::{TomlWriter, TomlReader};
 
@@ -95,4 +95,4 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-crate::stdlib_register!(toml: marshalAny, Unmarshal);
+vo_runtime::stdlib_register!(toml: marshalAny, Unmarshal);

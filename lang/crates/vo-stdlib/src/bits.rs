@@ -186,7 +186,7 @@ fn div64(hi: u64, lo: u64, y: u64) -> (u64, u64) {
     ((dividend / divisor) as u64, (dividend % divisor) as u64)
 }
 
-crate::stdlib_register!(math_bits:
+vo_runtime::stdlib_register!(math_bits:
     LeadingZeros, LeadingZeros8, LeadingZeros16, LeadingZeros32, LeadingZeros64,
     TrailingZeros, TrailingZeros8, TrailingZeros16, TrailingZeros32, TrailingZeros64,
     OnesCount, OnesCount8, OnesCount16, OnesCount32, OnesCount64,

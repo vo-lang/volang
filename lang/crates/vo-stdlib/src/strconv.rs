@@ -4,7 +4,7 @@
 //! Integer parsing/formatting and quote/unquote are implemented in Vo.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
+use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
@@ -91,4 +91,4 @@ fn format_float(f: f64, fmt: u8, prec: i64, bit_size: i64) -> String {
     }
 }
 
-crate::stdlib_register!(strconv: ParseFloat, FormatFloat);
+vo_runtime::stdlib_register!(strconv: ParseFloat, FormatFloat);

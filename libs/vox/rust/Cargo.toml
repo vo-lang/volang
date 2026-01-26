@@ -18,6 +18,7 @@ crate-type = ["rlib", "cdylib"]
 vo-engine = { path = "../../../lang/crates/vo-engine" }
 vo-vm = { path = "../../../lang/crates/vo-vm" }
 vo-runtime = { path = "../../../lang/crates/vo-runtime" }
+vo-stdlib = { path = "../../../lang/crates/vo-stdlib" }
 vo-ext = { path = "../../../lang/crates/vo-ext" }
 vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
 vo-common = { path = "../../../lang/crates/vo-common" }

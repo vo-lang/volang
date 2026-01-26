@@ -288,7 +288,7 @@ fn unicode_is_symbol(c: char) -> bool {
     )
 }
 
-crate::stdlib_register!(unicode:
+vo_runtime::stdlib_register!(unicode:
     IsLetter, IsDigit, IsSpace, IsUpper, IsLower, IsControl,
     IsPrint, IsPunct, IsGraphic, IsNumber, IsMark, IsSymbol,
     ToLower, ToUpper, ToTitle, SimpleFold,

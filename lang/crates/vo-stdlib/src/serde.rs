@@ -14,10 +14,10 @@ use std::borrow::Cow;
 use vo_common_core::types::ValueKind;
 use vo_common_core::runtime_type::RuntimeType;
 
-use crate::ffi::ExternCallContext;
-use crate::gc::GcRef;
-use crate::objects::{array, interface, map, slice, string as str_obj};
-use crate::slot::SLOT_BYTES;
+use vo_runtime::ffi::ExternCallContext;
+use vo_runtime::gc::GcRef;
+use vo_runtime::objects::{array, interface, map, slice, string as str_obj};
+use vo_runtime::slot::SLOT_BYTES;
 use super::tag::{get_tag_value, parse_field_options};
 
 pub const MAX_DEPTH: usize = 64;

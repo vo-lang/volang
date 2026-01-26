@@ -7,8 +7,8 @@
 #[cfg(feature = "std")]
 use regex::Regex;
 
-use crate::ffi::{ExternCallContext, ExternResult};
 use vo_ffi_macro::vostd_extern_ctx;
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
 
 // ==================== Matching ====================
 
@@ -27,7 +27,7 @@ fn match_string(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_extern_ctx("regexp", "matchBytes")]
 fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::slice;
+    use vo_runtime::objects::slice;
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let b_ref = call.arg_ref(slots::ARG_B);
     let b_len = slice::len(b_ref);
@@ -58,7 +58,7 @@ fn find_string(call: &mut ExternCallContext) -> ExternResult {
         Err(_) => String::new(),
     };
     let gc = call.gc();
-    let str_ref = crate::objects::string::from_rust_str(gc, &result);
+    let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
     call.ret_ref(0, str_ref);
     ExternResult::Ok
 }
@@ -78,7 +78,7 @@ fn find_string_index(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_extern_ctx("regexp", "findAllString")]
 fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{array, slice, string};
+    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -101,7 +101,7 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());
     for (i, r) in results.iter().enumerate() {
-        let str_ref = string::from_rust_str(gc, r);
+        let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
@@ -121,7 +121,7 @@ fn replace_all_string(call: &mut ExternCallContext) -> ExternResult {
         Err(_) => src.to_string(),
     };
     let gc = call.gc();
-    let str_ref = crate::objects::string::from_rust_str(gc, &result);
+    let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
     call.ret_ref(0, str_ref);
     ExternResult::Ok
 }
@@ -136,7 +136,7 @@ fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
         Err(_) => src.to_string(),
     };
     let gc = call.gc();
-    let str_ref = crate::objects::string::from_rust_str(gc, &result);
+    let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
     call.ret_ref(0, str_ref);
     ExternResult::Ok
 }
@@ -145,7 +145,7 @@ fn replace_all_literal_string(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_extern_ctx("regexp", "splitString")]
 fn split_string(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{array, slice, string};
+    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -168,7 +168,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());
     for (i, r) in results.iter().enumerate() {
-        let str_ref = string::from_rust_str(gc, r);
+        let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
@@ -180,7 +180,7 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_extern_ctx("regexp", "findStringSubmatch")]
 fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{array, slice, string};
+    use vo_runtime::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueMeta;
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let s = call.arg_str(slots::ARG_S);
@@ -202,7 +202,7 @@ fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
     let elem_meta = ValueMeta::new(0, vo_common_core::types::ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, results.len());
     for (i, r) in results.iter().enumerate() {
-        let str_ref = string::from_rust_str(gc, r);
+        let str_ref = str_obj::from_rust_str(gc, r);
         array::set(arr, i, str_ref as u64, 8);
     }
     let slice_ref = slice::from_array(gc, arr);
@@ -217,9 +217,9 @@ fn quote_meta(call: &mut ExternCallContext) -> ExternResult {
     let s = call.arg_str(slots::ARG_S);
     let result = regex::escape(s);
     let gc = call.gc();
-    let str_ref = crate::objects::string::from_rust_str(gc, &result);
+    let str_ref = vo_runtime::objects::string::from_rust_str(gc, &result);
     call.ret_ref(0, str_ref);
     ExternResult::Ok
 }
 
-crate::stdlib_register!(regexp: matchString, matchBytes, findString, findStringIndex, findAllString, replaceAllString, replaceAllLiteralString, splitString, findStringSubmatch, quoteMeta);
+vo_runtime::stdlib_register!(regexp: matchString, matchBytes, findString, findStringIndex, findAllString, replaceAllString, replaceAllLiteralString, splitString, findStringSubmatch, quoteMeta);

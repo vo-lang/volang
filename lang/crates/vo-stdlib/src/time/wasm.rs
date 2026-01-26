@@ -1,4 +1,4 @@
-//! WASM platform extern implementations.
+//! WASM time implementations.
 
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::{ExternCall, ExternRegistry, ExternResult};

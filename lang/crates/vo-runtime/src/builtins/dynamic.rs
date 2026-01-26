@@ -14,7 +14,7 @@ use vo_ffi_macro::vo_errors;
 
 use crate::ffi::{ExternCallContext, ExternResult};
 use crate::gc::{Gc, GcRef};
-use crate::objects::{array, interface, map, slice, string, struct_ops};
+use crate::objects::{array, interface, map, slice, string as str_obj, struct_ops};
 use crate::slot::SLOT_BYTES;
 use vo_common_core::runtime_type::RuntimeType;
 use super::error_helper::write_error_to;
@@ -220,7 +220,7 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     let field_name = if name_ref.is_null() {
         return dyn_error(call, DynErr::NilBase, "field name is nil");
     } else {
-        string::as_str(name_ref)
+        str_obj::as_str(name_ref)
     };
     
     // Get value kind
@@ -557,7 +557,7 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
         }
         ValueKind::String => {
-            let s = string::as_str(base_ref);
+            let s = str_obj::as_str(base_ref);
             let bytes = s.as_bytes();
             let idx = match check_int_index(key_slot0, key_slot1, bytes.len()) {
                 Ok(i) => i,
@@ -646,7 +646,7 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     if name_ref.is_null() {
         return dyn_error_only(call, DynErr::NilBase, "field name is nil");
     }
-    let field_name = string::as_str(name_ref);
+    let field_name = str_obj::as_str(name_ref);
 
     let base_vk = interface::unpack_value_kind(base_slot0);
     let base_rttid = interface::unpack_rttid(base_slot0);

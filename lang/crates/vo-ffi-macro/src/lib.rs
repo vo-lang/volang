@@ -321,8 +321,8 @@ fn vostd_extern_ctx_nostd_impl(
         }
         
         #[doc(hidden)]
-        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
+        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
     })
 }
 
@@ -363,19 +363,19 @@ fn vostd_extern_ctx_impl(
         
         #[cfg(feature = "std")]
         #[doc(hidden)]
-        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
+        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
         
         #[cfg(not(feature = "std"))]
         #[doc(hidden)]
-        pub fn #fn_name(_call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
-            crate::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
+        pub fn #fn_name(_call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+            vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
         }
         
         #[cfg(not(feature = "std"))]
         #[doc(hidden)]
-        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
+        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #fn_name);
     })
 }
 
@@ -1029,14 +1029,14 @@ fn vostd_extern_only_impl(
         
         #[cfg(not(feature = "std"))]
         #[doc(hidden)]
-        pub fn #wrapper_name(_call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
-            crate::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
+        pub fn #wrapper_name(_call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+            vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from(#panic_msg))
         }
         
         #[cfg(not(feature = "std"))]
         #[doc(hidden)]
-        pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-            crate::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
+        pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
     })
 }
 
@@ -1061,30 +1061,30 @@ fn generate_extern_entry(
     if needs_gc {
         quote! {
             #[doc(hidden)]
-            pub fn #wrapper_name(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
+            pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
                 #(#arg_reads)*
                 let __result = #call_expr;
                 #ret_writes
-                crate::ffi::ExternResult::Ok
+                vo_runtime::ffi::ExternResult::Ok
             }
             
             #[doc(hidden)]
-            pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-                crate::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
+            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #wrapper_name);
         }
     } else {
         quote! {
             #[doc(hidden)]
-            pub fn #wrapper_name(call: &mut crate::ffi::ExternCall) -> crate::ffi::ExternResult {
+            pub fn #wrapper_name(call: &mut vo_runtime::ffi::ExternCall) -> vo_runtime::ffi::ExternResult {
                 #(#arg_reads)*
                 let __result = #call_expr;
                 #ret_writes
-                crate::ffi::ExternResult::Ok
+                vo_runtime::ffi::ExternResult::Ok
             }
             
             #[doc(hidden)]
-            pub const #stdlib_entry_name: crate::ffi::StdlibEntry = 
-                crate::ffi::StdlibEntry::NoCtx(#lookup_name, #wrapper_name);
+            pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry = 
+                vo_runtime::ffi::StdlibEntry::NoCtx(#lookup_name, #wrapper_name);
         }
     }
 }
@@ -1939,14 +1939,14 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
         enum_variants.push(quote! { #name });
         if is_internal {
             create_errors.push(quote! {
-                let err = crate::stdlib::error_helper::create_error(call, #msg);
+                let err = crate::builtins::error_helper::create_error(call, #msg);
                 errors[#i] = err;
                 call.ret_u64(#idx as u16, err.0);
                 call.ret_u64((#idx + 1) as u16, err.1);
             });
         } else {
             create_errors.push(quote! {
-                let err = vo_runtime::stdlib::error_helper::create_error(call, #msg);
+                let err = vo_runtime::builtins::error_helper::create_error(call, #msg);
                 errors[#i] = err;
                 call.ret_u64(#idx as u16, err.0);
                 call.ret_u64((#idx + 1) as u16, err.1);
@@ -1975,17 +1975,17 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
                 }
             }
             
-            fn #getter_fn(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
+            fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
                 let mut errors = [(0u64, 0u64); #error_count];
                 #(#create_errors)*
                 unsafe { #static_name = Some(errors); }
-                crate::ffi::ExternResult::Ok
+                vo_runtime::ffi::ExternResult::Ok
             }
             
             // For stdlib_register! macro (works in both std and no_std)
             #[doc(hidden)]
-            pub const #stdlib_const_name: crate::ffi::StdlibEntry = 
-                crate::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
+            pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
+                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
         }
     } else {
         quote! {
@@ -2086,6 +2086,125 @@ fn to_pascal_case(s: &str) -> String {
 }
 
 // =============================================================================
+// vostd_errors! macro - Same as vo_errors! but for vo-stdlib (uses vo_runtime path)
+// =============================================================================
+
+/// Like `vo_errors!` but for use in vo-stdlib.
+/// Uses `vo_runtime::builtins::error_helper` path and generates `__STDLIB_` constant
+/// for `stdlib_register!` macro (no linkme/distributed_slice).
+///
+/// # Example
+/// ```ignore
+/// vostd_errors! {
+///     "os" => {
+///         NotExist => "file does not exist",
+///         Permission => "permission denied",
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn vostd_errors(input: TokenStream) -> TokenStream {
+    match vostd_errors_impl(input.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
+    // Parse: "pkg" => { Name => "msg", ... }
+    let parsed: VoStdErrorsInput = syn::parse2(input)?;
+    
+    let pkg_name = &parsed.pkg_name;
+    let pkg_upper = pkg_name.to_uppercase();
+    let pkg_lower = pkg_name.to_lowercase();
+    
+    let static_name = format_ident!("{}_ERRORS", pkg_upper);
+    let enum_name = format_ident!("{}ErrorKind", to_pascal_case(pkg_name));
+    let getter_fn = format_ident!("get_{}_errors", pkg_lower);
+    let helper_fn = format_ident!("{}_sentinel_error", pkg_lower);
+    let getter_vo_name = format!("get{}Errors", to_pascal_case(pkg_name));
+    let lookup_name = format!("{}_{}", pkg_lower, getter_vo_name);
+    let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
+    
+    let error_count = parsed.errors.len();
+    
+    let mut enum_variants = Vec::new();
+    let mut create_errors = Vec::new();
+    let mut match_arms = Vec::new();
+    
+    for (i, (name, msg)) in parsed.errors.iter().enumerate() {
+        let idx = i * 2;
+        enum_variants.push(quote! { #name });
+        create_errors.push(quote! {
+            let err = vo_runtime::builtins::error_helper::create_error(call, #msg);
+            errors[#i] = err;
+            call.ret_u64(#idx as u16, err.0);
+            call.ret_u64((#idx + 1) as u16, err.1);
+        });
+        match_arms.push(quote! {
+            #enum_name::#name => unsafe { #static_name.as_ref().map(|e| e[#i]) }
+        });
+    }
+    
+    Ok(quote! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #enum_name {
+            #(#enum_variants),*
+        }
+        
+        static mut #static_name: Option<[(u64, u64); #error_count]> = None;
+        
+        pub fn #helper_fn(kind: #enum_name) -> Option<(u64, u64)> {
+            match kind {
+                #(#match_arms),*
+            }
+        }
+        
+        fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
+            let mut errors = [(0u64, 0u64); #error_count];
+            #(#create_errors)*
+            unsafe { #static_name = Some(errors); }
+            vo_runtime::ffi::ExternResult::Ok
+        }
+        
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
+            vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
+    })
+}
+
+/// Input for vostd_errors! macro: "pkg" => { Name => "msg", ... }
+struct VoStdErrorsInput {
+    pkg_name: String,
+    errors: Vec<(syn::Ident, String)>,
+}
+
+impl syn::parse::Parse for VoStdErrorsInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let pkg_lit: syn::LitStr = input.parse()?;
+        let pkg_name = pkg_lit.value();
+        input.parse::<Token![=>]>()?;
+        
+        let content;
+        syn::braced!(content in input);
+        
+        let mut errors = Vec::new();
+        while !content.is_empty() {
+            let name: syn::Ident = content.parse()?;
+            content.parse::<Token![=>]>()?;
+            let msg: syn::LitStr = content.parse()?;
+            errors.push((name, msg.value()));
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
+            }
+        }
+        
+        Ok(VoStdErrorsInput { pkg_name, errors })
+    }
+}
+
+// =============================================================================
 // vo_consts! macro - Define constants in Rust and expose to Vo via native getter
 // =============================================================================
 
@@ -2158,21 +2277,21 @@ fn vo_consts_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
         quote! {
             #(#const_defs)*
             
-            fn #getter_fn(call: &mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult {
+            fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
                 #(#ret_stmts)*
-                crate::ffi::ExternResult::Ok
+                vo_runtime::ffi::ExternResult::Ok
             }
             
             // For stdlib_register! macro (works in both std and no_std)
             #[doc(hidden)]
-            pub const #stdlib_const_name: crate::ffi::StdlibEntry = 
-                crate::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
+            pub const #stdlib_const_name: vo_runtime::ffi::StdlibEntry = 
+                vo_runtime::ffi::StdlibEntry::WithCtx(#lookup_name, #getter_fn);
             
             // For distributed_slice (std only)
             #[cfg(feature = "std")]
-            #[crate::distributed_slice(crate::EXTERN_TABLE_WITH_CONTEXT)]
+            #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE_WITH_CONTEXT)]
             #[doc(hidden)]
-            static #entry_name: crate::ffi::ExternEntryWithContext = crate::ffi::ExternEntryWithContext {
+            static #entry_name: vo_runtime::ffi::ExternEntryWithContext = vo_runtime::ffi::ExternEntryWithContext {
                 name: #lookup_name,
                 func: #getter_fn,
             };

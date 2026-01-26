@@ -33,16 +33,15 @@ pub use containers::{
     VoPtr, VoClosure,
 };
 
-// ==================== Type-Safe Slot Wrappers ====================
-
-// Re-export InterfaceSlot from objects::interface (the canonical location)
-pub use crate::objects::interface::InterfaceSlot;
 
 #[cfg(feature = "std")]
 use linkme::distributed_slice;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::{string, slice};
+
+// Public re-export for extension developers
+pub use crate::objects::interface::InterfaceSlot;
 use vo_common_core::bytecode::{InterfaceMeta, Module, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};

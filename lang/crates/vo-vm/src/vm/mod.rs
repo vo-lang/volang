@@ -162,7 +162,7 @@ impl Vm {
     
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) {
-        vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
+        vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
 
         #[cfg(all(target_arch = "wasm32", feature = "wasm-platform"))]
         {
@@ -182,11 +182,9 @@ impl Vm {
         module: Module,
         ext_loader: Option<&vo_runtime::ext_loader::ExtensionLoader>,
     ) {
-        vo_runtime::register_all_stdlib_externs(&mut self.state.extern_registry, &module.externs);
-
-        #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            vo_stdlib_native::time::register_externs(&mut self.state.extern_registry, &module.externs);
+            vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
         }
 
         #[cfg(all(target_arch = "wasm32", feature = "wasm-platform"))]

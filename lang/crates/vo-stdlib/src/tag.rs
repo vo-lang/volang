@@ -2,9 +2,6 @@
 //!
 //! Parses Go-style struct tags like `json:"name,omitempty" toml:"other"`.
 
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
-
 /// Get the value for a specific key from a struct tag.
 ///
 /// Tag format: `key:"value" key2:"value2"`

@@ -14,7 +14,7 @@ use alloc::format;
 use vo_common_core::types::ValueKind;
 
 use crate::ffi::{ExternCallContext, ExternResult};
-use super::fmt::format_interface_with_ctx;
+use super::format::format_interface_with_ctx;
 
 /// Format all interface{} args starting from `start_slot` into a space-separated string.
 /// Each arg is 2 slots: [slot0 = packed_info, slot1 = data]
@@ -67,8 +67,8 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::{slice, array, string};
     use crate::gc::Gc;
+    use crate::objects::{slice, array, string as str_obj};
     use vo_common_core::types::ValueKind;
     
     let dst = call.arg_ref(0);
@@ -84,8 +84,8 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     // Check if src is a string (copy([]byte, string) case)
     let src_kind = Gc::header(src).value_meta.value_kind();
     let (src_len, src_ptr) = if src_kind == ValueKind::String {
-        let len = string::len(src);
-        let bytes = string::as_bytes(src);
+        let len = str_obj::len(src);
+        let bytes = str_obj::as_bytes(src);
         (len, bytes.as_ptr() as *mut u8)
     } else {
         (slice::len(src), slice::data_ptr(src))
@@ -306,7 +306,7 @@ fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
     let error_data = call.arg_u64(1);
     
     // Use format_interface_with_ctx to properly extract error message
-    let error_str = super::fmt::format_interface_with_ctx(error_slot0, error_data, Some(call));
+    let error_str = format_interface_with_ctx(error_slot0, error_data, Some(call));
     let msg = format!("panic: {}", error_str);
     
     ExternResult::Panic(msg)

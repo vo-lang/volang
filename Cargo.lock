@@ -508,6 +508,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "include_dir"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1312,7 +1323,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "hashbrown 0.15.5",
- "hostname",
+ "hostname 0.3.1",
  "lazy_static",
  "libc",
  "libloading",
@@ -1328,20 +1339,21 @@ dependencies = [
 name = "vo-stdlib"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "hostname 0.4.2",
  "js-sys",
+ "lazy_static",
+ "libc",
+ "linkme",
+ "paste",
+ "regex",
  "rust-embed",
  "vo-common",
  "vo-common-core",
+ "vo-ffi-macro",
  "vo-runtime",
  "wasm-bindgen",
  "web-sys",
-]
-
-[[package]]
-name = "vo-stdlib-native"
-version = "0.1.0"
-dependencies = [
- "vo-runtime",
 ]
 
 [[package]]
@@ -1367,7 +1379,7 @@ dependencies = [
  "vo-common-core",
  "vo-jit",
  "vo-runtime",
- "vo-stdlib-native",
+ "vo-stdlib",
  "vo-web-runtime-wasm",
 ]
 
@@ -1381,6 +1393,7 @@ dependencies = [
  "vo-ext",
  "vo-ffi-macro",
  "vo-runtime",
+ "vo-stdlib",
  "vo-syntax",
  "vo-vm",
 ]

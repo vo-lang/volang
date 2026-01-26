@@ -5,15 +5,13 @@
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
-use alloc::format;
 
 use vo_common_core::types::ValueKind;
 
-use crate::ffi::{ExternCallContext, ExternResult};
-use crate::gc::GcRef;
-use crate::objects::interface;
-use super::error_helper::write_error_to;
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::gc::GcRef;
+use vo_runtime::objects::interface;
+use vo_runtime::builtins::error_helper::write_error_to;
 use super::serde::{marshal_struct_value, marshal_any_value, unmarshal_struct, get_pointed_type_rttid, FormatWriter as _};
 use super::serde_json::{JsonWriter, JsonReader, write_json_string_to_buf};
 
@@ -117,8 +115,8 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     let mut buf: Vec<u8> = if buf_ref.is_null() {
         Vec::new()
     } else {
-        let data = crate::objects::slice::data_ptr(buf_ref);
-        let len = crate::objects::slice::len(buf_ref);
+        let data = vo_runtime::objects::slice::data_ptr(buf_ref);
+        let len = vo_runtime::objects::slice::len(buf_ref);
         unsafe { core::slice::from_raw_parts(data, len).to_vec() }
     };
     
@@ -232,4 +230,4 @@ fn parse_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-crate::stdlib_register!(json: marshalAny, Unmarshal, writeJsonString, parseJsonString);
+vo_runtime::stdlib_register!(json: marshalAny, Unmarshal, writeJsonString, parseJsonString);

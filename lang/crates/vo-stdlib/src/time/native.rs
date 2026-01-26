@@ -1,4 +1,4 @@
-//! Native platform extern implementations.
+//! Native time implementations.
 
 use std::sync::OnceLock;
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};

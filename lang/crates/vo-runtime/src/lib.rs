@@ -3,6 +3,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+extern crate self as vo_runtime;
+
 pub mod slot;
 pub mod output;
 
@@ -15,9 +17,8 @@ pub mod itab;
 // FFI core types (no_std compatible), registration requires std
 pub mod ffi;
 
-// Builtins and stdlib (no_std compatible, linkme registration is std-only)
+// Builtins (no_std compatible, linkme registration is std-only)
 pub mod builtins;
-pub mod stdlib;
 
 // Std-only modules
 #[cfg(feature = "std")]
@@ -92,20 +93,3 @@ macro_rules! stdlib_register {
     };
 }
 
-/// Register all stdlib extern functions into the registry.
-pub fn register_all_stdlib_externs(registry: &mut ExternRegistry, externs: &[bytecode::ExternDef]) {
-    // Register from per-module tables (works in both std and no_std)
-    stdlib::builtin::register_externs(registry, externs);
-    stdlib::math::register_externs(registry, externs);
-    stdlib::bits::register_externs(registry, externs);
-    stdlib::bytes::register_externs(registry, externs);
-    stdlib::strings::register_externs(registry, externs);
-    stdlib::strconv::register_externs(registry, externs);
-    stdlib::unicode::register_externs(registry, externs);
-    stdlib::fmt::register_externs(registry, externs);
-    stdlib::dynamic::register_externs(registry, externs);
-    stdlib::os::register_externs(registry, externs);
-    stdlib::regexp::register_externs(registry, externs);
-    stdlib::json::register_externs(registry, externs);
-    stdlib::toml::register_externs(registry, externs);
-}

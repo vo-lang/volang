@@ -156,7 +156,7 @@ fn equal_fold(s: &str, t: &str) -> bool {
     s.to_lowercase() == t.to_lowercase()
 }
 
-crate::stdlib_register!(strings:
+vo_runtime::stdlib_register!(strings:
     Index, LastIndex, Count, EqualFold,
     ToLower, ToUpper, ToTitle,
     Split, SplitN, SplitAfter, SplitAfterN,

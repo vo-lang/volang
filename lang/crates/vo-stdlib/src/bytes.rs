@@ -95,4 +95,4 @@ fn replace(s: &[u8], old: &[u8], new: &[u8], n: i64) -> Vec<u8> {
     result
 }
 
-crate::stdlib_register!(bytes: Index, LastIndex, Count, ToLower, ToUpper, Replace);
+vo_runtime::stdlib_register!(bytes: Index, LastIndex, Count, ToLower, ToUpper, Replace);

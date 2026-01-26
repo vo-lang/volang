@@ -1,4 +1,4 @@
-//! Shared error helper functions for stdlib native implementations.
+//! Shared error helper functions for builtin native implementations.
 
 use vo_common_core::types::ValueKind;
 

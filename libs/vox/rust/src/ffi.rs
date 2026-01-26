@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use vo_ext::prelude::*;
 use vo_vm::bytecode::Module;
 use crate::{compile, compile_string, CompileOutput, run, RunMode};
-use vo_runtime::stdlib::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_common::symbol::SymbolInterner;
 use vo_syntax::parser;
 use vo_syntax::ast::File;

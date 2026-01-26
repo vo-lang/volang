@@ -52,12 +52,9 @@ fn main() {
         }
     };
     
-    // Determine run mode
-    let mode = if cfg!(feature = "jit") {
-        vo_engine::RunMode::Jit
-    } else {
-        vo_engine::RunMode::Vm
-    };
+    // Always run cmd/vo in VM mode - it's the CLI, not the code being tested.
+    // The --mode flag passed to cmd/vo controls how user code runs.
+    let mode = vo_engine::RunMode::Vm;
     
     // Run
     if let Err(e) = vo_engine::run(output, mode, full_args) {
