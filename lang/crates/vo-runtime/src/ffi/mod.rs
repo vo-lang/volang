@@ -47,6 +47,47 @@ use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use crate::itab::ItabCache;
 
+#[cfg(feature = "std")]
+use std::collections::HashMap;
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+
+/// Cache for sentinel error instances (per-VM, keyed by package name).
+/// Each package (e.g., "dyn", "os") stores its sentinel errors as (slot0, slot1) pairs.
+/// This ensures errors.Is works correctly within a single VM run while preventing
+/// cross-module corruption when running multiple modules in the same process.
+#[derive(Debug, Clone, Default)]
+pub struct SentinelErrorCache {
+    #[cfg(feature = "std")]
+    inner: HashMap<&'static str, Vec<(u64, u64)>>,
+    #[cfg(not(feature = "std"))]
+    inner: BTreeMap<&'static str, Vec<(u64, u64)>>,
+}
+
+impl SentinelErrorCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if cache contains errors for a package (returns bool, no borrow conflict).
+    pub fn contains(&self, pkg: &str) -> bool {
+        self.inner.contains_key(pkg)
+    }
+
+    pub fn get(&self, pkg: &str) -> Option<&[(u64, u64)]> {
+        self.inner.get(pkg).map(|v| v.as_slice())
+    }
+
+    /// Get a specific error by index, returning None if not initialized or index out of bounds.
+    pub fn get_one(&self, pkg: &str, idx: usize) -> Option<(u64, u64)> {
+        self.inner.get(pkg).and_then(|v| v.get(idx).copied())
+    }
+
+    pub fn insert(&mut self, pkg: &'static str, errors: Vec<(u64, u64)>) {
+        self.inner.insert(pkg, errors);
+    }
+}
+
 /// Extern function execution result.
 #[derive(Debug, Clone)]
 pub enum ExternResult {
@@ -299,8 +340,6 @@ pub struct ExternCallContext<'a> {
     interface_metas: &'a [InterfaceMeta],
     /// Runtime types for rttid resolution.
     runtime_types: &'a [RuntimeType],
-    /// Pre-computed IDs for well-known types.
-    well_known: &'a WellKnownTypes,
     itab_cache: &'a mut ItabCache,
     /// Function definitions for closure calls.
     func_defs: &'a [vo_common_core::bytecode::FunctionDef],
@@ -312,8 +351,12 @@ pub struct ExternCallContext<'a> {
     fiber: *mut core::ffi::c_void,
     /// Callback to execute closures.
     call_closure_fn: Option<ClosureCallFn>,
-    /// Program arguments (set by launcher).
+    /// Pre-computed IDs for well-known types.
+    well_known: &'a WellKnownTypes,
+    /// Program arguments.
     program_args: &'a [String],
+    /// Sentinel error cache.
+    sentinel_errors: &'a mut SentinelErrorCache,
 }
 
 impl<'a> ExternCallContext<'a> {
@@ -330,14 +373,15 @@ impl<'a> ExternCallContext<'a> {
         named_type_metas: &'a [NamedTypeMeta],
         interface_metas: &'a [InterfaceMeta],
         runtime_types: &'a [RuntimeType],
-        well_known: &'a WellKnownTypes,
         itab_cache: &'a mut ItabCache,
         func_defs: &'a [vo_common_core::bytecode::FunctionDef],
         module: &'a Module,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
         call_closure_fn: Option<ClosureCallFn>,
+        well_known: &'a WellKnownTypes,
         program_args: &'a [String],
+        sentinel_errors: &'a mut SentinelErrorCache,
     ) -> Self {
         Self {
             call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
@@ -346,14 +390,15 @@ impl<'a> ExternCallContext<'a> {
             named_type_metas,
             interface_metas,
             runtime_types,
-            well_known,
             itab_cache,
             func_defs,
             module,
             vm,
             fiber,
             call_closure_fn,
+            well_known,
             program_args,
+            sentinel_errors,
         }
     }
     
@@ -396,8 +441,20 @@ impl<'a> ExternCallContext<'a> {
     }
 
     #[inline]
-    pub fn well_known(&self) -> &'a WellKnownTypes {
+    pub fn well_known(&self) -> &WellKnownTypes {
         self.well_known
+    }
+
+    /// Get sentinel errors cache (immutable).
+    #[inline]
+    pub fn sentinel_errors(&self) -> &SentinelErrorCache {
+        &*self.sentinel_errors
+    }
+
+    /// Get sentinel errors cache (mutable).
+    #[inline]
+    pub fn sentinel_errors_mut(&mut self) -> &mut SentinelErrorCache {
+        self.sentinel_errors
     }
 
     /// Get or create itab for a named type implementing an interface.
@@ -1200,14 +1257,15 @@ impl ExternRegistry {
         interface_metas: &[InterfaceMeta],
         named_type_metas: &[NamedTypeMeta],
         runtime_types: &[RuntimeType],
-        well_known: &WellKnownTypes,
         itab_cache: &mut ItabCache,
         func_defs: &[vo_common_core::bytecode::FunctionDef],
         module: &Module,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
         call_closure_fn: Option<ClosureCallFn>,
+        well_known: &WellKnownTypes,
         program_args: &[String],
+        sentinel_errors: &mut SentinelErrorCache,
     ) -> ExternResult {
         match self.funcs.get(id as usize) {
             Some(Some(ExternFnEntry::Simple(f))) => {
@@ -1226,14 +1284,15 @@ impl ExternRegistry {
                     named_type_metas,
                     interface_metas,
                     runtime_types,
-                    well_known,
                     itab_cache,
                     func_defs,
                     module,
                     vm,
                     fiber,
                     call_closure_fn,
+                    well_known,
                     program_args,
+                    sentinel_errors,
                 );
                 f(&mut call)
             }

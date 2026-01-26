@@ -105,6 +105,9 @@ pub struct JitContext {
     
     /// Pointer to program arguments.
     pub program_args: *const Vec<String>,
+    
+    /// Pointer to sentinel error cache.
+    pub sentinel_errors: *mut crate::ffi::SentinelErrorCache,
 }
 
 // =============================================================================

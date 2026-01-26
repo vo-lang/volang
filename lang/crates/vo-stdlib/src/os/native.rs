@@ -123,13 +123,12 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
     };
     
     if let Some(k) = kind {
-        if let Some((slot0, slot1)) = os_sentinel_error(k) {
-            call.ret_u64(ret_slot, slot0);
-            call.ret_u64(ret_slot + 1, slot1);
-            return;
-        }
+        let (slot0, slot1) = os_sentinel_error(call, k);
+        call.ret_u64(ret_slot, slot0);
+        call.ret_u64(ret_slot + 1, slot1);
+    } else {
+        write_error_to(call, ret_slot, &err.to_string());
     }
-    write_error_to(call, ret_slot, &err.to_string());
 }
 
 #[cfg(feature = "std")]

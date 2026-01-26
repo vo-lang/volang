@@ -1,0 +1,94 @@
+// files.vo - File system utilities for test discovery
+package main
+
+import (
+	"os"
+	"strings"
+)
+
+// Recursively find all .vo files in a directory
+func findVoFiles(dir string) []string {
+	var files []string
+	files = collectVoFiles(dir, files)
+	return files
+}
+
+func collectVoFiles(dir string, files []string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return files
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		path := dir + "/" + name
+
+		// Skip hidden files and directories
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		// Skip proj_* directories (handled separately)
+		if strings.HasPrefix(name, "proj_") {
+			continue
+		}
+
+		if entry.IsDir() {
+			files = collectVoFiles(path, files)
+		} else if strings.HasSuffix(name, ".vo") {
+			files = append(files, path)
+		}
+	}
+	
+	return files
+}
+
+// Find project directories (proj_*)
+func findProjectDirs(dir string) []string {
+	dirs := []string{}
+	
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return dirs
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() && strings.HasPrefix(name, "proj_") {
+			dirs = append(dirs, dir + "/" + name)
+		}
+	}
+
+	return dirs
+}
+
+// Find zip files
+func findZipFiles(dir string) []string {
+	var zips []string
+	zips = collectZipFiles(dir, zips)
+	return zips
+}
+
+func collectZipFiles(dir string, zips []string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return zips
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		path := dir + "/" + name
+
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		if entry.IsDir() {
+			zips = collectZipFiles(path, zips)
+		} else if strings.HasSuffix(name, ".zip") {
+			zips = append(zips, path)
+		}
+	}
+	
+	return zips
+}

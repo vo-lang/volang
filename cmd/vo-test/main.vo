@@ -1,0 +1,44 @@
+// vo-test - Parallel test runner for Vo language
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	args := os.Args[1:]
+	
+	if len(args) < 1 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	mode := args[0]
+	rest := args[1:]
+
+	code := runTests(mode, rest)
+	os.Exit(code)
+}
+
+func printUsage() {
+	fmt.Println("Usage: vo-test <mode> [options] [file]")
+	fmt.Println("")
+	fmt.Println("Modes:")
+	fmt.Println("  vm          Run VM tests only")
+	fmt.Println("  jit         Run JIT tests only")
+	fmt.Println("  both        Run both VM and JIT tests")
+	fmt.Println("  gc          Run GC validation tests")
+	fmt.Println("  nostd       Run no_std tests")
+	fmt.Println("")
+	fmt.Println("Options:")
+	fmt.Println("  -v, --verbose       Show detailed output")
+	fmt.Println("  -j, --jobs N        Number of parallel workers (default: CPU cores)")
+	fmt.Println("  --direct            Use direct mode (bypass CLI)")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  vo-test both                    # Run all tests in parallel")
+	fmt.Println("  vo-test vm -v                   # Run VM tests with verbose output")
+	fmt.Println("  vo-test both test.vo            # Run single file")
+	fmt.Println("  vo-test both -j 8               # Use 8 parallel workers")
+}

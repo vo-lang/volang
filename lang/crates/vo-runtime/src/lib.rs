@@ -50,7 +50,7 @@ pub use objects::interface::InterfaceSlot;
 // Re-exports from ffi (core types always available)
 pub use ffi::{
     ExternCall, ExternCallContext, ExternFn, ExternFnWithContext, ExternRegistry, ExternResult,
-    ClosureCallResult, ClosureCallFn,
+    ClosureCallResult, ClosureCallFn, SentinelErrorCache,
 };
 // Re-exports from ffi (std only - linkme registration)
 #[cfg(feature = "std")]

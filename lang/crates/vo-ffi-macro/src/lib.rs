@@ -1919,8 +1919,9 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     let is_internal = parsed.is_internal;
     
     // Generate identifiers
-    let static_name = format_ident!("{}_ERRORS", pkg_upper);
+    let _static_name = format_ident!("{}_ERRORS", pkg_upper);
     let enum_name = format_ident!("{}ErrorKind", to_pascal_case(pkg_name));
+    let init_fn = format_ident!("init_{}_errors", pkg_lower);
     let getter_fn = format_ident!("get_{}_errors", pkg_lower);
     let helper_fn = format_ident!("{}_sentinel_error", pkg_lower);
     let getter_vo_name = format!("get{}Errors", to_pascal_case(pkg_name));
@@ -1932,53 +1933,81 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Generate enum variants and match arms
     let mut enum_variants = Vec::new();
     let mut create_errors = Vec::new();
-    let mut match_arms = Vec::new();
+    let mut sentinel_match_arms = Vec::new();
     
     for (i, (name, msg)) in parsed.errors.iter().enumerate() {
-        let idx = i * 2;
         enum_variants.push(quote! { #name });
         if is_internal {
             create_errors.push(quote! {
                 let err = crate::builtins::error_helper::create_error(call, #msg);
                 errors[#i] = err;
-                call.ret_u64(#idx as u16, err.0);
-                call.ret_u64((#idx + 1) as u16, err.1);
             });
         } else {
             create_errors.push(quote! {
                 let err = vo_runtime::builtins::error_helper::create_error(call, #msg);
                 errors[#i] = err;
-                call.ret_u64(#idx as u16, err.0);
-                call.ret_u64((#idx + 1) as u16, err.1);
             });
         }
-        match_arms.push(quote! {
-            #enum_name::#name => unsafe { #static_name.as_ref().map(|e| e[#i]) }
+        // sentinel_match_arms uses get_one() to return copied value (no borrow conflict)
+        sentinel_match_arms.push(quote! {
+            #enum_name::#name => #i
         });
     }
     
     // Generate __STDLIB_ constant name for stdlib_register! macro (no_std compatible)
     let stdlib_const_name = format_ident!("__STDLIB_{}_{}", pkg_lower, getter_vo_name);
     
+    let pkg_str = pkg_lower.as_str();
     let generated = if is_internal {
         quote! {
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             pub enum #enum_name {
                 #(#enum_variants),*
             }
-            
-            static mut #static_name: Option<[(u64, u64); #error_count]> = None;
-            
-            pub fn #helper_fn(kind: #enum_name) -> Option<(u64, u64)> {
-                match kind {
-                    #(#match_arms),*
+
+            #[inline]
+            fn #init_fn(call: &mut vo_runtime::ffi::ExternCallContext) {
+                // Fast path: already initialized
+                let needs_init = !call.sentinel_errors().contains(#pkg_str);
+                if !needs_init {
+                    return;
                 }
+                let mut errors = [(0u64, 0u64); #error_count];
+                #(#create_errors)*
+                call.sentinel_errors_mut().insert(#pkg_str, errors.to_vec());
+            }
+            
+            pub fn #helper_fn(call: &mut vo_runtime::ffi::ExternCallContext, kind: #enum_name) -> (u64, u64) {
+                let idx: usize = match kind {
+                    #(#sentinel_match_arms),*
+                };
+                // Check if already cached (save result to break borrow)
+                let cached_val = call.sentinel_errors().get_one(#pkg_str, idx);
+                if let Some(err) = cached_val {
+                    return err;
+                }
+                // Auto-initialize
+                #init_fn(call);
+                // Must succeed after init
+                call.sentinel_errors().get_one(#pkg_str, idx)
+                    .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
             }
             
             fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-                let mut errors = [(0u64, 0u64); #error_count];
-                #(#create_errors)*
-                unsafe { #static_name = Some(errors); }
+                #init_fn(call);
+
+                // Copy cached values into return slots.
+                // Must not hold an immutable borrow of call across ret_u64 calls.
+                let errors_vec: Vec<(u64, u64)> = call
+                    .sentinel_errors()
+                    .get(#pkg_str)
+                    .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
+                    .to_vec();
+                for (i, (slot0, slot1)) in errors_vec.iter().copied().enumerate() {
+                    let idx = i * 2;
+                    call.ret_u64(idx as u16, slot0);
+                    call.ret_u64((idx + 1) as u16, slot1);
+                }
                 vo_runtime::ffi::ExternResult::Ok
             }
             
@@ -1993,19 +2022,48 @@ fn vo_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
             pub enum #enum_name {
                 #(#enum_variants),*
             }
-            
-            static mut #static_name: Option<[(u64, u64); #error_count]> = None;
-            
-            pub fn #helper_fn(kind: #enum_name) -> Option<(u64, u64)> {
-                match kind {
-                    #(#match_arms),*
+
+            #[inline]
+            fn #init_fn(call: &mut vo_runtime::ffi::ExternCallContext) {
+                // Fast path: already initialized
+                let needs_init = !call.sentinel_errors().contains(#pkg_str);
+                if !needs_init {
+                    return;
                 }
+                let mut errors = [(0u64, 0u64); #error_count];
+                #(#create_errors)*
+                call.sentinel_errors_mut().insert(#pkg_str, errors.to_vec());
+            }
+            
+            pub fn #helper_fn(call: &mut vo_runtime::ffi::ExternCallContext, kind: #enum_name) -> (u64, u64) {
+                let idx: usize = match kind {
+                    #(#sentinel_match_arms),*
+                };
+                // Check if already cached (save result to break borrow)
+                let cached_val = call.sentinel_errors().get_one(#pkg_str, idx);
+                if let Some(err) = cached_val {
+                    return err;
+                }
+                // Auto-initialize
+                #init_fn(call);
+                // Must succeed after init
+                call.sentinel_errors().get_one(#pkg_str, idx)
+                    .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
             }
             
             fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-                let mut errors = [(0u64, 0u64); #error_count];
-                #(#create_errors)*
-                unsafe { #static_name = Some(errors); }
+                #init_fn(call);
+
+                let errors_vec: Vec<(u64, u64)> = call
+                    .sentinel_errors()
+                    .get(#pkg_str)
+                    .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
+                    .to_vec();
+                for (i, (slot0, slot1)) in errors_vec.iter().copied().enumerate() {
+                    let idx = i * 2;
+                    call.ret_u64(idx as u16, slot0);
+                    call.ret_u64((idx + 1) as u16, slot1);
+                }
                 vo_runtime::ffi::ExternResult::Ok
             }
             
@@ -2115,11 +2173,11 @@ fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parsed: VoStdErrorsInput = syn::parse2(input)?;
     
     let pkg_name = &parsed.pkg_name;
-    let pkg_upper = pkg_name.to_uppercase();
+    let _pkg_upper = pkg_name.to_uppercase();
     let pkg_lower = pkg_name.to_lowercase();
     
-    let static_name = format_ident!("{}_ERRORS", pkg_upper);
     let enum_name = format_ident!("{}ErrorKind", to_pascal_case(pkg_name));
+    let init_fn = format_ident!("init_{}_errors", pkg_lower);
     let getter_fn = format_ident!("get_{}_errors", pkg_lower);
     let helper_fn = format_ident!("{}_sentinel_error", pkg_lower);
     let getter_vo_name = format!("get{}Errors", to_pascal_case(pkg_name));
@@ -2130,7 +2188,7 @@ fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     
     let mut enum_variants = Vec::new();
     let mut create_errors = Vec::new();
-    let mut match_arms = Vec::new();
+    let mut sentinel_match_arms = Vec::new();
     
     for (i, (name, msg)) in parsed.errors.iter().enumerate() {
         let idx = i * 2;
@@ -2141,29 +2199,59 @@ fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
             call.ret_u64(#idx as u16, err.0);
             call.ret_u64((#idx + 1) as u16, err.1);
         });
-        match_arms.push(quote! {
-            #enum_name::#name => unsafe { #static_name.as_ref().map(|e| e[#i]) }
+        // sentinel_match_arms uses get_one() to return copied value (no borrow conflict)
+        sentinel_match_arms.push(quote! {
+            #enum_name::#name => #i
         });
     }
     
+    let pkg_str = pkg_lower.as_str();
     Ok(quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum #enum_name {
             #(#enum_variants),*
         }
-        
-        static mut #static_name: Option<[(u64, u64); #error_count]> = None;
-        
-        pub fn #helper_fn(kind: #enum_name) -> Option<(u64, u64)> {
-            match kind {
-                #(#match_arms),*
+
+        #[inline]
+        fn #init_fn(call: &mut vo_runtime::ffi::ExternCallContext) {
+            let needs_init = !call.sentinel_errors().contains(#pkg_str);
+            if !needs_init {
+                return;
             }
+            let mut errors = [(0u64, 0u64); #error_count];
+            #(#create_errors)*
+            call.sentinel_errors_mut().insert(#pkg_str, errors.to_vec());
+        }
+        
+        pub fn #helper_fn(call: &mut vo_runtime::ffi::ExternCallContext, kind: #enum_name) -> (u64, u64) {
+            let idx: usize = match kind {
+                #(#sentinel_match_arms),*
+            };
+            // Check if already cached (save result to break borrow)
+            let cached_val = call.sentinel_errors().get_one(#pkg_str, idx);
+            if let Some(err) = cached_val {
+                return err;
+            }
+            // Auto-initialize
+            #init_fn(call);
+            // Must succeed after init
+            call.sentinel_errors().get_one(#pkg_str, idx)
+                .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
         }
         
         fn #getter_fn(call: &mut vo_runtime::ffi::ExternCallContext) -> vo_runtime::ffi::ExternResult {
-            let mut errors = [(0u64, 0u64); #error_count];
-            #(#create_errors)*
-            unsafe { #static_name = Some(errors); }
+            #init_fn(call);
+
+            let errors_vec: Vec<(u64, u64)> = call
+                .sentinel_errors()
+                .get(#pkg_str)
+                .expect(concat!("sentinel error init failed for '", #pkg_str, "' - well_known not available"))
+                .to_vec();
+            for (i, (slot0, slot1)) in errors_vec.iter().copied().enumerate() {
+                let idx = i * 2;
+                call.ret_u64(idx as u16, slot0);
+                call.ret_u64((idx + 1) as u16, slot1);
+            }
             vo_runtime::ffi::ExternResult::Ok
         }
         

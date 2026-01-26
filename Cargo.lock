@@ -1371,6 +1371,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-test"
+version = "0.1.0"
+dependencies = [
+ "vo-engine",
+]
+
+[[package]]
 name = "vo-vm"
 version = "0.1.0"
 dependencies = [

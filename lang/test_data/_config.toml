@@ -1,0 +1,1318 @@
+# Vo Integration Test Configuration
+#
+# Tests NOT listed here will run in BOTH vm and jit modes and expected to pass.
+#
+# Format:
+#   [[tests]]
+#   file = "path/to/test.vo"      # Relative to test_data/
+#   skip = ["vm", "jit"]          # Optional: skip modes (vm, jit, or both)
+#   should_fail = true            # Optional: must fail at compile/type-check
+#   reason = "why"                # Optional: reason for skip/should_fail
+
+[[tests]]
+file = "channel_send.vo"
+
+[[tests]]
+file = "clone_immediate_read.vo"
+
+[[tests]]
+file = "complex_literal.vo"
+
+[[tests]]
+file = "const.vo"
+
+[[tests]]
+file = "const_fold.vo"
+
+[[tests]]
+file = "constant.vo"
+
+[[tests]]
+file = "debug_array_index.vo"
+
+[[tests]]
+file = "debug_clone.vo"
+
+[[tests]]
+file = "debug_escaped_array.vo"
+
+[[tests]]
+file = "debug_iface_bugs.vo"
+
+[[tests]]
+file = "debug_sequence.vo"
+
+[[tests]]
+file = "defer_stmt.vo"
+
+[[tests]]
+file = "dyn/dyn_write_no_error_return.vo"
+
+[[tests]]
+file = "dyn/dyn_write_fast_path.vo"
+
+[[tests]]
+file = "embed_iface_simple.vo"
+
+[[tests]]
+file = "embed_interface.vo"
+
+[[tests]]
+file = "embed_interface_impl.vo"
+
+[[tests]]
+file = "embed_method.vo"
+
+[[tests]]
+file = "embed_pointer.vo"
+
+[[tests]]
+file = "embed_shadow.vo"
+
+[[tests]]
+file = "embed_struct.vo"
+
+[[tests]]
+file = "escape_return_value.vo"
+
+[[tests]]
+file = "escape_struct_assign.vo"
+
+[[tests]]
+file = "fib_goroutine.vo"
+
+[[tests]]
+file = "field_offset_debug.vo"
+
+[[tests]]
+file = "for_stmt.vo"
+
+[[tests]]
+file = "label_stmt.vo"
+
+[[tests]]
+file = "go_stmt.vo"
+
+[[tests]]
+file = "goto_stmt.vo"
+should_fail = true
+reason = "goto is not supported"
+
+[[tests]]
+file = "hex_literal_debug.vo"
+
+[[tests]]
+file = "iface_escape_closure.vo"
+
+[[tests]]
+file = "iface_to_iface_assertion.vo"
+
+[[tests]]
+file = "init_call_error.vo"
+should_fail = true
+reason = "init() cannot be called explicitly"
+
+[[tests]]
+file = "interface.vo"
+
+[[tests]]
+file = "interface_closure.vo"
+
+[[tests]]
+file = "interface_complex_subset.vo"
+
+[[tests]]
+file = "interface_conversion.vo"
+
+[[tests]]
+file = "interface_method_set.vo"
+
+[[tests]]
+file = "interface_pointer.vo"
+
+[[tests]]
+file = "interface_simple.vo"
+
+[[tests]]
+file = "local_type.vo"
+
+[[tests]]
+file = "map.vo"
+
+[[tests]]
+file = "method_dispatch_bug.vo"
+
+[[tests]]
+file = "minimal_bug.vo"
+
+[[tests]]
+file = "minimal_bug2.vo"
+
+[[tests]]
+file = "multi_init.vo"
+
+[[tests]]
+file = "multi_type_method.vo"
+
+[[tests]]
+file = "nested_clone_test.vo"
+
+[[tests]]
+file = "nested_struct_bug.vo"
+
+[[tests]]
+file = "point_then_rect.vo"
+
+[[tests]]
+file = "pointer_basic.vo"
+
+[[tests]]
+file = "pointer_comprehensive.vo"
+
+[[tests]]
+file = "pointer_embedded.vo"
+
+[[tests]]
+file = "pointer_method_call.vo"
+
+[[tests]]
+file = "proj_multifile/"
+
+[[tests]]
+file = "proj_taskman/"
+
+[[tests]]
+file = "qualified_embed_iface.vo"
+
+[[tests]]
+file = "range_string.vo"
+
+[[tests]]
+file = "rect_only.vo"
+
+[[tests]]
+file = "rect_only_sum.vo"
+
+[[tests]]
+file = "rune_literal.vo"
+
+[[tests]]
+file = "select_stmt.vo"
+
+[[tests]]
+file = "select_stmt_assert_fail.vo"
+should_fail = true
+reason = "assert(false) is compile-time error"
+
+[[tests]]
+file = "setfield_getfield_test.vo"
+
+[[tests]]
+file = "shift_ops.vo"
+
+[[tests]]
+file = "setfield_test.vo"
+
+[[tests]]
+file = "simple_clone_test.vo"
+
+[[tests]]
+file = "array_slice.vo"
+
+[[tests]]
+file = "bitwise_ops.vo"
+
+[[tests]]
+file = "slice.vo"
+
+[[tests]]
+file = "slice_map.vo"
+
+[[tests]]
+file = "slice_ops.vo"
+
+[[tests]]
+file = "stack_array_iter.vo"
+
+[[tests]]
+file = "stack_vs_escaped_array.vo"
+
+[[tests]]
+file = "stdlib/base64.vo"
+
+[[tests]]
+file = "stdlib/bytes.vo"
+
+[[tests]]
+file = "io_package.vo"
+
+[[tests]]
+file = "stdlib/errors.vo"
+
+[[tests]]
+file = "stdlib/hex.vo"
+
+[[tests]]
+file = "stdlib/math.vo"
+
+[[tests]]
+file = "stdlib/regexp.vo"
+
+[[tests]]
+file = "stdlib/sort.vo"
+
+[[tests]]
+file = "stdlib/strconv.vo"
+
+[[tests]]
+file = "stdlib/strings.vo"
+
+[[tests]]
+file = "stdlib/unicode.vo"
+
+[[tests]]
+file = "struct_method_simple.vo"
+
+[[tests]]
+file = "struct_object.vo"
+
+[[tests]]
+file = "switch_stmt.vo"
+
+[[tests]]
+file = "three_index_slice.vo"
+
+[[tests]]
+file = "named_return.vo"
+
+[[tests]]
+file = "fallthrough.vo"
+
+[[tests]]
+file = "escaped_array_init.vo"
+
+[[tests]]
+file = "type_switch.vo"
+
+[[tests]]
+file = "type_assertion.vo"
+
+[[tests]]
+file = "type_assertion_ok.vo"
+
+[[tests]]
+file = "typed_nil_interface.vo"
+
+[[tests]]
+file = "type_debug.vo"
+
+[[tests]]
+file = "value_receiver_bug.vo"
+
+[[tests]]
+file = "var_dependency.vo"
+
+[[tests]]
+file = "var_init_complex.vo"
+
+[[tests]]
+file = "var_init_func.vo"
+
+[[tests]]
+file = "var_init_order.vo"
+
+[[tests]]
+file = "fail_stmt.vo"
+
+[[tests]]
+file = "question_operator.vo"
+
+[[tests]]
+file = "errdefer_stmt.vo"
+
+[[tests]]
+file = "debug_nil_interface.vo"
+
+[[tests]]
+file = "debug_iface.vo"
+
+[[tests]]
+file = "zip/single_file.zip"
+
+[[tests]]
+file = "zip/multi.zip"
+
+[[tests]]
+file = "zip/subdir.zip"
+zip_root = "src/"
+reason = "project in src/ subdirectory"
+
+[[tests]]
+file = "typechecker/pointer_must_be_struct.vo"
+should_fail = true
+reason = "pointer types must point to struct types (Vo spec)"
+
+[[tests]]
+file = "typechecker/addr_of_must_be_struct.vo"
+should_fail = true
+reason = "address-of operator only valid for struct types (Vo spec)"
+
+[[tests]]
+file = "typechecker/semicolon_insertion_return.vo"
+should_fail = true
+reason = "lexer semicolon insertion: return must terminate statement"
+
+[[tests]]
+file = "typechecker/pointer_receiver_non_addressable_return.vo"
+should_fail = true
+reason = "pointer-receiver method call requires addressable value"
+
+[[tests]]
+file = "typechecker/pointer_receiver_non_addressable_map_index.vo"
+should_fail = true
+reason = "map index expressions are not addressable"
+
+[[tests]]
+file = "typechecker/dyn_protocol_error.vo"
+should_fail = true
+reason = "concrete type without protocol method should fail"
+
+[[tests]]
+file = "array_slice_get_set.vo"
+
+[[tests]]
+file = "bytes_buffer.vo"
+
+[[tests]]
+file = "dyn/dyn_access.vo"
+
+[[tests]]
+file = "dyn/dyn_access_big_struct.vo"
+
+[[tests]]
+file = "dyn/dyn_access_interface_field.vo"
+
+[[tests]]
+file = "dyn/dyn_access_interface_itab_bug.vo"
+
+[[tests]]
+file = "dyn/dyn_access_slice_interface_elem.vo"
+
+[[tests]]
+file = "dyn/dyn_call_args.vo"
+
+[[tests]]
+file = "dyn/dyn_call_methods.vo"
+
+[[tests]]
+file = "dyn/dyn_call_multi_slot_ret.vo"
+
+[[tests]]
+file = "dyn/dyn_call_question.vo"
+
+[[tests]]
+file = "dyn/dyn_call_ret_array.vo"
+
+[[tests]]
+file = "dyn/dyn_call_ret_types.vo"
+
+[[tests]]
+file = "dyn/dyn_call_simple.vo"
+
+[[tests]]
+file = "dyn/dyn_get_attr.vo"
+
+[[tests]]
+file = "dyn/dyn_get_method.vo"
+
+[[tests]]
+file = "dyn/dyn_get_method_simple.vo"
+
+[[tests]]
+file = "dyn/dyn_member_method.vo"
+
+[[tests]]
+file = "dyn/dyn_method_value_receiver.vo"
+
+[[tests]]
+file = "dyn/dyn_set_attr_iface_mismatch.vo"
+
+[[tests]]
+file = "dyn/dyn_set_attr_interface_field.vo"
+
+[[tests]]
+file = "dyn/dyn_try_unwrap.vo"
+
+[[tests]]
+file = "dyn/dyn_write.vo"
+
+[[tests]]
+file = "dyn/dyn_api.vo"
+
+[[tests]]
+file = "dyn/chained_method_calls.vo"
+
+[[tests]]
+file = "dyn/multi_level_chain.vo"
+
+[[tests]]
+file = "dyn/nil_handling.vo"
+
+[[tests]]
+file = "dyn/nested_map_access.vo"
+
+[[tests]]
+file = "dyn/error_propagation_chain.vo"
+
+[[tests]]
+file = "error_handling_sugar.vo"
+
+[[tests]]
+file = "gc_closure_capture.vo"
+
+[[tests]]
+file = "iface_to_iface_assign.vo"
+
+[[tests]]
+file = "io_readfull_only.vo"
+
+[[tests]]
+file = "nil_slice_map.vo"
+
+[[tests]]
+file = "packed_array.vo"
+
+[[tests]]
+file = "private_type_itab.vo"
+
+[[tests]]
+file = "jit/native_math.vo"
+
+[[tests]]
+file = "jit/native_strings.vo"
+
+[[tests]]
+file = "jit/string_split.vo"
+
+[[tests]]
+file = "typechecker/assignable_channel.vo"
+
+[[tests]]
+file = "typechecker/assignable_identical.vo"
+
+[[tests]]
+file = "typechecker/assignable_interface.vo"
+
+[[tests]]
+file = "typechecker/assignable_nil.vo"
+
+[[tests]]
+file = "typechecker/interface_embedding.vo"
+
+[[tests]]
+file = "typechecker/method_sig_complex_params.vo"
+
+[[tests]]
+file = "typechecker/method_sig_func_types.vo"
+
+[[tests]]
+file = "typechecker/type_assertion.vo"
+
+[[tests]]
+file = "typechecker/type_conversion.vo"
+
+[[tests]]
+file = "typechecker/interface_complex_hierarchy.vo"
+
+[[tests]]
+file = "defer_named_return.vo"
+
+[[tests]]
+file = "interface_value_compare.vo"
+
+[[tests]]
+file = "slice_append_semantics.vo"
+
+[[tests]]
+file = "type_conversion_edge.vo"
+
+[[tests]]
+file = "type_switch_multi_type.vo"
+
+[[tests]]
+file = "variadic_spread.vo"
+
+[[tests]]
+file = "composite_literal_nested.vo"
+
+[[tests]]
+file = "for_range_edge_cases.vo"
+
+[[tests]]
+file = "iota_complex.vo"
+
+[[tests]]
+file = "defer_eval_timing.vo"
+
+[[tests]]
+file = "short_var_redecl.vo"
+
+[[tests]]
+file = "method_value.vo"
+
+[[tests]]
+file = "switch_nested_break.vo"
+
+[[tests]]
+file = "iface_noncomparable_panics.vo"
+
+[[tests]]
+file = "range_string_index.vo"
+
+[[tests]]
+file = "switch_tagless.vo"
+
+[[tests]]
+file = "const_untyped_promotion.vo"
+
+[[tests]]
+file = "hex_float_literal.vo"
+
+[[tests]]
+file = "panic_recover.vo"
+
+[[tests]]
+file = "grouped_decl.vo"
+
+[[tests]]
+file = "continue_with_label.vo"
+
+[[tests]]
+file = "bare_return_multi.vo"
+
+[[tests]]
+file = "assert_diagnostic.vo"
+
+[[tests]]
+file = "recv_on_closed_channel.vo"
+
+[[tests]]
+file = "for_range_channel.vo"
+
+[[tests]]
+file = "type_switch_nil.vo"
+
+[[tests]]
+file = "named_type_slice_method.vo"
+
+[[tests]]
+file = "map_struct_key.vo"
+
+[[tests]]
+file = "string_byte_rune_conv.vo"
+
+[[tests]]
+file = "compound_assign_side_effect.vo"
+
+[[tests]]
+file = "interface_embed_hierarchy.vo"
+
+[[tests]]
+file = "bug_ptr_recv_named_slice.vo"
+should_fail = true
+
+[[tests]]
+file = "bug_map_struct_key_string.vo"
+
+[[tests]]
+file = "compound_assign_map.vo"
+
+[[tests]]
+file = "empty_struct_map_key.vo"
+
+[[tests]]
+file = "interface_nested_embed.vo"
+
+[[tests]]
+file = "closure_defer_interact.vo"
+
+[[tests]]
+file = "slice_three_index.vo"
+
+[[tests]]
+file = "array_as_map_key.vo"
+
+[[tests]]
+file = "recursive_closure.vo"
+
+[[tests]]
+file = "copy_builtin.vo"
+
+[[tests]]
+file = "multi_return_discard.vo"
+
+[[tests]]
+file = "nil_pointer_method_panic.vo"
+
+[[tests]]
+file = "slice_cap_boundary.vo"
+
+[[tests]]
+file = "nested_struct_zero.vo"
+
+[[tests]]
+file = "blank_identifier_complex.vo"
+
+[[tests]]
+file = "global_func_var.vo"
+
+[[tests]]
+file = "method_expression.vo"
+
+[[tests]]
+file = "make_boundary_panic.vo"
+
+[[tests]]
+file = "map_delete_iterate.vo"
+
+[[tests]]
+file = "closure_defer_recover_combo.vo"
+
+[[tests]]
+file = "multi_return_as_arg.vo"
+
+[[tests]]
+file = "range_modify_container.vo"
+
+[[tests]]
+file = "shift_boundary.vo"
+
+[[tests]]
+file = "float_special_values.vo"
+
+[[tests]]
+file = "recursive_struct.vo"
+
+[[tests]]
+file = "iface_uncomparable_panic.vo"
+
+[[tests]]
+file = "closure_multilayer_capture.vo"
+
+[[tests]]
+file = "integer_div_mod_edge.vo"
+
+[[tests]]
+file = "large_shift_amount.vo"
+
+[[tests]]
+file = "integer_overflow_wrap.vo"
+
+[[tests]]
+file = "index_bounds_panic.vo"
+
+[[tests]]
+file = "nested_type_switch.vo"
+
+[[tests]]
+file = "directional_chan_runtime.vo"
+
+[[tests]]
+file = "nil_map_behavior.vo"
+
+[[tests]]
+file = "nil_func_call_panic.vo"
+
+[[tests]]
+file = "defer_panic_order.vo"
+
+[[tests]]
+file = "array_value_semantics.vo"
+
+[[tests]]
+file = "interface_embed_diamond.vo"
+
+[[tests]]
+file = "slice_reslice_cap.vo"
+
+[[tests]]
+file = "interface_method_nil_recv.vo"
+
+[[tests]]
+file = "slice_nil_append.vo"
+
+[[tests]]
+file = "closure_escape_local.vo"
+
+[[tests]]
+file = "struct_embed_method_shadow.vo"
+
+[[tests]]
+file = "for_range_map_delete.vo"
+
+[[tests]]
+file = "string_index_rune.vo"
+
+[[tests]]
+file = "const_iota_complex.vo"
+
+[[tests]]
+file = "nested_closure_modify.vo"
+
+[[tests]]
+file = "map_concurrent_safe.vo"
+
+[[tests]]
+file = "anonymous_struct_literal.vo"
+
+[[tests]]
+file = "range_var_modification.vo"
+
+[[tests]]
+file = "composite_literal_address.vo"
+
+[[tests]]
+file = "select_default_behavior.vo"
+
+[[tests]]
+file = "multi_level_embedding.vo"
+
+[[tests]]
+file = "bug_select_recv_assign.vo"
+
+[[tests]]
+file = "append_self_slice.vo"
+
+[[tests]]
+file = "interface_method_value.vo"
+
+[[tests]]
+file = "chained_type_assertion.vo"
+
+[[tests]]
+file = "zero_embed_method.vo"
+
+[[tests]]
+file = "bug_composite_ptr_method_minimal.vo"
+
+[[tests]]
+file = "composite_ptr_method.vo"
+
+[[tests]]
+file = "iota_skip_complex.vo"
+
+[[tests]]
+file = "immediate_func_literal.vo"
+
+[[tests]]
+file = "type_alias_method_chain.vo"
+
+[[tests]]
+file = "bug_map_any_string_key.vo"
+
+[[tests]]
+file = "bug_switch_init_shadow.vo"
+
+[[tests]]
+file = "bug_for_init_shadow.vo"
+
+[[tests]]
+file = "bug_if_init_shadow.vo"
+
+[[tests]]
+file = "compound_assign_eval_order.vo"
+
+[[tests]]
+file = "string_byte_rune_convert.vo"
+
+[[tests]]
+file = "closure_capture_pointer.vo"
+
+[[tests]]
+file = "nested_label_break_continue.vo"
+
+[[tests]]
+file = "interface_ptr_embed_method.vo"
+
+[[tests]]
+file = "bug_closure_ptr_compare.vo"
+
+[[tests]]
+file = "select_nil_channel.vo"
+
+[[tests]]
+file = "closure_mutual_recursion.vo"
+
+[[tests]]
+file = "switch_expr_eval_order.vo"
+
+[[tests]]
+file = "multi_assign_map_lhs.vo"
+
+[[tests]]
+file = "func_literal_immediate_call.vo"
+
+[[tests]]
+file = "bug_type_switch_interface_case.vo"
+
+[[tests]]
+file = "bug_iife_crash.vo"
+
+[[tests]]
+file = "anon_interface_assertion.vo"
+
+[[tests]]
+file = "range_var_reassign.vo"
+
+[[tests]]
+file = "const_bitwise_edge.vo"
+
+[[tests]]
+file = "closure_type_switch.vo"
+
+[[tests]]
+file = "embed_ptr_method_promote.vo"
+
+[[tests]]
+file = "multi_return_chain.vo"
+
+[[tests]]
+file = "variadic_interface_combo.vo"
+
+[[tests]]
+file = "method_chain_receiver.vo"
+
+[[tests]]
+file = "const_typed_boundary.vo"
+
+[[tests]]
+file = "closure_range_capture.vo"
+
+[[tests]]
+file = "embed_deep_method_shadow.vo"
+
+[[tests]]
+file = "defer_loop_return.vo"
+
+[[tests]]
+file = "anon_struct_iface_impl.vo"
+
+[[tests]]
+file = "defer_panic_chain.vo"
+
+[[tests]]
+file = "slice_spread_variadic.vo"
+
+[[tests]]
+file = "const_expr_overflow.vo"
+
+[[tests]]
+file = "bug_recover_nested_call.vo"
+
+[[tests]]
+file = "dyn/dyn_call_direct.vo"
+
+[[tests]]
+file = "dyn/dyn_array_index.vo"
+
+[[tests]]
+file = "dyn/dyn_named_type_method.vo"
+
+[[tests]]
+file = "dyn/dyn_variadic_call.vo"
+
+[[tests]]
+file = "dyn/dyn_deep_chained_assign.vo"
+
+[[tests]]
+file = "dyn/dyn_error_types.vo"
+
+[[tests]]
+file = "dyn/dyn_recursive_json_traverse.vo"
+
+[[tests]]
+file = "dyn/dyn_closure_capture_result.vo"
+
+[[tests]]
+file = "dyn/dyn_method_returns_error.vo"
+
+[[tests]]
+file = "dyn/dyn_interface_field_write.vo"
+
+[[tests]]
+file = "dyn/dyn_type_coercion_write.vo"
+
+[[tests]]
+file = "dyn/dyn_nil_receiver_method.vo"
+
+[[tests]]
+file = "dyn/dyn_goroutine_access.vo"
+
+[[tests]]
+file = "dyn/dyn_defer_access.vo"
+
+[[tests]]
+file = "dyn/dyn_type_switch_combo.vo"
+
+[[tests]]
+file = "dyn/dyn_anon_struct.vo"
+
+[[tests]]
+file = "dyn/dyn_method_chain_call.vo"
+
+[[tests]]
+file = "dyn/dyn_panic_recover.vo"
+
+[[tests]]
+file = "dyn/dyn_embed_field_write.vo"
+
+[[tests]]
+file = "dyn/dyn_named_type_access.vo"
+
+[[tests]]
+file = "dyn/dyn_empty_struct.vo"
+
+[[tests]]
+file = "dyn/dyn_return_channel.vo"
+
+[[tests]]
+file = "dyn/dyn_interface_receiver.vo"
+
+[[tests]]
+file = "dyn/dyn_array_write.vo"
+
+[[tests]]
+file = "dyn/dyn_nested_interface.vo"
+
+[[tests]]
+file = "dyn/dyn_return_func_call.vo"
+
+[[tests]]
+file = "dyn/dyn_range_iteration.vo"
+
+[[tests]]
+file = "dyn/dyn_multi_ret_func_arg.vo"
+
+[[tests]]
+file = "dyn/dyn_concurrent_modify.vo"
+
+[[tests]]
+file = "dyn/dyn_slice_operations.vo"
+
+[[tests]]
+file = "dyn/dyn_variadic_spread.vo"
+
+[[tests]]
+file = "dyn/dyn_string_index.vo"
+
+[[tests]]
+file = "dyn/dyn_result_chain_call.vo"
+
+[[tests]]
+file = "dyn/dyn_closure_return_call.vo"
+
+[[tests]]
+file = "dyn/dyn_multidim_access.vo"
+
+[[tests]]
+file = "dyn/dyn_set_from_get.vo"
+
+[[tests]]
+file = "dyn/dyn_recursive_self_call.vo"
+
+[[tests]]
+file = "dyn/dyn_array_as_base.vo"
+
+[[tests]]
+file = "dyn/dyn_method_on_nil_field.vo"
+
+[[tests]]
+file = "dyn/dyn_named_embed_protocol.vo"
+
+[[tests]]
+file = "dyn/dyn_map_delete_get.vo"
+
+[[tests]]
+file = "dyn/dyn_interface_array_elem.vo"
+
+[[tests]]
+file = "dyn/dyn_func_field_call.vo"
+
+[[tests]]
+file = "dyn/dyn_chan_field_access.vo"
+
+[[tests]]
+file = "bug_nested_array_compound.vo"
+
+[[tests]]
+file = "bug_for_range_break_label.vo"
+
+[[tests]]
+file = "defer_panic_named_return.vo"
+
+[[tests]]
+file = "type_assertion_chain_method.vo"
+
+[[tests]]
+file = "embed_ptr_iface_complex.vo"
+
+[[tests]]
+file = "chan_of_chan.vo"
+
+[[tests]]
+file = "select_multi_ready.vo"
+
+[[tests]]
+file = "interface_typed_nil.vo"
+
+[[tests]]
+file = "composite_literal_addr.vo"
+
+[[tests]]
+file = "go_method_value.vo"
+
+[[tests]]
+file = "sparse_array_literal.vo"
+
+[[tests]]
+file = "fallthrough_to_default.vo"
+
+[[tests]]
+file = "for_post_side_effect.vo"
+
+[[tests]]
+file = "multi_return_variadic_spread.vo"
+
+[[tests]]
+file = "interface_nil_map_key.vo"
+
+[[tests]]
+file = "defer_return_modify_complex.vo"
+
+[[tests]]
+file = "bug_sparse_array_keyed.vo"
+
+[[tests]]
+file = "bug_switch_default_first.vo"
+
+[[tests]]
+file = "bug_nested_defer_not_run.vo"
+
+[[tests]]
+file = "closure_as_map_value.vo"
+
+[[tests]]
+file = "composite_literal_method_call.vo"
+
+[[tests]]
+file = "slice_func_elem_call.vo"
+
+[[tests]]
+file = "bug_defer_break_label.vo"
+
+[[tests]]
+file = "bug_type_switch_closure_capture.vo"
+
+[[tests]]
+file = "nested_loop_label_defer.vo"
+
+[[tests]]
+file = "type_switch_closure_capture.vo"
+
+[[tests]]
+file = "continue_label_defer.vo"
+
+[[tests]]
+file = "multi_assign_index_modify.vo"
+
+[[tests]]
+file = "closure_goroutine_immediate.vo"
+
+[[tests]]
+file = "defer_multi_return_arg.vo"
+
+[[tests]]
+file = "type_switch_nested_break.vo"
+
+[[tests]]
+file = "select_nested_break.vo"
+
+[[tests]]
+file = "select_type_switch_combo.vo"
+
+[[tests]]
+file = "errdefer_closure_panic.vo"
+
+[[tests]]
+file = "select_send_eval_order.vo"
+
+[[tests]]
+file = "for_range_defer_goroutine.vo"
+
+[[tests]]
+file = "interface_embed_assert_chain.vo"
+
+[[tests]]
+file = "multi_assign_eval_order.vo"
+
+[[tests]]
+file = "closure_panic_recover.vo"
+
+[[tests]]
+file = "defer_return_shadow.vo"
+
+[[tests]]
+file = "switch_fallthrough_complex.vo"
+
+[[tests]]
+file = "slice_aliasing.vo"
+
+[[tests]]
+file = "map_iteration_order.vo"
+
+[[tests]]
+file = "goroutine_panic_crash.vo"
+
+[[tests]]
+file = "panic_complex_value.vo"
+
+[[tests]]
+file = "defer_repanic_chain.vo"
+
+[[tests]]
+file = "nil_value_receiver_method.vo"
+
+[[tests]]
+file = "make_negative_panic.vo"
+
+[[tests]]
+file = "return_expr_panic_defer.vo"
+
+[[tests]]
+file = "multi_assign_panic_order.vo"
+
+[[tests]]
+file = "defer_slice_map_modify.vo"
+
+[[tests]]
+file = "bug_for_range_closure_capture.vo"
+
+[[tests]]
+file = "multi_init_order.vo"
+
+[[tests]]
+file = "empty_struct_chan_signal.vo"
+
+[[tests]]
+file = "composite_addr_method_call.vo"
+
+[[tests]]
+file = "type_conversion_method_chain.vo"
+
+[[tests]]
+file = "bug_labeled_break_defer.vo"
+
+[[tests]]
+file = "interface_nil_semantics.vo"
+
+[[tests]]
+file = "bug_multi_level_pointer_embed.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_22_iface_closure_capture.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_22_type_convert_numeric.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_1920_errdefer_closure_named_ret.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_1921_method_value_iface_embed.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2008_method_expr_embed_deep.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2015_iface_embed_complex.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2016_error_question_errdefer.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2049_errdefer_named_ret_modify.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2059_dyn_access_edge.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2112_multi_value_edge.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2118_forrange_complex.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2204_multi_ret_any_chain.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2207_dyn_access_method_chain.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2208_for_range_complex_expr.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2235_bare_return_iface.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2243_multi_ret_as_arg.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_2244_panic_recover_complex.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_closure_loop_iface.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_defer_errdefer_combo.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_eval_order_edge.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_goroutine_closure.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_iface_composite_edge.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_iface_type_alias.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_iface_variadic_multi.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_int_overflow.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_struct_embed_method.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_type_conv_boundary.vo"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_23_value_ptr_receiver_mix.vo"
+
+[[tests]]
+file = "os_simple_test.vo"
+skip = ["nostd"]
+reason = "os module requires std"
+
+[[tests]]
+file = "os_test.vo"
+skip = ["nostd"]
+reason = "os module requires std"
+
+[[tests]]
+file = "stdlib/regexp.vo"
+skip = ["nostd"]
+reason = "regexp module requires std"

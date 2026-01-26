@@ -210,6 +210,8 @@ impl Vm {
         self.state.globals = vec![0u64; total_global_slots];
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
+        // Reset sentinel error cache for new module (prevents cross-module corruption)
+        self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
         
         // Initialize JIT manager for this module
         #[cfg(feature = "jit")]
@@ -831,7 +833,6 @@ impl Vm {
                         &module.interface_metas,
                         &module.named_type_metas,
                         &module.runtime_types,
-                        &module.well_known,
                         &mut self.state.itab_cache,
                         &module.functions,
                         module,
@@ -839,7 +840,9 @@ impl Vm {
                         fiber_ptr,
                         closure_call_fn,
                         &mut extern_panic_msg,
+                        &module.well_known,
                         &self.state.program_args,
+                        &mut self.state.sentinel_errors,
                     );
                     // Convert extern panic to recoverable runtime panic
                     if matches!(result, ExecResult::Panic) {

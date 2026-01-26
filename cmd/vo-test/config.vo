@@ -1,0 +1,81 @@
+// config.vo - Parse _config.toml test configuration
+package main
+
+import (
+	"dyn"
+	"encoding/toml"
+	"os"
+)
+
+type TestConfig struct {
+	skip       []string
+	shouldFail bool
+	zipRoot    string
+}
+
+func loadTestConfig(configPath string) (map[string]TestConfig, error) {
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := toml.Decode(content)
+	if err != nil {
+		return nil, err
+	}
+
+	configs := make(map[string]TestConfig)
+
+	testsAny, err := data~>tests
+	if err != nil || testsAny == nil {
+		return configs, nil
+	}
+	tests, ok := testsAny.(dyn.SliceObject)
+	if !ok {
+		return configs, nil
+	}
+	for _, entry := range tests {
+		file := entry~>file?.(string)
+		if file == "" {
+			continue
+		}
+
+		var skip []string
+		skipVal, _ := entry~>skip
+		if skipVal != nil {
+			if skipSlice, ok := skipVal.(dyn.SliceObject); ok {
+				for _, s := range skipSlice {
+					skip = append(skip, s.(string))
+				}
+			}
+		}
+
+		shouldFail := false
+		sf, _ := entry~>should_fail
+		if sf != nil {
+			shouldFail = sf.(bool)
+		}
+
+		zipRoot := ""
+		zr, _ := entry~>zip_root
+		if zr != nil {
+			zipRoot = zr.(string)
+		}
+
+		configs[file] = TestConfig{
+			skip:       skip,
+			shouldFail: shouldFail,
+			zipRoot:    zipRoot,
+		}
+	}
+	return configs, nil
+}
+
+func (tc TestConfig) shouldSkip(mode string) bool {
+	for _, skipMode := range tc.skip {
+		if skipMode == mode {
+			return true
+		}
+	}
+	return false
+}

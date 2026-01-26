@@ -1,0 +1,607 @@
+// runner.vo - Parallel test execution engine
+package main
+
+import (
+	"../../libs/vox"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type TestJob struct {
+	file string
+	mode string
+	shouldFail bool
+	gcDebug bool
+}
+
+func writeProgress(s string) {
+	_, _ = os.Stderr.WriteString(s)
+}
+
+func expectedErrorSubstrings(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return []string{}
+	}
+
+	lines := strings.Split(string(data), "\n")
+	expected := []string{}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		idx := strings.Index(trimmed, "Expected:")
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(trimmed[idx+len("Expected:"):])
+		if rest == "" {
+			continue
+		}
+		q1 := strings.Index(rest, "\"")
+		q2 := -1
+		if q1 >= 0 {
+			q2 = strings.LastIndex(rest, "\"")
+		}
+		if q1 >= 0 && q2 > q1 {
+			expected = append(expected, rest[q1+1:q2])
+		} else {
+			expected = append(expected, rest)
+		}
+	}
+	return expected
+}
+
+func matchesAllSubstrings(msg string, expected []string) bool {
+	for _, s := range expected {
+		if s == "" {
+			continue
+		}
+		if !matchesPattern(msg, s) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesPattern(msg string, pattern string) bool {
+	// Support a minimal wildcard: 'X' matches any substring.
+	// This keeps test comments stable while allowing concrete type names.
+	if !strings.Contains(pattern, "X") {
+		return strings.Contains(msg, pattern)
+	}
+	parts := strings.Split(pattern, "X")
+	idx := 0
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		pos := strings.Index(msg[idx:], p)
+		if pos < 0 {
+			return false
+		}
+		idx += pos + len(p)
+	}
+	return true
+}
+
+type TestResult struct {
+	file string
+	mode string
+	passed bool
+	skipped bool
+	elapsedMs int64
+	errorMsg string
+}
+
+type TestStats struct {
+	vmPassed int
+	vmFailed int
+	vmSkipped int
+	jitPassed int
+	jitFailed int
+	jitSkipped int
+	failedTests []string
+}
+
+func runTests(mode string, args []string) int {
+	// Parse options
+	verbose := false
+	workers := 4  // default
+	singleFile := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+		} else if strings.HasPrefix(arg, "-j") {
+			// Parse -j8 or -j 8
+			numStr := arg[2:]
+			if numStr == "" && i+1 < len(args) {
+				i++
+				numStr = args[i]
+			}
+			if n, err := strconv.Atoi(numStr); err == nil && n > 0 {
+				workers = n
+			}
+		} else if !strings.HasPrefix(arg, "-") {
+			singleFile = arg
+		}
+	}
+
+	// Load test configuration
+	testDataDir := "lang/test_data"
+	configPath := testDataDir + "/_config.toml"
+	configs, err := loadTestConfig(configPath)
+	if err != nil {
+		fmt.Println("[VO-TEST] Warning: could not load _config.toml:", err.Error())
+		configs = make(map[string]TestConfig)
+	}
+
+	// Single file mode
+	if singleFile != "" {
+		return runSingleFile(singleFile, mode, verbose, configs)
+	}
+
+	// Collect test files
+	jobs := collectTestJobs(testDataDir, mode, configs)
+	
+	if len(jobs) == 0 {
+		fmt.Println("[VO-TEST] No tests found")
+		return 1
+	}
+
+	fmt.Println("[VO-TEST] Running", len(jobs), "tests with", workers, "workers...")
+	fmt.Println("")
+
+	// Run tests in parallel
+	results := runTestsParallel(jobs, workers, verbose)
+
+	// Print results
+	stats := calculateStats(results)
+	printResults(stats, verbose)
+
+	if stats.vmFailed > 0 || stats.jitFailed > 0 {
+		return 1
+	}
+	return 0
+}
+
+func collectTestJobs(testDir string, mode string, configs map[string]TestConfig) []TestJob {
+	jobs := []TestJob{}
+	
+	runVM := mode == "vm" || mode == "both" || mode == "gc"
+	runJIT := mode == "jit" || mode == "both" || mode == "gc"
+	isGCMode := mode == "gc"
+	isNoStdMode := mode == "nostd"
+
+	// Collect .vo files
+	files := findVoFiles(testDir)
+	
+	for _, file := range files {
+		relPath := file
+		if strings.HasPrefix(file, testDir + "/") {
+			relPath = file[len(testDir)+1:]
+		}
+
+		config := configs[relPath]
+		fileName := relPath
+		if idx := strings.LastIndex(relPath, "/"); idx >= 0 {
+			fileName = relPath[idx+1:]
+		}
+		isGCFile := strings.HasPrefix(fileName, "gc_")
+
+		// gc mode: only gc_* files; other modes: skip gc_* files unless explicitly testing
+		if isGCMode && !isGCFile {
+			continue
+		}
+		if !isGCMode && !isNoStdMode && isGCFile {
+			continue
+		}
+
+		gcDebug := isGCMode && isGCFile
+
+		// should_fail tests run once (not per mode)
+		if config.shouldFail {
+			jobs = append(jobs, TestJob{
+				file: file,
+				mode: "compile",
+				shouldFail: true,
+				gcDebug: false,
+			})
+			continue
+		}
+
+		if runVM && !config.shouldSkip("vm") {
+			jobs = append(jobs, TestJob{
+				file: file,
+				mode: "vm",
+				shouldFail: false,
+				gcDebug: gcDebug,
+			})
+		}
+
+		if runJIT && !config.shouldSkip("jit") {
+			jobs = append(jobs, TestJob{
+				file: file,
+				mode: "jit",
+				shouldFail: false,
+				gcDebug: gcDebug,
+			})
+		}
+	}
+
+	// Collect project directories (proj_*)
+	if !isGCMode && !isNoStdMode {
+		projDirs := findProjectDirs(testDir)
+		for _, dir := range projDirs {
+			relPath := dir
+			if strings.HasPrefix(dir, testDir + "/") {
+				relPath = dir[len(testDir)+1:] + "/"
+			}
+
+			config := configs[relPath]
+			
+			if config.shouldFail {
+				jobs = append(jobs, TestJob{
+					file: dir,
+					mode: "compile",
+					shouldFail: true,
+					gcDebug: false,
+				})
+				continue
+			}
+
+			if runVM && !config.shouldSkip("vm") {
+				jobs = append(jobs, TestJob{
+					file: dir,
+					mode: "vm",
+					shouldFail: false,
+					gcDebug: false,
+				})
+			}
+
+			if runJIT && !config.shouldSkip("jit") {
+				jobs = append(jobs, TestJob{
+					file: dir,
+					mode: "jit",
+					shouldFail: false,
+					gcDebug: false,
+				})
+			}
+		}
+
+		// Collect zip files
+		zipFiles := findZipFiles(testDir)
+		for _, zipFile := range zipFiles {
+			relPath := zipFile
+			if strings.HasPrefix(zipFile, testDir + "/") {
+				relPath = zipFile[len(testDir)+1:]
+			}
+
+			config := configs[relPath]
+			
+			// Handle zip_root config
+			testPath := zipFile
+			if config.zipRoot != "" {
+				testPath = zipFile + ":" + config.zipRoot
+			}
+
+			if runVM && !config.shouldSkip("vm") {
+				jobs = append(jobs, TestJob{
+					file: testPath,
+					mode: "vm",
+					shouldFail: false,
+					gcDebug: false,
+				})
+			}
+
+			if runJIT && !config.shouldSkip("jit") {
+				jobs = append(jobs, TestJob{
+					file: testPath,
+					mode: "jit",
+					shouldFail: false,
+					gcDebug: false,
+				})
+			}
+		}
+	}
+
+	return jobs
+}
+
+func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
+	jobChan := make(chan TestJob, len(jobs))
+	resultChan := make(chan TestResult, len(jobs))
+
+	// Start workers
+	for i := 0; i < workers; i++ {
+		go testWorker(jobChan, resultChan)
+	}
+
+	// Send jobs
+	for _, job := range jobs {
+		jobChan <- job
+	}
+	close(jobChan)
+
+	// Collect results with progress
+	results := []TestResult{}
+	for i := 0; i < len(jobs); i++ {
+		result := <-resultChan
+		results = append(results, result)
+		
+		if !verbose {
+			printProgress(result, i+1, len(jobs))
+		}
+	}
+
+	return results
+}
+
+func testWorker(jobs <-chan TestJob, results chan<- TestResult) {
+	for job := range jobs {
+		result := runSingleTest(job)
+		results <- result
+	}
+}
+
+func runSingleTest(job TestJob) TestResult {
+	start := time.Now()
+
+	if job.shouldFail {
+		return runShouldFailTest(job, start)
+	}
+
+	// Compile
+	var module vox.Module
+	var err error
+	
+	if strings.HasSuffix(job.file, ".vo") {
+		module, err = vox.CompileFile(job.file)
+	} else {
+		module, err = vox.CompileDir(job.file)
+	}
+
+	if err != nil {
+		return TestResult{
+			file: job.file,
+			mode: job.mode,
+			passed: false,
+			skipped: false,
+			elapsedMs: time.Since(start).Milliseconds(),
+			errorMsg: "[COMPILE] " + err.Error(),
+		}
+	}
+
+	// Run
+	if job.mode == "jit" {
+		err = vox.RunJit(module)
+	} else {
+		err = vox.Run(module)
+	}
+	vox.Free(module)
+
+	errorMsg := ""
+	if err != nil {
+		errorMsg = err.Error()
+	}
+
+	return TestResult{
+		file: job.file,
+		mode: job.mode,
+		passed: err == nil,
+		skipped: false,
+		elapsedMs: time.Since(start).Milliseconds(),
+		errorMsg: errorMsg,
+	}
+}
+
+func runShouldFailTest(job TestJob, start time.Time) TestResult {
+	var err error
+	if strings.HasSuffix(job.file, ".vo") {
+		_, err = vox.CompileFile(job.file)
+	} else {
+		_, err = vox.CompileDir(job.file)
+	}
+
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+
+	passed := err != nil
+	if passed && strings.HasSuffix(job.file, ".vo") {
+		expected := expectedErrorSubstrings(job.file)
+		if len(expected) > 0 {
+			passed = matchesAllSubstrings(errMsg, expected)
+		}
+	}
+
+	return TestResult{
+		file: job.file,
+		mode: "should_fail",
+		passed: passed,
+		skipped: false,
+		elapsedMs: time.Since(start).Milliseconds(),
+		errorMsg: errMsg,
+	}
+}
+
+func runSingleFile(file string, mode string, verbose bool, configs map[string]TestConfig) int {
+	fmt.Println("[VO-TEST] Running single file:", file)
+	
+	// Determine full path
+	testPath := file
+	if !strings.HasPrefix(file, "/") && !strings.HasPrefix(file, "lang/test_data/") {
+		testPath = "lang/test_data/" + file
+	}
+
+	relPath := file
+	if strings.HasPrefix(file, "lang/test_data/") {
+		relPath = file[len("lang/test_data/"):]
+	}
+	config := configs[relPath]
+	if config.shouldFail {
+		job := TestJob{
+			file: testPath,
+			mode: "compile",
+			shouldFail: true,
+			gcDebug: false,
+		}
+		result := runShouldFailTest(job, time.Now())
+		printSingleResult(result)
+		if !result.passed {
+			return 1
+		}
+		return 0
+	}
+
+	runVM := mode == "vm" || mode == "both"
+	runJIT := mode == "jit" || mode == "both"
+
+	failed := false
+
+	if runVM {
+		job := TestJob{
+			file: testPath,
+			mode: "vm",
+			shouldFail: false,
+			gcDebug: strings.Contains(file, "gc_"),
+		}
+		result := runSingleTest(job)
+		printSingleResult(result)
+		if !result.passed {
+			failed = true
+		}
+	}
+
+	if runJIT {
+		job := TestJob{
+			file: testPath,
+			mode: "jit",
+			shouldFail: false,
+			gcDebug: strings.Contains(file, "gc_"),
+		}
+		result := runSingleTest(job)
+		printSingleResult(result)
+		if !result.passed {
+			failed = true
+		}
+	}
+
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+func printSingleResult(result TestResult) {
+	status := "✓"
+	if !result.passed {
+		status = "✗"
+	}
+	
+	fmt.Println(status, result.file, "["+result.mode+"]", "("+formatDuration(result.elapsedMs)+")")
+	
+	if !result.passed && result.errorMsg != "" {
+		fmt.Println("  Error:", result.errorMsg)
+	}
+}
+
+func printProgress(result TestResult, current int, total int) {
+	// Printing carriage-return progress interacts badly with test stdout in logs.
+	// Use periodic newline progress instead.
+	if current != total && current%50 != 0 {
+		return
+	}
+
+	status := "✓"
+	if !result.passed {
+		status = "✗"
+	} else if result.skipped {
+		status = "⊘"
+	}
+	
+	// Extract filename only
+	file := result.file
+	if idx := strings.LastIndex(file, "/"); idx >= 0 {
+		file = file[idx+1:]
+	}
+	
+	writeProgress("  " + status + " " + file + " [" + result.mode + "] (" + formatDuration(result.elapsedMs) + ") [" + strconv.Itoa(current) + "/" + strconv.Itoa(total) + "]\n")
+}
+
+func formatDuration(ms int64) string {
+	if ms < 10 {
+		return "<10ms"
+	} else if ms < 1000 {
+		return strconv.FormatInt(int(ms), 10) + "ms"
+	} else {
+		sec := ms / 1000
+		return strconv.FormatInt(int(sec), 10) + "s"
+	}
+}
+
+func calculateStats(results []TestResult) TestStats {
+	stats := TestStats{
+		failedTests: []string{},
+	}
+
+	for _, r := range results {
+		if r.skipped {
+			if r.mode == "vm" {
+				stats.vmSkipped++
+			} else if r.mode == "jit" {
+				stats.jitSkipped++
+			}
+			continue
+		}
+
+		if r.passed {
+			if r.mode == "vm" || r.mode == "should_fail" {
+				stats.vmPassed++
+			} else if r.mode == "jit" {
+				stats.jitPassed++
+			}
+		} else {
+			if r.mode == "vm" || r.mode == "should_fail" {
+				stats.vmFailed++
+			} else if r.mode == "jit" {
+				stats.jitFailed++
+			}
+			stats.failedTests = append(stats.failedTests, r.file+" ["+r.mode+"]")
+		}
+	}
+
+	return stats
+}
+
+func printResults(stats TestStats, verbose bool) {
+	fmt.Println("")
+	
+	if len(stats.failedTests) > 0 {
+		fmt.Println("Failed tests:")
+		for _, test := range stats.failedTests {
+			fmt.Println("  ✗", test)
+		}
+		fmt.Println("")
+	}
+
+	fmt.Println("╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("║                   Vo Test Results                        ║")
+	fmt.Println("╠══════════════════════════════════════════════════════════╣")
+	fmt.Println("║  VM:   ", stats.vmPassed, "passed ", stats.vmFailed, "failed ", stats.vmSkipped, "skipped              ║")
+	fmt.Println("║  JIT:  ", stats.jitPassed, "passed ", stats.jitFailed, "failed ", stats.jitSkipped, "skipped              ║")
+	fmt.Println("╠══════════════════════════════════════════════════════════╣")
+	
+	totalPassed := stats.vmPassed + stats.jitPassed
+	totalFailed := stats.vmFailed + stats.jitFailed
+	
+	fmt.Println("║  Total:", totalPassed, "passed ", totalFailed, "failed                           ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+}

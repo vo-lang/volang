@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use vo_runtime::gc::Gc;
+use vo_runtime::SentinelErrorCache;
 
 use crate::exec::ExternRegistry;
 use vo_runtime::itab::ItabCache;
@@ -54,6 +55,8 @@ pub struct VmState {
     pub itab_cache: ItabCache,
     pub extern_registry: ExternRegistry,
     pub program_args: Vec<String>,
+    /// Per-VM sentinel error cache (reset on each module load).
+    pub sentinel_errors: SentinelErrorCache,
 }
 
 impl VmState {
@@ -64,6 +67,7 @@ impl VmState {
             itab_cache: ItabCache::new(),
             extern_registry: ExternRegistry::new(),
             program_args: Vec::new(),
+            sentinel_errors: SentinelErrorCache::new(),
         }
     }
 }

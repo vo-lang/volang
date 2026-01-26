@@ -13,6 +13,8 @@ use crate::vm::ExecResult;
 
 pub use vo_runtime::ffi::ExternRegistry;
 use vo_runtime::ffi::ExternResult;
+use vo_runtime::SentinelErrorCache;
+use vo_common_core::bytecode::WellKnownTypes;
 use vo_runtime::gc::Gc;
 use vo_common_core::bytecode::Module;
 
@@ -27,7 +29,6 @@ pub fn exec_call_extern(
     interface_metas: &[vo_common_core::bytecode::InterfaceMeta],
     named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[vo_runtime::RuntimeType],
-    well_known: &vo_common_core::bytecode::WellKnownTypes,
     itab_cache: &mut vo_runtime::itab::ItabCache,
     func_defs: &[vo_common_core::bytecode::FunctionDef],
     module: &Module,
@@ -35,7 +36,9 @@ pub fn exec_call_extern(
     fiber: *mut core::ffi::c_void,
     call_closure_fn: Option<vo_runtime::ffi::ClosureCallFn>,
     fiber_panic_msg: &mut Option<String>,
+    well_known: &WellKnownTypes,
     program_args: &[String],
+    sentinel_errors: &mut SentinelErrorCache,
 ) -> ExecResult {
     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
     let extern_id = inst.b as u32;
@@ -62,14 +65,15 @@ pub fn exec_call_extern(
         interface_metas,
         named_type_metas,
         runtime_types,
-        well_known,
         itab_cache,
         func_defs,
         module,
         vm,
         fiber,
         call_closure_fn,
+        well_known,
         program_args,
+        sentinel_errors,
     );
 
     match result {

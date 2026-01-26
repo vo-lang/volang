@@ -8,6 +8,7 @@ members = [
   "playground/rust",
   "cmd/vo/rust",
   "cmd/vo-embed",
+  "cmd/vo-test/rust",
 ]
 
 [workspace.package]

@@ -62,6 +62,7 @@ pub extern "C" fn call_extern_trampoline(
     }
     
     let program_args = unsafe { &*ctx.program_args };
+    let sentinel_errors = unsafe { &mut *ctx.sentinel_errors };
     let result = registry.call(
         extern_id,
         &mut temp_stack,
@@ -74,14 +75,15 @@ pub extern "C" fn call_extern_trampoline(
         &module.interface_metas,
         &module.named_type_metas,
         &module.runtime_types,
-        &module.well_known,
         itab_cache,
         &module.functions,
         module,
         ctx.vm,
         ctx.fiber,
         Some(super::closure_call_trampoline),
+        &module.well_known,
         program_args,
+        sentinel_errors,
     );
     
     match result {
@@ -163,6 +165,7 @@ pub fn build_jit_ctx(
         jit_func_table,
         jit_func_count,
         program_args: &state.program_args as *const _,
+        sentinel_errors: &mut state.sentinel_errors as *mut _,
     }
 }
 
