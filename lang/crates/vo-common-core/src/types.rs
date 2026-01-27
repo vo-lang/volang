@@ -130,6 +130,8 @@ pub enum ValueKind {
     Channel = 20,
     Closure = 21,
     Pointer = 22,
+    Port = 23,
+    Island = 24,
 }
 
 impl ValueKind {

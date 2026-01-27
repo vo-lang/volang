@@ -211,7 +211,8 @@ fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
         ValueKind::Int32 | ValueKind::Int64 | ValueKind::Uint | ValueKind::Uint8 | 
         ValueKind::Uint16 | ValueKind::Uint32 | ValueKind::Uint64 |
         ValueKind::Float32 | ValueKind::Float64 | ValueKind::Pointer | 
-        ValueKind::Slice | ValueKind::Map | ValueKind::Channel | ValueKind::Closure => {
+        ValueKind::Slice | ValueKind::Map | ValueKind::Channel | ValueKind::Closure |
+        ValueKind::Port | ValueKind::Island => {
             // Immediate or reference identity comparison
             left_slot1 == right_slot1
         }

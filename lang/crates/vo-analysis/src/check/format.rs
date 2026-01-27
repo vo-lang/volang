@@ -210,7 +210,14 @@ fn write_stmt(buf: &mut String, stmt: &Stmt, interner: &SymbolInterner) {
             }
         }
         StmtKind::Go(g) => {
-            buf.push_str("go ");
+            buf.push_str("go");
+            if let Some(island) = &g.target_island {
+                buf.push_str(" @(");
+                write_expr(buf, island, interner);
+                buf.push_str(") ");
+            } else {
+                buf.push(' ');
+            }
             write_expr(buf, &g.call, interner);
         }
         StmtKind::Defer(d) => {

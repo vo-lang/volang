@@ -488,7 +488,7 @@ pub extern "C" fn vo_map_set(m: u64, key_ptr: *const u64, key_slots: u32, val_pt
             let slot0 = key[0];
             let inner_vk = interface::unpack_value_kind(slot0);
             match inner_vk {
-                ValueKind::Slice | ValueKind::Map | ValueKind::Closure | ValueKind::Channel => {
+                ValueKind::Slice | ValueKind::Map | ValueKind::Closure => {
                     return 1; // Uncomparable type - should panic
                 }
                 _ => {}

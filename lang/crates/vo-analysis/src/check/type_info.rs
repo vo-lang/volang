@@ -265,6 +265,8 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
             let len = a.len().unwrap_or(0) as u16;
             elem_slots * len
         }
+        Type::Port(_) => 1,  // port is GcRef
+        Type::Island => 1,   // island is GcRef
         Type::Named(n) => type_slot_count(n.underlying(), tc_objs),
         Type::Tuple(t) => {
             let mut total = 0u16;
@@ -318,6 +320,8 @@ pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> 
             }
             types
         }
+        Type::Port(_) => vec![SlotType::GcRef],
+        Type::Island => vec![SlotType::GcRef],
         Type::Named(n) => type_slot_types(n.underlying(), tc_objs),
         Type::Tuple(t) => {
             let mut types = Vec::new();
@@ -377,9 +381,11 @@ pub fn type_value_kind(type_key: TypeKey, tc_objs: &TCObjects) -> ValueKind {
         Type::Struct(_) => ValueKind::Struct,
         Type::Interface(_) => ValueKind::Interface,
         Type::Chan(_) => ValueKind::Channel,
+        Type::Port(_) => ValueKind::Port,
+        Type::Island => ValueKind::Island,
         Type::Signature(_) => ValueKind::Closure,
         Type::Named(n) => type_value_kind(n.underlying(), tc_objs),
-        other => panic!("type_value_kind: unhandled type {:?}", other),
+        Type::Tuple(_) => ValueKind::Void,
     }
 }
 

@@ -90,6 +90,12 @@ pub enum RuntimeType {
     
     /// Tuple type (for function multi-value returns)
     Tuple(Vec<ValueRttid>),
+    
+    /// Port type: port[T] for cross-island communication
+    Port(ValueRttid),
+    
+    /// Island type: represents a VM instance
+    Island,
 }
 
 /// Channel direction.
@@ -211,6 +217,8 @@ impl PartialEq for RuntimeType {
                 m1.iter().all(|method| m2.contains(method))
             }
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
+            (Self::Port(a), Self::Port(b)) => a == b,
+            (Self::Island, Self::Island) => true,
             _ => false,
         }
     }
@@ -257,6 +265,8 @@ impl core::hash::Hash for RuntimeType {
                 combined.hash(state);
             }
             Self::Tuple(elems) => elems.hash(state),
+            Self::Port(elem) => elem.hash(state),
+            Self::Island => {}
         }
     }
 }

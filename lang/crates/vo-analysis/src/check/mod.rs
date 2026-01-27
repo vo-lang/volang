@@ -18,6 +18,7 @@ mod interface;
 mod label;
 pub(crate) mod resolver;
 mod returns;
+pub mod sendable;
 mod stmt;
 pub mod type_info;
 mod typexpr;

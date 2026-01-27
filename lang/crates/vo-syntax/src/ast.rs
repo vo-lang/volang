@@ -709,6 +709,9 @@ pub struct RecvStmt {
 /// A go statement.
 #[derive(Debug, Clone)]
 pub struct GoStmt {
+    /// The target island expression (for `go @(island) call` syntax).
+    /// None means current island (standard `go call` syntax).
+    pub target_island: Option<Expr>,
     /// The call expression.
     pub call: Expr,
 }
@@ -1245,7 +1248,12 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
                 }
             }
         }
-        StmtKind::Go(g) => visitor.visit_expr(&g.call),
+        StmtKind::Go(g) => {
+            if let Some(island) = &g.target_island {
+                visitor.visit_expr(island);
+            }
+            visitor.visit_expr(&g.call);
+        }
         StmtKind::Defer(d) => visitor.visit_expr(&d.call),
         StmtKind::ErrDefer(d) => visitor.visit_expr(&d.call),
         StmtKind::Fail(f) => visitor.visit_expr(&f.error),

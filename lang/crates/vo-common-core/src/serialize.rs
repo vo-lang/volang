@@ -126,6 +126,8 @@ const RT_FUNC: u8 = 7;
 const RT_STRUCT: u8 = 8;
 const RT_INTERFACE: u8 = 9;
 const RT_TUPLE: u8 = 10;
+const RT_PORT: u8 = 11;
+const RT_ISLAND: u8 = 12;
 
 fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
     match rt {
@@ -204,6 +206,13 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
             for t in types {
                 w.write_u32(t.to_raw());
             }
+        }
+        RuntimeType::Port(elem_rttid) => {
+            w.write_u8(RT_PORT);
+            w.write_u32(elem_rttid.to_raw());
+        }
+        RuntimeType::Island => {
+            w.write_u8(RT_ISLAND);
         }
     }
 }
@@ -301,6 +310,13 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
                 types.push(ValueRttid::from_raw(r.read_u32()?));
             }
             Ok(RuntimeType::Tuple(types))
+        }
+        RT_PORT => {
+            let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
+            Ok(RuntimeType::Port(elem_rttid))
+        }
+        RT_ISLAND => {
+            Ok(RuntimeType::Island)
         }
         _ => Ok(RuntimeType::Basic(crate::types::ValueKind::Void)),
     }

@@ -86,8 +86,7 @@ pub fn exec_map_set(stack: &[u64], bp: usize, inst: &Instruction, gc: &mut Gc, m
             match inner_vk {
                 vo_runtime::ValueKind::Slice | 
                 vo_runtime::ValueKind::Map | 
-                vo_runtime::ValueKind::Closure | 
-                vo_runtime::ValueKind::Channel => {
+                vo_runtime::ValueKind::Closure => {
                     return false; // Uncomparable type - should panic
                 }
                 _ => {}

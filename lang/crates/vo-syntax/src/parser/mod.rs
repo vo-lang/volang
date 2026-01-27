@@ -1380,6 +1380,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_stmt_go_island_syntax() {
+        // Test go @(island) syntax with space
+        let file = parse_ok(
+            r#"
+            func main() {
+                go @(i) foo()
+            }
+        "#,
+        );
+        match &file.decls[0] {
+            Decl::Func(f) => {
+                let body = f.body.as_ref().unwrap();
+                if let StmtKind::Go(go_stmt) = &body.stmts[0].kind {
+                    assert!(go_stmt.target_island.is_some());
+                    assert!(matches!(go_stmt.call.kind, ExprKind::Call(_)));
+                } else {
+                    panic!("expected Go statement");
+                }
+            }
+            _ => panic!("expected func decl"),
+        }
+
+        // Test without space: go@(island)
+        let file2 = parse_ok(
+            r#"
+            func main() {
+                go@(x) bar()
+            }
+        "#,
+        );
+        match &file2.decls[0] {
+            Decl::Func(f) => {
+                let body = f.body.as_ref().unwrap();
+                if let StmtKind::Go(go_stmt) = &body.stmts[0].kind {
+                    assert!(go_stmt.target_island.is_some());
+                } else {
+                    panic!("expected Go statement");
+                }
+            }
+            _ => panic!("expected func decl"),
+        }
+
+        // Test standard go (no island) still works
+        let file3 = parse_ok(
+            r#"
+            func main() {
+                go foo()
+            }
+        "#,
+        );
+        match &file3.decls[0] {
+            Decl::Func(f) => {
+                let body = f.body.as_ref().unwrap();
+                if let StmtKind::Go(go_stmt) = &body.stmts[0].kind {
+                    assert!(go_stmt.target_island.is_none());
+                } else {
+                    panic!("expected Go statement");
+                }
+            }
+            _ => panic!("expected func decl"),
+        }
+    }
+
     // =========================================================================
     // Error handling tests
     // =========================================================================

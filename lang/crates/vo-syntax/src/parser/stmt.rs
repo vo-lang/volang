@@ -48,9 +48,19 @@ impl<'a> Parser<'a> {
             TokenKind::Select => self.parse_select_stmt()?,
             TokenKind::Go => {
                 self.advance();
+                // go @(island) call - cross-island syntax
+                // go call           - standard syntax (current island)
+                let target_island = if self.eat(TokenKind::At) {
+                    self.expect(TokenKind::LParen)?;
+                    let island_expr = self.parse_expr()?;
+                    self.expect(TokenKind::RParen)?;
+                    Some(island_expr)
+                } else {
+                    None
+                };
                 let call = self.parse_expr()?;
                 self.expect_semi();
-                StmtKind::Go(GoStmt { call })
+                StmtKind::Go(GoStmt { target_island, call })
             }
             TokenKind::Defer => {
                 self.advance();
@@ -705,4 +715,5 @@ impl<'a> Parser<'a> {
             _ => unreachable!("not an assignment operator: {:?}", kind),
         }
     }
+
 }

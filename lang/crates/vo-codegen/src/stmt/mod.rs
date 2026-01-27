@@ -176,7 +176,7 @@ fn compile_stmt_with_label(
 
         // === Go ===
         StmtKind::Go(go_stmt) => {
-            defer_go::compile_go(&go_stmt.call, ctx, func, info)?;
+            defer_go::compile_go(go_stmt.target_island.as_ref(), &go_stmt.call, ctx, func, info)?;
         }
 
         // === Send (channel send) ===

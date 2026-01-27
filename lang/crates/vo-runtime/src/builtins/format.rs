@@ -49,6 +49,8 @@ pub fn format_value(val: u64, kind: ValueKind) -> String {
         ValueKind::Interface => "<interface>".to_string(),
         ValueKind::Channel => "<chan>".to_string(),
         ValueKind::Closure => "<func>".to_string(),
+        ValueKind::Port => "<port>".to_string(),
+        ValueKind::Island => "<island>".to_string(),
     }
 }
 
@@ -101,6 +103,8 @@ pub fn format_interface_with_ctx(slot0: u64, slot1: u64, call: Option<&ExternCal
         ValueKind::Array => format!("[...]"),
         ValueKind::Struct => format!("{{...}}"),
         ValueKind::Interface => format!("0x{:x}", slot1),
+        ValueKind::Port => format!("<port>"),
+        ValueKind::Island => format!("<island>"),
     }
 }
 

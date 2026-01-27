@@ -591,6 +591,12 @@ impl Checker {
             }
 
             StmtKind::Go(gs) => {
+                if let Some(island) = &gs.target_island {
+                    let x = &mut Operand::new();
+                    self.expr(x, island);
+                    // TODO (1.4): type check that island is of type `island`
+                    // TODO (1.4): sendability check for captured variables
+                }
                 self.suspended_call("go", &gs.call);
             }
 

@@ -25,6 +25,8 @@ pub enum Type {
     Interface(InterfaceDetail),
     Map(MapDetail),
     Chan(ChanDetail),
+    Port(PortDetail),
+    Island,
     Named(NamedDetail),
 }
 
@@ -132,6 +134,25 @@ impl Type {
             Type::Chan(c) => Some(c),
             _ => None,
         }
+    }
+
+    pub fn try_as_port(&self) -> Option<&PortDetail> {
+        match self {
+            Type::Port(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn is_chan(&self) -> bool {
+        matches!(self, Type::Chan(_))
+    }
+
+    pub fn is_port(&self) -> bool {
+        matches!(self, Type::Port(_))
+    }
+
+    pub fn is_island(&self) -> bool {
+        matches!(self, Type::Island)
     }
 
     pub fn try_as_named(&self) -> Option<&NamedDetail> {
@@ -258,6 +279,8 @@ impl Type {
                 | Type::Interface(_)
                 | Type::Map(_)
                 | Type::Chan(_)
+                | Type::Port(_)
+                | Type::Island
         )
     }
 
@@ -265,7 +288,8 @@ impl Type {
     pub fn comparable(&self, objs: &TCObjects) -> bool {
         match self.underlying_val(objs) {
             Type::Basic(b) => b.typ() != BasicType::UntypedNil,
-            Type::Pointer(_) | Type::Interface(_) | Type::Chan(_) => true,
+            Type::Pointer(_) | Type::Interface(_) | Type::Chan(_) 
+                | Type::Port(_) | Type::Island => true,
             Type::Struct(s) => s
                 .fields()
                 .iter()
@@ -751,6 +775,23 @@ impl ChanDetail {
     }
 }
 
+/// A PortDetail represents a cross-island communication port type.
+/// Similar to chan but for cross-island messaging with deep-copy semantics.
+#[derive(Debug)]
+pub struct PortDetail {
+    elem: TypeKey,
+}
+
+impl PortDetail {
+    pub fn new(elem: TypeKey) -> PortDetail {
+        PortDetail { elem }
+    }
+
+    pub fn elem(&self) -> TypeKey {
+        self.elem
+    }
+}
+
 /// A NamedDetail represents a named (defined) type.
 #[derive(Debug)]
 pub struct NamedDetail {
@@ -870,6 +911,18 @@ pub fn is_const_type(t: TypeKey, objs: &TCObjects) -> bool {
 
 pub fn is_interface(t: TypeKey, objs: &TCObjects) -> bool {
     objs.types[t].is_interface(objs)
+}
+
+pub fn is_chan(t: TypeKey, objs: &TCObjects) -> bool {
+    objs.types[t].is_chan()
+}
+
+pub fn is_port(t: TypeKey, objs: &TCObjects) -> bool {
+    objs.types[t].is_port()
+}
+
+pub fn is_island(t: TypeKey, objs: &TCObjects) -> bool {
+    objs.types[t].is_island()
 }
 
 pub fn has_nil(t: TypeKey, objs: &TCObjects) -> bool {
@@ -1006,6 +1059,10 @@ fn identical_impl(
         (Type::Chan(cx), Type::Chan(cy)) => {
             cx.dir() == cy.dir() && identical_impl(cx.elem(), cy.elem(), cmp_tags, dup, objs)
         }
+        (Type::Port(px), Type::Port(py)) => {
+            identical_impl(px.elem(), py.elem(), cmp_tags, dup, objs)
+        }
+        (Type::Island, Type::Island) => true,
         (Type::Named(nx), Type::Named(ny)) => nx.obj() == ny.obj(),
         _ => false,
     }
@@ -1144,6 +1201,13 @@ fn fmt_type_impl(
             if paren {
                 f.write_char(')')?;
             }
+        }
+        Type::Port(detail) => {
+            f.write_str("port ")?;
+            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
+        }
+        Type::Island => {
+            f.write_str("island")?;
         }
         Type::Named(detail) => {
             if let Some(okey) = detail.obj() {

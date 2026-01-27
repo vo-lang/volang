@@ -328,7 +328,12 @@ impl<'a> EscapeAnalyzer<'a> {
                     }
                 }
             }
-            StmtKind::Go(g) => self.visit_expr(&g.call),
+            StmtKind::Go(g) => {
+                if let Some(island) = &g.target_island {
+                    self.visit_expr(island);
+                }
+                self.visit_expr(&g.call);
+            }
             StmtKind::Defer(d) => {
                 // Named returns must escape for correct panic/recover semantics
                 self.mark_named_returns_escaped();

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use vo_runtime::{RuntimeType, ValueKind, ValueRttid, ChanDir, StructField, InterfaceMethod};
 use vo_analysis::objects::{TypeKey, ObjKey};
-use vo_analysis::typ::{Type, BasicType};
+use vo_analysis::typ::Type;
 
 /// A type interner that assigns unique runtime type IDs to types.
 ///
@@ -122,8 +122,8 @@ fn type_key_to_runtime_type(
     ctx: &mut InternContext,
 ) -> (RuntimeType, ValueKind) {
     match &tc_objs.types[type_key] {
-        Type::Basic(basic) => {
-            let vk = basic_type_to_value_kind(basic.typ());
+        Type::Basic(_) => {
+            let vk = vo_analysis::check::type_info::type_value_kind(type_key, tc_objs);
             (RuntimeType::Basic(vk), vk)
         }
         Type::Named(named) => {
@@ -133,22 +133,7 @@ fn type_key_to_runtime_type(
             // IMPORTANT: do NOT recursively convert the full underlying RuntimeType here.
             // For self-referential named interface types (e.g. builtin error with Unwrap() error),
             // recursing into interface method signatures would cause infinite recursion.
-            let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
-            let vk = match &tc_objs.types[underlying] {
-                Type::Basic(b) => basic_type_to_value_kind(b.typ()),
-                Type::Pointer(_) => ValueKind::Pointer,
-                Type::Array(_) => ValueKind::Array,
-                Type::Slice(_) => ValueKind::Slice,
-                Type::Map(_) => ValueKind::Map,
-                Type::Chan(_) => ValueKind::Channel,
-                Type::Signature(_) => ValueKind::Closure,
-                Type::Struct(_) => ValueKind::Struct,
-                Type::Interface(_) => ValueKind::Interface,
-                Type::Tuple(_) => ValueKind::Void,
-                Type::Named(_) => {
-                    panic!("type_interner: unexpected Named underlying for a Named type")
-                }
-            };
+            let vk = vo_analysis::check::type_info::type_value_kind(type_key, tc_objs);
             // Use ObjKey for lookup - dynamically register if not found
             let id = if let Some(&obj_key) = named.obj().as_ref() {
                 *ctx.named_type_ids.entry(obj_key).or_insert_with(|| {
@@ -339,29 +324,13 @@ fn type_key_to_runtime_type(
                 .collect();
             (RuntimeType::Tuple(elems), ValueKind::Void)
         }
-    }
-}
-
-/// Converts a BasicType to ValueKind.
-fn basic_type_to_value_kind(typ: BasicType) -> ValueKind {
-    match typ {
-        BasicType::Bool | BasicType::UntypedBool => ValueKind::Bool,
-        BasicType::Int | BasicType::UntypedInt => ValueKind::Int,
-        BasicType::Int8 => ValueKind::Int8,
-        BasicType::Int16 => ValueKind::Int16,
-        BasicType::Int32 | BasicType::UntypedRune | BasicType::Rune => ValueKind::Int32,
-        BasicType::Int64 => ValueKind::Int64,
-        BasicType::Uint => ValueKind::Uint,
-        BasicType::Uint8 | BasicType::Byte => ValueKind::Uint8,
-        BasicType::Uint16 => ValueKind::Uint16,
-        BasicType::Uint32 => ValueKind::Uint32,
-        BasicType::Uint64 => ValueKind::Uint64,
-        BasicType::Uintptr => ValueKind::Uint64, // Map uintptr to uint64
-        BasicType::Float32 => ValueKind::Float32,
-        BasicType::Float64 | BasicType::UntypedFloat => ValueKind::Float64,
-        BasicType::Str | BasicType::UntypedString => ValueKind::String,
-        BasicType::UntypedNil => ValueKind::Void,
-        BasicType::Invalid => ValueKind::Void,
+        Type::Port(port) => {
+            let elem_value_rttid = intern_type_key(interner, port.elem(), tc_objs, str_interner, ctx);
+            (RuntimeType::Port(elem_value_rttid), ValueKind::Port)
+        }
+        Type::Island => {
+            (RuntimeType::Island, ValueKind::Island)
+        }
     }
 }
 

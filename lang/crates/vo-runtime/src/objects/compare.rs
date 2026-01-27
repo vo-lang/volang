@@ -130,8 +130,9 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
     let rttid = ((b_slot0 >> 8) & 0xFFFFFF) as u32;
     
     // Check for uncomparable types - return 2 to signal panic
+    // Note: Port and Island ARE comparable (identity comparison like Pointer)
     match vk {
-        ValueKind::Slice | ValueKind::Map | ValueKind::Closure | ValueKind::Channel => {
+        ValueKind::Slice | ValueKind::Map | ValueKind::Closure => {
             return 2;
         }
         _ => {}

@@ -21,6 +21,7 @@ pub mod selection;
 pub mod typ;
 pub mod universe;
 
+pub use check::sendable::{check_sendable, Sendability};
 pub use check::{Checker, Initializer, TypeAndValue, TypeInfo};
 pub use obj::{Builtin, ConstValue, EntityType, LangObj};
 pub use objects::*;

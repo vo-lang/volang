@@ -311,13 +311,20 @@ fn emit_go_closure(closure_reg: u16, args_start: u16, arg_slots: u16, func: &mut
 
 /// Compile go statement
 /// GoStart: a=func_id/closure, b=args_start, c=arg_slots, flags bit0=is_closure
+/// TODO (3.2): GoIsland opcode for target_island case
 pub(crate) fn compile_go(
+    target_island: Option<&vo_syntax::ast::Expr>,
     call: &vo_syntax::ast::Expr,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::ExprKind;
+    
+    // TODO (3.2): implement go @(island) with GoIsland opcode
+    if target_island.is_some() {
+        return Err(CodegenError::UnsupportedStmt("go @(island) not yet implemented".to_string()));
+    }
     
     let ExprKind::Call(call_expr) = &call.kind else {
         return Err(CodegenError::UnsupportedStmt("go requires a call expression".to_string()));

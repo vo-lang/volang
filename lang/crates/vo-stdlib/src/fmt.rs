@@ -54,6 +54,8 @@ fn value_kind_to_type_name(vk: ValueKind) -> String {
         ValueKind::Array => "[...]...".to_string(),
         ValueKind::Struct => "struct{...}".to_string(),
         ValueKind::Interface => "interface{}".to_string(),
+        ValueKind::Port => "port ...".to_string(),
+        ValueKind::Island => "island".to_string(),
     }
 }
 
