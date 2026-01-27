@@ -280,10 +280,14 @@ impl Vm {
                 ExecResult::Continue => {}
                 ExecResult::Return => break JitResult::Ok,
                 ExecResult::Osr(_, _, _) => {}
-                ExecResult::Yield | ExecResult::Block => {
+                ExecResult::Yield => {
+                    // Yield in sync call: no other fibers to run, just continue
+                }
+                ExecResult::Block => {
                     if !self.scheduler.ready_queue.is_empty() {
                         self.run_scheduler_round();
                     } else {
+                        // True blocking with no other fibers = deadlock
                         let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
                         fiber.set_fatal_panic();
                         break JitResult::Panic;

@@ -299,13 +299,15 @@ impl Vm {
             }
             exec::ChanResult::Wake(id) => {
                 scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                ExecResult::Continue
+                // Channel operation made another fiber runnable; yield so it can run.
+                ExecResult::Yield
             }
             exec::ChanResult::WakeMultiple(ids) => {
                 for id in ids {
                     scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                 }
-                ExecResult::Continue
+                // Channel operation made other fibers runnable; yield so they can run.
+                ExecResult::Yield
             }
             exec::ChanResult::SendOnClosed => {
                 runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
@@ -1474,9 +1476,11 @@ impl Vm {
             match exec_result {
                 ExecResult::Done | ExecResult::Return => break true,
                 ExecResult::Panic => break false,
-                ExecResult::Continue => {}
-                ExecResult::Yield | ExecResult::Block => {
-                    // For sync call, blocking is an error
+                ExecResult::Continue | ExecResult::Yield => {
+                    // Yield in sync call: no other fibers to run, just continue
+                }
+                ExecResult::Block => {
+                    // For sync call, true blocking is an error (would deadlock)
                     break false;
                 }
                 ExecResult::Osr(_, _, _) => {
@@ -1539,7 +1543,7 @@ pub extern "C" fn closure_call_trampoline(
     #[cfg(feature = "std")]
     return match result {
         Ok(true) => vo_runtime::ffi::ClosureCallResult::Ok,
-        _ => vo_runtime::ffi::ClosureCallResult::Panic,
+        _ => vo_runtime::ffi::ClosureCallResult::Panic
     };
     
     // In no_std mode, no panic catching (panics will abort)

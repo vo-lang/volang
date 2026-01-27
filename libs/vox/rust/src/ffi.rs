@@ -7,6 +7,7 @@ use vo_ext::prelude::*;
 use vo_vm::bytecode::Module;
 use crate::{compile, compile_string, CompileOutput, run, RunMode};
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::output;
 use vo_common::symbol::SymbolInterner;
 use vo_syntax::parser;
 use vo_syntax::ast::File;
@@ -21,6 +22,37 @@ struct StoredModule {
     module: Module,
     source_root: std::path::PathBuf,
     extensions: Vec<vo_runtime::ext_loader::ExtensionManifest>,
+}
+
+#[vo_extern_ctx("vox", "RunJitCapture")]
+fn runner_run_jit_capture(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+
+    let stored = match get_module(module_id) {
+        Some(m) => m,
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "invalid module handle");
+            return ExternResult::Ok;
+        }
+    };
+
+    let output_obj = CompileOutput {
+        module: stored.module,
+        source_root: stored.source_root,
+        extensions: stored.extensions,
+    };
+
+    output::start_capture();
+    let run_result = run(output_obj, RunMode::Jit, Vec::new());
+    let captured = output::stop_capture();
+
+    ctx.ret_str(slots::RET_0, &captured);
+    match run_result {
+        Ok(()) => ctx.ret_nil_error(slots::RET_1),
+        Err(e) => write_error_to(ctx, slots::RET_1, &e.to_string()),
+    }
+    ExternResult::Ok
 }
 
 static MODULES: Mutex<Vec<Option<StoredModule>>> = Mutex::new(Vec::new());
@@ -190,6 +222,37 @@ fn runner_run(ctx: &mut ExternCallContext) -> ExternResult {
         Err(e) => {
             write_error_to(ctx, slots::RET_0, &e.to_string());
         }
+    }
+    ExternResult::Ok
+}
+
+#[vo_extern_ctx("vox", "RunCapture")]
+fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
+    let module_id = ctx.arg_any_as_i64(slots::ARG_M);
+
+    let stored = match get_module(module_id) {
+        Some(m) => m,
+        None => {
+            ctx.ret_str(slots::RET_0, "");
+            write_error_to(ctx, slots::RET_1, "invalid module handle");
+            return ExternResult::Ok;
+        }
+    };
+
+    let output_obj = CompileOutput {
+        module: stored.module,
+        source_root: stored.source_root,
+        extensions: stored.extensions,
+    };
+
+    output::start_capture();
+    let run_result = run(output_obj, RunMode::Vm, Vec::new());
+    let captured = output::stop_capture();
+
+    ctx.ret_str(slots::RET_0, &captured);
+    match run_result {
+        Ok(()) => ctx.ret_nil_error(slots::RET_1),
+        Err(e) => write_error_to(ctx, slots::RET_1, &e.to_string()),
     }
     ExternResult::Ok
 }

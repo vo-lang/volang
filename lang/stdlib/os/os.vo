@@ -619,6 +619,12 @@ var (
 	Stderr = &File{fd: 2, name: "/dev/stderr"}
 )
 
+func nativeIsTerminal(fd int) bool
+
+func IsTerminal(fd int) bool {
+	return nativeIsTerminal(fd)
+}
+
 // ==================== Path Separator ====================
 
 // PathSeparator is the OS-specific path separator.

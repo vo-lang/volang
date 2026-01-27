@@ -71,3 +71,4 @@ playground/src/wasm/pkg/
 # VoGUI JS
 libs/vogui/js/node_modules/
 libs/vogui/js/dist/
+cmd/vo-test/.vo-cache/

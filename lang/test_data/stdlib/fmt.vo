@@ -46,10 +46,17 @@ func testSprintf() {
 	assert(fmt.Sprintf("%d", 42) == "42")
 	assert(fmt.Sprintf("%d", -42) == "-42")
 	assert(fmt.Sprintf("%d", 0) == "0")
+	assert(fmt.Sprintf("%+d", 42) == "+42")
+	assert(fmt.Sprintf("%04d", 42) == "0042")
+	assert(fmt.Sprintf("%-4d", 42) == "42  ")
+	assert(fmt.Sprintf("%.4d", 42) == "0042")
 	
 	// %s - strings
 	assert(fmt.Sprintf("%s", "hello") == "hello")
 	assert(fmt.Sprintf("%s", "") == "")
+	assert(fmt.Sprintf("%.3s", "hello") == "hel")
+	assert(fmt.Sprintf("%5s", "hi") == "   hi")
+	assert(fmt.Sprintf("%-5s", "hi") == "hi   ")
 	
 	// %v - default format
 	assert(fmt.Sprintf("%v", 42) == "42")
@@ -62,8 +69,11 @@ func testSprintf() {
 	assert(fmt.Sprintf("%t", false) == "false")
 	
 	// %f - floats
-	assert(fmt.Sprintf("%f", 3.14) == "3.14")
-	assert(fmt.Sprintf("%f", 0.0) == "0")
+	assert(fmt.Sprintf("%f", 3.14) == "3.140000")
+	assert(fmt.Sprintf("%f", 0.0) == "0.000000")
+	assert(fmt.Sprintf("%.2f", 3.14159) == "3.14")
+	assert(fmt.Sprintf("%6.2f", 3.14159) == "  3.14")
+	assert(fmt.Sprintf("%+6.2f", 3.14159) == " +3.14")
 	
 	// %x - hex lowercase
 	assert(fmt.Sprintf("%x", 255) == "ff")

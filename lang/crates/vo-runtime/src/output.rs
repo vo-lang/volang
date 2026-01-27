@@ -3,6 +3,26 @@
 //! In std mode, print/println go directly to stdout.
 //! In no_std mode (WASM), output is captured to a buffer that can be retrieved.
 
+#[cfg(feature = "std")]
+use std::cell::RefCell;
+
+#[cfg(feature = "std")]
+thread_local! {
+    static CAPTURE_STACK: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+#[cfg(feature = "std")]
+pub fn start_capture() {
+    CAPTURE_STACK.with(|s| s.borrow_mut().push(String::new()));
+}
+
+#[cfg(feature = "std")]
+pub fn stop_capture() -> String {
+    CAPTURE_STACK
+        .with(|s| s.borrow_mut().pop())
+        .expect("output capture stack underflow")
+}
+
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
@@ -31,7 +51,17 @@ impl OutputBuffer {
 #[cfg(feature = "std")]
 #[inline]
 pub fn write(s: &str) {
-    print!("{}", s);
+    let mut captured = false;
+    CAPTURE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(buf) = stack.last_mut() {
+            buf.push_str(s);
+            captured = true;
+        }
+    });
+    if !captured {
+        print!("{}", s);
+    }
 }
 
 #[cfg(not(feature = "std"))]
@@ -44,7 +74,18 @@ pub fn write(s: &str) {
 #[cfg(feature = "std")]
 #[inline]
 pub fn writeln(s: &str) {
-    println!("{}", s);
+    let mut captured = false;
+    CAPTURE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(buf) = stack.last_mut() {
+            buf.push_str(s);
+            buf.push('\n');
+            captured = true;
+        }
+    });
+    if !captured {
+        println!("{}", s);
+    }
 }
 
 #[cfg(not(feature = "std"))]

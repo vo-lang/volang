@@ -10,15 +10,110 @@ import (
 	"time"
 )
 
+const (
+	ansiBold   = "\x1b[1m"
+	ansiDim    = "\x1b[2m"
+	ansiGreen  = "\x1b[0;32m"
+	ansiRed    = "\x1b[0;31m"
+	ansiCyan   = "\x1b[0;36m"
+	ansiYellow = "\x1b[1;33m"
+	ansiReset  = "\x1b[0m"
+)
+
+var colorEnabled bool
+
+
 type TestJob struct {
 	file string
 	mode string
 	shouldFail bool
 	gcDebug bool
+	index int
+	skipped bool
 }
 
 func writeProgress(s string) {
 	_, _ = os.Stderr.WriteString(s)
+}
+
+func colorize(s string, color string) string {
+	if !colorEnabled {
+		return s
+	}
+	return color + s + ansiReset
+}
+
+func statusSymbol(result TestResult) string {
+	if result.skipped {
+		return colorize("⊘", ansiYellow)
+	}
+	if result.passed {
+		return colorize("✓", ansiGreen)
+	}
+	return colorize("✗", ansiRed)
+}
+
+func displayPath(path string) string {
+	if strings.HasPrefix(path, "lang/test_data/") {
+		path = path[len("lang/test_data/"):]
+	}
+	// Project directory tests are printed with trailing slash in d_py.py
+	if !strings.HasSuffix(path, ".vo") && !strings.HasSuffix(path, "/") {
+		// Keep zip paths like zip/foo.zip:src/ unchanged
+		if !strings.Contains(path, ".zip") && !strings.Contains(path, ":") {
+			path = path + "/"
+		}
+	}
+	return path
+}
+
+func pad3(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) == 1 {
+		return "  " + s
+	}
+	if len(s) == 2 {
+		return " " + s
+	}
+	return s
+}
+
+func formatElapsedSeconds(ms int64) float64 {
+	return float64(ms) / 1000.0
+}
+
+func timeStyleCode(elapsedSec float64) string {
+	if elapsedSec > 1.0 {
+		return ansiYellow
+	}
+	if elapsedSec > 0.1 {
+		return ansiDim + ansiYellow
+	}
+	return ansiDim
+}
+
+func printTestLine(result TestResult, verbose bool) {
+	file := displayPath(result.file)
+
+	if result.skipped {
+		if !verbose {
+			return
+		}
+		fmt.Println("  " + statusSymbol(result) + " " + file + " [" + result.mode + " skipped]")
+		return
+	}
+
+	elapsed := formatElapsedSeconds(result.elapsedMs)
+	timeStr := colorize(fmt.Sprintf("(%.2fs)", elapsed), timeStyleCode(elapsed))
+	fmt.Println("  " + statusSymbol(result) + " " + file + " [" + result.mode + "] " + timeStr)
+
+	if verbose && result.output != "" {
+		_, _ = os.Stdout.WriteString(result.output)
+	}
+
+	if verbose && !result.passed && result.errorMsg != "" {
+		fmt.Println(result.errorMsg)
+	}
 }
 
 func expectedErrorSubstrings(path string) []string {
@@ -95,7 +190,9 @@ type TestResult struct {
 	passed bool
 	skipped bool
 	elapsedMs int64
+	output string
 	errorMsg string
+	index int
 }
 
 type TestStats struct {
@@ -105,14 +202,23 @@ type TestStats struct {
 	jitPassed int
 	jitFailed int
 	jitSkipped int
+	nostdPassed int
+	nostdFailed int
+	nostdSkipped int
 	failedTests []string
 }
 
 func runTests(mode string, args []string) int {
+	if mode == "nostd" {
+		fmt.Println("[VO-TEST] nostd mode is not supported yet")
+		return 1
+	}
+
 	// Parse options
 	verbose := false
 	workers := 4  // default
 	singleFile := ""
+	colorMode := "auto"
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -128,8 +234,30 @@ func runTests(mode string, args []string) int {
 			if n, err := strconv.Atoi(numStr); err == nil && n > 0 {
 				workers = n
 			}
+		} else if strings.HasPrefix(arg, "--color=") {
+			colorMode = strings.TrimPrefix(arg, "--color=")
 		} else if !strings.HasPrefix(arg, "-") {
 			singleFile = arg
+		}
+	}
+
+	if colorMode == "always" {
+		colorEnabled = true
+	} else if colorMode == "never" {
+		colorEnabled = false
+	} else if colorMode == "auto" {
+		colorEnabled = os.IsTerminal(os.Stdout.Fd())
+	} else {
+		fmt.Println("[VO-TEST] invalid --color mode: " + colorMode)
+		return 1
+	}
+
+	// JIT threshold to match d_py.py behavior
+	if mode == "jit" || mode == "both" || mode == "gc" {
+		err := os.Setenv("VO_JIT_CALL_THRESHOLD", "1")
+		if err != nil {
+			fmt.Println("[VO-TEST] could not set VO_JIT_CALL_THRESHOLD: " + err.Error())
+			return 1
 		}
 	}
 
@@ -138,8 +266,8 @@ func runTests(mode string, args []string) int {
 	configPath := testDataDir + "/_config.toml"
 	configs, err := loadTestConfig(configPath)
 	if err != nil {
-		fmt.Println("[VO-TEST] Warning: could not load _config.toml:", err.Error())
-		configs = make(map[string]TestConfig)
+		fmt.Println("[VO-TEST] could not load _config.toml: " + err.Error())
+		return 1
 	}
 
 	// Single file mode
@@ -155,7 +283,7 @@ func runTests(mode string, args []string) int {
 		return 1
 	}
 
-	fmt.Println("[VO-TEST] Running", len(jobs), "tests with", workers, "workers...")
+	fmt.Println(colorize("Running Vo integration tests...", ansiBold))
 	fmt.Println("")
 
 	// Run tests in parallel
@@ -165,7 +293,8 @@ func runTests(mode string, args []string) int {
 	stats := calculateStats(results)
 	printResults(stats, verbose)
 
-	if stats.vmFailed > 0 || stats.jitFailed > 0 {
+	totalFailed := stats.vmFailed + stats.jitFailed + stats.nostdFailed
+	if totalFailed > 0 {
 		return 1
 	}
 	return 0
@@ -212,26 +341,54 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				mode: "compile",
 				shouldFail: true,
 				gcDebug: false,
+				index: 0,
+				skipped: false,
 			})
 			continue
 		}
 
-		if runVM && !config.shouldSkip("vm") {
+		if runVM {
+			if config.shouldSkip("vm") {
+				jobs = append(jobs, TestJob{
+					file: file,
+					mode: "vm",
+					shouldFail: false,
+					gcDebug: false,
+					index: 0,
+					skipped: true,
+				})
+			} else {
 			jobs = append(jobs, TestJob{
 				file: file,
 				mode: "vm",
 				shouldFail: false,
 				gcDebug: gcDebug,
+				index: 0,
+				skipped: false,
 			})
+			}
 		}
 
-		if runJIT && !config.shouldSkip("jit") {
+		if runJIT {
+			if config.shouldSkip("jit") {
+				jobs = append(jobs, TestJob{
+					file: file,
+					mode: "jit",
+					shouldFail: false,
+					gcDebug: false,
+					index: 0,
+					skipped: true,
+				})
+			} else {
 			jobs = append(jobs, TestJob{
 				file: file,
 				mode: "jit",
 				shouldFail: false,
 				gcDebug: gcDebug,
+				index: 0,
+				skipped: false,
 			})
+			}
 		}
 	}
 
@@ -252,26 +409,54 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 					mode: "compile",
 					shouldFail: true,
 					gcDebug: false,
+					index: 0,
+					skipped: false,
 				})
 				continue
 			}
 
-			if runVM && !config.shouldSkip("vm") {
+			if runVM {
+				if config.shouldSkip("vm") {
+					jobs = append(jobs, TestJob{
+						file: dir,
+						mode: "vm",
+						shouldFail: false,
+						gcDebug: false,
+						index: 0,
+						skipped: true,
+					})
+				} else {
 				jobs = append(jobs, TestJob{
 					file: dir,
 					mode: "vm",
 					shouldFail: false,
 					gcDebug: false,
+					index: 0,
+					skipped: false,
 				})
+				}
 			}
 
-			if runJIT && !config.shouldSkip("jit") {
+			if runJIT {
+				if config.shouldSkip("jit") {
+					jobs = append(jobs, TestJob{
+						file: dir,
+						mode: "jit",
+						shouldFail: false,
+						gcDebug: false,
+						index: 0,
+						skipped: true,
+					})
+				} else {
 				jobs = append(jobs, TestJob{
 					file: dir,
 					mode: "jit",
 					shouldFail: false,
 					gcDebug: false,
+					index: 0,
+					skipped: false,
 				})
+				}
 			}
 		}
 
@@ -291,22 +476,48 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				testPath = zipFile + ":" + config.zipRoot
 			}
 
-			if runVM && !config.shouldSkip("vm") {
+			if runVM {
+				if config.shouldSkip("vm") {
+					jobs = append(jobs, TestJob{
+						file: testPath,
+						mode: "vm",
+						shouldFail: false,
+						gcDebug: false,
+						index: 0,
+						skipped: true,
+					})
+				} else {
 				jobs = append(jobs, TestJob{
 					file: testPath,
 					mode: "vm",
 					shouldFail: false,
 					gcDebug: false,
+					index: 0,
+					skipped: false,
 				})
+				}
 			}
 
-			if runJIT && !config.shouldSkip("jit") {
+			if runJIT {
+				if config.shouldSkip("jit") {
+					jobs = append(jobs, TestJob{
+						file: testPath,
+						mode: "jit",
+						shouldFail: false,
+						gcDebug: false,
+						index: 0,
+						skipped: true,
+					})
+				} else {
 				jobs = append(jobs, TestJob{
 					file: testPath,
 					mode: "jit",
 					shouldFail: false,
 					gcDebug: false,
+					index: 0,
+					skipped: false,
 				})
+				}
 			}
 		}
 	}
@@ -318,28 +529,31 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 	jobChan := make(chan TestJob, len(jobs))
 	resultChan := make(chan TestResult, len(jobs))
 
+	for i := 0; i < len(jobs); i++ {
+		jobs[i].index = i
+	}
+
 	// Start workers
 	for i := 0; i < workers; i++ {
 		go testWorker(jobChan, resultChan)
 	}
 
-	// Send jobs
-	for _, job := range jobs {
-		jobChan <- job
-	}
-	close(jobChan)
+	// Send jobs (in a separate goroutine) so we can start receiving results immediately.
+	go func() {
+		for _, job := range jobs {
+			jobChan <- job
+		}
+		close(jobChan)
+	}()
 
-	// Collect results with progress
-	results := []TestResult{}
+	results := make([]TestResult, len(jobs))
+
+	// Receive results and print immediately
 	for i := 0; i < len(jobs); i++ {
 		result := <-resultChan
-		results = append(results, result)
-		
-		if !verbose {
-			printProgress(result, i+1, len(jobs))
-		}
+		results[result.index] = result
+		printTestLine(result, verbose)
 	}
-
 	return results
 }
 
@@ -352,6 +566,18 @@ func testWorker(jobs <-chan TestJob, results chan<- TestResult) {
 
 func runSingleTest(job TestJob) TestResult {
 	start := time.Now()
+	if job.skipped {
+		return TestResult{
+			file: job.file,
+			mode: job.mode,
+			passed: true,
+			skipped: true,
+			elapsedMs: 0,
+			output: "",
+			errorMsg: "",
+			index: job.index,
+		}
+	}
 
 	if job.shouldFail {
 		return runShouldFailTest(job, start)
@@ -374,15 +600,18 @@ func runSingleTest(job TestJob) TestResult {
 			passed: false,
 			skipped: false,
 			elapsedMs: time.Since(start).Milliseconds(),
+			output: "",
 			errorMsg: "[COMPILE] " + err.Error(),
+			index: job.index,
 		}
 	}
 
 	// Run
+	output := ""
 	if job.mode == "jit" {
-		err = vox.RunJit(module)
+		output, err = vox.RunJitCapture(module)
 	} else {
-		err = vox.Run(module)
+		output, err = vox.RunCapture(module)
 	}
 	vox.Free(module)
 
@@ -397,7 +626,9 @@ func runSingleTest(job TestJob) TestResult {
 		passed: err == nil,
 		skipped: false,
 		elapsedMs: time.Since(start).Milliseconds(),
+		output: output,
 		errorMsg: errorMsg,
+		index: job.index,
 	}
 }
 
@@ -428,12 +659,14 @@ func runShouldFailTest(job TestJob, start time.Time) TestResult {
 		passed: passed,
 		skipped: false,
 		elapsedMs: time.Since(start).Milliseconds(),
+		output: "",
 		errorMsg: errMsg,
+		index: job.index,
 	}
 }
 
 func runSingleFile(file string, mode string, verbose bool, configs map[string]TestConfig) int {
-	fmt.Println("[VO-TEST] Running single file:", file)
+	fmt.Println("[VO-TEST] Running single file: " + file)
 	
 	// Determine full path
 	testPath := file
@@ -454,7 +687,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			gcDebug: false,
 		}
 		result := runShouldFailTest(job, time.Now())
-		printSingleResult(result)
+		printSingleResult(result, verbose)
 		if !result.passed {
 			return 1
 		}
@@ -474,7 +707,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			gcDebug: strings.Contains(file, "gc_"),
 		}
 		result := runSingleTest(job)
-		printSingleResult(result)
+		printSingleResult(result, verbose)
 		if !result.passed {
 			failed = true
 		}
@@ -488,7 +721,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			gcDebug: strings.Contains(file, "gc_"),
 		}
 		result := runSingleTest(job)
-		printSingleResult(result)
+		printSingleResult(result, verbose)
 		if !result.passed {
 			failed = true
 		}
@@ -500,16 +733,16 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 	return 0
 }
 
-func printSingleResult(result TestResult) {
-	status := "✓"
-	if !result.passed {
-		status = "✗"
+
+func printSingleResult(result TestResult, verbose bool) {
+	status := statusSymbol(result)
+	fmt.Println(status + " " + result.file + " ["+result.mode+"] ("+formatDuration(result.elapsedMs)+")")
+	if verbose && result.output != "" {
+		_, _ = os.Stdout.WriteString(result.output)
 	}
 	
-	fmt.Println(status, result.file, "["+result.mode+"]", "("+formatDuration(result.elapsedMs)+")")
-	
 	if !result.passed && result.errorMsg != "" {
-		fmt.Println("  Error:", result.errorMsg)
+		fmt.Println("  Error: " + result.errorMsg)
 	}
 }
 
@@ -520,12 +753,7 @@ func printProgress(result TestResult, current int, total int) {
 		return
 	}
 
-	status := "✓"
-	if !result.passed {
-		status = "✗"
-	} else if result.skipped {
-		status = "⊘"
-	}
+	status := statusSymbol(result)
 	
 	// Extract filename only
 	file := result.file
@@ -574,7 +802,7 @@ func calculateStats(results []TestResult) TestStats {
 			} else if r.mode == "jit" {
 				stats.jitFailed++
 			}
-			stats.failedTests = append(stats.failedTests, r.file+" ["+r.mode+"]")
+			stats.failedTests = append(stats.failedTests, displayPath(r.file)+" ["+r.mode+"]")
 		}
 	}
 
@@ -582,26 +810,36 @@ func calculateStats(results []TestResult) TestStats {
 }
 
 func printResults(stats TestStats, verbose bool) {
+	totalPassed := stats.vmPassed + stats.jitPassed + stats.nostdPassed
+	totalFailed := stats.vmFailed + stats.jitFailed + stats.nostdFailed
+
 	fmt.Println("")
-	
 	if len(stats.failedTests) > 0 {
-		fmt.Println("Failed tests:")
-		for _, test := range stats.failedTests {
-			fmt.Println("  ✗", test)
+		fmt.Println(colorize("Failed:", ansiRed+ansiBold))
+		for _, msg := range stats.failedTests {
+			fmt.Println("  " + colorize("✗", ansiRed) + " " + msg)
 		}
 		fmt.Println("")
 	}
 
-	fmt.Println("╔══════════════════════════════════════════════════════════╗")
-	fmt.Println("║                   Vo Test Results                        ║")
-	fmt.Println("╠══════════════════════════════════════════════════════════╣")
-	fmt.Println("║  VM:   ", stats.vmPassed, "passed ", stats.vmFailed, "failed ", stats.vmSkipped, "skipped              ║")
-	fmt.Println("║  JIT:  ", stats.jitPassed, "passed ", stats.jitFailed, "failed ", stats.jitSkipped, "skipped              ║")
-	fmt.Println("╠══════════════════════════════════════════════════════════╣")
-	
-	totalPassed := stats.vmPassed + stats.jitPassed
-	totalFailed := stats.vmFailed + stats.jitFailed
-	
-	fmt.Println("║  Total:", totalPassed, "passed ", totalFailed, "failed                           ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+	top := "╔══════════════════════════════════════════════════════════╗"
+	title := "║                   Vo Test Results                        ║"
+	sep := "╠══════════════════════════════════════════════════════════╣"
+	bottom := "╚══════════════════════════════════════════════════════════╝"
+
+	fmt.Println(colorize(top, ansiCyan))
+	fmt.Println(colorize("║", ansiCyan) + colorize("                   Vo Test Results                        ", ansiBold) + colorize("║", ansiCyan))
+	fmt.Println(colorize(sep, ansiCyan))
+
+	vmLine := colorize("║", ansiCyan) + "  VM:    " + colorize(pad3(stats.vmPassed)+" passed", ansiGreen) + "  " + colorize(pad3(stats.vmFailed)+" failed", ansiRed) + "  " + colorize(pad3(stats.vmSkipped)+" skipped", ansiYellow) + "              " + colorize("║", ansiCyan)
+	jitLine := colorize("║", ansiCyan) + "  JIT:   " + colorize(pad3(stats.jitPassed)+" passed", ansiGreen) + "  " + colorize(pad3(stats.jitFailed)+" failed", ansiRed) + "  " + colorize(pad3(stats.jitSkipped)+" skipped", ansiYellow) + "              " + colorize("║", ansiCyan)
+	nostdLine := colorize("║", ansiCyan) + "  NOSTD: " + colorize(pad3(stats.nostdPassed)+" passed", ansiGreen) + "  " + colorize(pad3(stats.nostdFailed)+" failed", ansiRed) + "  " + colorize(pad3(stats.nostdSkipped)+" skipped", ansiYellow) + "              " + colorize("║", ansiCyan)
+	fmt.Println(vmLine)
+	fmt.Println(jitLine)
+	fmt.Println(nostdLine)
+
+	fmt.Println(colorize(sep, ansiCyan))
+	totalLine := colorize("║", ansiCyan) + "  Total: " + colorize(pad3(totalPassed)+" passed", ansiGreen) + "  " + colorize(pad3(totalFailed)+" failed", ansiRed) + "                           " + colorize("║", ansiCyan)
+	fmt.Println(totalLine)
+	fmt.Println(colorize(bottom, ansiCyan))
 }

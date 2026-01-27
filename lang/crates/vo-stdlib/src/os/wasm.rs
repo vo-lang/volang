@@ -14,6 +14,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
             "os_fileRead" | "os_fileWrite" | "os_fileReadAt" | "os_fileWriteAt" |
             "os_fileSeek" | "os_fileClose" | "os_fileSync" | "os_fileStat" | "os_fileTruncate" |
             "os_openFile" |
+            "os_nativeIsTerminal" |
             // Directory operations
             "os_nativeMkdir" | "os_nativeMkdirAll" | "os_nativeRemove" | "os_nativeRemoveAll" |
             "os_nativeRename" | "os_nativeStat" | "os_nativeLstat" | "os_nativeReadDir" |

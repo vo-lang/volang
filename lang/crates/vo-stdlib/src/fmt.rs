@@ -88,6 +88,143 @@ fn format_args_slice_with_ctx(slice_ref: GcRef, call: Option<&ExternCallContext>
 // Printf format string parsing and formatting
 // =============================================================================
 
+#[derive(Clone, Copy, Default)]
+struct FormatFlags {
+    left: bool,
+    plus: bool,
+    zero: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FormatSpec {
+    flags: FormatFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+    verb: char,
+}
+
+fn parse_number(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> Option<usize> {
+    let mut n: usize = 0;
+    let mut any = false;
+    while let Some(&c) = chars.peek() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        any = true;
+        chars.next();
+        n = n * 10 + (c as u8 - b'0') as usize;
+    }
+    if any { Some(n) } else { None }
+}
+
+fn parse_format_spec(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> Option<FormatSpec> {
+    let mut flags = FormatFlags::default();
+
+    loop {
+        match chars.peek().copied() {
+            Some('-') => {
+                flags.left = true;
+                let _ = chars.next();
+            }
+            Some('+') => {
+                flags.plus = true;
+                let _ = chars.next();
+            }
+            Some('0') => {
+                flags.zero = true;
+                let _ = chars.next();
+            }
+            _ => break,
+        }
+    }
+
+    let width = parse_number(chars);
+
+    let precision = if chars.peek().copied() == Some('.') {
+        let _ = chars.next();
+        Some(parse_number(chars).unwrap_or(0))
+    } else {
+        None
+    };
+
+    let verb = chars.next()?;
+    Some(FormatSpec {
+        flags,
+        width,
+        precision,
+        verb,
+    })
+}
+
+fn pad_width(mut s: String, spec: FormatSpec, default_pad: char) -> String {
+    let Some(width) = spec.width else {
+        return s;
+    };
+
+    let len = s.chars().count();
+    if len >= width {
+        return s;
+    }
+
+    let pad_len = width - len;
+    let pad_char = if spec.flags.zero && !spec.flags.left { '0' } else { default_pad };
+    if spec.flags.left {
+        for _ in 0..pad_len {
+            s.push(pad_char);
+        }
+        return s;
+    }
+
+    let mut out = String::new();
+    for _ in 0..pad_len {
+        out.push(pad_char);
+    }
+    out.push_str(&s);
+    out
+}
+
+fn pad_numeric(mut s: String, spec: FormatSpec) -> String {
+    let Some(width) = spec.width else {
+        return s;
+    };
+
+    let len = s.chars().count();
+    if len >= width {
+        return s;
+    }
+
+    let pad_len = width - len;
+    if spec.flags.left {
+        for _ in 0..pad_len {
+            s.push(' ');
+        }
+        return s;
+    }
+
+    let pad_char = if spec.flags.zero { '0' } else { ' ' };
+
+    let mut out = String::new();
+    let mut it = s.chars();
+    if pad_char == '0' {
+        if let Some(first) = it.next() {
+            if first == '-' || first == '+' {
+                out.push(first);
+                for _ in 0..pad_len {
+                    out.push('0');
+                }
+                out.extend(it);
+                return out;
+            }
+        }
+    }
+
+    for _ in 0..pad_len {
+        out.push(pad_char);
+    }
+    out.push_str(&s);
+    out
+}
+
 /// Format with printf-style format string.
 fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallContext>) -> String {
     let args_len = if args_ref.is_null() { 0 } else { slice::len(args_ref) };
@@ -106,57 +243,104 @@ fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallConte
             result.push(c);
             continue;
         }
-        
-        // Parse format specifier
-        match chars.next() {
-            None => {
-                result.push('%');
-                break;
-            }
-            Some('%') => {
-                result.push('%');
-            }
-            Some(spec) => {
-                if arg_idx >= args_len {
-                    result.push_str("%!");
-                    result.push(spec);
-                    result.push_str("(MISSING)");
-                } else {
-                    let slot0 = unsafe { *data_ptr.add(arg_idx * 2) };
-                    let slot1 = unsafe { *data_ptr.add(arg_idx * 2 + 1) };
-                    result.push_str(&format_with_verb(spec, slot0, slot1, call));
-                    arg_idx += 1;
-                }
-            }
+
+        if chars.peek().copied() == Some('%') {
+            let _ = chars.next();
+            result.push('%');
+            continue;
         }
+
+        let Some(spec) = parse_format_spec(&mut chars) else {
+            result.push('%');
+            break;
+        };
+
+        if arg_idx >= args_len {
+            result.push_str("%!");
+            result.push(spec.verb);
+            result.push_str("(MISSING)");
+            continue;
+        }
+
+        let slot0 = unsafe { *data_ptr.add(arg_idx * 2) };
+        let slot1 = unsafe { *data_ptr.add(arg_idx * 2 + 1) };
+        result.push_str(&format_with_spec(spec, slot0, slot1, call));
+        arg_idx += 1;
     }
     
     result
 }
 
-/// Format a value with a specific format verb.
-fn format_with_verb(verb: char, slot0: u64, slot1: u64, call: Option<&ExternCallContext>) -> String {
+fn format_with_spec(spec: FormatSpec, slot0: u64, slot1: u64, call: Option<&ExternCallContext>) -> String {
     let vk = interface::unpack_value_kind(slot0);
-    
-    match verb {
+
+    match spec.verb {
         'v' => format_interface_with_ctx(slot0, slot1, call),
         'd' => {
             if vk.is_integer() {
-                (slot1 as i64).to_string()
+                let mut s = (slot1 as i64).to_string();
+                if spec.flags.plus && !s.starts_with('-') {
+                    s = format!("+{}", s);
+                }
+
+                if let Some(prec) = spec.precision {
+                    let (sign, digits) = if s.starts_with('-') {
+                        ('-', &s[1..])
+                    } else if s.starts_with('+') {
+                        ('+', &s[1..])
+                    } else {
+                        ('\0', s.as_str())
+                    };
+
+                    let digit_len = digits.chars().count();
+                    if digit_len < prec {
+                        let mut out = String::new();
+                        if sign != '\0' {
+                            out.push(sign);
+                        }
+                        for _ in 0..(prec - digit_len) {
+                            out.push('0');
+                        }
+                        out.push_str(digits);
+                        s = out;
+                    }
+                }
+
+                pad_numeric(s, spec)
             } else {
                 format!("%!d({})", format_interface(slot0, slot1))
             }
         }
         's' => {
             match vk {
-                ValueKind::String => str_obj::as_str(slot1 as GcRef).to_string(),
-                _ => format_interface_with_ctx(slot0, slot1, call),
+                ValueKind::String => {
+                    let mut s = str_obj::as_str(slot1 as GcRef).to_string();
+                    if let Some(prec) = spec.precision {
+                        s = s.chars().take(prec).collect();
+                    }
+                    pad_width(s, spec, ' ')
+                }
+                _ => pad_width(format_interface_with_ctx(slot0, slot1, call), spec, ' '),
             }
         }
         'f' => {
             match vk {
-                ValueKind::Float32 => format!("{}", f32::from_bits(slot1 as u32)),
-                ValueKind::Float64 => format!("{}", f64::from_bits(slot1)),
+                ValueKind::Float32 | ValueKind::Float64 => {
+                    let f = match vk {
+                        ValueKind::Float32 => f32::from_bits(slot1 as u32) as f64,
+                        ValueKind::Float64 => f64::from_bits(slot1),
+                        _ => unreachable!(),
+                    };
+
+                    let prec = spec.precision.unwrap_or(6);
+                    let mut s = if spec.flags.plus {
+                        format!("{:+.*}", prec, f)
+                    } else {
+                        format!("{:.*}", prec, f)
+                    };
+                    s = pad_numeric(s, spec);
+                    s
+                }
                 _ => format!("%!f({})", format_interface(slot0, slot1)),
             }
         }
@@ -207,7 +391,7 @@ fn format_with_verb(verb: char, slot0: u64, slot1: u64, call: Option<&ExternCall
             }
         }
         'T' => value_kind_to_type_name(vk),
-        _ => format!("%!{}({})", verb, format_interface(slot0, slot1)),
+        _ => format!("%!{}({})", spec.verb, format_interface(slot0, slot1)),
     }
 }
 

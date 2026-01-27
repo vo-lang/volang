@@ -10,6 +10,8 @@ use std::io::{Read, Write, Seek, SeekFrom};
 #[cfg(feature = "std")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 #[cfg(feature = "std")]
+use std::os::unix::io::AsRawFd;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
 use std::sync::Mutex;
@@ -686,6 +688,36 @@ fn os_get_args(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[vostd_extern_ctx("os", "nativeIsTerminal")]
+fn os_is_terminal(call: &mut ExternCallContext) -> ExternResult {
+    let fd = call.arg_i64(slots::ARG_FD) as i32;
+
+    #[cfg(unix)]
+    {
+        if (0..=2).contains(&fd) {
+            let ok = unsafe { libc::isatty(fd) == 1 };
+            call.ret_bool(slots::RET_0, ok);
+            return ExternResult::Ok;
+        }
+
+        let handles = FILE_HANDLES.lock().unwrap();
+        if let Some(file) = handles.get(&fd) {
+            let raw_fd = file.as_raw_fd();
+            let ok = unsafe { libc::isatty(raw_fd) == 1 };
+            call.ret_bool(slots::RET_0, ok);
+        } else {
+            call.ret_bool(slots::RET_0, false);
+        }
+        return ExternResult::Ok;
+    }
+
+    #[cfg(not(unix))]
+    {
+        call.ret_bool(slots::RET_0, false);
+        ExternResult::Ok
+    }
+}
+
 #[vostd_extern_ctx("os", "nativeHostname")]
 fn os_hostname(call: &mut ExternCallContext) -> ExternResult {
     match hostname::get() {
@@ -751,5 +783,5 @@ vo_runtime::stdlib_register!(os:
     nativeGetenv, nativeSetenv, nativeUnsetenv, nativeEnviron, nativeLookupEnv, nativeClearenv, nativeExpandEnv,
     nativeGetwd, nativeChdir, nativeUserHomeDir, nativeUserCacheDir, nativeUserConfigDir, nativeTempDir,
     nativeGetpid, nativeGetppid, nativeGetuid, nativeGeteuid, nativeGetgid, nativeGetegid,
-    nativeExit, nativeGetArgs, nativeHostname, nativeExecutable, nativeCreateTemp, nativeMkdirTemp,
+    nativeExit, nativeGetArgs, nativeIsTerminal, nativeHostname, nativeExecutable, nativeCreateTemp, nativeMkdirTemp,
 );

@@ -28,6 +28,12 @@ func Run(m Module) error
 // RunJit executes a compiled Module with JIT compiler.
 func RunJit(m Module) error
 
+// RunCapture executes a compiled Module with VM interpreter and captures program output.
+func RunCapture(m Module) (string, error)
+
+// RunJitCapture executes a compiled Module with JIT compiler and captures program output.
+func RunJitCapture(m Module) (string, error)
+
 // RunFile compiles and runs a .vo file (VM mode).
 func RunFile(path string) error
 
