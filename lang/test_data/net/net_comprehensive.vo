@@ -1,0 +1,275 @@
+package main
+
+import (
+	"net"
+)
+
+func main() {
+	testIPTypes()
+	testIPMethods()
+	testIPMask()
+	testIPNet()
+	testParseCIDR()
+	testSplitHostPort()
+	testJoinHostPort()
+	testAddressTypes()
+	println("net comprehensive tests passed")
+}
+
+func testIPTypes() {
+	// IPv4 constructor
+	ip := net.IPv4(192, 168, 1, 1)
+	assert(len(ip) == 4, "IPv4 should be 4 bytes")
+	assert(ip[0] == 192, "IPv4 first byte")
+	assert(ip[3] == 1, "IPv4 last byte")
+
+	// IPv4 constants
+	assert(len(net.IPv4zero) == 4, "IPv4zero length")
+	assert(net.IPv4zero[0] == 0, "IPv4zero value")
+	assert(net.IPv4bcast[0] == 255, "IPv4bcast value")
+
+	// IPv6 constants
+	assert(len(net.IPv6zero) == 16, "IPv6zero length")
+	assert(len(net.IPv6loopback) == 16, "IPv6loopback length")
+	assert(net.IPv6loopback[15] == 1, "IPv6loopback last byte")
+}
+
+func testIPMethods() {
+	// To4
+	ipv4 := net.IPv4(10, 0, 0, 1)
+	assert(ipv4.To4() != nil, "IPv4.To4 should not be nil")
+	assert(len(ipv4.To4()) == 4, "IPv4.To4 length")
+
+	// To16
+	ip16 := ipv4.To16()
+	assert(ip16 != nil, "IPv4.To16 should not be nil")
+	assert(len(ip16) == 16, "IPv4.To16 length")
+	assert(ip16[10] == 0xff, "IPv4.To16 mapping byte 10")
+	assert(ip16[11] == 0xff, "IPv4.To16 mapping byte 11")
+	assert(ip16[12] == 10, "IPv4.To16 mapped IP")
+
+	// String
+	assert(ipv4.String() == "10.0.0.1", "IPv4.String: "+ipv4.String())
+
+	// Equal
+	ipv4_2 := net.IPv4(10, 0, 0, 1)
+	assert(ipv4.Equal(ipv4_2), "IPv4 Equal same")
+	ipv4_3 := net.IPv4(10, 0, 0, 2)
+	assert(!ipv4.Equal(ipv4_3), "IPv4 Equal different")
+
+	// IsLoopback
+	loopback := net.IPv4(127, 0, 0, 1)
+	assert(loopback.IsLoopback(), "127.0.0.1 IsLoopback")
+	assert(!ipv4.IsLoopback(), "10.0.0.1 not IsLoopback")
+
+	// IsPrivate
+	private10 := net.IPv4(10, 1, 2, 3)
+	assert(private10.IsPrivate(), "10.x.x.x IsPrivate")
+	private172 := net.IPv4(172, 16, 0, 1)
+	assert(private172.IsPrivate(), "172.16.x.x IsPrivate")
+	private192 := net.IPv4(192, 168, 1, 1)
+	assert(private192.IsPrivate(), "192.168.x.x IsPrivate")
+	public := net.IPv4(8, 8, 8, 8)
+	assert(!public.IsPrivate(), "8.8.8.8 not IsPrivate")
+
+	// IsMulticast
+	multicast := net.IPv4(224, 0, 0, 1)
+	assert(multicast.IsMulticast(), "224.0.0.1 IsMulticast")
+	assert(!ipv4.IsMulticast(), "10.0.0.1 not IsMulticast")
+
+	// IsUnspecified
+	assert(net.IPv4zero.IsUnspecified(), "IPv4zero IsUnspecified")
+	assert(!ipv4.IsUnspecified(), "10.0.0.1 not IsUnspecified")
+
+	// IsLinkLocalUnicast
+	linkLocal := net.IPv4(169, 254, 1, 1)
+	assert(linkLocal.IsLinkLocalUnicast(), "169.254.x.x IsLinkLocalUnicast")
+
+	// IsLinkLocalMulticast
+	linkLocalMcast := net.IPv4(224, 0, 0, 1)
+	assert(linkLocalMcast.IsLinkLocalMulticast(), "224.0.0.x IsLinkLocalMulticast")
+
+	// IsGlobalUnicast
+	assert(public.IsGlobalUnicast(), "8.8.8.8 IsGlobalUnicast")
+	assert(!loopback.IsGlobalUnicast(), "127.0.0.1 not IsGlobalUnicast")
+}
+
+func testIPMask() {
+	// IPv4Mask
+	mask := net.IPv4Mask(255, 255, 255, 0)
+	assert(len(mask) == 4, "IPv4Mask length")
+	assert(mask[0] == 255, "IPv4Mask byte 0")
+	assert(mask[3] == 0, "IPv4Mask byte 3")
+
+	// CIDRMask
+	cidr24 := net.CIDRMask(24, 32)
+	assert(cidr24 != nil, "CIDRMask(24, 32) not nil")
+	assert(len(cidr24) == 4, "CIDRMask length")
+	assert(cidr24[0] == 255, "CIDRMask byte 0")
+	assert(cidr24[2] == 255, "CIDRMask byte 2")
+	assert(cidr24[3] == 0, "CIDRMask byte 3")
+
+	cidr16 := net.CIDRMask(16, 32)
+	assert(cidr16[0] == 255, "CIDRMask(16) byte 0")
+	assert(cidr16[1] == 255, "CIDRMask(16) byte 1")
+	assert(cidr16[2] == 0, "CIDRMask(16) byte 2")
+
+	// CIDRMask for IPv6
+	cidr64 := net.CIDRMask(64, 128)
+	assert(cidr64 != nil, "CIDRMask(64, 128) not nil")
+	assert(len(cidr64) == 16, "CIDRMask IPv6 length")
+
+	// Invalid CIDRMask
+	assert(net.CIDRMask(-1, 32) == nil, "CIDRMask negative ones")
+	assert(net.CIDRMask(33, 32) == nil, "CIDRMask ones > bits")
+	assert(net.CIDRMask(8, 64) == nil, "CIDRMask invalid bits")
+
+	// Size
+	ones, bits := cidr24.Size()
+	assert(ones == 24, "CIDRMask Size ones")
+	assert(bits == 32, "CIDRMask Size bits")
+
+	// String
+	maskStr := cidr24.String()
+	assert(maskStr == "ffffff00", "CIDRMask String: "+maskStr)
+
+	// IP.Mask
+	ip := net.IPv4(192, 168, 1, 100)
+	masked := ip.Mask(cidr24)
+	assert(masked != nil, "IP.Mask not nil")
+	assert(masked.String() == "192.168.1.0", "IP.Mask result: "+masked.String())
+}
+
+func testIPNet() {
+	ip := net.IPv4(192, 168, 1, 0)
+	mask := net.CIDRMask(24, 32)
+	ipnet := &net.IPNet{IP: ip, Mask: mask}
+
+	// String
+	netStr := ipnet.String()
+	assert(netStr == "192.168.1.0/24", "IPNet.String: "+netStr)
+
+	// Contains
+	inside := net.IPv4(192, 168, 1, 50)
+	outside := net.IPv4(192, 168, 2, 1)
+	assert(ipnet.Contains(inside), "IPNet.Contains inside")
+	assert(!ipnet.Contains(outside), "IPNet.Contains outside")
+
+	// Network returns the network name string
+	network := ipnet.Network()
+	assert(network == "ip+net", "IPNet.Network: "+network)
+}
+
+func testParseCIDR() {
+	// Valid CIDR
+	ip, ipnet, err := net.ParseCIDR("10.0.0.0/8")
+	assert(err == nil, "ParseCIDR error")
+	assert(ip != nil, "ParseCIDR IP not nil")
+	assert(ipnet != nil, "ParseCIDR IPNet not nil")
+	assert(ip.String() == "10.0.0.0", "ParseCIDR IP: "+ip.String())
+	assert(ipnet.String() == "10.0.0.0/8", "ParseCIDR IPNet: "+ipnet.String())
+
+	// CIDR with host bits
+	ip2, ipnet2, err2 := net.ParseCIDR("192.168.1.100/24")
+	assert(err2 == nil, "ParseCIDR host bits error")
+	assert(ip2.String() == "192.168.1.100", "ParseCIDR host IP: "+ip2.String())
+	assert(ipnet2.IP.String() == "192.168.1.0", "ParseCIDR network IP: "+ipnet2.IP.String())
+
+	// Invalid CIDR
+	_, _, err3 := net.ParseCIDR("invalid")
+	assert(err3 != nil, "ParseCIDR invalid should error")
+
+	// ParseIP
+	parsed := net.ParseIP("1.2.3.4")
+	assert(parsed != nil, "ParseIP valid")
+	assert(parsed.String() == "1.2.3.4", "ParseIP result: "+parsed.String())
+
+	parsedv6 := net.ParseIP("::1")
+	assert(parsedv6 != nil, "ParseIP IPv6")
+	assert(parsedv6.String() == "::1", "ParseIP IPv6 result: "+parsedv6.String())
+
+	invalid := net.ParseIP("not-an-ip")
+	assert(invalid == nil, "ParseIP invalid should be nil")
+}
+
+func testSplitHostPort() {
+	// Basic
+	host, port, err := net.SplitHostPort("localhost:8080")
+	assert(err == nil, "SplitHostPort error")
+	assert(host == "localhost", "SplitHostPort host: "+host)
+	assert(port == "8080", "SplitHostPort port: "+port)
+
+	// IPv4
+	host2, port2, err2 := net.SplitHostPort("192.168.1.1:80")
+	assert(err2 == nil, "SplitHostPort IPv4 error")
+	assert(host2 == "192.168.1.1", "SplitHostPort IPv4 host: "+host2)
+	assert(port2 == "80", "SplitHostPort IPv4 port: "+port2)
+
+	// IPv6 with brackets
+	host3, port3, err3 := net.SplitHostPort("[::1]:443")
+	assert(err3 == nil, "SplitHostPort IPv6 error")
+	assert(host3 == "::1", "SplitHostPort IPv6 host: "+host3)
+	assert(port3 == "443", "SplitHostPort IPv6 port: "+port3)
+
+	// Invalid - no port
+	_, _, err4 := net.SplitHostPort("localhost")
+	assert(err4 != nil, "SplitHostPort no port should error")
+
+	// Invalid - empty
+	_, _, err5 := net.SplitHostPort("")
+	assert(err5 != nil, "SplitHostPort empty should error")
+}
+
+func testJoinHostPort() {
+	// Basic
+	addr := net.JoinHostPort("localhost", "8080")
+	assert(addr == "localhost:8080", "JoinHostPort basic: "+addr)
+
+	// IPv4
+	addr2 := net.JoinHostPort("192.168.1.1", "80")
+	assert(addr2 == "192.168.1.1:80", "JoinHostPort IPv4: "+addr2)
+
+	// IPv6 (should add brackets)
+	addr3 := net.JoinHostPort("::1", "443")
+	assert(addr3 == "[::1]:443", "JoinHostPort IPv6: "+addr3)
+
+	// IPv6 full
+	addr4 := net.JoinHostPort("2001:db8::1", "8080")
+	assert(addr4 == "[2001:db8::1]:8080", "JoinHostPort IPv6 full: "+addr4)
+}
+
+func testAddressTypes() {
+	// TCPAddr
+	tcpAddr := &net.TCPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: 8080,
+		Zone: "",
+	}
+	assert(tcpAddr.Network() == "tcp", "TCPAddr.Network")
+	tcpStr := tcpAddr.String()
+	assert(tcpStr == "127.0.0.1:8080", "TCPAddr.String: "+tcpStr)
+
+	// UDPAddr
+	udpAddr := &net.UDPAddr{
+		IP:   net.IPv4(10, 0, 0, 1),
+		Port: 53,
+		Zone: "",
+	}
+	assert(udpAddr.Network() == "udp", "UDPAddr.Network")
+	udpStr := udpAddr.String()
+	assert(udpStr == "10.0.0.1:53", "UDPAddr.String: "+udpStr)
+
+	// UnixAddr
+	unixAddr := &net.UnixAddr{
+		Name: "/var/run/test.sock",
+		Net:  "unix",
+	}
+	assert(unixAddr.Network() == "unix", "UnixAddr.Network")
+	assert(unixAddr.String() == "/var/run/test.sock", "UnixAddr.String")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}

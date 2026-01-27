@@ -2191,13 +2191,12 @@ fn vostd_errors_impl(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut sentinel_match_arms = Vec::new();
     
     for (i, (name, msg)) in parsed.errors.iter().enumerate() {
-        let idx = i * 2;
         enum_variants.push(quote! { #name });
+        // init_fn only creates errors and caches them - NO ret_u64 here!
+        // ret_u64 is only called in getter_fn which has proper stack allocation
         create_errors.push(quote! {
             let err = vo_runtime::builtins::error_helper::create_error(call, #msg);
             errors[#i] = err;
-            call.ret_u64(#idx as u16, err.0);
-            call.ret_u64((#idx + 1) as u16, err.1);
         });
         // sentinel_match_arms uses get_one() to return copied value (no borrow conflict)
         sentinel_match_arms.push(quote! {

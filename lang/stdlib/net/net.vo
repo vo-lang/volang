@@ -1,0 +1,1011 @@
+package net
+
+import (
+	"errors"
+	"time"
+)
+
+// ==================== Errors ====================
+
+var ErrClosed = errors.New("use of closed network connection")
+
+// ==================== Core Interfaces ====================
+
+// Addr represents a network end point address.
+type Addr interface {
+	Network() string // name of the network (for example, "tcp", "udp")
+	String() string  // string form of address (for example, "192.0.2.1:25", "[2001:db8::1]:80")
+}
+
+// Conn is a generic stream-oriented network connection.
+type Conn interface {
+	Read(b []byte) (n int, err error)
+	Write(b []byte) (n int, err error)
+	Close() error
+	LocalAddr() Addr
+	RemoteAddr() Addr
+	SetDeadline(t time.Time) error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
+}
+
+// Listener is a generic network listener for stream-oriented protocols.
+type Listener interface {
+	Accept() (Conn, error)
+	Close() error
+	Addr() Addr
+}
+
+// PacketConn is a generic packet-oriented network connection.
+type PacketConn interface {
+	ReadFrom(p []byte) (n int, addr Addr, err error)
+	WriteTo(p []byte, addr Addr) (n int, err error)
+	Close() error
+	LocalAddr() Addr
+	SetDeadline(t time.Time) error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
+}
+
+// ==================== IP Types ====================
+
+// IP is an IP address. It can be IPv4 (4 bytes) or IPv6 (16 bytes).
+type IP []byte
+
+// IPMask is an IP address mask.
+type IPMask []byte
+
+// IPNet represents an IP network.
+type IPNet struct {
+	IP   IP     // network address
+	Mask IPMask // network mask
+}
+
+// IPv4 constants
+var (
+	IPv4zero      = IP{0, 0, 0, 0}
+	IPv4bcast     = IP{255, 255, 255, 255}
+	IPv6zero      = make(IP, 16)
+	IPv6loopback  = IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+)
+
+// IPv4 returns the IP address (in 4-byte form) of the IPv4 address a.b.c.d.
+func IPv4(a, b, c, d byte) IP {
+	return IP{a, b, c, d}
+}
+
+// IPv4Mask returns the IP mask (in 4-byte form) of the IPv4 mask a.b.c.d.
+func IPv4Mask(a, b, c, d byte) IPMask {
+	return IPMask{a, b, c, d}
+}
+
+// CIDRMask returns an IPMask consisting of ones followed by zeros, with the given number of ones and total bits.
+func CIDRMask(ones, bits int) IPMask {
+	if bits != 8*4 && bits != 8*16 {
+		return nil
+	}
+	if ones < 0 || ones > bits {
+		return nil
+	}
+	l := bits / 8
+	m := make(IPMask, l)
+	n := ones / 8
+	for i := 0; i < n; i++ {
+		m[i] = 0xff
+	}
+	if n < l {
+		m[n] = byte(0xff) << (8 - ones%8)
+	}
+	return m
+}
+
+// IsUnspecified reports whether ip is an unspecified address.
+func (ip IP) IsUnspecified() bool {
+	return ip.Equal(IPv4zero) || ip.Equal(IPv6zero)
+}
+
+// IsLoopback reports whether ip is a loopback address.
+func (ip IP) IsLoopback() bool {
+	if len(ip) == 4 {
+		return ip[0] == 127
+	}
+	return ip.Equal(IPv6loopback)
+}
+
+// IsPrivate reports whether ip is a private address.
+func (ip IP) IsPrivate() bool {
+	if len(ip) == 4 {
+		// 10.0.0.0/8
+		if ip[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12
+		if ip[0] == 172 && ip[1]&0xf0 == 16 {
+			return true
+		}
+		// 192.168.0.0/16
+		if ip[0] == 192 && ip[1] == 168 {
+			return true
+		}
+		return false
+	}
+	// fc00::/7
+	if len(ip) == 16 {
+		return ip[0]&0xfe == 0xfc
+	}
+	return false
+}
+
+// IsMulticast reports whether ip is a multicast address.
+func (ip IP) IsMulticast() bool {
+	if len(ip) == 4 {
+		return ip[0]&0xf0 == 0xe0
+	}
+	if len(ip) == 16 {
+		return ip[0] == 0xff
+	}
+	return false
+}
+
+// IsLinkLocalUnicast reports whether ip is a link-local unicast address.
+func (ip IP) IsLinkLocalUnicast() bool {
+	if len(ip) == 4 {
+		return ip[0] == 169 && ip[1] == 254
+	}
+	if len(ip) == 16 {
+		return ip[0] == 0xfe && ip[1]&0xc0 == 0x80
+	}
+	return false
+}
+
+// IsLinkLocalMulticast reports whether ip is a link-local multicast address.
+func (ip IP) IsLinkLocalMulticast() bool {
+	if len(ip) == 4 {
+		return ip[0] == 224 && ip[1] == 0 && ip[2] == 0
+	}
+	if len(ip) == 16 {
+		return ip[0] == 0xff && ip[1]&0x0f == 0x02
+	}
+	return false
+}
+
+// IsGlobalUnicast reports whether ip is a global unicast address.
+func (ip IP) IsGlobalUnicast() bool {
+	return (len(ip) == 4 || len(ip) == 16) &&
+		!ip.Equal(IPv4bcast) &&
+		!ip.IsUnspecified() &&
+		!ip.IsLoopback() &&
+		!ip.IsMulticast() &&
+		!ip.IsLinkLocalUnicast()
+}
+
+// To4 converts the IP address to a 4-byte representation.
+// If ip is not an IPv4 address, To4 returns nil.
+func (ip IP) To4() IP {
+	if len(ip) == 4 {
+		return ip
+	}
+	if len(ip) == 16 &&
+		isZeros(ip[0:10]) &&
+		ip[10] == 0xff &&
+		ip[11] == 0xff {
+		return ip[12:16]
+	}
+	return nil
+}
+
+// To16 converts the IP address to a 16-byte representation.
+// If ip is not an IP address (it is the wrong length), To16 returns nil.
+func (ip IP) To16() IP {
+	if len(ip) == 4 {
+		return IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, ip[0], ip[1], ip[2], ip[3]}
+	}
+	if len(ip) == 16 {
+		return ip
+	}
+	return nil
+}
+
+// Equal reports whether ip and x are the same IP address.
+func (ip IP) Equal(x IP) bool {
+	if len(ip) == len(x) {
+		for i := range ip {
+			if ip[i] != x[i] {
+				return false
+			}
+		}
+		return true
+	}
+	if len(ip) == 4 && len(x) == 16 {
+		return x.Equal(ip.To16())
+	}
+	if len(ip) == 16 && len(x) == 4 {
+		return ip.Equal(x.To16())
+	}
+	return false
+}
+
+// Mask returns the result of masking the IP address with mask.
+func (ip IP) Mask(mask IPMask) IP {
+	if len(mask) == 16 && len(ip) == 4 && isZeros(mask[:12]) {
+		mask = mask[12:]
+	}
+	if len(mask) == 4 && len(ip) == 16 && isZeros(ip[:12]) {
+		ip = ip[12:]
+	}
+	n := len(ip)
+	if n != len(mask) {
+		return nil
+	}
+	out := make(IP, n)
+	for i := 0; i < n; i++ {
+		out[i] = ip[i] & mask[i]
+	}
+	return out
+}
+
+// String returns the string form of the IP address.
+func (ip IP) String() string {
+	if len(ip) == 0 {
+		return "<nil>"
+	}
+	if len(ip) == 4 {
+		return ipv4String(ip)
+	}
+	if len(ip) == 16 {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ipv4String(ip4)
+		}
+		return ipv6String(ip)
+	}
+	return "?"
+}
+
+// Size returns the number of leading ones and total bits in the mask.
+func (m IPMask) Size() (ones, bits int) {
+	bits = len(m) * 8
+	ones = 0
+	for i := 0; i < len(m); i++ {
+		if m[i] == 0xff {
+			ones += 8
+			continue
+		}
+		for j := 7; j >= 0; j-- {
+			if m[i]&(1<<j) != 0 {
+				ones++
+			} else {
+				return ones, bits
+			}
+		}
+	}
+	return ones, bits
+}
+
+// String returns the hexadecimal form of m.
+func (m IPMask) String() string {
+	if len(m) == 0 {
+		return "<nil>"
+	}
+	return hexString(m)
+}
+
+// Contains reports whether the network includes ip.
+func (n *IPNet) Contains(ip IP) bool {
+	nn := len(n.IP)
+	if nn != len(ip) {
+		if nn == 4 && len(ip) == 16 {
+			ip = ip.To4()
+			if ip == nil {
+				return false
+			}
+		} else if nn == 16 && len(ip) == 4 {
+			ip = ip.To16()
+		} else {
+			return false
+		}
+	}
+	for i := 0; i < nn; i++ {
+		if n.IP[i]&n.Mask[i] != ip[i]&n.Mask[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Network returns the address's network name, "ip+net".
+func (n *IPNet) Network() string {
+	return "ip+net"
+}
+
+// String returns the CIDR notation of n.
+func (n *IPNet) String() string {
+	if n == nil {
+		return "<nil>"
+	}
+	ones, _ := n.Mask.Size()
+	return n.IP.String() + "/" + itoa(ones)
+}
+
+// ==================== Parsing Functions ====================
+
+// ParseIP parses s as an IP address, returning the result.
+// The string s can be in dotted decimal ("192.0.2.1") or IPv6 ("2001:db8::1") form.
+// If s is not a valid textual representation of an IP address, ParseIP returns nil.
+func ParseIP(s string) IP {
+	ip, _ := parseIP(s)
+	return ip
+}
+
+// ParseCIDR parses s as a CIDR notation IP address and prefix length.
+func ParseCIDR(s string) (IP, *IPNet, error) {
+	return parseCIDR(s)
+}
+
+// ==================== Host:Port Functions ====================
+
+// SplitHostPort splits a network address of the form "host:port" or "[host]:port" into host and port.
+func SplitHostPort(hostport string) (host, port string, err error) {
+	return splitHostPort(hostport)
+}
+
+// JoinHostPort combines host and port into a network address.
+func JoinHostPort(host, port string) string {
+	if indexByte(host, ':') >= 0 {
+		return "[" + host + "]:" + port
+	}
+	return host + ":" + port
+}
+
+// ==================== TCP Address ====================
+
+// TCPAddr represents the address of a TCP end point.
+type TCPAddr struct {
+	IP   IP
+	Port int
+	Zone string // IPv6 scoped addressing zone
+}
+
+// Network returns the address's network name, "tcp".
+func (a *TCPAddr) Network() string { return "tcp" }
+
+// String returns the string form of the TCP address.
+func (a *TCPAddr) String() string {
+	if a == nil {
+		return "<nil>"
+	}
+	ip := a.IP.String()
+	if a.Zone != "" {
+		return JoinHostPort(ip+"%"+a.Zone, itoa(a.Port))
+	}
+	return JoinHostPort(ip, itoa(a.Port))
+}
+
+// ResolveTCPAddr returns an address of TCP end point.
+func ResolveTCPAddr(network, address string) (*TCPAddr, error) {
+	return resolveTCPAddr(network, address)
+}
+
+// ==================== UDP Address ====================
+
+// UDPAddr represents the address of a UDP end point.
+type UDPAddr struct {
+	IP   IP
+	Port int
+	Zone string // IPv6 scoped addressing zone
+}
+
+// Network returns the address's network name, "udp".
+func (a *UDPAddr) Network() string { return "udp" }
+
+// String returns the string form of the UDP address.
+func (a *UDPAddr) String() string {
+	if a == nil {
+		return "<nil>"
+	}
+	ip := a.IP.String()
+	if a.Zone != "" {
+		return JoinHostPort(ip+"%"+a.Zone, itoa(a.Port))
+	}
+	return JoinHostPort(ip, itoa(a.Port))
+}
+
+// ResolveUDPAddr returns an address of UDP end point.
+func ResolveUDPAddr(network, address string) (*UDPAddr, error) {
+	return resolveUDPAddr(network, address)
+}
+
+// ==================== Internal Address Wrapper ====================
+
+// stringAddr is an internal wrapper for address strings returned by native code.
+type stringAddr struct {
+	network string
+	addr    string
+}
+
+func (a *stringAddr) Network() string { return a.network }
+func (a *stringAddr) String() string  { return a.addr }
+
+// ==================== Unix Address ====================
+
+// UnixAddr represents the address of a Unix domain socket end point.
+type UnixAddr struct {
+	Name string
+	Net  string // "unix" or "unixgram"
+}
+
+// Network returns the address's network name, "unix" or "unixgram".
+func (a *UnixAddr) Network() string {
+	return a.Net
+}
+
+// String returns the string form of the address.
+func (a *UnixAddr) String() string {
+	if a == nil {
+		return "<nil>"
+	}
+	return a.Name
+}
+
+// ==================== TCP Connection ====================
+
+// TCPConn is an implementation of the Conn interface for TCP network connections.
+type TCPConn struct {
+	handle int
+}
+
+func (c *TCPConn) Read(b []byte) (int, error)  { return tcpConnRead(c.handle, b) }
+func (c *TCPConn) Write(b []byte) (int, error) { return tcpConnWrite(c.handle, b) }
+func (c *TCPConn) Close() error                { return tcpConnClose(c.handle) }
+func (c *TCPConn) LocalAddr() Addr             { return &stringAddr{"tcp", tcpConnLocalAddr(c.handle)} }
+func (c *TCPConn) RemoteAddr() Addr            { return &stringAddr{"tcp", tcpConnRemoteAddr(c.handle)} }
+func (c *TCPConn) SetDeadline(t time.Time) error      { return tcpConnSetDeadline(c.handle, t.UnixNano()) }
+func (c *TCPConn) SetReadDeadline(t time.Time) error  { return tcpConnSetReadDeadline(c.handle, t.UnixNano()) }
+func (c *TCPConn) SetWriteDeadline(t time.Time) error { return tcpConnSetWriteDeadline(c.handle, t.UnixNano()) }
+
+// TCPListener is a TCP network listener.
+type TCPListener struct {
+	handle int
+}
+
+func (l *TCPListener) Accept() (Conn, error) {
+	h, err := tcpListenerAccept(l.handle)
+	if err != nil {
+		return nil, err
+	}
+	return &TCPConn{handle: h}, nil
+}
+func (l *TCPListener) Close() error { return tcpListenerClose(l.handle) }
+func (l *TCPListener) Addr() Addr   { return &stringAddr{"tcp", tcpListenerAddr(l.handle)} }
+
+// ==================== UDP Connection ====================
+
+// UDPConn is an implementation of the Conn and PacketConn interfaces for UDP network connections.
+type UDPConn struct {
+	handle int
+}
+
+func (c *UDPConn) ReadFrom(p []byte) (int, Addr, error) {
+	n, addr, err := udpConnReadFrom(c.handle, p)
+	if err != nil {
+		return n, nil, err
+	}
+	return n, &stringAddr{"udp", addr}, nil
+}
+func (c *UDPConn) WriteTo(p []byte, addr Addr) (int, error) { return udpConnWriteTo(c.handle, p, addr.String()) }
+func (c *UDPConn) Close() error                { return udpConnClose(c.handle) }
+func (c *UDPConn) LocalAddr() Addr             { return &stringAddr{"udp", udpConnLocalAddr(c.handle)} }
+func (c *UDPConn) SetDeadline(t time.Time) error      { return udpConnSetDeadline(c.handle, t.UnixNano()) }
+func (c *UDPConn) SetReadDeadline(t time.Time) error  { return udpConnSetReadDeadline(c.handle, t.UnixNano()) }
+func (c *UDPConn) SetWriteDeadline(t time.Time) error { return udpConnSetWriteDeadline(c.handle, t.UnixNano()) }
+
+// ==================== Unix Connection ====================
+
+// UnixConn is an implementation of the Conn interface for Unix domain socket connections.
+type UnixConn struct {
+	handle int
+}
+
+func (c *UnixConn) Read(b []byte) (int, error)  { return unixConnRead(c.handle, b) }
+func (c *UnixConn) Write(b []byte) (int, error) { return unixConnWrite(c.handle, b) }
+func (c *UnixConn) Close() error                { return unixConnClose(c.handle) }
+func (c *UnixConn) LocalAddr() Addr             { return &UnixAddr{Name: "", Net: "unix"} }
+func (c *UnixConn) RemoteAddr() Addr            { return &UnixAddr{Name: "", Net: "unix"} }
+func (c *UnixConn) SetDeadline(t time.Time) error      { return nil }
+func (c *UnixConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *UnixConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// UnixListener is a Unix domain socket listener.
+type UnixListener struct {
+	handle int
+	addr   string
+}
+
+func (l *UnixListener) Accept() (Conn, error) {
+	h, err := unixListenerAccept(l.handle)
+	if err != nil {
+		return nil, err
+	}
+	return &UnixConn{handle: h}, nil
+}
+func (l *UnixListener) Close() error { return unixListenerClose(l.handle) }
+func (l *UnixListener) Addr() Addr   { return &UnixAddr{Name: l.addr, Net: "unix"} }
+
+// ==================== Dial / Listen ====================
+
+// Dial connects to the address on the named network.
+// Known networks are "tcp", "tcp4" (IPv4-only), "tcp6" (IPv6-only),
+// "udp", "udp4" (IPv4-only), "udp6" (IPv6-only), "unix".
+func Dial(network, address string) (Conn, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		h, err := dial(network, address, 0)
+		if err != nil {
+			return nil, err
+		}
+		return &TCPConn{handle: h}, nil
+	case "unix":
+		h, err := unixDial(address)
+		if err != nil {
+			return nil, err
+		}
+		return &UnixConn{handle: h}, nil
+	default:
+		return nil, errors.New("unknown network: " + network)
+	}
+}
+
+// DialTimeout acts like Dial but takes a timeout.
+func DialTimeout(network, address string, timeout time.Duration) (Conn, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		h, err := dial(network, address, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return &TCPConn{handle: h}, nil
+	case "unix":
+		h, err := unixDial(address)
+		if err != nil {
+			return nil, err
+		}
+		return &UnixConn{handle: h}, nil
+	default:
+		return nil, errors.New("unknown network: " + network)
+	}
+}
+
+// Listen announces on the local network address.
+// Known networks are "tcp", "tcp4" (IPv4-only), "tcp6" (IPv6-only), "unix".
+func Listen(network, address string) (Listener, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		h, err := listen(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &TCPListener{handle: h}, nil
+	case "unix":
+		h, err := unixListen(address)
+		if err != nil {
+			return nil, err
+		}
+		return &UnixListener{handle: h, addr: address}, nil
+	default:
+		return nil, errors.New("unknown network: " + network)
+	}
+}
+
+// ListenPacket announces on the local network address.
+// Known networks are "udp", "udp4" (IPv4-only), "udp6" (IPv6-only).
+func ListenPacket(network, address string) (PacketConn, error) {
+	h, err := listenPacket(network, address)
+	if err != nil {
+		return nil, err
+	}
+	return &UDPConn{handle: h}, nil
+}
+
+// ==================== DNS Lookup ====================
+
+// LookupHost looks up the given host using the local resolver.
+// It returns a slice of that host's addresses.
+func LookupHost(host string) (addrs []string, err error) {
+	return lookupHost(host)
+}
+
+// LookupIP looks up host using the local resolver.
+// It returns a slice of that host's IPv4 and IPv6 addresses.
+func LookupIP(host string) ([]IP, error) {
+	return lookupIP(host)
+}
+
+// LookupAddr performs a reverse lookup for the given address.
+func LookupAddr(addr string) (names []string, err error) {
+	return lookupAddr(addr)
+}
+
+// ==================== Internal Helpers ====================
+
+func isZeros(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastIndexByte(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := false
+	if i < 0 {
+		neg = true
+		i = -i
+	}
+	var buf [20]byte
+	n := len(buf)
+	for i > 0 {
+		n--
+		buf[n] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		n--
+		buf[n] = '-'
+	}
+	return string(buf[n:])
+}
+
+func atoi(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	neg := false
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + int(s[i]-'0')
+	}
+	if neg {
+		n = -n
+	}
+	return n, true
+}
+
+func hexDigit(c byte) byte {
+	if c < 10 {
+		return '0' + c
+	}
+	return 'a' + c - 10
+}
+
+func hexString(b []byte) string {
+	s := make([]byte, len(b)*2)
+	for i, v := range b {
+		s[i*2] = hexDigit(v >> 4)
+		s[i*2+1] = hexDigit(v & 0x0f)
+	}
+	return string(s)
+}
+
+func ipv4String(ip IP) string {
+	return itoa(int(ip[0])) + "." + itoa(int(ip[1])) + "." + itoa(int(ip[2])) + "." + itoa(int(ip[3]))
+}
+
+func ipv6String(ip IP) string {
+	// Find longest run of zeros
+	e0, e1 := -1, -1
+	for i := 0; i < 16; i += 2 {
+		j := i
+		for j < 16 && ip[j] == 0 && ip[j+1] == 0 {
+			j += 2
+		}
+		if j > i && j-i > e1-e0 {
+			e0, e1 = i, j
+		}
+	}
+	if e1-e0 <= 2 {
+		e0, e1 = -1, -1
+	}
+
+	var b []byte
+	for i := 0; i < 16; i += 2 {
+		if i == e0 {
+			b = append(b, ':', ':')
+			i = e1
+			if i >= 16 {
+				break
+			}
+		} else if i > 0 {
+			b = append(b, ':')
+		}
+		b = appendHex(b, (int(ip[i])<<8)|int(ip[i+1]))
+	}
+	return string(b)
+}
+
+func appendHex(b []byte, x int) []byte {
+	if x == 0 {
+		return append(b, '0')
+	}
+	var buf [4]byte
+	i := len(buf)
+	for x > 0 {
+		i--
+		buf[i] = hexDigit(byte(x & 0xf))
+		x >>= 4
+	}
+	return append(b, buf[i:]...)
+}
+
+func parseIP(s string) (IP, error) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			return parseIPv4(s)
+		}
+		if s[i] == ':' {
+			return parseIPv6(s)
+		}
+	}
+	return nil, errors.New("invalid IP address: " + s)
+}
+
+func parseIPv4(s string) (IP, error) {
+	var ip [4]byte
+	for i := 0; i < 4; i++ {
+		if i > 0 {
+			if len(s) == 0 || s[0] != '.' {
+				return nil, errors.New("invalid IPv4 address")
+			}
+			s = s[1:]
+		}
+		n, j := 0, 0
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			n = n*10 + int(s[j]-'0')
+			if n > 255 {
+				return nil, errors.New("invalid IPv4 address")
+			}
+			j++
+		}
+		if j == 0 {
+			return nil, errors.New("invalid IPv4 address")
+		}
+		s = s[j:]
+		ip[i] = byte(n)
+	}
+	if len(s) != 0 {
+		return nil, errors.New("invalid IPv4 address")
+	}
+	return IP{ip[0], ip[1], ip[2], ip[3]}, nil
+}
+
+func parseIPv6(s string) (IP, error) {
+	ip := make(IP, 16)
+	ellipsis := -1
+
+	if len(s) >= 2 && s[0] == ':' && s[1] == ':' {
+		ellipsis = 0
+		s = s[2:]
+		if len(s) == 0 {
+			return ip, nil
+		}
+	}
+
+	i := 0
+	for i < 16 {
+		// Parse hex
+		n, j := 0, 0
+		for j < len(s) {
+			c := s[j]
+			if c >= '0' && c <= '9' {
+				n = n*16 + int(c-'0')
+			} else if c >= 'a' && c <= 'f' {
+				n = n*16 + int(c-'a'+10)
+			} else if c >= 'A' && c <= 'F' {
+				n = n*16 + int(c-'A'+10)
+			} else {
+				break
+			}
+			if n > 0xffff {
+				return nil, errors.New("invalid IPv6 address")
+			}
+			j++
+		}
+		if j == 0 {
+			return nil, errors.New("invalid IPv6 address")
+		}
+		if j < len(s) && s[j] == '.' {
+			// IPv4-mapped ending
+			if i > 12 {
+				return nil, errors.New("invalid IPv6 address")
+			}
+			ip4, err := parseIPv4(s)
+			if err != nil {
+				return nil, err
+			}
+			ip[i] = ip4[0]
+			ip[i+1] = ip4[1]
+			ip[i+2] = ip4[2]
+			ip[i+3] = ip4[3]
+			i += 4
+			s = ""
+			break
+		}
+		ip[i] = byte(n >> 8)
+		ip[i+1] = byte(n)
+		i += 2
+		s = s[j:]
+		if len(s) == 0 {
+			break
+		}
+		if s[0] != ':' {
+			return nil, errors.New("invalid IPv6 address")
+		}
+		s = s[1:]
+		if len(s) > 0 && s[0] == ':' {
+			if ellipsis >= 0 {
+				return nil, errors.New("invalid IPv6 address: multiple ::")
+			}
+			ellipsis = i
+			s = s[1:]
+			if len(s) == 0 {
+				break
+			}
+		}
+	}
+
+	if len(s) != 0 {
+		return nil, errors.New("invalid IPv6 address")
+	}
+
+	if i < 16 {
+		if ellipsis < 0 {
+			return nil, errors.New("invalid IPv6 address")
+		}
+		n := 16 - i
+		for j := i - 1; j >= ellipsis; j-- {
+			ip[j+n] = ip[j]
+		}
+		for j := ellipsis; j < ellipsis+n; j++ {
+			ip[j] = 0
+		}
+	} else if ellipsis >= 0 {
+		return nil, errors.New("invalid IPv6 address")
+	}
+
+	return ip, nil
+}
+
+func parseCIDR(s string) (IP, *IPNet, error) {
+	i := indexByte(s, '/')
+	if i < 0 {
+		return nil, nil, errors.New("invalid CIDR address: " + s)
+	}
+	addr, mask := s[:i], s[i+1:]
+	ip, err := parseIP(addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	n, ok := atoi(mask)
+	if !ok || n < 0 {
+		return nil, nil, errors.New("invalid CIDR address: " + s)
+	}
+	var m IPMask
+	if len(ip) == 4 {
+		if n > 32 {
+			return nil, nil, errors.New("invalid CIDR address: " + s)
+		}
+		m = CIDRMask(n, 32)
+	} else {
+		if n > 128 {
+			return nil, nil, errors.New("invalid CIDR address: " + s)
+		}
+		m = CIDRMask(n, 128)
+	}
+	return ip, &IPNet{IP: ip.Mask(m), Mask: m}, nil
+}
+
+func splitHostPort(hostport string) (host, port string, err error) {
+	i := lastIndexByte(hostport, ':')
+	if i < 0 {
+		return "", "", errors.New("missing port in address")
+	}
+
+	if hostport[0] == '[' {
+		// IPv6 literal
+		end := indexByte(hostport, ']')
+		if end < 0 {
+			return "", "", errors.New("missing ']' in address")
+		}
+		if end+1 == len(hostport) {
+			return "", "", errors.New("missing port in address")
+		}
+		if end+1 != i {
+			if hostport[end+1] != ':' {
+				return "", "", errors.New("missing port in address")
+			}
+		}
+		host = hostport[1:end]
+	} else {
+		host = hostport[:i]
+		if indexByte(host, ':') >= 0 {
+			return "", "", errors.New("too many colons in address")
+		}
+	}
+
+	port = hostport[i+1:]
+	return host, port, nil
+}
+
+// ==================== Native Extern Stubs ====================
+
+// Core dial/listen
+func dial(network, address string, timeout time.Duration) (int, error)
+func listen(network, address string) (int, error)
+func listenPacket(network, address string) (int, error)
+
+// TCP connection operations
+func tcpConnRead(handle int, b []byte) (int, error)
+func tcpConnWrite(handle int, b []byte) (int, error)
+func tcpConnClose(handle int) error
+func tcpConnLocalAddr(handle int) string
+func tcpConnRemoteAddr(handle int) string
+func tcpConnSetDeadline(handle int, deadlineNs int64) error
+func tcpConnSetReadDeadline(handle int, deadlineNs int64) error
+func tcpConnSetWriteDeadline(handle int, deadlineNs int64) error
+
+// TCP listener operations
+func tcpListenerAccept(handle int) (int, error)
+func tcpListenerClose(handle int) error
+func tcpListenerAddr(handle int) string
+
+// UDP connection operations
+func udpConnReadFrom(handle int, p []byte) (int, string, error)
+func udpConnWriteTo(handle int, p []byte, addr string) (int, error)
+func udpConnClose(handle int) error
+func udpConnLocalAddr(handle int) string
+func udpConnSetDeadline(handle int, deadlineNs int64) error
+func udpConnSetReadDeadline(handle int, deadlineNs int64) error
+func udpConnSetWriteDeadline(handle int, deadlineNs int64) error
+
+// Unix socket operations
+func unixDial(address string) (int, error)
+func unixListen(address string) (int, error)
+func unixConnRead(handle int, b []byte) (int, error)
+func unixConnWrite(handle int, b []byte) (int, error)
+func unixConnClose(handle int) error
+func unixListenerAccept(handle int) (int, error)
+func unixListenerClose(handle int) error
+
+// DNS
+func resolveTCPAddr(network, address string) (*TCPAddr, error)
+func resolveUDPAddr(network, address string) (*UDPAddr, error)
+func lookupHost(host string) ([]string, error)
+func lookupIP(host string) ([]IP, error)
+func lookupAddr(addr string) ([]string, error)

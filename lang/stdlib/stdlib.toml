@@ -29,6 +29,7 @@ dyn = { path = "dyn" }
 io = { path = "io" }
 os = { path = "os" }
 time = { path = "time" }
+net = { path = "net" }
 "math/rand" = { path = "math/rand" }
 # path = { path = "path" }
 # "path/filepath" = { path = "path/filepath" }

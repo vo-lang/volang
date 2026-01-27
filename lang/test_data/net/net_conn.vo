@@ -1,0 +1,152 @@
+package main
+
+import (
+	"net"
+	"time"
+)
+
+func main() {
+	testTCPListenClose()
+	testUDPListenClose()
+	testDialErrors()
+	// TODO: testTCPEcho requires goroutines to work properly
+	println("net connection tests passed")
+}
+
+func testTCPListenClose() {
+	// Basic listen and close test
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("Listen failed: " + err.Error())
+	}
+
+	addr := listener.Addr()
+	if addr == nil {
+		panic("Listener.Addr() is nil")
+	}
+	if addr.Network() != "tcp" {
+		panic("Listener.Addr().Network() should be tcp")
+	}
+
+	err = listener.Close()
+	if err != nil {
+		panic("Close failed: " + err.Error())
+	}
+}
+
+func testUDPListenClose() {
+	// UDP listen and close
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		panic("ListenPacket failed: " + err.Error())
+	}
+
+	addr := conn.LocalAddr()
+	if addr == nil {
+		panic("UDP LocalAddr is nil")
+	}
+	if addr.Network() != "udp" {
+		panic("UDP LocalAddr.Network() should be udp")
+	}
+
+	err = conn.Close()
+	if err != nil {
+		panic("UDP Close failed: " + err.Error())
+	}
+}
+
+func testDialErrors() {
+	// Test dial to non-existent address (should fail quickly)
+	_, err := net.DialTimeout("tcp", "127.0.0.1:1", 100*time.Millisecond)
+	if err == nil {
+		panic("Dial to closed port should fail")
+	}
+
+	// Test unknown network
+	_, err = net.Dial("invalid", "localhost:80")
+	if err == nil {
+		panic("Dial with invalid network should fail")
+	}
+
+	// Test Listen unknown network
+	_, err = net.Listen("invalid", "localhost:80")
+	if err == nil {
+		panic("Listen with invalid network should fail")
+	}
+
+	// Test ListenPacket unknown network
+	_, err = net.ListenPacket("invalid", "localhost:80")
+	if err == nil {
+		panic("ListenPacket with invalid network should fail")
+	}
+}
+
+func testTCPEcho() {
+	// Start listener
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("Listen failed: " + err.Error())
+	}
+	listenAddr := listener.Addr().String()
+
+	// Start server in goroutine
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+
+		// Echo: read and write back
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		_, err = conn.Write(buf[:n])
+		serverDone <- err
+	}()
+
+	// Client connects
+	conn, err := net.Dial("tcp", listenAddr)
+	if err != nil {
+		panic("Dial failed: " + err.Error())
+	}
+	defer conn.Close()
+	defer listener.Close()
+
+	// Check addresses
+	if conn.LocalAddr() == nil {
+		panic("LocalAddr is nil")
+	}
+	if conn.RemoteAddr() == nil {
+		panic("RemoteAddr is nil")
+	}
+
+	// Send data
+	testData := "hello"
+	_, err = conn.Write([]byte(testData))
+	if err != nil {
+		panic("Write failed: " + err.Error())
+	}
+
+	// Read echo
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		panic("Read failed: " + err.Error())
+	}
+
+	if string(buf[:n]) != testData {
+		panic("Echo mismatch: expected " + testData + ", got " + string(buf[:n]))
+	}
+
+	// Wait for server
+	if err := <-serverDone; err != nil {
+		panic("Server error: " + err.Error())
+	}
+}

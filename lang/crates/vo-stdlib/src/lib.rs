@@ -33,6 +33,7 @@ pub(crate) mod serde_toml;
 // Platform-specific modules
 pub mod time;
 pub mod os;
+pub mod net;
 
 pub use source::{EmbeddedStdlib, StdlibFs};
 
@@ -62,4 +63,5 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     // Register platform-specific externs
     time::register_externs(registry, externs);
     os::register_externs(registry, externs);
+    net::register_externs(registry, externs);
 }
