@@ -1,4 +1,5 @@
 // Vo WASM runtime wrapper
+import { vfs, registerVFSBindings } from '@vo-web/vfs';
 
 export type RunStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -16,11 +17,20 @@ export interface GuiResult {
 
 // Unified WASM module instance
 let wasmModule: any = null;
+let vfsInitialized = false;
 
 async function loadWasm(): Promise<any> {
   if (wasmModule) return wasmModule;
 
   try {
+    // Initialize VFS first (load from OPFS)
+    if (!vfsInitialized) {
+      await vfs.init();
+      registerVFSBindings();
+      vfsInitialized = true;
+      console.log('VFS initialized');
+    }
+
     const { default: init, compileAndRun, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
     await init();
     wasmModule = { compileAndRun, version, initGuiApp, handleGuiEvent };

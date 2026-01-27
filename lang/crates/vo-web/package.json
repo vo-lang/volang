@@ -1,0 +1,38 @@
+{
+  "name": "vo-web",
+  "version": "0.1.0",
+  "description": "Vo language runtime for the web",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./wasm": {
+      "import": "./pkg/vo_web.js",
+      "types": "./pkg/vo_web.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "pkg"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --out-dir pkg",
+    "build:js": "tsc",
+    "build": "npm run build:wasm && npm run build:js",
+    "clean": "rm -rf dist pkg"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "vo",
+    "language",
+    "wasm",
+    "webassembly"
+  ],
+  "license": "MIT"
+}
