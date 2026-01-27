@@ -139,9 +139,8 @@ pub fn compile_call(
             let pkg_name = pkg_key
                 .map(|pk| {
                     let pkg = &info.project.tc_objs.pkgs[pk];
-                    pkg.name().clone().unwrap_or_else(|| {
-                        pkg.path().rsplit('/').next().unwrap_or("main").to_string()
-                    })
+                    // Use full path with / replaced by _, but remove .. and . components
+                    normalize_pkg_path(pkg.path())
                 })
                 .unwrap_or_else(|| "main".to_string());
             let extern_name = format!("{}_{}", pkg_name, func_name);
@@ -730,4 +729,14 @@ fn pack_variadic_args(
     }
     
     Ok(dst)
+}
+
+/// Normalize a package path for extern name generation.
+/// Removes `.` and `..` components and replaces `/` with `_`.
+/// E.g., "../../libs/vox" -> "libs_vox", "encoding/json" -> "encoding_json"
+pub fn normalize_pkg_path(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect::<Vec<_>>()
+        .join("_")
 }

@@ -53,12 +53,12 @@ fn marshal_impl(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_extern_ctx_nostd("json", "marshalAny")]
+#[vostd_extern_ctx_nostd("encoding/json", "marshalAny")]
 fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     marshal_impl(call)
 }
 
-#[vostd_extern_ctx_nostd("json", "Unmarshal")]
+#[vostd_extern_ctx_nostd("encoding/json", "Unmarshal")]
 fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     let json_str = {
         let data = call.arg_bytes(0);
@@ -104,7 +104,7 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
 // ==================== Shared String Functions ====================
 
 /// writeJsonString(buf []byte, s string, escapeHTML bool) []byte
-#[vostd_extern_ctx_nostd("json", "writeJsonString")]
+#[vostd_extern_ctx_nostd("encoding/json", "writeJsonString")]
 fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     // Args: buf []byte (1 slot), s string (1 slot), escapeHTML bool (1 slot)
     let buf_ref = call.arg_ref(0);
@@ -130,7 +130,7 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// parseJsonString(data []byte, pos int) (string, int, error)
-#[vostd_extern_ctx_nostd("json", "parseJsonString")]
+#[vostd_extern_ctx_nostd("encoding/json", "parseJsonString")]
 fn parse_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     // Args: data []byte (1 slot), pos int (1 slot)
     let data = call.arg_bytes(0);
@@ -230,4 +230,4 @@ fn parse_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-vo_runtime::stdlib_register!(json: marshalAny, Unmarshal, writeJsonString, parseJsonString);
+vo_runtime::stdlib_register!(encoding_json: marshalAny, Unmarshal, writeJsonString, parseJsonString);

@@ -1,0 +1,16 @@
+package main
+
+import "math/rand"
+
+func main() {
+    // Test Perm
+    p := rand.Perm(5)
+    println("Perm(5):", p)
+    
+    // Test Shuffle
+    arr := []int{1, 2, 3, 4, 5}
+    rand.Shuffle(len(arr), func(i, j int) {
+        arr[i], arr[j] = arr[j], arr[i]
+    })
+    println("Shuffled:", arr)
+}

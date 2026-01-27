@@ -39,19 +39,6 @@ const MODE_SYMLINK: u32 = 1 << 27;
 lazy_static::lazy_static! {
     static ref FILE_HANDLES: Mutex<HashMap<i32, File>> = Mutex::new(HashMap::new());
     static ref NEXT_FD: Mutex<i32> = Mutex::new(100);
-    static ref TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-}
-
-#[cfg(feature = "std")]
-fn temp_random() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    std::process::id().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    std::time::SystemTime::now().hash(&mut hasher);
-    TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed).hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(feature = "std")]
@@ -743,7 +730,7 @@ fn os_create_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = if dir.is_empty() { std::env::temp_dir() } else { std::path::PathBuf::from(dir) };
     let (prefix, suffix) = if let Some(pos) = pattern.find('*') { (&pattern[..pos], &pattern[pos + 1..]) } else { (pattern, "") };
     for _ in 0..10000 {
-        let name = format!("{}{:016x}{}", prefix, temp_random(), suffix);
+        let name = format!("{}{:016x}{}", prefix, crate::rand::next_u64(), suffix);
         let path = dir.join(&name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => { let fd = register_file(file); call.ret_i64(slots::RET_0, fd as i64); call.ret_str(slots::RET_1, &path.to_string_lossy()); write_nil_error(call, slots::RET_2); return ExternResult::Ok; }
@@ -762,7 +749,7 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
     let dir = if dir.is_empty() { std::env::temp_dir() } else { std::path::PathBuf::from(dir) };
     let (prefix, suffix) = if let Some(pos) = pattern.find('*') { (&pattern[..pos], &pattern[pos + 1..]) } else { (pattern, "") };
     for _ in 0..10000 {
-        let name = format!("{}{:016x}{}", prefix, temp_random(), suffix);
+        let name = format!("{}{:016x}{}", prefix, crate::rand::next_u64(), suffix);
         let path = dir.join(&name);
         match fs::create_dir(&path) {
             Ok(_) => { call.ret_str(slots::RET_0, &path.to_string_lossy()); write_nil_error(call, slots::RET_1); return ExternResult::Ok; }

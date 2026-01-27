@@ -13,6 +13,7 @@ mod source;
 // Cross-platform stdlib modules
 pub mod math;
 pub mod bits;
+pub mod rand;
 pub mod bytes;
 pub mod strings;
 pub mod strconv;
@@ -47,6 +48,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     // Register cross-platform stdlib externs
     math::register_externs(registry, externs);
     bits::register_externs(registry, externs);
+    rand::register_externs(registry, externs);
     bytes::register_externs(registry, externs);
     strings::register_externs(registry, externs);
     strconv::register_externs(registry, externs);

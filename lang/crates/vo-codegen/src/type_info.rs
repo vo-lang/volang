@@ -398,16 +398,14 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
     
-    /// Get the package name for a package identifier (short name, not full path)
+    /// Get the package name for extern function registration (full path with / replaced by _)
     pub fn package_name(&self, ident: &Ident) -> Option<String> {
         let obj = self.get_use(ident);
         if self.obj_is_pkg(obj) {
             let pkg_key = self.tc_objs().lobjs[obj].pkg_name_imported();
             let pkg = &self.tc_objs().pkgs[pkg_key];
-            // Use explicit name if set, otherwise extract from path
-            pkg.name().clone().or_else(|| {
-                pkg.path().rsplit('/').next().map(|s| s.to_string())
-            })
+            // Use normalized path with / replaced by _, removing .. and . components
+            Some(crate::expr::call::normalize_pkg_path(pkg.path()))
         } else {
             None
         }

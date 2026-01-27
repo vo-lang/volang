@@ -15,7 +15,7 @@ use super::serde_toml::{TomlWriter, TomlReader};
 
 use vo_ffi_macro::vostd_extern_ctx_nostd;
 
-#[vostd_extern_ctx_nostd("toml", "marshalAny")]
+#[vostd_extern_ctx_nostd("encoding/toml", "marshalAny")]
 fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     let v_slot0 = call.arg_u64(0);
     let v_slot1 = call.arg_u64(1);
@@ -52,7 +52,7 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_extern_ctx_nostd("toml", "Unmarshal")]
+#[vostd_extern_ctx_nostd("encoding/toml", "Unmarshal")]
 fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     let toml_str = {
         let data = call.arg_bytes(0);
@@ -95,4 +95,4 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-vo_runtime::stdlib_register!(toml: marshalAny, Unmarshal);
+vo_runtime::stdlib_register!(encoding_toml: marshalAny, Unmarshal);

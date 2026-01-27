@@ -1,0 +1,63 @@
+package rand
+
+// Package rand implements pseudo-random number generators.
+// The default source is automatically seeded at program startup.
+// This is similar to Go 1.20+ behavior.
+
+// Intn returns a non-negative pseudo-random int in [0, n).
+// It panics if n <= 0.
+func Intn(n int) int
+
+// Int63n returns a non-negative pseudo-random int in [0, n).
+// It panics if n <= 0.
+func Int63n(n int) int
+
+// Int returns a non-negative pseudo-random int.
+func Int() int
+
+// Uint64 returns a pseudo-random 64-bit unsigned integer.
+func Uint64() uint64
+
+// Uint32 returns a pseudo-random 32-bit unsigned integer.
+func Uint32() uint32
+
+// Float64 returns a pseudo-random float64 in [0.0, 1.0).
+func Float64() float64
+
+// Float32 returns a pseudo-random float64 in [0.0, 1.0).
+// Note: Returns float64 for ABI simplicity (Vo treats float32 as float64 internally).
+func Float32() float64
+
+// Read fills p with random bytes. It always returns len(p) and nil error.
+func Read(p []byte) (int, error)
+
+// Perm returns a slice of n ints in [0, n) in pseudo-random order.
+func Perm(n int) []int {
+	p := make([]int, n)
+	for i := 0; i < n; i++ {
+		p[i] = i
+	}
+	Shuffle(len(p), func(i int, j int) {
+		p[i], p[j] = p[j], p[i]
+	})
+	return p
+}
+
+// Shuffle pseudo-randomizes the order of elements.
+// n is the number of elements. swap swaps elements with indexes i and j.
+func Shuffle(n int, swap func(int, int)) {
+	if n < 2 {
+		return
+	}
+	// Fisher-Yates shuffle
+	for i := n - 1; i > 0; i-- {
+		j := Intn(i + 1)
+		swap(i, j)
+	}
+}
+
+// Seed is a no-op for compatibility. The default source is automatically seeded.
+// Deprecated: As of Go 1.20, this function is a no-op.
+func Seed(seed int) {
+	// No-op - automatic seeding
+}

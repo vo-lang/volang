@@ -24,7 +24,7 @@ struct StoredModule {
     extensions: Vec<vo_runtime::ext_loader::ExtensionManifest>,
 }
 
-#[vo_extern_ctx("vox", "RunJitCapture")]
+#[vo_extern_ctx("libs/vox", "RunJitCapture")]
 fn runner_run_jit_capture(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
 
@@ -143,7 +143,7 @@ fn free_ast(id: i64) {
 
 // ============ Compile Functions ============
 
-#[vo_extern_ctx("vox", "CompileFile")]
+#[vo_extern_ctx("libs/vox", "CompileFile")]
 fn runner_compile_file(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -161,7 +161,7 @@ fn runner_compile_file(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "CompileDir")]
+#[vo_extern_ctx("libs/vox", "CompileDir")]
 fn runner_compile_dir(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -179,7 +179,7 @@ fn runner_compile_dir(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "CompileString")]
+#[vo_extern_ctx("libs/vox", "CompileString")]
 fn runner_compile_string(ctx: &mut ExternCallContext) -> ExternResult {
     let code = ctx.arg_str(slots::ARG_CODE).to_string();
     
@@ -199,7 +199,7 @@ fn runner_compile_string(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ Run Functions ============
 
-#[vo_extern_ctx("vox", "Run")]
+#[vo_extern_ctx("libs/vox", "Run")]
 fn runner_run(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     
@@ -226,7 +226,7 @@ fn runner_run(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "RunCapture")]
+#[vo_extern_ctx("libs/vox", "RunCapture")]
 fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
 
@@ -257,7 +257,7 @@ fn runner_run_capture(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "RunJit")]
+#[vo_extern_ctx("libs/vox", "RunJit")]
 fn runner_run_jit(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     
@@ -284,7 +284,7 @@ fn runner_run_jit(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "RunFile")]
+#[vo_extern_ctx("libs/vox", "RunFile")]
 fn runner_run_file(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -297,7 +297,7 @@ fn runner_run_file(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "RunFileJit")]
+#[vo_extern_ctx("libs/vox", "RunFileJit")]
 fn runner_run_file_jit(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -312,7 +312,7 @@ fn runner_run_file_jit(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ Resource Functions ============
 
-#[vo_extern_ctx("vox", "Free")]
+#[vo_extern_ctx("libs/vox", "Free")]
 fn runner_free(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     free_module(module_id);
@@ -321,7 +321,7 @@ fn runner_free(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ Info Functions ============
 
-#[vo_extern_ctx("vox", "Name")]
+#[vo_extern_ctx("libs/vox", "Name")]
 fn runner_name(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     
@@ -336,7 +336,7 @@ fn runner_name(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ Module Info Functions ============
 
-#[vo_extern_ctx("vox", "FormatBytecode")]
+#[vo_extern_ctx("libs/vox", "FormatBytecode")]
 fn runner_format_bytecode(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     
@@ -351,7 +351,7 @@ fn runner_format_bytecode(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ AST Functions ============
 
-#[vo_extern_ctx("vox", "ParseFile")]
+#[vo_extern_ctx("libs/vox", "ParseFile")]
 fn runner_parse_file(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -379,7 +379,7 @@ fn runner_parse_file(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "ParseString")]
+#[vo_extern_ctx("libs/vox", "ParseString")]
 fn runner_parse_string(ctx: &mut ExternCallContext) -> ExternResult {
     let code = ctx.arg_str(slots::ARG_CODE).to_string();
     
@@ -398,7 +398,7 @@ fn runner_parse_string(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "PrintAst")]
+#[vo_extern_ctx("libs/vox", "PrintAst")]
 fn runner_print_ast(ctx: &mut ExternCallContext) -> ExternResult {
     let node_id = ctx.arg_any_as_i64(slots::ARG_NODE);
     
@@ -424,7 +424,7 @@ fn runner_print_ast(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "FreeAst")]
+#[vo_extern_ctx("libs/vox", "FreeAst")]
 fn runner_free_ast(ctx: &mut ExternCallContext) -> ExternResult {
     let node_id = ctx.arg_any_as_i64(slots::ARG_NODE);
     free_ast(node_id);
@@ -433,7 +433,7 @@ fn runner_free_ast(ctx: &mut ExternCallContext) -> ExternResult {
 
 // ============ Bytecode I/O Functions ============
 
-#[vo_extern_ctx("vox", "SaveBytecodeText")]
+#[vo_extern_ctx("libs/vox", "SaveBytecodeText")]
 fn runner_save_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
@@ -454,7 +454,7 @@ fn runner_save_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "LoadBytecodeText")]
+#[vo_extern_ctx("libs/vox", "LoadBytecodeText")]
 fn runner_load_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
     let _path = ctx.arg_str(slots::ARG_PATH).to_string();
     
@@ -464,7 +464,7 @@ fn runner_load_bytecode_text(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "SaveBytecodeBinary")]
+#[vo_extern_ctx("libs/vox", "SaveBytecodeBinary")]
 fn runner_save_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
     let module_id = ctx.arg_any_as_i64(slots::ARG_M);
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
@@ -485,7 +485,7 @@ fn runner_save_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vo_extern_ctx("vox", "LoadBytecodeBinary")]
+#[vo_extern_ctx("libs/vox", "LoadBytecodeBinary")]
 fn runner_load_bytecode_binary(ctx: &mut ExternCallContext) -> ExternResult {
     let path = ctx.arg_str(slots::ARG_PATH).to_string();
     

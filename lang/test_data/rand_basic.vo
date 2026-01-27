@@ -1,0 +1,86 @@
+package main
+
+import (
+	"fmt"
+	"math/rand"
+)
+
+func main() {
+	// Test Intn
+	for i := 0; i < 10; i++ {
+		n := rand.Intn(100)
+		assert(n >= 0 && n < 100, "Intn should return [0, 100)")
+	}
+	
+	// Test Int
+	n := rand.Int()
+	assert(n >= 0, "Int should return non-negative")
+	
+	// Test Uint64
+	_ = rand.Uint64()
+	
+	// Test Uint32
+	u32 := rand.Uint32()
+	assert(u32 <= 0xFFFFFFFF, "Uint32 should fit in 32 bits")
+	
+	// Test Float64
+	for i := 0; i < 10; i++ {
+		f := rand.Float64()
+		assert(f >= 0.0 && f < 1.0, "Float64 should return [0.0, 1.0)")
+	}
+	
+	// Test Float32
+	for i := 0; i < 10; i++ {
+		f := rand.Float32()
+		assert(f >= 0.0 && f < 1.0, "Float32 should return [0.0, 1.0)")
+	}
+	
+	// Test Perm
+	perm := rand.Perm(5)
+	assert(len(perm) == 5, "Perm(5) should return 5 elements")
+	sum := 0
+	for _, v := range perm {
+		sum += v
+	}
+	assert(sum == 0+1+2+3+4, "Perm should contain all elements 0-4")
+	
+	// Test Shuffle
+	arr := []int{1, 2, 3, 4, 5}
+	rand.Shuffle(len(arr), func(i, j int) {
+		arr[i], arr[j] = arr[j], arr[i]
+	})
+	sum = 0
+	for _, v := range arr {
+		sum += v
+	}
+	assert(sum == 15, "Shuffle should preserve all elements")
+	
+	// Test Read
+	buf := make([]byte, 32)
+	n2, err := rand.Read(buf)
+	assert(err == nil, "Read should not error")
+	assert(n2 == 32, "Read should fill buffer")
+	
+	// Check that at least some bytes are non-zero
+	nonZero := 0
+	for _, b := range buf {
+		if b != 0 {
+			nonZero++
+		}
+	}
+	assert(nonZero > 0, "Read should produce non-zero bytes")
+	
+	// Test Seed (no-op, should not panic)
+	rand.Seed(12345)
+	
+	fmt.Println("All rand tests passed!")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
+}
+
+// Expected output:
+// All rand tests passed!
