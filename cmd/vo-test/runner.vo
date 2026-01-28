@@ -3,8 +3,10 @@ package main
 
 import (
 	"../../libs/vox"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -209,11 +211,6 @@ type TestStats struct {
 }
 
 func runTests(mode string, args []string) int {
-	if mode == "nostd" {
-		fmt.Println("[VO-TEST] nostd mode is not supported yet")
-		return 1
-	}
-
 	// Parse options
 	verbose := false
 	workers := 4  // default
@@ -303,7 +300,7 @@ func runTests(mode string, args []string) int {
 func collectTestJobs(testDir string, mode string, configs map[string]TestConfig) []TestJob {
 	jobs := []TestJob{}
 	
-	runVM := mode == "vm" || mode == "both" || mode == "gc"
+	runVM := mode == "vm" || mode == "both" || mode == "gc" || mode == "nostd"
 	runJIT := mode == "jit" || mode == "both" || mode == "gc"
 	isGCMode := mode == "gc"
 	isNoStdMode := mode == "nostd"
@@ -348,10 +345,18 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 		}
 
 		if runVM {
-			if config.shouldSkip("vm") {
+			testMode := "vm"
+			if isNoStdMode {
+				testMode = "nostd"
+			}
+			skipMode := "vm"
+			if isNoStdMode {
+				skipMode = "nostd"
+			}
+			if config.shouldSkip(skipMode) {
 				jobs = append(jobs, TestJob{
 					file: file,
-					mode: "vm",
+					mode: testMode,
 					shouldFail: false,
 					gcDebug: false,
 					index: 0,
@@ -360,7 +365,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 			} else {
 			jobs = append(jobs, TestJob{
 				file: file,
-				mode: "vm",
+				mode: testMode,
 				shouldFail: false,
 				gcDebug: gcDebug,
 				index: 0,
@@ -608,7 +613,9 @@ func runSingleTest(job TestJob) TestResult {
 
 	// Run
 	output := ""
-	if job.mode == "jit" {
+	if job.mode == "nostd" {
+		output, err = runWithVoEmbed(module)
+	} else if job.mode == "jit" {
 		output, err = vox.RunJitCapture(module)
 	} else {
 		output, err = vox.RunCapture(module)
@@ -630,6 +637,34 @@ func runSingleTest(job TestJob) TestResult {
 		errorMsg: errorMsg,
 		index: job.index,
 	}
+}
+
+func runWithVoEmbed(module vox.Module) (string, error) {
+	// Save bytecode to unique temp file
+	tempFile := fmt.Sprintf("/tmp/vo_nostd_%d.vob", time.Now().UnixNano())
+	err := vox.SaveBytecodeBinary(module, tempFile)
+	if err != nil {
+		return "", err
+	}
+
+	// Run vo-embed with the bytecode
+	cmd := exec.Command("target/debug/vo-embed", []string{tempFile})
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+
+	// Clean up temp file
+	_ = os.Remove(tempFile)
+
+	if err != nil {
+		return outputStr, err
+	}
+
+	// Check for success marker
+	if !strings.Contains(outputStr, "[VO:OK]") {
+		return outputStr, errors.New("vo-embed did not output [VO:OK]")
+	}
+
+	return outputStr, nil
 }
 
 func runShouldFailTest(job TestJob, start time.Time) TestResult {
@@ -696,8 +731,23 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 
 	runVM := mode == "vm" || mode == "both"
 	runJIT := mode == "jit" || mode == "both"
+	runNoStd := mode == "nostd"
 
 	failed := false
+
+	if runNoStd {
+		job := TestJob{
+			file: testPath,
+			mode: "nostd",
+			shouldFail: false,
+			gcDebug: false,
+		}
+		result := runSingleTest(job)
+		printSingleResult(result, verbose)
+		if !result.passed {
+			failed = true
+		}
+	}
 
 	if runVM {
 		job := TestJob{
@@ -786,6 +836,8 @@ func calculateStats(results []TestResult) TestStats {
 				stats.vmSkipped++
 			} else if r.mode == "jit" {
 				stats.jitSkipped++
+			} else if r.mode == "nostd" {
+				stats.nostdSkipped++
 			}
 			continue
 		}
@@ -795,12 +847,16 @@ func calculateStats(results []TestResult) TestStats {
 				stats.vmPassed++
 			} else if r.mode == "jit" {
 				stats.jitPassed++
+			} else if r.mode == "nostd" {
+				stats.nostdPassed++
 			}
 		} else {
 			if r.mode == "vm" || r.mode == "should_fail" {
 				stats.vmFailed++
 			} else if r.mode == "jit" {
 				stats.jitFailed++
+			} else if r.mode == "nostd" {
+				stats.nostdFailed++
 			}
 			stats.failedTests = append(stats.failedTests, displayPath(r.file)+" ["+r.mode+"]")
 		}

@@ -28,10 +28,18 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 VO_TEST_BIN = PROJECT_ROOT / 'target' / 'debug' / 'vo-test'
 
 
-def ensure_vo_test_built():
+def ensure_vo_test_built(nostd=False):
     """Build vo-test if it doesn't exist or is outdated."""
+    packages = ['vo-test', 'vo-vox']
+    if nostd:
+        packages.append('vo-embed')
+    
+    cmd = ['cargo', 'build']
+    for pkg in packages:
+        cmd.extend(['-p', pkg])
+    
     result = subprocess.run(
-        ['cargo', 'build', '-p', 'vo-test', '-p', 'vo-vox'],
+        cmd,
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True
@@ -44,7 +52,8 @@ def ensure_vo_test_built():
 
 def run_test(args):
     """Run tests using vo-test."""
-    ensure_vo_test_built()
+    nostd = 'nostd' in args
+    ensure_vo_test_built(nostd=nostd)
     
     # Forward all arguments to vo-test
     cmd = [str(VO_TEST_BIN)] + args
