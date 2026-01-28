@@ -8,7 +8,7 @@ import "fmt"
 func test1() {
 	fmt.Println("Test 1: integer overflow")
 	
-	var maxInt int = 9223372036854775807  // max int64
+	var maxInt int64 = 9223372036854775807  // max int64
 	overflow := maxInt + 1
 	assert(overflow < 0, "overflow should wrap to negative")
 }
@@ -17,7 +17,7 @@ func test1() {
 func test2() {
 	fmt.Println("Test 2: integer underflow")
 	
-	var minInt int = -9223372036854775808  // min int64
+	var minInt int64 = -9223372036854775808  // min int64
 	underflow := minInt - 1
 	assert(underflow > 0, "underflow should wrap to positive")
 }

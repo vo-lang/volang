@@ -61,7 +61,7 @@ func testRightShiftSigned() {
 	assert(result == -4, "right shift signed")
 	
 	// Unsigned doesn't preserve sign
-	var y uint = 0xFFFFFFFF_FFFFFFFF
+	var y uint64 = 0xFFFFFFFF_FFFFFFFF
 	result2 := y >> 60
 	assert(result2 == 0xF, "right shift unsigned")
 }

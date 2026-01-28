@@ -5,6 +5,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
 import { fileURLToPath } from "url";
+import { parse as parseToml } from "smol-toml";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,19 +14,36 @@ import init, { compileAndRun, version } from "./pkg/vo_web.js";
 const voWeb = { compileAndRun, version };
 
 const TEST_DIR = join(__dirname, "../../test_data");
+const CONFIG_PATH = join(TEST_DIR, "_config.toml");
 
-// Tests to skip in WASM (require std, native externs, GC debug, or edge cases)
-const SKIP_TESTS = new Set([
-  "gc_basic.vo",
-  "gc_closure_capture.vo",
-  "os_simple_test.vo",
-  "os_test.vo",
-  "stdlib/regexp.vo",
-  "init_call_error.vo",
-  "select_stmt_assert_fail.vo",
-  "bug_ptr_recv_named_slice.vo",  // tests compile-time rejection
-  "goto_stmt.vo",  // goto edge cases
-]);
+// Load test config and build skip/should_fail sets
+function loadConfig() {
+  const skipTests = new Set();
+  const shouldFailTests = new Set();
+  
+  if (!existsSync(CONFIG_PATH)) {
+    return { skipTests, shouldFailTests };
+  }
+  
+  const configText = readFileSync(CONFIG_PATH, "utf-8");
+  const config = parseToml(configText);
+  
+  for (const test of config.tests || []) {
+    const file = test.file;
+    // Skip if wasm is in skip list
+    if (test.skip && test.skip.includes("wasm")) {
+      skipTests.add(file);
+    }
+    // should_fail tests
+    if (test.should_fail) {
+      shouldFailTests.add(file);
+    }
+  }
+  
+  return { skipTests, shouldFailTests };
+}
+
+const { skipTests: SKIP_TESTS, shouldFailTests: SHOULD_FAIL_TESTS } = loadConfig();
 
 // Colors
 const GREEN = "\x1b[32m";
@@ -61,9 +79,15 @@ async function runTest(filePath) {
   const source = readFileSync(filePath, "utf-8");
   const relPath = relative(TEST_DIR, filePath);
   
-  // Skip known unsupported tests
+  // Skip tests marked with skip=["wasm"] in config
   if (SKIP_TESTS.has(relPath)) {
     console.log(`  ${YELLOW}⊘${NC} ${relPath} [wasm skipped]`);
+    return "skip";
+  }
+  
+  // Handle should_fail tests
+  if (SHOULD_FAIL_TESTS.has(relPath)) {
+    console.log(`  ${YELLOW}⊘${NC} ${relPath} [should_fail]`);
     return "skip";
   }
   

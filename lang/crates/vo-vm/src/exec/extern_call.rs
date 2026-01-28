@@ -3,6 +3,8 @@
 //! Uses ExternRegistry from vo-runtime-core for extern function dispatch.
 
 #[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

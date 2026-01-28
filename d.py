@@ -73,7 +73,11 @@ def main():
     rest_args = sys.argv[2:]
     
     if command == 'test':
-        run_test(rest_args)
+        # wasm tests use d_py.py (node-based test runner)
+        if rest_args and rest_args[0] == 'wasm':
+            run_other_command(command, rest_args)
+        else:
+            run_test(rest_args)
     elif command in ('bench', 'loc', 'clean', 'play'):
         run_other_command(command, rest_args)
     elif command in ('-h', '--help', 'help'):

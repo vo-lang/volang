@@ -1304,21 +1304,120 @@ file = "skill_debug_vo/2026_01_23_value_ptr_receiver_mix.vo"
 
 [[tests]]
 file = "os_simple_test.vo"
-skip = ["nostd"]
-reason = "os module requires std"
+skip = ["nostd", "wasm"]
+reason = "os module requires std/native"
 
 [[tests]]
 file = "os_test.vo"
-skip = ["nostd"]
-reason = "os module requires std"
+skip = ["nostd", "wasm"]
+reason = "os module requires std/native"
+
+[[tests]]
+file = "os_pipe_chtimes.vo"
+skip = ["wasm"]
+reason = "os module requires native"
 
 [[tests]]
 file = "stdlib/regexp.vo"
-skip = ["nostd"]
+skip = ["nostd", "wasm"]
 reason = "regexp module requires std"
 
 [[tests]]
-file = "skill_debug_vo/2026_01_28_1411_island_port_capture.vo"
+file = "stdlib/time.vo"
+skip = ["wasm"]
+reason = "time module uses unreachable in wasm"
+
+[[tests]]
+file = "gc_basic.vo"
+skip = ["wasm"]
+reason = "GC debug not available in wasm"
+
+[[tests]]
+file = "gc_closure_capture.vo"
+skip = ["wasm"]
+reason = "GC debug not available in wasm"
+
+[[tests]]
+file = "exec_basic.vo"
+skip = ["wasm"]
+reason = "exec requires native externs"
+
+[[tests]]
+file = "exec_comprehensive.vo"
+skip = ["wasm"]
+reason = "exec requires native externs"
+
+[[tests]]
+file = "net/net_conn.vo"
+skip = ["wasm"]
+reason = "net requires native externs"
+
+[[tests]]
+file = "rand_basic.vo"
+skip = ["wasm"]
+reason = "rand requires native externs"
+
+[[tests]]
+file = "filepath_comprehensive.vo"
+skip = ["wasm"]
+reason = "filesystem operations not supported in wasm"
+
+[[tests]]
+file = "island_basic.vo"
+skip = ["wasm"]
+reason = "island/goroutine not supported in wasm"
+
+[[tests]]
+file = "island_nil_values_transfer.vo"
+skip = ["wasm"]
+reason = "island/goroutine not supported in wasm"
+
+[[tests]]
+file = "island_port_comm.vo"
+skip = ["wasm"]
+reason = "island/goroutine not supported in wasm"
+
+[[tests]]
+file = "island_sendable_types.vo"
+skip = ["wasm"]
+reason = "island/goroutine not supported in wasm"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1340_port_recv_ok.vo"
+skip = ["wasm"]
+reason = "port requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1342_port_nested_struct.vo"
+skip = ["wasm"]
+reason = "port requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1405_island_map_transfer.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1406_island_pointer_transfer.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1409_island_bidirectional.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1410_island_multiple.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
 
 [[tests]]
 file = "skill_debug_vo/2026_01_28_1420_empty_struct_slice.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1411_island_port_capture.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
