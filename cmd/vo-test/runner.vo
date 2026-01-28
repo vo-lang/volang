@@ -787,7 +787,9 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 func printSingleResult(result TestResult, verbose bool) {
 	status := statusSymbol(result)
 	fmt.Println(status + " " + result.file + " ["+result.mode+"] ("+formatDuration(result.elapsedMs)+")")
-	if verbose && result.output != "" {
+	
+	// Single file test: always show output
+	if result.output != "" {
 		_, _ = os.Stdout.WriteString(result.output)
 	}
 	
