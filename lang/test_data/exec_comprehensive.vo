@@ -1,0 +1,200 @@
+package main
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+func main() {
+	testLookPath()
+	testCommandOutput()
+	testCommandRun()
+	testCombinedOutput()
+	testCommandDir()
+	testCommandEnv()
+	testCommandString()
+	testProcessState()
+	testStartWait()
+	
+	fmt.Println("All exec tests passed!")
+}
+
+func testLookPath() {
+	// Find common commands
+	path, err := exec.LookPath("ls")
+	assert(err == nil, "LookPath ls")
+	assert(len(path) > 0, "LookPath ls path not empty")
+	assert(strings.Contains(path, "ls"), "LookPath ls contains ls")
+	
+	path, err = exec.LookPath("echo")
+	assert(err == nil, "LookPath echo")
+	assert(len(path) > 0, "LookPath echo path not empty")
+	
+	path, err = exec.LookPath("sh")
+	assert(err == nil, "LookPath sh")
+	assert(len(path) > 0, "LookPath sh path not empty")
+	
+	// Nonexistent command
+	_, err = exec.LookPath("nonexistent_command_xyz_12345")
+	assert(err != nil, "LookPath nonexistent should fail")
+	
+	// Absolute path
+	path, err = exec.LookPath("/bin/sh")
+	assert(err == nil, "LookPath /bin/sh")
+	assert(path == "/bin/sh", "LookPath /bin/sh returns same path")
+}
+
+func testCommandOutput() {
+	// Simple echo
+	cmd := exec.Command("echo", []string{"hello"})
+	output, err := cmd.Output()
+	assert(err == nil, "echo hello")
+	assert(strings.TrimSpace(string(output)) == "hello", "echo hello output")
+	
+	// Multiple arguments
+	cmd = exec.Command("echo", []string{"hello", "world"})
+	output, err = cmd.Output()
+	assert(err == nil, "echo hello world")
+	assert(strings.TrimSpace(string(output)) == "hello world", "echo hello world output")
+	
+	// Empty args
+	cmd = exec.Command("echo", nil)
+	output, err = cmd.Output()
+	assert(err == nil, "echo no args")
+	assert(strings.TrimSpace(string(output)) == "", "echo no args output")
+	
+	// Command with special chars
+	cmd = exec.Command("echo", []string{"a b c"})
+	output, err = cmd.Output()
+	assert(err == nil, "echo with spaces")
+	assert(strings.TrimSpace(string(output)) == "a b c", "echo with spaces output")
+}
+
+func testCommandRun() {
+	// Successful command
+	cmd := exec.Command("true", nil)
+	err := cmd.Run()
+	assert(err == nil, "true should succeed")
+	
+	// Failed command
+	cmd = exec.Command("false", nil)
+	err = cmd.Run()
+	assert(err != nil, "false should fail")
+	
+	// Check exit error
+	exitErr, ok := err.(*exec.ExitError)
+	assert(ok, "error should be ExitError")
+	assert(exitErr.ProcessState != nil, "ExitError should have ProcessState")
+	assert(!exitErr.ProcessState.Success(), "false should not be success")
+}
+
+func testCombinedOutput() {
+	// Stdout only
+	cmd := exec.Command("echo", []string{"stdout"})
+	output, err := cmd.CombinedOutput()
+	assert(err == nil, "CombinedOutput stdout only")
+	assert(strings.Contains(string(output), "stdout"), "CombinedOutput contains stdout")
+	
+	// Both stdout and stderr
+	cmd = exec.Command("sh", []string{"-c", "echo out; echo err >&2"})
+	output, err = cmd.CombinedOutput()
+	assert(err == nil, "CombinedOutput both")
+	assert(strings.Contains(string(output), "out"), "CombinedOutput contains out")
+	assert(strings.Contains(string(output), "err"), "CombinedOutput contains err")
+}
+
+func testCommandDir() {
+	// Set working directory
+	cmd := exec.Command("pwd", nil)
+	cmd.Dir = "/tmp"
+	output, err := cmd.Output()
+	assert(err == nil, "pwd in /tmp")
+	assert(strings.TrimSpace(string(output)) == "/tmp", "pwd output is /tmp")
+	
+	// Different directory
+	cmd = exec.Command("pwd", nil)
+	cmd.Dir = "/"
+	output, err = cmd.Output()
+	assert(err == nil, "pwd in /")
+	assert(strings.TrimSpace(string(output)) == "/", "pwd output is /")
+}
+
+func testCommandEnv() {
+	// Set custom environment
+	cmd := exec.Command("sh", []string{"-c", "echo $MY_VAR"})
+	cmd.Env = []string{"MY_VAR=hello123"}
+	output, err := cmd.Output()
+	assert(err == nil, "env var")
+	assert(strings.TrimSpace(string(output)) == "hello123", "env var output")
+	
+	// Multiple env vars
+	cmd = exec.Command("sh", []string{"-c", "echo $A $B"})
+	cmd.Env = []string{"A=first", "B=second"}
+	output, err = cmd.Output()
+	assert(err == nil, "multi env var")
+	assert(strings.TrimSpace(string(output)) == "first second", "multi env var output")
+}
+
+func testCommandString() {
+	cmd := exec.Command("ls", []string{"-la", "/tmp"})
+	s := cmd.String()
+	assert(strings.Contains(s, "ls"), "String contains ls")
+	assert(strings.Contains(s, "-la"), "String contains -la")
+	assert(strings.Contains(s, "/tmp"), "String contains /tmp")
+}
+
+func testProcessState() {
+	// Successful exit
+	cmd := exec.Command("true", nil)
+	cmd.Run()
+	assert(cmd.ProcessState != nil, "ProcessState not nil")
+	assert(cmd.ProcessState.Exited(), "ProcessState Exited")
+	assert(cmd.ProcessState.Success(), "ProcessState Success")
+	assert(cmd.ProcessState.ExitCode() == 0, "ProcessState ExitCode 0")
+	
+	// Failed exit
+	cmd = exec.Command("sh", []string{"-c", "exit 42"})
+	cmd.Run()
+	assert(cmd.ProcessState != nil, "ProcessState not nil for exit 42")
+	assert(cmd.ProcessState.Exited(), "ProcessState Exited for exit 42")
+	assert(!cmd.ProcessState.Success(), "ProcessState not Success for exit 42")
+	assert(cmd.ProcessState.ExitCode() == 42, "ProcessState ExitCode 42")
+	
+	// Pid
+	assert(cmd.ProcessState.Pid() > 0, "ProcessState Pid > 0")
+	
+	// String representation
+	s := cmd.ProcessState.String()
+	assert(len(s) > 0, "ProcessState String not empty")
+}
+
+func testStartWait() {
+	// Start then wait
+	cmd := exec.Command("echo", []string{"async"})
+	err := cmd.Start()
+	assert(err == nil, "Start")
+	assert(cmd.Process != nil, "Process not nil after Start")
+	assert(cmd.Process.Pid > 0, "Process Pid > 0")
+	
+	err = cmd.Wait()
+	assert(err == nil, "Wait")
+	assert(cmd.ProcessState != nil, "ProcessState after Wait")
+	assert(cmd.ProcessState.Success(), "Success after Wait")
+	
+	// Double wait should error
+	err = cmd.Wait()
+	assert(err != nil, "Double Wait should error")
+	
+	// Start already started should error
+	cmd = exec.Command("true", nil)
+	cmd.Start()
+	err = cmd.Start()
+	assert(err != nil, "Double Start should error")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("Assertion failed: " + msg)
+	}
+}

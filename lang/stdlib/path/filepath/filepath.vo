@@ -1,0 +1,763 @@
+package filepath
+
+import (
+	"errors"
+	"os"
+	"strings"
+)
+
+// Separator is the OS-specific path separator character.
+const Separator = '/'
+
+// ListSeparator is the OS-specific path list separator character.
+const ListSeparator = ':'
+
+// ErrBadPattern indicates a pattern was malformed.
+var ErrBadPattern = errors.New("syntax error in pattern")
+
+// SkipDir is used as a return value from WalkDirFunc to indicate that
+// the directory named in the call is to be skipped.
+var SkipDir = errors.New("skip this directory")
+
+// SkipAll is used as a return value from WalkDirFunc to indicate that
+// all remaining files are to be skipped.
+var SkipAll = errors.New("skip everything and stop the walk")
+
+// Clean returns the shortest path name equivalent to path.
+// It applies the following rules iteratively until no further processing can be done:
+//
+//  1. Replace multiple Separator elements with a single one.
+//  2. Eliminate each . path name element (the current directory).
+//  3. Eliminate each inner .. path name element (the parent directory)
+//     along with the non-.. element that precedes it.
+//  4. Eliminate .. elements that begin a rooted path:
+//     that is, replace "/.." by "/" at the beginning of a path.
+//
+// The returned path ends in a slash only if it represents a root directory.
+//
+// If the result is empty, Clean returns ".".
+func Clean(path string) string {
+	if path == "" {
+		return "."
+	}
+
+	rooted := path[0] == '/'
+	n := len(path)
+
+	// Invariants:
+	//  - reading from path; r is index of next byte to process.
+	//  - writing to buf; w is index of next byte to write.
+	//  - dotdot is index in buf where .. must stop, either because
+	//    it is the leading slash or it is a leading ../../.. prefix.
+	buf := make([]byte, n)
+	r := 0
+	w := 0
+	dotdot := 0
+
+	if rooted {
+		buf[0] = '/'
+		r = 1
+		w = 1
+		dotdot = 1
+	}
+
+	for r < n {
+		if path[r] == '/' {
+			// empty path element
+			r++
+		} else if path[r] == '.' && (r+1 == n || path[r+1] == '/') {
+			// . element
+			r++
+		} else if path[r] == '.' && path[r+1] == '.' && (r+2 == n || path[r+2] == '/') {
+			// .. element: remove to last /
+			r += 2
+			if w > dotdot {
+				// can backtrack
+				w--
+				for w > dotdot && buf[w] != '/' {
+					w--
+				}
+			} else if !rooted {
+				// cannot backtrack, but not rooted, so append .. element.
+				if w > 0 {
+					buf[w] = '/'
+					w++
+				}
+				buf[w] = '.'
+				w++
+				buf[w] = '.'
+				w++
+				dotdot = w
+			}
+		} else {
+			// real path element.
+			// add slash if needed
+			if rooted && w != 1 || !rooted && w != 0 {
+				buf[w] = '/'
+				w++
+			}
+			// copy element
+			for r < n && path[r] != '/' {
+				buf[w] = path[r]
+				w++
+				r++
+			}
+		}
+	}
+
+	// Turn empty string into "."
+	if w == 0 {
+		return "."
+	}
+
+	return string(buf[:w])
+}
+
+// ToSlash returns the result of replacing each separator character in path
+// with a slash ('/') character.
+func ToSlash(path string) string {
+	if Separator == '/' {
+		return path
+	}
+	return strings.ReplaceAll(path, string([]byte{Separator}), "/")
+}
+
+// FromSlash returns the result of replacing each slash ('/') character in path
+// with a separator character.
+func FromSlash(path string) string {
+	if Separator == '/' {
+		return path
+	}
+	return strings.ReplaceAll(path, "/", string([]byte{Separator}))
+}
+
+// SplitList splits a list of paths joined by the OS-specific ListSeparator.
+func SplitList(path string) []string {
+	if path == "" {
+		return []string{}
+	}
+	return strings.Split(path, string([]byte{ListSeparator}))
+}
+
+// Split splits path immediately following the final Separator,
+// separating it into a directory and file name component.
+// If there is no Separator in path, Split returns an empty dir
+// and file set to path.
+// The returned values have the property that path = dir+file.
+func Split(path string) (dir, file string) {
+	i := len(path) - 1
+	for i >= 0 && path[i] != Separator {
+		i--
+	}
+	return path[:i+1], path[i+1:]
+}
+
+// Join joins any number of path elements into a single path,
+// separating them with an OS specific Separator.
+// Empty elements are ignored.
+// The result is Cleaned.
+func Join(elem []string) string {
+	size := 0
+	for _, e := range elem {
+		size += len(e)
+	}
+	if size == 0 {
+		return ""
+	}
+
+	buf := make([]byte, 0, size+len(elem)-1)
+	for _, e := range elem {
+		if e == "" {
+			continue
+		}
+		if len(buf) > 0 || e == "" {
+			buf = append(buf, Separator)
+		}
+		buf = append(buf, e...)
+	}
+	return Clean(string(buf))
+}
+
+// Ext returns the file name extension used by path.
+// The extension is the suffix beginning at the final dot
+// in the final element of path; it is empty if there is no dot.
+func Ext(path string) string {
+	for i := len(path) - 1; i >= 0 && path[i] != Separator; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+	}
+	return ""
+}
+
+// Base returns the last element of path.
+// Trailing path separators are removed before extracting the last element.
+// If the path is empty, Base returns ".".
+// If the path consists entirely of separators, Base returns a single separator.
+func Base(path string) string {
+	if path == "" {
+		return "."
+	}
+	// Strip trailing slashes.
+	for len(path) > 0 && path[len(path)-1] == Separator {
+		path = path[:len(path)-1]
+	}
+	// Find the last element
+	i := len(path) - 1
+	for i >= 0 && path[i] != Separator {
+		i--
+	}
+	if i >= 0 {
+		path = path[i+1:]
+	}
+	// If empty now, it had only slashes.
+	if path == "" {
+		return string([]byte{Separator})
+	}
+	return path
+}
+
+// Dir returns all but the last element of path, typically the path's directory.
+// After dropping the final element, Dir calls Clean on the path and trailing
+// slashes are removed.
+// If the path is empty, Dir returns ".".
+// If the path consists entirely of separators, Dir returns a single separator.
+// The returned path does not end in a separator unless it is the root directory.
+func Dir(path string) string {
+	dir, _ := Split(path)
+	return Clean(dir)
+}
+
+// VolumeName returns leading volume name.
+// Given "C:\foo\bar" it returns "C:" on Windows.
+// Given "\\host\share\foo" it returns "\\host\share".
+// On other platforms it returns "".
+func VolumeName(path string) string {
+	// On Unix, there is no volume name
+	return ""
+}
+
+// IsAbs reports whether the path is absolute.
+func IsAbs(path string) bool {
+	return len(path) > 0 && path[0] == Separator
+}
+
+// Abs returns an absolute representation of path.
+// If the path is not absolute it will be joined with the current
+// working directory to turn it into an absolute path.
+func Abs(path string) (string, error) {
+	if IsAbs(path) {
+		return Clean(path), nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return Join([]string{wd, path}), nil
+}
+
+// Rel returns a relative path that is lexically equivalent to targpath when
+// joined to basepath with an intervening separator.
+// On success, the returned path will always be relative to basepath.
+// Rel returns an error if targpath can't be made relative to basepath.
+func Rel(basepath, targpath string) (string, error) {
+	baseClean := Clean(basepath)
+	targClean := Clean(targpath)
+
+	if baseClean == targClean {
+		return ".", nil
+	}
+
+	// Check if both are absolute or both are relative
+	baseAbs := IsAbs(baseClean)
+	targAbs := IsAbs(targClean)
+	if baseAbs != targAbs {
+		return "", errors.New("Rel: can't make " + targpath + " relative to " + basepath)
+	}
+
+	// Split the paths into components
+	baseList := splitPath(baseClean)
+	targList := splitPath(targClean)
+
+	// Find common prefix length
+	commonLen := 0
+	for commonLen < len(baseList) && commonLen < len(targList) {
+		if baseList[commonLen] != targList[commonLen] {
+			break
+		}
+		commonLen++
+	}
+
+	// Build the relative path
+	// Go up from base to common ancestor
+	var rel []string
+	for i := commonLen; i < len(baseList); i++ {
+		rel = append(rel, "..")
+	}
+	// Go down from common ancestor to target
+	for i := commonLen; i < len(targList); i++ {
+		rel = append(rel, targList[i])
+	}
+
+	if len(rel) == 0 {
+		return ".", nil
+	}
+	return Join(rel), nil
+}
+
+// splitPath splits a clean path into components.
+func splitPath(path string) []string {
+	if path == "" || path == "." {
+		return nil
+	}
+	if path == "/" {
+		return []string{"/"}
+	}
+
+	var parts []string
+	if path[0] == '/' {
+		parts = append(parts, "/")
+		path = path[1:]
+	}
+
+	for len(path) > 0 {
+		i := strings.IndexByte(path, Separator)
+		if i < 0 {
+			if path != "" {
+				parts = append(parts, path)
+			}
+			break
+		}
+		if i > 0 {
+			parts = append(parts, path[:i])
+		}
+		path = path[i+1:]
+	}
+	return parts
+}
+
+// EvalSymlinks returns the path name after the evaluation of any symbolic links.
+func EvalSymlinks(path string) (string, error) {
+	return evalSymlinks(path)
+}
+
+// Match reports whether name matches the shell pattern.
+// The pattern syntax is:
+//
+//	pattern:
+//		{ term }
+//	term:
+//		'*'         matches any sequence of non-Separator characters
+//		'?'         matches any single non-Separator character
+//		'[' [ '^' ] { character-range } ']'
+//		            character class (must be non-empty)
+//		c           matches character c (c != '*', '?', '\\', '[')
+//		'\\' c      matches character c
+//
+//	character-range:
+//		c           matches character c (c != '\\', '-', ']')
+//		'\\' c      matches character c
+//		lo '-' hi   matches character c for lo <= c <= hi
+func Match(pattern, name string) (matched bool, err error) {
+	return matchPattern(pattern, name)
+}
+
+// matchPattern implements the pattern matching algorithm.
+func matchPattern(pattern, name string) (bool, error) {
+Pattern:
+	for len(pattern) > 0 {
+		var star bool
+		var chunk string
+		star, chunk, pattern = scanChunk(pattern)
+		if star && chunk == "" {
+			// Trailing * matches rest of string unless it has a /
+			return strings.IndexByte(name, Separator) < 0, nil
+		}
+		// Look for match at current position
+		t, ok, err := matchChunk(chunk, name)
+		if ok && (len(t) == 0 || len(pattern) > 0) {
+			name = t
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if star {
+			// Look for match skipping i+1 bytes
+			for i := 0; i < len(name) && name[i] != Separator; i++ {
+				t, ok, err := matchChunk(chunk, name[i+1:])
+				if ok {
+					// If we're the last chunk, make sure we've exhausted the name
+					if len(pattern) == 0 && len(t) > 0 {
+						continue
+					}
+					name = t
+					continue Pattern
+				}
+				if err != nil {
+					return false, err
+				}
+			}
+		}
+		return false, nil
+	}
+	return len(name) == 0, nil
+}
+
+// scanChunk gets the next segment of pattern.
+func scanChunk(pattern string) (star bool, chunk, rest string) {
+	for len(pattern) > 0 && pattern[0] == '*' {
+		pattern = pattern[1:]
+		star = true
+	}
+	inrange := false
+	var i int
+	for i = 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if c == '\\' {
+			if i+1 < len(pattern) {
+				i++
+			}
+		} else if c == '[' {
+			inrange = true
+		} else if c == ']' {
+			inrange = false
+		} else if c == '*' {
+			if !inrange {
+				break
+			}
+		}
+	}
+	return star, pattern[:i], pattern[i:]
+}
+
+// matchChunk checks if chunk matches the beginning of s.
+func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+	for len(chunk) > 0 {
+		if len(s) == 0 {
+			return "", false, nil
+		}
+		c := chunk[0]
+		chunk = chunk[1:]
+		switch c {
+		case '[':
+			// Character class
+			r := s[0]
+			s = s[1:]
+			negated := false
+			if len(chunk) > 0 && chunk[0] == '^' {
+				negated = true
+				chunk = chunk[1:]
+			}
+			match := false
+			nrange := 0
+			for {
+				if len(chunk) == 0 {
+					return "", false, ErrBadPattern
+				}
+				if chunk[0] == ']' && nrange > 0 {
+					chunk = chunk[1:]
+					break
+				}
+				var lo, hi byte
+				lo, chunk, err = getEsc(chunk)
+				if err != nil {
+					return "", false, err
+				}
+				hi = lo
+				if len(chunk) > 0 && chunk[0] == '-' {
+					chunk = chunk[1:]
+					if len(chunk) == 0 {
+						return "", false, ErrBadPattern
+					}
+					hi, chunk, err = getEsc(chunk)
+					if err != nil {
+						return "", false, err
+					}
+				}
+				if lo <= r && r <= hi {
+					match = true
+				}
+				nrange++
+			}
+			if match == negated {
+				return "", false, nil
+			}
+		case '?':
+			if s[0] == Separator {
+				return "", false, nil
+			}
+			s = s[1:]
+		case '\\':
+			if len(chunk) == 0 {
+				return "", false, ErrBadPattern
+			}
+			if chunk[0] != s[0] {
+				return "", false, nil
+			}
+			s = s[1:]
+			chunk = chunk[1:]
+		default:
+			if c != s[0] {
+				return "", false, nil
+			}
+			s = s[1:]
+		}
+	}
+	return s, true, nil
+}
+
+// getEsc gets a possibly escaped character.
+func getEsc(chunk string) (byte, string, error) {
+	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
+		return 0, "", ErrBadPattern
+	}
+	if chunk[0] == '\\' {
+		chunk = chunk[1:]
+		if len(chunk) == 0 {
+			return 0, "", ErrBadPattern
+		}
+	}
+	return chunk[0], chunk[1:], nil
+}
+
+// Glob returns the names of all files matching pattern.
+// The pattern may describe hierarchical names such as /usr/*/bin/ed
+// (assuming the Separator is '/').
+//
+// Glob ignores file system errors such as I/O errors reading directories.
+// The only possible returned error is ErrBadPattern.
+func Glob(pattern string) (matches []string, err error) {
+	return glob(pattern)
+}
+
+// glob is the implementation of Glob.
+func glob(pattern string) ([]string, error) {
+	// Check pattern is well-formed
+	if _, err := Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if !hasMeta(pattern) {
+		_, err := os.Lstat(pattern)
+		if err != nil {
+			return nil, nil
+		}
+		return []string{pattern}, nil
+	}
+
+	dir, file := Split(pattern)
+	if dir == "" {
+		dir = "."
+	}
+	dir = Clean(dir)
+
+	if !hasMeta(dir) {
+		return globDir(dir, file, nil)
+	}
+
+	// Recursively handle directory patterns
+	m, err := glob(dir)
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	for _, d := range m {
+		matches, err = globDir(d, file, matches)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return matches, nil
+}
+
+// globDir globs a single directory.
+func globDir(dir, pattern string, matches []string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Ignore I/O errors per spec
+		return matches, nil
+	}
+	for _, e := range entries {
+		n := e.Name()
+		matched, err := Match(pattern, n)
+		if err != nil {
+			return matches, err
+		}
+		if matched {
+			matches = append(matches, Join([]string{dir, n}))
+		}
+	}
+	return matches, nil
+}
+
+// hasMeta reports whether path contains any of the magic characters
+// recognized by Match.
+func hasMeta(path string) bool {
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c == '*' || c == '?' || c == '[' || c == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// WalkFunc is the type of the function called by Walk to visit each
+// file or directory.
+type WalkFunc func(path string, info *os.FileInfo, err error) error
+
+// Walk walks the file tree rooted at root, calling fn for each file or
+// directory in the tree, including root.
+//
+// All errors that arise visiting files and directories are filtered by fn.
+// Walk does not follow symbolic links.
+//
+// Walk is less efficient than WalkDir because it calls os.Lstat on every
+// visited file or directory.
+func Walk(root string, fn WalkFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		// Call fn to let it decide what to do with the error
+		err = fn(root, nil, err)
+	} else {
+		err = walk(root, &info, fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
+}
+
+// walk recursively descends path, calling fn.
+func walk(path string, info *os.FileInfo, fn WalkFunc) error {
+	if !info.IsDir() {
+		return fn(path, info, nil)
+	}
+
+	// Call fn for the directory first
+	err := fn(path, info, nil)
+	if err != nil {
+		if err == SkipDir {
+			return nil
+		}
+		return err
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		// Second call, to report ReadDir error
+		err = fn(path, info, err)
+		if err != nil {
+			if err == SkipDir {
+				return nil
+			}
+			return err
+		}
+	}
+
+	for _, entry := range entries {
+		entryPath := Join([]string{path, entry.Name()})
+		entryInfo, err := os.Lstat(entryPath)
+		if err != nil {
+			err = fn(entryPath, nil, err)
+			if err != nil {
+				if err == SkipDir {
+					continue
+				}
+				return err
+			}
+		} else {
+			err = walk(entryPath, &entryInfo, fn)
+			if err != nil {
+				if err == SkipDir {
+					continue
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// WalkDirFunc is the type of the function called by WalkDir to visit
+// each file or directory.
+type WalkDirFunc func(path string, d *os.DirEntry, err error) error
+
+// WalkDir walks the file tree rooted at root, calling fn for each file or
+// directory in the tree, including root.
+//
+// All errors that arise visiting files and directories are filtered by fn.
+// The files are walked in lexical order.
+// WalkDir does not follow symbolic links.
+//
+// WalkDir calls fn with paths that use the separator character appropriate
+// for the operating system.
+func WalkDir(root string, fn WalkDirFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		err = fn(root, nil, err)
+	} else {
+		d := fileInfoToDirEntry(&info)
+		err = walkDir(root, &d, fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
+}
+
+// walkDir recursively descends path, calling fn.
+func walkDir(path string, d *os.DirEntry, fn WalkDirFunc) error {
+	if !d.IsDir() {
+		return fn(path, d, nil)
+	}
+
+	// Call fn for the directory first
+	err := fn(path, d, nil)
+	if err != nil {
+		if err == SkipDir {
+			return nil
+		}
+		return err
+	}
+
+	entries, readErr := os.ReadDir(path)
+	if readErr != nil {
+		// Second call, to report ReadDir error
+		err = fn(path, d, readErr)
+		if err != nil {
+			if err == SkipDir {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+
+	for _, entry := range entries {
+		entryPath := Join([]string{path, entry.Name()})
+		err = walkDir(entryPath, &entry, fn)
+		if err != nil {
+			if err == SkipDir || err == SkipAll {
+				if err == SkipAll {
+					return err
+				}
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// fileInfoToDirEntry converts FileInfo to DirEntry.
+func fileInfoToDirEntry(info *os.FileInfo) os.DirEntry {
+	return os.DirEntry{
+		name:  info.Name(),
+		isDir: info.IsDir(),
+		mode:  info.Mode(),
+	}
+}
+
+// Native function for EvalSymlinks - needs to follow symlinks and resolve path.
+func evalSymlinks(path string) (string, error)

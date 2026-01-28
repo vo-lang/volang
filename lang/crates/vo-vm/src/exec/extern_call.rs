@@ -46,9 +46,10 @@ pub fn exec_call_extern(
     let arg_count = inst.flags as u16;
 
     if extern_id as usize >= externs.len() {
+        *fiber_panic_msg = Some(format!("extern function id {} out of range", extern_id));
         return ExecResult::Panic;
     }
-    let _extern_def = &externs[extern_id as usize];
+    let extern_def = &externs[extern_id as usize];
     let dst = inst.a;
 
     // Call through ExternRegistry using ExternCall API
@@ -81,7 +82,15 @@ pub fn exec_call_extern(
         ExternResult::Yield => ExecResult::Yield,
         ExternResult::Block => ExecResult::Block,
         ExternResult::Panic(msg) => {
-            *fiber_panic_msg = Some(msg);
+            // Enhance error message with function name if it's a "not found" error
+            if msg.contains("not found") || msg.contains("not registered") {
+                *fiber_panic_msg = Some(format!(
+                    "extern function '{}' (id={}) not registered",
+                    extern_def.name, extern_id
+                ));
+            } else {
+                *fiber_panic_msg = Some(msg);
+            }
             ExecResult::Panic
         }
     }

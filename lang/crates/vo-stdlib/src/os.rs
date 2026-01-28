@@ -761,6 +761,108 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+// ==================== Pipe ====================
+
+#[cfg(feature = "std")]
+#[vostd_extern_ctx("os", "nativePipe")]
+fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    
+    match nix::unistd::pipe() {
+        Ok((read_fd, write_fd)) => {
+            let rfd_raw = read_fd.into_raw_fd();
+            let wfd_raw = write_fd.into_raw_fd();
+            
+            // Wrap raw fds into File and register in our handle system
+            let r_file = unsafe { File::from_raw_fd(rfd_raw) };
+            let w_file = unsafe { File::from_raw_fd(wfd_raw) };
+            
+            let rfd = register_file(r_file);
+            let wfd = register_file(w_file);
+            
+            call.ret_i64(0, rfd as i64);
+            call.ret_i64(1, wfd as i64);
+            write_nil_error(call, 2);
+        }
+        Err(e) => {
+            call.ret_i64(0, -1);
+            call.ret_i64(1, -1);
+            write_error_to(call, 2, &e.to_string());
+        }
+    }
+    ExternResult::Ok
+}
+
+// ==================== Chtimes ====================
+
+#[cfg(feature = "std")]
+#[vostd_extern_ctx("os", "nativeChtimes")]
+fn os_native_chtimes(call: &mut ExternCallContext) -> ExternResult {
+    use std::time::{Duration, UNIX_EPOCH};
+    use std::fs::FileTimes;
+    
+    let name = call.arg_str(slots::ARG_NAME);
+    let atime = call.arg_i64(slots::ARG_ATIME);
+    let mtime = call.arg_i64(slots::ARG_MTIME);
+    
+    let atime_systime = UNIX_EPOCH + Duration::from_secs(atime as u64);
+    let mtime_systime = UNIX_EPOCH + Duration::from_secs(mtime as u64);
+    
+    let file = match File::options().write(true).open(&name) {
+        Ok(f) => f,
+        Err(e) => {
+            write_io_error(call, 0, e);
+            return ExternResult::Ok;
+        }
+    };
+    
+    let times = FileTimes::new()
+        .set_accessed(atime_systime)
+        .set_modified(mtime_systime);
+    
+    match file.set_times(times) {
+        Ok(_) => write_nil_error(call, 0),
+        Err(e) => write_io_error(call, 0, e),
+    }
+    ExternResult::Ok
+}
+
+// ==================== FindProcess / Kill ====================
+
+#[cfg(feature = "std")]
+#[vostd_extern_ctx("os", "nativeFindProcess")]
+fn os_native_find_process(call: &mut ExternCallContext) -> ExternResult {
+    let pid = call.arg_i64(slots::ARG_PID) as i32;
+    
+    // Check if process exists by sending signal 0
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+        Ok(_) => write_nil_error(call, 0),
+        Err(e) => write_error_to(call, 0, &e.to_string()),
+    }
+    ExternResult::Ok
+}
+
+#[cfg(feature = "std")]
+#[vostd_extern_ctx("os", "nativeKillProcess")]
+fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
+    let pid = call.arg_i64(slots::ARG_PID) as i32;
+    let sig = call.arg_i64(slots::ARG_SIG) as i32;
+    
+    let signal = match nix::sys::signal::Signal::try_from(sig) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            write_error_to(call, 0, "invalid signal");
+            return ExternResult::Ok;
+        }
+    };
+    
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
+        Ok(_) => write_nil_error(call, 0),
+        Err(e) => write_error_to(call, 0, &e.to_string()),
+    }
+    ExternResult::Ok
+}
+
 #[cfg(feature = "std")]
 vo_runtime::stdlib_register!(os:
     getOsErrors, getOsConsts,
@@ -772,6 +874,7 @@ vo_runtime::stdlib_register!(os:
     nativeGetwd, nativeChdir, nativeUserHomeDir, nativeUserCacheDir, nativeUserConfigDir, nativeTempDir,
     nativeGetpid, nativeGetppid, nativeGetuid, nativeGeteuid, nativeGetgid, nativeGetegid,
     nativeExit, nativeGetArgs, nativeIsTerminal, nativeHostname, nativeExecutable, nativeCreateTemp, nativeMkdirTemp,
+    nativePipe, nativeChtimes, nativeFindProcess, nativeKillProcess,
 );
 
 #[cfg(not(feature = "std"))]

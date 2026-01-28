@@ -1,0 +1,325 @@
+package exec
+
+import (
+	"errors"
+	"io"
+	"os"
+	"strings"
+)
+
+// Error is returned by LookPath when it fails to find the executable.
+var ErrNotFound = errors.New("executable file not found in $PATH")
+
+// Cmd represents an external command being prepared or run.
+//
+// A Cmd cannot be reused after calling its Run, Output or CombinedOutput methods.
+type Cmd struct {
+	// Path is the path of the command to run.
+	Path string
+
+	// Args holds command line arguments, including the command as Args[0].
+	Args []string
+
+	// Dir specifies the working directory of the command.
+	// If Dir is the empty string, Run runs the command in the
+	// calling process's current directory.
+	Dir string
+
+	// Env specifies the environment of the process.
+	// Each entry is of the form "key=value".
+	// If Env is nil, the new process uses the current process's environment.
+	Env []string
+
+	// Stdin specifies the process's standard input.
+	Stdin io.Reader
+
+	// Stdout specifies the process's standard output.
+	Stdout io.Writer
+
+	// Stderr specifies the process's standard error.
+	Stderr io.Writer
+
+	// Process is the underlying process, once started.
+	Process *Process
+
+	// ProcessState contains information about an exited process.
+	ProcessState *ProcessState
+
+	// Internal fields
+	finished    bool
+	childFiles  []int // file descriptors to pass to child
+	closeAfterStart []int
+	closeAfterWait  []int
+}
+
+// Process stores information about a process created by Start.
+type Process struct {
+	Pid int
+}
+
+// ProcessState stores information about a process that has exited.
+type ProcessState struct {
+	pid        int
+	exitCode   int
+	exited     bool
+	signaled   bool
+	signal     int
+}
+
+// Pid returns the process id of the exited process.
+func (p *ProcessState) Pid() int {
+	return p.pid
+}
+
+// ExitCode returns the exit code of the exited process.
+// Returns -1 if the process hasn't exited or was terminated by a signal.
+func (p *ProcessState) ExitCode() int {
+	if !p.exited {
+		return -1
+	}
+	return p.exitCode
+}
+
+// Exited reports whether the program has exited.
+func (p *ProcessState) Exited() bool {
+	return p.exited
+}
+
+// Success reports whether the program exited successfully.
+func (p *ProcessState) Success() bool {
+	return p.exited && p.exitCode == 0
+}
+
+// String returns a string representation of the process state.
+func (p *ProcessState) String() string {
+	if p == nil {
+		return "<nil>"
+	}
+	if p.signaled {
+		return "signal: killed"
+	}
+	if p.exited {
+		if p.exitCode == 0 {
+			return "exit status 0"
+		}
+		return "exit status " + itoa(p.exitCode)
+	}
+	return "running"
+}
+
+// ExitError is returned by Cmd.Wait when the command exits with a non-zero status.
+type ExitError struct {
+	ProcessState *ProcessState
+	Stderr       []byte
+}
+
+func (e *ExitError) Error() string {
+	return "exit status " + itoa(e.ProcessState.exitCode)
+}
+
+// Command returns the Cmd struct to execute the named program with
+// the given arguments.
+//
+// It sets only the Path and Args in the returned structure.
+//
+// If name contains no path separators, Command uses LookPath to
+// resolve name to a complete path if possible. Otherwise it uses name directly.
+func Command(name string, arg []string) *Cmd {
+	cmd := &Cmd{
+		Path: name,
+		Args: append([]string{name}, arg...),
+	}
+	if !strings.Contains(name, "/") {
+		lp, err := LookPath(name)
+		if err == nil {
+			cmd.Path = lp
+		}
+	}
+	return cmd
+}
+
+// String returns a human-readable description of c.
+func (c *Cmd) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	b := strings.Join(c.Args, " ")
+	return b
+}
+
+// Run starts the specified command and waits for it to complete.
+//
+// The returned error is nil if the command runs, has no problems
+// copying stdin, stdout, and stderr, and exits with a zero exit status.
+func (c *Cmd) Run() error {
+	err := c.Start()
+	if err != nil {
+		return err
+	}
+	return c.Wait()
+}
+
+// Start starts the specified command but does not wait for it to complete.
+//
+// If Start returns successfully, the c.Process field will be set.
+//
+// After a successful call to Start the Wait method must be called in
+// order to release associated system resources.
+func (c *Cmd) Start() error {
+	if c.Path == "" {
+		return errors.New("exec: no command")
+	}
+	if c.finished {
+		return errors.New("exec: already finished")
+	}
+	if c.Process != nil {
+		return errors.New("exec: already started")
+	}
+
+	// Prepare stdin/stdout/stderr
+	var stdinFd, stdoutFd, stderrFd int = -1, -1, -1
+
+	// For now, we don't support piping - just inherit or use /dev/null
+	// A full implementation would create pipes here
+
+	pid, err := startProcess(c.Path, c.Args, c.Dir, c.Env, stdinFd, stdoutFd, stderrFd)
+	if err != nil {
+		return err
+	}
+
+	c.Process = &Process{Pid: pid}
+	return nil
+}
+
+// Wait waits for the command to exit and waits for any copying to
+// stdin or copying from stdout or stderr to complete.
+//
+// The command must have been started by Start.
+//
+// The returned error is nil if the command runs, has no problems
+// copying stdin, stdout, and stderr, and exits with a zero exit status.
+func (c *Cmd) Wait() error {
+	if c.Process == nil {
+		return errors.New("exec: not started")
+	}
+	if c.finished {
+		return errors.New("exec: Wait was already called")
+	}
+	c.finished = true
+
+	state, err := waitProcess(c.Process.Pid)
+	if err != nil {
+		return err
+	}
+	c.ProcessState = state
+
+	if !state.Success() {
+		return &ExitError{ProcessState: state}
+	}
+	return nil
+}
+
+// Output runs the command and returns its standard output.
+// Any returned error will usually be of type *ExitError.
+func (c *Cmd) Output() ([]byte, error) {
+	if c.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+
+	stdout, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, false)
+	if err != nil {
+		return stdout, err
+	}
+	return stdout, nil
+}
+
+// CombinedOutput runs the command and returns its combined
+// standard output and standard error.
+func (c *Cmd) CombinedOutput() ([]byte, error) {
+	if c.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	if c.Stderr != nil {
+		return nil, errors.New("exec: Stderr already set")
+	}
+
+	output, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, true)
+	if err != nil {
+		return output, err
+	}
+	return output, nil
+}
+
+// LookPath searches for an executable named file in the directories
+// named by the PATH environment variable.
+// If file contains a slash, it is tried directly.
+// LookPath also uses PATHEXT environment variable to match a suitable candidate.
+func LookPath(file string) (string, error) {
+	if strings.Contains(file, "/") {
+		info, err := os.Stat(file)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() {
+			return "", ErrNotFound
+		}
+		// Check if executable
+		if info.Mode()&0111 != 0 {
+			return file, nil
+		}
+		return "", ErrNotFound
+	}
+
+	path := os.Getenv("PATH")
+	if path == "" {
+		return "", ErrNotFound
+	}
+
+	for _, dir := range strings.Split(path, ":") {
+		if dir == "" {
+			dir = "."
+		}
+		p := dir + "/" + file
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		// Check if executable
+		if info.Mode()&0111 != 0 {
+			return p, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
+// itoa converts an integer to a string.
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := false
+	if i < 0 {
+		neg = true
+		i = -i
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// Native functions for process management
+func startProcess(path string, args []string, dir string, env []string, stdin, stdout, stderr int) (int, error)
+func waitProcess(pid int) (*ProcessState, error)
+func runCaptureOutput(path string, args []string, dir string, env []string, combined bool) ([]byte, error)

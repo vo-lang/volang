@@ -11,7 +11,7 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-std = ["vo-runtime/std", "dep:regex", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc"]
+std = ["vo-runtime/std", "dep:regex", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc", "dep:nix"]
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime", default-features = false }
@@ -28,6 +28,7 @@ dirs = { version = "5", optional = true }
 hostname = { version = "0.4", optional = true }
 linkme = { version = "0.3", optional = true }
 libc = { version = "0.2", optional = true }
+nix = { version = "0.29", optional = true, features = ["signal", "process"] }
 
 # WASM-only dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

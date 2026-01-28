@@ -566,6 +566,57 @@ func Executable() (string, error) {
 	return nativeExecutable()
 }
 
+// ==================== Pipe ====================
+
+func nativePipe() (int, int, error)
+
+// Pipe returns a connected pair of Files; reads from r return bytes written to w.
+func Pipe() (r *File, w *File, err error) {
+	rfd, wfd, err := nativePipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &File{fd: rfd, name: "|0"}, &File{fd: wfd, name: "|1"}, nil
+}
+
+// ==================== Chtimes ====================
+
+func nativeChtimes(name string, atime, mtime int64) error
+
+// Chtimes changes the access and modification times of the named file.
+func Chtimes(name string, atime, mtime int64) error {
+	return nativeChtimes(name, atime, mtime)
+}
+
+// ==================== Process ====================
+
+func nativeFindProcess(pid int) error
+func nativeKillProcess(pid, sig int) error
+
+// Process stores information about a process.
+type Process struct {
+	Pid int
+}
+
+// FindProcess looks for a running process by its pid.
+func FindProcess(pid int) (*Process, error) {
+	err := nativeFindProcess(pid)
+	if err != nil {
+		return nil, err
+	}
+	return &Process{Pid: pid}, nil
+}
+
+// Kill causes the Process to exit immediately.
+func (p *Process) Kill() error {
+	return p.Signal(9) // SIGKILL
+}
+
+// Signal sends a signal to the Process.
+func (p *Process) Signal(sig int) error {
+	return nativeKillProcess(p.Pid, sig)
+}
+
 // ==================== Temp File/Dir (extern) ====================
 
 func nativeCreateTemp(dir, pattern string) (int, string, error)

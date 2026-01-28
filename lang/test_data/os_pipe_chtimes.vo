@@ -1,0 +1,182 @@
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	testPipeBasic()
+	testPipeMultiWrite()
+	testPipeLargeData()
+	testChtimesBasic()
+	testChtimesDifferentTimes()
+	testChtimesNonExistent()
+	testFindProcessSelf()
+	testFindProcessNonExistent()
+	testProcessPid()
+	
+	fmt.Println("All os extension tests passed!")
+}
+
+// ==================== Pipe Tests ====================
+
+func testPipeBasic() {
+	r, w, err := os.Pipe()
+	assert(err == nil, "Pipe create")
+	assert(r != nil, "Pipe read end not nil")
+	assert(w != nil, "Pipe write end not nil")
+	
+	// Write and read
+	msg := []byte("hello")
+	n, err := w.Write(msg)
+	assert(err == nil, "Pipe write")
+	assert(n == 5, "Pipe write count")
+	
+	buf := make([]byte, 10)
+	n, err = r.Read(buf)
+	assert(err == nil, "Pipe read")
+	assert(n == 5, "Pipe read count")
+	assert(string(buf[:n]) == "hello", "Pipe content")
+	
+	r.Close()
+	w.Close()
+}
+
+func testPipeMultiWrite() {
+	r, w, err := os.Pipe()
+	assert(err == nil, "Pipe create multi")
+	
+	// Multiple writes
+	w.Write([]byte("one"))
+	w.Write([]byte("two"))
+	w.Write([]byte("three"))
+	
+	buf := make([]byte, 100)
+	total := 0
+	
+	// Read all
+	n, _ := r.Read(buf[total:])
+	total += n
+	
+	assert(string(buf[:total]) == "onetwothree", "Pipe multi write content")
+	
+	r.Close()
+	w.Close()
+}
+
+func testPipeLargeData() {
+	r, w, err := os.Pipe()
+	assert(err == nil, "Pipe create large")
+	
+	// Write 1KB of data
+	data := make([]byte, 1024)
+	for i := 0; i < len(data); i++ {
+		data[i] = byte(i % 256)
+	}
+	
+	n, err := w.Write(data)
+	assert(err == nil, "Pipe write large")
+	assert(n == 1024, "Pipe write large count")
+	
+	// Read it back
+	buf := make([]byte, 2048)
+	n, err = r.Read(buf)
+	assert(err == nil, "Pipe read large")
+	assert(n == 1024, "Pipe read large count")
+	
+	// Verify content
+	for i := 0; i < n; i++ {
+		assert(buf[i] == byte(i%256), "Pipe large data mismatch")
+	}
+	
+	r.Close()
+	w.Close()
+}
+
+// ==================== Chtimes Tests ====================
+
+func testChtimesBasic() {
+	f, err := os.CreateTemp("", "chtimes_basic")
+	assert(err == nil, "CreateTemp chtimes basic")
+	name := f.Name()
+	f.Close()
+	
+	// Set to 2020-01-01 00:00:00 UTC
+	atime := int64(1577836800)
+	mtime := int64(1577836800)
+	err = os.Chtimes(name, atime, mtime)
+	assert(err == nil, "Chtimes basic")
+	
+	info, err := os.Stat(name)
+	assert(err == nil, "Stat after Chtimes")
+	diff := abs(info.ModTime() - mtime)
+	assert(diff <= 1, "ModTime matches")
+	
+	os.Remove(name)
+}
+
+func testChtimesDifferentTimes() {
+	f, err := os.CreateTemp("", "chtimes_diff")
+	assert(err == nil, "CreateTemp chtimes diff")
+	name := f.Name()
+	f.Close()
+	
+	// Set different atime and mtime
+	atime := int64(1577836800) // 2020-01-01
+	mtime := int64(1609459200) // 2021-01-01
+	err = os.Chtimes(name, atime, mtime)
+	assert(err == nil, "Chtimes different times")
+	
+	info, err := os.Stat(name)
+	assert(err == nil, "Stat after Chtimes diff")
+	diff := abs(info.ModTime() - mtime)
+	assert(diff <= 1, "ModTime matches different")
+	
+	os.Remove(name)
+}
+
+func testChtimesNonExistent() {
+	err := os.Chtimes("/nonexistent/path/file.txt", 0, 0)
+	assert(err != nil, "Chtimes nonexistent should fail")
+}
+
+// ==================== FindProcess Tests ====================
+
+func testFindProcessSelf() {
+	pid := os.Getpid()
+	p, err := os.FindProcess(pid)
+	assert(err == nil, "FindProcess self")
+	assert(p != nil, "Process not nil")
+	assert(p.Pid == pid, "Process Pid matches self")
+}
+
+func testFindProcessNonExistent() {
+	_, err := os.FindProcess(999999999)
+	assert(err != nil, "FindProcess nonexistent should fail")
+}
+
+func testProcessPid() {
+	pid := os.Getpid()
+	p, err := os.FindProcess(pid)
+	assert(err == nil, "FindProcess for Pid test")
+	
+	// Verify Pid field
+	assert(p.Pid > 0, "Process.Pid positive")
+	assert(p.Pid == pid, "Process.Pid equals Getpid")
+}
+
+// ==================== Helpers ====================
+
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("Assertion failed: " + msg)
+	}
+}

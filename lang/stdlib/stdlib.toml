@@ -31,8 +31,8 @@ os = { path = "os" }
 time = { path = "time" }
 net = { path = "net" }
 "math/rand" = { path = "math/rand" }
-# path = { path = "path" }
-# "path/filepath" = { path = "path/filepath" }
+"path/filepath" = { path = "path/filepath" }
+"os/exec" = { path = "os/exec" }
 # bufio = { path = "bufio" }
 
 # Runtime packages (deep VM integration)

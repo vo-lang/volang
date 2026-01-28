@@ -1,0 +1,68 @@
+package main
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+func main() {
+	// Test LookPath
+	path, err := exec.LookPath("ls")
+	assert(err == nil, "LookPath ls failed: " + errStr(err))
+	assert(strings.Contains(path, "ls"), "LookPath should find ls")
+	fmt.Println("LookPath ls:", path)
+	
+	// Test Command.Output
+	cmd := exec.Command("echo", []string{"hello", "world"})
+	output, err := cmd.Output()
+	assert(err == nil, "echo failed: " + errStr(err))
+	assert(strings.TrimSpace(string(output)) == "hello world", "echo output mismatch: " + string(output))
+	fmt.Println("echo output:", strings.TrimSpace(string(output)))
+	
+	// Test Command.Run with exit 0
+	cmd = exec.Command("true", nil)
+	err = cmd.Run()
+	assert(err == nil, "true failed: " + errStr(err))
+	fmt.Println("true exited successfully")
+	
+	// Test Command.Run with exit 1
+	cmd = exec.Command("false", nil)
+	err = cmd.Run()
+	assert(err != nil, "false should fail")
+	fmt.Println("false exited with error (expected):", err.Error())
+	
+	// Test CombinedOutput
+	cmd = exec.Command("sh", []string{"-c", "echo stdout; echo stderr >&2"})
+	output, err = cmd.CombinedOutput()
+	// Note: combined output includes both stdout and stderr
+	fmt.Println("Combined output:", string(output))
+	
+	// Test Command with Dir
+	cmd = exec.Command("pwd", nil)
+	cmd.Dir = "/tmp"
+	output, err = cmd.Output()
+	assert(err == nil, "pwd failed: " + errStr(err))
+	assert(strings.TrimSpace(string(output)) == "/tmp", "pwd should be /tmp")
+	fmt.Println("pwd in /tmp:", strings.TrimSpace(string(output)))
+	
+	// Test LookPath not found
+	_, err = exec.LookPath("nonexistent_command_12345")
+	assert(err != nil, "LookPath should fail for nonexistent command")
+	fmt.Println("LookPath for nonexistent command failed (expected)")
+	
+	fmt.Println("All exec tests passed!")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("Assertion failed: " + msg)
+	}
+}
+
+func errStr(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
+}

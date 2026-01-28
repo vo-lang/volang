@@ -1,0 +1,374 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	testClean()
+	testBase()
+	testDir()
+	testExt()
+	testSplit()
+	testJoin()
+	testIsAbs()
+	testRel()
+	testMatch()
+	testSplitList()
+	testToFromSlash()
+	testAbs()
+	testGlob()
+	testWalkDir()
+	
+	fmt.Println("All filepath tests passed!")
+}
+
+func testClean() {
+	// Basic cleaning
+	assert(filepath.Clean("/a/b/../c") == "/a/c", "Clean /a/b/../c")
+	assert(filepath.Clean("a//b") == "a/b", "Clean a//b")
+	assert(filepath.Clean("./a") == "a", "Clean ./a")
+	assert(filepath.Clean("") == ".", "Clean empty")
+	assert(filepath.Clean(".") == ".", "Clean .")
+	assert(filepath.Clean("..") == "..", "Clean ..")
+	
+	// Multiple slashes
+	assert(filepath.Clean("a///b") == "a/b", "Clean a///b")
+	assert(filepath.Clean("///a") == "/a", "Clean ///a")
+	
+	// Parent directory
+	assert(filepath.Clean("/a/b/c/../..") == "/a", "Clean /a/b/c/../..")
+	assert(filepath.Clean("a/b/c/../..") == "a", "Clean a/b/c/../..")
+	assert(filepath.Clean("a/b/../../../c") == "../c", "Clean a/b/../../../c")
+	
+	// Root handling
+	assert(filepath.Clean("/..") == "/", "Clean /..")
+	assert(filepath.Clean("/../..") == "/", "Clean /../..")
+	assert(filepath.Clean("/a/..") == "/", "Clean /a/..")
+	
+	// Current directory
+	assert(filepath.Clean("./a/./b") == "a/b", "Clean ./a/./b")
+	assert(filepath.Clean("a/./b/.") == "a/b", "Clean a/./b/.")
+	
+	// Trailing slashes
+	assert(filepath.Clean("a/b/") == "a/b", "Clean a/b/")
+	assert(filepath.Clean("/a/b/") == "/a/b", "Clean /a/b/")
+}
+
+func testBase() {
+	assert(filepath.Base("/a/b/c") == "c", "Base /a/b/c")
+	assert(filepath.Base("/a/b/c/") == "c", "Base /a/b/c/")
+	assert(filepath.Base("") == ".", "Base empty")
+	assert(filepath.Base("/") == "/", "Base /")
+	assert(filepath.Base("//") == "/", "Base //")
+	assert(filepath.Base("a") == "a", "Base a")
+	assert(filepath.Base("a/b") == "b", "Base a/b")
+	assert(filepath.Base("/a") == "a", "Base /a")
+	assert(filepath.Base("///a///") == "a", "Base ///a///")
+}
+
+func testDir() {
+	assert(filepath.Dir("/a/b/c") == "/a/b", "Dir /a/b/c")
+	assert(filepath.Dir("/a/") == "/a", "Dir /a/")
+	assert(filepath.Dir("a") == ".", "Dir a")
+	assert(filepath.Dir("/a") == "/", "Dir /a")
+	assert(filepath.Dir("/") == "/", "Dir /")
+	assert(filepath.Dir("") == ".", "Dir empty")
+	assert(filepath.Dir("a/b") == "a", "Dir a/b")
+	assert(filepath.Dir("a/b/c") == "a/b", "Dir a/b/c")
+}
+
+func testExt() {
+	assert(filepath.Ext("file.txt") == ".txt", "Ext file.txt")
+	assert(filepath.Ext("file.tar.gz") == ".gz", "Ext file.tar.gz")
+	assert(filepath.Ext("file") == "", "Ext file")
+	assert(filepath.Ext(".file") == ".file", "Ext .file")
+	assert(filepath.Ext("a/b/file.go") == ".go", "Ext a/b/file.go")
+	assert(filepath.Ext("a.b/c") == "", "Ext a.b/c")
+	assert(filepath.Ext("") == "", "Ext empty")
+	assert(filepath.Ext(".") == ".", "Ext .")
+	assert(filepath.Ext("..") == ".", "Ext ..")
+}
+
+func testSplit() {
+	dir, file := filepath.Split("/a/b/c")
+	assert(dir == "/a/b/", "Split /a/b/c dir")
+	assert(file == "c", "Split /a/b/c file")
+	
+	dir, file = filepath.Split("a/b")
+	assert(dir == "a/", "Split a/b dir")
+	assert(file == "b", "Split a/b file")
+	
+	dir, file = filepath.Split("abc")
+	assert(dir == "", "Split abc dir")
+	assert(file == "abc", "Split abc file")
+	
+	dir, file = filepath.Split("/")
+	assert(dir == "/", "Split / dir")
+	assert(file == "", "Split / file")
+	
+	dir, file = filepath.Split("")
+	assert(dir == "", "Split empty dir")
+	assert(file == "", "Split empty file")
+}
+
+func testJoin() {
+	assert(filepath.Join([]string{"a", "b", "c"}) == "a/b/c", "Join a,b,c")
+	assert(filepath.Join([]string{"/a", "b"}) == "/a/b", "Join /a,b")
+	assert(filepath.Join([]string{"a", "", "b"}) == "a/b", "Join a,,b")
+	assert(filepath.Join([]string{}) == "", "Join empty")
+	assert(filepath.Join([]string{""}) == "", "Join single empty")
+	assert(filepath.Join([]string{"a"}) == "a", "Join single a")
+	assert(filepath.Join([]string{"/", "a"}) == "/a", "Join /,a")
+	assert(filepath.Join([]string{"a", "b", "..", "c"}) == "a/c", "Join a,b,..,c")
+}
+
+func testIsAbs() {
+	assert(filepath.IsAbs("/a/b"), "IsAbs /a/b")
+	assert(filepath.IsAbs("/"), "IsAbs /")
+	assert(!filepath.IsAbs("a/b"), "IsAbs a/b (false)")
+	assert(!filepath.IsAbs(""), "IsAbs empty (false)")
+	assert(!filepath.IsAbs("."), "IsAbs . (false)")
+	assert(!filepath.IsAbs(".."), "IsAbs .. (false)")
+}
+
+func testRel() {
+	// Same directory
+	rel, err := filepath.Rel("/a/b", "/a/b")
+	assert(err == nil, "Rel same dir err")
+	assert(rel == ".", "Rel same dir: got " + rel)
+	
+	// Subdirectory
+	rel, err = filepath.Rel("/a/b", "/a/b/c/d")
+	assert(err == nil, "Rel subdir err")
+	assert(rel == "c/d", "Rel subdir: got " + rel)
+	
+	// Parent directory
+	rel, err = filepath.Rel("/a/b/c", "/a/b")
+	assert(err == nil, "Rel parent err")
+	assert(rel == "..", "Rel parent: got " + rel)
+	
+	// Multiple levels up
+	rel, err = filepath.Rel("/a/b/c/d", "/a/b")
+	assert(err == nil, "Rel multi up err")
+	assert(rel == "../..", "Rel multi up: got " + rel)
+	
+	// Sibling
+	rel, err = filepath.Rel("/a/b", "/a/c")
+	assert(err == nil, "Rel sibling err")
+	assert(rel == "../c", "Rel sibling: got " + rel)
+	
+	// Deep sibling
+	rel, err = filepath.Rel("/a/b/c", "/a/x/y")
+	assert(err == nil, "Rel deep sibling err")
+	assert(rel == "../../x/y", "Rel deep sibling: got " + rel)
+	
+	// Relative paths
+	rel, err = filepath.Rel("a/b", "a/b/c")
+	assert(err == nil, "Rel relative err")
+	assert(rel == "c", "Rel relative: got " + rel)
+	
+	// Error: mixed abs/rel
+	_, err = filepath.Rel("/a", "b")
+	assert(err != nil, "Rel mixed should error")
+}
+
+func testMatch() {
+	// Basic wildcards
+	matched, err := filepath.Match("*.txt", "file.txt")
+	assert(err == nil, "Match *.txt err")
+	assert(matched, "Match *.txt")
+	
+	matched, err = filepath.Match("*.txt", "file.go")
+	assert(err == nil, "Match *.txt not match err")
+	assert(!matched, "Match *.txt should not match file.go")
+	
+	// Single character
+	matched, err = filepath.Match("?.txt", "a.txt")
+	assert(err == nil, "Match ?.txt err")
+	assert(matched, "Match ?.txt")
+	
+	matched, err = filepath.Match("?.txt", "ab.txt")
+	assert(err == nil, "Match ?.txt not match err")
+	assert(!matched, "Match ?.txt should not match ab.txt")
+	
+	// Character class
+	matched, err = filepath.Match("[a-z]*.go", "main.go")
+	assert(err == nil, "Match [a-z]*.go err")
+	assert(matched, "Match [a-z]*.go")
+	
+	matched, err = filepath.Match("[0-9]*.txt", "123.txt")
+	assert(err == nil, "Match [0-9]*.txt err")
+	assert(matched, "Match [0-9]*.txt")
+	
+	matched, err = filepath.Match("[0-9]*.txt", "abc.txt")
+	assert(err == nil, "Match [0-9]*.txt not match err")
+	assert(!matched, "Match [0-9]*.txt should not match abc.txt")
+	
+	// Negated character class
+	matched, err = filepath.Match("[^a-z]*.txt", "1file.txt")
+	assert(err == nil, "Match [^a-z]*.txt err")
+	assert(matched, "Match [^a-z]*.txt")
+	
+	// Empty pattern
+	matched, err = filepath.Match("", "")
+	assert(err == nil, "Match empty err")
+	assert(matched, "Match empty")
+	
+	matched, err = filepath.Match("", "a")
+	assert(err == nil, "Match empty not match err")
+	assert(!matched, "Match empty should not match a")
+	
+	// Exact match
+	matched, err = filepath.Match("abc", "abc")
+	assert(err == nil, "Match exact err")
+	assert(matched, "Match exact")
+	
+	// Star at end
+	matched, err = filepath.Match("file*", "filename")
+	assert(err == nil, "Match file* err")
+	assert(matched, "Match file*")
+	
+	// Star at beginning
+	matched, err = filepath.Match("*name", "filename")
+	assert(err == nil, "Match *name err")
+	assert(matched, "Match *name")
+	
+	// Star in middle
+	matched, err = filepath.Match("f*e", "file")
+	assert(err == nil, "Match f*e err")
+	assert(matched, "Match f*e")
+	
+	// Multiple stars
+	matched, err = filepath.Match("*.*", "file.txt")
+	assert(err == nil, "Match *.* err")
+	assert(matched, "Match *.*")
+	
+	// No separator match
+	matched, err = filepath.Match("*", "a/b")
+	assert(err == nil, "Match * with / err")
+	assert(!matched, "Match * should not match a/b")
+	
+	// Bad pattern
+	_, err = filepath.Match("[", "a")
+	assert(err != nil, "Match bad pattern should error")
+}
+
+func testSplitList() {
+	list := filepath.SplitList("/a:/b:/c")
+	assert(len(list) == 3, "SplitList length")
+	assert(list[0] == "/a", "SplitList 0")
+	assert(list[1] == "/b", "SplitList 1")
+	assert(list[2] == "/c", "SplitList 2")
+	
+	list = filepath.SplitList("")
+	assert(len(list) == 0, "SplitList empty")
+	
+	list = filepath.SplitList("/single")
+	assert(len(list) == 1, "SplitList single length")
+	assert(list[0] == "/single", "SplitList single")
+}
+
+func testToFromSlash() {
+	// On Unix, these are no-ops
+	assert(filepath.ToSlash("/a/b/c") == "/a/b/c", "ToSlash")
+	assert(filepath.FromSlash("/a/b/c") == "/a/b/c", "FromSlash")
+}
+
+func testAbs() {
+	// Absolute path stays absolute
+	abs, err := filepath.Abs("/a/b/c")
+	assert(err == nil, "Abs /a/b/c err")
+	assert(abs == "/a/b/c", "Abs /a/b/c: got " + abs)
+	
+	// Relative path becomes absolute
+	abs, err = filepath.Abs("a/b")
+	assert(err == nil, "Abs a/b err")
+	assert(filepath.IsAbs(abs), "Abs a/b should be absolute")
+}
+
+func testGlob() {
+	// Create temp dir with test files
+	dir, err := os.MkdirTemp("", "glob_test")
+	assert(err == nil, "MkdirTemp err")
+	
+	// Create test files
+	err = os.WriteFile(dir+"/file1.txt", []byte("1"), 0644)
+	assert(err == nil, "WriteFile file1.txt err")
+	err = os.WriteFile(dir+"/file2.txt", []byte("2"), 0644)
+	assert(err == nil, "WriteFile file2.txt err")
+	err = os.WriteFile(dir+"/other.go", []byte("go"), 0644)
+	assert(err == nil, "WriteFile other.go err")
+	
+	// Test glob
+	matches, err := filepath.Glob(dir + "/*.txt")
+	assert(err == nil, "Glob *.txt err")
+	assert(len(matches) == 2, "Glob *.txt should match 2 files")
+	
+	matches, err = filepath.Glob(dir + "/*.go")
+	assert(err == nil, "Glob *.go err")
+	assert(len(matches) == 1, "Glob *.go should match 1 file")
+	
+	matches, err = filepath.Glob(dir + "/*.xyz")
+	assert(err == nil, "Glob *.xyz err")
+	assert(len(matches) == 0, "Glob *.xyz should match 0 files")
+	
+	// Bad pattern
+	_, err = filepath.Glob("[")
+	assert(err != nil, "Glob bad pattern should error")
+	
+	// Cleanup
+	os.RemoveAll(dir)
+}
+
+func testWalkDir() {
+	// Create temp dir with nested structure
+	dir, err := os.MkdirTemp("", "walk_test")
+	assert(err == nil, "MkdirTemp err")
+	
+	// Create structure: dir/a/b/c.txt, dir/d.txt
+	os.MkdirAll(dir+"/a/b", 0755)
+	os.WriteFile(dir+"/a/b/c.txt", []byte("c"), 0644)
+	os.WriteFile(dir+"/d.txt", []byte("d"), 0644)
+	os.WriteFile(dir+"/a/e.txt", []byte("e"), 0644)
+	
+	// Walk and collect paths
+	var paths []string
+	err = filepath.WalkDir(dir, func(path string, d *os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		paths = append(paths, path)
+		return nil
+	})
+	assert(err == nil, "WalkDir err")
+	assert(len(paths) >= 5, "WalkDir should find at least 5 entries")
+	
+	// Test SkipDir
+	var skippedPaths []string
+	err = filepath.WalkDir(dir, func(path string, d *os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		skippedPaths = append(skippedPaths, path)
+		if d.IsDir() && filepath.Base(path) == "a" {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	assert(err == nil, "WalkDir SkipDir err")
+	// Should have dir, dir/a (then skip), dir/d.txt
+	assert(len(skippedPaths) < len(paths), "SkipDir should skip entries")
+	
+	// Cleanup
+	os.RemoveAll(dir)
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("Assertion failed: " + msg)
+	}
+}

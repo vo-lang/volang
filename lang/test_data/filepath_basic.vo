@@ -1,0 +1,80 @@
+package main
+
+import (
+	"fmt"
+	"path/filepath"
+)
+
+func main() {
+	// Test Clean
+	assert(filepath.Clean("/a/b/../c") == "/a/c", "Clean failed")
+	assert(filepath.Clean("a//b") == "a/b", "Clean double slash failed")
+	assert(filepath.Clean("./a") == "a", "Clean dot failed")
+	assert(filepath.Clean("") == ".", "Clean empty failed")
+	
+	// Test Base
+	assert(filepath.Base("/a/b/c") == "c", "Base failed")
+	assert(filepath.Base("/a/b/c/") == "c", "Base trailing slash failed")
+	assert(filepath.Base("") == ".", "Base empty failed")
+	assert(filepath.Base("/") == "/", "Base root failed")
+	
+	// Test Dir
+	assert(filepath.Dir("/a/b/c") == "/a/b", "Dir failed")
+	assert(filepath.Dir("/a/") == "/a", "Dir trailing slash failed")
+	assert(filepath.Dir("a") == ".", "Dir single failed")
+	
+	// Test Ext
+	assert(filepath.Ext("file.txt") == ".txt", "Ext failed")
+	assert(filepath.Ext("file.tar.gz") == ".gz", "Ext double failed")
+	assert(filepath.Ext("file") == "", "Ext none failed")
+	
+	// Test Split
+	dir, file := filepath.Split("/a/b/c")
+	assert(dir == "/a/b/", "Split dir failed")
+	assert(file == "c", "Split file failed")
+	
+	// Test Join
+	assert(filepath.Join([]string{"a", "b", "c"}) == "a/b/c", "Join failed")
+	assert(filepath.Join([]string{"/a", "b"}) == "/a/b", "Join abs failed")
+	assert(filepath.Join([]string{"a", "", "b"}) == "a/b", "Join empty failed")
+	
+	// Test IsAbs
+	assert(filepath.IsAbs("/a/b"), "IsAbs failed")
+	assert(!filepath.IsAbs("a/b"), "IsAbs relative failed")
+	
+	// Test Rel
+	rel, err := filepath.Rel("/a/b", "/a/b/c/d")
+	assert(err == nil, "Rel error")
+	assert(rel == "c/d", "Rel failed: got " + rel)
+	
+	rel, err = filepath.Rel("/a/b/c", "/a/b")
+	assert(err == nil, "Rel up error")
+	assert(rel == "..", "Rel up failed: got " + rel)
+	
+	// Test Match
+	matched, err := filepath.Match("*.txt", "file.txt")
+	assert(err == nil, "Match error")
+	assert(matched, "Match failed")
+	
+	matched, err = filepath.Match("*.txt", "file.go")
+	assert(err == nil, "Match no error")
+	assert(!matched, "Match should not match")
+	
+	matched, err = filepath.Match("[a-z]*.go", "main.go")
+	assert(err == nil, "Match range error")
+	assert(matched, "Match range failed")
+	
+	// Test SplitList
+	list := filepath.SplitList("/a:/b:/c")
+	assert(len(list) == 3, "SplitList length failed")
+	assert(list[0] == "/a", "SplitList 0 failed")
+	assert(list[1] == "/b", "SplitList 1 failed")
+	
+	fmt.Println("All filepath tests passed!")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("Assertion failed: " + msg)
+	}
+}

@@ -239,22 +239,23 @@ pub fn create_vm_from_module(module: Module, register_externs: ExternRegistrar) 
     vo_runtime::output::clear_output();
     
     let mut vm = Vm::new();
+    let reg = &mut vm.state.extern_registry;
+    let exts = &module.externs;
     
-    // Register stdlib externs
-    vo_stdlib::register_externs(&mut vm.state.extern_registry, &module.externs);
+    // stdlib (cross-platform)
+    vo_stdlib::register_externs(reg, exts);
     
-    // Register wasm platform externs (os/time/regexp)
-    vo_web_runtime_wasm::os::register_externs(&mut vm.state.extern_registry, &module.externs);
-    vo_web_runtime_wasm::time::register_externs(&mut vm.state.extern_registry, &module.externs);
-    vo_web_runtime_wasm::regexp::register_externs(&mut vm.state.extern_registry, &module.externs);
+    // wasm platform
+    vo_web_runtime_wasm::os::register_externs(reg, exts);
+    vo_web_runtime_wasm::time::register_externs(reg, exts);
+    vo_web_runtime_wasm::regexp::register_externs(reg, exts);
+    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
     
-    // Register additional externs from caller
-    register_externs(&mut vm.state.extern_registry, &module.externs);
+    // caller
+    register_externs(reg, exts);
     
     vm.load(module);
-    
     vm.run().map_err(|e| format!("{:?}", e))?;
-    
     Ok(vm)
 }
 
