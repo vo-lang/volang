@@ -20,6 +20,13 @@ pub use super::queue_state::{SendResult, RecvResult};
 #[cfg(feature = "std")]
 pub use super::queue_state::WaiterInfo;
 
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, Copy)]
+pub struct WaiterInfo {
+    pub island_id: u32,
+    pub fiber_id: u64,
+}
+
 #[cfg(feature = "std")]
 pub type PortSendResult = SendResult<WaiterInfo, PackedValue>;
 #[cfg(feature = "std")]
@@ -56,13 +63,31 @@ pub fn with_state<T, F: FnOnce(&mut PortState) -> T>(port: GcRef, f: F) -> T {
 #[inline]
 pub fn len(port: GcRef) -> usize { with_state(port, |s| s.len()) }
 
+#[cfg(not(feature = "std"))]
+#[inline]
+pub fn len(_port: GcRef) -> usize {
+    panic!("Port not supported in no_std mode")
+}
+
 #[cfg(feature = "std")]
 #[inline]
 pub fn is_closed(port: GcRef) -> bool { with_state(port, |s| s.is_closed()) }
 
+#[cfg(not(feature = "std"))]
+#[inline]
+pub fn is_closed(_port: GcRef) -> bool {
+    panic!("Port not supported in no_std mode")
+}
+
 #[cfg(feature = "std")]
 #[inline]
 pub fn close(port: GcRef) { with_state(port, |s| s.close()); }
+
+#[cfg(not(feature = "std"))]
+#[inline]
+pub fn close(_port: GcRef) {
+    panic!("Port not supported in no_std mode")
+}
 
 /// Try to send a packed value through the port.
 #[cfg(feature = "std")]
@@ -87,6 +112,11 @@ pub fn register_sender(port: GcRef, waiter: WaiterInfo, value: PackedValue) {
 #[cfg(feature = "std")]
 pub fn register_receiver(port: GcRef, waiter: WaiterInfo) {
     with_state(port, |s| s.register_receiver(waiter));
+}
+
+#[cfg(not(feature = "std"))]
+pub fn register_receiver(_port: GcRef, _waiter: WaiterInfo) {
+    panic!("Port not supported in no_std mode")
 }
 
 /// Take all waiting receivers (for close notification).
@@ -135,11 +165,21 @@ pub fn get_state_ptr(port: GcRef) -> u64 {
     QueueData::as_ref(port).state
 }
 
+#[cfg(not(feature = "std"))]
+pub fn get_state_ptr(_port: GcRef) -> u64 {
+    panic!("Port not supported in no_std mode")
+}
+
 /// Get port metadata for cross-island transfer.
 #[cfg(feature = "std")]
 pub fn get_metadata(port: GcRef) -> (u64, ValueMeta, u16) {
     let data = QueueData::as_ref(port);
     (data.cap, data.elem_meta, data.elem_slots)
+}
+
+#[cfg(not(feature = "std"))]
+pub fn get_metadata(_port: GcRef) -> (u64, ValueMeta, u16) {
+    panic!("Port not supported in no_std mode")
 }
 
 /// Create a port from raw state pointer (for cross-island transfer).

@@ -5,10 +5,14 @@ use alloc::{format, string::String};
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::port::{self, RecvResult, SendResult, WaiterInfo};
+#[cfg(feature = "std")]
 use vo_runtime::objects::queue_state;
+#[cfg(feature = "std")]
 use vo_runtime::pack::{pack_slots, unpack_slots};
 use vo_runtime::ValueMeta;
+#[cfg(feature = "std")]
 use vo_common_core::bytecode::StructMeta;
+#[cfg(feature = "std")]
 use vo_common_core::RuntimeType;
 
 use crate::instruction::Instruction;
@@ -51,6 +55,7 @@ pub fn exec_port_new(
     Ok(())
 }
 
+#[cfg(feature = "std")]
 pub fn exec_port_send(
     stack: &[u64],
     bp: usize,
@@ -83,6 +88,19 @@ pub fn exec_port_send(
     }
 }
 
+#[cfg(not(feature = "std"))]
+pub fn exec_port_send(
+    _stack: &[u64],
+    _bp: usize,
+    _island_id: u32,
+    _fiber_id: u64,
+    _inst: &Instruction,
+    _gc: &Gc,
+) -> PortResult {
+    panic!("Port not supported in no_std mode")
+}
+
+#[cfg(feature = "std")]
 pub fn exec_port_recv(
     stack: &mut [u64],
     bp: usize,
@@ -131,6 +149,18 @@ pub fn exec_port_recv(
             PortResult::Continue
         }
     }
+}
+
+#[cfg(not(feature = "std"))]
+pub fn exec_port_recv(
+    _stack: &mut [u64],
+    _bp: usize,
+    _island_id: u32,
+    _fiber_id: u64,
+    _inst: &Instruction,
+    _gc: &mut Gc,
+) -> PortResult {
+    panic!("Port not supported in no_std mode")
 }
 
 pub fn exec_port_close(stack: &[u64], bp: usize, inst: &Instruction) -> PortResult {

@@ -5,6 +5,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::port;

@@ -1,0 +1,59 @@
+// Regression test: nil value transfer across islands must preserve nil semantics
+// Bug: pack.rs was not writing full metadata for nil map, causing unpack to fail
+// Fix: pack_map now writes all metadata for nil; unpack_slice/array/map detect nil via zero elem_bytes/key_slots
+package main
+
+import "time"
+
+type Data struct {
+	X int
+}
+
+func main() {
+	testNilValues()
+	testEmptyValues()
+	println("PASS")
+}
+
+func testNilValues() {
+	i := make(island)
+	p := make(port int, 1)
+	
+	var nilSlice []int
+	var nilMap map[string]int
+	var nilPtr *Data
+	
+	go @(i) func(ch port int, s []int, m map[string]int, ptr *Data) {
+		assert(s == nil, "slice should be nil")
+		assert(m == nil, "map should be nil")
+		assert(ptr == nil, "pointer should be nil")
+		assert(len(s) == 0, "nil slice len should be 0")
+		ch <- 1
+	}(p, nilSlice, nilMap, nilPtr)
+	
+	time.Sleep(50 * time.Millisecond)
+	<-p
+	close(p)
+	println("testNilValues passed")
+}
+
+func testEmptyValues() {
+	i := make(island)
+	p := make(port int, 1)
+	
+	emptySlice := make([]int, 0)
+	emptyMap := make(map[string]int)
+	
+	go @(i) func(ch port int, s []int, m map[string]int) {
+		assert(s != nil, "empty slice should not be nil")
+		assert(m != nil, "empty map should not be nil")
+		assert(len(s) == 0, "empty slice len should be 0")
+		assert(len(m) == 0, "empty map len should be 0")
+		ch <- 1
+	}(p, emptySlice, emptyMap)
+	
+	time.Sleep(50 * time.Millisecond)
+	<-p
+	close(p)
+	println("testEmptyValues passed")
+}

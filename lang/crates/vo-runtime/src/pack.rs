@@ -205,13 +205,12 @@ fn pack_slice(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) {
+    // Explicit null marker for all reference types
     if slice_ref.is_null() {
-        // Null slice
-        packed.data.extend_from_slice(&0u64.to_le_bytes()); // length
-        packed.data.extend_from_slice(&0u32.to_le_bytes()); // elem_meta
-        packed.data.extend_from_slice(&0u32.to_le_bytes()); // elem_bytes
+        packed.data.push(0); // null marker
         return;
     }
+    packed.data.push(1); // non-null marker
 
     let length = slice::len(slice_ref);
     let elem_meta = slice::elem_meta(slice_ref);
@@ -222,13 +221,26 @@ fn pack_slice(
     packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
     packed.data.extend_from_slice(&(elem_bytes as u32).to_le_bytes());
 
-    // Pack each element
-    let elem_slots = (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES;
+    // Zero-size elements (e.g., struct{}) - just write count, no element data
+    if elem_bytes == 0 {
+        return;
+    }
+
+    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
+    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
+        let meta_id = elem_meta.meta_id() as usize;
+        if meta_id < struct_metas.len() {
+            struct_metas[meta_id].slot_types.len()
+        } else {
+            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        }
+    } else {
+        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+    };
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = slice::data_ptr(slice_ref);
 
     for i in 0..length {
-        // Read element from slice
         read_element(data_ptr, i, elem_bytes, elem_meta, &mut elem_buf);
         pack_value(packed, gc, &elem_buf, elem_meta, struct_metas, runtime_types);
     }
@@ -241,12 +253,12 @@ fn pack_array(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) {
+    // Explicit null marker for all reference types
     if arr_ref.is_null() {
-        packed.data.extend_from_slice(&0u64.to_le_bytes()); // length
-        packed.data.extend_from_slice(&0u32.to_le_bytes()); // elem_meta
-        packed.data.extend_from_slice(&0u32.to_le_bytes()); // elem_bytes
+        packed.data.push(0); // null marker
         return;
     }
+    packed.data.push(1); // non-null marker
 
     let length = array::len(arr_ref);
     let elem_meta = array::elem_meta(arr_ref);
@@ -256,8 +268,22 @@ fn pack_array(
     packed.data.extend_from_slice(&elem_meta.to_raw().to_le_bytes());
     packed.data.extend_from_slice(&(elem_bytes as u32).to_le_bytes());
 
-    // Pack each element
-    let elem_slots = (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES;
+    // Zero-size elements (e.g., struct{}) - just write count, no element data
+    if elem_bytes == 0 {
+        return;
+    }
+
+    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
+    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
+        let meta_id = elem_meta.meta_id() as usize;
+        if meta_id < struct_metas.len() {
+            struct_metas[meta_id].slot_types.len()
+        } else {
+            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        }
+    } else {
+        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+    };
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = array::data_ptr_bytes(arr_ref);
 
@@ -345,10 +371,12 @@ fn pack_map(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) {
+    // Explicit null marker for all reference types
     if map_ref.is_null() {
-        packed.data.extend_from_slice(&0u64.to_le_bytes()); // length
+        packed.data.push(0); // null marker
         return;
     }
+    packed.data.push(1); // non-null marker
 
     let length = map::len(map_ref);
     let key_meta = map::key_meta(map_ref);
@@ -447,14 +475,37 @@ fn unpack_slice(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> GcRef {
+    // Read explicit null marker
+    let is_non_null = data[*cursor];
+    *cursor += 1;
+    if is_non_null == 0 {
+        return core::ptr::null_mut();
+    }
+
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let elem_bytes = read_u32(data, cursor) as usize;
 
     // Create slice with capacity = length
     let new_slice = slice::create(gc, elem_meta, elem_bytes, length, length);
+
+    // Zero-size elements (e.g., struct{}) - no element data to read
+    if elem_bytes == 0 {
+        return new_slice;
+    }
+
     let data_ptr = slice::data_ptr(new_slice);
-    let elem_slots = (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES;
+    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
+    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
+        let meta_id = elem_meta.meta_id() as usize;
+        if meta_id < struct_metas.len() {
+            struct_metas[meta_id].slot_types.len()
+        } else {
+            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        }
+    } else {
+        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+    };
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
@@ -472,13 +523,36 @@ fn unpack_array(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> GcRef {
+    // Read explicit null marker
+    let is_non_null = data[*cursor];
+    *cursor += 1;
+    if is_non_null == 0 {
+        return core::ptr::null_mut();
+    }
+
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let elem_bytes = read_u32(data, cursor) as usize;
 
     let new_arr = array::create(gc, elem_meta, elem_bytes, length);
+
+    // Zero-size elements (e.g., struct{}) - no element data to read
+    if elem_bytes == 0 {
+        return new_arr;
+    }
+
     let data_ptr = array::data_ptr_bytes(new_arr);
-    let elem_slots = (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES;
+    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
+    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
+        let meta_id = elem_meta.meta_id() as usize;
+        if meta_id < struct_metas.len() {
+            struct_metas[meta_id].slot_types.len()
+        } else {
+            (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+        }
+    } else {
+        (elem_bytes + SLOT_BYTES - 1) / SLOT_BYTES
+    };
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
@@ -553,6 +627,13 @@ fn unpack_map(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> GcRef {
+    // Read explicit null marker
+    let is_non_null = data[*cursor];
+    *cursor += 1;
+    if is_non_null == 0 {
+        return core::ptr::null_mut();
+    }
+
     let length = read_u64(data, cursor) as usize;
     let key_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let val_meta = ValueMeta::from_raw(read_u32(data, cursor));

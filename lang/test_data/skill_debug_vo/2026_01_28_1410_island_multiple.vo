@@ -1,0 +1,28 @@
+// Test multiple islands
+package main
+
+import "time"
+
+func main() {
+	i1 := make(island)
+	i2 := make(island)
+	p := make(port int, 2)
+	
+	go @(i1) func(ch port int) {
+		ch <- 100
+	}(p)
+	
+	go @(i2) func(ch port int) {
+		ch <- 200
+	}(p)
+	
+	time.Sleep(50 * time.Millisecond)
+	
+	v1 := <-p
+	v2 := <-p
+	sum := v1 + v2
+	assert(sum == 300, "expected 300")
+	
+	close(p)
+	println("PASS")
+}

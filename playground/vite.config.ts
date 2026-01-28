@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     alias: {
-      '@vo-playground': path.resolve(__dirname, '../lang/crates/vo-web/pkg'),
+      '@vo-playground': path.resolve(__dirname, 'rust/pkg'),
       '@vo-web': path.resolve(__dirname, '../lang/crates/vo-web/js'),
     },
   },

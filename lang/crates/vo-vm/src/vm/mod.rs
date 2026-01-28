@@ -1569,6 +1569,7 @@ impl Vm {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
                     ExecResult::Continue
                 }
+                #[cfg(feature = "std")]
                 Opcode::GoIsland => {
                     let result = exec::exec_go_island(stack, bp, &inst);
                     let island_id = vo_runtime::island::id(result.island);
@@ -1612,6 +1613,19 @@ impl Vm {
                         }
                         ExecResult::Continue
                     }
+                }
+                #[cfg(not(feature = "std"))]
+                Opcode::GoIsland => {
+                    // In no_std, islands always spawn on main island (id=0)
+                    let closure_ref = stack[bp + inst.b as usize] as vo_runtime::gc::GcRef;
+                    let func_id = vo_runtime::objects::closure::func_id(closure_ref);
+                    let local_slots = module.functions[func_id as usize].local_slots;
+                    
+                    let mut new_fiber = crate::fiber::Fiber::new(0);
+                    new_fiber.push_frame(func_id, local_slots, 0, 0);
+                    new_fiber.stack[0] = closure_ref as u64;
+                    self.scheduler.spawn(new_fiber);
+                    ExecResult::Continue
                 }
 
                 Opcode::Invalid => ExecResult::Panic,

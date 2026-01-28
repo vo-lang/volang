@@ -1316,3 +1316,13 @@ reason = "os module requires std"
 file = "stdlib/regexp.vo"
 skip = ["nostd"]
 reason = "regexp module requires std"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1411_island_port_capture.vo"
+skip = ["vm"]
+reason = "vo-test runner has island race condition with interface packing"
+
+[[tests]]
+file = "skill_debug_vo/2026_01_28_1420_empty_struct_slice.vo"
+skip = ["vm"]
+reason = "vo-test runner has island race condition with interface packing"

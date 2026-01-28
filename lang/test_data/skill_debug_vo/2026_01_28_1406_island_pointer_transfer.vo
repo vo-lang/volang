@@ -1,0 +1,30 @@
+// Test pointer (*T) transfer across islands
+package main
+
+import "time"
+
+type Data struct {
+	X int
+	Y int
+}
+
+func main() {
+	i := make(island)
+	p := make(port int, 1)
+	
+	d := &Data{X: 100, Y: 200}
+	
+	go @(i) func(ch port int, ptr *Data) {
+		assert(ptr != nil, "pointer should not be nil")
+		assert(ptr.X == 100, "X mismatch")
+		assert(ptr.Y == 200, "Y mismatch")
+		ch <- ptr.X + ptr.Y
+	}(p, d)
+	
+	time.Sleep(50 * time.Millisecond)
+	result := <-p
+	assert(result == 300, "expected 100+200=300")
+	
+	close(p)
+	println("PASS")
+}

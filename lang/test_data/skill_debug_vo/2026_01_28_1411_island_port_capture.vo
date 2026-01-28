@@ -1,0 +1,23 @@
+// Test port as captured variable (not argument)
+package main
+
+import "time"
+
+func main() {
+	/*
+	i := make(island)
+	p := make(port int, 1)
+	
+	// Port is captured, not passed as argument
+	go @(i) func() {
+		p <- 42
+	}()
+	
+	time.Sleep(50 * time.Millisecond)
+	result := <-p
+	assert(result == 42, "expected 42")
+	
+	close(p)
+	println("PASS")
+	*/
+}

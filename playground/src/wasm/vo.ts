@@ -31,7 +31,7 @@ async function loadWasm(): Promise<any> {
       console.log('VFS initialized');
     }
 
-    const { default: init, compileAndRun, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_web.js');
+    const { default: init, compileAndRun, version, initGuiApp, handleGuiEvent } = await import('@vo-playground/vo_playground.js');
     await init();
     wasmModule = { compileAndRun, version, initGuiApp, handleGuiEvent };
     console.log('Vo Playground WASM loaded:', version());

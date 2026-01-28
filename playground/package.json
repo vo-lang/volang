@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "wasm": "(cd ../lang/crates/vo-web && wasm-pack build --target web) && (cd ../libs/vogui/rust && wasm-pack build --target web)"
+    "wasm": "(cd ../lang/crates/vo-web && wasm-pack build --target web) && (cd rust && wasm-pack build --target web)"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

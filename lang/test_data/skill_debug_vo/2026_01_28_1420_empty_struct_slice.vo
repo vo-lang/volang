@@ -1,0 +1,23 @@
+// Test: verify []struct{} transfer across islands
+package main
+
+import "time"
+
+func main() {
+	i := make(island)
+	p := make(port int, 1)
+	
+	// Non-nil slice of empty struct
+	s := make([]struct{}, 5)
+	
+	go @(i) func(ch port int, data []struct{}) {
+		assert(data != nil, "slice should NOT be nil")
+		assert(len(data) == 5, "len should be 5")
+		ch <- 1
+	}(p, s)
+	
+	time.Sleep(50 * time.Millisecond)
+	<-p
+	close(p)
+	println("PASS")
+}
