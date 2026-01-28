@@ -1,0 +1,50 @@
+// Test port recv with ok flag
+package main
+
+import "time"
+
+func main() {
+	// Test 1: recv with ok flag from open port
+	p := make(port int, 1)
+	p <- 42
+	v, ok := <-p
+	assert(ok, "should be ok=true for open port")
+	assert(v == 42, "should recv 42")
+	println("test1 passed: recv with ok from open port")
+	
+	// Test 2: recv with ok flag from closed port
+	p2 := make(port int, 0)
+	i := make(island)
+	
+	go @(i) func(ch port int) {
+		time.Sleep(10 * time.Millisecond)
+		close(ch)
+	}(p2)
+	
+	v2, ok2 := <-p2
+	assert(!ok2, "should be ok=false for closed port")
+	assert(v2 == 0, "should recv zero value for closed port")
+	println("test2 passed: recv with ok from closed port")
+	
+	// Test 3: multiple recv after close
+	p3 := make(port int, 2)
+	p3 <- 10
+	p3 <- 20
+	close(p3)
+	
+	v3a, ok3a := <-p3
+	assert(ok3a, "buffered value should have ok=true")
+	assert(v3a == 10, "should recv 10")
+	
+	v3b, ok3b := <-p3
+	assert(ok3b, "buffered value should have ok=true")
+	assert(v3b == 20, "should recv 20")
+	
+	v3c, ok3c := <-p3
+	assert(!ok3c, "should be ok=false after buffer empty")
+	assert(v3c == 0, "should recv zero value")
+	println("test3 passed: recv buffered values then closed")
+	
+	close(p)
+	println("PASS")
+}

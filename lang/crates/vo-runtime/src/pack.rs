@@ -12,6 +12,7 @@ use crate::objects::{array, map, slice, string};
 use crate::slot::SLOT_BYTES;
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{ValueKind, ValueMeta};
+use vo_common_core::RuntimeType;
 
 /// Packed representation of a sendable value.
 /// Contains serialized bytes that can be transferred across islands.
@@ -52,6 +53,7 @@ impl Default for PackedValue {
 /// - `src`: Source slots
 /// - `value_meta`: Type metadata for the value
 /// - `struct_metas`: Struct metadata for recursive packing
+/// - `runtime_types`: Runtime type info for looking up nested struct meta_ids
 ///
 /// # Returns
 /// PackedValue containing the serialized data
@@ -60,9 +62,10 @@ pub fn pack_slots(
     src: &[u64],
     value_meta: ValueMeta,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> PackedValue {
     let mut packed = PackedValue::new();
-    pack_value(&mut packed, gc, src, value_meta, struct_metas);
+    pack_value(&mut packed, gc, src, value_meta, struct_metas, runtime_types);
     packed
 }
 
@@ -73,19 +76,37 @@ pub fn pack_slots(
 /// - `packed`: The packed value to unpack
 /// - `dst`: Destination slots
 /// - `struct_metas`: Struct metadata for recursive unpacking
+/// - `runtime_types`: Runtime type info for looking up nested struct meta_ids
 pub fn unpack_slots(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     let mut cursor = 0;
-    unpack_value(gc, &packed.data, &mut cursor, dst, struct_metas);
+    unpack_value(gc, &packed.data, &mut cursor, dst, struct_metas, runtime_types);
 }
 
 // =============================================================================
 // Internal Pack Implementation
 // =============================================================================
+
+/// Look up struct meta_id from rttid using runtime_types.
+/// For struct types, the rttid indexes into runtime_types which contains the meta_id.
+fn lookup_struct_meta_id(rttid: u32, runtime_types: &[RuntimeType]) -> u32 {
+    if let Some(rt) = runtime_types.get(rttid as usize) {
+        if let RuntimeType::Struct { meta_id, .. } = rt {
+            return *meta_id;
+        }
+        if let RuntimeType::Named { struct_meta_id, .. } = rt {
+            if let Some(id) = struct_meta_id {
+                return *id;
+            }
+        }
+    }
+    panic!("Cannot find struct meta_id for rttid {}", rttid);
+}
 
 fn pack_value(
     packed: &mut PackedValue,
@@ -93,6 +114,7 @@ fn pack_value(
     src: &[u64],
     value_meta: ValueMeta,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     let vk = value_meta.value_kind();
     
@@ -127,31 +149,31 @@ fn pack_value(
         // Slice: recursively pack elements
         ValueKind::Slice => {
             let slice_ref = src[0] as GcRef;
-            pack_slice(packed, gc, slice_ref, struct_metas);
+            pack_slice(packed, gc, slice_ref, struct_metas, runtime_types);
         }
 
         // Array: recursively pack elements (boxed array on heap)
         ValueKind::Array => {
             let arr_ref = src[0] as GcRef;
-            pack_array(packed, gc, arr_ref, struct_metas);
+            pack_array(packed, gc, arr_ref, struct_metas, runtime_types);
         }
 
         // Struct: recursively pack fields
         ValueKind::Struct => {
             let meta_id = value_meta.meta_id() as usize;
-            pack_struct_inline(packed, gc, src, meta_id, struct_metas);
+            pack_struct_inline(packed, gc, src, meta_id, struct_metas, runtime_types);
         }
 
         // Pointer: pack pointed object (deep copy)
         ValueKind::Pointer => {
             let ptr_ref = src[0] as GcRef;
-            pack_pointer(packed, gc, ptr_ref, value_meta, struct_metas);
+            pack_pointer(packed, gc, ptr_ref, value_meta, struct_metas, runtime_types);
         }
 
         // Map: iterate and pack entries
         ValueKind::Map => {
             let map_ref = src[0] as GcRef;
-            pack_map(packed, gc, map_ref, struct_metas);
+            pack_map(packed, gc, map_ref, struct_metas, runtime_types);
         }
 
         // Not sendable - these should be caught at compile time
@@ -181,6 +203,7 @@ fn pack_slice(
     gc: &Gc,
     slice_ref: GcRef,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     if slice_ref.is_null() {
         // Null slice
@@ -207,7 +230,7 @@ fn pack_slice(
     for i in 0..length {
         // Read element from slice
         read_element(data_ptr, i, elem_bytes, elem_meta, &mut elem_buf);
-        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas);
+        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas, runtime_types);
     }
 }
 
@@ -216,6 +239,7 @@ fn pack_array(
     gc: &Gc,
     arr_ref: GcRef,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     if arr_ref.is_null() {
         packed.data.extend_from_slice(&0u64.to_le_bytes()); // length
@@ -239,7 +263,7 @@ fn pack_array(
 
     for i in 0..length {
         read_element(data_ptr, i, elem_bytes, elem_meta, &mut elem_buf);
-        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas);
+        pack_value(packed, gc, &elem_buf, elem_meta, struct_metas, runtime_types);
     }
 }
 
@@ -249,6 +273,7 @@ fn pack_struct_inline(
     src: &[u64],
     meta_id: usize,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     if meta_id >= struct_metas.len() {
         panic!("Invalid struct meta_id: {}", meta_id);
@@ -267,10 +292,16 @@ fn pack_struct_inline(
         let field_slots = field.slot_count as usize;
         let slot_idx = field.offset as usize;
 
-        // Create ValueMeta from type_info for packing
-        let field_meta = ValueMeta::new(field.type_info.rttid(), field_vk);
+        // For nested structs, look up the correct meta_id from runtime_types.
+        // For other types, meta_id is not used (containers read metadata from GC object).
+        let field_meta = if field_vk == ValueKind::Struct {
+            let nested_meta_id = lookup_struct_meta_id(field.type_info.rttid(), runtime_types);
+            ValueMeta::new(nested_meta_id, field_vk)
+        } else {
+            ValueMeta::new(0, field_vk)
+        };
         let field_src = &src[slot_idx..slot_idx + field_slots];
-        pack_value(packed, gc, field_src, field_meta, struct_metas);
+        pack_value(packed, gc, field_src, field_meta, struct_metas, runtime_types);
     }
 }
 
@@ -280,6 +311,7 @@ fn pack_pointer(
     ptr_ref: GcRef,
     _value_meta: ValueMeta,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     if ptr_ref.is_null() {
         packed.data.push(0); // null marker
@@ -303,7 +335,7 @@ fn pack_pointer(
     for i in 0..slots {
         obj_slots[i] = unsafe { Gc::read_slot(ptr_ref, i) };
     }
-    pack_value(packed, gc, &obj_slots, obj_meta, struct_metas);
+    pack_value(packed, gc, &obj_slots, obj_meta, struct_metas, runtime_types);
 }
 
 fn pack_map(
@@ -311,6 +343,7 @@ fn pack_map(
     gc: &Gc,
     map_ref: GcRef,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     if map_ref.is_null() {
         packed.data.extend_from_slice(&0u64.to_le_bytes()); // length
@@ -334,8 +367,8 @@ fn pack_map(
     // Iterate and pack entries
     let mut iter = map::iter_init(map_ref);
     while let Some((k, v)) = map::iter_next(&mut iter) {
-        pack_value(packed, gc, k, key_meta, struct_metas);
-        pack_value(packed, gc, v, val_meta, struct_metas);
+        pack_value(packed, gc, k, key_meta, struct_metas, runtime_types);
+        pack_value(packed, gc, v, val_meta, struct_metas, runtime_types);
     }
 }
 
@@ -349,6 +382,7 @@ fn unpack_value(
     cursor: &mut usize,
     dst: &mut [u64],
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     let vk = ValueKind::from_u8(data[*cursor]);
     *cursor += 1;
@@ -376,23 +410,23 @@ fn unpack_value(
         }
 
         ValueKind::Slice => {
-            dst[0] = unpack_slice(gc, data, cursor, struct_metas) as u64;
+            dst[0] = unpack_slice(gc, data, cursor, struct_metas, runtime_types) as u64;
         }
 
         ValueKind::Array => {
-            dst[0] = unpack_array(gc, data, cursor, struct_metas) as u64;
+            dst[0] = unpack_array(gc, data, cursor, struct_metas, runtime_types) as u64;
         }
 
         ValueKind::Struct => {
-            unpack_struct_inline(gc, data, cursor, dst, struct_metas);
+            unpack_struct_inline(gc, data, cursor, dst, struct_metas, runtime_types);
         }
 
         ValueKind::Pointer => {
-            dst[0] = unpack_pointer(gc, data, cursor, struct_metas) as u64;
+            dst[0] = unpack_pointer(gc, data, cursor, struct_metas, runtime_types) as u64;
         }
 
         ValueKind::Map => {
-            dst[0] = unpack_map(gc, data, cursor, struct_metas) as u64;
+            dst[0] = unpack_map(gc, data, cursor, struct_metas, runtime_types) as u64;
         }
 
         _ => panic!("Cannot unpack non-sendable type: {:?}", vk),
@@ -411,6 +445,7 @@ fn unpack_slice(
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> GcRef {
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
@@ -423,7 +458,7 @@ fn unpack_slice(
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
-        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas);
+        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas, runtime_types);
         write_element(data_ptr, i, elem_bytes, &elem_buf);
     }
 
@@ -435,6 +470,7 @@ fn unpack_array(
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> GcRef {
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
@@ -446,7 +482,7 @@ fn unpack_array(
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
-        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas);
+        unpack_value(gc, data, cursor, &mut elem_buf, struct_metas, runtime_types);
         write_element(data_ptr, i, elem_bytes, &elem_buf);
     }
 
@@ -459,6 +495,7 @@ fn unpack_struct_inline(
     cursor: &mut usize,
     dst: &mut [u64],
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) {
     let meta_id = read_u32(data, cursor) as usize;
     let _slot_count = read_u32(data, cursor) as usize;
@@ -474,7 +511,7 @@ fn unpack_struct_inline(
         let field_slots = field.slot_count as usize;
         let slot_idx = field.offset as usize;
         let field_dst = &mut dst[slot_idx..slot_idx + field_slots];
-        unpack_value(gc, data, cursor, field_dst, struct_metas);
+        unpack_value(gc, data, cursor, field_dst, struct_metas, runtime_types);
     }
 }
 
@@ -483,6 +520,7 @@ fn unpack_pointer(
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> GcRef {
     let is_non_null = data[*cursor];
     *cursor += 1;
@@ -498,7 +536,7 @@ fn unpack_pointer(
     let new_obj = gc.alloc(obj_meta, slots as u16);
     let mut obj_slots = vec![0u64; slots];
     
-    unpack_value(gc, data, cursor, &mut obj_slots, struct_metas);
+    unpack_value(gc, data, cursor, &mut obj_slots, struct_metas, runtime_types);
     
     // Write slots to new object
     for (i, &val) in obj_slots.iter().enumerate() {
@@ -513,6 +551,7 @@ fn unpack_map(
     data: &[u8],
     cursor: &mut usize,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> GcRef {
     let length = read_u64(data, cursor) as usize;
     let key_meta = ValueMeta::from_raw(read_u32(data, cursor));
@@ -528,8 +567,8 @@ fn unpack_map(
     let mut val_buf = vec![0u64; val_slots as usize];
 
     for _ in 0..length {
-        unpack_value(gc, data, cursor, &mut key_buf, struct_metas);
-        unpack_value(gc, data, cursor, &mut val_buf, struct_metas);
+        unpack_value(gc, data, cursor, &mut key_buf, struct_metas, runtime_types);
+        unpack_value(gc, data, cursor, &mut val_buf, struct_metas, runtime_types);
         map::set(new_map, &key_buf, &val_buf, None);
     }
 
@@ -620,13 +659,14 @@ mod tests {
     fn test_pack_unpack_scalar() {
         let mut gc = Gc::new();
         let struct_metas = vec![];
+        let runtime_types = vec![];
 
         // Test integer
         let src = [42u64];
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Int64), &struct_metas);
+        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::Int64), &struct_metas, &runtime_types);
         
         let mut dst = [0u64];
-        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas);
+        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
         
         assert_eq!(dst[0], 42);
     }
@@ -635,15 +675,16 @@ mod tests {
     fn test_pack_unpack_string() {
         let mut gc = Gc::new();
         let struct_metas = vec![];
+        let runtime_types = vec![];
 
         // Create a string
         let str_ref = string::create(&mut gc, b"hello");
         let src = [str_ref as u64];
         
-        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::String), &struct_metas);
+        let packed = pack_slots(&gc, &src, ValueMeta::new(0, ValueKind::String), &struct_metas, &runtime_types);
         
         let mut dst = [0u64];
-        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas);
+        unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
         
         let unpacked_str = dst[0] as GcRef;
         assert_eq!(string::as_str(unpacked_str), "hello");

@@ -1500,7 +1500,7 @@ impl Vm {
                 Opcode::PortSend => {
                     let island_id = self.state.current_island_id;
                     let fiber_id = fiber_id.to_raw() as u64;
-                    match exec::exec_port_send(stack, bp, island_id, fiber_id, &inst, &self.state.gc, &module.struct_metas) {
+                    match exec::exec_port_send(stack, bp, island_id, fiber_id, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types) {
                         exec::PortResult::Continue => ExecResult::Continue,
                         exec::PortResult::Yield => ExecResult::Block,
                         exec::PortResult::WakeRemote(waiter) => {
@@ -1521,7 +1521,7 @@ impl Vm {
                 Opcode::PortRecv => {
                     let island_id = self.state.current_island_id;
                     let fiber_id = fiber_id.to_raw() as u64;
-                    match exec::exec_port_recv(stack, bp, island_id, fiber_id, &inst, &mut self.state.gc, &module.struct_metas) {
+                    match exec::exec_port_recv(stack, bp, island_id, fiber_id, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types) {
                         exec::PortResult::Continue => ExecResult::Continue,
                         exec::PortResult::Yield => ExecResult::Block,
                         exec::PortResult::WakeRemote(waiter) => {
@@ -1595,6 +1595,7 @@ impl Vm {
                             &func_def.capture_types,
                             &func_def.param_types,
                             &module.struct_metas,
+                            &module.runtime_types,
                         );
                         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
                         let cmd = vo_runtime::island::IslandCommand::SpawnFiber {

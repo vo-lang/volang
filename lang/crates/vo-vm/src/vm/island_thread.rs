@@ -77,7 +77,7 @@ fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
     let (capture_port_map, arg_port_map) = build_port_maps(vm, &payload.port_wires);
     
     // Get function info from module
-    let (local_slots, capture_types, param_types, struct_metas) = {
+    let (local_slots, capture_types, param_types, struct_metas, runtime_types) = {
         let module = vm.module().expect("module loaded");
         let func_idx = payload.func_id as usize;
         assert!(func_idx < module.functions.len(), "island spawn: invalid func_id {}", payload.func_id);
@@ -87,6 +87,7 @@ fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
             func_def.capture_types.clone(),
             func_def.param_types.clone(),
             module.struct_metas.clone(),
+            module.runtime_types.clone(),
         )
     };
     
@@ -98,6 +99,7 @@ fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
         payload.num_captures,
         &capture_types,
         &struct_metas,
+        &runtime_types,
     );
     
     // Unpack args (proper deep copy)
@@ -108,6 +110,7 @@ fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
         payload.num_args,
         &param_types,
         &struct_metas,
+        &runtime_types,
     );
     
     // Create closure with captures

@@ -1,0 +1,43 @@
+// Test nested struct transfer across islands
+package main
+
+import "time"
+
+type Inner struct {
+	Value int
+	Name  string
+}
+
+type Outer struct {
+	A Inner
+	B []int
+	C string
+}
+
+func main() {
+	i := make(island)
+	p := make(port int, 1)
+	
+	outer := Outer{
+		A: Inner{Value: 100, Name: "inner"},
+		B: []int{1, 2, 3},
+		C: "outer",
+	}
+	
+	go @(i) func(ch port int, data Outer) {
+		sum := data.A.Value
+		for _, v := range data.B {
+			sum += v
+		}
+		assert(data.A.Name == "inner", "inner name mismatch")
+		assert(data.C == "outer", "outer string mismatch")
+		ch <- sum
+	}(p, outer)
+	
+	time.Sleep(50 * time.Millisecond)
+	result := <-p
+	assert(result == 106, "expected 100+1+2+3=106")
+	
+	close(p)
+	println("PASS")
+}

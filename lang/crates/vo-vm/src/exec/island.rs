@@ -130,6 +130,7 @@ pub fn pack_closure_for_island(
     capture_types: &[(u32, u16)],
     param_types: &[(u32, u16)],
     struct_metas: &[vo_common_core::bytecode::StructMeta],
+    runtime_types: &[vo_common_core::RuntimeType],
 ) -> Vec<u8> {
     vo_runtime::island_msg::encode_spawn_payload(
         gc,
@@ -139,5 +140,6 @@ pub fn pack_closure_for_island(
         &result.arg_data,
         param_types,
         struct_metas,
+        runtime_types,
     )
 }

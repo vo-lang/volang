@@ -13,6 +13,7 @@ use crate::slot::Slot;
 use crate::ValueKind;
 use crate::ValueMeta;
 use vo_common_core::bytecode::StructMeta;
+use vo_common_core::RuntimeType;
 
 /// Read little-endian integers from byte slice at offset.
 #[inline]
@@ -99,6 +100,7 @@ pub fn encode_spawn_payload(
     args: &[Slot],
     param_types: &[(u32, u16)], // (ValueMeta raw, slots) from FunctionDef
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -170,7 +172,7 @@ pub fn encode_spawn_payload(
             }
             
             // Pack the value
-            let packed = pack_slots(gc, &value_slots, value_meta, struct_metas);
+            let packed = pack_slots(gc, &value_slots, value_meta, struct_metas, runtime_types);
             let packed_data = packed.data();
             buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
             buf.extend_from_slice(packed_data);
@@ -194,7 +196,7 @@ pub fn encode_spawn_payload(
         
         if arg_offset + slots_usize <= args.len() {
             let value_slots = &args[arg_offset..arg_offset + slots_usize];
-            let packed = pack_slots(gc, value_slots, value_meta, struct_metas);
+            let packed = pack_slots(gc, value_slots, value_meta, struct_metas, runtime_types);
             let packed_data = packed.data();
             buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
             buf.extend_from_slice(packed_data);
@@ -282,6 +284,7 @@ pub fn unpack_captures(
     num_captures: u16,
     capture_types: &[(u32, u16)],
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> (Vec<GcRef>, usize) {
     let mut captures = Vec::with_capacity(num_captures as usize);
     let mut offset = data_offset;
@@ -302,7 +305,7 @@ pub fn unpack_captures(
         // Unpack the value
         let packed = PackedValue::from_data(data[offset..offset + len].to_vec());
         let mut value_slots = vec![0u64; slots as usize];
-        unpack_slots(gc, &packed, &mut value_slots, struct_metas);
+        unpack_slots(gc, &packed, &mut value_slots, struct_metas, runtime_types);
         offset += len;
 
         // Allocate a box for the capture
@@ -325,6 +328,7 @@ pub fn unpack_args(
     num_args: u16,
     param_types: &[(u32, u16)],
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> Vec<u64> {
     let mut args = Vec::new();
     let mut offset = data_offset;
@@ -343,7 +347,7 @@ pub fn unpack_args(
         // Unpack the value
         let packed = PackedValue::from_data(data[offset..offset + len].to_vec());
         let mut value_slots = vec![0u64; slots as usize];
-        unpack_slots(gc, &packed, &mut value_slots, struct_metas);
+        unpack_slots(gc, &packed, &mut value_slots, struct_metas, runtime_types);
         offset += len;
 
         args.extend_from_slice(&value_slots);

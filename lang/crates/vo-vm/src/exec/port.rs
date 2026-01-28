@@ -9,6 +9,7 @@ use vo_runtime::objects::queue_state;
 use vo_runtime::pack::{pack_slots, unpack_slots};
 use vo_runtime::ValueMeta;
 use vo_common_core::bytecode::StructMeta;
+use vo_common_core::RuntimeType;
 
 use crate::instruction::Instruction;
 
@@ -58,6 +59,7 @@ pub fn exec_port_send(
     inst: &Instruction,
     gc: &Gc,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> PortResult {
     let p = stack[bp + inst.a as usize] as GcRef;
     let elem_slots = inst.flags as usize;
@@ -67,7 +69,7 @@ pub fn exec_port_send(
     let src = &stack[src_start..src_start + elem_slots];
 
     // Pack the value for cross-island transfer
-    let packed = pack_slots(gc, src, elem_meta, struct_metas);
+    let packed = pack_slots(gc, src, elem_meta, struct_metas, runtime_types);
 
     match port::try_send(p, packed) {
         SendResult::DirectSend(receiver) => PortResult::WakeRemote(receiver),
@@ -89,6 +91,7 @@ pub fn exec_port_recv(
     inst: &Instruction,
     gc: &mut Gc,
     struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
 ) -> PortResult {
     let p = stack[bp + inst.b as usize] as GcRef;
     let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
@@ -102,7 +105,7 @@ pub fn exec_port_recv(
             if let Some(packed) = packed_opt {
                 // Unpack the value into destination island's heap
                 let dst = &mut stack[dst_start..dst_start + elem_slots];
-                unpack_slots(gc, &packed, dst, struct_metas);
+                unpack_slots(gc, &packed, dst, struct_metas, runtime_types);
             }
             if has_ok {
                 stack[dst_start + elem_slots] = 1; // ok = true
