@@ -236,6 +236,114 @@ impl Scheduler {
             self.current = None;
         }
     }
+    
+    /// Suspend current fiber for JIT->VM trampoline call.
+    /// Running -> Suspended, NOT added to ready_queue.
+    /// Returns the suspended fiber ID (to be resumed later).
+    #[cfg(feature = "jit")]
+    pub fn suspend_current_for_jit_call(&mut self) -> Option<u32> {
+        let id = match self.current {
+            Some(id) => id,
+            None => return None,
+        };
+
+        let fiber = &mut self.fibers[id as usize];
+        if !fiber.state.is_running() {
+            panic!(
+                "suspend_current_for_jit_call: current fiber is not Running: id={} state={:?}",
+                id, fiber.state
+            );
+        }
+
+        fiber.state = FiberState::Suspended;
+        self.current = None;
+        Some(id)
+    }
+    
+    /// Resume a suspended fiber after JIT->VM trampoline completes.
+    /// Suspended -> Running, set as current.
+    #[cfg(feature = "jit")]
+    pub fn resume_suspended_fiber(&mut self, id: u32) {
+        if let Some(current) = self.current {
+            panic!(
+                "resume_suspended_fiber: scheduler.current is already set: current={} resume_id={}",
+                current, id
+            );
+        }
+
+        let fiber = &mut self.fibers[id as usize];
+        if !fiber.state.is_suspended() {
+            panic!(
+                "resume_suspended_fiber: fiber is not Suspended: id={} state={:?}",
+                id, fiber.state
+            );
+        }
+
+        fiber.state = FiberState::Running;
+        self.current = Some(id);
+    }
+    
+    /// Block a trampoline fiber on queue (channel).
+    /// Running -> Blocked(Queue).
+    #[cfg(feature = "jit")]
+    pub fn block_trampoline_for_queue(&mut self, id: FiberId) {
+        match id {
+            FiberId::Trampoline(idx) => {
+                let fiber = &mut self.trampoline_fibers[idx as usize];
+                fiber.state = FiberState::Blocked(BlockReason::Queue);
+            }
+            FiberId::Regular(_) => panic!("block_trampoline_for_queue called with regular FiberId"),
+        }
+    }
+    
+    /// Block a trampoline fiber on I/O.
+    /// Running -> Blocked(Io(token)), registered in io_waiters.
+    #[cfg(all(feature = "jit", feature = "std"))]
+    pub fn block_trampoline_for_io(&mut self, id: FiberId, token: IoToken) {
+        match id {
+            FiberId::Trampoline(idx) => {
+                let fiber = &mut self.trampoline_fibers[idx as usize];
+                fiber.state = FiberState::Blocked(BlockReason::Io(token));
+                self.io_waiters.insert(token, id);
+            }
+            FiberId::Regular(_) => panic!("block_trampoline_for_io called with regular FiberId"),
+        }
+    }
+    
+    /// Check if a trampoline fiber is running (ready to continue execution).
+    #[cfg(feature = "jit")]
+    pub fn is_trampoline_running(&self, id: FiberId) -> bool {
+        match id {
+            FiberId::Trampoline(idx) => self.trampoline_fibers[idx as usize].state.is_running(),
+            FiberId::Regular(_) => false,
+        }
+    }
+    
+    /// Check if a trampoline fiber is blocked on queue (channel/select).
+    #[cfg(feature = "jit")]
+    pub fn is_trampoline_blocked_on_queue(&self, id: FiberId) -> bool {
+        match id {
+            FiberId::Trampoline(idx) => {
+                matches!(self.trampoline_fibers[idx as usize].state, FiberState::Blocked(BlockReason::Queue))
+            }
+            FiberId::Regular(_) => false,
+        }
+    }
+    
+    /// Wake a trampoline fiber from Blocked(Queue) to Running.
+    /// Used for select statements that use polling.
+    #[cfg(feature = "jit")]
+    pub fn wake_trampoline(&mut self, id: FiberId) {
+        match id {
+            FiberId::Trampoline(idx) => {
+                let fiber = &mut self.trampoline_fibers[idx as usize];
+                if fiber.state.is_blocked() {
+                    fiber.state = FiberState::Running;
+                }
+            }
+            FiberId::Regular(_) => {}
+        }
+    }
 
     /// Pick next runnable fiber and set it to Running.
     /// Runnable -> Running.
@@ -286,6 +394,10 @@ impl Scheduler {
     /// Check if there are blocked fibers (potential deadlock detection).
     pub fn has_blocked(&self) -> bool {
         self.fibers.iter().any(|f| f.state.is_blocked())
+            || self
+                .trampoline_fibers
+                .iter()
+                .any(|f| f.state.is_blocked())
     }
     
     /// Current fiber blocks on I/O.
@@ -322,8 +434,13 @@ impl Scheduler {
                         woken += 1;
                     }
                 }
-                FiberId::Trampoline(_) => {
-                    panic!("I/O wait token woke trampoline fiber: token={}", token);
+                FiberId::Trampoline(idx) => {
+                    let fiber = &mut self.trampoline_fibers[idx as usize];
+                    fiber.resume_io_token = Some(token);
+                    if fiber.state.is_blocked() {
+                        fiber.state = FiberState::Running;
+                        woken += 1;
+                    }
                 }
             }
         }

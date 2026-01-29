@@ -475,39 +475,6 @@ impl Vm {
         }
     }
     
-    /// Run one round of scheduler to let other fibers make progress.
-    /// Used when trampoline fiber blocks on channel operations.
-    #[cfg(feature = "jit")]
-    fn run_scheduler_round(&mut self) {
-        // Save current fiber state - trampoline calls happen during regular fiber execution,
-        // so we need to preserve the caller's scheduler state
-        let saved_current = self.scheduler.current.take();
-        if let Some(id) = saved_current {
-            // The caller fiber was Running, mark it as Runnable and put in ready_queue
-            // so it can be scheduled during this round
-            let fiber = &mut self.scheduler.fibers[id as usize];
-            if fiber.state.is_running() {
-                fiber.state = crate::fiber::FiberState::Runnable;
-                self.scheduler.ready_queue.push_back(id);
-            }
-        }
-        
-        // Temporarily disable JIT to prevent nested trampoline calls
-        #[cfg(feature = "jit")]
-        let jit_mgr = self.jit_mgr.take();
-        
-        // Ignore Blocked - trampoline fiber may be waiting, not a deadlock
-        let _ = self.run_scheduling_loop(Some(1000));
-        
-        // Restore JIT manager
-        #[cfg(feature = "jit")]
-        { self.jit_mgr = jit_mgr; }
-        
-        // Note: we don't restore saved_current because the scheduling loop
-        // handles fiber states correctly. The caller (execute_jit_call) will
-        // continue with the trampoline fiber, not a regular fiber.
-    }
-
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {

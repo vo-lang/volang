@@ -185,6 +185,9 @@ pub enum FiberState {
     Running,
     /// Blocked waiting for external event.
     Blocked(BlockReason),
+    /// Suspended during JIT->VM trampoline call.
+    /// The fiber is waiting for a trampoline to complete, not in ready_queue.
+    Suspended,
     /// Finished, slot can be recycled.
     Dead,
 }
@@ -208,6 +211,11 @@ impl FiberState {
     #[inline]
     pub fn is_dead(&self) -> bool {
         matches!(self, FiberState::Dead)
+    }
+    
+    #[inline]
+    pub fn is_suspended(&self) -> bool {
+        matches!(self, FiberState::Suspended)
     }
 }
 

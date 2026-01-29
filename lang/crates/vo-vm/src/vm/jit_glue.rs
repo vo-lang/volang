@@ -254,6 +254,9 @@ impl Vm {
     /// execution container for VM interpretation.
     ///
     /// This is the core logic for vm_call_trampoline.
+    ///
+    /// Design: During trampoline execution, the caller fiber is Suspended (not in ready_queue).
+    /// If trampoline blocks on I/O or channel, we run the scheduler loop until it's woken.
     pub fn execute_jit_call_with_caller(
         &mut self,
         func_id: u32,
@@ -290,6 +293,10 @@ impl Vm {
         // Fall back to VM interpretation using trampoline fiber
         // Trampoline fiber provides stack/frames for VM execution, but panic_state
         // will be propagated back to caller_fiber at the end.
+        
+        // Suspend the caller fiber - it must not be scheduled while trampoline runs
+        let suspended_caller = self.scheduler.suspend_current_for_jit_call();
+        
         let trampoline_id = self.scheduler.acquire_trampoline_fiber();
         
         let func_def = &module.functions[func_id as usize];
@@ -315,12 +322,43 @@ impl Vm {
                 ExecResult::TimesliceExpired | ExecResult::FrameChanged | ExecResult::Osr(_, _, _) => {
                     // Continue execution
                 }
-                ExecResult::Block(_) => {
-                    // Blocking I/O in trampoline - run other fibers until completion
-                    if !self.scheduler.ready_queue.is_empty() {
-                        self.run_scheduler_round();
-                    } else {
-                        // True blocking with no other fibers = deadlock
+                ExecResult::Block(reason) => {
+                    // Trampoline blocked - handle based on reason
+                    match reason {
+                        crate::fiber::BlockReason::Queue => {
+                            // Channel block - mark trampoline as blocked, run scheduler until woken
+                            // Rewind PC so the blocking instruction is retried
+                            {
+                                let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                                if let Some(frame) = fiber.current_frame_mut() {
+                                    frame.pc = frame.pc.saturating_sub(1);
+                                }
+                            }
+                            self.scheduler.block_trampoline_for_queue(trampoline_id);
+                            
+                            // Run scheduler loop until trampoline is woken by channel operation
+                            self.wait_for_trampoline_wake(trampoline_id);
+                        }
+                        #[cfg(feature = "std")]
+                        crate::fiber::BlockReason::Io(token) => {
+                            // I/O block - mark trampoline as blocked, register in io_waiters
+                            // Rewind PC so the blocking instruction is retried
+                            {
+                                let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                                if let Some(frame) = fiber.current_frame_mut() {
+                                    frame.pc = frame.pc.saturating_sub(1);
+                                }
+                            }
+                            self.scheduler.block_trampoline_for_io(trampoline_id, token);
+                            
+                            // Run scheduler loop + poll_io until trampoline is woken
+                            self.wait_for_trampoline_wake(trampoline_id);
+                        }
+                    }
+                    
+                    // Check if trampoline is now running again
+                    if !self.scheduler.is_trampoline_running(trampoline_id) {
+                        // Still blocked with no way to wake - deadlock
                         let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
                         fiber.set_fatal_panic();
                         break JitResult::Panic;
@@ -348,7 +386,61 @@ impl Vm {
         }
         
         self.scheduler.release_trampoline_fiber(trampoline_id);
+        
+        // Resume the suspended caller fiber
+        if let Some(caller_id) = suspended_caller {
+            self.scheduler.resume_suspended_fiber(caller_id);
+        }
+        
         result
+    }
+    
+    /// Wait for a trampoline fiber to be woken (from Blocked -> Running).
+    /// Runs the scheduler loop and polls I/O until the trampoline is ready.
+    fn wait_for_trampoline_wake(&mut self, trampoline_id: crate::scheduler::FiberId) {
+        // Temporarily disable JIT to prevent nested trampoline calls
+        let jit_mgr = self.jit_mgr.take();
+
+        while !self.scheduler.is_trampoline_running(trampoline_id) {
+            // Poll I/O to wake any I/O-blocked fibers (including trampoline)
+            #[cfg(feature = "std")]
+            {
+                self.scheduler.poll_io(&mut self.state.io);
+                if self.scheduler.is_trampoline_running(trampoline_id) {
+                    break;
+                }
+            }
+
+            // Run other fibers to potentially wake trampoline via channel or produce I/O.
+            if !self.scheduler.ready_queue.is_empty() {
+                let _ = self.run_scheduling_loop(Some(100));
+                continue;
+            }
+
+            // Nothing runnable right now.
+            // For select statements that use polling (check channel state without registering
+            // as a waiter), we need to give the trampoline another chance to check.
+            // Force trampoline back to Running so it can re-execute the select instruction.
+            if self.scheduler.is_trampoline_blocked_on_queue(trampoline_id) {
+                self.scheduler.wake_trampoline(trampoline_id);
+                break;
+            }
+
+            // If there is no pending I/O and no blocked fibers, we cannot make progress.
+            #[cfg(feature = "std")]
+            if !self.scheduler.has_io_waiters() && !self.scheduler.has_blocked() {
+                break;
+            }
+
+            #[cfg(feature = "std")]
+            std::thread::sleep(std::time::Duration::from_micros(100));
+
+            #[cfg(not(feature = "std"))]
+            break;
+        }
+        
+        // Restore JIT manager
+        self.jit_mgr = jit_mgr;
     }
 
     /// Call a JIT function inline from VM execution (resolve_call path).

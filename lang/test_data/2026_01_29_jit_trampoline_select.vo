@@ -1,0 +1,38 @@
+// Regression test: JIT trampoline executing function with select
+// Bug: When JIT main calls a function containing select via trampoline,
+// the trampoline would deadlock because select uses polling (not waiter registration)
+// and wait_for_trampoline_wake would exit early without giving select a chance to retry.
+package main
+
+import "fmt"
+
+func test6() {
+	ch1 := make(chan int, 1)
+	ch2 := make(chan int, 1)
+	
+	go func() {
+		ch1 <- 100
+	}()
+	
+	go func() {
+		ch2 <- 200
+	}()
+	
+	sum := 0
+	for i := 0; i < 2; i++ {
+		select {
+		case v := <-ch1:
+			sum += v
+		case v := <-ch2:
+			sum += v
+		}
+	}
+	
+	assert(sum == 300, "test6: select from goroutines")
+	fmt.Println("Test 6: PASSED - select from goroutines")
+}
+
+func main() {
+	test6()
+	fmt.Println("done")
+}
