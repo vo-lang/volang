@@ -63,6 +63,8 @@ pub extern "C" fn call_extern_trampoline(
     
     let program_args = unsafe { &*ctx.program_args };
     let sentinel_errors = unsafe { &mut *ctx.sentinel_errors };
+    #[cfg(feature = "std")]
+    let mut io = vo_runtime::io::IoRuntime::new().unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e));
     let result = registry.call(
         extern_id,
         &mut temp_stack,
@@ -84,6 +86,10 @@ pub extern "C" fn call_extern_trampoline(
         &module.well_known,
         program_args,
         sentinel_errors,
+        #[cfg(feature = "std")]
+        &mut io,
+        #[cfg(feature = "std")]
+        None,
     );
     
     match result {
@@ -104,6 +110,13 @@ pub extern "C" fn call_extern_trampoline(
             // Blocking I/O: return Block to let JIT exit back to VM scheduler.
             // The fiber will be parked and woken later by the runtime.
             JitResult::Block
+        }
+        #[cfg(feature = "std")]
+        ExternResult::WaitIo { .. } => {
+            // JIT doesn't support WaitIo yet. Treat as fatal error.
+            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+            fiber.set_fatal_panic();
+            JitResult::Panic
         }
         ExternResult::Panic(msg) => {
             // Extern panics are recoverable - convert to Recoverable panic
@@ -278,7 +291,7 @@ impl Vm {
         }
         
         let result = loop {
-            let exec_result = self.run_fiber(crate::scheduler::FiberId::from_raw(trampoline_id));
+            let exec_result = self.run_fiber(trampoline_id);
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
@@ -297,6 +310,13 @@ impl Vm {
                         fiber.set_fatal_panic();
                         break JitResult::Panic;
                     }
+                }
+                #[cfg(feature = "std")]
+                ExecResult::WaitIo { .. } => {
+                    // I/O wait in sync call: would deadlock, treat as error
+                    let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
+                    fiber.set_fatal_panic();
+                    break JitResult::Panic;
                 }
             }
         };

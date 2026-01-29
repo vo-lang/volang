@@ -974,6 +974,39 @@ impl<'a> TypeInfoWrapper<'a> {
         None
     }
 
+    /// Get method signature slot counts from method ObjKey.
+    /// Returns (recv_slots, total_param_slots, ret_slots) where total_param_slots includes receiver.
+    pub fn method_signature_slots(&self, method_obj: ObjKey) -> Option<(u16, u16, u16)> {
+        let method_type = self.tc_objs().lobjs[method_obj].typ()?;
+        let sig = self.as_signature(method_type);
+
+        let recv_obj = sig.recv().as_ref()?;
+        let recv_type = self.tc_objs().lobjs[*recv_obj].typ()?;
+        let recv_slots = self.type_slot_count(recv_type);
+
+        let mut other_param_slots = 0u16;
+        let params_key = sig.params();
+        if let Type::Tuple(tuple) = &self.tc_objs().types[params_key] {
+            for &p in tuple.vars() {
+                if let Some(param_type) = self.tc_objs().lobjs[p].typ() {
+                    other_param_slots += self.type_slot_count(param_type);
+                }
+            }
+        }
+
+        let mut ret_slots = 0u16;
+        let results_key = sig.results();
+        if let Type::Tuple(tuple) = &self.tc_objs().types[results_key] {
+            for &r in tuple.vars() {
+                if let Some(ret_type) = self.tc_objs().lobjs[r].typ() {
+                    ret_slots += self.type_slot_count(ret_type);
+                }
+            }
+        }
+
+        Some((recv_slots, recv_slots + other_param_slots, ret_slots))
+    }
+
     /// Get channel element slot count
     pub fn chan_elem_slots(&self, type_key: TypeKey) -> u16 {
         let underlying = typ::underlying_type(type_key, self.tc_objs());

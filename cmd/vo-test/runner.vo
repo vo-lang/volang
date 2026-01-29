@@ -540,7 +540,7 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 
 	// Start workers
 	for i := 0; i < workers; i++ {
-		go testWorker(jobChan, resultChan)
+		go testWorker(jobChan, resultChan, verbose)
 	}
 
 	// Send jobs (in a separate goroutine) so we can start receiving results immediately.
@@ -562,14 +562,14 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 	return results
 }
 
-func testWorker(jobs <-chan TestJob, results chan<- TestResult) {
+func testWorker(jobs <-chan TestJob, results chan<- TestResult, verbose bool) {
 	for job := range jobs {
-		result := runSingleTest(job)
+		result := runSingleTest(job, verbose)
 		results <- result
 	}
 }
 
-func runSingleTest(job TestJob) TestResult {
+func runSingleTest(job TestJob, verbose bool) TestResult {
 	start := time.Now()
 	if job.skipped {
 		return TestResult{
@@ -582,6 +582,10 @@ func runSingleTest(job TestJob) TestResult {
 			errorMsg: "",
 			index: job.index,
 		}
+	}
+
+	if verbose {
+		fmt.Println("  [VO-TEST] START " + displayPath(job.file) + " [" + job.mode + "]")
 	}
 
 	if job.shouldFail {
@@ -742,7 +746,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			shouldFail: false,
 			gcDebug: false,
 		}
-		result := runSingleTest(job)
+		result := runSingleTest(job, verbose)
 		printSingleResult(result, verbose)
 		if !result.passed {
 			failed = true
@@ -756,7 +760,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			shouldFail: false,
 			gcDebug: strings.Contains(file, "gc_"),
 		}
-		result := runSingleTest(job)
+		result := runSingleTest(job, verbose)
 		printSingleResult(result, verbose)
 		if !result.passed {
 			failed = true
@@ -770,7 +774,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 			shouldFail: false,
 			gcDebug: strings.Contains(file, "gc_"),
 		}
-		result := runSingleTest(job)
+		result := runSingleTest(job, verbose)
 		printSingleResult(result, verbose)
 		if !result.passed {
 			failed = true

@@ -1,0 +1,41 @@
+package main
+
+import (
+	"http"
+	"io"
+)
+
+func main() {
+	println("Testing HTTP client...")
+	println("Calling http.Get...")
+	
+	// Test GET request to httpbin
+	resp, err := http.Get("http://httpbin.org/get")
+	println("http.Get returned")
+	if err != nil {
+		println("GET failed:", err.Error())
+		return
+	}
+	println("GET succeeded!")
+	defer resp.Body.Close()
+	
+	println("Status:", resp.Status)
+	println("StatusCode:", resp.StatusCode)
+	
+	// Read body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		println("Read body failed:", err.Error())
+		return
+	}
+	
+	println("Body length:", len(body))
+	println("Body (first 200 chars):")
+	if len(body) > 200 {
+		println(string(body[:200]))
+	} else {
+		println(string(body))
+	}
+	
+	println("\nHTTP client test passed!")
+}

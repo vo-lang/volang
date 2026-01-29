@@ -24,6 +24,7 @@ pub mod regexp;
 pub mod json;
 pub mod toml_pkg;
 pub mod tag;
+pub mod io;
 
 // Internal modules (used by json/toml)
 pub(crate) mod serde;
@@ -34,6 +35,7 @@ pub(crate) mod serde_toml;
 pub mod time;
 pub mod os;
 pub mod net;
+pub mod http;
 pub mod filepath;
 pub mod exec;
 
@@ -59,6 +61,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     fmt::register_externs(registry, externs);
     json::register_externs(registry, externs);
     toml_pkg::register_externs(registry, externs);
+    io::register_externs(registry, externs);
 
     // std-only
     #[cfg(feature = "std")]
@@ -67,6 +70,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
         time::register_externs(registry, externs);
         os::register_externs(registry, externs);
         net::register_externs(registry, externs);
+        http::register_externs(registry, externs);
         filepath::register_externs(registry, externs);
         exec::register_externs(registry, externs);
     }

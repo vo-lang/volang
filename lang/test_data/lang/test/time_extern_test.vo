@@ -1,0 +1,9 @@
+package main
+
+import "time"
+
+func main() {
+	println("Testing time extern...")
+	time.Sleep(time.Millisecond * 100)
+	println("Sleep done!")
+}

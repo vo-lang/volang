@@ -948,87 +948,28 @@ impl CodegenContext {
         wrapper_id
     }
     
-    /// Get or create wrapper function for value receiver method value.
-    /// The wrapper unboxes the captured receiver and calls the original method.
+    /// Get or create wrapper function for method value (value or pointer receiver).
+    /// 
+    /// - `needs_deref`: true for value receiver (unbox via PtrGet), false for pointer receiver
+    /// - `recv_slots`: slots needed for receiver in method signature
+    /// - `param_slots`: total param slots including receiver
     pub fn get_or_create_method_value_wrapper(
         &mut self,
         recv_type: TypeKey,
         method_func_id: u32,
-        method_name: &str,
-        info: &crate::type_info::TypeInfoWrapper,
+        needs_deref: bool,
+        recv_slots: u16,
+        param_slots: u16,
+        ret_slots: u16,
     ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::Value { recv_type, func_id: method_func_id };
-        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
-            return Ok(wrapper_id);
-        }
-        
-        // Get method signature info
-        let orig_func = &self.module.functions[method_func_id as usize];
-        let param_slots = orig_func.param_slots;
-        let ret_slots = orig_func.ret_slots;
-        let recv_slots = info.type_slot_count(recv_type);
-        
-        // Create wrapper function:
-        // slot 0: closure ref (boxed receiver in capture 0)
-        // slots 1..1+param_slots: params (excluding receiver since method value hides it)
-        //
-        // Wrapper body:
-        // 1. ClosureGet to get boxed receiver
-        // 2. PtrGet to unbox receiver value
-        // 3. Call original method with receiver + params
-        // 4. Return result
-        
-        use vo_vm::instruction::{Instruction, Opcode};
-        
-        // Wrapper params: closure_ref(1) + other_params
-        let other_param_slots = param_slots.saturating_sub(recv_slots as u16);
-        let wrapper_param_slots = 1 + other_param_slots;
-        
-        let mut code = Vec::new();
-        let recv_reg = wrapper_param_slots;
-        
-        // ClosureGet + PtrGet: unbox receiver value
-        code.push(Instruction::new(Opcode::ClosureGet, recv_reg, 0, 0));
-        if recv_slots == 1 {
-            code.push(Instruction::new(Opcode::PtrGet, recv_reg, recv_reg, 0));
+        let cache_key = if needs_deref {
+            MethodValueWrapperKey::Value { recv_type, func_id: method_func_id }
         } else {
-            code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, recv_reg, 0));
-        }
-        
-        // Copy other params after receiver
-        let args_start = recv_reg;
-        Self::emit_copy_params(&mut code, 1, recv_reg + recv_slots as u16, other_param_slots);
-        
-        // Call and return
-        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
-        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
-        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
-        
-        let wrapper_name = format!("__method_value_{}_{}", method_name, method_func_id);
-        let local_slots = wrapper_param_slots + param_slots.max(ret_slots);
-        let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
-        Ok(wrapper_id)
-    }
-    
-    /// Get or create wrapper function for pointer receiver method value.
-    /// The wrapper gets the pointer from capture and calls the original method.
-    pub fn get_or_create_method_value_wrapper_ptr(
-        &mut self,
-        recv_type: TypeKey,
-        method_func_id: u32,
-        method_name: &str,
-        _info: &crate::type_info::TypeInfoWrapper,
-    ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::Pointer { recv_type, func_id: method_func_id };
+            MethodValueWrapperKey::Pointer { recv_type, func_id: method_func_id }
+        };
         if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
             return Ok(wrapper_id);
         }
-        
-        let orig_func = &self.module.functions[method_func_id as usize];
-        let param_slots = orig_func.param_slots;
-        let ret_slots = orig_func.ret_slots;
-        let recv_slots = 1u16; // pointer is 1 slot
         
         use vo_vm::instruction::{Instruction, Opcode};
         
@@ -1036,23 +977,31 @@ impl CodegenContext {
         let wrapper_param_slots = 1 + other_param_slots;
         
         let mut code = Vec::new();
-        let ptr_reg = wrapper_param_slots;
+        let recv_reg = wrapper_param_slots;
         
-        // ClosureGet: get pointer from capture 0
-        code.push(Instruction::new(Opcode::ClosureGet, ptr_reg, 0, 0));
+        // ClosureGet: get receiver (pointer or boxed value) from capture 0
+        code.push(Instruction::new(Opcode::ClosureGet, recv_reg, 0, 0));
+        
+        // For value receiver: unbox via PtrGet
+        if needs_deref {
+            if recv_slots == 1 {
+                code.push(Instruction::new(Opcode::PtrGet, recv_reg, recv_reg, 0));
+            } else {
+                code.push(Instruction::with_flags(Opcode::PtrGetN, recv_slots as u8, recv_reg, recv_reg, 0));
+            }
+        }
         
         // Copy other params after receiver
-        let args_start = ptr_reg;
-        Self::emit_copy_params(&mut code, 1, ptr_reg + recv_slots, other_param_slots);
+        Self::emit_copy_params(&mut code, 1, recv_reg + recv_slots, other_param_slots);
         
         // Call and return
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, args_start, call_c));
-        code.push(Instruction::with_flags(Opcode::Return, 0, args_start, ret_slots, 0));
+        code.push(Instruction::with_flags(Opcode::Call, func_id_high, func_id_low, recv_reg, call_c));
+        code.push(Instruction::with_flags(Opcode::Return, 0, recv_reg, ret_slots, 0));
         
-        let wrapper_name = format!("__method_value_ptr_{}_{}", method_name, method_func_id);
-        // Fix: use max(param_slots, ret_slots) for consistency
+        let suffix = if needs_deref { "" } else { "_ptr" };
+        let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
         let local_slots = wrapper_param_slots + param_slots.max(ret_slots);
         let wrapper_id = self.register_wrapper_func(wrapper_name, wrapper_param_slots, ret_slots, local_slots, code, cache_key);
         Ok(wrapper_id)

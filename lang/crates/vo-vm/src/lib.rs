@@ -9,6 +9,7 @@ pub mod vm;
 pub mod exec;
 mod gc_roots;
 
+
 // Re-export from vo-common-core for backward compatibility
 pub use vo_runtime::bytecode;
 pub use vo_runtime::instruction;

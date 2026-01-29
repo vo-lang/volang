@@ -40,17 +40,16 @@ pub fn exec_go_start(
     let mut new_fiber = Fiber::new(next_fiber_id);
     new_fiber.push_frame(func_id, func.local_slots, 0, 0);
 
+    let arg_count = arg_slots as usize;
+    let src_start = bp + args_start as usize;
+    
     if let Some(closure_ref) = closure_ref {
         // Closure goes in reg[0], args start at reg[1]
         new_fiber.stack[0] = closure_ref as u64;
-        for i in 0..arg_slots as usize {
-            new_fiber.stack[1 + i] = stack[bp + args_start as usize + i];
-        }
+        new_fiber.stack[1..1 + arg_count].copy_from_slice(&stack[src_start..src_start + arg_count]);
     } else {
         // Regular function: args start at reg[0]
-        for i in 0..arg_slots as usize {
-            new_fiber.stack[i] = stack[bp + args_start as usize + i];
-        }
+        new_fiber.stack[..arg_count].copy_from_slice(&stack[src_start..src_start + arg_count]);
     }
 
     GoResult { new_fiber }

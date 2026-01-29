@@ -73,9 +73,16 @@ pub fn exec_port_send(
     let elem_meta = queue_state::elem_meta(p);
     let src = &stack[src_start..src_start + elem_slots];
 
+    if elem_slots != 0 && elem_meta.value_kind() == vo_runtime::ValueKind::Void {
+        panic!(
+            "port send: elem_slots={} but elem_meta is Void (raw={})",
+            elem_slots,
+            elem_meta.to_raw()
+        );
+    }
+
     // Pack the value for cross-island transfer
     let packed = pack_slots(gc, src, elem_meta, struct_metas, runtime_types);
-
     match port::try_send(p, packed) {
         SendResult::DirectSend(receiver) => PortResult::WakeRemote(receiver),
         SendResult::Buffered => PortResult::Continue,
@@ -120,7 +127,18 @@ pub fn exec_port_recv(
 
     match result {
         RecvResult::Success(woke_sender) => {
+            if packed_opt.is_none() {
+                panic!("port recv: success without payload");
+            }
             if let Some(packed) = packed_opt {
+                if elem_slots != 0 && packed.data().first().copied() == Some(vo_runtime::ValueKind::Void as u8) {
+                    let elem_meta = queue_state::elem_meta(p);
+                    panic!(
+                        "port recv: elem_slots={} but packed tag is Void (port elem_meta raw={})",
+                        elem_slots,
+                        elem_meta.to_raw()
+                    );
+                }
                 // Unpack the value into destination island's heap
                 let dst = &mut stack[dst_start..dst_start + elem_slots];
                 unpack_slots(gc, &packed, dst, struct_metas, runtime_types);

@@ -152,7 +152,7 @@ The event loop uses standard Go/Vo concurrency: a goroutine blocked on channel r
 │  2. User clicks button                                       │
 │     └─> handleGuiEvent(handlerId, payload)                  │
 │         └─> channel.try_send(Event{...})                    │
-│         └─> scheduler.wake(gui_fiber_id)                    │
+│         └─> scheduler.wake_fiber(gui_fiber_id)              │
 │         └─> vm.run() until fiber blocks again               │
 │         └─> return new render JSON                          │
 │                                                              │

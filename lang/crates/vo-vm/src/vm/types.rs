@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 #[cfg(feature = "std")]
 use vo_runtime::island::IslandCommand;
+#[cfg(feature = "std")]
+use vo_runtime::io::IoToken;
 
 /// Shared registry of island command senders.
 #[cfg(feature = "std")]
@@ -39,6 +41,9 @@ pub enum ExecResult {
     Done,
     /// OSR request: (func_id, backedge_pc, loop_header_pc)
     Osr(u32, usize, usize),
+    /// Wait for I/O completion.
+    #[cfg(feature = "std")]
+    WaitIo { token: IoToken },
 }
 
 /// Runtime error location for debug info lookup.
@@ -78,6 +83,8 @@ pub struct VmState {
     pub itab_cache: ItabCache,
     pub extern_registry: ExternRegistry,
     pub program_args: Vec<String>,
+    #[cfg(feature = "std")]
+    pub io: vo_runtime::io::IoRuntime,
     /// Per-VM sentinel error cache (reset on each module load).
     pub sentinel_errors: SentinelErrorCache,
     /// Next island ID to assign
@@ -104,6 +111,9 @@ impl VmState {
             itab_cache: ItabCache::new(),
             extern_registry: ExternRegistry::new(),
             program_args: Vec::new(),
+            #[cfg(feature = "std")]
+            io: vo_runtime::io::IoRuntime::new()
+                .unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e)),
             sentinel_errors: SentinelErrorCache::new(),
             next_island_id: 1, // 0 is main island
             #[cfg(feature = "std")]

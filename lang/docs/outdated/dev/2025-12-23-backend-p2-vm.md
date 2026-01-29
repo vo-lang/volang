@@ -749,7 +749,7 @@ Opcode::ChanSend => {
     
     match channel::get_state(chan).try_send(value.clone(), cap) {
         SendResult::DirectSend(receiver_id) => {
-            scheduler.wake(receiver_id);
+            scheduler.wake_fiber(FiberId::from_raw(receiver_id));
         }
         SendResult::Buffered => {}
         SendResult::WouldBlock => {
@@ -772,7 +772,7 @@ Opcode::ChanRecv => {
             let val = value.unwrap();
             for (i, &v) in val.iter().enumerate() { slots[a + i] = v; }
             if has_ok { slots[a + elem_slots] = 1; }
-            if let Some(id) = woke_sender { scheduler.wake(id); }
+            if let Some(id) = woke_sender { scheduler.wake_fiber(FiberId::from_raw(id)); }
         }
         RecvResult::WouldBlock => {
             channel::get_state(chan).register_receiver(fiber_id);
@@ -788,8 +788,8 @@ Opcode::ChanRecv => {
 Opcode::ChanClose => {
     let state = channel::get_state(slots[a] as GcRef);
     state.close();
-    for id in state.take_waiting_receivers() { scheduler.wake(id); }
-    for (id, _) in state.take_waiting_senders() { scheduler.wake(id); }
+    for id in state.take_waiting_receivers() { scheduler.wake_fiber(FiberId::from_raw(id)); }
+    for (id, _) in state.take_waiting_senders() { scheduler.wake_fiber(FiberId::from_raw(id)); }
 }
 ```
 
@@ -935,6 +935,6 @@ fn wake_select(fiber_id: FiberId, case_index: usize) {
         }
     }
     
-    scheduler.wake(fiber_id);
+    scheduler.wake_fiber(FiberId::from_raw(fiber_id));
 }
 ```

@@ -41,7 +41,7 @@ pub fn compile_selector(
     if let Some(selection) = info.get_selection(expr.id) {
         match selection.kind() {
             vo_analysis::selection::SelectionKind::MethodVal => {
-                return super::method_value::compile_method_value(expr, sel, selection, dst, ctx, func, info);
+                return super::method_value::compile_method_value(sel, selection, dst, ctx, func, info);
             }
             vo_analysis::selection::SelectionKind::MethodExpr => {
                 return super::method_value::compile_method_expr(expr, sel, selection, dst, ctx, func, info);

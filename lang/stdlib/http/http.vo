@@ -1,0 +1,839 @@
+package http
+
+import (
+	"errors"
+	"io"
+	"net"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ==================== Status Codes ====================
+
+const (
+	StatusContinue           = 100
+	StatusSwitchingProtocols = 101
+	StatusOK                 = 200
+	StatusCreated            = 201
+	StatusAccepted           = 202
+	StatusNoContent          = 204
+	StatusMovedPermanently   = 301
+	StatusFound              = 302
+	StatusNotModified        = 304
+	StatusBadRequest         = 400
+	StatusUnauthorized       = 401
+	StatusForbidden          = 403
+	StatusNotFound           = 404
+	StatusMethodNotAllowed   = 405
+	StatusRequestTimeout     = 408
+	StatusInternalServerError = 500
+	StatusNotImplemented     = 501
+	StatusBadGateway         = 502
+	StatusServiceUnavailable = 503
+	StatusGatewayTimeout     = 504
+)
+
+// ==================== Methods ====================
+
+const (
+	MethodGet     = "GET"
+	MethodHead    = "HEAD"
+	MethodPost    = "POST"
+	MethodPut     = "PUT"
+	MethodPatch   = "PATCH"
+	MethodDelete  = "DELETE"
+	MethodOptions = "OPTIONS"
+)
+
+// ==================== Header ====================
+
+// Header represents the key-value pairs in an HTTP header.
+type Header map[string][]string
+
+// Add adds the key-value pair to the header.
+func (h Header) Add(key, value string) {
+	h[key] = append(h[key], value)
+}
+
+// Set sets the header entries associated with key to the single element value.
+func (h Header) Set(key, value string) {
+	h[key] = []string{value}
+}
+
+// Get gets the first value associated with the given key.
+func (h Header) Get(key string) string {
+	if v, ok := h[key]; ok && len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+// Del deletes the values associated with key.
+func (h Header) Del(key string) {
+	delete(h, key)
+}
+
+// Values returns all values associated with the given key.
+func (h Header) Values(key string) []string {
+	return h[key]
+}
+
+// Clone returns a copy of h.
+func (h Header) Clone() Header {
+	h2 := make(Header)
+	for k, vv := range h {
+		vv2 := make([]string, len(vv))
+		copy(vv2, vv)
+		h2[k] = vv2
+	}
+	return h2
+}
+
+// ==================== Request ====================
+
+// Request represents an HTTP request received by a server or to be sent by a client.
+type Request struct {
+	Method        string
+	URL           string
+	Proto         string
+	Header        Header
+	Body          io.Reader
+	ContentLength int64
+	Host          string
+	RemoteAddr    string
+	RequestURI    string
+}
+
+// NewRequest creates a new Request with the given method, URL, and optional body.
+func NewRequest(method, url string, body io.Reader) (*Request, error) {
+	if method == "" {
+		method = MethodGet
+	}
+	req := &Request{
+		Method: method,
+		URL:    url,
+		Proto:  "HTTP/1.1",
+		Header: make(Header),
+		Body:   body,
+	}
+	return req, nil
+}
+
+// ==================== Response ====================
+
+// Response represents the response from an HTTP request.
+type Response struct {
+	Status        string
+	StatusCode    int
+	Proto         string
+	Header        Header
+	Body          io.ReadCloser
+	ContentLength int64
+	Request       *Request
+}
+
+// ==================== Client ====================
+
+// Client is an HTTP client.
+type Client struct {
+	Timeout time.Duration
+}
+
+// DefaultClient is the default Client.
+var DefaultClient = &Client{}
+
+// Get issues a GET to the specified URL.
+func Get(url string) (*Response, error) {
+	return DefaultClient.Get(url)
+}
+
+// Head issues a HEAD to the specified URL.
+func Head(url string) (*Response, error) {
+	return DefaultClient.Head(url)
+}
+
+// Post issues a POST to the specified URL.
+func Post(url, contentType string, body io.Reader) (*Response, error) {
+	return DefaultClient.Post(url, contentType, body)
+}
+
+// Get issues a GET to the specified URL.
+func (c *Client) Get(url string) (*Response, error) {
+	req, err := NewRequest(MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}
+
+// Head issues a HEAD to the specified URL.
+func (c *Client) Head(url string) (*Response, error) {
+	req, err := NewRequest(MethodHead, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}
+
+// Post issues a POST to the specified URL.
+func (c *Client) Post(url, contentType string, body io.Reader) (*Response, error) {
+	req, err := NewRequest(MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	return c.Do(req)
+}
+
+// Do sends an HTTP request and returns an HTTP response.
+func (c *Client) Do(req *Request) (*Response, error) {
+	// Parse URL to get host and path
+	host, path, err := parseURL(req.URL)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Dial TCP connection
+	conn, err := net.Dial("tcp", host)
+	if err != nil {
+		return nil, err
+	}
+	
+	// TODO: timeout support requires conn.SetDeadline which needs Time.Add
+	_ = c.Timeout
+	
+	// Build and send HTTP request
+	if err := writeRequest(conn, req, host, path); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	
+	// Read and parse HTTP response
+	resp, err := readResponse(conn, req)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	
+	return resp, nil
+}
+
+// parseURL extracts host:port and path from URL.
+// Supports http://host:port/path and http://host/path formats.
+func parseURL(url string) (host, path string, err error) {
+	// Remove scheme
+	if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	} else if strings.HasPrefix(url, "https://") {
+		return "", "", errors.New("https not supported")
+	}
+	
+	// Split host and path
+	idx := strings.Index(url, "/")
+	if idx == -1 {
+		host = url
+		path = "/"
+	} else {
+		host = url[:idx]
+		path = url[idx:]
+	}
+	
+	// Add default port if missing
+	if strings.Index(host, ":") == -1 {
+		host = host + ":80"
+	}
+	
+	if path == "" {
+		path = "/"
+	}
+	
+	return host, path, nil
+}
+
+// writeRequest writes HTTP request to connection.
+func writeRequest(conn net.Conn, req *Request, host, path string) error {
+	// Request line: METHOD /path HTTP/1.1\r\n
+	line := req.Method + " " + path + " HTTP/1.1\r\n"
+	if _, err := conn.Write([]byte(line)); err != nil {
+		return err
+	}
+	
+	// Host header (required for HTTP/1.1)
+	hostHeader := "Host: " + strings.Split(host, ":")[0] + "\r\n"
+	if _, err := conn.Write([]byte(hostHeader)); err != nil {
+		return err
+	}
+	
+	// User headers
+	for key, values := range req.Header {
+		for _, val := range values {
+			header := key + ": " + val + "\r\n"
+			if _, err := conn.Write([]byte(header)); err != nil {
+				return err
+			}
+		}
+	}
+	
+	// Body handling
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+	}
+	
+	if len(bodyBytes) > 0 {
+		cl := "Content-Length: " + strconv.Itoa(len(bodyBytes)) + "\r\n"
+		if _, err := conn.Write([]byte(cl)); err != nil {
+			return err
+		}
+	}
+	
+	// End of headers
+	if _, err := conn.Write([]byte("\r\n")); err != nil {
+		return err
+	}
+	
+	// Write body
+	if len(bodyBytes) > 0 {
+		if _, err := conn.Write(bodyBytes); err != nil {
+			return err
+		}
+	}
+	
+	return nil
+}
+
+// readResponse reads and parses HTTP response from connection.
+func readResponse(conn net.Conn, req *Request) (*Response, error) {
+	// Read response into buffer
+	buf := make([]byte, 4096)
+	var data []byte
+	
+	// Read headers (until \r\n\r\n)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil && err.Error() != "EOF" {
+			if len(data) == 0 {
+				return nil, err
+			}
+			break
+		}
+		if n == 0 {
+			break
+		}
+		data = append(data, buf[:n]...)
+		
+		// Check if we have complete headers
+		if strings.Index(string(data), "\r\n\r\n") != -1 {
+			break
+		}
+	}
+	
+	if len(data) == 0 {
+		return nil, errors.New("empty response")
+	}
+	
+	// Parse response
+	text := string(data)
+	headerEnd := strings.Index(text, "\r\n\r\n")
+	if headerEnd == -1 {
+		return nil, errors.New("invalid response: no header end")
+	}
+	
+	headerPart := text[:headerEnd]
+	bodyStart := data[headerEnd+4:]
+	
+	// Parse status line: HTTP/1.1 200 OK
+	lines := strings.Split(headerPart, "\r\n")
+	if len(lines) == 0 {
+		return nil, errors.New("invalid response: no status line")
+	}
+	
+	statusLine := lines[0]
+	parts := strings.SplitN(statusLine, " ", 3)
+	if len(parts) < 2 {
+		return nil, errors.New("invalid status line")
+	}
+	
+	proto := parts[0]
+	statusCode, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, errors.New("invalid status code")
+	}
+	status := statusLine
+	
+	// Parse headers
+	headers := make(Header)
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		colonIdx := strings.Index(line, ":")
+		if colonIdx == -1 {
+			continue
+		}
+		key := strings.TrimSpace(line[:colonIdx])
+		val := strings.TrimSpace(line[colonIdx+1:])
+		headers[key] = append(headers[key], val)
+	}
+	
+	// Get content length
+	contentLength := int64(-1)
+	if cl := headers.Get("Content-Length"); cl != "" {
+		if n, err := strconv.Atoi(cl); err == nil {
+			contentLength = int64(n)
+		}
+	}
+	
+	// Read remaining body if Content-Length specified
+	body := bodyStart
+	if contentLength > 0 && int64(len(body)) < contentLength {
+		remaining := contentLength - int64(len(body))
+		for remaining > 0 {
+			n, err := conn.Read(buf)
+			if err != nil {
+				break
+			}
+			body = append(body, buf[:n]...)
+			remaining -= int64(n)
+		}
+	}
+	
+	resp := &Response{
+		Status:        status,
+		StatusCode:    statusCode,
+		Proto:         proto,
+		Header:        headers,
+		Body:          &connBody{conn: conn, buf: body, pos: 0},
+		ContentLength: contentLength,
+		Request:       req,
+	}
+	
+	return resp, nil
+}
+
+// connBody implements io.ReadCloser for response body.
+type connBody struct {
+	conn net.Conn
+	buf  []byte
+	pos  int
+}
+
+func (b *connBody) Read(p []byte) (int, error) {
+	if b.pos >= len(b.buf) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.buf[b.pos:])
+	b.pos += n
+	return n, nil
+}
+
+func (b *connBody) Close() error {
+	return b.conn.Close()
+}
+
+// ==================== ResponseWriter ====================
+
+// ResponseWriter interface is used by an HTTP handler to construct an HTTP response.
+type ResponseWriter interface {
+	Header() Header
+	Write([]byte) (int, error)
+	WriteHeader(statusCode int)
+}
+
+// ==================== Handler ====================
+
+// Handler responds to an HTTP request.
+type Handler interface {
+	ServeHTTP(ResponseWriter, *Request)
+}
+
+// HandlerFunc is an adapter to allow the use of ordinary functions as HTTP handlers.
+type HandlerFunc func(ResponseWriter, *Request)
+
+// ServeHTTP calls f(w, r).
+func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+	f(w, r)
+}
+
+// ==================== ServeMux ====================
+
+// ServeMux is an HTTP request multiplexer.
+type ServeMux struct {
+	patterns []string
+	handlers []Handler
+}
+
+// NewServeMux allocates and returns a new ServeMux.
+func NewServeMux() *ServeMux {
+	return &ServeMux{}
+}
+
+// Handle registers the handler for the given pattern.
+func (mux *ServeMux) Handle(pattern string, handler Handler) {
+	mux.patterns = append(mux.patterns, pattern)
+	mux.handlers = append(mux.handlers, handler)
+}
+
+// HandleFunc registers the handler function for the given pattern.
+func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+	mux.Handle(pattern, HandlerFunc(handler))
+}
+
+// ServeHTTP dispatches the request to the handler whose pattern most closely matches.
+func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
+	h := mux.match(r.URL)
+	if h == nil {
+		NotFound(w, r)
+		return
+	}
+	h.ServeHTTP(w, r)
+}
+
+func (mux *ServeMux) match(url string) Handler {
+	path := urlPath(url)
+	bestMatch := -1
+	bestLen := 0
+	for i, pattern := range mux.patterns {
+		if pathMatch(pattern, path) {
+			if len(pattern) > bestLen {
+				bestMatch = i
+				bestLen = len(pattern)
+			}
+		}
+	}
+	if bestMatch >= 0 {
+		return mux.handlers[bestMatch]
+	}
+	return nil
+}
+
+// DefaultServeMux is the default ServeMux.
+var DefaultServeMux = NewServeMux()
+
+// Handle registers the handler for the given pattern in the DefaultServeMux.
+func Handle(pattern string, handler Handler) {
+	DefaultServeMux.Handle(pattern, handler)
+}
+
+// HandleFunc registers the handler function for the given pattern in the DefaultServeMux.
+func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+	DefaultServeMux.HandleFunc(pattern, handler)
+}
+
+// ==================== Server ====================
+
+// Server defines parameters for running an HTTP server.
+type Server struct {
+	Addr    string
+	Handler Handler
+	ln      net.Listener
+}
+
+var ErrServerClosed = errors.New("http: Server closed")
+
+// ListenAndServe listens on the TCP network address addr and then calls Serve.
+func (srv *Server) ListenAndServe() error {
+	addr := srv.Addr
+	if addr == "" {
+		addr = ":8080"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv.ln = ln
+	return srv.Serve(ln)
+}
+
+// Serve accepts incoming connections on the Listener l.
+func (srv *Server) Serve(l net.Listener) error {
+	defer l.Close()
+	
+	handler := srv.Handler
+	if handler == nil {
+		handler = DefaultServeMux
+	}
+	if srv.ln == nil {
+		srv.ln = l
+	}
+	
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			if err.Error() == "use of closed network connection" {
+				srv.ln = nil
+				return ErrServerClosed
+			}
+			srv.ln = nil
+			return err
+		}
+		go srv.handleConn(conn, handler)
+	}
+}
+
+func (srv *Server) handleConn(conn net.Conn, handler Handler) {
+	defer conn.Close()
+
+	req, err := parseRequest(conn)
+	if err != nil {
+		return
+	}
+	
+	w := &serverResponseWriter{
+		conn:   conn,
+		header: make(Header),
+	}
+	
+	handler.ServeHTTP(w, req)
+	w.finishRequest()
+	return
+}
+
+// Close immediately closes all active connections and the listener.
+func (srv *Server) Close() error {
+	err := srv.ln.Close()
+	srv.ln = nil
+	return err
+}
+
+// ListenAndServe listens on the TCP network address addr and then calls Serve with handler.
+func ListenAndServe(addr string, handler Handler) error {
+	server := &Server{Addr: addr, Handler: handler}
+	return server.ListenAndServe()
+}
+
+// ==================== Helper Functions ====================
+
+// NotFound replies to the request with an HTTP 404 not found error.
+func NotFound(w ResponseWriter, r *Request) {
+	w.WriteHeader(StatusNotFound)
+	w.Write([]byte("404 page not found\n"))
+}
+
+// Error replies to the request with the specified error message and HTTP code.
+func Error(w ResponseWriter, error string, code int) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	w.Write([]byte(error))
+}
+
+// StatusText returns a text for the HTTP status code.
+func StatusText(code int) string {
+	switch code {
+	case StatusContinue:
+		return "Continue"
+	case StatusSwitchingProtocols:
+		return "Switching Protocols"
+	case StatusOK:
+		return "OK"
+	case StatusCreated:
+		return "Created"
+	case StatusAccepted:
+		return "Accepted"
+	case StatusNoContent:
+		return "No Content"
+	case StatusMovedPermanently:
+		return "Moved Permanently"
+	case StatusFound:
+		return "Found"
+	case StatusNotModified:
+		return "Not Modified"
+	case StatusBadRequest:
+		return "Bad Request"
+	case StatusUnauthorized:
+		return "Unauthorized"
+	case StatusForbidden:
+		return "Forbidden"
+	case StatusNotFound:
+		return "Not Found"
+	case StatusMethodNotAllowed:
+		return "Method Not Allowed"
+	case StatusRequestTimeout:
+		return "Request Timeout"
+	case StatusInternalServerError:
+		return "Internal Server Error"
+	case StatusNotImplemented:
+		return "Not Implemented"
+	case StatusBadGateway:
+		return "Bad Gateway"
+	case StatusServiceUnavailable:
+		return "Service Unavailable"
+	case StatusGatewayTimeout:
+		return "Gateway Timeout"
+	}
+	return ""
+}
+
+// ==================== Internal Response Writer ====================
+
+type serverResponseWriter struct {
+	conn        net.Conn
+	header      Header
+	wroteHeader bool
+	statusCode  int
+}
+
+func (w *serverResponseWriter) Header() Header {
+	return w.header
+}
+
+func (w *serverResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(StatusOK)
+	}
+	return w.conn.Write(data)
+}
+
+func (w *serverResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.statusCode = statusCode
+	if w.header.Get("Connection") == "" {
+		w.header.Set("Connection", "close")
+	}
+	
+	status := "HTTP/1.1 " + strconv.Itoa(statusCode) + " " + StatusText(statusCode) + "\r\n"
+	w.conn.Write([]byte(status))
+	
+	for key, values := range w.header {
+		for _, value := range values {
+			w.conn.Write([]byte(key + ": " + value + "\r\n"))
+		}
+	}
+	w.conn.Write([]byte("\r\n"))
+}
+
+func (w *serverResponseWriter) finishRequest() {
+	if !w.wroteHeader {
+		w.WriteHeader(StatusOK)
+	}
+}
+
+// ==================== Internal Helpers ====================
+
+func urlPath(url string) string {
+	start := 0
+	for i := 0; i < len(url); i++ {
+		if url[i] == '/' && i+1 < len(url) && url[i+1] == '/' {
+			i += 2
+			for i < len(url) && url[i] != '/' {
+				i++
+			}
+			start = i
+			break
+		}
+	}
+	if start == 0 && len(url) > 0 && url[0] == '/' {
+		start = 0
+	}
+	end := len(url)
+	for i := start; i < len(url); i++ {
+		if url[i] == '?' {
+			end = i
+			break
+		}
+	}
+	if start >= end {
+		return "/"
+	}
+	return url[start:end]
+}
+
+func pathMatch(pattern, path string) bool {
+	if len(pattern) == 0 {
+		return false
+	}
+	if pattern == path {
+		return true
+	}
+	if pattern[len(pattern)-1] == '/' {
+		return len(path) >= len(pattern) && path[:len(pattern)] == pattern
+	}
+	return false
+}
+
+
+func parseRequest(conn net.Conn) (*Request, error) {
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	
+	data := string(buf[:n])
+	
+	// Parse request line
+	lineEnd := 0
+	for i := 0; i < len(data)-1; i++ {
+		if data[i] == '\r' && data[i+1] == '\n' {
+			lineEnd = i
+			break
+		}
+	}
+	if lineEnd == 0 {
+		return nil, errors.New("invalid request line")
+	}
+	
+	reqLine := data[:lineEnd]
+	method, rest := parseWord(reqLine)
+	uri, proto := parseWord(rest)
+	
+	req := &Request{
+		Method:     method,
+		URL:        uri,
+		RequestURI: uri,
+		Proto:      proto,
+		Header:     make(Header),
+	}
+	
+	// Parse headers
+	pos := lineEnd + 2
+	for pos < len(data)-1 {
+		if data[pos] == '\r' && data[pos+1] == '\n' {
+			break
+		}
+		hdrEnd := pos
+		for hdrEnd < len(data)-1 {
+			if data[hdrEnd] == '\r' && data[hdrEnd+1] == '\n' {
+				break
+			}
+			hdrEnd++
+		}
+		hdrLine := data[pos:hdrEnd]
+		colonIdx := -1
+		for i := 0; i < len(hdrLine); i++ {
+			if hdrLine[i] == ':' {
+				colonIdx = i
+				break
+			}
+		}
+		if colonIdx > 0 {
+			key := hdrLine[:colonIdx]
+			val := hdrLine[colonIdx+1:]
+			for len(val) > 0 && val[0] == ' ' {
+				val = val[1:]
+			}
+			req.Header.Add(key, val)
+		}
+		pos = hdrEnd + 2
+	}
+	
+	return req, nil
+}
+
+func parseWord(s string) (word, rest string) {
+	for len(s) > 0 && s[0] == ' ' {
+		s = s[1:]
+	}
+	end := 0
+	for end < len(s) && s[end] != ' ' {
+		end++
+	}
+	word = s[:end]
+	rest = s[end:]
+	for len(rest) > 0 && rest[0] == ' ' {
+		rest = rest[1:]
+	}
+	return word, rest
+}

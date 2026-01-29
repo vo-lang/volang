@@ -1,0 +1,16 @@
+package main
+
+import "net"
+
+func main() {
+	println("Testing net.Dial...")
+	conn, err := net.Dial("tcp", "httpbin.org:80")
+	println("net.Dial returned")
+	if err != nil {
+		println("Dial failed:", err.Error())
+		return
+	}
+	println("Connected!")
+	conn.Close()
+	println("Done")
+}

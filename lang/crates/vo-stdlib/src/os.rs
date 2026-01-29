@@ -6,7 +6,7 @@
 #[cfg(feature = "std")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(feature = "std")]
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 #[cfg(feature = "std")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 #[cfg(feature = "std")]
@@ -22,6 +22,8 @@ use vo_ffi_macro::{vostd_extern_ctx, vostd_errors, vo_consts};
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
+#[cfg(feature = "std")]
+use vo_runtime::io::IoHandle;
 #[cfg(feature = "std")]
 use vo_runtime::objects::slice;
 #[cfg(feature = "std")]
@@ -43,6 +45,19 @@ lazy_static::lazy_static! {
 
 #[cfg(feature = "std")]
 fn register_file(file: File) -> i32 {
+    #[cfg(unix)]
+    {
+        let raw_fd = file.as_raw_fd();
+        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+        if flags == -1 {
+            panic!("fcntl(F_GETFL) failed: {}", std::io::Error::last_os_error());
+        }
+        let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if ret == -1 {
+            panic!("fcntl(F_SETFL) failed: {}", std::io::Error::last_os_error());
+        }
+    }
+
     let mut handles = FILE_HANDLES.lock().unwrap();
     let mut next_fd = NEXT_FD.lock().unwrap();
     let fd = *next_fd;
@@ -157,14 +172,64 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
         }
         return ExternResult::Ok;
     }
-    
-    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
-        match file.read(buf) {
-            Ok(0) => { call.ret_i64(slots::RET_0, 0); write_error_to(call, slots::RET_1, "EOF"); }
-            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
-            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
+
+    let raw_fd = {
+        let handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get(&fd) {
+            Some(f) => f,
+            None => {
+                call.ret_i64(slots::RET_0, 0);
+                write_error_to(call, slots::RET_1, "invalid file descriptor");
+                return ExternResult::Ok;
+            }
+        };
+        file.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_read(raw_fd as IoHandle, buf_ptr, buf_len);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(0) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_error_to(call, slots::RET_1, "EOF");
+                        }
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
+                }
+                None => return ExternResult::WaitIo { token },
+            }
         }
-    });
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(0) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, "EOF");
+        }
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
+    }
     ExternResult::Ok
 }
 
@@ -184,13 +249,56 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
         }
         return ExternResult::Ok;
     }
-    
-    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
-        match file.write(buf) {
-            Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
-            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
+
+    let raw_fd = {
+        let handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get(&fd) {
+            Some(f) => f,
+            None => {
+                call.ret_i64(slots::RET_0, 0);
+                write_error_to(call, slots::RET_1, "invalid file descriptor");
+                return ExternResult::Ok;
+            }
+        };
+        file.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_write(raw_fd as IoHandle, buf_ptr, buf_len);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
+                }
+                None => return ExternResult::WaitIo { token },
+            }
         }
-    });
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
+    }
     ExternResult::Ok
 }
 
@@ -203,21 +311,63 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
     
-    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
-        let current_pos = file.stream_position().unwrap_or(0);
-        match file.seek(SeekFrom::Start(offset as u64)) {
-            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
-            Ok(_) => {
-                let result = file.read(buf);
-                let _ = file.seek(SeekFrom::Start(current_pos));
-                match result {
-                    Ok(0) => { call.ret_i64(slots::RET_0, 0); write_error_to(call, slots::RET_1, "EOF"); }
-                    Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
-                    Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
+    let raw_fd = {
+        let handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get(&fd) {
+            Some(f) => f,
+            None => {
+                call.ret_i64(slots::RET_0, 0);
+                write_error_to(call, slots::RET_1, "invalid file descriptor");
+                return ExternResult::Ok;
+            }
+        };
+        file.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_read_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(0) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_error_to(call, slots::RET_1, "EOF");
+                        }
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
                 }
+                None => return ExternResult::WaitIo { token },
             }
         }
-    });
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(0) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, "EOF");
+        }
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
+    }
     ExternResult::Ok
 }
 
@@ -230,20 +380,55 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let buf_ptr = slice::data_ptr(buf_ref);
     let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
     
-    with_file_mut!(fd, call, slots::RET_1, ret0, |file| {
-        let current_pos = file.stream_position().unwrap_or(0);
-        match file.seek(SeekFrom::Start(offset as u64)) {
-            Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
-            Ok(_) => {
-                let result = file.write(buf);
-                let _ = file.seek(SeekFrom::Start(current_pos));
-                match result {
-                    Ok(n) => { call.ret_i64(slots::RET_0, n as i64); write_nil_error(call, slots::RET_1); }
-                    Err(e) => { call.ret_i64(slots::RET_0, 0); write_io_error(call, slots::RET_1, e); }
+    let raw_fd = {
+        let handles = FILE_HANDLES.lock().unwrap();
+        let file = match handles.get(&fd) {
+            Some(f) => f,
+            None => {
+                call.ret_i64(slots::RET_0, 0);
+                write_error_to(call, slots::RET_1, "invalid file descriptor");
+                return ExternResult::Ok;
+            }
+        };
+        file.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_write_at(raw_fd as IoHandle, buf_ptr, buf_len, offset);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
                 }
+                None => return ExternResult::WaitIo { token },
             }
         }
-    });
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
+    }
     ExternResult::Ok
 }
 

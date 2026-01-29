@@ -1,23 +1,30 @@
 //! TCP connection and listener implementations.
 
-use std::io::{Read, Write};
+use std::io::{Read, Write, ErrorKind};
 use std::net::{TcpStream, TcpListener, ToSocketAddrs};
 use std::time::Duration;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
 
 use vo_ffi_macro::vostd_extern_ctx;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::io::IoHandle;
 use vo_runtime::objects::slice;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 
 use super::{TCP_CONN_HANDLES, TCP_LISTENER_HANDLES, next_handle, write_io_error};
 
 fn register_tcp_conn(conn: TcpStream) -> i32 {
+    // Set non-blocking mode for async I/O
+    conn.set_nonblocking(true).ok();
     let h = next_handle();
     TCP_CONN_HANDLES.lock().unwrap().insert(h, conn);
     h
 }
 
 fn register_tcp_listener(listener: TcpListener) -> i32 {
+    // Set non-blocking mode for async accept
+    listener.set_nonblocking(true).ok();
     let h = next_handle();
     TCP_LISTENER_HANDLES.lock().unwrap().insert(h, listener);
     h
@@ -90,27 +97,63 @@ pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) };
-    
-    let mut handles = TCP_CONN_HANDLES.lock().unwrap();
-    if let Some(conn) = handles.get_mut(&handle) {
-        match conn.read(buf) {
-            Ok(0) => {
+
+    let fd = {
+        let mut handles = TCP_CONN_HANDLES.lock().unwrap();
+        let conn = match handles.get_mut(&handle) {
+            Some(c) => c,
+            None => {
                 call.ret_i64(slots::RET_0, 0);
-                write_error_to(call, slots::RET_1, "EOF");
+                write_error_to(call, slots::RET_1, "use of closed network connection");
+                return ExternResult::Ok;
             }
-            Ok(n) => {
-                call.ret_i64(slots::RET_0, n as i64);
-                write_nil_error(call, slots::RET_1);
-            }
-            Err(e) => {
-                call.ret_i64(slots::RET_0, 0);
-                write_io_error(call, slots::RET_1, e);
+        };
+        conn.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_read(fd as IoHandle, buf_ptr, buf_len);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(0) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_error_to(call, slots::RET_1, "EOF");
+                        }
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
+                }
+                None => return ExternResult::WaitIo { token },
             }
         }
-    } else {
-        call.ret_i64(slots::RET_0, 0);
-        write_error_to(call, slots::RET_1, "use of closed network connection");
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(0) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, "EOF");
+        }
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
     }
     ExternResult::Ok
 }
@@ -121,23 +164,55 @@ pub fn net_tcp_conn_write(call: &mut ExternCallContext) -> ExternResult {
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
-    
-    let mut handles = TCP_CONN_HANDLES.lock().unwrap();
-    if let Some(conn) = handles.get_mut(&handle) {
-        match conn.write(buf) {
-            Ok(n) => {
-                call.ret_i64(slots::RET_0, n as i64);
-                write_nil_error(call, slots::RET_1);
-            }
-            Err(e) => {
+
+    let fd = {
+        let mut handles = TCP_CONN_HANDLES.lock().unwrap();
+        let conn = match handles.get_mut(&handle) {
+            Some(c) => c,
+            None => {
                 call.ret_i64(slots::RET_0, 0);
-                write_io_error(call, slots::RET_1, e);
+                write_error_to(call, slots::RET_1, "use of closed network connection");
+                return ExternResult::Ok;
+            }
+        };
+        conn.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call
+                .io_mut()
+                .submit_write(fd as IoHandle, buf_ptr, buf_len);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(n) => {
+                            call.ret_i64(slots::RET_0, n as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
+                }
+                None => return ExternResult::WaitIo { token },
             }
         }
-    } else {
-        call.ret_i64(slots::RET_0, 0);
-        write_error_to(call, slots::RET_1, "use of closed network connection");
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(n) => {
+            call.ret_i64(slots::RET_0, n as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
     }
     ExternResult::Ok
 }
@@ -249,24 +324,61 @@ pub fn net_tcp_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternRe
 #[vostd_extern_ctx("net", "tcpListenerAccept")]
 pub fn net_tcp_listener_accept(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-    
-    let handles = TCP_LISTENER_HANDLES.lock().unwrap();
-    if let Some(listener) = handles.get(&handle) {
-        match listener.accept() {
-            Ok((stream, _addr)) => {
-                drop(handles);
-                let h = register_tcp_conn(stream);
-                call.ret_i64(slots::RET_0, h as i64);
-                write_nil_error(call, slots::RET_1);
-            }
-            Err(e) => {
+
+    let fd = {
+        let handles = TCP_LISTENER_HANDLES.lock().unwrap();
+        let listener = match handles.get(&handle) {
+            Some(l) => l,
+            None => {
                 call.ret_i64(slots::RET_0, 0);
-                write_io_error(call, slots::RET_1, e);
+                write_error_to(call, slots::RET_1, "use of closed network connection");
+                return ExternResult::Ok;
+            }
+        };
+        listener.as_raw_fd()
+    };
+
+    let token = match call.resume_io_token() {
+        Some(token) => token,
+        None => {
+            let token = call.io_mut().submit_accept(fd as IoHandle);
+            match call.io_mut().try_take_completion(token) {
+                Some(c) => {
+                    match c.result {
+                        Ok(_) => {
+                            let new_fd = i32::try_from(c.extra)
+                                .unwrap_or_else(|_| panic!("invalid accepted fd: {}", c.extra));
+                            let stream = unsafe { TcpStream::from_raw_fd(new_fd) };
+                            let h = register_tcp_conn(stream);
+                            call.ret_i64(slots::RET_0, h as i64);
+                            write_nil_error(call, slots::RET_1);
+                        }
+                        Err(e) => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_io_error(call, slots::RET_1, e);
+                        }
+                    }
+                    return ExternResult::Ok;
+                }
+                None => return ExternResult::WaitIo { token },
             }
         }
-    } else {
-        call.ret_i64(slots::RET_0, 0);
-        write_error_to(call, slots::RET_1, "use of closed network connection");
+    };
+
+    let c = call.io_mut().take_completion(token);
+    match c.result {
+        Ok(_) => {
+            let new_fd = i32::try_from(c.extra)
+                .unwrap_or_else(|_| panic!("invalid accepted fd: {}", c.extra));
+            let stream = unsafe { TcpStream::from_raw_fd(new_fd) };
+            let h = register_tcp_conn(stream);
+            call.ret_i64(slots::RET_0, h as i64);
+            write_nil_error(call, slots::RET_1);
+        }
+        Err(e) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_io_error(call, slots::RET_1, e);
+        }
     }
     ExternResult::Ok
 }

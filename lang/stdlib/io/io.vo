@@ -9,38 +9,29 @@ const (
 	SeekEnd     = 2 // Seek relative to the end
 )
 
-// EOF is returned by Read when no more input is available.
-var EOF = errors.New("EOF")
+// Common errors returned by io functions.
+// These are initialized from native to enable errors.Is matching.
+var (
+	EOF             error
+	ErrUnexpectedEOF error
+	ErrShortWrite   error
+	ErrShortBuffer  error
+	ErrNoProgress   error
+	ErrClosedPipe   error
+	ErrInvalidWrite error
+	ErrWhence       error
+	ErrOffset       error
+	ErrNegativeRead error
+	ErrNegativeCount error
+)
 
-// ErrUnexpectedEOF means that EOF was encountered in the middle of reading a fixed-size block or data structure.
-var ErrUnexpectedEOF = errors.New("unexpected EOF")
+func init() {
+	EOF, ErrUnexpectedEOF, ErrShortWrite, ErrShortBuffer,
+		ErrNoProgress, ErrClosedPipe, ErrInvalidWrite, ErrWhence,
+		ErrOffset, ErrNegativeRead, ErrNegativeCount = getIoErrors()
+}
 
-// ErrShortWrite means that a write accepted fewer bytes than requested but failed to return an explicit error.
-var ErrShortWrite = errors.New("short write")
-
-// ErrShortBuffer means that a read required a longer buffer than was provided.
-var ErrShortBuffer = errors.New("short buffer")
-
-// ErrNoProgress is returned by some clients of a Reader when many calls to Read have failed to return any data or error.
-var ErrNoProgress = errors.New("multiple Read calls return no data or error")
-
-// ErrClosedPipe is the error used for read or write operations on a closed pipe.
-var ErrClosedPipe = errors.New("io: read/write on closed pipe")
-
-// ErrInvalidWrite means that a write returned an impossible count.
-var ErrInvalidWrite = errors.New("invalid write result")
-
-// ErrWhence means an invalid Seek whence value.
-var ErrWhence = errors.New("invalid whence")
-
-// ErrOffset means an invalid Seek offset.
-var ErrOffset = errors.New("invalid offset")
-
-// ErrNegativeRead means a Reader returned a negative count.
-var ErrNegativeRead = errors.New("negative read count")
-
-// ErrNegativeCount means a negative count was passed.
-var ErrNegativeCount = errors.New("negative count")
+func getIoErrors() (error, error, error, error, error, error, error, error, error, error, error)
 
 // ==================== Core Interfaces ====================
 

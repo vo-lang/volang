@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 vo-engine = { path = "../../../lang/crates/vo-engine" }
+vo-vox = { path = "../../../libs/vox/rust" }
 
 [profile.release]
 opt-level = 3

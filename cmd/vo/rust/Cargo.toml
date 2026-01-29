@@ -15,3 +15,4 @@ jit = ["vo-engine/jit"]
 
 [dependencies]
 vo-engine = { path = "../../../lang/crates/vo-engine" }
+vo-vox = { path = "../../../libs/vox/rust" }

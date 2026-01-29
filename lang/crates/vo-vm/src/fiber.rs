@@ -5,8 +5,11 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use vo_runtime::objects::interface::InterfaceSlot;
+#[cfg(feature = "std")]
+use vo_runtime::io::IoToken;
+
 use vo_runtime::gc::GcRef;
-use vo_runtime::InterfaceSlot;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CallFrame {
@@ -180,6 +183,24 @@ pub enum FiberStatus {
     Dead,
 }
 
+/// I/O wait kind for non-blocking I/O.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoKind {
+    Read,
+    Write,
+}
+
+/// Reason why a fiber is parked (blocked waiting for something).
+#[derive(Debug, Clone)]
+pub enum ParkReason {
+    /// Waiting on channel operation (send or receive).
+    Channel,
+    /// Waiting on I/O operation (std only).
+    #[cfg(feature = "std")]
+    Io { token: IoToken },
+}
+
 /// Unified panic state for both recoverable and fatal panics.
 #[derive(Debug, Clone, Copy)]
 pub enum PanicState {
@@ -220,6 +241,10 @@ pub struct Fiber {
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
     /// A defer registered at generation N can only recover panics with generation > N.
     pub panic_generation: u64,
+    /// Reason why this fiber is parked, if any.
+    pub park_reason: Option<ParkReason>,
+    #[cfg(feature = "std")]
+    pub resume_io_token: Option<IoToken>,
 }
 
 impl Fiber {
@@ -234,6 +259,9 @@ impl Fiber {
             select_state: None,
             panic_state: None,
             panic_generation: 0,
+            park_reason: None,
+            #[cfg(feature = "std")]
+            resume_io_token: None,
         }
     }
     
@@ -247,6 +275,11 @@ impl Fiber {
         self.select_state = None;
         self.panic_state = None;
         self.panic_generation = 0;
+        self.park_reason = None;
+        #[cfg(feature = "std")]
+        {
+            self.resume_io_token = None;
+        }
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.

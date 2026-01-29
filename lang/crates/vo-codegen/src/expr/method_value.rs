@@ -17,7 +17,6 @@ use super::{compile_expr, compile_expr_to};
 /// Compile method value expression (t.M where M is a method).
 /// Creates a closure that captures the receiver and calls the method.
 pub fn compile_method_value(
-    _expr: &Expr,
     sel: &vo_syntax::ast::SelectorExpr,
     selection: &vo_analysis::selection::Selection,
     dst: u16,
@@ -28,6 +27,10 @@ pub fn compile_method_value(
     let recv_type = info.expr_type(sel.expr.id);
     let method_name = info.project.interner.resolve(sel.sel.symbol)
         .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
+
+    let (method_recv_slots, method_param_slots, method_ret_slots) =
+        info.method_signature_slots(selection.obj())
+            .ok_or_else(|| CodegenError::Internal("cannot get method signature slots".to_string()))?;
     
     // Interface method value: capture interface, use CallIface in wrapper
     if info.is_interface(recv_type) {
@@ -50,7 +53,18 @@ pub fn compile_method_value(
     match call_info.dispatch {
         crate::embed::MethodDispatch::Static { func_id, expects_ptr_recv } => {
             return compile_method_value_static(
-                sel, recv_type, func_id, expects_ptr_recv, &call_info.embed_path, dst, ctx, func, info
+                sel,
+                recv_type,
+                func_id,
+                expects_ptr_recv,
+                &call_info.embed_path,
+                dst,
+                ctx,
+                func,
+                info,
+                method_recv_slots,
+                method_param_slots,
+                method_ret_slots,
             );
         }
         crate::embed::MethodDispatch::EmbeddedInterface { .. } => {
@@ -62,6 +76,25 @@ pub fn compile_method_value(
             return Err(CodegenError::Internal("unexpected interface dispatch in method value".to_string()));
         }
     }
+}
+
+/// Box a value into a heap-allocated pointer.
+/// Returns the register holding the boxed pointer.
+fn emit_box_value(
+    reg: u16,
+    slots: u16,
+    value_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> u16 {
+    let meta_idx = ctx.get_or_create_value_meta(value_type, info);
+    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+    let boxed = func.alloc_temp_typed(&[SlotType::GcRef]);
+    func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed, meta_reg, 0);
+    func.emit_ptr_set(boxed, 0, reg, slots);
+    boxed
 }
 
 /// Compile method value for static dispatch (direct or promoted method).
@@ -80,76 +113,30 @@ fn compile_method_value_static(
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
+    method_recv_slots: u16,
+    method_param_slots: u16,
+    method_ret_slots: u16,
 ) -> Result<(), CodegenError> {
-    let method_name = info.project.interner.resolve(sel.sel.symbol)
-        .ok_or_else(|| CodegenError::Internal("cannot resolve method name".to_string()))?;
-    
-    // Step 1: Extract receiver using unified abstraction
-    // Pass expects_ptr_recv so extract_receiver can return Pointer for HeapBoxed variables
     let recv = crate::embed::extract_receiver(&sel.expr, recv_type, embed_path, expects_ptr_recv, ctx, func, info)?;
     
-    // Step 2: Prepare capture based on method receiver type
-    // 
-    // Two cases:
-    // 1. Pointer receiver: capture pointer, wrapper calls method directly with pointer
-    // 2. Value receiver: capture boxed pointer, wrapper derefs and calls with value
-    //
-    // For embedded pointer fields (e.g., pe.Get where pe has *Base), we capture
-    // the embedded pointer itself (not a copy) so mutations are visible.
+    // Convert receiver to pointer (box if needed)
+    let (ptr_reg, capture_type) = match recv {
+        crate::embed::ReceiverValue::Pointer { reg, pointee_type } => (reg, pointee_type),
+        crate::embed::ReceiverValue::Value { reg, value_type, slots } => {
+            let boxed = emit_box_value(reg, slots, value_type, ctx, func, info);
+            (boxed, value_type)
+        }
+    };
     
-    if expects_ptr_recv {
-        // Pointer receiver: capture pointer, use wrapper that calls with pointer
-        let (ptr_reg, _) = match recv {
-            crate::embed::ReceiverValue::Pointer { reg, pointee_type } => (reg, pointee_type),
-            crate::embed::ReceiverValue::Value { reg, value_type, slots } => {
-                // Value -> Pointer: box the value
-                let meta_idx = ctx.get_or_create_value_meta(value_type, info);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                let boxed = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed, meta_reg, 0);
-                func.emit_ptr_set(boxed, 0, reg, slots);
-                (boxed, value_type)
-            }
-        };
-        
-        let wrapper_id = ctx.get_or_create_method_value_wrapper_ptr(
-            recv_type, method_func_id, method_name, info
-        )?;
-        
-        func.emit_closure_new(dst, wrapper_id, 1);
-        func.emit_ptr_set_with_barrier(dst, 1, ptr_reg, 1, true);
-    } else {
-        // Value receiver: need a pointer to deref on each call
-        // For embedded pointer fields, use that pointer directly (not a copy)
-        // For value types, box the value
-        let (boxed_reg, value_type) = match recv {
-            crate::embed::ReceiverValue::Pointer { reg, pointee_type } => {
-                // Already have pointer (e.g., embedded *Base) - use it directly
-                // This ensures mutations through original pointer are visible
-                (reg, pointee_type)
-            }
-            crate::embed::ReceiverValue::Value { reg, value_type, slots } => {
-                // Box the value
-                let meta_idx = ctx.get_or_create_value_meta(value_type, info);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                
-                let boxed = func.alloc_temp_typed(&[SlotType::GcRef]);
-                func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed, meta_reg, 0);
-                func.emit_ptr_set(boxed, 0, reg, slots);
-                (boxed, value_type)
-            }
-        };
-        
-        let wrapper_id = ctx.get_or_create_method_value_wrapper(
-            value_type, method_func_id, &method_name, info
-        )?;
-        
-        func.emit_closure_new(dst, wrapper_id, 1);
-        func.emit_ptr_set_with_barrier(dst, 1, boxed_reg, 1, true);
-    }
+    // Create wrapper: needs_deref = !expects_ptr_recv (value receiver needs unboxing)
+    let wrapper_id = ctx.get_or_create_method_value_wrapper(
+        capture_type, method_func_id,
+        !expects_ptr_recv, // needs_deref
+        method_recv_slots, method_param_slots, method_ret_slots,
+    )?;
     
+    func.emit_closure_new(dst, wrapper_id, 1);
+    func.emit_ptr_set_with_barrier(dst, 1, ptr_reg, 1, true);
     Ok(())
 }
 

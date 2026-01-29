@@ -240,7 +240,11 @@ impl Vm {
         loop {
             if let Some(max) = max_iterations {
                 iterations += 1;
-                if iterations > max { break; }
+                if iterations > max {
+                    // Suspend current fiber before breaking so it can be rescheduled later
+                    self.scheduler.suspend_current();
+                    break;
+                }
             }
             
             // Process any wake commands from other islands
@@ -258,6 +262,15 @@ impl Vm {
             
             // Check if we have runnable fibers
             if !self.scheduler.has_runnable() {
+                // Poll I/O first to wake any fibers waiting on I/O
+                #[cfg(feature = "std")]
+                {
+                    let woken = self.scheduler.poll_io(&mut self.state.io);
+                    if woken > 0 {
+                        continue;
+                    }
+                }
+                
                 // No runnable fibers - check if we have blocked fibers waiting for island wakes
                 #[cfg(feature = "std")]
                 if self.scheduler.has_blocked() && self.state.main_cmd_rx.is_some() {
@@ -269,11 +282,70 @@ impl Vm {
                                 continue;
                             }
                             Ok(_) => continue,
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                // Also poll I/O during timeout wait
+                                self.scheduler.poll_io(&mut self.state.io);
+                                continue;
+                            }
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
                 }
+                
+                // Check if there are I/O waiters or blocked fibers - if so, keep polling
+                #[cfg(feature = "std")]
+                if self.scheduler.has_io_waiters() || self.scheduler.has_blocked() {
+                    // Island VMs (current_island_id != 0) should return to let run_island_thread handle wake commands
+                    if self.state.current_island_id != 0 && !self.scheduler.has_io_waiters() {
+                        break;
+                    }
+                    if !self.scheduler.has_io_waiters() && self.state.main_cmd_rx.is_none() {
+                        if let Some(module) = self.module.as_ref() {
+                            let mut msg = String::new();
+                            msg.push_str("vm deadlock: all fibers blocked\n");
+                            // Print suspended fibers with details
+                            for (id, fiber) in self.scheduler.fibers.iter().enumerate() {
+                                if fiber.status != crate::fiber::FiberStatus::Suspended {
+                                    continue;
+                                }
+                                msg.push_str(&format!(
+                                    "  fiber={} status={:?} park_reason={:?}\n",
+                                    id, fiber.status, fiber.park_reason
+                                ));
+                                if let Some(frame) = fiber.frames.last() {
+                                    let func = &module.functions[frame.func_id as usize];
+                                    let code = &func.code;
+                                    let pc = frame.pc;
+                                    let prev_pc = pc.saturating_sub(1);
+                                    if let Some(inst) = code.get(prev_pc) {
+                                        msg.push_str(&format!(
+                                            "    at func={} pc={} inst@{}={:?}\n",
+                                            frame.func_id,
+                                            pc,
+                                            prev_pc,
+                                            inst.opcode()
+                                        ));
+                                    }
+                                    if let Some(inst) = code.get(pc) {
+                                        msg.push_str(&format!(
+                                            "    next inst@{}={:?}\n",
+                                            pc,
+                                            inst.opcode()
+                                        ));
+                                    }
+                                }
+                            }
+                            panic!("{}", msg);
+                        } else {
+                            panic!("vm deadlock: all fibers blocked");
+                        }
+                    }
+
+                    self.scheduler.poll_io(&mut self.state.io);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                
                 break;
             }
             
@@ -285,8 +357,20 @@ impl Vm {
             let result = self.run_fiber(fiber_id);
             
             match result {
-                ExecResult::Continue | ExecResult::Yield | ExecResult::Osr(_, _, _) => {
+                ExecResult::Continue | ExecResult::Osr(_, _, _) => {
                     self.scheduler.suspend_current();
+                }
+                ExecResult::Yield => {
+                    self.scheduler.suspend_current();
+                }
+                #[cfg(feature = "std")]
+                ExecResult::WaitIo { token } => {
+                    // Retry the same instruction after I/O becomes ready.
+                    // Without this, we would continue past the CallExtern/CallIface
+                    // with uninitialized return slots.
+                    let fiber = self.scheduler.current_fiber_mut().unwrap();
+                    fiber.current_frame_mut().unwrap().pc -= 1;
+                    self.scheduler.park_current_for_io(token);
                 }
                 ExecResult::Return | ExecResult::Done => {
                     let _ = self.scheduler.kill_current();
@@ -343,11 +427,62 @@ impl Vm {
             }
         }
     }
+
+    fn handle_chan_send_result(
+        result: exec::ChanResult,
+        gc: &mut vo_runtime::gc::Gc,
+        fiber: &mut Fiber,
+        stack: &mut Vec<u64>,
+        module: &Module,
+        scheduler: &mut Scheduler,
+    ) -> ExecResult {
+        match result {
+            exec::ChanResult::Continue => ExecResult::Continue,
+            exec::ChanResult::Yield => {
+                let _ = fiber;
+                ExecResult::Block
+            }
+            exec::ChanResult::Wake(id) => {
+                scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
+                ExecResult::Yield
+            }
+            exec::ChanResult::WakeMultiple(ids) => {
+                for id in ids {
+                    scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
+                }
+                ExecResult::Yield
+            }
+            exec::ChanResult::SendOnClosed => {
+                runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+            }
+            exec::ChanResult::CloseNil => {
+                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
+            }
+            exec::ChanResult::CloseClosed => {
+                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_CLOSED_CHANNEL.to_string())
+            }
+        }
+    }
     
     /// Run one round of scheduler to let other fibers make progress.
     /// Used when trampoline fiber blocks on channel operations.
     #[cfg(feature = "jit")]
     fn run_scheduler_round(&mut self) {
+        // Save current fiber state - trampoline calls happen during regular fiber execution,
+        // so we need to preserve the caller's scheduler state
+        let saved_current = self.scheduler.current.take();
+        if let Some(id) = saved_current {
+            // The caller fiber was Running, mark it as Suspended and put in ready_queue
+            // so it can be scheduled during this round
+            let fiber = &mut self.scheduler.fibers[id as usize];
+            if fiber.status == crate::fiber::FiberStatus::Running {
+                fiber.status = crate::fiber::FiberStatus::Suspended;
+                if !self.scheduler.ready_queue.contains(&id) {
+                    self.scheduler.ready_queue.push_back(id);
+                }
+            }
+        }
+        
         // Temporarily disable JIT to prevent nested trampoline calls
         #[cfg(feature = "jit")]
         let jit_mgr = self.jit_mgr.take();
@@ -357,6 +492,10 @@ impl Vm {
         // Restore JIT manager
         #[cfg(feature = "jit")]
         { self.jit_mgr = jit_mgr; }
+        
+        // Note: we don't restore saved_current because the scheduling loop
+        // handles fiber states correctly. The caller (execute_jit_call) will
+        // continue with the trampoline fiber, not a regular fiber.
     }
 
     /// Run a fiber for up to TIME_SLICE instructions.
@@ -847,6 +986,8 @@ impl Vm {
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = Some(closure_call_trampoline);
+                    #[cfg(feature = "std")]
+                    let resume_io_token = fiber.resume_io_token.take();
                     let result = exec::exec_call_extern(
                         stack,
                         bp,
@@ -868,6 +1009,10 @@ impl Vm {
                         &module.well_known,
                         &self.state.program_args,
                         &mut self.state.sentinel_errors,
+                        #[cfg(feature = "std")]
+                        &mut self.state.io,
+                        #[cfg(feature = "std")]
+                        resume_io_token,
                     );
                     // Convert extern panic to recoverable runtime panic
                     if matches!(result, ExecResult::Panic) {
@@ -1271,7 +1416,7 @@ impl Vm {
                     }
                 }
                 Opcode::ChanSend => {
-                    Self::handle_chan_result(
+                    Self::handle_chan_send_result(
                         exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
                     )
@@ -1523,7 +1668,11 @@ impl Vm {
                     let fiber_id = fiber_id.to_raw() as u64;
                     match exec::exec_port_recv(stack, bp, island_id, fiber_id, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types) {
                         exec::PortResult::Continue => ExecResult::Continue,
-                        exec::PortResult::Yield => ExecResult::Block,
+                        exec::PortResult::Yield => {
+                            // Retry PortRecv after being woken, so destination slots are filled.
+                            frame.pc -= 1;
+                            ExecResult::Block
+                        }
                         exec::PortResult::WakeRemote(waiter) => {
                             self.state.wake_waiter(&waiter, &mut self.scheduler);
                             ExecResult::Continue
@@ -1680,7 +1829,7 @@ impl Vm {
         }
         
         let success = loop {
-            let exec_result = self.run_fiber(crate::scheduler::FiberId::from_raw(trampoline_id));
+            let exec_result = self.run_fiber(trampoline_id);
             match exec_result {
                 ExecResult::Done | ExecResult::Return => break true,
                 ExecResult::Panic => break false,
@@ -1693,6 +1842,11 @@ impl Vm {
                 }
                 ExecResult::Osr(_, _, _) => {
                     // OSR not available without JIT, treat as continue
+                }
+                #[cfg(feature = "std")]
+                ExecResult::WaitIo { .. } => {
+                    // I/O wait in sync call: would deadlock, treat as error
+                    break false;
                 }
             }
         };

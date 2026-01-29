@@ -33,20 +33,19 @@ pub use containers::{
     VoPtr, VoClosure,
 };
 
-
-#[cfg(feature = "std")]
-use linkme::distributed_slice;
-
-use crate::gc::{Gc, GcRef};
-use crate::objects::{string, slice};
-
 // Public re-export for extension developers
 pub use crate::objects::interface::InterfaceSlot;
 use vo_common_core::bytecode::{InterfaceMeta, Module, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use crate::itab::ItabCache;
-
+use crate::gc::{Gc, GcRef};
+use crate::objects::{slice, string};
+#[cfg(feature = "std")]
+use crate::distributed_slice;
+#[cfg(feature = "std")]
+use crate::io::{IoRuntime, IoToken};
+ 
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
@@ -98,6 +97,9 @@ pub enum ExternResult {
     /// Block current fiber (for blocking I/O operations).
     /// The fiber will be parked and must be explicitly woken by runtime.
     Block,
+    /// Wait for I/O completion.
+    #[cfg(feature = "std")]
+    WaitIo { token: IoToken },
     /// Panic with error message.
     Panic(String),
 }
@@ -360,6 +362,13 @@ pub struct ExternCallContext<'a> {
     program_args: &'a [String],
     /// Sentinel error cache.
     sentinel_errors: &'a mut SentinelErrorCache,
+    /// Runtime I/O (std only).
+    #[cfg(feature = "std")]
+    io: &'a mut IoRuntime,
+    /// I/O token that woke this fiber (std only). When present, extern should
+    /// consume the completion for this token instead of submitting a new op.
+    #[cfg(feature = "std")]
+    resume_io_token: Option<IoToken>,
 }
 
 impl<'a> ExternCallContext<'a> {
@@ -385,6 +394,8 @@ impl<'a> ExternCallContext<'a> {
         well_known: &'a WellKnownTypes,
         program_args: &'a [String],
         sentinel_errors: &'a mut SentinelErrorCache,
+        #[cfg(feature = "std")] io: &'a mut IoRuntime,
+        #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
     ) -> Self {
         Self {
             call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
@@ -402,6 +413,10 @@ impl<'a> ExternCallContext<'a> {
             well_known,
             program_args,
             sentinel_errors,
+            #[cfg(feature = "std")]
+            io,
+            #[cfg(feature = "std")]
+            resume_io_token,
         }
     }
     
@@ -458,6 +473,19 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn sentinel_errors_mut(&mut self) -> &mut SentinelErrorCache {
         self.sentinel_errors
+    }
+
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn io_mut(&mut self) -> &mut IoRuntime {
+        self.io
+    }
+
+    /// Token that resumed this extern call due to I/O completion.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn resume_io_token(&self) -> Option<IoToken> {
+        self.resume_io_token
     }
 
     /// Get or create itab for a named type implementing an interface.
@@ -812,92 +840,82 @@ impl<'a> ExternCallContext<'a> {
     /// Get return ValueRttids for all return values from a Func RuntimeType.
     pub fn get_func_results(&self, func_rttid: u32) -> Vec<ValueRttid> {
         use crate::RuntimeType;
-        
+
         if let Some(RuntimeType::Func { results, .. }) = self.runtime_types.get(func_rttid as usize) {
             return results.clone();
         }
         Vec::new()
     }
-    
+
     /// Get full function signature info for dynamic calls.
     /// Returns (params, results, is_variadic).
     pub fn get_func_signature(&self, func_rttid: u32) -> Option<(&Vec<ValueRttid>, &Vec<ValueRttid>, bool)> {
         use crate::RuntimeType;
-        
+
         match self.runtime_types.get(func_rttid as usize)? {
             RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
             _ => None,
         }
     }
-    
+
     /// Get variadic element type from a slice type.
     /// Returns the element's ValueRttid.
     pub fn get_slice_elem(&self, slice_rttid: u32) -> Option<ValueRttid> {
         use crate::RuntimeType;
-        
+
         match self.runtime_types.get(slice_rttid as usize)? {
             RuntimeType::Slice(elem) => Some(*elem),
             _ => None,
         }
     }
-    
+
     /// Check if two function signatures are compatible for dynamic call.
     /// Returns Ok(()) if compatible, Err(message) if not.
-    ///
-    /// # Design: LHS determines expected signature
-    ///
-    /// The `expected_sig_rttid` is built from LHS types at compile time.
-    /// This function enforces that:
-    /// - Parameter count must match exactly
-    /// - Return count must match exactly (LHS count == closure return count)
-    /// - Each expected param type must be assignable from actual param type
-    /// - Each actual return type must be assignable to expected return type (any accepts all)
-    ///
-    /// If return count mismatches, this returns an error before the call happens.
     pub fn check_func_signature_compatible(
         &self,
         closure_sig_rttid: u32,
         expected_sig_rttid: u32,
     ) -> Result<(), String> {
         use crate::RuntimeType;
-        
-        // Special case: expected_sig_rttid == 0 means skip parameter check (used for spread calls)
+
         if expected_sig_rttid == 0 {
             return Ok(());
         }
-        
+
         let get_func_sig = |rttid: u32| -> Option<(&Vec<crate::ValueRttid>, &Vec<crate::ValueRttid>, bool)> {
             match self.runtime_types.get(rttid as usize)? {
                 RuntimeType::Func { params, results, variadic } => Some((params, results, *variadic)),
                 _ => None,
             }
         };
-        
-        let (closure_params, closure_results, closure_variadic) = get_func_sig(closure_sig_rttid)
-            .ok_or("closure is not a function type")?;
-        let (expected_params, expected_results, _) = get_func_sig(expected_sig_rttid)
-            .ok_or("expected signature is not a function type")?;
-        
-        // Check parameter compatibility
+
+        let (closure_params, closure_results, closure_variadic) =
+            get_func_sig(closure_sig_rttid).ok_or("closure is not a function type")?;
+        let (expected_params, expected_results, _) =
+            get_func_sig(expected_sig_rttid).ok_or("expected signature is not a function type")?;
+
         if closure_variadic {
-            // Variadic function: closure has N params where last is []T
-            // Expected can have >= N-1 params (variadic part can be empty or have multiple args)
             let non_variadic_count = closure_params.len().saturating_sub(1);
             if expected_params.len() < non_variadic_count {
-                return Err(format!("parameter count mismatch: expected at least {}, got {}", 
-                    non_variadic_count, expected_params.len()));
+                return Err(format!(
+                    "parameter count mismatch: expected at least {}, got {}",
+                    non_variadic_count,
+                    expected_params.len()
+                ));
             }
-            
-            // Check non-variadic parameters
-            for (i, (expected, closure)) in expected_params.iter().take(non_variadic_count).zip(closure_params).enumerate() {
+
+            for (i, (expected, closure)) in expected_params
+                .iter()
+                .take(non_variadic_count)
+                .zip(closure_params)
+                .enumerate()
+            {
                 if !self.value_rttids_compatible(*expected, *closure) {
                     return Err(format!("parameter {} type mismatch", i + 1));
                 }
             }
-            
-            // Check variadic parameters: each must be compatible with slice element type
+
             if let Some(variadic_param) = closure_params.last() {
-                // Get element type from the slice type
                 let variadic_rttid = variadic_param.rttid();
                 if let Some(RuntimeType::Slice(elem_rttid)) = self.runtime_types.get(variadic_rttid as usize) {
                     for (i, expected) in expected_params.iter().skip(non_variadic_count).enumerate() {
@@ -910,93 +928,84 @@ impl<'a> ExternCallContext<'a> {
                 }
             }
         } else {
-            // Non-variadic: exact parameter count match
             if closure_params.len() != expected_params.len() {
-                return Err(format!("parameter count mismatch: expected {}, got {}", 
-                    expected_params.len(), closure_params.len()));
+                return Err(format!(
+                    "parameter count mismatch: expected {}, got {}",
+                    expected_params.len(),
+                    closure_params.len()
+                ));
             }
-            
+
             for (i, (expected, closure)) in expected_params.iter().zip(closure_params).enumerate() {
                 if !self.value_rttids_compatible(*expected, *closure) {
                     return Err(format!("parameter {} type mismatch", i + 1));
                 }
             }
         }
-        
-        // Check return compatibility
+
         if closure_results.len() != expected_results.len() {
             return Err(format!(
                 "return count mismatch: dynamic call expects {} return value(s), but function returns {}\n\
                  note: dynamic access (~>) always adds an error to returns, e.g. func() T becomes (T, error)\n\
                  hint: with '?', LHS count = function returns (error consumed by '?')\n\
                  hint: without '?', LHS count = function returns + 1 (last LHS is error)",
-                expected_results.len(), closure_results.len()
+                expected_results.len(),
+                closure_results.len()
             ));
         }
-        
+
         for (i, (closure, expected)) in closure_results.iter().zip(expected_results).enumerate() {
             if !self.value_rttids_compatible(*closure, *expected) {
                 return Err(format!("return {} type mismatch", i + 1));
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if source ValueRttid is compatible with target ValueRttid.
     fn value_rttids_compatible(&self, source: crate::ValueRttid, target: crate::ValueRttid) -> bool {
         use crate::RuntimeType;
-        
+
         if source == target {
             return true;
         }
-        
-        // Check if target is any (empty interface) - any accepts all
+
         let target_rttid = target.rttid();
         if let Some(RuntimeType::Interface { methods, .. }) = self.runtime_types.get(target_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
         }
-        
-        // Check if source is any (empty interface) - any can be passed to any type (unbox at runtime)
+
         let source_rttid = source.rttid();
         if let Some(RuntimeType::Interface { methods, .. }) = self.runtime_types.get(source_rttid as usize) {
             if methods.is_empty() {
                 return true;
             }
         }
-        
+
         false
     }
 
-    /// Get element ValueRttid from a Slice/Map/Chan RuntimeType.
-    /// Now that RuntimeType stores ValueRttid directly, this is O(1).
-    /// Returns elem ValueRttid for slice/chan, val ValueRttid for map.
-    /// Panics if base_rttid is invalid - this indicates a codegen bug.
+    /// Get element ValueRttid from a Slice/Map/Chan/Array RuntimeType.
     pub fn get_elem_value_rttid_from_base(&self, base_rttid: u32) -> crate::ValueRttid {
         use crate::RuntimeType;
-        
-        let rt = self.runtime_types.get(base_rttid as usize)
+
+        let rt = self
+            .runtime_types
+            .get(base_rttid as usize)
             .expect("dyn_get_index: base_rttid not found in runtime_types");
-        
+
         match rt {
-            RuntimeType::Slice(elem_rttid) 
-            | RuntimeType::Chan { elem: elem_rttid, .. }
-            | RuntimeType::Array { elem: elem_rttid, .. } => {
-                *elem_rttid
-            }
-            RuntimeType::Pointer(elem_rttid) => {
-                *elem_rttid
-            }
-            RuntimeType::Map { val, .. } => {
-                *val
-            }
-            // String indexing returns uint8 - basic type
+            RuntimeType::Slice(elem)
+            | RuntimeType::Chan { elem, .. }
+            | RuntimeType::Array { elem, .. } => *elem,
+            RuntimeType::Pointer(elem) => *elem,
+            RuntimeType::Map { val, .. } => *val,
             RuntimeType::Basic(crate::ValueKind::String) => {
                 crate::ValueRttid::new(crate::ValueKind::Uint8 as u32, crate::ValueKind::Uint8)
             }
-            // Named type: recurse on underlying type
             RuntimeType::Named { id, .. } => {
                 let meta = &self.named_type_metas[*id as usize];
                 let underlying_rttid = meta.underlying_meta.meta_id();
@@ -1007,13 +1016,14 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Get array length from RuntimeType::Array.
-    /// Panics if rttid is not an array type.
     pub fn get_array_len_from_rttid(&self, rttid: u32) -> usize {
         use crate::RuntimeType;
-        
-        let rt = self.runtime_types.get(rttid as usize)
+
+        let rt = self
+            .runtime_types
+            .get(rttid as usize)
             .expect("get_array_len_from_rttid: rttid not found in runtime_types");
-        
+
         match rt {
             RuntimeType::Array { len, .. } => *len as usize,
             RuntimeType::Named { id, .. } => {
@@ -1026,16 +1036,15 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Get the slot count for a type based on its rttid.
-    /// Uses runtime_types to resolve the actual type and compute slot count.
     pub fn get_type_slot_count(&self, rttid: u32) -> u16 {
         use crate::RuntimeType;
-        
-        // Get the RuntimeType for this rttid
-        let rt = self.runtime_types.get(rttid as usize)
+
+        let rt = self
+            .runtime_types
+            .get(rttid as usize)
             .expect("get_type_slot_count: rttid not found in runtime_types");
-        
+
         match rt {
-            // Named type: get underlying type info from named_type_meta
             RuntimeType::Named { id: named_id, .. } => {
                 if let Some(named_meta) = self.named_type_metas.get(*named_id as usize) {
                     let underlying_vk = named_meta.underlying_meta.value_kind();
@@ -1052,21 +1061,17 @@ impl<'a> ExternCallContext<'a> {
                 }
                 1
             }
-            // Anonymous struct: use embedded meta_id
             RuntimeType::Struct { meta_id, .. } => {
                 if let Some(meta) = self.struct_meta(*meta_id as usize) {
                     return meta.slot_count();
                 }
                 2
             }
-            // Interface is always 2 slots
             RuntimeType::Interface { .. } => 2,
-            // Array: compute total slots from element slots * length
             RuntimeType::Array { len, elem } => {
                 let elem_slots = self.get_type_slot_count(elem.rttid());
                 elem_slots * (*len as u16)
             }
-            // All other types are 1 slot (reference types)
             _ => 1,
         }
     }
@@ -1269,6 +1274,8 @@ impl ExternRegistry {
         well_known: &WellKnownTypes,
         program_args: &[String],
         sentinel_errors: &mut SentinelErrorCache,
+        #[cfg(feature = "std")] io: &mut IoRuntime,
+        #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
     ) -> ExternResult {
         match self.funcs.get(id as usize) {
             Some(Some(ExternFnEntry::Simple(f))) => {
@@ -1296,6 +1303,10 @@ impl ExternRegistry {
                     well_known,
                     program_args,
                     sentinel_errors,
+                    #[cfg(feature = "std")]
+                    io,
+                    #[cfg(feature = "std")]
+                    resume_io_token,
                 );
                 f(&mut call)
             }

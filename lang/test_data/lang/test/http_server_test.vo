@@ -1,0 +1,45 @@
+package main
+
+import (
+	"http"
+	"io"
+	"time"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Hello, World!"))
+	})
+
+	srv := &http.Server{Addr: "127.0.0.1:8080"}
+	done := make(chan error, 1)
+
+	go func() {
+		err := srv.ListenAndServe()
+		done <- err
+	}()
+
+	var resp *http.Response
+	var err error
+	for i := 0; i < 200; i++ {
+		resp, err = http.Get("http://127.0.0.1:8080/")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert(err == nil)
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	assert(err == nil)
+	assert(string(b) == "Hello, World!")
+
+	err = srv.Close()
+	assert(err == nil)
+
+	err = <-done
+	if err != nil {
+		assert(err.Error() == http.ErrServerClosed.Error())
+	}
+}

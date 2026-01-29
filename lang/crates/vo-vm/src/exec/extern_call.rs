@@ -19,6 +19,10 @@ use vo_runtime::SentinelErrorCache;
 use vo_common_core::bytecode::WellKnownTypes;
 use vo_runtime::gc::Gc;
 use vo_common_core::bytecode::Module;
+#[cfg(feature = "std")]
+use vo_runtime::io::IoRuntime;
+#[cfg(feature = "std")]
+use vo_runtime::io::IoToken;
 
 pub fn exec_call_extern(
     stack: &mut Vec<u64>,
@@ -41,6 +45,10 @@ pub fn exec_call_extern(
     well_known: &WellKnownTypes,
     program_args: &[String],
     sentinel_errors: &mut SentinelErrorCache,
+    #[cfg(feature = "std")]
+    io: &mut IoRuntime,
+    #[cfg(feature = "std")]
+    resume_io_token: Option<IoToken>,
 ) -> ExecResult {
     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
     let extern_id = inst.b as u32;
@@ -77,12 +85,18 @@ pub fn exec_call_extern(
         well_known,
         program_args,
         sentinel_errors,
+        #[cfg(feature = "std")]
+        io,
+        #[cfg(feature = "std")]
+        resume_io_token,
     );
 
     match result {
         ExternResult::Ok => ExecResult::Continue,
         ExternResult::Yield => ExecResult::Yield,
         ExternResult::Block => ExecResult::Block,
+        #[cfg(feature = "std")]
+        ExternResult::WaitIo { token } => ExecResult::WaitIo { token },
         ExternResult::Panic(msg) => {
             // Enhance error message with function name if it's a "not found" error
             if msg.contains("not found") || msg.contains("not registered") {

@@ -10,7 +10,7 @@ default = ["jit"]
 jit = ["vo-vm/jit"]
 
 [dependencies]
-vo-stdlib = { path = "../vo-stdlib" }
+vo-stdlib = { path = "../vo-stdlib", features = ["std"] }
 vo-vm = { path = "../vo-vm" }
 vo-runtime = { path = "../vo-runtime" }
 vo-common = { path = "../vo-common" }
