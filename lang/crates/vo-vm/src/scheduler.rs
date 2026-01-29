@@ -306,8 +306,7 @@ impl Scheduler {
     pub fn poll_io(&mut self, io: &mut IoRuntime) -> usize {
         let mut woken = 0;
 
-        for completion in io.poll() {
-            let token = completion.token;
+        for token in io.poll() {
             let fiber_id = match self.io_waiters.remove(&token) {
                 Some(id) => id,
                 None => continue,

@@ -23,7 +23,7 @@ use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
 #[cfg(feature = "std")]
-use vo_runtime::io::IoHandle;
+use vo_runtime::io::{IoHandle, CompletionData};
 #[cfg(feature = "std")]
 use vo_runtime::objects::slice;
 #[cfg(feature = "std")]
@@ -195,14 +195,15 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
                     match c.result {
-                        Ok(0) => {
+                        Ok(CompletionData::Size(0)) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_error_to(call, slots::RET_1, "EOF");
                         }
-                        Ok(n) => {
+                        Ok(CompletionData::Size(n)) => {
                             call.ret_i64(slots::RET_0, n as i64);
                             write_nil_error(call, slots::RET_1);
                         }
+                        Ok(_) => panic!("unexpected completion data for read"),
                         Err(e) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_io_error(call, slots::RET_1, e);
@@ -217,14 +218,15 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     match c.result {
-        Ok(0) => {
+        Ok(CompletionData::Size(0)) => {
             call.ret_i64(slots::RET_0, 0);
             write_error_to(call, slots::RET_1, "EOF");
         }
-        Ok(n) => {
+        Ok(CompletionData::Size(n)) => {
             call.ret_i64(slots::RET_0, n as i64);
             write_nil_error(call, slots::RET_1);
         }
+        Ok(_) => panic!("unexpected completion data for read"),
         Err(e) => {
             call.ret_i64(slots::RET_0, 0);
             write_io_error(call, slots::RET_1, e);
@@ -272,10 +274,11 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
                     match c.result {
-                        Ok(n) => {
+                        Ok(CompletionData::Size(n)) => {
                             call.ret_i64(slots::RET_0, n as i64);
                             write_nil_error(call, slots::RET_1);
                         }
+                        Ok(_) => panic!("unexpected completion data for write"),
                         Err(e) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_io_error(call, slots::RET_1, e);
@@ -290,10 +293,11 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     match c.result {
-        Ok(n) => {
+        Ok(CompletionData::Size(n)) => {
             call.ret_i64(slots::RET_0, n as i64);
             write_nil_error(call, slots::RET_1);
         }
+        Ok(_) => panic!("unexpected completion data for write"),
         Err(e) => {
             call.ret_i64(slots::RET_0, 0);
             write_io_error(call, slots::RET_1, e);
@@ -333,14 +337,15 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
                     match c.result {
-                        Ok(0) => {
+                        Ok(CompletionData::Size(0)) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_error_to(call, slots::RET_1, "EOF");
                         }
-                        Ok(n) => {
+                        Ok(CompletionData::Size(n)) => {
                             call.ret_i64(slots::RET_0, n as i64);
                             write_nil_error(call, slots::RET_1);
                         }
+                        Ok(_) => panic!("unexpected completion data for read"),
                         Err(e) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_io_error(call, slots::RET_1, e);
@@ -355,14 +360,15 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     match c.result {
-        Ok(0) => {
+        Ok(CompletionData::Size(0)) => {
             call.ret_i64(slots::RET_0, 0);
             write_error_to(call, slots::RET_1, "EOF");
         }
-        Ok(n) => {
+        Ok(CompletionData::Size(n)) => {
             call.ret_i64(slots::RET_0, n as i64);
             write_nil_error(call, slots::RET_1);
         }
+        Ok(_) => panic!("unexpected completion data for read"),
         Err(e) => {
             call.ret_i64(slots::RET_0, 0);
             write_io_error(call, slots::RET_1, e);
@@ -402,10 +408,11 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
                     match c.result {
-                        Ok(n) => {
+                        Ok(CompletionData::Size(n)) => {
                             call.ret_i64(slots::RET_0, n as i64);
                             write_nil_error(call, slots::RET_1);
                         }
+                        Ok(_) => panic!("unexpected completion data for write"),
                         Err(e) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_io_error(call, slots::RET_1, e);
@@ -420,10 +427,11 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     match c.result {
-        Ok(n) => {
+        Ok(CompletionData::Size(n)) => {
             call.ret_i64(slots::RET_0, n as i64);
             write_nil_error(call, slots::RET_1);
         }
+        Ok(_) => panic!("unexpected completion data for write"),
         Err(e) => {
             call.ret_i64(slots::RET_0, 0);
             write_io_error(call, slots::RET_1, e);

@@ -1,3 +1,10 @@
+//! Async I/O runtime with completion-based API.
+//!
+//! Design principles:
+//! - Unified completion-based API hiding readiness vs completion differences
+//! - Each fd can have at most one pending read and one pending write simultaneously
+//! - Platform-specific drivers (epoll, kqueue, IOCP) implement the same interface
+
 #![cfg(feature = "std")]
 
 use std::collections::HashMap;
@@ -6,400 +13,180 @@ use std::io;
 pub type IoHandle = u64;
 pub type IoToken = u64;
 
+/// Kind of I/O operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IoKind {
+pub enum OpKind {
     Read,
     Write,
     Accept,
     Connect,
 }
 
+/// Result of a completed I/O operation.
 #[derive(Debug)]
 pub struct Completion {
     pub token: IoToken,
-    pub kind: IoKind,
-    pub result: io::Result<usize>,
-    pub extra: u64,
+    pub result: io::Result<CompletionData>,
 }
 
+/// Data returned by a completed operation.
+#[derive(Debug)]
+pub enum CompletionData {
+    /// Read/Write: bytes transferred
+    Size(usize),
+    /// Accept: new fd
+    Accept(IoHandle),
+    /// Connect: success (no additional data)
+    Connect,
+}
+
+/// Pending operation descriptor.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingOp {
+    pub token: IoToken,
+    pub handle: IoHandle,
+    pub kind: OpKind,
+    pub buf_ptr: usize,
+    pub buf_len: usize,
+    pub offset: i64,
+}
+
+/// Async I/O runtime.
 #[derive(Debug)]
 pub struct IoRuntime {
-    poller: IoPoller,
+    driver: IoDriver,
     next_token: IoToken,
-    pending_ops: HashMap<IoToken, PendingOp>,
-    completion_cache: HashMap<IoToken, Completion>,
-    handle_to_token: HashMap<IoHandle, IoToken>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PendingOp {
-    token: IoToken,
-    handle: IoHandle,
-    kind: IoKind,
-    buf_ptr: usize,
-    buf_len: usize,
-    offset: i64,
+    completions: HashMap<IoToken, Completion>,
 }
 
 impl IoRuntime {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
-            poller: IoPoller::new()?,
+            driver: IoDriver::new()?,
             next_token: 1,
-            pending_ops: HashMap::new(),
-            completion_cache: HashMap::new(),
-            handle_to_token: HashMap::new(),
+            completions: HashMap::new(),
         })
     }
 
-    #[inline]
     fn alloc_token(&mut self) -> IoToken {
         let token = self.next_token;
         self.next_token = self.next_token.wrapping_add(1);
         token
     }
 
-    #[inline]
-    pub fn try_take_completion(&mut self, token: IoToken) -> Option<Completion> {
-        self.completion_cache.remove(&token)
+    /// Submit a read operation.
+    pub fn submit_read(&mut self, handle: IoHandle, buf: *mut u8, len: usize) -> IoToken {
+        self.submit(handle, OpKind::Read, buf as usize, len, -1)
     }
 
-    #[inline]
-    pub fn take_completion(&mut self, token: IoToken) -> Completion {
-        self.try_take_completion(token)
-            .unwrap_or_else(|| panic!("completion not found: token={}", token))
+    /// Submit a write operation.
+    pub fn submit_write(&mut self, handle: IoHandle, buf: *const u8, len: usize) -> IoToken {
+        self.submit(handle, OpKind::Write, buf as usize, len, -1)
     }
 
-    pub fn submit_read(&mut self, handle: IoHandle, dst: *mut u8, len: usize) -> IoToken {
-        self.submit_op(handle, IoKind::Read, dst as usize, len, -1)
-    }
-
-    pub fn submit_write(&mut self, handle: IoHandle, src: *const u8, len: usize) -> IoToken {
-        self.submit_op(handle, IoKind::Write, src as usize, len, -1)
-    }
-
+    /// Submit an accept operation.
     pub fn submit_accept(&mut self, handle: IoHandle) -> IoToken {
-        self.submit_op(handle, IoKind::Accept, 0, 0, -1)
+        self.submit(handle, OpKind::Accept, 0, 0, -1)
     }
 
-    pub fn submit_read_at(
-        &mut self,
-        handle: IoHandle,
-        dst: *mut u8,
-        len: usize,
-        offset: i64,
-    ) -> IoToken {
-        self.submit_op(handle, IoKind::Read, dst as usize, len, offset)
+    /// Submit a read at offset operation (for files).
+    pub fn submit_read_at(&mut self, handle: IoHandle, buf: *mut u8, len: usize, offset: i64) -> IoToken {
+        self.submit(handle, OpKind::Read, buf as usize, len, offset)
     }
 
-    pub fn submit_write_at(
-        &mut self,
-        handle: IoHandle,
-        src: *const u8,
-        len: usize,
-        offset: i64,
-    ) -> IoToken {
-        self.submit_op(handle, IoKind::Write, src as usize, len, offset)
+    /// Submit a write at offset operation (for files).
+    pub fn submit_write_at(&mut self, handle: IoHandle, buf: *const u8, len: usize, offset: i64) -> IoToken {
+        self.submit(handle, OpKind::Write, buf as usize, len, offset)
     }
 
-    fn submit_op(
-        &mut self,
-        handle: IoHandle,
-        kind: IoKind,
-        buf_ptr: usize,
-        buf_len: usize,
-        offset: i64,
-    ) -> IoToken {
-        if self.handle_to_token.contains_key(&handle) {
-            panic!("concurrent io op on same handle is not supported: handle={}", handle);
-        }
-
+    fn submit(&mut self, handle: IoHandle, kind: OpKind, buf_ptr: usize, buf_len: usize, offset: i64) -> IoToken {
         let token = self.alloc_token();
-        let op = PendingOp {
-            token,
-            handle,
-            kind,
-            buf_ptr,
-            buf_len,
-            offset,
-        };
+        let op = PendingOp { token, handle, kind, buf_ptr, buf_len, offset };
 
-        match self.try_complete_unix(op) {
-            TryCompleteResult::Completed(c) => {
-                self.completion_cache.insert(token, c);
+        // Driver handles concurrent op check and registration
+        match self.driver.submit(op) {
+            SubmitResult::Completed(c) => {
+                self.completions.insert(token, c);
             }
-            TryCompleteResult::WouldBlock(op) => {
-                self.pending_ops.insert(token, op);
-                self.handle_to_token.insert(handle, token);
-                self.poller
-                    .register(handle, token, kind)
-                    .unwrap_or_else(|e| panic!("IoPoller::register failed: {}", e));
+            SubmitResult::Pending => {
+                // Driver is now tracking the pending op
             }
         }
 
         token
     }
 
-    pub fn cancel_handle(&mut self, handle: IoHandle) {
-        if let Some(token) = self.handle_to_token.remove(&handle) {
-            self.pending_ops.remove(&token);
-            self.completion_cache.remove(&token);
-        }
-        self.poller.unregister(handle)
+    /// Try to take a completion without blocking.
+    #[inline]
+    pub fn try_take_completion(&mut self, token: IoToken) -> Option<Completion> {
+        self.completions.remove(&token)
     }
 
-    pub fn poll(&mut self) -> Vec<Completion> {
-        let events = self.poller.poll();
-        let mut completed = Vec::new();
-
-        for event in events {
-            let token = event.token;
-            let op = self.pending_ops.remove(&token).unwrap_or_else(|| {
-                panic!("io poll got token with no pending op: token={}", token)
-            });
-
-            let handle = op.handle;
-            let kind = op.kind;
-
-            match self.try_complete_unix(op) {
-                TryCompleteResult::Completed(c) => {
-                    self.handle_to_token.remove(&handle);
-                    self.completion_cache.insert(token, c);
-
-                    // Return a lightweight completion to drive wakes. Real completion is cached
-                    // and must be consumed by take_completion(token).
-                    completed.push(Completion {
-                        token,
-                        kind,
-                        result: Ok(0),
-                        extra: handle,
-                    });
-                }
-                TryCompleteResult::WouldBlock(op) => {
-                    // Re-register and keep waiting.
-                    self.pending_ops.insert(token, op);
-                    self.poller
-                        .register(op.handle, token, op.kind)
-                        .unwrap_or_else(|e| panic!("IoPoller::register failed: {}", e));
-                }
-            }
-        }
-
-        completed
+    /// Take a completion, panics if not found.
+    #[inline]
+    pub fn take_completion(&mut self, token: IoToken) -> Completion {
+        self.try_take_completion(token)
+            .unwrap_or_else(|| panic!("completion not found: token={}", token))
     }
 
-    pub fn has_waiters(&self) -> bool {
-        self.poller.has_waiters() || !self.pending_ops.is_empty()
-    }
-
-    /// Check if a completion exists for the given token without consuming it.
+    /// Check if a completion is ready.
     #[inline]
     pub fn has_completion(&self, token: IoToken) -> bool {
-        self.completion_cache.contains_key(&token)
-    }
-}
-
-#[derive(Debug)]
-enum TryCompleteResult {
-    Completed(Completion),
-    WouldBlock(PendingOp),
-}
-
-impl IoRuntime {
-    fn try_complete_unix(&self, op: PendingOp) -> TryCompleteResult {
-        #[cfg(unix)]
-        {
-            return unix_try_complete(op);
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = op;
-            unreachable!("submit op completion is windows-only via IOCP backend")
-        }
-
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = op;
-            unreachable!("unsupported platform")
-        }
-    }
-}
-
-#[cfg(unix)]
-fn unix_try_complete(op: PendingOp) -> TryCompleteResult {
-    let fd = i32::try_from(op.handle).unwrap_or_else(|_| panic!("invalid unix fd handle"));
-    let (res, extra) = match op.kind {
-        IoKind::Read => {
-            let n = if op.offset >= 0 {
-                unsafe {
-                    libc::pread(
-                        fd,
-                        op.buf_ptr as *mut core::ffi::c_void,
-                        op.buf_len,
-                        op.offset,
-                    )
-                }
-            } else {
-                unsafe { libc::read(fd, op.buf_ptr as *mut core::ffi::c_void, op.buf_len) }
-            };
-            if n >= 0 {
-                (Ok(n as usize), op.handle)
-            } else {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    return TryCompleteResult::WouldBlock(op);
-                }
-                (Err(e), op.handle)
-            }
-        }
-        IoKind::Write => {
-            let n = if op.offset >= 0 {
-                unsafe {
-                    libc::pwrite(
-                        fd,
-                        op.buf_ptr as *const core::ffi::c_void,
-                        op.buf_len,
-                        op.offset,
-                    )
-                }
-            } else {
-                unsafe { libc::write(fd, op.buf_ptr as *const core::ffi::c_void, op.buf_len) }
-            };
-            if n >= 0 {
-                (Ok(n as usize), op.handle)
-            } else {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    return TryCompleteResult::WouldBlock(op);
-                }
-                (Err(e), op.handle)
-            }
-        }
-        IoKind::Accept => {
-            let nfd = unsafe { libc::accept(fd, core::ptr::null_mut(), core::ptr::null_mut()) };
-            if nfd >= 0 {
-                // Best-effort set non-blocking.
-                let flags = unsafe { libc::fcntl(nfd, libc::F_GETFL) };
-                if flags != -1 {
-                    let _ = unsafe { libc::fcntl(nfd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-                }
-                (Ok(0), nfd as IoHandle)
-            } else {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    return TryCompleteResult::WouldBlock(op);
-                }
-                (Err(e), op.handle)
-            }
-        }
-        IoKind::Connect => {
-            panic!("submit_connect not implemented yet")
-        }
-    };
-
-    TryCompleteResult::Completed(Completion {
-        token: op.token,
-        kind: op.kind,
-        result: res,
-        extra,
-    })
-}
-
-#[derive(Debug)]
-pub enum IoPoller {
-    Unix(unix::UnixPoller),
-
-    #[cfg(windows)]
-    Windows(windows::WindowsPoller),
-}
-
-impl IoPoller {
-    pub fn new() -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            return Ok(Self::Unix(unix::UnixPoller::new()?));
-        }
-
-        #[cfg(windows)]
-        {
-            return Ok(Self::Windows(windows::WindowsPoller::new()?));
-        }
-
-        #[cfg(not(any(unix, windows)))]
-        {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "I/O polling not supported on this platform",
-            ))
-        }
+        self.completions.contains_key(&token)
     }
 
-    pub fn register(&mut self, handle: IoHandle, token: IoToken, kind: IoKind) -> io::Result<()> {
-        match self {
-            IoPoller::Unix(p) => p.register(handle, token, kind),
-            #[cfg(windows)]
-            IoPoller::Windows(p) => p.register(handle, token, kind),
+    /// Poll for completed operations (non-blocking).
+    /// Returns tokens of newly completed operations.
+    pub fn poll(&mut self) -> Vec<IoToken> {
+        let driver_completions = self.driver.poll();
+        let mut completed_tokens = Vec::with_capacity(driver_completions.len());
+
+        for completion in driver_completions {
+            let token = completion.token;
+            self.completions.insert(token, completion);
+            completed_tokens.push(token);
         }
+
+        completed_tokens
     }
 
-    pub fn unregister(&mut self, handle: IoHandle) {
-        match self {
-            IoPoller::Unix(p) => p.unregister(handle),
-            #[cfg(windows)]
-            IoPoller::Windows(p) => p.unregister(handle),
-        }
+    /// Cancel all pending operations on a handle.
+    pub fn cancel(&mut self, handle: IoHandle) {
+        self.driver.cancel(handle);
     }
 
-    pub fn poll(&mut self) -> Vec<Completion> {
-        match self {
-            IoPoller::Unix(p) => p.poll(),
-            #[cfg(windows)]
-            IoPoller::Windows(p) => p.poll(),
-        }
+    /// Check if there are any pending operations.
+    pub fn has_pending(&self) -> bool {
+        self.driver.has_pending()
+    }
+
+    // Legacy API compatibility
+    pub fn cancel_handle(&mut self, handle: IoHandle) {
+        self.cancel(handle);
     }
 
     pub fn has_waiters(&self) -> bool {
-        match self {
-            IoPoller::Unix(p) => p.has_waiters(),
-            #[cfg(windows)]
-            IoPoller::Windows(p) => p.has_waiters(),
-        }
+        self.has_pending()
     }
 }
 
+/// Result of submitting an operation.
+pub(crate) enum SubmitResult {
+    /// Operation completed immediately.
+    Completed(Completion),
+    /// Operation is pending, will complete later via poll().
+    Pending,
+}
+
+// Platform-specific driver
 #[cfg(unix)]
 mod unix;
 
+#[cfg(unix)]
+use unix::UnixDriver as IoDriver;
+
 #[cfg(windows)]
-mod windows {
-    use super::*;
+mod windows;
 
-    #[derive(Debug)]
-    pub struct WindowsPoller;
-
-    impl WindowsPoller {
-        pub fn new() -> io::Result<Self> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "windows iocp backend not implemented",
-            ))
-        }
-
-        pub fn register(&mut self, _handle: IoHandle, _token: IoToken, _kind: IoKind) -> io::Result<()> {
-            unreachable!("windows iocp backend not implemented")
-        }
-
-        pub fn unregister(&mut self, _handle: IoHandle) {
-            unreachable!("windows iocp backend not implemented")
-        }
-
-        pub fn poll(&mut self) -> Vec<Completion> {
-            unreachable!("windows iocp backend not implemented")
-        }
-
-        pub fn has_waiters(&self) -> bool {
-            unreachable!("windows iocp backend not implemented")
-        }
-    }
-}
+#[cfg(windows)]
+use windows::WindowsDriver as IoDriver;

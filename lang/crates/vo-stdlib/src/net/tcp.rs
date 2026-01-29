@@ -1,6 +1,5 @@
 //! TCP connection and listener implementations.
 
-use std::io::{Read, Write, ErrorKind};
 use std::net::{TcpStream, TcpListener, ToSocketAddrs};
 use std::time::Duration;
 use std::os::fd::AsRawFd;
@@ -8,11 +7,38 @@ use std::os::fd::FromRawFd;
 
 use vo_ffi_macro::vostd_extern_ctx;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
-use vo_runtime::io::IoHandle;
+use vo_runtime::io::{IoHandle, CompletionData};
 use vo_runtime::objects::slice;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 
 use super::{TCP_CONN_HANDLES, TCP_LISTENER_HANDLES, next_handle, write_io_error};
+use vo_runtime::io::Completion;
+
+/// Handle read/write completion result.
+fn handle_rw_completion(
+    call: &mut ExternCallContext,
+    c: Completion,
+    ret_size: u16,
+    ret_err: u16,
+    check_eof: bool,
+) -> ExternResult {
+    match c.result {
+        Ok(CompletionData::Size(0)) if check_eof => {
+            call.ret_i64(ret_size, 0);
+            write_error_to(call, ret_err, "EOF");
+        }
+        Ok(CompletionData::Size(n)) => {
+            call.ret_i64(ret_size, n as i64);
+            write_nil_error(call, ret_err);
+        }
+        Ok(_) => panic!("unexpected completion data"),
+        Err(e) => {
+            call.ret_i64(ret_size, 0);
+            write_io_error(call, ret_err, e);
+        }
+    }
+    ExternResult::Ok
+}
 
 fn register_tcp_conn(conn: TcpStream) -> i32 {
     // Set non-blocking mode for async I/O
@@ -99,63 +125,30 @@ pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
     let buf_ptr = slice::data_ptr(buf_ref);
 
     let fd = {
-        let mut handles = TCP_CONN_HANDLES.lock().unwrap();
-        let conn = match handles.get_mut(&handle) {
-            Some(c) => c,
+        let handles = TCP_CONN_HANDLES.lock().unwrap();
+        match handles.get(&handle) {
+            Some(c) => c.as_raw_fd(),
             None => {
                 call.ret_i64(slots::RET_0, 0);
                 write_error_to(call, slots::RET_1, "use of closed network connection");
                 return ExternResult::Ok;
             }
-        };
-        conn.as_raw_fd()
+        }
     };
 
     let token = match call.resume_io_token() {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_read(fd as IoHandle, buf_ptr, buf_len);
+            let token = call.io_mut().submit_read(fd as IoHandle, buf_ptr, buf_len);
             match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    match c.result {
-                        Ok(0) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_error_to(call, slots::RET_1, "EOF");
-                        }
-                        Ok(n) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
-                    return ExternResult::Ok;
-                }
+                Some(c) => return handle_rw_completion(call, c, slots::RET_0, slots::RET_1, true),
                 None => return ExternResult::WaitIo { token },
             }
         }
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(0) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_error_to(call, slots::RET_1, "EOF");
-        }
-        Ok(n) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
-    ExternResult::Ok
+    handle_rw_completion(call, c, slots::RET_0, slots::RET_1, true)
 }
 
 #[vostd_extern_ctx("net", "tcpConnWrite")]
@@ -166,55 +159,30 @@ pub fn net_tcp_conn_write(call: &mut ExternCallContext) -> ExternResult {
     let buf_ptr = slice::data_ptr(buf_ref);
 
     let fd = {
-        let mut handles = TCP_CONN_HANDLES.lock().unwrap();
-        let conn = match handles.get_mut(&handle) {
-            Some(c) => c,
+        let handles = TCP_CONN_HANDLES.lock().unwrap();
+        match handles.get(&handle) {
+            Some(c) => c.as_raw_fd(),
             None => {
                 call.ret_i64(slots::RET_0, 0);
                 write_error_to(call, slots::RET_1, "use of closed network connection");
                 return ExternResult::Ok;
             }
-        };
-        conn.as_raw_fd()
+        }
     };
 
     let token = match call.resume_io_token() {
         Some(token) => token,
         None => {
-            let token = call
-                .io_mut()
-                .submit_write(fd as IoHandle, buf_ptr, buf_len);
+            let token = call.io_mut().submit_write(fd as IoHandle, buf_ptr, buf_len);
             match call.io_mut().try_take_completion(token) {
-                Some(c) => {
-                    match c.result {
-                        Ok(n) => {
-                            call.ret_i64(slots::RET_0, n as i64);
-                            write_nil_error(call, slots::RET_1);
-                        }
-                        Err(e) => {
-                            call.ret_i64(slots::RET_0, 0);
-                            write_io_error(call, slots::RET_1, e);
-                        }
-                    }
-                    return ExternResult::Ok;
-                }
+                Some(c) => return handle_rw_completion(call, c, slots::RET_0, slots::RET_1, false),
                 None => return ExternResult::WaitIo { token },
             }
         }
     };
 
     let c = call.io_mut().take_completion(token);
-    match c.result {
-        Ok(n) => {
-            call.ret_i64(slots::RET_0, n as i64);
-            write_nil_error(call, slots::RET_1);
-        }
-        Err(e) => {
-            call.ret_i64(slots::RET_0, 0);
-            write_io_error(call, slots::RET_1, e);
-        }
-    }
-    ExternResult::Ok
+    handle_rw_completion(call, c, slots::RET_0, slots::RET_1, false)
 }
 
 #[vostd_extern_ctx("net", "tcpConnClose")]
@@ -345,14 +313,13 @@ pub fn net_tcp_listener_accept(call: &mut ExternCallContext) -> ExternResult {
             match call.io_mut().try_take_completion(token) {
                 Some(c) => {
                     match c.result {
-                        Ok(_) => {
-                            let new_fd = i32::try_from(c.extra)
-                                .unwrap_or_else(|_| panic!("invalid accepted fd: {}", c.extra));
-                            let stream = unsafe { TcpStream::from_raw_fd(new_fd) };
+                        Ok(CompletionData::Accept(new_fd)) => {
+                            let stream = unsafe { TcpStream::from_raw_fd(new_fd as i32) };
                             let h = register_tcp_conn(stream);
                             call.ret_i64(slots::RET_0, h as i64);
                             write_nil_error(call, slots::RET_1);
                         }
+                        Ok(_) => panic!("unexpected completion data for accept"),
                         Err(e) => {
                             call.ret_i64(slots::RET_0, 0);
                             write_io_error(call, slots::RET_1, e);
@@ -367,14 +334,13 @@ pub fn net_tcp_listener_accept(call: &mut ExternCallContext) -> ExternResult {
 
     let c = call.io_mut().take_completion(token);
     match c.result {
-        Ok(_) => {
-            let new_fd = i32::try_from(c.extra)
-                .unwrap_or_else(|_| panic!("invalid accepted fd: {}", c.extra));
-            let stream = unsafe { TcpStream::from_raw_fd(new_fd) };
+        Ok(CompletionData::Accept(new_fd)) => {
+            let stream = unsafe { TcpStream::from_raw_fd(new_fd as i32) };
             let h = register_tcp_conn(stream);
             call.ret_i64(slots::RET_0, h as i64);
             write_nil_error(call, slots::RET_1);
         }
+        Ok(_) => panic!("unexpected completion data for accept"),
         Err(e) => {
             call.ret_i64(slots::RET_0, 0);
             write_io_error(call, slots::RET_1, e);

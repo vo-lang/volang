@@ -316,6 +316,7 @@ impl Vm {
                     // Continue execution
                 }
                 ExecResult::Block(_) => {
+                    // Blocking I/O in trampoline - run other fibers until completion
                     if !self.scheduler.ready_queue.is_empty() {
                         self.run_scheduler_round();
                     } else {
