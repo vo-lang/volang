@@ -295,13 +295,10 @@ impl Vm {
             match exec_result {
                 ExecResult::Done => break JitResult::Ok,
                 ExecResult::Panic => break JitResult::Panic,
-                ExecResult::Continue => {}
-                ExecResult::Return => break JitResult::Ok,
-                ExecResult::Osr(_, _, _) => {}
-                ExecResult::Yield => {
-                    // Yield in sync call: no other fibers to run, just continue
+                ExecResult::TimesliceExpired | ExecResult::FrameChanged | ExecResult::Osr(_, _, _) => {
+                    // Continue execution
                 }
-                ExecResult::Block => {
+                ExecResult::Block(_) => {
                     if !self.scheduler.ready_queue.is_empty() {
                         self.run_scheduler_round();
                     } else {
@@ -310,13 +307,6 @@ impl Vm {
                         fiber.set_fatal_panic();
                         break JitResult::Panic;
                     }
-                }
-                #[cfg(feature = "std")]
-                ExecResult::WaitIo { .. } => {
-                    // I/O wait in sync call: would deadlock, treat as error
-                    let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                    fiber.set_fatal_panic();
-                    break JitResult::Panic;
                 }
             }
         };
@@ -371,11 +361,11 @@ impl Vm {
                 for i in 0..call_ret_slots.min(ret_buf.len()) {
                     fiber.write_reg(arg_start + i as u16, ret_buf[i]);
                 }
-                ExecResult::Continue
+                ExecResult::FrameChanged
             }
             JitResult::Block => {
                 // Blocking I/O: return Block to VM scheduler
-                ExecResult::Block
+                ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             JitResult::Panic => {
                 // panic_state already set by call_jit_direct

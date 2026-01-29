@@ -176,30 +176,51 @@ pub struct SelectState {
     pub woken_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FiberStatus {
+/// Fiber lifecycle state - single source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FiberState {
+    /// In ready_queue, waiting to be scheduled.
+    Runnable,
+    /// Currently being executed by VM.
     Running,
-    Suspended,
+    /// Blocked waiting for external event.
+    Blocked(BlockReason),
+    /// Finished, slot can be recycled.
     Dead,
 }
 
-/// I/O wait kind for non-blocking I/O.
-#[cfg(feature = "std")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IoKind {
-    Read,
-    Write,
+impl FiberState {
+    #[inline]
+    pub fn is_runnable(&self) -> bool {
+        matches!(self, FiberState::Runnable)
+    }
+    
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        matches!(self, FiberState::Running)
+    }
+    
+    #[inline]
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, FiberState::Blocked(_))
+    }
+    
+    #[inline]
+    pub fn is_dead(&self) -> bool {
+        matches!(self, FiberState::Dead)
+    }
 }
 
-/// Reason why a fiber is parked (blocked waiting for something).
-#[derive(Debug, Clone)]
-pub enum ParkReason {
-    /// Waiting on channel operation (send or receive).
-    Channel,
-    /// Waiting on I/O operation (std only).
+/// Reason why a fiber is blocked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Waiting for channel/port send/recv (queue-like primitives).
+    Queue,
+    /// Waiting for I/O completion.
     #[cfg(feature = "std")]
-    Io { token: IoToken },
+    Io(vo_runtime::io::IoToken),
 }
+
 
 /// Unified panic state for both recoverable and fatal panics.
 #[derive(Debug, Clone, Copy)]
@@ -231,7 +252,8 @@ impl PanicState {
 #[derive(Debug)]
 pub struct Fiber {
     pub id: u32,
-    pub status: FiberStatus,
+    /// Unified state machine (single source of truth).
+    pub state: FiberState,
     pub stack: Vec<u64>,
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
@@ -241,8 +263,6 @@ pub struct Fiber {
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
     /// A defer registered at generation N can only recover panics with generation > N.
     pub panic_generation: u64,
-    /// Reason why this fiber is parked, if any.
-    pub park_reason: Option<ParkReason>,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
 }
@@ -251,7 +271,7 @@ impl Fiber {
     pub fn new(id: u32) -> Self {
         Self {
             id,
-            status: FiberStatus::Suspended,
+            state: FiberState::Runnable,
             stack: Vec::new(),
             frames: Vec::new(),
             defer_stack: Vec::new(),
@@ -259,7 +279,6 @@ impl Fiber {
             select_state: None,
             panic_state: None,
             panic_generation: 0,
-            park_reason: None,
             #[cfg(feature = "std")]
             resume_io_token: None,
         }
@@ -267,7 +286,7 @@ impl Fiber {
     
     /// Reset fiber for reuse (trampoline fiber pool).
     pub fn reset(&mut self) {
-        self.status = FiberStatus::Running;
+        self.state = FiberState::Running;
         self.stack.clear();
         self.frames.clear();
         self.defer_stack.clear();
@@ -275,7 +294,6 @@ impl Fiber {
         self.select_state = None;
         self.panic_state = None;
         self.panic_generation = 0;
-        self.park_reason = None;
         #[cfg(feature = "std")]
         {
             self.resume_io_token = None;

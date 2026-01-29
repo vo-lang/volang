@@ -503,7 +503,7 @@ fn write_return_values(
         for i in 0..write_count {
             stack[caller_bp + ret_reg as usize + i] = ret_vals[i];
         }
-        ExecResult::Return
+        ExecResult::FrameChanged
     }
 }
 
@@ -625,5 +625,5 @@ fn call_defer_entry(
         ret_count: 0,
     });
 
-    ExecResult::Return
+    ExecResult::FrameChanged
 }

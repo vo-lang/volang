@@ -229,10 +229,10 @@ pub fn exec_iface_assert(
                 stack[bp + inst.a as usize + i as usize] = 0;
             }
         }
-        ExecResult::Continue
+        ExecResult::FrameChanged
     } else if matches {
         write_success(stack, itab_cache);
-        ExecResult::Continue
+        ExecResult::FrameChanged
     } else {
         ExecResult::Panic
     }
@@ -256,5 +256,5 @@ pub fn exec_iface_eq(stack: &mut [u64], bp: usize, inst: &Instruction, module: &
     }
     
     stack[bp + inst.a as usize] = result;
-    ExecResult::Continue
+    ExecResult::FrameChanged
 }

@@ -92,11 +92,11 @@ pub fn exec_call_extern(
     );
 
     match result {
-        ExternResult::Ok => ExecResult::Continue,
-        ExternResult::Yield => ExecResult::Yield,
-        ExternResult::Block => ExecResult::Block,
+        ExternResult::Ok => ExecResult::FrameChanged,
+        ExternResult::Yield => ExecResult::TimesliceExpired,
+        ExternResult::Block => ExecResult::Block(crate::fiber::BlockReason::Queue),
         #[cfg(feature = "std")]
-        ExternResult::WaitIo { token } => ExecResult::WaitIo { token },
+        ExternResult::WaitIo { token } => ExecResult::Block(crate::fiber::BlockReason::Io(token)),
         ExternResult::Panic(msg) => {
             // Enhance error message with function name if it's a "not found" error
             if msg.contains("not found") || msg.contains("not registered") {

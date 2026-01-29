@@ -37,7 +37,7 @@ pub fn run_island_thread(
                 if handle_command(&mut vm, cmd) { break; }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if vm.scheduler.has_runnable() {
+                if vm.scheduler.has_work() {
                     let _ = vm.run_scheduled();
                 } else {
                     // Block waiting for command

@@ -5,7 +5,7 @@ use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::{HashMap, VecDeque};
 
-use crate::fiber::{Fiber, FiberStatus, ParkReason};
+use crate::fiber::{BlockReason, Fiber, FiberState};
 #[cfg(feature = "std")]
 use vo_runtime::io::{IoRuntime, IoToken};
 
@@ -86,6 +86,7 @@ impl Scheduler {
     }
     
     /// Acquire a trampoline fiber for JIT->VM calls.
+    /// Initial state: Running (NOT in ready_queue).
     pub fn acquire_trampoline_fiber(&mut self) -> FiberId {
         let index = if let Some(slot) = self.trampoline_free_slots.pop() {
             // Reuse existing fiber
@@ -95,7 +96,7 @@ impl Scheduler {
             // Create new fiber
             let index = self.trampoline_fibers.len() as u32;
             let mut fiber = Fiber::new(FiberId::Trampoline(index).to_raw());
-            fiber.status = FiberStatus::Running;
+            fiber.state = FiberState::Running;
             self.trampoline_fibers.push(Box::new(fiber));
             index
         };
@@ -180,12 +181,15 @@ impl Scheduler {
         }
     }
     
-    /// Wake a fiber by FiberId (type-safe version).
+    /// Wake a blocked fiber by FiberId.
+    /// For Regular: Blocked(*) -> Runnable (added to ready_queue).
+    /// For Trampoline: Blocked(*) -> Running (NOT added to queue, driven by JIT glue).
     pub fn wake_fiber(&mut self, id: FiberId) {
         match id {
             FiberId::Regular(idx) => {
                 let fiber = &mut self.fibers[idx as usize];
-                if fiber.status == FiberStatus::Suspended {
+                if fiber.state.is_blocked() {
+                    fiber.state = FiberState::Runnable;
                     if !self.ready_queue.contains(&idx) {
                         self.ready_queue.push_back(idx);
                     }
@@ -193,8 +197,8 @@ impl Scheduler {
             }
             FiberId::Trampoline(idx) => {
                 let fiber = &mut self.trampoline_fibers[idx as usize];
-                if fiber.status == FiberStatus::Suspended {
-                    fiber.status = FiberStatus::Running;
+                if fiber.state.is_blocked() {
+                    fiber.state = FiberState::Running;
                 }
             }
         }
@@ -212,31 +216,38 @@ impl Scheduler {
         self.current.map(|id| &mut *self.fibers[id as usize])
     }
 
-    pub fn suspend_current(&mut self) {
+    /// Current fiber yields CPU, remains runnable.
+    /// Running -> Runnable (back to ready_queue).
+    pub fn yield_current(&mut self) {
         if let Some(id) = self.current {
-            self.fibers[id as usize].status = FiberStatus::Suspended;
-            if !self.ready_queue.contains(&id) {
-                self.ready_queue.push_back(id);
-            }
+            let fiber = &mut self.fibers[id as usize];
+            fiber.state = FiberState::Runnable;
+            self.ready_queue.push_back(id);
             self.current = None;
         }
     }
 
-    pub fn block_current(&mut self) {
+    /// Current fiber blocks on queue (channel/port).
+    /// Running -> Blocked(Queue).
+    pub fn block_for_queue(&mut self) {
         if let Some(id) = self.current {
-            self.fibers[id as usize].status = FiberStatus::Suspended;
+            let fiber = &mut self.fibers[id as usize];
+            fiber.state = FiberState::Blocked(BlockReason::Queue);
             self.current = None;
         }
     }
 
+    /// Pick next runnable fiber and set it to Running.
+    /// Runnable -> Running.
     pub fn schedule_next(&mut self) -> Option<u32> {
         while let Some(id) = self.ready_queue.pop_front() {
             let fiber = &mut self.fibers[id as usize];
-            if fiber.status != FiberStatus::Dead {
-                fiber.status = FiberStatus::Running;
+            if fiber.state.is_runnable() {
+                fiber.state = FiberState::Running;
                 self.current = Some(id);
                 return Some(id);
             }
+            // Skip dead/blocked fibers that shouldn't be in queue
         }
         self.current = None;
         None
@@ -244,12 +255,13 @@ impl Scheduler {
 
     /// Kill current fiber and return (panic_msg, error_location).
     /// error_location is (func_id, pc) from the current frame if available.
+    /// * -> Dead.
     pub fn kill_current(&mut self) -> (Option<String>, Option<(u32, u32)>) {
         if let Some(id) = self.current {
             let fiber = &mut self.fibers[id as usize];
             let msg = fiber.panic_message();
             let loc = fiber.current_frame().map(|f| (f.func_id, f.pc as u32));
-            fiber.status = FiberStatus::Dead;
+            fiber.state = FiberState::Dead;
             self.free_slots.push(id);
             self.current = None;
             (msg, loc)
@@ -258,37 +270,36 @@ impl Scheduler {
         }
     }
 
-    pub fn has_runnable(&self) -> bool {
+    /// Check if scheduler has work to do (can make forward progress).
+    /// True if either:
+    /// - ready_queue is not empty (there are Runnable fibers waiting), OR
+    /// - there is a currently Running regular fiber.
+    pub fn has_work(&self) -> bool {
         if !self.ready_queue.is_empty() {
             return true;
         }
         if let Some(id) = self.current {
-            return self.fibers[id as usize].status == FiberStatus::Running;
+            return self.fibers[id as usize].state.is_running();
         }
         false
     }
-    
-    /// Check if there are blocked/suspended fibers waiting to be woken.
+    /// Check if there are blocked fibers (potential deadlock detection).
     pub fn has_blocked(&self) -> bool {
-        // If we have fibers but none runnable, some must be blocked/suspended
-        !self.fibers.is_empty() && !self.has_runnable() && 
-            self.fibers.iter().any(|f| f.status == FiberStatus::Suspended)
+        self.fibers.iter().any(|f| f.state.is_blocked())
     }
     
-    /// Park current fiber with a reason. The fiber will be blocked until unparked.
+    /// Current fiber blocks on I/O.
+    /// Running -> Blocked(Io(token)).
+    /// ONLY for regular fibers. Trampoline calling this -> panic.
     #[cfg(feature = "std")]
-    pub fn park_current_for_io(&mut self, token: IoToken) {
+    pub fn block_for_io(&mut self, token: IoToken) {
         if let Some(id) = self.current {
             let fiber = &mut self.fibers[id as usize];
-            fiber.status = FiberStatus::Suspended;
-            fiber.park_reason = Some(ParkReason::Io { token });
-
+            fiber.state = FiberState::Blocked(BlockReason::Io(token));
             self.io_waiters.insert(token, FiberId::Regular(id));
-
             self.current = None;
         }
     }
-    
     /// Poll I/O and wake any fibers that are ready.
     /// Returns number of fibers woken.
     #[cfg(feature = "std")]
@@ -305,12 +316,10 @@ impl Scheduler {
             match fiber_id {
                 FiberId::Regular(id) => {
                     let fiber = &mut self.fibers[id as usize];
-                    fiber.park_reason = None;
                     fiber.resume_io_token = Some(token);
-                    if fiber.status == FiberStatus::Suspended {
-                        if !self.ready_queue.contains(&id) {
-                            self.ready_queue.push_back(id);
-                        }
+                    if fiber.state.is_blocked() {
+                        fiber.state = FiberState::Runnable;
+                        self.ready_queue.push_back(id);
                         woken += 1;
                     }
                 }

@@ -242,7 +242,7 @@ impl Vm {
                 iterations += 1;
                 if iterations > max {
                     // Suspend current fiber before breaking so it can be rescheduled later
-                    self.scheduler.suspend_current();
+                    self.scheduler.yield_current();
                     break;
                 }
             }
@@ -261,7 +261,7 @@ impl Vm {
             }
             
             // Check if we have runnable fibers
-            if !self.scheduler.has_runnable() {
+            if !self.scheduler.has_work() {
                 // Poll I/O first to wake any fibers waiting on I/O
                 #[cfg(feature = "std")]
                 {
@@ -303,14 +303,14 @@ impl Vm {
                         if let Some(module) = self.module.as_ref() {
                             let mut msg = String::new();
                             msg.push_str("vm deadlock: all fibers blocked\n");
-                            // Print suspended fibers with details
+                            // Print blocked fibers with details
                             for (id, fiber) in self.scheduler.fibers.iter().enumerate() {
-                                if fiber.status != crate::fiber::FiberStatus::Suspended {
+                                if !fiber.state.is_blocked() {
                                     continue;
                                 }
                                 msg.push_str(&format!(
-                                    "  fiber={} status={:?} park_reason={:?}\n",
-                                    id, fiber.status, fiber.park_reason
+                                    "  fiber={} state={:?}\n",
+                                    id, fiber.state
                                 ));
                                 if let Some(frame) = fiber.frames.last() {
                                     let func = &module.functions[frame.func_id as usize];
@@ -357,31 +357,34 @@ impl Vm {
             let result = self.run_fiber(fiber_id);
             
             match result {
-                ExecResult::Continue | ExecResult::Osr(_, _, _) => {
-                    self.scheduler.suspend_current();
+                ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
+                    self.scheduler.yield_current();
                 }
-                ExecResult::Yield => {
-                    self.scheduler.suspend_current();
+                ExecResult::Block(reason) => {
+                    match reason {
+                        crate::fiber::BlockReason::Queue => {
+                            self.scheduler.block_for_queue();
+                        }
+                        #[cfg(feature = "std")]
+                        crate::fiber::BlockReason::Io(token) => {
+                            // Retry the same instruction after I/O becomes ready.
+                            let fiber = self.scheduler.current_fiber_mut().unwrap();
+                            fiber.current_frame_mut().unwrap().pc -= 1;
+                            self.scheduler.block_for_io(token);
+                        }
+                    }
                 }
-                #[cfg(feature = "std")]
-                ExecResult::WaitIo { token } => {
-                    // Retry the same instruction after I/O becomes ready.
-                    // Without this, we would continue past the CallExtern/CallIface
-                    // with uninitialized return slots.
-                    let fiber = self.scheduler.current_fiber_mut().unwrap();
-                    fiber.current_frame_mut().unwrap().pc -= 1;
-                    self.scheduler.park_current_for_io(token);
-                }
-                ExecResult::Return | ExecResult::Done => {
+                ExecResult::Done => {
                     let _ = self.scheduler.kill_current();
-                }
-                ExecResult::Block => {
-                    self.scheduler.block_current();
                 }
                 ExecResult::Panic => {
                     let (msg, loc_tuple) = self.scheduler.kill_current();
                     let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
                     return Err(VmError::PanicUnwound { msg, loc });
+                }
+                ExecResult::FrameChanged => {
+                    // Internal to run_fiber, should not reach here
+                    self.scheduler.yield_current();
                 }
             }
         }
@@ -399,22 +402,22 @@ impl Vm {
         scheduler: &mut Scheduler,
     ) -> ExecResult {
         match result {
-            exec::ChanResult::Continue => ExecResult::Continue,
+            exec::ChanResult::Continue => ExecResult::FrameChanged,
             exec::ChanResult::Yield => {
                 fiber.current_frame_mut().unwrap().pc -= 1;
-                ExecResult::Block
+                ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             exec::ChanResult::Wake(id) => {
                 scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                 // Channel operation made another fiber runnable; yield so it can run.
-                ExecResult::Yield
+                ExecResult::TimesliceExpired
             }
             exec::ChanResult::WakeMultiple(ids) => {
                 for id in ids {
                     scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                 }
                 // Channel operation made other fibers runnable; yield so they can run.
-                ExecResult::Yield
+                ExecResult::TimesliceExpired
             }
             exec::ChanResult::SendOnClosed => {
                 runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
@@ -437,20 +440,20 @@ impl Vm {
         scheduler: &mut Scheduler,
     ) -> ExecResult {
         match result {
-            exec::ChanResult::Continue => ExecResult::Continue,
+            exec::ChanResult::Continue => ExecResult::FrameChanged,
             exec::ChanResult::Yield => {
                 let _ = fiber;
-                ExecResult::Block
+                ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             exec::ChanResult::Wake(id) => {
                 scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                ExecResult::Yield
+                ExecResult::TimesliceExpired
             }
             exec::ChanResult::WakeMultiple(ids) => {
                 for id in ids {
                     scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
                 }
-                ExecResult::Yield
+                ExecResult::TimesliceExpired
             }
             exec::ChanResult::SendOnClosed => {
                 runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
@@ -472,14 +475,12 @@ impl Vm {
         // so we need to preserve the caller's scheduler state
         let saved_current = self.scheduler.current.take();
         if let Some(id) = saved_current {
-            // The caller fiber was Running, mark it as Suspended and put in ready_queue
+            // The caller fiber was Running, mark it as Runnable and put in ready_queue
             // so it can be scheduled during this round
             let fiber = &mut self.scheduler.fibers[id as usize];
-            if fiber.status == crate::fiber::FiberStatus::Running {
-                fiber.status = crate::fiber::FiberStatus::Suspended;
-                if !self.scheduler.ready_queue.contains(&id) {
-                    self.scheduler.ready_queue.push_back(id);
-                }
+            if fiber.state.is_running() {
+                fiber.state = crate::fiber::FiberState::Runnable;
+                self.scheduler.ready_queue.push_back(id);
             }
         }
         
@@ -558,90 +559,90 @@ impl Vm {
                             }
                         }
                     }
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::LoadInt => {
                     let val = inst.imm32() as i64 as u64;
                     stack_set(stack, bp + inst.a as usize, val);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LoadConst => {
                     exec::exec_load_const(stack, bp, &inst, &module.constants);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::Copy => {
                     let val = stack_get(stack, bp + inst.b as usize);
                     stack_set(stack, bp + inst.a as usize, val);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::CopyN => {
                     exec::exec_copy_n(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SlotGet => {
                     exec::exec_slot_get(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SlotSet => {
                     exec::exec_slot_set(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SlotGetN => {
                     exec::exec_slot_get_n(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SlotSetN => {
                     exec::exec_slot_set_n(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::GlobalGet => {
                     exec::exec_global_get(stack, bp, &inst, &self.state.globals);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GlobalGetN => {
                     exec::exec_global_get_n(stack, bp, &inst, &self.state.globals);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GlobalSet => {
                     exec::exec_global_set(&stack, bp, &inst, &mut self.state.globals);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GlobalSetN => {
                     exec::exec_global_set_n(&stack, bp, &inst, &mut self.state.globals);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::PtrNew => {
                     exec::exec_ptr_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::PtrGet => {
                     if exec::exec_ptr_get(stack, bp, &inst) {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
                     }
                 }
                 Opcode::PtrSet => {
                     if exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc) {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
                     }
                 }
                 Opcode::PtrGetN => {
                     if exec::exec_ptr_get_n(stack, bp, &inst) {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
                     }
                 }
                 Opcode::PtrSetN => {
                     if exec::exec_ptr_set_n(&stack, bp, &inst) {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
                     }
@@ -652,7 +653,7 @@ impl Vm {
                     let offset = stack_get(stack, bp + inst.c as usize) as usize;
                     let addr = ptr + (offset * 8) as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Integer arithmetic - inline for hot path
@@ -660,19 +661,19 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, a.wrapping_add(b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SubI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, a.wrapping_sub(b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MulI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, a.wrapping_mul(b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::DivI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
@@ -681,7 +682,7 @@ impl Vm {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_div(b) as u64);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::ModI => {
@@ -691,7 +692,7 @@ impl Vm {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b) as u64);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::DivU => {
@@ -701,7 +702,7 @@ impl Vm {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_div(b));
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::ModU => {
@@ -711,13 +712,13 @@ impl Vm {
                         runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b));
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::NegI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, a.wrapping_neg() as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Float arithmetic
@@ -725,30 +726,30 @@ impl Vm {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a + b).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SubF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a - b).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MulF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a * b).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::DivF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a / b).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::NegF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     stack_set(stack, bp + inst.a as usize, (-a).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Integer comparison - inline
@@ -756,37 +757,37 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a == b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::NeI => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a != b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LtI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a < b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LeI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a <= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GtI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a > b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GeI => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a >= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 
                 // Unsigned integer comparison
@@ -794,25 +795,25 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a < b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LeU => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a <= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GtU => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a > b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GeU => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, (a >= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Float comparison
@@ -820,37 +821,37 @@ impl Vm {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a == b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::NeF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a != b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LtF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a < b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::LeF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a <= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GtF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a > b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::GeF => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     let b = f64::from_bits(stack_get(stack, bp + inst.c as usize));
                     stack_set(stack, bp + inst.a as usize, (a >= b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Bitwise - inline
@@ -858,30 +859,30 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, a & b);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Or => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, a | b);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Xor => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, a ^ b);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::AndNot => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     stack_set(stack, bp + inst.a as usize, a & !b);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Not => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     stack_set(stack, bp + inst.a as usize, !a);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Shl => {
                     let a = stack_get(stack, bp + inst.b as usize);
@@ -892,7 +893,7 @@ impl Vm {
                         // Go semantics: shift >= 64 returns 0
                         let result = if b >= 64 { 0 } else { a.wrapping_shl(b as u32) };
                         stack_set(stack, bp + inst.a as usize, result);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::ShrS => {
@@ -904,7 +905,7 @@ impl Vm {
                         // Go semantics: signed right shift >= 64 returns 0 (positive) or -1 (negative)
                         let result = if b >= 64 { if a < 0 { -1i64 } else { 0i64 } } else { a.wrapping_shr(b as u32) };
                         stack_set(stack, bp + inst.a as usize, result as u64);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::ShrU => {
@@ -916,20 +917,20 @@ impl Vm {
                         // Go semantics: unsigned right shift >= 64 returns 0
                         let result = if b >= 64 { 0 } else { a.wrapping_shr(b as u32) };
                         stack_set(stack, bp + inst.a as usize, result);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::BoolNot => {
                     let a = stack_get(stack, bp + inst.b as usize);
                     stack_set(stack, bp + inst.a as usize, (a == 0) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Jump - inline with OSR support
                 Opcode::Jump => {
                     let offset = inst.imm32();
                     frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::JumpIf => {
                     let cond = stack_get(stack, bp + inst.a as usize);
@@ -937,7 +938,7 @@ impl Vm {
                         let offset = inst.imm32();
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::JumpIfNot => {
                     let cond = stack_get(stack, bp + inst.a as usize);
@@ -945,7 +946,7 @@ impl Vm {
                         let offset = inst.imm32();
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Call instructions
@@ -1052,13 +1053,13 @@ impl Vm {
                 // String operations
                 Opcode::StrNew => {
                     exec::exec_str_new(stack, bp, &inst, &module.constants, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrLen => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let len = if s.is_null() { 0 } else { string_len(s) };
                     stack_set(stack, bp + inst.a as usize, len as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrIndex => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -1073,52 +1074,52 @@ impl Vm {
                     } else {
                         let byte = string_index(s, idx);
                         stack_set(stack, bp + inst.a as usize, byte as u64);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::StrConcat => {
                     exec::exec_str_concat(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrSlice => {
                     exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrEq => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::eq(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrNe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::ne(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrLt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::lt(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrLe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::le(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrGt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::gt(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrGe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
                     stack_set(stack, bp + inst.a as usize, string::ge(a, b) as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::StrDecodeRune => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -1126,13 +1127,13 @@ impl Vm {
                     let (rune, width) = string::decode_rune_at(s, pos);
                     stack_set(stack, bp + inst.a as usize, rune as u64);
                     stack_set(stack, bp + inst.a as usize + 1, width as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Array operations
                 Opcode::ArrayNew => {
                     exec::exec_array_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ArrayGet => {
                     // flags: 0=dynamic, 1-8=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
@@ -1165,7 +1166,7 @@ impl Vm {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
-                            return ExecResult::Continue;
+                            return ExecResult::FrameChanged;
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
@@ -1173,11 +1174,11 @@ impl Vm {
                                 let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
                             }
-                            return ExecResult::Continue;
+                            return ExecResult::FrameChanged;
                         }
                     };
                     stack_set(stack, dst, val);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                     }
                 }
                 Opcode::ArraySet => {
@@ -1218,7 +1219,7 @@ impl Vm {
                             }
                         }
                     }
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                     }
                 }
                 Opcode::ArrayAddr => {
@@ -1229,13 +1230,13 @@ impl Vm {
                     let base = array::data_ptr_bytes(arr);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Slice operations
                 Opcode::SliceNew => {
                     match exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
-                        Ok(()) => ExecResult::Continue,
+                        Ok(()) => ExecResult::FrameChanged,
                         Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
                     }
                 }
@@ -1269,7 +1270,7 @@ impl Vm {
                                     let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                     stack_set(stack, dst + i, unsafe { *ptr });
                                 }
-                                return ExecResult::Continue;
+                                return ExecResult::FrameChanged;
                             }
                             _ => {
                                 let elem_bytes = inst.flags as usize;
@@ -1277,11 +1278,11 @@ impl Vm {
                                     let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                     stack_set(stack, dst + i, unsafe { *ptr });
                                 }
-                                return ExecResult::Continue;
+                                return ExecResult::FrameChanged;
                             }
                         };
                         stack_set(stack, dst, val);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::SliceSet => {
@@ -1321,24 +1322,24 @@ impl Vm {
                                 }
                             }
                         }
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 Opcode::SliceLen => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let len = if s.is_null() { 0 } else { slice_len(s) };
                     stack_set(stack, bp + inst.a as usize, len as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SliceCap => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let cap = if s.is_null() { 0 } else { slice_cap(s) };
                     stack_set(stack, bp + inst.a as usize, cap as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SliceSlice => {
                     if exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc) {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
@@ -1350,7 +1351,7 @@ impl Vm {
                 }
                 Opcode::SliceAppend => {
                     exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SliceAddr => {
                     // Get element address: a=dst, b=slice_reg, c=index, flags=elem_bytes
@@ -1360,17 +1361,17 @@ impl Vm {
                     let base = slice_data_ptr(s);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Map operations
                 Opcode::MapNew => {
                     exec::exec_map_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MapGet => {
                     exec::exec_map_get(stack, bp, &inst, Some(module));
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MapSet => {
                     // nil map write panics (Go semantics)
@@ -1382,7 +1383,7 @@ impl Vm {
                         if !ok {
                             runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_UNHASHABLE_TYPE.to_string())
                         } else {
-                            ExecResult::Continue
+                            ExecResult::FrameChanged
                         }
                     }
                 }
@@ -1390,28 +1391,28 @@ impl Vm {
                     // nil map delete is a no-op (Go semantics: delete from nil map does nothing)
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
-                        return ExecResult::Continue;
+                        return ExecResult::FrameChanged;
                     }
                     exec::exec_map_delete(&stack, bp, &inst, Some(module));
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MapLen => {
                     exec::exec_map_len(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MapIterInit => {
                     exec::exec_map_iter_init(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::MapIterNext => {
                     exec::exec_map_iter_next(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Channel operations - need scheduler access
                 Opcode::ChanNew => {
                     match exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc) {
-                        Ok(()) => ExecResult::Continue,
+                        Ok(()) => ExecResult::FrameChanged,
                         Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
                     }
                 }
@@ -1435,33 +1436,33 @@ impl Vm {
                 }
                 Opcode::ChanLen => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::channel::len);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ChanCap => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Select operations - allowed on trampoline, if it yields execute_jit_call handles it
                 Opcode::SelectBegin => {
                     exec::exec_select_begin(&mut fiber.select_state, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SelectSend => {
                     exec::exec_select_send(&mut fiber.select_state, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SelectRecv => {
                     exec::exec_select_recv(&mut fiber.select_state, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::SelectExec => {
                     match exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst) {
-                        exec::SelectResult::Continue => ExecResult::Continue,
+                        exec::SelectResult::Continue => ExecResult::FrameChanged,
                         exec::SelectResult::Block => {
                             // Rewind PC so SelectExec is re-executed after other fibers run
                             frame.pc -= 1;
-                            ExecResult::Block
+                            ExecResult::Block(crate::fiber::BlockReason::Queue)
                         }
                         exec::SelectResult::SendOnClosed => {
                             runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
@@ -1472,11 +1473,11 @@ impl Vm {
                 // Closure operations
                 Opcode::ClosureNew => {
                     exec::exec_closure_new(stack, bp, &inst, &mut self.state.gc);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ClosureGet => {
                     exec::exec_closure_get(stack, bp, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Goroutine - spawn new fiber
@@ -1486,7 +1487,7 @@ impl Vm {
                     self.scheduler.spawn(go_result.new_fiber);
                     // With Box<Fiber>, fiber addresses are stable across Vec reallocation.
                     // But we still return to refresh stack/frames pointers for consistency.
-                    return ExecResult::Continue;
+                    return ExecResult::FrameChanged;
                 }
 
                 // Defer and error handling
@@ -1495,25 +1496,25 @@ impl Vm {
                     // so nested defers can recover the same panic as their parent.
                     let generation = fiber.effective_defer_generation();
                     exec::exec_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
                     exec::exec_err_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Panic => {
                     user_panic(fiber, stack, bp, inst.a, module)
                 }
                 Opcode::Recover => {
                     exec::exec_recover(stack, bp, fiber, &inst);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 // Interface operations
                 Opcode::IfaceAssign => {
                     exec::exec_iface_assign(stack, bp, &inst, &mut self.state.gc, &mut self.state.itab_cache, module);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::IfaceAssert => {
                     let result = exec::exec_iface_assert(stack, bp, &inst, &mut self.state.itab_cache, module);
@@ -1540,22 +1541,22 @@ impl Vm {
                 Opcode::ConvI2F => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     stack_set(stack, bp + inst.a as usize, (a as f64).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ConvF2I => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     stack_set(stack, bp + inst.a as usize, a as i64 as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ConvF64F32 => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
                     stack_set(stack, bp + inst.a as usize, (a as f32).to_bits() as u64);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::ConvF32F64 => {
                     let a = f32::from_bits(stack_get(stack, bp + inst.b as usize) as u32);
                     stack_set(stack, bp + inst.a as usize, (a as f64).to_bits());
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::Trunc => {
                     let val = stack_get(stack, bp + inst.b as usize);
@@ -1572,7 +1573,7 @@ impl Vm {
                         _ => val,
                     };
                     stack_set(stack, bp + inst.a as usize, result);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::IndexCheck => {
@@ -1584,7 +1585,7 @@ impl Vm {
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
 
@@ -1628,16 +1629,16 @@ impl Vm {
                         join_handle: Some(join_handle),
                     });
                     
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::IslandNew => {
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, 0);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::PortNew => {
                     match exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
-                        Ok(()) => ExecResult::Continue,
+                        Ok(()) => ExecResult::FrameChanged,
                         Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
                     }
                 }
@@ -1646,16 +1647,16 @@ impl Vm {
                     let island_id = self.state.current_island_id;
                     let fiber_id = fiber_id.to_raw() as u64;
                     match exec::exec_port_send(stack, bp, island_id, fiber_id, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types) {
-                        exec::PortResult::Continue => ExecResult::Continue,
-                        exec::PortResult::Yield => ExecResult::Block,
+                        exec::PortResult::Continue => ExecResult::FrameChanged,
+                        exec::PortResult::Yield => ExecResult::Block(crate::fiber::BlockReason::Queue),
                         exec::PortResult::WakeRemote(waiter) => {
                             self.state.wake_waiter(&waiter, &mut self.scheduler);
-                            ExecResult::Continue
+                            ExecResult::FrameChanged
                         }
                         exec::PortResult::SendOnClosed => {
                             runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
                         }
-                        _ => ExecResult::Continue,
+                        _ => ExecResult::FrameChanged,
                     }
                 }
                 #[cfg(not(feature = "std"))]
@@ -1667,17 +1668,17 @@ impl Vm {
                     let island_id = self.state.current_island_id;
                     let fiber_id = fiber_id.to_raw() as u64;
                     match exec::exec_port_recv(stack, bp, island_id, fiber_id, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types) {
-                        exec::PortResult::Continue => ExecResult::Continue,
+                        exec::PortResult::Continue => ExecResult::FrameChanged,
                         exec::PortResult::Yield => {
                             // Retry PortRecv after being woken, so destination slots are filled.
                             frame.pc -= 1;
-                            ExecResult::Block
+                            ExecResult::Block(crate::fiber::BlockReason::Queue)
                         }
                         exec::PortResult::WakeRemote(waiter) => {
                             self.state.wake_waiter(&waiter, &mut self.scheduler);
-                            ExecResult::Continue
+                            ExecResult::FrameChanged
                         }
-                        _ => ExecResult::Continue,
+                        _ => ExecResult::FrameChanged,
                     }
                 }
                 #[cfg(not(feature = "std"))]
@@ -1687,7 +1688,7 @@ impl Vm {
                 #[cfg(feature = "std")]
                 Opcode::PortClose => {
                     match exec::exec_port_close(stack, bp, &inst) {
-                        exec::PortResult::Continue => ExecResult::Continue,
+                        exec::PortResult::Continue => ExecResult::FrameChanged,
                         exec::PortResult::CloseNil => {
                             runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
                         }
@@ -1695,28 +1696,28 @@ impl Vm {
                             for waiter in &waiters {
                                 self.state.wake_waiter(waiter, &mut self.scheduler);
                             }
-                            ExecResult::Continue
+                            ExecResult::FrameChanged
                         }
-                        _ => ExecResult::Continue,
+                        _ => ExecResult::FrameChanged,
                     }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortClose => {
                     match exec::exec_port_close(stack, bp, &inst) {
-                        exec::PortResult::Continue => ExecResult::Continue,
+                        exec::PortResult::Continue => ExecResult::FrameChanged,
                         exec::PortResult::CloseNil => {
                             runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
                         }
-                        _ => ExecResult::Continue,
+                        _ => ExecResult::FrameChanged,
                     }
                 }
                 Opcode::PortLen => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::port::len);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 Opcode::PortCap => {
                     exec::exec_queue_get(stack, bp, &inst, vo_runtime::objects::queue_state::capacity);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
                 #[cfg(feature = "std")]
                 Opcode::GoIsland => {
@@ -1734,7 +1735,7 @@ impl Vm {
                         new_fiber.push_frame(func_id, local_slots, 0, 0);
                         new_fiber.stack[0] = closure_ref as u64;
                         self.scheduler.spawn(new_fiber);
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     } else {
                         let capture_count = result.capture_data.len() as u16;
                         // Get type info from closure's FunctionDef for proper serialization
@@ -1760,7 +1761,7 @@ impl Vm {
                                 }
                             }
                         }
-                        ExecResult::Continue
+                        ExecResult::FrameChanged
                     }
                 }
                 #[cfg(not(feature = "std"))]
@@ -1774,15 +1775,14 @@ impl Vm {
                     new_fiber.push_frame(func_id, local_slots, 0, 0);
                     new_fiber.stack[0] = closure_ref as u64;
                     self.scheduler.spawn(new_fiber);
-                    ExecResult::Continue
+                    ExecResult::FrameChanged
                 }
 
                 Opcode::Invalid => ExecResult::Panic,
             };
 
             match result {
-                ExecResult::Continue => continue,
-                ExecResult::Return => {
+                ExecResult::FrameChanged => {
                     let frames_empty = self.scheduler.get_fiber(fiber_id).frames.is_empty();
                     if frames_empty {
                         return ExecResult::Done;
@@ -1794,7 +1794,7 @@ impl Vm {
             }
         }
 
-        ExecResult::Continue
+        ExecResult::TimesliceExpired
     }
 
     /// Execute a closure synchronously from extern function callback.
@@ -1831,21 +1831,13 @@ impl Vm {
         let success = loop {
             let exec_result = self.run_fiber(trampoline_id);
             match exec_result {
-                ExecResult::Done | ExecResult::Return => break true,
+                ExecResult::Done => break true,
                 ExecResult::Panic => break false,
-                ExecResult::Continue | ExecResult::Yield => {
-                    // Yield in sync call: no other fibers to run, just continue
+                ExecResult::TimesliceExpired | ExecResult::FrameChanged | ExecResult::Osr(_, _, _) => {
+                    // Continue execution
                 }
-                ExecResult::Block => {
+                ExecResult::Block(_) => {
                     // For sync call, true blocking is an error (would deadlock)
-                    break false;
-                }
-                ExecResult::Osr(_, _, _) => {
-                    // OSR not available without JIT, treat as continue
-                }
-                #[cfg(feature = "std")]
-                ExecResult::WaitIo { .. } => {
-                    // I/O wait in sync call: would deadlock, treat as error
                     break false;
                 }
             }

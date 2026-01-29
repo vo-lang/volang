@@ -21,8 +21,6 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 #[cfg(feature = "std")]
 use vo_runtime::island::IslandCommand;
-#[cfg(feature = "std")]
-use vo_runtime::io::IoToken;
 
 /// Shared registry of island command senders.
 #[cfg(feature = "std")]
@@ -31,19 +29,21 @@ pub type IslandRegistry = Arc<Mutex<HashMap<u32, Sender<IslandCommand>>>>;
 /// Time slice: number of instructions before forced yield check.
 pub const TIME_SLICE: u32 = 1000;
 
+/// VM execution result - drives scheduler state transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecResult {
-    Continue,
-    Return,
-    Yield,
-    Block,  // Channel blocking - don't re-queue, wait for wake
+    /// Call/return changed frames, refetch locals.
+    FrameChanged,
+    /// Time slice expired, yield to scheduler.
+    TimesliceExpired,
+    /// Block on external event.
+    Block(crate::fiber::BlockReason),
+    /// Panic, unwind or kill.
     Panic,
+    /// Fiber finished.
     Done,
-    /// OSR request: (func_id, backedge_pc, loop_header_pc)
+    /// OSR request: (func_id, backedge_pc, loop_header_pc).
     Osr(u32, usize, usize),
-    /// Wait for I/O completion.
-    #[cfg(feature = "std")]
-    WaitIo { token: IoToken },
 }
 
 /// Runtime error location for debug info lookup.

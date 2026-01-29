@@ -51,7 +51,7 @@ pub fn exec_call(
     });
 
     // Return because frames changed
-    ExecResult::Return
+    ExecResult::FrameChanged
 }
 
 pub fn exec_call_closure(
@@ -102,7 +102,7 @@ pub fn exec_call_closure(
     });
 
     // Return because frames changed
-    ExecResult::Return
+    ExecResult::FrameChanged
 }
 
 pub fn exec_call_iface(
@@ -150,6 +150,6 @@ pub fn exec_call_iface(
     });
 
     // Return because frames changed
-    ExecResult::Return
+    ExecResult::FrameChanged
 }
 
