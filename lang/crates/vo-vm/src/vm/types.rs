@@ -53,6 +53,20 @@ pub struct ErrorLocation {
     pub pc: u32,
 }
 
+/// Scheduling loop outcome - separates scheduling from deadlock handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingOutcome {
+    /// All fibers completed normally.
+    Completed,
+    /// Reached iteration limit, suspended for later continuation.
+    Suspended,
+    /// All fibers blocked, no progress possible.
+    /// Caller decides whether this is a deadlock or expected (e.g., trampoline context).
+    Blocked,
+    /// A fiber panicked.
+    Panicked,
+}
+
 #[derive(Debug)]
 pub enum VmError {
     NoEntryFunction,

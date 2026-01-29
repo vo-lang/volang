@@ -24,7 +24,7 @@ mod types;
 pub mod island_thread;
 
 pub use helpers::{stack_get, stack_set};
-pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE};
+pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
 
@@ -224,17 +224,24 @@ impl Vm {
         fiber.push_frame(entry_func, func.local_slots, 0, 0);
         self.scheduler.spawn(fiber);
 
-        self.run_scheduling_loop(None)
+        match self.run_scheduling_loop(None)? {
+            SchedulingOutcome::Blocked => self.report_deadlock(),
+            _ => Ok(()),
+        }
     }
     
     /// Run existing runnable fibers without spawning entry fiber.
     /// Used for event handling after initial run.
     pub fn run_scheduled(&mut self) -> Result<(), VmError> {
-        self.run_scheduling_loop(None)
+        match self.run_scheduling_loop(None)? {
+            SchedulingOutcome::Blocked => self.report_deadlock(),
+            _ => Ok(()),
+        }
     }
     
     /// Core scheduling loop - runs fibers until all block or limit reached.
-    fn run_scheduling_loop(&mut self, max_iterations: Option<usize>) -> Result<(), VmError> {
+    /// Returns outcome without handling deadlock - caller decides the appropriate response.
+    fn run_scheduling_loop(&mut self, max_iterations: Option<usize>) -> Result<SchedulingOutcome, VmError> {
         let mut iterations = 0;
         
         loop {
@@ -299,46 +306,10 @@ impl Vm {
                     if self.state.current_island_id != 0 && !self.scheduler.has_io_waiters() {
                         break;
                     }
+                    // All fibers blocked, no I/O waiters, no island communication
+                    // Return Blocked - caller decides if this is a deadlock
                     if !self.scheduler.has_io_waiters() && self.state.main_cmd_rx.is_none() {
-                        if let Some(module) = self.module.as_ref() {
-                            let mut msg = String::new();
-                            msg.push_str("vm deadlock: all fibers blocked\n");
-                            // Print blocked fibers with details
-                            for (id, fiber) in self.scheduler.fibers.iter().enumerate() {
-                                if !fiber.state.is_blocked() {
-                                    continue;
-                                }
-                                msg.push_str(&format!(
-                                    "  fiber={} state={:?}\n",
-                                    id, fiber.state
-                                ));
-                                if let Some(frame) = fiber.frames.last() {
-                                    let func = &module.functions[frame.func_id as usize];
-                                    let code = &func.code;
-                                    let pc = frame.pc;
-                                    let prev_pc = pc.saturating_sub(1);
-                                    if let Some(inst) = code.get(prev_pc) {
-                                        msg.push_str(&format!(
-                                            "    at func={} pc={} inst@{}={:?}\n",
-                                            frame.func_id,
-                                            pc,
-                                            prev_pc,
-                                            inst.opcode()
-                                        ));
-                                    }
-                                    if let Some(inst) = code.get(pc) {
-                                        msg.push_str(&format!(
-                                            "    next inst@{}={:?}\n",
-                                            pc,
-                                            inst.opcode()
-                                        ));
-                                    }
-                                }
-                            }
-                            panic!("{}", msg);
-                        } else {
-                            panic!("vm deadlock: all fibers blocked");
-                        }
+                        return Ok(SchedulingOutcome::Blocked);
                     }
 
                     self.scheduler.poll_io(&mut self.state.io);
@@ -346,7 +317,7 @@ impl Vm {
                     continue;
                 }
                 
-                break;
+                return Ok(SchedulingOutcome::Completed);
             }
             
             let fiber_id = match self.scheduler.schedule_next() {
@@ -380,7 +351,12 @@ impl Vm {
                 ExecResult::Panic => {
                     let (msg, loc_tuple) = self.scheduler.kill_current();
                     let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
-                    return Err(VmError::PanicUnwound { msg, loc });
+                    // For top-level callers, convert to error. For run_scheduler_round, just return.
+                    if max_iterations.is_none() {
+                        return Err(VmError::PanicUnwound { msg, loc });
+                    } else {
+                        return Ok(SchedulingOutcome::Panicked);
+                    }
                 }
                 ExecResult::FrameChanged => {
                     // Internal to run_fiber, should not reach here
@@ -389,7 +365,39 @@ impl Vm {
             }
         }
 
-        Ok(())
+        Ok(SchedulingOutcome::Completed)
+    }
+    
+    /// Report deadlock with detailed fiber state.
+    fn report_deadlock(&self) -> Result<(), VmError> {
+        if let Some(module) = self.module.as_ref() {
+            let mut msg = String::new();
+            msg.push_str("vm deadlock: all fibers blocked\n");
+            for (id, fiber) in self.scheduler.fibers.iter().enumerate() {
+                if !fiber.state.is_blocked() {
+                    continue;
+                }
+                msg.push_str(&format!("  fiber={} state={:?}\n", id, fiber.state));
+                if let Some(frame) = fiber.frames.last() {
+                    let func = &module.functions[frame.func_id as usize];
+                    let code = &func.code;
+                    let pc = frame.pc;
+                    let prev_pc = pc.saturating_sub(1);
+                    if let Some(inst) = code.get(prev_pc) {
+                        msg.push_str(&format!(
+                            "    at func={} pc={} inst@{}={:?}\n",
+                            frame.func_id, pc, prev_pc, inst.opcode()
+                        ));
+                    }
+                    if let Some(inst) = code.get(pc) {
+                        msg.push_str(&format!("    next inst@{}={:?}\n", pc, inst.opcode()));
+                    }
+                }
+            }
+            panic!("{}", msg);
+        } else {
+            panic!("vm deadlock: all fibers blocked");
+        }
     }
     
     /// Handle ChanResult from channel operations uniformly.
@@ -488,6 +496,7 @@ impl Vm {
         #[cfg(feature = "jit")]
         let jit_mgr = self.jit_mgr.take();
         
+        // Ignore Blocked - trampoline fiber may be waiting, not a deadlock
         let _ = self.run_scheduling_loop(Some(1000));
         
         // Restore JIT manager
