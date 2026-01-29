@@ -191,6 +191,12 @@ impl IoRuntime {
     pub fn has_waiters(&self) -> bool {
         self.poller.has_waiters() || !self.pending_ops.is_empty()
     }
+
+    /// Check if a completion exists for the given token without consuming it.
+    #[inline]
+    pub fn has_completion(&self, token: IoToken) -> bool {
+        self.completion_cache.contains_key(&token)
+    }
 }
 
 #[derive(Debug)]

@@ -64,69 +64,84 @@ pub extern "C" fn call_extern_trampoline(
     let program_args = unsafe { &*ctx.program_args };
     let sentinel_errors = unsafe { &mut *ctx.sentinel_errors };
     #[cfg(feature = "std")]
-    let mut io = vo_runtime::io::IoRuntime::new().unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e));
-    let result = registry.call(
-        extern_id,
-        &mut temp_stack,
-        0,
-        0,
-        arg_count as u16,
-        0,
-        gc,
-        &module.struct_metas,
-        &module.interface_metas,
-        &module.named_type_metas,
-        &module.runtime_types,
-        itab_cache,
-        &module.functions,
-        module,
-        ctx.vm,
-        ctx.fiber,
-        Some(super::closure_call_trampoline),
-        &module.well_known,
-        program_args,
-        sentinel_errors,
-        #[cfg(feature = "std")]
-        &mut io,
-        #[cfg(feature = "std")]
-        None,
-    );
+    let io = unsafe { &mut *ctx.io };
     
-    match result {
-        ExternResult::Ok => {
-            // Copy back ret_slots (not arg_count) since extern may return more than args
-            for i in 0..ret_slots as usize {
-                unsafe { *ret.add(i) = temp_stack[i] };
+    // Resume token for WaitIo - initially None
+    #[cfg(feature = "std")]
+    let mut resume_token: Option<vo_runtime::io::IoToken> = None;
+    
+    loop {
+        let result = registry.call(
+            extern_id,
+            &mut temp_stack,
+            0,
+            0,
+            arg_count as u16,
+            0,
+            gc,
+            &module.struct_metas,
+            &module.interface_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
+            itab_cache,
+            &module.functions,
+            module,
+            ctx.vm,
+            ctx.fiber,
+            Some(super::closure_call_trampoline),
+            &module.well_known,
+            program_args,
+            sentinel_errors,
+            #[cfg(feature = "std")]
+            io,
+            #[cfg(feature = "std")]
+            resume_token.take(),
+        );
+        
+        match result {
+            ExternResult::Ok => {
+                // Copy back ret_slots (not arg_count) since extern may return more than args
+                for i in 0..ret_slots as usize {
+                    unsafe { *ret.add(i) = temp_stack[i] };
+                }
+                return JitResult::Ok;
             }
-            JitResult::Ok
-        }
-        ExternResult::Yield => {
-            // JIT doesn't support yield (async operations). This is a fatal error.
-            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-            fiber.set_fatal_panic();
-            JitResult::Panic
-        }
-        ExternResult::Block => {
-            // Blocking I/O: return Block to let JIT exit back to VM scheduler.
-            // The fiber will be parked and woken later by the runtime.
-            JitResult::Block
-        }
-        #[cfg(feature = "std")]
-        ExternResult::WaitIo { .. } => {
-            // JIT doesn't support WaitIo yet. Treat as fatal error.
-            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-            fiber.set_fatal_panic();
-            JitResult::Panic
-        }
-        ExternResult::Panic(msg) => {
-            // Extern panics are recoverable - convert to Recoverable panic
-            // Pack as interface{} with string value
-            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-            let gc = unsafe { &mut *ctx.gc };
-            let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
-            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-            fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
-            JitResult::Panic
+            ExternResult::Yield => {
+                // JIT doesn't support yield (async operations). This is a fatal error.
+                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+                fiber.set_fatal_panic();
+                return JitResult::Panic;
+            }
+            ExternResult::Block => {
+                // Blocking I/O: return Block to let JIT exit back to VM scheduler.
+                // The fiber will be parked and woken later by the runtime.
+                return JitResult::Block;
+            }
+            #[cfg(feature = "std")]
+            ExternResult::WaitIo { token } => {
+                // Synchronously wait for I/O completion using shared IoRuntime, then resume.
+                // Poll until the token's completion appears in the cache.
+                // Note: Don't consume the completion here - extern will call take_completion.
+                while !io.has_completion(token) {
+                    // poll() returns Vec<Completion> for completions that just finished.
+                    // Safe to ignore: completions are cached in io.completion_cache, and
+                    // the extern will retrieve ours via take_completion(token) when resumed.
+                    let _ = io.poll();
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                resume_token = Some(token);
+                // Loop back to call the extern again with the resume token
+            }
+            ExternResult::Panic(msg) => {
+                // Extern panics are recoverable - convert to Recoverable panic
+                // Pack as interface{} with string value
+                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+                let gc = unsafe { &mut *ctx.gc };
+                let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
+                let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+                fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+                return JitResult::Panic;
+            }
         }
     }
 }
@@ -184,6 +199,8 @@ pub fn build_jit_ctx(
         jit_func_count,
         program_args: &state.program_args as *const _,
         sentinel_errors: &mut state.sentinel_errors as *mut _,
+        #[cfg(feature = "std")]
+        io: &mut state.io as *mut _,
     }
 }
 

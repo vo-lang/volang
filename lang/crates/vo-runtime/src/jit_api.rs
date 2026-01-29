@@ -108,6 +108,11 @@ pub struct JitContext {
     
     /// Pointer to sentinel error cache.
     pub sentinel_errors: *mut crate::ffi::SentinelErrorCache,
+    
+    /// Pointer to shared IoRuntime for async I/O operations.
+    /// JIT extern calls use this instead of creating per-call IoRuntime.
+    #[cfg(feature = "std")]
+    pub io: *mut crate::io::IoRuntime,
 }
 
 // =============================================================================
