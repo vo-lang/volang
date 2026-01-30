@@ -12,6 +12,7 @@ use crate::bytecode::Module;
 use crate::fiber::Fiber;
 use crate::exec;
 use super::types::ExecResult;
+use super::types::RuntimeTrapKind;
 
 // String and slice have identical layout - use slice constants for both
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
@@ -83,13 +84,66 @@ pub const ERR_NEGATIVE_SHIFT: &str = "runtime error: negative shift amount";
 pub const ERR_NIL_FUNC_CALL: &str = "runtime error: call of nil function";
 pub const ERR_TYPE_ASSERTION: &str = "runtime error: interface conversion: interface is nil, not";
 pub const ERR_SEND_ON_CLOSED: &str = "runtime error: send on closed channel";
+pub const ERR_SEND_ON_NIL: &str = "runtime error: send on nil channel";
+pub const ERR_RECV_ON_NIL: &str = "runtime error: receive on nil channel";
 pub const ERR_CLOSE_NIL_CHANNEL: &str = "runtime error: close of nil channel";
 pub const ERR_CLOSE_CLOSED_CHANNEL: &str = "runtime error: close of closed channel";
+
+#[inline]
+pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
+    match kind {
+        RuntimeTrapKind::NilPointerDereference => ERR_NIL_POINTER,
+        RuntimeTrapKind::NilMapWrite => ERR_NIL_MAP_WRITE,
+        RuntimeTrapKind::UnhashableType => ERR_UNHASHABLE_TYPE,
+        RuntimeTrapKind::UncomparableType => ERR_UNCOMPARABLE_TYPE,
+        RuntimeTrapKind::NegativeShift => ERR_NEGATIVE_SHIFT,
+        RuntimeTrapKind::NilFuncCall => ERR_NIL_FUNC_CALL,
+        RuntimeTrapKind::TypeAssertionFailed => ERR_TYPE_ASSERTION,
+        RuntimeTrapKind::DivisionByZero => "runtime error: integer divide by zero",
+        RuntimeTrapKind::IndexOutOfBounds => "runtime error: index out of range",
+        RuntimeTrapKind::SliceBoundsOutOfRange => "runtime error: slice bounds out of range",
+        RuntimeTrapKind::MakeSlice => "runtime error: makeslice",
+        RuntimeTrapKind::MakeChan => "runtime error: makechan",
+        RuntimeTrapKind::MakePort => "runtime error: makeport",
+        RuntimeTrapKind::PortNotSupported => "Port not supported in no_std",
+        RuntimeTrapKind::SendOnClosedChannel => ERR_SEND_ON_CLOSED,
+        RuntimeTrapKind::SendOnNilChannel => ERR_SEND_ON_NIL,
+        RuntimeTrapKind::RecvOnNilChannel => ERR_RECV_ON_NIL,
+        RuntimeTrapKind::CloseNilChannel => ERR_CLOSE_NIL_CHANNEL,
+        RuntimeTrapKind::CloseClosedChannel => ERR_CLOSE_CLOSED_CHANNEL,
+    }
+}
 
 /// Trigger a recoverable runtime panic with proper unwind mechanism.
 /// Use this for all user-triggerable runtime errors (bounds check, nil access, etc.)
 #[inline]
 pub fn runtime_panic(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    stack: &mut Vec<u64>,
+    module: &Module,
+    kind: RuntimeTrapKind,
+    msg: String,
+) -> ExecResult {
+    let panic_str = string::new_from_string(gc, msg);
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
+    panic_unwind(fiber, stack, module)
+}
+
+#[inline]
+pub fn runtime_trap(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    stack: &mut Vec<u64>,
+    module: &Module,
+    kind: RuntimeTrapKind,
+) -> ExecResult {
+    runtime_panic(gc, fiber, stack, module, kind, String::from(runtime_trap_message(kind)))
+}
+
+#[inline]
+pub fn runtime_panic_msg(
     gc: &mut Gc,
     fiber: &mut Fiber,
     stack: &mut Vec<u64>,

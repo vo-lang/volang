@@ -2,7 +2,7 @@
 
 use vo_common_core::debug_info::SourceLoc;
 use vo_vm::bytecode::Module;
-use vo_vm::vm::{Vm, VmError};
+use vo_vm::vm::{RuntimeTrapKind, Vm, VmError};
 use vo_runtime::ext_loader::{ExtensionLoader, ExtensionManifest};
 
 use crate::compile::{CompileOutput, CompileError};
@@ -29,6 +29,7 @@ pub enum RuntimeErrorKind {
     TypeAssertionFailed,
     DivisionByZero,
     SendOnClosedChannel,
+    Deadlock,
     Other,
 }
 
@@ -39,23 +40,22 @@ impl RuntimeError {
         };
         
         let (message, location, kind) = match e {
+            VmError::RuntimeTrap { kind, msg, loc } => {
+                let k = match kind {
+                    RuntimeTrapKind::IndexOutOfBounds => RuntimeErrorKind::IndexOutOfBounds,
+                    RuntimeTrapKind::NilPointerDereference => RuntimeErrorKind::NilPointerDereference,
+                    RuntimeTrapKind::TypeAssertionFailed => RuntimeErrorKind::TypeAssertionFailed,
+                    RuntimeTrapKind::DivisionByZero => RuntimeErrorKind::DivisionByZero,
+                    RuntimeTrapKind::SendOnClosedChannel => RuntimeErrorKind::SendOnClosedChannel,
+                    _ => RuntimeErrorKind::Other,
+                };
+                (msg.clone(), lookup(loc), k)
+            }
             VmError::PanicUnwound { msg, loc } => {
                 (msg.as_deref().unwrap_or("panic").to_string(), lookup(loc), RuntimeErrorKind::Panic)
             }
-            VmError::IndexOutOfBounds(loc) => {
-                ("index out of bounds".into(), lookup(loc), RuntimeErrorKind::IndexOutOfBounds)
-            }
-            VmError::NilPointerDereference(loc) => {
-                ("nil pointer dereference".into(), lookup(loc), RuntimeErrorKind::NilPointerDereference)
-            }
-            VmError::TypeAssertionFailed(loc) => {
-                ("type assertion failed".into(), lookup(loc), RuntimeErrorKind::TypeAssertionFailed)
-            }
-            VmError::DivisionByZero(loc) => {
-                ("division by zero".into(), lookup(loc), RuntimeErrorKind::DivisionByZero)
-            }
-            VmError::SendOnClosedChannel(loc) => {
-                ("send on closed channel".into(), lookup(loc), RuntimeErrorKind::SendOnClosedChannel)
+            VmError::Deadlock(msg) => {
+                (msg.clone(), None, RuntimeErrorKind::Deadlock)
             }
             _ => (format!("{:?}", e), None, RuntimeErrorKind::Other),
         };

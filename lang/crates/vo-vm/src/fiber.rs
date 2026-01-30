@@ -11,6 +11,8 @@ use vo_runtime::io::IoToken;
 
 use vo_runtime::gc::GcRef;
 
+use crate::vm::RuntimeTrapKind;
+
 #[derive(Debug, Clone, Copy)]
 pub struct CallFrame {
     pub func_id: u32,
@@ -181,15 +183,36 @@ pub struct SelectState {
 pub enum FiberState {
     /// In ready_queue, waiting to be scheduled.
     Runnable,
-    /// Currently being executed by VM.
+    /// Currently being executed (VM or JIT, distinguished by exec_mode).
     Running,
     /// Blocked waiting for external event.
     Blocked(BlockReason),
-    /// Suspended during JIT->VM trampoline call.
-    /// The fiber is waiting for a trampoline to complete, not in ready_queue.
-    Suspended,
     /// Finished, slot can be recycled.
     Dead,
+}
+
+/// Execution engine for a fiber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// VM interpreter mode.
+    #[default]
+    Vm,
+    /// JIT compiled code mode.
+    Jit,
+}
+
+/// Context for a pending JIT continuation.
+/// Stored when JIT returns NeedVm to hand off to VM.
+#[derive(Debug, Clone)]
+pub struct JitCallContext {
+    /// Function ID of the JIT caller (the frame that will resume in JIT).
+    pub caller_func_id: u32,
+    /// Continuation PC where JIT should resume.
+    pub resume_pc: u32,
+    /// The expected frames.len() when the JIT caller is back at top.
+    pub caller_frame_count: usize,
+    /// VM stack depth snapshot (for cleanup on panic).
+    pub vm_stack_depth: usize,
 }
 
 impl FiberState {
@@ -211,11 +234,6 @@ impl FiberState {
     #[inline]
     pub fn is_dead(&self) -> bool {
         matches!(self, FiberState::Dead)
-    }
-    
-    #[inline]
-    pub fn is_suspended(&self) -> bool {
-        matches!(self, FiberState::Suspended)
     }
 }
 
@@ -262,12 +280,17 @@ pub struct Fiber {
     pub id: u32,
     /// Unified state machine (single source of truth).
     pub state: FiberState,
+    /// Execution engine (VM or JIT).
+    pub exec_mode: ExecMode,
+    /// JIT call context stack for NeedVm handoffs.
+    pub jit_call_stack: Vec<JitCallContext>,
     pub stack: Vec<u64>,
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
     pub unwinding: Option<UnwindingState>,
     pub select_state: Option<SelectState>,
     pub panic_state: Option<PanicState>,
+    pub panic_trap_kind: Option<RuntimeTrapKind>,
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
     /// A defer registered at generation N can only recover panics with generation > N.
     pub panic_generation: u64,
@@ -280,27 +303,33 @@ impl Fiber {
         Self {
             id,
             state: FiberState::Runnable,
+            exec_mode: ExecMode::default(),
+            jit_call_stack: Vec::new(),
             stack: Vec::new(),
             frames: Vec::new(),
             defer_stack: Vec::new(),
             unwinding: None,
             select_state: None,
             panic_state: None,
+            panic_trap_kind: None,
             panic_generation: 0,
             #[cfg(feature = "std")]
             resume_io_token: None,
         }
     }
     
-    /// Reset fiber for reuse (trampoline fiber pool).
+    /// Reset fiber for reuse.
     pub fn reset(&mut self) {
         self.state = FiberState::Running;
+        self.exec_mode = ExecMode::default();
+        self.jit_call_stack.clear();
         self.stack.clear();
         self.frames.clear();
         self.defer_stack.clear();
         self.unwinding = None;
         self.select_state = None;
         self.panic_state = None;
+        self.panic_trap_kind = None;
         self.panic_generation = 0;
         #[cfg(feature = "std")]
         {
@@ -312,7 +341,10 @@ impl Fiber {
     /// Used by recover() to consume the panic value.
     pub fn take_recoverable_panic(&mut self) -> Option<InterfaceSlot> {
         match self.panic_state.take() {
-            Some(PanicState::Recoverable(val)) => Some(val),
+            Some(PanicState::Recoverable(val)) => {
+                self.panic_trap_kind = None;
+                Some(val)
+            }
             other => {
                 self.panic_state = other; // Put it back if not recoverable
                 None
@@ -323,6 +355,7 @@ impl Fiber {
     /// Set a fatal (non-recoverable) panic.
     pub fn set_fatal_panic(&mut self) {
         self.panic_state = Some(PanicState::Fatal);
+        self.panic_trap_kind = None;
     }
     
     /// Set a recoverable panic with full interface{} value (InterfaceSlot).
@@ -330,6 +363,14 @@ impl Fiber {
     pub fn set_recoverable_panic(&mut self, msg: InterfaceSlot) {
         self.panic_generation += 1;
         self.panic_state = Some(PanicState::Recoverable(msg));
+        self.panic_trap_kind = None;
+    }
+
+    /// Set a recoverable runtime trap (typed runtime panic).
+    pub fn set_recoverable_trap(&mut self, kind: RuntimeTrapKind, msg: InterfaceSlot) {
+        self.panic_generation += 1;
+        self.panic_state = Some(PanicState::Recoverable(msg));
+        self.panic_trap_kind = Some(kind);
     }
     
     /// Get panic message for error reporting.

@@ -40,8 +40,6 @@ impl Vm {
         let module = self.module.as_ref().unwrap();
         scan_globals(&mut self.state.gc, &self.state.globals, &module.globals);
         scan_fibers(&mut self.state.gc, &self.scheduler.fibers, &module.functions);
-        // Also scan trampoline fibers (used for JIT->VM calls)
-        scan_fibers(&mut self.state.gc, &self.scheduler.trampoline_fibers, &module.functions);
     }
 }
 

@@ -53,6 +53,29 @@ pub struct ErrorLocation {
     pub pc: u32,
 }
 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub enum RuntimeTrapKind {
+     NilPointerDereference,
+     NilMapWrite,
+     UnhashableType,
+     UncomparableType,
+     NegativeShift,
+     NilFuncCall,
+     TypeAssertionFailed,
+     DivisionByZero,
+     IndexOutOfBounds,
+     SliceBoundsOutOfRange,
+     MakeSlice,
+     MakeChan,
+     MakePort,
+     PortNotSupported,
+     SendOnClosedChannel,
+     SendOnNilChannel,
+     RecvOnNilChannel,
+     CloseNilChannel,
+     CloseClosedChannel,
+ }
+
 /// Scheduling loop outcome - separates scheduling from deadlock handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulingOutcome {
@@ -74,12 +97,13 @@ pub enum VmError {
     StackOverflow,
     StackUnderflow,
     InvalidOpcode(u8),
-    DivisionByZero(Option<ErrorLocation>),
-    IndexOutOfBounds(Option<ErrorLocation>),
-    NilPointerDereference(Option<ErrorLocation>),
-    TypeAssertionFailed(Option<ErrorLocation>),
+    RuntimeTrap {
+        kind: RuntimeTrapKind,
+        msg: String,
+        loc: Option<ErrorLocation>,
+    },
     PanicUnwound { msg: Option<String>, loc: Option<ErrorLocation> },
-    SendOnClosedChannel(Option<ErrorLocation>),
+    Deadlock(String),
 }
 
 /// Active island thread info.

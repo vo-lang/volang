@@ -162,6 +162,11 @@ pub enum FiberState {
 
 **Implementation sync required**: The current `fiber.rs` comment for `Running` says "Currently being executed by VM." This comment must be updated to reflect the new semantics: "Currently being executed (VM or JIT, distinguished by `exec_mode`)."
 
+**Scheduler is unaware of `exec_mode`**: The Scheduler only cares about `FiberState` (Runnable/Running/Blocked/Dead). It does **not** branch on `exec_mode`. The `exec_mode` is purely an internal concern of the VM loop. This separation ensures:
+- Scheduler API remains simple: `wake_fiber()`, `block_for_queue()`, etc.
+- No "is this a JIT fiber?" checks in Scheduler code
+- All JIT/VM switching happens inside `run_fiber()`, not at Scheduler level
+
 ### 2) JIT Is an Execution Engine, Not a State
 
 JIT must not own its own block/yield/wake logic.
@@ -182,6 +187,8 @@ pub enum StopReason {
     ///   (JIT has already advanced pc past the last executed instruction).
     /// - This ensures VM can safely continue interpreting without decode errors or
     ///   re-executing the last JIT instruction.
+    /// - **Hard contract**: JIT and VM must use the same `next_pc()` / instruction boundary
+    ///   logic. In debug builds, VM should `debug_assert!(is_valid_instruction_boundary(pc))`.
     /// - VM loop determines fiber completion by checking `frames.is_empty()`.
     /// - If `frames` is non-empty, VM loop continues execution (may switch mode or re-enter JIT).
     /// - JIT must NOT pop the last frame and return; frame management is VM's responsibility.
@@ -289,13 +296,32 @@ fiber.exec_mode == ExecMode::Vm                          // (1) must be in VM mo
 - `NeedVm` corresponds to **one triggering instruction in the caller frame** (the frame that will resume in JIT).
 - `vm_entry_pc` is the start PC of that instruction; `resume_pc` is the PC immediately after it (in the same caller frame).
 - VM is **allowed to execute arbitrarily many instructions** to complete the triggering instruction's semantics (e.g., a `Call` will execute the entire callee function).
-- **Critical constraint**: Before returning to the caller frame, VM must **not** advance the caller frame's PC beyond the triggering instruction. The caller frame's PC must remain at `vm_entry_pc` until the instruction completes, then jump directly to `resume_pc`.
-- When VM returns to the caller frame (after callee returns / channel op completes / etc.), the caller frame's `pc` **must** equal `resume_pc`.
+
+**Hard contract: VM "complete-one-triggering-instr" mode**:
+
+When `jit_call_stack` is non-empty, VM operates in a special mode:
+
+1. **PC must not drift**: The caller frame's PC must remain at `vm_entry_pc` until the triggering instruction **completes**, then be **explicitly set** to `resume_pc`. It must NOT "naturally advance" through normal VM step logic.
+
+2. **Implementation hook required**: In VM interpreter's `Call`/`CallInterface`/`CallClosure` handlers, when the instruction completes (callee returns), check:
+   ```rust
+   if !fiber.jit_call_stack.is_empty() {
+       let ctx = fiber.jit_call_stack.last().unwrap();
+       if fiber.frames.len() == ctx.caller_frame_count 
+           && fiber.frames.last().unwrap().pc == ctx.vm_entry_pc as usize 
+       {
+           // Explicitly set pc to resume_pc, do NOT use normal pc advance
+           fiber.frames.last_mut().unwrap().pc = ctx.resume_pc as usize;
+       }
+   }
+   ```
+
+3. **Why explicit, not natural**: Different instructions advance PC at different times. If VM's normal step logic advances PC inconsistently with JIT's `resume_pc` calculation (especially for variable-length instructions), re-entry will fail silently or resume at wrong PC.
 
 **Hard contract: VM execution to completion**:
-- If the triggering instruction is `Call`, VM may push/pop frames, but **must** eventually return to caller frame and advance `pc` to `resume_pc`.
-- If VM execution diverges (panic unwind, early return, yield) **before** reaching `resume_pc`, JIT resume is **forbidden**. The `jit_call_stack` must be unwound (see PanicUnwind handling).
-- Re-entry check runs after **every** VM step (not just `StepResult::Return`), because `pc == resume_pc` may be reached via `Continue` for non-Call instructions.
+- If the triggering instruction is `Call`, VM may push/pop frames, but **must** eventually return to caller frame and set `pc` to `resume_pc` (via the explicit hook above).
+- If VM execution diverges (panic unwind) **before** reaching `resume_pc`, JIT resume is **forbidden**. The `jit_call_stack` must be unwound (see PanicUnwind handling).
+- **Block/Yield are NOT divergence**: If VM blocks or yields mid-execution, `jit_call_stack` is preserved. When the fiber resumes, VM continues until the triggering instruction completes and sets `pc = resume_pc`.
 
 **Concrete example (Call instruction)**:
 ```
@@ -325,6 +351,12 @@ This avoids storing native code addresses in `JitCallContext`, which would be in
 - Populated at JIT compile time, read-only at runtime.
 - **Thread model**: Current VM/JIT is single-threaded synchronous execution. No locking needed; table is written during compilation (before execution) and only read during execution.
 
+**Continuation table timing constraint**:
+- The table entry for `(func_id, resume_pc)` **must** exist before any execution path can reach the corresponding `NeedVm` return site.
+- For eager compilation: table is fully populated before `run_fiber()` starts.
+- For lazy compilation: "compile + publish table entry" must happen synchronously before the function is first called. In single-threaded execution, this is naturally satisfied (compile happens in `resolve_call()` before dispatch).
+- **Invariant**: If `jit_resume(func_id, resume_pc)` is called, the entry **must** exist. Missing entry is a fatal bug (panic), not a fallback condition.
+
 **Recompilation policy**: The current design does **not** support recompilation of already-JIT-compiled functions. Once a function is compiled, its continuation table entries remain valid for the lifetime of the VM. If tiered compilation or deoptimization is added in the future, the continuation table must be invalidated atomically with the old code, and any in-flight `JitCallContext` entries pointing to the old code must be handled (e.g., by falling back to VM interpretation).
 
 **Critical requirement: No SSA state across the boundary (NeedVm = forced spill point)**
@@ -346,6 +378,22 @@ This avoids storing native code addresses in `JitCallContext`, which would be in
 - This simplifies the state machine: once JIT hands off to VM, VM runs to completion of the triggering instruction before JIT resumes.
 - **Implication**: The "nested handoffs" example `JIT main → VM funcA → JIT funcB → VM funcC` is **not supported** in Strategy A. Instead, funcB would run in VM mode until the original JIT continuation is popped.
 
+**How to enforce Strategy A** (checkable rules):
+
+1. **Initial JIT entry**: Only allowed when `jit_call_stack.is_empty() && pc == 0 && can_jit(func_id)`.
+
+2. **JIT resume (continuation)**: Only allowed via re-entry check (five-tuple match). This is the **only** way to enter JIT mid-function.
+
+3. **FORBIDDEN**: VM's `Call` handler must **never** check `can_jit(callee)` and switch to JIT when `jit_call_stack` is non-empty. Even if callee is JIT-able, it runs in VM mode.
+
+4. **Implementation guard**: In VM's Call/CallInterface/CallClosure handlers:
+   ```rust
+   // DO NOT add this optimization when jit_call_stack is non-empty:
+   // if can_jit(callee_func_id) { exec_mode = Jit; }  // WRONG!
+   ```
+
+**Why this matters**: Without this enforcement, an implementer might add a "VM calls JIT-able callee → run in JIT" optimization, which breaks the single-continuation invariant and causes interleaved spill points.
+
 **Why Strategy A is required (specific risks of nested JIT entry)**:
 1. **Multi-source continuations**: Nested entry would create multiple independent `JitCallContext` entries from different JIT "sessions". Distinguishing which continuation belongs to which JIT instance is error-prone.
 2. **Interleaved forced spill points**: If VM calls JIT funcB which then returns `NeedVm`, we now have two forced spill points with different `vm_stack_depth` snapshots. SSA/stack synchronization complexity grows exponentially.
@@ -355,8 +403,19 @@ This avoids storing native code addresses in `JitCallContext`, which would be in
 
 **`jit_call_stack` semantics**:
 - It is a **stack of pending JIT continuations**, each waiting for VM to complete a triggering instruction.
-- Push on `NeedVm`; pop on successful re-entry (three-tuple match).
-- If panic/yield/block occurs before re-entry, the entire stack must be unwound (no partial pop).
+- Push on `NeedVm`; pop on successful re-entry (five-tuple match).
+
+**`jit_call_stack` cleanup rules** (CRITICAL - different behavior for different events):
+
+| Event | Action | Rationale |
+|-------|--------|-----------|
+| **Panic** | Clear entire stack + restore `vm_stack_depth` | Panic unwinding invalidates all pending continuations |
+| **Block** | **Preserve** stack | Normal path — fiber will resume and eventually reach `resume_pc` |
+| **Yield** | **Preserve** stack | Normal path — fiber will resume and eventually reach `resume_pc` |
+| **Re-entry success** | Pop one context | Continuation completed normally |
+| **Fiber returns** | Stack naturally empty | No pending continuations when fiber completes |
+
+**Why Block/Yield preserve the stack**: The entire point of `NeedVm` is to allow VM to execute operations that may block/yield. When the fiber resumes after wake, it continues VM execution until the triggering instruction completes.
 
 ---
 
@@ -701,8 +760,13 @@ pub fn run_fiber(&mut self, fiber: &mut Fiber) -> FiberResult {
                         fiber.frames.last_mut().unwrap().pc = vm_entry_pc as usize;
                     }
                     StopReason::PanicUnwind => {
-                        // JIT detected panic; clean up and let VM handle unwinding
-                        fiber.jit_call_stack.clear();
+                        // JIT detected panic; clean up jit_call_stack with proper stack restoration
+                        // CRITICAL: Must restore vm_stack_depth to avoid stack garbage
+                        while let Some(ctx) = fiber.jit_call_stack.pop() {
+                            // Truncate stack to the depth at NeedVm boundary
+                            // This removes any args/temps pushed by VM during callee execution
+                            fiber.stack.truncate(ctx.vm_stack_depth);
+                        }
                         fiber.exec_mode = ExecMode::Vm;
                         return FiberResult::Panic;
                     }

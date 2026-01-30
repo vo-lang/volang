@@ -113,6 +113,14 @@ pub struct JitContext {
     /// JIT extern calls use this instead of creating per-call IoRuntime.
     #[cfg(feature = "std")]
     pub io: *mut crate::io::IoRuntime,
+    
+    /// NeedVm entry PC (set by JIT when returning NeedVm).
+    /// This is the PC of the instruction that needs VM execution.
+    pub need_vm_entry_pc: u32,
+    
+    /// NeedVm resume PC (set by JIT when returning NeedVm).
+    /// This is the continuation PC where JIT should resume after VM completes.
+    pub need_vm_resume_pc: u32,
 }
 
 // =============================================================================
@@ -125,12 +133,13 @@ pub struct JitContext {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitResult {
-    /// Function completed successfully.
+    /// Function completed successfully (or returned normally).
     Ok = 0,
     /// Function panicked.
     Panic = 1,
-    /// Function blocked on I/O, need to return to VM scheduler.
-    Block = 2,
+    /// Hand off execution to VM interpreter.
+    /// need_vm_entry_pc and need_vm_resume_pc in JitContext contain the PCs.
+    NeedVm = 2,
 }
 
 // =============================================================================

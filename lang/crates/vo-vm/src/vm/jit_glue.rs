@@ -113,9 +113,11 @@ pub extern "C" fn call_extern_trampoline(
                 return JitResult::Panic;
             }
             ExternResult::Block => {
-                // Blocking I/O: return Block to let JIT exit back to VM scheduler.
-                // The fiber will be parked and woken later by the runtime.
-                return JitResult::Block;
+                // Blocking operation - need to return to VM scheduler.
+                // This shouldn't normally happen with extern functions.
+                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+                fiber.set_fatal_panic();
+                return JitResult::Panic;
             }
             #[cfg(feature = "std")]
             ExternResult::WaitIo { token } => {
@@ -146,19 +148,43 @@ pub extern "C" fn call_extern_trampoline(
     }
 }
 
-pub extern "C" fn vm_call_trampoline(
+
+// =============================================================================
+// JitContext Builder
+// =============================================================================
+
+/// Synchronous VM call from JIT code.
+/// This uses execute_closure_sync to run VM code in a temporary fiber.
+pub extern "C" fn vm_call_sync(
     vm: *mut std::ffi::c_void,
-    caller_fiber: *mut std::ffi::c_void,
+    fiber: *mut std::ffi::c_void,
     func_id: u32,
     args: *const u64,
     arg_count: u32,
     ret: *mut u64,
     ret_count: u32,
 ) -> JitResult {
-    // Catch any panics to prevent unwinding through extern "C" boundary
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let vm = unsafe { &mut *(vm as *mut Vm) };
-        vm.execute_jit_call_with_caller(func_id, args, arg_count, ret, ret_count, caller_fiber)
+        let vm = unsafe { &mut *(vm as *mut super::Vm) };
+        
+        // Copy args to a Vec
+        let args_vec: Vec<u64> = (0..arg_count as usize)
+            .map(|i| unsafe { *args.add(i) })
+            .collect();
+        
+        // Use execute_closure_sync which handles all the complexity
+        let (success, panic_state) = vm.execute_closure_sync(func_id, &args_vec, ret, ret_count);
+        
+        if success {
+            JitResult::Ok
+        } else {
+            // Transfer panic state to caller's fiber so defer/recover can work
+            if let Some(ps) = panic_state {
+                let caller_fiber = unsafe { &mut *(fiber as *mut Fiber) };
+                caller_fiber.panic_state = Some(ps);
+            }
+            JitResult::Panic
+        }
     }));
     
     match result {
@@ -166,10 +192,6 @@ pub extern "C" fn vm_call_trampoline(
         Err(_) => JitResult::Panic,
     }
 }
-
-// =============================================================================
-// JitContext Builder
-// =============================================================================
 
 pub fn build_jit_ctx(
     state: &mut VmState,
@@ -190,7 +212,7 @@ pub fn build_jit_ctx(
         panic_msg,
         vm: vm_ptr,
         fiber: fiber_ptr,
-        call_vm_fn: Some(vm_call_trampoline),
+        call_vm_fn: Some(vm_call_sync),
         itab_cache: &mut state.itab_cache as *mut _,
         extern_registry: &state.extern_registry as *const _ as *const std::ffi::c_void,
         call_extern_fn: Some(call_extern_trampoline),
@@ -201,6 +223,8 @@ pub fn build_jit_ctx(
         sentinel_errors: &mut state.sentinel_errors as *mut _,
         #[cfg(feature = "std")]
         io: &mut state.io as *mut _,
+        need_vm_entry_pc: 0,
+        need_vm_resume_pc: 0,
     }
 }
 
@@ -208,15 +232,23 @@ pub fn build_jit_ctx(
 // JIT Call Methods for Vm
 // =============================================================================
 
+/// Result from JIT execution with NeedVm context.
+pub struct JitExecResult {
+    pub result: JitResult,
+    pub need_vm_entry_pc: u32,
+    pub need_vm_resume_pc: u32,
+}
+
 impl Vm {
     /// Call a JIT function with a fresh context (raw pointer version).
+    /// Returns JitExecResult which includes NeedVm context if applicable.
     pub(super) fn call_jit_direct(
         &mut self,
         jit_func: JitFunc,
         fiber_ptr: *mut std::ffi::c_void,
         args: *mut u64,
         ret: *mut u64,
-    ) -> JitResult {
+    ) -> JitExecResult {
         let jit_mgr = self.jit_mgr.as_ref().unwrap();
         let func_table_ptr = jit_mgr.func_table_ptr();
         let func_table_len = jit_mgr.func_table_len() as u32;
@@ -237,214 +269,33 @@ impl Vm {
         let result = jit_func(&mut ctx, args, ret);
         
         // Set recoverable panic state if JIT triggered panic
-        if result == JitResult::Panic && panic_flag {
+        if result == JitResult::Panic {
             let fiber = unsafe { &mut *(fiber_ptr as *mut Fiber) };
-            // Use actual panic message if vo_panic set it, otherwise use runtime error
-            if !panic_msg.is_nil() {
-                fiber.set_recoverable_panic(panic_msg);
-            } else {
-                set_jit_runtime_panic(&mut self.state.gc, fiber);
+            // Only set panic_state if not already set (vm_call_sync may have set it)
+            if fiber.panic_state.is_none() {
+                if panic_flag && !panic_msg.is_nil() {
+                    // Use actual panic message from vo_panic
+                    fiber.set_recoverable_panic(panic_msg);
+                } else {
+                    // Fallback: use generic runtime error
+                    set_jit_runtime_panic(&mut self.state.gc, fiber);
+                }
             }
         }
-        result
+        
+        JitExecResult {
+            result,
+            need_vm_entry_pc: ctx.need_vm_entry_pc,
+            need_vm_resume_pc: ctx.need_vm_resume_pc,
+        }
     }
 
-    /// Execute a JIT->VM call. JitContext.fiber always points to caller_fiber (the original fiber
-    /// that owns defer/recover), not the trampoline fiber. Trampoline fiber is only used as an
-    /// execution container for VM interpretation.
-    ///
-    /// This is the core logic for vm_call_trampoline.
-    ///
-    /// Design: During trampoline execution, the caller fiber is Suspended (not in ready_queue).
-    /// If trampoline blocks on I/O or channel, we run the scheduler loop until it's woken.
-    pub fn execute_jit_call_with_caller(
-        &mut self,
-        func_id: u32,
-        args: *const u64,
-        arg_count: u32,
-        ret: *mut u64,
-        ret_count: u32,
-        caller_fiber_ptr: *mut std::ffi::c_void,
-    ) -> JitResult {
-        let module = match &self.module {
-            Some(m) => m as *const Module,
-            None => return JitResult::Panic,
-        };
-        let module = unsafe { &*module };
-        
-        // Try JIT compilation/execution first
-        // IMPORTANT: Use caller_fiber_ptr for JitContext.fiber so panic goes to the right fiber
-        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-            if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-                // JIT function exists - call directly with caller fiber as JitContext.fiber
-                return self.call_jit_direct(jit_func, caller_fiber_ptr, args as *mut u64, ret);
-            }
-            
-            if jit_mgr.record_call(func_id) {
-                let func_def = &module.functions[func_id as usize];
-                if jit_mgr.compile_full(func_id, func_def, module).is_ok() {
-                    if let Some(jit_func) = jit_mgr.get_entry(func_id) {
-                        return self.call_jit_direct(jit_func, caller_fiber_ptr, args as *mut u64, ret);
-                    }
-                }
-            }
-        }
-        
-        // Fall back to VM interpretation using trampoline fiber
-        // Trampoline fiber provides stack/frames for VM execution, but panic_state
-        // will be propagated back to caller_fiber at the end.
-        
-        // Suspend the caller fiber - it must not be scheduled while trampoline runs
-        let suspended_caller = self.scheduler.suspend_current_for_jit_call();
-        
-        let trampoline_id = self.scheduler.acquire_trampoline_fiber();
-        
-        let func_def = &module.functions[func_id as usize];
-        let local_slots = func_def.local_slots;
-        let param_slots = func_def.param_slots as usize;
-        let func_ret_slots = func_def.ret_slots as usize;
-        
-        {
-            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-            fiber.push_frame(func_id, local_slots, 0, func_ret_slots as u16);
-            let bp = fiber.frames.last().unwrap().bp;
-            for i in 0..param_slots.min(arg_count as usize) {
-                let arg_val = unsafe { *args.add(i) };
-                fiber.stack[bp + i] = arg_val;
-            }
-        }
-        
-        let result = loop {
-            let exec_result = self.run_fiber(trampoline_id);
-            match exec_result {
-                ExecResult::Done => break JitResult::Ok,
-                ExecResult::Panic => break JitResult::Panic,
-                ExecResult::TimesliceExpired | ExecResult::FrameChanged | ExecResult::Osr(_, _, _) => {
-                    // Continue execution
-                }
-                ExecResult::Block(reason) => {
-                    // Trampoline blocked - handle based on reason
-                    match reason {
-                        crate::fiber::BlockReason::Queue => {
-                            // Channel block - mark trampoline as blocked, run scheduler until woken
-                            // Rewind PC so the blocking instruction is retried
-                            {
-                                let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                                if let Some(frame) = fiber.current_frame_mut() {
-                                    frame.pc = frame.pc.saturating_sub(1);
-                                }
-                            }
-                            self.scheduler.block_trampoline_for_queue(trampoline_id);
-                            
-                            // Run scheduler loop until trampoline is woken by channel operation
-                            self.wait_for_trampoline_wake(trampoline_id);
-                        }
-                        #[cfg(feature = "std")]
-                        crate::fiber::BlockReason::Io(token) => {
-                            // I/O block - mark trampoline as blocked, register in io_waiters
-                            // Rewind PC so the blocking instruction is retried
-                            {
-                                let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                                if let Some(frame) = fiber.current_frame_mut() {
-                                    frame.pc = frame.pc.saturating_sub(1);
-                                }
-                            }
-                            self.scheduler.block_trampoline_for_io(trampoline_id, token);
-                            
-                            // Run scheduler loop + poll_io until trampoline is woken
-                            self.wait_for_trampoline_wake(trampoline_id);
-                        }
-                    }
-                    
-                    // Check if trampoline is now running again
-                    if !self.scheduler.is_trampoline_running(trampoline_id) {
-                        // Still blocked with no way to wake - deadlock
-                        let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-                        fiber.set_fatal_panic();
-                        break JitResult::Panic;
-                    }
-                }
-            }
-        };
-        
-        if result == JitResult::Ok {
-            let fiber = self.scheduler.trampoline_fiber(trampoline_id);
-            for i in 0..(ret_count as usize) {
-                if i < fiber.stack.len() {
-                    unsafe { *ret.add(i) = fiber.stack[i] };
-                }
-            }
-        } else if result == JitResult::Panic && !caller_fiber_ptr.is_null() {
-            // VM execution panicked - propagate panic_state and panic_generation to caller fiber
-            let trampoline_fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-            if let Some(panic_state) = trampoline_fiber.panic_state.take() {
-                let caller_fiber = unsafe { &mut *(caller_fiber_ptr as *mut Fiber) };
-                caller_fiber.panic_state = Some(panic_state);
-                // Also propagate panic_generation so caller's defers can recover
-                caller_fiber.panic_generation = trampoline_fiber.panic_generation;
-            }
-        }
-        
-        self.scheduler.release_trampoline_fiber(trampoline_id);
-        
-        // Resume the suspended caller fiber
-        if let Some(caller_id) = suspended_caller {
-            self.scheduler.resume_suspended_fiber(caller_id);
-        }
-        
-        result
-    }
-    
-    /// Wait for a trampoline fiber to be woken (from Blocked -> Running).
-    /// Runs the scheduler loop and polls I/O until the trampoline is ready.
-    fn wait_for_trampoline_wake(&mut self, trampoline_id: crate::scheduler::FiberId) {
-        // Temporarily disable JIT to prevent nested trampoline calls
-        let jit_mgr = self.jit_mgr.take();
-
-        while !self.scheduler.is_trampoline_running(trampoline_id) {
-            // Poll I/O to wake any I/O-blocked fibers (including trampoline)
-            #[cfg(feature = "std")]
-            {
-                self.scheduler.poll_io(&mut self.state.io);
-                if self.scheduler.is_trampoline_running(trampoline_id) {
-                    break;
-                }
-            }
-
-            // Run other fibers to potentially wake trampoline via channel or produce I/O.
-            if !self.scheduler.ready_queue.is_empty() {
-                let _ = self.run_scheduling_loop(Some(100));
-                continue;
-            }
-
-            // Nothing runnable right now.
-            // For select statements that use polling (check channel state without registering
-            // as a waiter), we need to give the trampoline another chance to check.
-            // Force trampoline back to Running so it can re-execute the select instruction.
-            if self.scheduler.is_trampoline_blocked_on_queue(trampoline_id) {
-                self.scheduler.wake_trampoline(trampoline_id);
-                break;
-            }
-
-            // If there is no pending I/O and no blocked fibers, we cannot make progress.
-            #[cfg(feature = "std")]
-            if !self.scheduler.has_io_waiters() && !self.scheduler.has_blocked() {
-                break;
-            }
-
-            #[cfg(feature = "std")]
-            std::thread::sleep(std::time::Duration::from_micros(100));
-
-            #[cfg(not(feature = "std"))]
-            break;
-        }
-        
-        // Restore JIT manager
-        self.jit_mgr = jit_mgr;
-    }
 
     /// Call a JIT function inline from VM execution (resolve_call path).
     /// JitContext.fiber points to the current fiber for correct panic handling.
+    /// 
+    /// Returns (ExecResult, Option<(entry_pc, resume_pc)>) where the second element
+    /// contains NeedVm context if JIT returned NeedVm.
     pub(super) fn call_jit_inline(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
@@ -453,7 +304,7 @@ impl Vm {
         arg_slots: usize,
         func_ret_slots: usize,
         call_ret_slots: usize,
-    ) -> ExecResult {
+    ) -> (ExecResult, Option<(u32, u32)>) {
         // Read args from fiber stack
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
         let mut args: Vec<u64> = (0..arg_slots)
@@ -462,24 +313,25 @@ impl Vm {
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         
         let mut ret_buf = vec![0u64; func_ret_slots.max(1)];
-        let result = self.call_jit_direct(jit_func, fiber_ptr, args.as_mut_ptr(), ret_buf.as_mut_ptr());
+        let jit_result = self.call_jit_direct(jit_func, fiber_ptr, args.as_mut_ptr(), ret_buf.as_mut_ptr());
         
-        match result {
+        match jit_result.result {
             JitResult::Ok => {
                 // Write returns back to fiber stack
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
                 for i in 0..call_ret_slots.min(ret_buf.len()) {
                     fiber.write_reg(arg_start + i as u16, ret_buf[i]);
                 }
-                ExecResult::FrameChanged
+                (ExecResult::FrameChanged, None)
             }
-            JitResult::Block => {
-                // Blocking I/O: return Block to VM scheduler
-                ExecResult::Block(crate::fiber::BlockReason::Queue)
+            JitResult::NeedVm => {
+                // JIT needs VM to execute a call to a may-block function
+                // Return the entry_pc and resume_pc so caller can handle it
+                (ExecResult::FrameChanged, Some((jit_result.need_vm_entry_pc, jit_result.need_vm_resume_pc)))
             }
             JitResult::Panic => {
                 // panic_state already set by call_jit_direct
-                ExecResult::Panic
+                (ExecResult::Panic, None)
             }
         }
     }

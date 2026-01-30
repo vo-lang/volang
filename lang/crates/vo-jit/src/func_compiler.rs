@@ -300,7 +300,13 @@ impl<'a> FunctionCompiler<'a> {
         
         // Get target function's actual ret_slots for buffer allocation
         // (callee writes based on its func_def.ret_slots, not call instruction's ret_slots)
-        let func_ret_slots = self.vo_module.functions[func_id as usize].ret_slots as usize;
+        let target_func = &self.vo_module.functions[func_id as usize];
+        let func_ret_slots = target_func.ret_slots as usize;
+        
+        // Note: We don't special-case func_may_block here. Functions that may block
+        // (channel/select/goroutine) are called via call_vm_func which uses execute_closure_sync.
+        // If the operation truly blocks, it returns Panic. For buffered channels with
+        // available space/data, it works fine.
         
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
@@ -337,6 +343,7 @@ impl<'a> FunctionCompiler<'a> {
             self.sync_var((arg_start + i) as u16, val);
         }
     }
+    
 
     fn call_extern(&mut self, inst: &Instruction) {
         let call_extern_func = match self.helpers.call_extern {

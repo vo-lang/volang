@@ -322,4 +322,9 @@ impl JitManager {
     pub fn has_loop(&self, func_id: u32, begin_pc: usize) -> bool {
         self.compiler.get_loop(func_id, begin_pc).is_some()
     }
+    
+    /// Check if a function can be JIT compiled.
+    pub fn compiler_can_jit(&self, func_def: &FunctionDef, module: &VoModule) -> bool {
+        self.compiler.can_jit(func_def, module)
+    }
 }

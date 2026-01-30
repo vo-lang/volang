@@ -11,18 +11,14 @@ use vo_runtime::objects::channel::{self, RecvResult, SendResult};
 use vo_runtime::objects::queue_state;
 
 use crate::instruction::Instruction;
+use crate::vm::RuntimeTrapKind;
 
 pub enum ChanResult {
     Continue,
     Yield,
     Wake(u32),
     WakeMultiple(Vec<u32>),
-    /// Send on closed channel - panic
-    SendOnClosed,
-    /// Close nil channel - panic
-    CloseNil,
-    /// Close already closed channel - panic
-    CloseClosed,
+    Trap(RuntimeTrapKind),
 }
 
 /// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
@@ -50,6 +46,9 @@ pub fn exec_chan_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut 
 
 pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
     let ch = stack[bp + inst.a as usize] as GcRef;
+    if ch.is_null() {
+        return ChanResult::Trap(RuntimeTrapKind::SendOnNilChannel);
+    }
     let elem_slots = inst.flags as usize;
     let src_start = bp + inst.b as usize;
 
@@ -64,12 +63,15 @@ pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instructio
             state.register_sender(fiber_id as u64, value);
             ChanResult::Yield
         }
-        SendResult::Closed => ChanResult::SendOnClosed,
+        SendResult::Closed => ChanResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
     }
 }
 
 pub fn exec_chan_recv(stack: &mut [u64], bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
     let ch = stack[bp + inst.b as usize] as GcRef;
+    if ch.is_null() {
+        return ChanResult::Trap(RuntimeTrapKind::RecvOnNilChannel);
+    }
     let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
     let has_ok = (inst.flags & 1) != 0;
     let dst_start = bp + inst.a as usize;
@@ -123,11 +125,11 @@ where F: FnOnce(GcRef) -> usize {
 pub fn exec_chan_close(stack: &[u64], bp: usize, inst: &Instruction) -> ChanResult {
     let ch = stack[bp + inst.a as usize] as GcRef;
     if ch.is_null() {
-        return ChanResult::CloseNil;
+        return ChanResult::Trap(RuntimeTrapKind::CloseNilChannel);
     }
     let state = channel::get_state(ch);
     if state.is_closed() {
-        return ChanResult::CloseClosed;
+        return ChanResult::Trap(RuntimeTrapKind::CloseClosedChannel);
     }
     state.close();
     let mut wake_ids: Vec<u32> = state.take_waiting_receivers().into_iter().map(|id| id as u32).collect();

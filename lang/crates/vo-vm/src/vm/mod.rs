@@ -24,19 +24,18 @@ mod types;
 pub mod island_thread;
 
 pub use helpers::{stack_get, stack_set};
-pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome};
+pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
 
-use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, user_panic,
-    ERR_NIL_POINTER, ERR_NIL_MAP_WRITE, ERR_UNHASHABLE_TYPE, ERR_UNCOMPARABLE_TYPE, ERR_NEGATIVE_SHIFT, ERR_NIL_FUNC_CALL, ERR_TYPE_ASSERTION,
-    ERR_SEND_ON_CLOSED, ERR_CLOSE_NIL_CHANNEL, ERR_CLOSE_CLOSED_CHANNEL};
+use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, runtime_panic_msg, runtime_trap, user_panic};
 #[cfg(feature = "jit")]
 use helpers::panic_unwind;
 
 use crate::bytecode::Module;
 use crate::exec;
-use crate::fiber::Fiber;
+use crate::fiber::{Fiber, FiberState};
+use crate::scheduler::FiberId;
 use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
 use vo_runtime::itab::ItabCache;
@@ -349,10 +348,14 @@ impl Vm {
                     let _ = self.scheduler.kill_current();
                 }
                 ExecResult::Panic => {
-                    let (msg, loc_tuple) = self.scheduler.kill_current();
+                    let (trap_kind, msg, loc_tuple) = self.scheduler.kill_current();
                     let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
                     // For top-level callers, convert to error. For run_scheduler_round, just return.
                     if max_iterations.is_none() {
+                        if let Some(kind) = trap_kind {
+                            let msg = msg.expect("runtime trap should have message");
+                            return Err(VmError::RuntimeTrap { kind, msg, loc });
+                        }
                         return Err(VmError::PanicUnwound { msg, loc });
                     } else {
                         return Ok(SchedulingOutcome::Panicked);
@@ -394,13 +397,18 @@ impl Vm {
                     }
                 }
             }
-            panic!("{}", msg);
+            return Err(VmError::Deadlock(msg));
         } else {
-            panic!("vm deadlock: all fibers blocked");
+            return Err(VmError::Deadlock("vm deadlock: all fibers blocked".to_string()));
         }
     }
     
-    /// Handle ChanResult from channel operations uniformly.
+    /// Handle ChanResult from channel operations.
+    /// 
+    /// `advance_woken_pc`: When true, increment woken fiber's PC so it doesn't retry.
+    /// - Recv waking a sender: true (sender's value was taken, send is complete)
+    /// - Send waking a receiver: false (receiver needs to execute recv to get value)
+    /// - Close waking waiters: false (they need to retry to see closed state)
     fn handle_chan_result(
         result: exec::ChanResult,
         gc: &mut vo_runtime::gc::Gc,
@@ -408,6 +416,7 @@ impl Vm {
         stack: &mut Vec<u64>,
         module: &Module,
         scheduler: &mut Scheduler,
+        advance_woken_pc: bool,
     ) -> ExecResult {
         match result {
             exec::ChanResult::Continue => ExecResult::FrameChanged,
@@ -416,65 +425,31 @@ impl Vm {
                 ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             exec::ChanResult::Wake(id) => {
-                scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                // Channel operation made another fiber runnable; yield so it can run.
+                let fiber_id = crate::scheduler::FiberId::from_raw(id);
+                if advance_woken_pc {
+                    if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
+                        frame.pc += 1;
+                    }
+                }
+                scheduler.wake_fiber(fiber_id);
                 ExecResult::TimesliceExpired
             }
             exec::ChanResult::WakeMultiple(ids) => {
                 for id in ids {
-                    scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
+                    let fiber_id = crate::scheduler::FiberId::from_raw(id);
+                    if advance_woken_pc {
+                        if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
+                            frame.pc += 1;
+                        }
+                    }
+                    scheduler.wake_fiber(fiber_id);
                 }
-                // Channel operation made other fibers runnable; yield so they can run.
                 ExecResult::TimesliceExpired
             }
-            exec::ChanResult::SendOnClosed => {
-                runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
-            }
-            exec::ChanResult::CloseNil => {
-                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
-            }
-            exec::ChanResult::CloseClosed => {
-                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_CLOSED_CHANNEL.to_string())
-            }
+            exec::ChanResult::Trap(kind) => runtime_trap(gc, fiber, stack, module, kind),
         }
     }
 
-    fn handle_chan_send_result(
-        result: exec::ChanResult,
-        gc: &mut vo_runtime::gc::Gc,
-        fiber: &mut Fiber,
-        stack: &mut Vec<u64>,
-        module: &Module,
-        scheduler: &mut Scheduler,
-    ) -> ExecResult {
-        match result {
-            exec::ChanResult::Continue => ExecResult::FrameChanged,
-            exec::ChanResult::Yield => {
-                let _ = fiber;
-                ExecResult::Block(crate::fiber::BlockReason::Queue)
-            }
-            exec::ChanResult::Wake(id) => {
-                scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                ExecResult::TimesliceExpired
-            }
-            exec::ChanResult::WakeMultiple(ids) => {
-                for id in ids {
-                    scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(id));
-                }
-                ExecResult::TimesliceExpired
-            }
-            exec::ChanResult::SendOnClosed => {
-                runtime_panic(gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
-            }
-            exec::ChanResult::CloseNil => {
-                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
-            }
-            exec::ChanResult::CloseClosed => {
-                runtime_panic(gc, fiber, stack, module, ERR_CLOSE_CLOSED_CHANNEL.to_string())
-            }
-        }
-    }
-    
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
@@ -599,28 +574,28 @@ impl Vm {
                     if exec::exec_ptr_get(stack, bp, &inst) {
                         ExecResult::FrameChanged
                     } else {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference)
                     }
                 }
                 Opcode::PtrSet => {
                     if exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc) {
                         ExecResult::FrameChanged
                     } else {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference)
                     }
                 }
                 Opcode::PtrGetN => {
                     if exec::exec_ptr_get_n(stack, bp, &inst) {
                         ExecResult::FrameChanged
                     } else {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference)
                     }
                 }
                 Opcode::PtrSetN => {
                     if exec::exec_ptr_set_n(&stack, bp, &inst) {
                         ExecResult::FrameChanged
                     } else {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_POINTER.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference)
                     }
                 }
                 Opcode::PtrAdd => {
@@ -655,7 +630,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero)
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_div(b) as u64);
                         ExecResult::FrameChanged
@@ -665,7 +640,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero)
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b) as u64);
                         ExecResult::FrameChanged
@@ -675,7 +650,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero)
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_div(b));
                         ExecResult::FrameChanged
@@ -685,7 +660,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, "runtime error: integer divide by zero".to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero)
                     } else {
                         stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b));
                         ExecResult::FrameChanged
@@ -864,7 +839,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NEGATIVE_SHIFT.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift)
                     } else {
                         // Go semantics: shift >= 64 returns 0
                         let result = if b >= 64 { 0 } else { a.wrapping_shl(b as u32) };
@@ -876,7 +851,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NEGATIVE_SHIFT.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift)
                     } else {
                         // Go semantics: signed right shift >= 64 returns 0 (positive) or -1 (negative)
                         let result = if b >= 64 { if a < 0 { -1i64 } else { 0i64 } } else { a.wrapping_shr(b as u32) };
@@ -888,7 +863,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NEGATIVE_SHIFT.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift)
                     } else {
                         // Go semantics: unsigned right shift >= 64 returns 0
                         let result = if b >= 64 { 0 } else { a.wrapping_shr(b as u32) };
@@ -942,9 +917,28 @@ impl Vm {
                         // Use func_def.ret_slots for buffer allocation (JIT writes based on func definition)
                         // but only copy back call_ret_slots to caller's stack
                         let func_ret_slots = target_func.ret_slots as usize;
-                        let result = self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, func_ret_slots, call_ret_slots);
-                        // JIT already set fiber.panic_state, just run unwind to execute defers
-                        if matches!(result, ExecResult::Panic) {
+                        let (result, need_vm) = self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, func_ret_slots, call_ret_slots);
+                        
+                        if let Some((entry_pc, _resume_pc)) = need_vm {
+                            // JIT returned NeedVm - JIT was executing target_func but hit a call
+                            // that may block. We need to:
+                            // 1. Push target_func's frame onto fiber (JIT didn't complete it)
+                            // 2. Copy arguments from caller's stack to new frame
+                            // 3. Set PC to entry_pc (the Call instruction within target_func)
+                            // 4. Continue VM execution
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            let local_slots = target_func.local_slots;
+                            let ret_reg = (bp + arg_start as usize) as u16;
+                            let new_bp = fiber.stack.len();
+                            fiber.push_frame(target_func_id, local_slots, ret_reg, call_ret_slots as u16);
+                            // Copy args from caller's frame to new frame (like exec_call does)
+                            for i in 0..arg_slots {
+                                fiber.stack[new_bp + i] = fiber.stack[bp + arg_start as usize + i];
+                            }
+                            fiber.frames.last_mut().unwrap().pc = entry_pc as usize;
+                            ExecResult::FrameChanged
+                        } else if matches!(result, ExecResult::Panic) {
+                            // JIT already set fiber.panic_state, just run unwind to execute defers
                             panic_unwind(fiber, stack, module)
                         } else {
                             result
@@ -994,7 +988,7 @@ impl Vm {
                     // Convert extern panic to recoverable runtime panic
                     if matches!(result, ExecResult::Panic) {
                         if let Some(msg) = extern_panic_msg {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, msg)
+                            runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg)
                         } else {
                             result
                         }
@@ -1005,7 +999,7 @@ impl Vm {
                 Opcode::CallClosure => {
                     let closure_ref = stack[bp + inst.a as usize] as vo_runtime::gc::GcRef;
                     if closure_ref.is_null() {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_FUNC_CALL.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall)
                     } else {
                         exec::exec_call_closure(stack, &mut fiber.frames, &inst, module)
                     }
@@ -1045,6 +1039,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1120,6 +1115,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1166,6 +1162,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1213,7 +1210,7 @@ impl Vm {
                 Opcode::SliceNew => {
                     match exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
                         Ok(()) => ExecResult::FrameChanged,
-                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
+                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeSlice, msg),
                     }
                 }
                 Opcode::SliceGet => {
@@ -1225,6 +1222,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1270,6 +1268,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1321,6 +1320,7 @@ impl Vm {
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::SliceBoundsOutOfRange,
                             format!("runtime error: slice bounds out of range [{}:{}]", lo, hi)
                         )
                     }
@@ -1353,11 +1353,11 @@ impl Vm {
                     // nil map write panics (Go semantics)
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
-                        runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_NIL_MAP_WRITE.to_string())
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilMapWrite)
                     } else {
                         let ok = exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc, Some(module));
                         if !ok {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_UNHASHABLE_TYPE.to_string())
+                            runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UnhashableType)
                         } else {
                             ExecResult::FrameChanged
                         }
@@ -1389,25 +1389,28 @@ impl Vm {
                 Opcode::ChanNew => {
                     match exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc) {
                         Ok(()) => ExecResult::FrameChanged,
-                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
+                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeChan, msg),
                     }
                 }
                 Opcode::ChanSend => {
-                    Self::handle_chan_send_result(
+                    Self::handle_chan_result(
                         exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                        false, // send wakes receiver who needs to execute recv
                     )
                 }
                 Opcode::ChanRecv => {
                     Self::handle_chan_result(
                         exec::exec_chan_recv(stack, bp, fiber_id.to_raw(), &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                        true, // recv wakes sender whose send is now complete
                     )
                 }
                 Opcode::ChanClose => {
                     Self::handle_chan_result(
                         exec::exec_chan_close(&stack, bp, &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler,
+                        false, // waiters need to retry to see closed state
                     )
                 }
                 Opcode::ChanLen => {
@@ -1438,10 +1441,10 @@ impl Vm {
                         exec::SelectResult::Block => {
                             // Rewind PC so SelectExec is re-executed after other fibers run
                             frame.pc -= 1;
-                            ExecResult::Block(crate::fiber::BlockReason::Queue)
+                            ExecResult::TimesliceExpired
                         }
                         exec::SelectResult::SendOnClosed => {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+                            runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel)
                         }
                     }
                 }
@@ -1495,9 +1498,7 @@ impl Vm {
                 Opcode::IfaceAssert => {
                     let result = exec::exec_iface_assert(stack, bp, &inst, &mut self.state.itab_cache, module);
                     if matches!(result, ExecResult::Panic) {
-                        runtime_panic(
-                            &mut self.state.gc, fiber, stack, module, ERR_TYPE_ASSERTION.to_string()
-                        )
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::TypeAssertionFailed)
                     } else {
                         result
                     }
@@ -1505,9 +1506,7 @@ impl Vm {
                 Opcode::IfaceEq => {
                     let result = exec::exec_iface_eq(stack, bp, &inst, module);
                     if matches!(result, ExecResult::Panic) {
-                        runtime_panic(
-                            &mut self.state.gc, fiber, stack, module, ERR_UNCOMPARABLE_TYPE.to_string()
-                        )
+                        runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UncomparableType)
                     } else {
                         result
                     }
@@ -1558,6 +1557,7 @@ impl Vm {
                     if idx >= len {
                         runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
+                            RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
                         )
                     } else {
@@ -1615,7 +1615,7 @@ impl Vm {
                 Opcode::PortNew => {
                     match exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
                         Ok(()) => ExecResult::FrameChanged,
-                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, msg),
+                        Err(msg) => runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg),
                     }
                 }
                 #[cfg(feature = "std")]
@@ -1630,14 +1630,14 @@ impl Vm {
                             ExecResult::FrameChanged
                         }
                         exec::PortResult::SendOnClosed => {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_SEND_ON_CLOSED.to_string())
+                            runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel)
                         }
                         _ => ExecResult::FrameChanged,
                     }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortSend => {
-                    runtime_panic(&mut self.state.gc, fiber, stack, module, "Port not supported in no_std".to_string())
+                    runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported)
                 }
                 #[cfg(feature = "std")]
                 Opcode::PortRecv => {
@@ -1659,14 +1659,14 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortRecv => {
-                    runtime_panic(&mut self.state.gc, fiber, stack, module, "Port not supported in no_std".to_string())
+                    runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported)
                 }
                 #[cfg(feature = "std")]
                 Opcode::PortClose => {
                     match exec::exec_port_close(stack, bp, &inst) {
                         exec::PortResult::Continue => ExecResult::FrameChanged,
                         exec::PortResult::CloseNil => {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
+                            runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel)
                         }
                         exec::PortResult::Closed(waiters) => {
                             for waiter in &waiters {
@@ -1682,7 +1682,7 @@ impl Vm {
                     match exec::exec_port_close(stack, bp, &inst) {
                         exec::PortResult::Continue => ExecResult::FrameChanged,
                         exec::PortResult::CloseNil => {
-                            runtime_panic(&mut self.state.gc, fiber, stack, module, ERR_CLOSE_NIL_CHANNEL.to_string())
+                            runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel)
                         }
                         _ => ExecResult::FrameChanged,
                     }
@@ -1774,64 +1774,118 @@ impl Vm {
     }
 
     /// Execute a closure synchronously from extern function callback.
-    /// Returns true on success, false on panic.
+    /// Returns (success, panic_state) - panic_state is Some if panic occurred.
+    /// 
+    /// This creates a temporary fiber, adds it to the scheduler, executes it,
+    /// then removes it. Blocking operations will fail (would deadlock).
     pub fn execute_closure_sync(
         &mut self,
         func_id: u32,
         args: &[u64],
         ret: *mut u64,
         ret_count: u32,
-    ) -> bool {
+    ) -> (bool, Option<crate::fiber::PanicState>) {
         let module = match &self.module {
             Some(m) => m as *const Module,
-            None => return false,
+            None => return (false, None),
         };
         let module = unsafe { &*module };
-        
-        let trampoline_id = self.scheduler.acquire_trampoline_fiber();
         
         let func_def = &module.functions[func_id as usize];
         let local_slots = func_def.local_slots;
         let param_slots = func_def.param_slots as usize;
         let func_ret_slots = func_def.ret_slots as usize;
         
-        {
-            let fiber = self.scheduler.trampoline_fiber_mut(trampoline_id);
-            fiber.push_frame(func_id, local_slots, 0, func_ret_slots as u16);
-            let bp = fiber.frames.last().unwrap().bp;
-            for i in 0..param_slots.min(args.len()) {
-                fiber.stack[bp + i] = args[i];
-            }
+        // Create temporary fiber and add to scheduler
+        let mut temp_fiber = Fiber::new(0); // ID will be assigned by spawn
+        temp_fiber.push_frame(func_id, local_slots, 0, func_ret_slots as u16);
+        let bp = temp_fiber.frames.last().unwrap().bp;
+        for i in 0..param_slots.min(args.len()) {
+            temp_fiber.stack[bp + i] = args[i];
         }
         
-        let success = loop {
-            let exec_result = self.run_fiber(trampoline_id);
-            match exec_result {
-                ExecResult::Done => break true,
-                ExecResult::Panic => break false,
-                ExecResult::TimesliceExpired | ExecResult::FrameChanged | ExecResult::Osr(_, _, _) => {
-                    // Continue execution
-                }
-                ExecResult::Block(_) => {
-                    // For sync call, true blocking is an error (would deadlock)
-                    break false;
-                }
-            }
-        };
-        
-        if success {
-            let fiber = self.scheduler.trampoline_fiber(trampoline_id);
-            for i in 0..(ret_count as usize) {
-                if i < fiber.stack.len() {
-                    unsafe { *ret.add(i) = fiber.stack[i] };
-                }
-            }
-        }
-        
-        self.scheduler.release_trampoline_fiber(trampoline_id);
-        success
-    }
+        let temp_id = self.scheduler.spawn(temp_fiber);
+        let temp_fiber_id = FiberId::Regular(temp_id);
 
+        // Save and set current fiber.
+        let saved_current = self.scheduler.current;
+        self.scheduler.get_fiber_mut(temp_fiber_id).state = FiberState::Running;
+        self.scheduler.current = Some(temp_id);
+
+        let mut success = false;
+        let mut panic_state: Option<crate::fiber::PanicState> = None;
+
+        loop {
+            // If there is no current fiber, schedule one.
+            if self.scheduler.current.is_none() {
+                if self.scheduler.schedule_next().is_none() {
+                    break;
+                }
+            }
+
+            let current_raw = self.scheduler.current.expect("execute_closure_sync: current fiber missing");
+            let current_id = FiberId::Regular(current_raw);
+
+            let result = self.run_fiber(current_id);
+            match result {
+                ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
+                    self.scheduler.yield_current();
+                }
+                ExecResult::Block(reason) => {
+                    match reason {
+                        crate::fiber::BlockReason::Queue => self.scheduler.block_for_queue(),
+                        #[cfg(feature = "std")]
+                        crate::fiber::BlockReason::Io(token) => {
+                            // Retry the same instruction after I/O becomes ready.
+                            let fiber = self.scheduler.current_fiber_mut().unwrap();
+                            fiber.current_frame_mut().unwrap().pc -= 1;
+                            self.scheduler.block_for_io(token);
+                        }
+                    }
+                }
+                ExecResult::Done => {
+                    // Capture return values if this is the temp fiber.
+                    if current_raw == temp_id {
+                        let fiber = self.scheduler.get_fiber(current_id);
+                        for i in 0..(ret_count as usize) {
+                            if i < fiber.stack.len() {
+                                unsafe { *ret.add(i) = fiber.stack[i] };
+                            }
+                        }
+                        success = true;
+                    }
+
+                    let _ = self.scheduler.kill_current();
+
+                    if current_raw == temp_id {
+                        break;
+                    }
+                }
+                ExecResult::Panic => {
+                    // Capture panic state if this is the temp fiber.
+                    if current_raw == temp_id {
+                        panic_state = self.scheduler.get_fiber_mut(current_id).panic_state.take();
+                    }
+
+                    let _ = self.scheduler.kill_current();
+
+                    if current_raw == temp_id {
+                        break;
+                    }
+                }
+                ExecResult::FrameChanged => {
+                    // Shouldn't normally escape run_fiber, but if it does, yield.
+                    self.scheduler.yield_current();
+                }
+            }
+        }
+
+        // Restore original current fiber pointer for the caller (JIT is still running there).
+        self.scheduler.current = saved_current;
+
+        (success, panic_state)
+    }
+    
 }
 
 
@@ -1867,7 +1921,8 @@ pub extern "C" fn closure_call_trampoline(
         let func_def = &module.functions[func_id as usize];
         let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
         
-        vm.execute_closure_sync(func_id, &full_args, ret, ret_count)
+        let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
+        success
     }));
     
     #[cfg(feature = "std")]
@@ -1887,7 +1942,8 @@ pub extern "C" fn closure_call_trampoline(
         let func_def = &module.functions[func_id as usize];
         let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
         
-        if vm.execute_closure_sync(func_id, &full_args, ret, ret_count) {
+        let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
+        if success {
             vo_runtime::ffi::ClosureCallResult::Ok
         } else {
             vo_runtime::ffi::ClosureCallResult::Panic
