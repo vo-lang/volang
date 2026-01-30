@@ -166,7 +166,13 @@ fn compile_defer_pkg_func_call(
     // For extern functions, we need to generate a wrapper closure that calls the extern
     // and defer that wrapper
     let extern_name = crate::expr::call::get_extern_name(sel, info)?;
-    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(ctx, &extern_name, call_expr.args.len());
+    
+    // Get return slot count from function signature
+    let func_type = info.expr_type(call_expr.func.id);
+    let sig = info.as_signature(func_type);
+    let ret_slots = info.type_slot_count(sig.results()) as u16;
+    
+    let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(ctx, &extern_name, call_expr.args.len(), ret_slots);
     
     // Compile args as interface values for print/println/assert style functions
     let any_type = info.any_type();

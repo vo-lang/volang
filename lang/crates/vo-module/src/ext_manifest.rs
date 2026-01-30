@@ -81,11 +81,66 @@ fn parse_manifest(path: &Path) -> Result<ExtensionManifest, ExtManifestError> {
 
     let parent = path.parent().unwrap_or(Path::new("."));
     let full_path = parent.join(&native_path);
+    
+    // Auto-append platform-specific extension if not present
+    let full_path = resolve_library_path(full_path);
 
     Ok(ExtensionManifest {
         name,
         native_path: full_path,
     })
+}
+
+/// Resolve library path with platform-specific extension and profile.
+///
+/// - Replaces `{profile}` with `debug` or `release-native` based on build mode
+/// - If the path doesn't have a known library extension (.so, .dylib, .dll),
+///   automatically append the correct one for the current platform.
+fn resolve_library_path(path: PathBuf) -> PathBuf {
+    // Replace {profile} placeholder
+    let path_str = path.to_string_lossy();
+    let path = if path_str.contains("{profile}") {
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release-native" };
+        PathBuf::from(path_str.replace("{profile}", profile))
+    } else {
+        path
+    };
+    
+    // Check if already has a library extension
+    if let Some(ext) = path.extension() {
+        let ext = ext.to_string_lossy();
+        if ext == "so" || ext == "dylib" || ext == "dll" {
+            return path;
+        }
+    }
+    
+    // Append platform-specific extension
+    #[cfg(target_os = "linux")]
+    {
+        path.with_extension("so")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        path.with_extension("dylib")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: libfoo -> foo.dll
+        let file_name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let new_name = if file_name.starts_with("lib") {
+            &file_name[3..]
+        } else {
+            file_name
+        };
+        path.with_file_name(new_name).with_extension("dll")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        // Fallback: try .so
+        path.with_extension("so")
+    }
 }
 
 /// Extract a string value from a TOML line like `key = "value"`.

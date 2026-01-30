@@ -198,9 +198,12 @@ def run_playground(build_only: bool = False):
         print(f"\n{Colors.GREEN}Playground stopped{Colors.NC}")
 
 
-def ensure_vox_extension_built(arch: str = '64', release: bool = False):
+def ensure_vox_extension_built(arch: str = '64', release: bool = False, native: bool = False):
     """Build vo-vox extension if needed."""
-    profile = 'release' if release else 'debug'
+    if native:
+        profile = 'release-native'
+    else:
+        profile = 'release' if release else 'debug'
     
     if arch == '32':
         lib_path = PROJECT_ROOT / 'target' / TARGET_32 / profile / 'libvo_vox.so'
@@ -221,7 +224,9 @@ def ensure_vox_extension_built(arch: str = '64', release: bool = False):
     
     print(f"{Colors.DIM}Building vo-vox extension ({profile})...{Colors.NC}")
     build_cmd = ['cargo', 'build', '-q', '-p', 'vo-vox', '--features', 'ffi']
-    if release:
+    if native:
+        build_cmd.extend(['--profile', 'release-native'])
+    elif release:
         build_cmd.append('--release')
     if arch == '32':
         build_cmd.extend(['--target', TARGET_32])
@@ -233,9 +238,12 @@ def ensure_vox_extension_built(arch: str = '64', release: bool = False):
 
 
 
-def get_vo_bin(release: bool = False, arch: str = '64') -> Path:
+def get_vo_bin(release: bool = False, arch: str = '64', native: bool = False) -> Path:
     """Get the path to vo binary for the given architecture."""
-    profile = 'release' if release else 'debug'
+    if native:
+        profile = 'release-native'
+    else:
+        profile = 'release' if release else 'debug'
     if arch == '32':
         return PROJECT_ROOT / 'target' / TARGET_32 / profile / 'vo'
     return PROJECT_ROOT / 'target' / profile / 'vo'
@@ -966,7 +974,7 @@ class BenchmarkRunner:
         self.vo_only = vo_only
         self.all_langs = all_langs
         self.arch = arch
-        self.vo_bin = get_vo_bin(release=True, arch=arch)
+        self.vo_bin = get_vo_bin(native=True, arch=arch)
 
     def run(self, target: str):
         if target == 'score':
@@ -1000,8 +1008,8 @@ class BenchmarkRunner:
 
     def _build_vo(self):
         target_info = f" (target: {TARGET_32})" if self.arch == '32' else ""
-        print(f"Building Vo (release){target_info}...")
-        build_cmd = ['cargo', 'build', '--release', '-p', 'vo']
+        print(f"Building Vo (release-native){target_info}...")
+        build_cmd = ['cargo', 'build', '--profile', 'release-native', '-p', 'vo']
         if self.arch == '32':
             build_cmd.extend(['--target', TARGET_32, '--no-default-features'])
         code, _, stderr = run_cmd(build_cmd, capture=True)
@@ -1009,11 +1017,27 @@ class BenchmarkRunner:
             print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
             sys.exit(1)
         
-        # Build vo-vox extension (release mode for benchmarks)
-        ensure_vox_extension_built(arch=self.arch, release=True)
+        # Build vo-vox extension (release-native mode for benchmarks)
+        ensure_vox_extension_built(arch=self.arch, native=True)
+        
+        # Update vo.ext.toml to use release-native path for benchmarks
+        self._set_vox_path_for_benchmark()
         
         # Invalidate CLI cache if source files or binary changed
         invalidate_cli_cache_if_needed()
+    
+    def _set_vox_path_for_benchmark(self):
+        """Temporarily update vo.ext.toml to use release-native library."""
+        vox_toml = PROJECT_ROOT / 'libs' / 'vox' / 'vo.ext.toml'
+        if vox_toml.exists():
+            content = vox_toml.read_text()
+            new_content = content.replace(
+                'target/debug/libvo_vox.so',
+                'target/release-native/libvo_vox.so'
+            )
+            if new_content != content:
+                vox_toml.write_text(new_content)
+                print(f"{Colors.DIM}Updated vo.ext.toml for release-native{Colors.NC}")
 
     def _list_benchmarks(self):
         print("Available benchmarks:")

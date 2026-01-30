@@ -1,3 +1,3 @@
 [extension]
 name = "vox"
-path = "../../target/debug/libvo_vox.so"
+path = "../../target/{profile}/libvo_vox"

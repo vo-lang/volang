@@ -491,6 +491,7 @@ pub fn generate_defer_extern_wrapper(
     ctx: &mut CodegenContext,
     extern_name: &str,
     arg_count: usize,
+    ret_slots: u16,
 ) -> u32 {
     let wrapper_name = format!("$defer_extern_{}", extern_name);
     
@@ -504,7 +505,7 @@ pub fn generate_defer_extern_wrapper(
     builder.set_param_slots(arg_slots);
     builder.set_ret_slots(0);
     
-    let extern_id = ctx.get_or_register_extern(extern_name);
+    let extern_id = ctx.get_or_register_extern_with_ret_slots(extern_name, ret_slots);
     // CallExtern: flags=arg_count*2, a=dst, b=extern_id, c=args_start
     builder.emit_with_flags(Opcode::CallExtern, arg_slots as u8, 0, extern_id as u16, 0);
     builder.emit_op(Opcode::Return, 0, 0, 0);
