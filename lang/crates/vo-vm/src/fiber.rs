@@ -275,6 +275,9 @@ impl PanicState {
     }
 }
 
+/// Initial stack capacity in slots (64KB = 8192 slots).
+const INITIAL_STACK_CAPACITY: usize = 8192;
+
 #[derive(Debug)]
 pub struct Fiber {
     pub id: u32,
@@ -285,6 +288,8 @@ pub struct Fiber {
     /// JIT call context stack for NeedVm handoffs.
     pub jit_call_stack: Vec<JitCallContext>,
     pub stack: Vec<u64>,
+    /// Stack pointer - current stack top. stack[0..sp] is in use.
+    pub sp: usize,
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
     pub unwinding: Option<UnwindingState>,
@@ -305,7 +310,8 @@ impl Fiber {
             state: FiberState::Runnable,
             exec_mode: ExecMode::default(),
             jit_call_stack: Vec::new(),
-            stack: Vec::new(),
+            stack: Vec::with_capacity(INITIAL_STACK_CAPACITY),
+            sp: 0,
             frames: Vec::new(),
             defer_stack: Vec::new(),
             unwinding: None,
@@ -323,7 +329,7 @@ impl Fiber {
         self.state = FiberState::Running;
         self.exec_mode = ExecMode::default();
         self.jit_call_stack.clear();
-        self.stack.clear();
+        self.sp = 0;
         self.frames.clear();
         self.defer_stack.clear();
         self.unwinding = None;
@@ -432,9 +438,27 @@ impl Fiber {
         }
     }
 
+    /// Get raw pointer to stack for fast access.
+    #[inline(always)]
+    pub fn stack_ptr(&mut self) -> *mut u64 {
+        self.stack.as_mut_ptr()
+    }
+    
+    /// Ensure stack has capacity for at least `required` slots.
+    /// Grows by doubling if needed. Only call when sp might exceed capacity.
+    #[inline]
+    pub fn ensure_capacity(&mut self, required: usize) {
+        if required > self.stack.len() {
+            let new_cap = self.stack.len().max(INITIAL_STACK_CAPACITY).max(required).next_power_of_two();
+            self.stack.resize(new_cap, 0);
+        }
+    }
+
     pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) {
-        let bp = self.stack.len();
-        self.stack.resize(bp + local_slots as usize, 0);
+        let bp = self.sp;
+        let new_sp = bp + local_slots as usize;
+        self.ensure_capacity(new_sp);
+        self.sp = new_sp;
         self.frames.push(CallFrame {
             func_id,
             pc: 0,
@@ -446,7 +470,7 @@ impl Fiber {
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {
         if let Some(frame) = self.frames.pop() {
-            self.stack.truncate(frame.bp);
+            self.sp = frame.bp;
             Some(frame)
         } else {
             None

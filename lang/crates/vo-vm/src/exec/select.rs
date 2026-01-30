@@ -7,9 +7,11 @@ use alloc::vec::Vec;
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{channel, queue_state};
+use vo_runtime::slot::Slot;
 
 use crate::fiber::{SelectCase, SelectCaseKind, SelectState};
 use crate::instruction::Instruction;
+use crate::vm::helpers::{stack_get, stack_set};
 
 /// Result of select execution (analogous to ChanResult)
 pub enum SelectResult {
@@ -72,12 +74,12 @@ enum SelectCheckResult {
 
 /// Phase 1: Check which case can proceed (read-only)
 /// When multiple cases are ready, randomly select one (Go semantics)
-fn check_ready_case(stack: &[u64], bp: usize, state: &SelectState) -> SelectCheckResult {
+fn check_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> SelectCheckResult {
     // Collect all ready cases first
     let mut ready_cases: Vec<SelectCheckResult> = Vec::new();
     
     for (idx, case) in state.cases.iter().enumerate() {
-        let ch = stack[bp + case.chan_reg as usize] as GcRef;
+        let ch = stack_get(stack, bp + case.chan_reg as usize) as GcRef;
         if ch.is_null() {
             continue;
         }
@@ -120,12 +122,12 @@ fn check_ready_case(stack: &[u64], bp: usize, state: &SelectState) -> SelectChec
     }
 }
 
-pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<SelectState>, inst: &Instruction) -> SelectResult {
+pub fn exec_select_exec(stack: *mut Slot, bp: usize, select_state: &mut Option<SelectState>, inst: &Instruction) -> SelectResult {
     let state = select_state.as_mut().expect("no active select");
 
     // If woken by another goroutine, use that index
     if let Some(idx) = state.woken_index.take() {
-        stack[bp + inst.a as usize] = idx as u64;
+        stack_set(stack, bp + inst.a as usize, idx as u64);
         *select_state = None;
         return SelectResult::Continue;
     }
@@ -143,10 +145,10 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
                 return SelectResult::SendOnClosed;
             }
             let val_start = bp + val_reg as usize;
-            let value: Box<[u64]> = stack[val_start..val_start + elem_slots].into();
+            let value: Box<[u64]> = (0..elem_slots).map(|i| stack_get(stack, val_start + i)).collect();
             chan_state.buffer.push_back(value);
             
-            stack[bp + inst.a as usize] = idx as u64;
+            stack_set(stack, bp + inst.a as usize, idx as u64);
             *select_state = None;
             SelectResult::Continue
         }
@@ -168,23 +170,23 @@ pub fn exec_select_exec(stack: &mut [u64], bp: usize, select_state: &mut Option<
             // Copy value to stack (or zero-fill for closed channel)
             if let Some(val) = value {
                 for (i, &v) in val.iter().enumerate().take(elem_slots) {
-                    stack[dst_start + i] = v;
+                    stack_set(stack, dst_start + i, v);
                 }
             } else {
                 for i in 0..elem_slots {
-                    stack[dst_start + i] = 0;
+                    stack_set(stack, dst_start + i, 0);
                 }
             }
             if has_ok {
-                stack[dst_start + elem_slots] = ok as u64;
+                stack_set(stack, dst_start + elem_slots, ok as u64);
             }
             
-            stack[bp + inst.a as usize] = idx as u64;
+            stack_set(stack, bp + inst.a as usize, idx as u64);
             *select_state = None;
             SelectResult::Continue
         }
         SelectCheckResult::Default => {
-            stack[bp + inst.a as usize] = u64::MAX;
+            stack_set(stack, bp + inst.a as usize, u64::MAX);
             *select_state = None;
             SelectResult::Continue
         }

@@ -413,7 +413,7 @@ impl Vm {
         result: exec::ChanResult,
         gc: &mut vo_runtime::gc::Gc,
         fiber: &mut Fiber,
-        stack: &mut Vec<u64>,
+        stack: *mut vo_runtime::slot::Slot,
         module: &Module,
         scheduler: &mut Scheduler,
         advance_woken_pc: bool,
@@ -466,7 +466,8 @@ impl Vm {
         let fiber = unsafe { &mut *fiber_ptr };
 
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
-        let stack = unsafe { &mut *(&mut fiber.stack as *mut Vec<u64>) };
+        // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
+        let mut stack = fiber.stack_ptr();
         let frames_ptr = &mut fiber.frames as *mut Vec<crate::fiber::CallFrame>;
         let frames = unsafe { &mut *frames_ptr };
         
@@ -549,10 +550,10 @@ impl Vm {
                     exec::exec_global_get_n(stack, bp, &inst, &self.state.globals);
                 }
                 Opcode::GlobalSet => {
-                    exec::exec_global_set(&stack, bp, &inst, &mut self.state.globals);
+                    exec::exec_global_set(stack, bp, &inst, &mut self.state.globals);
                 }
                 Opcode::GlobalSetN => {
-                    exec::exec_global_set_n(&stack, bp, &inst, &mut self.state.globals);
+                    exec::exec_global_set_n(stack, bp, &inst, &mut self.state.globals);
                 }
 
                 Opcode::PtrNew => {
@@ -564,7 +565,7 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSet => {
-                    if !exec::exec_ptr_set(&stack, bp, &inst, &mut self.state.gc) {
+                    if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc) {
                         return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
                     }
                 }
@@ -574,7 +575,7 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSetN => {
-                    if !exec::exec_ptr_set_n(&stack, bp, &inst) {
+                    if !exec::exec_ptr_set_n(stack, bp, &inst) {
                         return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
                     }
                 }
@@ -861,13 +862,15 @@ impl Vm {
                             return result;
                         }
                     } else {
-                        exec::exec_call(stack, &mut fiber.frames, &inst, module);
+                        exec::exec_call(fiber, &inst, module);
+                        stack = fiber.stack_ptr();
                         refetch!();
                     }
                 }
                 #[cfg(not(feature = "jit"))]
                 Opcode::Call => {
-                    exec::exec_call(stack, &mut fiber.frames, &inst, module);
+                    exec::exec_call(fiber, &inst, module);
+                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::CallExtern => {
@@ -878,7 +881,7 @@ impl Vm {
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let result = exec::exec_call_extern(
-                        stack, bp, &inst, &module.externs, &self.state.extern_registry,
+                        &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
                         &mut self.state.gc, &module.struct_metas, &module.interface_metas,
                         &module.named_type_metas, &module.runtime_types, &mut self.state.itab_cache,
                         &module.functions, module, vm_ptr, fiber_ptr, closure_call_fn,
@@ -899,25 +902,28 @@ impl Vm {
                     }
                 }
                 Opcode::CallClosure => {
-                    let closure_ref = stack[bp + inst.a as usize] as vo_runtime::gc::GcRef;
+                    let closure_ref = stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
                     if closure_ref.is_null() {
                         return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall);
                     }
-                    exec::exec_call_closure(stack, &mut fiber.frames, &inst, module);
+                    exec::exec_call_closure(fiber, &inst, module);
+                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::CallIface => {
-                    exec::exec_call_iface(stack, &mut fiber.frames, &inst, module, &self.state.itab_cache);
+                    exec::exec_call_iface(fiber, &inst, module, &self.state.itab_cache);
+                    stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
                     refetch!();
                 }
                 Opcode::Return => {
                     let result = if fiber.is_direct_defer_context() {
-                        exec::handle_panic_unwind(stack, &mut fiber.frames, &mut fiber.defer_stack, &mut fiber.unwinding, &fiber.panic_state, module)
+                        exec::handle_panic_unwind(fiber, module)
                     } else {
                         let func = &module.functions[func_id as usize];
                         let is_error_return = (inst.flags & 1) != 0;
-                        exec::handle_return(stack, &mut fiber.frames, &mut fiber.defer_stack, &mut fiber.unwinding, &fiber.panic_state, &inst, func, module, is_error_return)
+                        exec::handle_return(fiber, &inst, func, module, is_error_return)
                     };
+                    stack = fiber.stack_ptr();  // Re-fetch after potential stack changes
                     if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
                 }
 
@@ -1193,14 +1199,14 @@ impl Vm {
                     if m.is_null() {
                         return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilMapWrite);
                     }
-                    if !exec::exec_map_set(&stack, bp, &inst, &mut self.state.gc, Some(module)) {
+                    if !exec::exec_map_set(stack, bp, &inst, &mut self.state.gc, Some(module)) {
                         return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UnhashableType);
                     }
                 }
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if !m.is_null() {
-                        exec::exec_map_delete(&stack, bp, &inst, Some(module));
+                        exec::exec_map_delete(stack, bp, &inst, Some(module));
                     }
                 }
                 Opcode::MapLen => {
@@ -1221,7 +1227,7 @@ impl Vm {
                 }
                 Opcode::ChanSend => {
                     let result = Self::handle_chan_result(
-                        exec::exec_chan_send(&stack, bp, fiber_id.to_raw(), &inst),
+                        exec::exec_chan_send(stack, bp, fiber_id.to_raw(), &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler, false);
                     if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
                 }
@@ -1233,7 +1239,7 @@ impl Vm {
                 }
                 Opcode::ChanClose => {
                     let result = Self::handle_chan_result(
-                        exec::exec_chan_close(&stack, bp, &inst),
+                        exec::exec_chan_close(stack, bp, &inst),
                         &mut self.state.gc, fiber, stack, module, &mut self.scheduler, false);
                     if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
                 }
@@ -1278,18 +1284,18 @@ impl Vm {
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
                     let next_id = self.scheduler.fibers.len() as u32;
-                    let go_result = exec::exec_go_start(&stack, bp, &inst, &module.functions, next_id);
+                    let go_result = exec::exec_go_start(stack, bp, &inst, &module.functions, next_id);
                     self.scheduler.spawn(go_result.new_fiber);
                 }
 
                 // Defer and error handling
                 Opcode::DeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
+                    exec::exec_defer_push(stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_err_defer_push(&stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
+                    exec::exec_err_defer_push(stack, bp, &fiber.frames, &mut fiber.defer_stack, &inst, &mut self.state.gc, generation);
                 }
                 Opcode::Panic => {
                     let result = user_panic(fiber, stack, bp, inst.a, module);
@@ -1468,7 +1474,7 @@ impl Vm {
                     let island_id = vo_runtime::island::id(result.island);
                     
                     if island_id == 0 {
-                        let closure_ref = stack[bp + inst.b as usize] as vo_runtime::gc::GcRef;
+                        let closure_ref = stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                         let func_id = vo_runtime::objects::closure::func_id(closure_ref);
                         let local_slots = module.functions[func_id as usize].local_slots;
                         let mut new_fiber = crate::fiber::Fiber::new(0);

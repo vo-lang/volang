@@ -20,19 +20,19 @@ const FIELD_LEN: usize = slice::FIELD_LEN;
 const FIELD_CAP: usize = slice::FIELD_CAP;
 
 // =============================================================================
-// Stack access helpers
+// Stack access helpers (raw pointer versions for performance)
 // =============================================================================
 
-/// Unchecked stack read - SAFETY: caller ensures idx is within bounds
+/// Unchecked stack read via raw pointer - SAFETY: caller ensures idx is within bounds
 #[inline(always)]
-pub fn stack_get(stack: &[Slot], idx: usize) -> Slot {
-    unsafe { *stack.get_unchecked(idx) }
+pub fn stack_get(stack: *const Slot, idx: usize) -> Slot {
+    unsafe { *stack.add(idx) }
 }
 
-/// Unchecked stack write - SAFETY: caller ensures idx is within bounds
+/// Unchecked stack write via raw pointer - SAFETY: caller ensures idx is within bounds
 #[inline(always)]
-pub fn stack_set(stack: &mut [Slot], idx: usize, val: Slot) {
-    unsafe { *stack.get_unchecked_mut(idx) = val }
+pub fn stack_set(stack: *mut Slot, idx: usize, val: Slot) {
+    unsafe { *stack.add(idx) = val }
 }
 
 // =============================================================================
@@ -120,7 +120,7 @@ pub fn runtime_trap_message(kind: RuntimeTrapKind) -> &'static str {
 pub fn runtime_panic(
     gc: &mut Gc,
     fiber: &mut Fiber,
-    stack: &mut Vec<u64>,
+    stack: *mut Slot,
     module: &Module,
     kind: RuntimeTrapKind,
     msg: String,
@@ -135,7 +135,7 @@ pub fn runtime_panic(
 pub fn runtime_trap(
     gc: &mut Gc,
     fiber: &mut Fiber,
-    stack: &mut Vec<u64>,
+    stack: *mut Slot,
     module: &Module,
     kind: RuntimeTrapKind,
 ) -> ExecResult {
@@ -146,7 +146,7 @@ pub fn runtime_trap(
 pub fn runtime_panic_msg(
     gc: &mut Gc,
     fiber: &mut Fiber,
-    stack: &mut Vec<u64>,
+    stack: *mut Slot,
     module: &Module,
     msg: String,
 ) -> ExecResult {
@@ -157,17 +157,10 @@ pub fn runtime_panic_msg(
 }
 
 /// Continue panic unwinding (simplified interface).
-/// Use when panic_state is already set (e.g., from JIT or after defer returns).
+/// Use when panic has already been set up.
 #[inline]
-pub fn panic_unwind(fiber: &mut Fiber, stack: &mut Vec<u64>, module: &Module) -> ExecResult {
-    exec::handle_panic_unwind(
-        stack,
-        &mut fiber.frames,
-        &mut fiber.defer_stack,
-        &mut fiber.unwinding,
-        &fiber.panic_state,
-        module,
-    )
+pub fn panic_unwind(fiber: &mut Fiber, _stack: *mut Slot, module: &Module) -> ExecResult {
+    exec::handle_panic_unwind(fiber, module)
 }
 
 /// User code panic() - set value and start unwinding in one call.
@@ -175,13 +168,13 @@ pub fn panic_unwind(fiber: &mut Fiber, stack: &mut Vec<u64>, module: &Module) ->
 #[inline]
 pub fn user_panic(
     fiber: &mut Fiber,
-    stack: &mut Vec<u64>,
+    stack: *mut Slot,
     bp: usize,
     val_reg: u16,
     module: &Module,
 ) -> ExecResult {
-    let slot0 = stack[bp + val_reg as usize];
-    let slot1 = stack[bp + val_reg as usize + 1];
+    let slot0 = stack_get(stack, bp + val_reg as usize);
+    let slot1 = stack_get(stack, bp + val_reg as usize + 1);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, slot1));
     panic_unwind(fiber, stack, module)
 }

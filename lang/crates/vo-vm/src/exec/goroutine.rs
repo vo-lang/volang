@@ -2,10 +2,12 @@
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
+use vo_runtime::slot::Slot;
 
 use crate::bytecode::FunctionDef;
 use crate::fiber::Fiber;
 use crate::instruction::Instruction;
+use crate::vm::helpers::stack_get;
 
 pub struct GoResult {
     pub new_fiber: Fiber,
@@ -17,7 +19,7 @@ pub struct GoResult {
 /// - c: arg_slots
 /// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
 pub fn exec_go_start(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     inst: &Instruction,
     functions: &[FunctionDef],
@@ -28,7 +30,7 @@ pub fn exec_go_start(
     let arg_slots = inst.c;
 
     let (func_id, closure_ref) = if is_closure {
-        let closure_ref = stack[bp + inst.a as usize] as GcRef;
+        let closure_ref = stack_get(stack, bp + inst.a as usize) as GcRef;
         let func_id = closure::func_id(closure_ref);
         (func_id, Some(closure_ref))
     } else {
@@ -42,14 +44,19 @@ pub fn exec_go_start(
 
     let arg_count = arg_slots as usize;
     let src_start = bp + args_start as usize;
+    let new_stack = new_fiber.stack_ptr();
     
     if let Some(closure_ref) = closure_ref {
         // Closure goes in reg[0], args start at reg[1]
-        new_fiber.stack[0] = closure_ref as u64;
-        new_fiber.stack[1..1 + arg_count].copy_from_slice(&stack[src_start..src_start + arg_count]);
+        unsafe { *new_stack = closure_ref as u64 };
+        for i in 0..arg_count {
+            unsafe { *new_stack.add(1 + i) = stack_get(stack, src_start + i) };
+        }
     } else {
         // Regular function: args start at reg[0]
-        new_fiber.stack[..arg_count].copy_from_slice(&stack[src_start..src_start + arg_count]);
+        for i in 0..arg_count {
+            unsafe { *new_stack.add(i) = stack_get(stack, src_start + i) };
+        }
     }
 
     GoResult { new_fiber }

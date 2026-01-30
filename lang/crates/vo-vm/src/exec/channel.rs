@@ -9,9 +9,11 @@ use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::channel::{self, RecvResult, SendResult};
 use vo_runtime::objects::queue_state;
+use vo_runtime::slot::Slot;
 
 use crate::instruction::Instruction;
 use crate::vm::RuntimeTrapKind;
+use crate::vm::helpers::{stack_get, stack_set};
 
 pub enum ChanResult {
     Continue,
@@ -25,12 +27,12 @@ pub enum ChanResult {
 pub type ChanNewResult = Result<(), String>;
 
 #[inline]
-pub fn exec_chan_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut Gc) -> ChanNewResult {
-    let meta_raw = stack[bp + inst.b as usize] as u32;
+pub fn exec_chan_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> ChanNewResult {
+    let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
     
     // Read as i64 first to check for negative values
-    let cap_i64 = stack[bp + inst.c as usize] as i64;
+    let cap_i64 = stack_get(stack, bp + inst.c as usize) as i64;
     
     // Check for negative capacity
     if cap_i64 < 0 {
@@ -40,19 +42,19 @@ pub fn exec_chan_new(stack: &mut [u64], bp: usize, inst: &Instruction, gc: &mut 
     let cap = cap_i64 as usize;
     let elem_slots = inst.flags as u16;
     let ch = channel::create(gc, elem_meta, elem_slots, cap);
-    stack[bp + inst.a as usize] = ch as u64;
+    stack_set(stack, bp + inst.a as usize, ch as u64);
     Ok(())
 }
 
-pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
-    let ch = stack[bp + inst.a as usize] as GcRef;
+pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
+    let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ch.is_null() {
         return ChanResult::Trap(RuntimeTrapKind::SendOnNilChannel);
     }
     let elem_slots = inst.flags as usize;
     let src_start = bp + inst.b as usize;
 
-    let value: Box<[u64]> = stack[src_start..src_start + elem_slots].into();
+    let value: Box<[u64]> = (0..elem_slots).map(|i| stack_get(stack, src_start + i)).collect();
     let cap = queue_state::capacity(ch);
     let state = channel::get_state(ch);
 
@@ -67,8 +69,8 @@ pub fn exec_chan_send(stack: &[u64], bp: usize, fiber_id: u32, inst: &Instructio
     }
 }
 
-pub fn exec_chan_recv(stack: &mut [u64], bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
-    let ch = stack[bp + inst.b as usize] as GcRef;
+pub fn exec_chan_recv(stack: *mut Slot, bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {
+    let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
     if ch.is_null() {
         return ChanResult::Trap(RuntimeTrapKind::RecvOnNilChannel);
     }
@@ -84,12 +86,12 @@ pub fn exec_chan_recv(stack: &mut [u64], bp: usize, fiber_id: u32, inst: &Instru
             if let Some(val) = value {
                 for (i, &v) in val.iter().enumerate() {
                     if i < elem_slots {
-                        stack[dst_start + i] = v;
+                        stack_set(stack, dst_start + i, v);
                     }
                 }
             }
             if has_ok {
-                stack[dst_start + elem_slots] = 1;
+                stack_set(stack, dst_start + elem_slots, 1);
             }
             if let Some(id) = woke_sender {
                 ChanResult::Wake(id as u32)
@@ -103,10 +105,10 @@ pub fn exec_chan_recv(stack: &mut [u64], bp: usize, fiber_id: u32, inst: &Instru
         }
         RecvResult::Closed => {
             for i in 0..elem_slots {
-                stack[dst_start + i] = 0;
+                stack_set(stack, dst_start + i, 0);
             }
             if has_ok {
-                stack[dst_start + elem_slots] = 0;
+                stack_set(stack, dst_start + elem_slots, 0);
             }
             ChanResult::Continue
         }
@@ -114,16 +116,16 @@ pub fn exec_chan_recv(stack: &mut [u64], bp: usize, fiber_id: u32, inst: &Instru
 }
 
 #[inline]
-pub fn exec_queue_get<F>(stack: &mut [u64], bp: usize, inst: &Instruction, get: F)
+pub fn exec_queue_get<F>(stack: *mut Slot, bp: usize, inst: &Instruction, get: F)
 where F: FnOnce(GcRef) -> usize {
-    let obj = stack[bp + inst.b as usize] as GcRef;
+    let obj = stack_get(stack, bp + inst.b as usize) as GcRef;
     let val = if obj.is_null() { 0 } else { get(obj) };
-    stack[bp + inst.a as usize] = val as u64;
+    stack_set(stack, bp + inst.a as usize, val as u64);
 }
 
 #[inline]
-pub fn exec_chan_close(stack: &[u64], bp: usize, inst: &Instruction) -> ChanResult {
-    let ch = stack[bp + inst.a as usize] as GcRef;
+pub fn exec_chan_close(stack: *const Slot, bp: usize, inst: &Instruction) -> ChanResult {
+    let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ch.is_null() {
         return ChanResult::Trap(RuntimeTrapKind::CloseNilChannel);
     }

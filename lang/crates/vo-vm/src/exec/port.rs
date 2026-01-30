@@ -9,6 +9,7 @@ use vo_runtime::objects::port::{self, RecvResult, SendResult, WaiterInfo};
 use vo_runtime::objects::queue_state;
 #[cfg(feature = "std")]
 use vo_runtime::pack::{pack_slots, unpack_slots};
+use vo_runtime::slot::Slot;
 use vo_runtime::ValueMeta;
 #[cfg(feature = "std")]
 use vo_common_core::bytecode::StructMeta;
@@ -16,6 +17,7 @@ use vo_common_core::bytecode::StructMeta;
 use vo_common_core::RuntimeType;
 
 use crate::instruction::Instruction;
+use crate::vm::helpers::{stack_get, stack_set};
 
 pub enum PortResult {
     Continue,
@@ -35,15 +37,15 @@ pub type PortNewResult = Result<(), String>;
 
 #[inline]
 pub fn exec_port_new(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
 ) -> PortNewResult {
-    let meta_raw = stack[bp + inst.b as usize] as u32;
+    let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
 
-    let cap_i64 = stack[bp + inst.c as usize] as i64;
+    let cap_i64 = stack_get(stack, bp + inst.c as usize) as i64;
     if cap_i64 < 0 {
         return Err(format!("runtime error: make port: size out of range"));
     }
@@ -51,13 +53,13 @@ pub fn exec_port_new(
     let cap = cap_i64 as usize;
     let elem_slots = inst.flags as u16;
     let p = port::create(gc, elem_meta, elem_slots, cap);
-    stack[bp + inst.a as usize] = p as u64;
+    stack_set(stack, bp + inst.a as usize, p as u64);
     Ok(())
 }
 
 #[cfg(feature = "std")]
 pub fn exec_port_send(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     island_id: u32,
     fiber_id: u64,
@@ -66,12 +68,12 @@ pub fn exec_port_send(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> PortResult {
-    let p = stack[bp + inst.a as usize] as GcRef;
+    let p = stack_get(stack, bp + inst.a as usize) as GcRef;
     let elem_slots = inst.flags as usize;
     let src_start = bp + inst.b as usize;
 
     let elem_meta = queue_state::elem_meta(p);
-    let src = &stack[src_start..src_start + elem_slots];
+    let src: Vec<u64> = (0..elem_slots).map(|i| stack_get(stack, src_start + i)).collect();
 
     if elem_slots != 0 && elem_meta.value_kind() == vo_runtime::ValueKind::Void {
         panic!(
@@ -82,7 +84,7 @@ pub fn exec_port_send(
     }
 
     // Pack the value for cross-island transfer
-    let packed = pack_slots(gc, src, elem_meta, struct_metas, runtime_types);
+    let packed = pack_slots(gc, &src, elem_meta, struct_metas, runtime_types);
     match port::try_send(p, packed) {
         SendResult::DirectSend(receiver) => PortResult::WakeRemote(receiver),
         SendResult::Buffered => PortResult::Continue,
@@ -97,7 +99,7 @@ pub fn exec_port_send(
 
 #[cfg(not(feature = "std"))]
 pub fn exec_port_send(
-    _stack: &[u64],
+    _stack: *const Slot,
     _bp: usize,
     _island_id: u32,
     _fiber_id: u64,
@@ -109,7 +111,7 @@ pub fn exec_port_send(
 
 #[cfg(feature = "std")]
 pub fn exec_port_recv(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     island_id: u32,
     fiber_id: u64,
@@ -118,7 +120,7 @@ pub fn exec_port_recv(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> PortResult {
-    let p = stack[bp + inst.b as usize] as GcRef;
+    let p = stack_get(stack, bp + inst.b as usize) as GcRef;
     let elem_slots = ((inst.flags >> 1) & 0x7F) as usize;
     let has_ok = (inst.flags & 1) != 0;
     let dst_start = bp + inst.a as usize;
@@ -140,11 +142,14 @@ pub fn exec_port_recv(
                     );
                 }
                 // Unpack the value into destination island's heap
-                let dst = &mut stack[dst_start..dst_start + elem_slots];
-                unpack_slots(gc, &packed, dst, struct_metas, runtime_types);
+                let mut dst: Vec<u64> = vec![0; elem_slots];
+                unpack_slots(gc, &packed, &mut dst, struct_metas, runtime_types);
+                for i in 0..elem_slots {
+                    stack_set(stack, dst_start + i, dst[i]);
+                }
             }
             if has_ok {
-                stack[dst_start + elem_slots] = 1; // ok = true
+                stack_set(stack, dst_start + elem_slots, 1); // ok = true
             }
             match woke_sender {
                 Some(sender) => PortResult::WakeRemote(sender),
@@ -159,10 +164,10 @@ pub fn exec_port_recv(
         RecvResult::Closed => {
             // Zero out destination slots
             for i in 0..elem_slots {
-                stack[dst_start + i] = 0;
+                stack_set(stack, dst_start + i, 0);
             }
             if has_ok {
-                stack[dst_start + elem_slots] = 0; // ok = false
+                stack_set(stack, dst_start + elem_slots, 0); // ok = false
             }
             PortResult::Continue
         }
@@ -171,7 +176,7 @@ pub fn exec_port_recv(
 
 #[cfg(not(feature = "std"))]
 pub fn exec_port_recv(
-    _stack: &mut [u64],
+    _stack: *mut Slot,
     _bp: usize,
     _island_id: u32,
     _fiber_id: u64,
@@ -181,8 +186,8 @@ pub fn exec_port_recv(
     panic!("Port not supported in no_std mode")
 }
 
-pub fn exec_port_close(stack: &[u64], bp: usize, inst: &Instruction) -> PortResult {
-    let p = stack[bp + inst.a as usize] as GcRef;
+pub fn exec_port_close(stack: *const Slot, bp: usize, inst: &Instruction) -> PortResult {
+    let p = stack_get(stack, bp + inst.a as usize) as GcRef;
 
     if p.is_null() {
         return PortResult::CloseNil;

@@ -7,10 +7,12 @@ use vo_runtime::{RuntimeType, ValueKind};
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::interface;
 use vo_runtime::itab::{self, ItabCache};
+use vo_runtime::slot::Slot;
 
 use crate::bytecode::{Constant, Module};
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
+use crate::vm::helpers::{stack_get, stack_set};
 
 /// Extract named_type_id from RuntimeType (recursively unwraps Pointer).
 /// Methods are always defined on the base Named type.
@@ -31,7 +33,7 @@ fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Opt
 /// - Concrete type: (rttid << 32) | itab_id, itab built at compile time
 /// - Interface source: iface_meta_id (high 32 bits = 0), itab built at runtime
 pub fn exec_iface_assign(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
@@ -39,7 +41,7 @@ pub fn exec_iface_assign(
     module: &Module,
 ) {
     let vk = ValueKind::from_u8(inst.flags);
-    let src = stack[bp + inst.b as usize];
+    let src = stack_get(stack, bp + inst.b as usize);
 
     // Unpack metadata from constant pool
     let packed = match &module.constants[inst.c as usize] {
@@ -100,7 +102,7 @@ pub fn exec_iface_assign(
         }
         ValueKind::Interface => {
             let src_slot0 = src;
-            let src_slot1 = stack[bp + inst.b as usize + 1];
+            let src_slot1 = stack_get(stack, bp + inst.b as usize + 1);
             let src_vk = interface::unpack_value_kind(src_slot0);
             if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
                 if src_slot1 != 0 {
@@ -115,8 +117,8 @@ pub fn exec_iface_assign(
         _ => src,
     };
 
-    stack[bp + inst.a as usize] = slot0;
-    stack[bp + inst.a as usize + 1] = slot1;
+    stack_set(stack, bp + inst.a as usize, slot0);
+    stack_set(stack, bp + inst.a as usize + 1, slot1);
 }
 
 /// IfaceAssert: a=dst, b=src_iface (2 slots), c=target_id
@@ -125,14 +127,14 @@ pub fn exec_iface_assign(
 /// For struct/array (determined by src_vk), copies value from GcRef to dst registers
 /// For interface (assert_kind=1), returns new interface with itab for target interface
 pub fn exec_iface_assert(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     itab_cache: &mut ItabCache,
     module: &Module,
 ) -> ExecResult {
-    let slot0 = stack[bp + inst.b as usize];
-    let slot1 = stack[bp + inst.b as usize + 1];
+    let slot0 = stack_get(stack, bp + inst.b as usize);
+    let slot1 = stack_get(stack, bp + inst.b as usize + 1);
 
     let assert_kind = inst.flags & 0x3;
     let has_ok = ((inst.flags >> 2) & 0x1) != 0;
@@ -160,7 +162,7 @@ pub fn exec_iface_assert(
     };
 
     // Helper to write successful result
-    let write_success = |stack: &mut [u64], itab_cache: &mut ItabCache| {
+    let write_success = |stack: *mut Slot, itab_cache: &mut ItabCache| {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
@@ -177,8 +179,8 @@ pub fn exec_iface_assert(
                 &module.interface_metas,
             );
             let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
-            stack[bp + inst.a as usize] = new_slot0;
-            stack[bp + inst.a as usize + 1] = slot1;
+            stack_set(stack, bp + inst.a as usize, new_slot0);
+            stack_set(stack, bp + inst.a as usize + 1, slot1);
         } else if src_vk == ValueKind::Struct {
             // Concrete type assertion for struct: copy value from GcRef
             let gc_ref = slot1 as GcRef;
@@ -186,11 +188,11 @@ pub fn exec_iface_assert(
             if slot1 != 0 {
                 for i in 0..slots {
                     let val = unsafe { *gc_ref.add(i as usize) };
-                    stack[bp + inst.a as usize + i as usize] = val;
+                    stack_set(stack, bp + inst.a as usize + i as usize, val);
                 }
             } else {
                 for i in 0..slots {
-                    stack[bp + inst.a as usize + i as usize] = 0;
+                    stack_set(stack, bp + inst.a as usize + i as usize, 0);
                 }
             }
         } else if src_vk == ValueKind::Array {
@@ -204,29 +206,29 @@ pub fn exec_iface_assert(
                 let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
                 for i in 0..slots {
                     let val = unsafe { *data_ptr.add(i as usize) };
-                    stack[bp + inst.a as usize + i as usize] = val;
+                    stack_set(stack, bp + inst.a as usize + i as usize, val);
                 }
             } else {
                 for i in 0..slots {
-                    stack[bp + inst.a as usize + i as usize] = 0;
+                    stack_set(stack, bp + inst.a as usize + i as usize, 0);
                 }
             }
         } else {
             // Concrete type assertion for other types: slot1 is the value
-            stack[bp + inst.a as usize] = slot1;
+            stack_set(stack, bp + inst.a as usize, slot1);
         }
     };
 
     if has_ok {
         let ok_slot = if assert_kind == 1 { inst.a + 2 } else if target_slots > 1 { inst.a + target_slots } else { inst.a + 1 };
-        stack[bp + ok_slot as usize] = matches as u64;
+        stack_set(stack, bp + ok_slot as usize, matches as u64);
         if matches {
             write_success(stack, itab_cache);
         } else {
             // Zero out destination on failure
             let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
             for i in 0..dst_slots {
-                stack[bp + inst.a as usize + i as usize] = 0;
+                stack_set(stack, bp + inst.a as usize + i as usize, 0);
             }
         }
         ExecResult::FrameChanged
@@ -241,13 +243,13 @@ pub fn exec_iface_assert(
 /// IfaceEq: a = (b == c) where b,c are 2-slot interface values
 /// Go interface equality: same dynamic type (rttid + vk) AND same dynamic value
 /// Panics if dynamic type is not comparable (slice, map, func, chan).
-pub fn exec_iface_eq(stack: &mut [u64], bp: usize, inst: &Instruction, module: &Module) -> ExecResult {
+pub fn exec_iface_eq(stack: *mut Slot, bp: usize, inst: &Instruction, module: &Module) -> ExecResult {
     use vo_runtime::objects::compare;
     
-    let b0 = stack[bp + inst.b as usize];
-    let b1 = stack[bp + inst.b as usize + 1];
-    let c0 = stack[bp + inst.c as usize];
-    let c1 = stack[bp + inst.c as usize + 1];
+    let b0 = stack_get(stack, bp + inst.b as usize);
+    let b1 = stack_get(stack, bp + inst.b as usize + 1);
+    let c0 = stack_get(stack, bp + inst.c as usize);
+    let c1 = stack_get(stack, bp + inst.c as usize + 1);
     
     let result = compare::iface_eq(b0, b1, c0, c1, module);
     
@@ -255,6 +257,6 @@ pub fn exec_iface_eq(stack: &mut [u64], bp: usize, inst: &Instruction, module: &
         return ExecResult::Panic;
     }
     
-    stack[bp + inst.a as usize] = result;
+    stack_set(stack, bp + inst.a as usize, result);
     ExecResult::FrameChanged
 }

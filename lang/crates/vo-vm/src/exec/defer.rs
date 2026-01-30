@@ -4,10 +4,12 @@
 use alloc::vec::Vec;
 
 use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::slot::Slot;
 use vo_runtime::{ValueKind, ValueMeta};
 
 use crate::fiber::{CallFrame, DeferEntry};
 use crate::instruction::Instruction;
+use crate::vm::helpers::{stack_get, stack_set};
 
 /// DeferPush instruction format:
 /// - a: func_id (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
@@ -16,7 +18,7 @@ use crate::instruction::Instruction;
 /// - flags bit 0: is_closure
 #[inline]
 pub fn exec_defer_push(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     frames: &[CallFrame],
     defer_stack: &mut Vec<DeferEntry>,
@@ -29,7 +31,7 @@ pub fn exec_defer_push(
 
 #[inline]
 pub fn exec_err_defer_push(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     frames: &[CallFrame],
     defer_stack: &mut Vec<DeferEntry>,
@@ -41,7 +43,7 @@ pub fn exec_err_defer_push(
 }
 
 fn push_defer_entry(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     frames: &[CallFrame],
     defer_stack: &mut Vec<DeferEntry>,
@@ -56,7 +58,7 @@ fn push_defer_entry(
     let frame_depth = frames.len();
 
     let (func_id, closure) = if is_closure {
-        let closure_ref = stack[bp + inst.a as usize] as GcRef;
+        let closure_ref = stack_get(stack, bp + inst.a as usize) as GcRef;
         (0, closure_ref)
     } else {
         let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
@@ -66,7 +68,7 @@ fn push_defer_entry(
     let args = if arg_slots > 0 {
         let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Array), arg_slots);
         for i in 0..arg_slots {
-            let val = stack[bp + arg_start as usize + i as usize];
+            let val = stack_get(stack, bp + arg_start as usize + i as usize);
             unsafe { Gc::write_slot(args_ref, i as usize, val) };
         }
         args_ref
@@ -98,20 +100,20 @@ fn push_defer_entry(
 /// This is critical: without this change, nested calls within the defer function
 /// would incorrectly trigger panic_unwind when they return.
 #[inline]
-pub fn exec_recover(stack: &mut [u64], bp: usize, fiber: &mut crate::fiber::Fiber, inst: &Instruction) {
+pub fn exec_recover(stack: *mut Slot, bp: usize, fiber: &mut crate::fiber::Fiber, inst: &Instruction) {
     use vo_runtime::InterfaceSlot;
     
     if !fiber.is_direct_defer_context() {
         // Not in direct defer context - return nil without consuming panic
-        stack[bp + inst.a as usize] = 0;
-        stack[bp + inst.a as usize + 1] = 0;
+        stack_set(stack, bp + inst.a as usize, 0);
+        stack_set(stack, bp + inst.a as usize + 1, 0);
         return;
     }
 
     let recovered = fiber.take_recoverable_panic();
     let val = recovered.unwrap_or(InterfaceSlot::nil());
-    stack[bp + inst.a as usize] = val.slot0;
-    stack[bp + inst.a as usize + 1] = val.slot1;
+    stack_set(stack, bp + inst.a as usize, val.slot0);
+    stack_set(stack, bp + inst.a as usize + 1, val.slot1);
     
     // If recover succeeded, switch unwinding mode from Panic to Return
     // so nested calls don't trigger panic_unwind.

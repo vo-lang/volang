@@ -6,6 +6,7 @@ use vo_runtime::objects::closure;
 use vo_runtime::slot::Slot;
 
 use crate::instruction::Instruction;
+use crate::vm::helpers::{stack_get, stack_set};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -44,7 +45,7 @@ pub struct GoIslandResult {
 #[cfg(feature = "std")]
 #[inline]
 pub fn exec_island_new(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
@@ -53,7 +54,7 @@ pub fn exec_island_new(
     // Channel managed by VM, not stored in GC object
     let (tx, rx) = std::sync::mpsc::channel::<IslandCommand>();
     let handle = island::create(gc, next_island_id);
-    stack[bp + inst.a as usize] = handle as u64;
+    stack_set(stack, bp + inst.a as usize, handle as u64);
     IslandNewResult {
         handle,
         command_tx: tx,
@@ -64,7 +65,7 @@ pub fn exec_island_new(
 #[cfg(not(feature = "std"))]
 #[inline]
 pub fn exec_island_new(
-    stack: &mut [u64],
+    stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
@@ -72,7 +73,7 @@ pub fn exec_island_new(
 ) -> GcRef {
     // Islands not supported in no_std - create dummy main island handle
     let handle = island::create_main(gc);
-    stack[bp + inst.a as usize] = handle as u64;
+    stack_set(stack, bp + inst.a as usize, handle as u64);
     handle
 }
 
@@ -86,12 +87,12 @@ pub fn exec_island_new(
 /// 3. Reads raw argument slots from stack
 /// 4. Returns data for VM coordinator to handle packing with proper type info
 pub fn exec_go_island(
-    stack: &[u64],
+    stack: *const Slot,
     bp: usize,
     inst: &Instruction,
 ) -> GoIslandResult {
-    let island_handle = stack[bp + inst.a as usize] as GcRef;
-    let closure_ref = stack[bp + inst.b as usize] as GcRef;
+    let island_handle = stack_get(stack, bp + inst.a as usize) as GcRef;
+    let closure_ref = stack_get(stack, bp + inst.b as usize) as GcRef;
     let args_start = bp + inst.c as usize;
     let arg_slots = inst.flags as usize;
 
@@ -108,7 +109,7 @@ pub fn exec_go_island(
     // Read raw argument slots
     let mut arg_data = Vec::with_capacity(arg_slots);
     for i in 0..arg_slots {
-        arg_data.push(stack[args_start + i]);
+        arg_data.push(stack_get(stack, args_start + i));
     }
 
     GoIslandResult {
