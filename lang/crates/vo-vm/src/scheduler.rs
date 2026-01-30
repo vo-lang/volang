@@ -126,9 +126,7 @@ impl Scheduler {
                 let fiber = &mut self.fibers[idx as usize];
                 if fiber.state.is_blocked() {
                     fiber.state = FiberState::Runnable;
-                    if !self.ready_queue.contains(&idx) {
-                        self.ready_queue.push_back(idx);
-                    }
+                    self.ready_queue.push_back(idx);
                 }
             }
         }

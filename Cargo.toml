@@ -16,9 +16,17 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
-# vo-web release profile (WASM optimization)
+# WASM-optimized release (size)
 [profile.release]
 opt-level = "s"
 lto = true
 strip = true
 debug = false
+
+# Native-optimized release (speed)
+[profile.release-native]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+debug-assertions = false
+overflow-checks = false
