@@ -30,7 +30,7 @@ public class Matrix2 {
 
         Mat3 tmp = new Mat3();
 
-        for (int i = 0; i < 3000000; i++) {
+        for (int i = 0; i < 300000; i++) {
             matMulInto(tmp, result, a);
             matMulInto(result, tmp, a);
         }

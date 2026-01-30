@@ -22,7 +22,7 @@ public class Trees {
 
     public static void main(String[] args) {
         int minDepth = 4;
-        int maxDepth = 16;
+        int maxDepth = 10;
         int stretchDepth = maxDepth + 1;
 
         Node stretchTree = make(stretchDepth);

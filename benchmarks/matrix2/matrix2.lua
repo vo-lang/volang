@@ -28,7 +28,7 @@ local tmp = {
     m20 = 0, m21 = 0, m22 = 0,
 }
 
-for i = 1, 1000000 do
+for i = 1, 300000 do
     matMulInto(tmp, result, a)
     matMulInto(result, tmp, a)
 end

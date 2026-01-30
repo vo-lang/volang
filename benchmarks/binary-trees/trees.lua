@@ -16,7 +16,7 @@ local function check(n)
 end
 
 local minDepth = 4
-local maxDepth = 16
+local maxDepth = 10
 local stretchDepth = maxDepth + 1
 
 local stretchTree = make(stretchDepth)
