@@ -6,9 +6,9 @@ license.workspace = true
 description = "Vox - compile, run, and inspect Vo programs"
 
 [features]
-default = []
+default = ["jit"]
 ffi = []
-jit = ["vo-vm/jit"]
+jit = ["vo-vm/jit", "vo-engine/jit"]
 gc-debug = ["vo-runtime/gc-debug"]
 
 [lib]

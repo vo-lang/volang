@@ -10,6 +10,17 @@ mod ffi;
 mod printer;
 mod format;
 
+/// Force link this crate's FFI functions.
+/// Call this from your main() to ensure linkme symbols are included.
+pub fn ensure_linked() {
+    // Reference vo_ext_get_entries to force linker to include FFI symbols
+    extern "C" {
+        fn vo_ext_get_entries() -> vo_ext::ExtensionTable;
+    }
+    // Use black_box to prevent optimization
+    let _ = std::hint::black_box(unsafe { vo_ext_get_entries() });
+}
+
 // Re-export vo-engine
 pub use vo_engine::{compile, compile_with_cache, compile_string, CompileError, CompileOutput};
 pub use vo_engine::{run, RunMode, RunError, RuntimeError, RuntimeErrorKind};

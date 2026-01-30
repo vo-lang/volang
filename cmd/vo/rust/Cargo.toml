@@ -11,8 +11,9 @@ path = "src/main.rs"
 
 [features]
 default = ["jit"]
-jit = ["vo-engine/jit"]
+jit = ["vo-engine/jit", "vo-vox/jit"]
 
 [dependencies]
 vo-engine = { path = "../../../lang/crates/vo-engine" }
 vo-vox = { path = "../../../libs/vox/rust" }
+vo-ext = { path = "../../../lang/crates/vo-ext" }

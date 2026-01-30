@@ -16,6 +16,7 @@ use crate::JitError;
 
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
+    func_id: u32,
     func_def: &'a FunctionDef,
     vo_module: &'a VoModule,
     vars: Vec<Variable>,
@@ -31,6 +32,7 @@ impl<'a> FunctionCompiler<'a> {
     pub fn new(
         func: &'a mut Function,
         func_ctx: &'a mut FunctionBuilderContext,
+        func_id: u32,
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         helpers: HelperFuncs,
@@ -41,6 +43,7 @@ impl<'a> FunctionCompiler<'a> {
         
         Self {
             builder,
+            func_id,
             func_def,
             vo_module,
             vars: Vec::new(),
@@ -289,27 +292,105 @@ impl<'a> FunctionCompiler<'a> {
     fn call(&mut self, inst: &Instruction) -> bool {
         self.do_emit_safepoint();
         
-        let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+        let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
         let call_ret_slots = (inst.c & 0xFF) as usize;
         
         // Get target function info
-        let target_func = &self.vo_module.functions[func_id as usize];
+        let target_func = &self.vo_module.functions[target_func_id as usize];
         
         // Check if callee is jittable (statically known at compile time)
-        let callee_jittable = Self::is_func_jittable(target_func);
+        let callee_jittable = crate::is_func_jittable(target_func);
         
         if callee_jittable {
-            // Callee is jittable - try JIT-to-JIT call, fallback to vo_call_vm if not compiled yet
-            self.call_with_jit_check(inst, func_id, arg_start, arg_slots, call_ret_slots, target_func);
+            // Self-recursive call optimization: direct call without jit_func_table check
+            if target_func_id == self.func_id {
+                self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
+            } else {
+                // Callee is jittable - try JIT-to-JIT call, fallback to vo_call_vm if not compiled yet
+                self.call_with_jit_check(inst, target_func_id, arg_start, arg_slots, call_ret_slots, target_func);
+            }
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee is NOT jittable (has defer/channel/select/etc)
             // Use vo_call_vm which handles blocking via temporary fiber (existing behavior)
             // This is a compromise - full NeedVm support requires JIT/VM state sharing
-            self.call_via_vm(func_id, arg_start, arg_slots, call_ret_slots, target_func);
+            self.call_via_vm(target_func_id, arg_start, arg_slots, call_ret_slots, target_func);
             false
+        }
+    }
+    
+    /// Optimized self-recursive call - load from jit_func_table without null check
+    fn call_self_recursive(&mut self, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
+        let func_ret_slots = target_func.ret_slots as usize;
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        
+        // Create stack slots for args and return values
+        let arg_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (arg_slots.max(1) * 8) as u32,
+            8,
+        ));
+        let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (func_ret_slots.max(1) * 8) as u32,
+            8,
+        ));
+        
+        // Store arguments to stack slot
+        for i in 0..arg_slots {
+            let val = self.builder.use_var(self.vars[arg_start + i]);
+            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
+        }
+        
+        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
+        let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
+        
+        // Load self from jit_func_table (we know it's compiled since we're executing it)
+        // JitContext offset 96 = jit_func_table pointer
+        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, 96);
+        let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
+        let offset = self.builder.ins().imul_imm(func_id_i64, 8);
+        let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
+        let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+        
+        // Create signature for indirect call
+        let sig = self.builder.func.import_signature({
+            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+            sig
+        });
+        
+        // Indirect call to self (no null check needed - we know it's compiled)
+        let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+        let result = self.builder.inst_results(call)[0];
+        
+        // Check result for panic
+        let one = self.builder.ins().iconst(types::I32, 1);
+        let is_panic = self.builder.ins().icmp(IntCC::Equal, result, one);
+        
+        let panic_block = self.builder.create_block();
+        let ok_block = self.builder.create_block();
+        
+        self.builder.ins().brif(is_panic, panic_block, &[], ok_block, &[]);
+        
+        // Panic path
+        self.builder.switch_to_block(panic_block);
+        self.builder.seal_block(panic_block);
+        let panic_val = self.builder.ins().iconst(types::I32, 1);
+        self.builder.ins().return_(&[panic_val]);
+        
+        // OK path - load return values
+        self.builder.switch_to_block(ok_block);
+        self.builder.seal_block(ok_block);
+        
+        for i in 0..call_ret_slots {
+            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+            self.sync_var((arg_start + i) as u16, val);
         }
     }
     
@@ -354,20 +435,6 @@ impl<'a> FunctionCompiler<'a> {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
             self.sync_var((arg_start + i) as u16, val);
         }
-    }
-    
-    /// Check if a function is jittable (does not contain blocking operations)
-    fn is_func_jittable(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-        use vo_runtime::instruction::Opcode;
-        for inst in &func.code {
-            match inst.opcode() {
-                Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-                | Opcode::GoStart | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
-                | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
-                _ => {}
-            }
-        }
-        true
     }
     
     /// JIT-to-JIT call with runtime check for compiled callee

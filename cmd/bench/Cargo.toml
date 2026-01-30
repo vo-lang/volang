@@ -1,0 +1,17 @@
+[package]
+name = "vo-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vo benchmark runner - directly compiles and runs .vo files without nesting"
+
+[[bin]]
+name = "vo-bench"
+path = "src/main.rs"
+
+[features]
+default = ["jit"]
+jit = ["vo-engine/jit"]
+
+[dependencies]
+vo-engine = { path = "../../lang/crates/vo-engine" }

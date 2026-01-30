@@ -197,6 +197,19 @@ impl JitManager {
         None
     }
     
+    /// Eagerly compile a function without waiting for call threshold.
+    /// Used for entry functions that should be JIT compiled immediately.
+    #[allow(dead_code)]
+    pub fn try_compile_eager(&mut self, func_id: u32, func_def: &FunctionDef, module: &VoModule) -> bool {
+        // Already compiled?
+        if self.get_entry(func_id).is_some() {
+            return true;
+        }
+        
+        // Try to compile
+        self.compile_full(func_id, func_def, module).is_ok()
+    }
+    
     // =========================================================================
     // Recording API
     // =========================================================================

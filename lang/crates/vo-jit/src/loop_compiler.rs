@@ -315,17 +315,32 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn call(&mut self, inst: &Instruction) {
-        let call_vm_func = match self.helpers.call_vm {
-            Some(f) => f,
-            None => return,
-        };
-        
         self.do_emit_safepoint();
         
         let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
         let arg_slots = (inst.c >> 8) as usize;
-        let ret_slots = (inst.c & 0xFF) as usize;
+        let call_ret_slots = (inst.c & 0xFF) as usize;
+        
+        // Get target function ret_slots for buffer sizing
+        let target_func = &self.vo_module.functions[func_id as usize];
+        let func_ret_slots = target_func.ret_slots as usize;
+        
+        // Check if callee is jittable
+        let callee_jittable = crate::is_func_jittable(target_func);
+        
+        if callee_jittable {
+            self.call_with_jit_check(func_id, arg_start, arg_slots, call_ret_slots, func_ret_slots);
+        } else {
+            self.call_via_vm(func_id, arg_start, arg_slots, call_ret_slots, func_ret_slots);
+        }
+    }
+    
+    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, arg_slots: usize, call_ret_slots: usize, func_ret_slots: usize) {
+        let call_vm_func = match self.helpers.call_vm {
+            Some(f) => f,
+            None => return,
+        };
         
         let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
@@ -334,7 +349,7 @@ impl<'a> LoopCompiler<'a> {
         ));
         let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (ret_slots.max(1) * 8) as u32,
+            (func_ret_slots.max(1) * 8) as u32,
             8,
         ));
         
@@ -347,7 +362,7 @@ impl<'a> LoopCompiler<'a> {
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
         let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-        let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
+        let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
         
         let ctx = self.ctx_ptr;
         let call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr, arg_count, ret_ptr, ret_count]);
@@ -355,7 +370,137 @@ impl<'a> LoopCompiler<'a> {
         
         self.check_call_result(result);
         
-        for i in 0..ret_slots {
+        for i in 0..call_ret_slots {
+            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+            self.write_var((arg_start + i) as u16, val);
+        }
+    }
+    
+    fn call_with_jit_check(&mut self, func_id: u32, arg_start: usize, arg_slots: usize, call_ret_slots: usize, func_ret_slots: usize) {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        
+        let ctx = self.ctx_ptr;
+        
+        // Create stack slots for args and return values
+        let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (arg_slots.max(1) * 8) as u32,
+            8,
+        ));
+        let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (func_ret_slots.max(1) * 8) as u32,
+            8,
+        ));
+        
+        // Store arguments
+        for i in 0..arg_slots {
+            let val = self.read_var((arg_start + i) as u16);
+            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
+        }
+        
+        // Load jit_func_table pointer from ctx (offset 96)
+        let jit_func_table = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), ctx, 96);
+        
+        // Calculate address: jit_func_table + func_id * 8
+        let func_id_i64 = self.builder.ins().iconst(types::I64, func_id as i64);
+        let offset = self.builder.ins().imul_imm(func_id_i64, 8);
+        let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
+        
+        // Load function pointer
+        let jit_func_ptr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), func_ptr_addr, 0);
+        
+        // Check if null
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let is_null = self.builder.ins().icmp(IntCC::Equal, jit_func_ptr, zero);
+        
+        // Create blocks
+        let jit_call_block = self.builder.create_block();
+        let vm_call_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        
+        self.builder.ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
+        
+        // === JIT-to-JIT call path ===
+        self.builder.switch_to_block(jit_call_block);
+        self.builder.seal_block(jit_call_block);
+        
+        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
+        let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
+        
+        // Create signature for JIT function
+        let sig = self.builder.func.import_signature({
+            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+            sig
+        });
+        
+        let jit_call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+        let jit_result = self.builder.inst_results(jit_call)[0];
+        
+        // Check for panic (create one constant in this block)
+        let jit_one = self.builder.ins().iconst(types::I32, 1);
+        let is_panic = self.builder.ins().icmp(IntCC::Equal, jit_result, jit_one);
+        
+        let jit_panic_block = self.builder.create_block();
+        let jit_ok_block = self.builder.create_block();
+        
+        self.builder.ins().brif(is_panic, jit_panic_block, &[], jit_ok_block, &[]);
+        
+        // JIT panic - return panic code
+        self.builder.switch_to_block(jit_panic_block);
+        self.builder.seal_block(jit_panic_block);
+        let panic_val = self.builder.ins().iconst(types::I32, crate::LOOP_RESULT_PANIC as i64);
+        self.builder.ins().return_(&[panic_val]);
+        
+        // JIT OK - jump to merge
+        self.builder.switch_to_block(jit_ok_block);
+        self.builder.seal_block(jit_ok_block);
+        self.builder.ins().jump(merge_block, &[]);
+        
+        // === VM call path ===
+        self.builder.switch_to_block(vm_call_block);
+        self.builder.seal_block(vm_call_block);
+        
+        if let Some(call_vm_func) = self.helpers.call_vm {
+            let args_ptr_vm = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
+            let ret_ptr_vm = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
+            let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
+            let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
+            let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
+            
+            let vm_call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
+            let vm_result = self.builder.inst_results(vm_call)[0];
+            
+            // Create one constant in this block (can't use value from jit_call_block)
+            let vm_one = self.builder.ins().iconst(types::I32, 1);
+            let vm_is_panic = self.builder.ins().icmp(IntCC::Equal, vm_result, vm_one);
+            
+            let vm_panic_block = self.builder.create_block();
+            let vm_ok_block = self.builder.create_block();
+            
+            self.builder.ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
+            
+            self.builder.switch_to_block(vm_panic_block);
+            self.builder.seal_block(vm_panic_block);
+            let vm_panic_val = self.builder.ins().iconst(types::I32, crate::LOOP_RESULT_PANIC as i64);
+            self.builder.ins().return_(&[vm_panic_val]);
+            
+            self.builder.switch_to_block(vm_ok_block);
+            self.builder.seal_block(vm_ok_block);
+            self.builder.ins().jump(merge_block, &[]);
+        } else {
+            self.builder.ins().jump(merge_block, &[]);
+        }
+        
+        // === Merge block ===
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        
+        for i in 0..call_ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
             self.write_var((arg_start + i) as u16, val);
         }

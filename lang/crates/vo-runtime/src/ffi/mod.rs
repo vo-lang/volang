@@ -1233,6 +1233,27 @@ impl ExternRegistry {
         }
     }
 
+    /// Register all functions from linkme distributed slices.
+    ///
+    /// This resolves extern function names from the module's extern defs
+    /// and registers them by ID from EXTERN_TABLE and EXTERN_TABLE_WITH_CONTEXT.
+    #[cfg(feature = "std")]
+    pub fn register_from_linkme(&mut self, extern_defs: &[crate::bytecode::ExternDef]) {
+        for (id, def) in extern_defs.iter().enumerate() {
+            // Already registered (e.g., from stdlib)?
+            if self.has(id as u32) {
+                continue;
+            }
+            
+            // Try to find in linkme tables
+            if let Some(func) = lookup_extern(&def.name) {
+                self.register(id as u32, func);
+            } else if let Some(func) = lookup_extern_with_context(&def.name) {
+                self.register_with_context(id as u32, func);
+            }
+        }
+    }
+
     /// Register a simple extern function (no GC access).
     pub fn register(&mut self, id: u32, func: ExternFn) {
         let idx = id as usize;

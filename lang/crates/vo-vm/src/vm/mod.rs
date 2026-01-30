@@ -182,6 +182,9 @@ impl Vm {
             vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
         }
 
+        // Register extern functions from linkme distributed slices
+        self.state.extern_registry.register_from_linkme(&module.externs);
+
         // Register extern functions from extension loader (if provided)
         if let Some(loader) = ext_loader {
             self.state.extern_registry.register_from_extension_loader(loader, &module.externs);
@@ -219,6 +222,7 @@ impl Vm {
         }
 
         let func = &module.functions[entry_func as usize];
+        
         let mut fiber = Fiber::new(0);
         fiber.push_frame(entry_func, func.local_slots, 0, 0);
         self.scheduler.spawn(fiber);

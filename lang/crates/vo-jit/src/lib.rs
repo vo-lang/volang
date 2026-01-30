@@ -24,6 +24,24 @@ use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitContext, JitResult};
 
 // =============================================================================
+// Shared Utilities
+// =============================================================================
+
+/// Check if a function is jittable (does not contain blocking operations).
+/// A function is NOT jittable if it uses defer, channels, select, or goroutines.
+pub fn is_func_jittable(func: &FunctionDef) -> bool {
+    for inst in &func.code {
+        match inst.opcode() {
+            Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
+            | Opcode::GoStart | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
+            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+// =============================================================================
 // JitError
 // =============================================================================
 
@@ -742,7 +760,7 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = FunctionCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, helpers);
+        let compiler = FunctionCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, helpers);
         compiler.compile()?;
         
         if self.debug_ir {

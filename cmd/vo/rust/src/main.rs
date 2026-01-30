@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::process;
 
 fn main() {
+    // Force link vo-vox FFI functions
+    vo_vox::ensure_linked();
+    
     let args: Vec<String> = env::args().collect();
     
     // Parse launcher arguments (before cmd/vo arguments)

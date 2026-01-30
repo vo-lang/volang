@@ -253,6 +253,13 @@ def get_vo_embed_bin() -> Path:
     """Get the path to vo-embed binary (bytecode runner with no_std deps)."""
     return PROJECT_ROOT / 'target' / 'debug' / 'vo-embed'
 
+
+def get_vo_bench_bin(arch: str = '64') -> Path:
+    """Get the path to vo-bench binary (direct benchmark runner)."""
+    if arch == '32':
+        return PROJECT_ROOT / 'target' / TARGET_32 / 'release' / 'vo-bench'
+    return PROJECT_ROOT / 'target' / 'release' / 'vo-bench'
+
 # Legacy paths for backward compatibility
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
 VO_BIN_RELEASE = PROJECT_ROOT / 'target' / 'release' / 'vo'
@@ -974,7 +981,7 @@ class BenchmarkRunner:
         self.vo_only = vo_only
         self.all_langs = all_langs
         self.arch = arch
-        self.vo_bin = get_vo_bin(native=True, arch=arch)
+        self.vo_bench_bin = get_vo_bench_bin(arch=arch)
 
     def run(self, target: str):
         if target == 'score':
@@ -1008,36 +1015,27 @@ class BenchmarkRunner:
 
     def _build_vo(self):
         target_info = f" (target: {TARGET_32})" if self.arch == '32' else ""
-        print(f"Building Vo (release-native){target_info}...")
-        build_cmd = ['cargo', 'build', '--profile', 'release-native', '-p', 'vo']
+        print(f"Building vo-bench (release){target_info}...")
+        build_cmd = ['cargo', 'build', '--release', '-p', 'vo-bench']
         if self.arch == '32':
             build_cmd.extend(['--target', TARGET_32, '--no-default-features'])
         code, _, stderr = run_cmd(build_cmd, capture=True)
         if code != 0:
             print(f"{Colors.RED}Build failed:{Colors.NC}\n{stderr}")
             sys.exit(1)
-        
-        # Build vo-vox extension (release-native mode for benchmarks)
-        ensure_vox_extension_built(arch=self.arch, native=True)
-        
-        # Update vo.ext.toml to use release-native path for benchmarks
-        self._set_vox_path_for_benchmark()
-        
-        # Invalidate CLI cache if source files or binary changed
-        invalidate_cli_cache_if_needed()
     
     def _set_vox_path_for_benchmark(self):
-        """Temporarily update vo.ext.toml to use release-native library."""
+        """Temporarily update vo.ext.toml to use release library."""
         vox_toml = PROJECT_ROOT / 'libs' / 'vox' / 'vo.ext.toml'
         if vox_toml.exists():
             content = vox_toml.read_text()
             new_content = content.replace(
                 'target/debug/libvo_vox.so',
-                'target/release-native/libvo_vox.so'
+                'target/release/libvo_vox.so'
             )
             if new_content != content:
                 vox_toml.write_text(new_content)
-                print(f"{Colors.DIM}Updated vo.ext.toml for release-native{Colors.NC}")
+                print(f"{Colors.DIM}Updated vo.ext.toml for release{Colors.NC}")
 
     def _list_benchmarks(self):
         print("Available benchmarks:")
@@ -1055,7 +1053,7 @@ class BenchmarkRunner:
 
     def _run_benchmark(self, name: str):
         bench_dir = BENCHMARK_DIR / name
-        vo_bin = str(self.vo_bin)
+        vo_bench_bin = str(self.vo_bench_bin)
 
         print(f"\n=== {name} ===\n")
 
@@ -1071,11 +1069,12 @@ class BenchmarkRunner:
         names = []
 
         if vo_file:
-            cmds.append(f"{vo_bin} --cache '{CLI_DIR}' run '{vo_file}'")
+            # Use vo-bench for direct execution (no nested VM calls)
+            cmds.append(f"'{vo_bench_bin}' '{vo_file}'")
             names.append('Vo-VM')
             # JIT not supported on 32-bit
             if self.arch != '32':
-                cmds.append(f"{vo_bin} --cache '{CLI_DIR}' run '{vo_file}' --mode=jit")
+                cmds.append(f"'{vo_bench_bin}' --jit '{vo_file}'")
                 names.append('Vo-JIT')
 
         if not self.vo_only:

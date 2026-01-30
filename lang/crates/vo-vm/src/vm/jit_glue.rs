@@ -305,32 +305,65 @@ impl Vm {
         func_ret_slots: usize,
         call_ret_slots: usize,
     ) -> (ExecResult, Option<(u32, u32)>) {
+        // Use stack-allocated buffers to avoid heap allocation on every call
+        // Most functions have <= 32 args and <= 16 returns
+        const MAX_STACK_SLOTS: usize = 32;
+        
         // Read args from fiber stack
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
-        let mut args: Vec<u64> = (0..arg_slots)
-            .map(|i| fiber.read_reg(arg_start + i as u16))
-            .collect();
+        let mut args_buf = [0u64; MAX_STACK_SLOTS];
+        let mut args_heap: Option<Vec<u64>> = None;
+        
+        let args_ptr = if arg_slots <= MAX_STACK_SLOTS {
+            for i in 0..arg_slots {
+                args_buf[i] = fiber.read_reg(arg_start + i as u16);
+            }
+            args_buf.as_mut_ptr()
+        } else {
+            let mut v: Vec<u64> = (0..arg_slots)
+                .map(|i| fiber.read_reg(arg_start + i as u16))
+                .collect();
+            let ptr = v.as_mut_ptr();
+            args_heap = Some(v);
+            ptr
+        };
+        
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         
-        let mut ret_buf = vec![0u64; func_ret_slots.max(1)];
-        let jit_result = self.call_jit_direct(jit_func, fiber_ptr, args.as_mut_ptr(), ret_buf.as_mut_ptr());
+        let mut ret_buf = [0u64; MAX_STACK_SLOTS];
+        let mut ret_heap: Option<Vec<u64>> = None;
+        
+        let ret_ptr = if func_ret_slots <= MAX_STACK_SLOTS {
+            ret_buf.as_mut_ptr()
+        } else {
+            let mut v = vec![0u64; func_ret_slots];
+            let ptr = v.as_mut_ptr();
+            ret_heap = Some(v);
+            ptr
+        };
+        
+        let jit_result = self.call_jit_direct(jit_func, fiber_ptr, args_ptr, ret_ptr);
+        
+        // Keep heap allocations alive until after call
+        drop(args_heap);
         
         match jit_result.result {
             JitResult::Ok => {
                 // Write returns back to fiber stack
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                for i in 0..call_ret_slots.min(ret_buf.len()) {
-                    fiber.write_reg(arg_start + i as u16, ret_buf[i]);
+                let ret_slice = if let Some(ref v) = ret_heap { v.as_slice() } else { &ret_buf[..] };
+                for i in 0..call_ret_slots.min(func_ret_slots) {
+                    fiber.write_reg(arg_start + i as u16, ret_slice[i]);
                 }
+                drop(ret_heap);
                 (ExecResult::FrameChanged, None)
             }
             JitResult::NeedVm => {
-                // JIT needs VM to execute a call to a may-block function
-                // Return the entry_pc and resume_pc so caller can handle it
+                drop(ret_heap);
                 (ExecResult::FrameChanged, Some((jit_result.need_vm_entry_pc, jit_result.need_vm_resume_pc)))
             }
             JitResult::Panic => {
-                // panic_state already set by call_jit_direct
+                drop(ret_heap);
                 (ExecResult::Panic, None)
             }
         }
@@ -376,10 +409,9 @@ impl Vm {
                                 return self.execute_loop_osr(fiber_id, loop_func, bp);
                             }
                         }
-                        Err(e) => {
-                            // Mark as failed and report error
+                        Err(_e) => {
+                            // Mark as failed
                             jit_mgr.mark_loop_failed(func_id, loop_begin_pc);
-                            eprintln!("[JIT] Loop compilation failed (func={}, pc={}): {:?}", func_id, loop_begin_pc, e);
                         }
                     }
                 }

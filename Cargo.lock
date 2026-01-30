@@ -1459,6 +1459,7 @@ name = "vo"
 version = "0.1.0"
 dependencies = [
  "vo-engine",
+ "vo-ext",
  "vo-vox",
 ]
 
@@ -1474,6 +1475,13 @@ dependencies = [
  "vo-common-core",
  "vo-module",
  "vo-syntax",
+]
+
+[[package]]
+name = "vo-bench"
+version = "0.1.0"
+dependencies = [
+ "vo-engine",
 ]
 
 [[package]]
