@@ -466,37 +466,38 @@ impl Vm {
         let fiber = unsafe { &mut *fiber_ptr };
 
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
-        // stack and frames are independent fields of fiber, accessed through raw pointers.
         let stack = unsafe { &mut *(&mut fiber.stack as *mut Vec<u64>) };
-        let frames = unsafe { &mut *(&mut fiber.frames as *mut Vec<crate::fiber::CallFrame>) };
+        let frames_ptr = &mut fiber.frames as *mut Vec<crate::fiber::CallFrame>;
+        let frames = unsafe { &mut *frames_ptr };
         
-        // Macro to fetch/re-fetch frame pointer and related variables
-        macro_rules! refetch_frame {
-            ($frame_ptr:ident, $frame:ident, $func_id:ident, $bp:ident, $code:ident) => {
-                $frame_ptr = match frames.last_mut() {
-                    Some(f) => f as *mut crate::fiber::CallFrame,
+        // Initialize frame variables using raw pointers
+        let mut frame_ptr: *mut crate::fiber::CallFrame = match frames.last_mut() {
+            Some(f) => f as *mut _,
+            None => return ExecResult::Done,
+        };
+        let mut func_id: u32 = unsafe { (*frame_ptr).func_id };
+        let mut bp: usize = unsafe { (*frame_ptr).bp };
+        let mut code: &[Instruction] = &module.functions[func_id as usize].code;
+        
+        // Macro to refetch frame after Call/Return - only called when frame actually changes
+        macro_rules! refetch {
+            () => {{
+                let frames = unsafe { &mut *frames_ptr };
+                frame_ptr = match frames.last_mut() {
+                    Some(f) => f as *mut _,
                     None => return ExecResult::Done,
                 };
-                $frame = unsafe { &mut *$frame_ptr };
-                $func_id = $frame.func_id;
-                $bp = $frame.bp;
-                $code = &module.functions[$func_id as usize].code;
-            };
+                func_id = unsafe { (*frame_ptr).func_id };
+                bp = unsafe { (*frame_ptr).bp };
+                code = &module.functions[func_id as usize].code;
+            }};
         }
-        
-        let mut frame_ptr: *mut crate::fiber::CallFrame;
-        let mut frame: &mut crate::fiber::CallFrame;
-        let mut func_id: u32;
-        let mut bp: usize;
-        let mut code: &[Instruction];
-        refetch_frame!(frame_ptr, frame, func_id, bp, code);
 
         for _ in 0..TIME_SLICE {
-            // SAFETY: codegen guarantees Return instruction at end of every function
+            let frame = unsafe { &mut *frame_ptr };
             let inst = unsafe { *code.get_unchecked(frame.pc) };
             frame.pc += 1;
 
-            // Single dispatch - all instructions handled here
             let result = match inst.opcode() {
                 Opcode::Hint => {
                     #[cfg(feature = "jit")]
@@ -1759,12 +1760,7 @@ impl Vm {
 
             match result {
                 ExecResult::FrameChanged => {
-                    let frames_empty = self.scheduler.get_fiber(fiber_id).frames.is_empty();
-                    if frames_empty {
-                        return ExecResult::Done;
-                    }
-                    // Re-fetch frame_ptr and related variables after Call/Return/Defer
-                    refetch_frame!(frame_ptr, frame, func_id, bp, code);
+                    refetch!();
                 }
                 other => return other,
             }

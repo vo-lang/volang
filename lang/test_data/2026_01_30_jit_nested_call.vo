@@ -1,0 +1,98 @@
+// Test nested JIT→VM→JIT calls within the same fiber.
+// A (jittable) calls B (non-jittable due to defer) calls C (jittable).
+
+package main
+
+import "fmt"
+
+// jittableA is JIT compiled (no blocking operations)
+func jittableA(x int) int {
+	return nonJittableB(x * 2)
+}
+
+// nonJittableB cannot be JIT compiled due to defer
+func nonJittableB(x int) int {
+	defer func() {
+		// This defer makes the function non-jittable
+	}()
+	return jittableC(x + 10)
+}
+
+// jittableC is JIT compiled (no blocking operations)
+func jittableC(x int) int {
+	return x * 3
+}
+
+// Test deep nesting: jit -> vm -> jit -> vm -> jit
+func deepA(x int) int {
+	return deepB(x + 1)
+}
+
+func deepB(x int) int {
+	defer func() {}()
+	return deepC(x + 2)
+}
+
+func deepC(x int) int {
+	return deepD(x + 3)
+}
+
+func deepD(x int) int {
+	defer func() {}()
+	return deepE(x + 4)
+}
+
+func deepE(x int) int {
+	return x * 10
+}
+
+// Test with channel (non-jittable)
+func withChannel(x int) int {
+	ch := make(chan int, 1)
+	ch <- x
+	return <-ch + jittableC(x)
+}
+
+// Test recursive call through VM
+func recursiveA(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return n + recursiveB(n - 1)
+}
+
+func recursiveB(n int) int {
+	defer func() {}()
+	return recursiveA(n)
+}
+
+func main() {
+	// Test basic JIT -> VM -> JIT
+	result1 := jittableA(5)
+	// jittableA(5) = nonJittableB(10) = jittableC(20) = 60
+	assert(result1 == 60, fmt.Sprintf("jittableA(5) = %d, expected 60", result1))
+
+	// Test deep nesting
+	result2 := deepA(1)
+	// deepA(1) = deepB(2) = deepC(4) = deepD(7) = deepE(11) = 110
+	assert(result2 == 110, fmt.Sprintf("deepA(1) = %d, expected 110", result2))
+
+	// Test with channel
+	result3 := withChannel(7)
+	// withChannel(7) = 7 + jittableC(7) = 7 + 21 = 28
+	assert(result3 == 28, fmt.Sprintf("withChannel(7) = %d, expected 28", result3))
+
+	// Test recursive
+	result4 := recursiveA(5)
+	// recursiveA(5) = 5 + recursiveB(4) = 5 + recursiveA(4) = 5 + 4 + recursiveB(3) = ...
+	// = 5 + 4 + 3 + 2 + 1 + 0 = 15
+	assert(result4 == 15, fmt.Sprintf("recursiveA(5) = %d, expected 15", result4))
+
+	println("PASS: nested JIT-VM-JIT calls")
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic(msg)
+	}
+}

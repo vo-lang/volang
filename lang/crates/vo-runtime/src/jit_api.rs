@@ -265,6 +265,24 @@ pub extern "C" fn vo_call_vm(
     call_fn(ctx.vm, ctx.fiber, func_id, args, arg_count, ret, ret_count)
 }
 
+/// Set NeedVm state in JitContext.
+/// Called by JIT when it needs to hand off to VM for a blocking operation.
+/// 
+/// # Arguments
+/// - `ctx`: JIT context
+/// - `entry_pc`: PC of the instruction that needs VM execution
+/// - `resume_pc`: PC where JIT should resume after VM completes
+/// 
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+#[no_mangle]
+pub extern "C" fn vo_set_need_vm(ctx: *mut JitContext, entry_pc: u32, resume_pc: u32) {
+    unsafe {
+        (*ctx).need_vm_entry_pc = entry_pc;
+        (*ctx).need_vm_resume_pc = resume_pc;
+    }
+}
+
 /// Trigger a user panic from JIT code.
 /// The panic message is stored in JitContext for the VM to read later.
 /// 

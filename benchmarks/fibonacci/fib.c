@@ -8,7 +8,7 @@ int fib(int n) {
 }
 
 int main() {
-    int n = 35;
+    int n = 32;
     int result = fib(n);
     printf("fib(%d) = %d\n", n, result);
     return 0;
