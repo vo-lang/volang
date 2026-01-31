@@ -4,7 +4,6 @@
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
-use vo_runtime::slot::Slot;
 
 use crate::bytecode::Module;
 use crate::fiber::{CallFrame, Fiber};
@@ -53,6 +52,7 @@ pub fn exec_call(
         bp: new_bp,
         ret_reg: inst.b,
         ret_count: ret_slots as u16,
+        is_jit_frame: false,
     });
 
     ExecResult::FrameChanged
@@ -109,6 +109,7 @@ pub fn exec_call_closure(
         bp: new_bp,
         ret_reg: inst.b,
         ret_count: ret_slots,
+        is_jit_frame: false,
     });
 
     ExecResult::FrameChanged
@@ -162,6 +163,7 @@ pub fn exec_call_iface(
         bp: new_bp,
         ret_reg: inst.b,
         ret_count: ret_slots as u16,
+        is_jit_frame: false,
     });
 
     ExecResult::FrameChanged

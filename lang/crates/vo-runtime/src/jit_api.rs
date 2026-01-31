@@ -114,12 +114,16 @@ pub struct JitContext {
     #[cfg(feature = "std")]
     pub io: *mut crate::io::IoRuntime,
     
-    /// NeedVm entry PC (set by JIT when returning NeedVm).
-    /// This is the PC of the instruction that needs VM execution.
-    pub need_vm_entry_pc: u32,
+    /// NeedVm: callee function ID
+    pub need_vm_func_id: u32,
     
-    /// NeedVm resume PC (set by JIT when returning NeedVm).
-    /// This is the continuation PC where JIT should resume after VM completes.
+    /// NeedVm: arg_start offset in JIT's local variable area
+    pub need_vm_arg_start: u16,
+    
+    /// NeedVm: callee entry PC (usually 0)
+    pub need_vm_entry_pc: u16,
+    
+    /// NeedVm: resume PC where JIT should continue after VM completes
     pub need_vm_resume_pc: u32,
 }
 
@@ -266,19 +270,16 @@ pub extern "C" fn vo_call_vm(
 }
 
 /// Set NeedVm state in JitContext.
-/// Called by JIT when it needs to hand off to VM for a blocking operation.
-/// 
-/// # Arguments
-/// - `ctx`: JIT context
-/// - `entry_pc`: PC of the instruction that needs VM execution
-/// - `resume_pc`: PC where JIT should resume after VM completes
+/// Called by JIT when it needs to hand off to VM for a non-jittable callee.
 /// 
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
 #[no_mangle]
-pub extern "C" fn vo_set_need_vm(ctx: *mut JitContext, entry_pc: u32, resume_pc: u32) {
+pub extern "C" fn vo_set_need_vm(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32) {
     unsafe {
-        (*ctx).need_vm_entry_pc = entry_pc;
+        (*ctx).need_vm_func_id = func_id;
+        (*ctx).need_vm_arg_start = arg_start as u16;
+        (*ctx).need_vm_entry_pc = 0; // Callee always starts at PC 0
         (*ctx).need_vm_resume_pc = resume_pc;
     }
 }

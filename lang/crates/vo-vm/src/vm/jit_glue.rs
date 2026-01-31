@@ -223,8 +223,35 @@ pub fn build_jit_ctx(
         sentinel_errors: &mut state.sentinel_errors as *mut _,
         #[cfg(feature = "std")]
         io: &mut state.io as *mut _,
+        need_vm_func_id: 0,
+        need_vm_arg_start: 0,
         need_vm_entry_pc: 0,
         need_vm_resume_pc: 0,
+    }
+}
+
+// =============================================================================
+// NeedVm Info
+// =============================================================================
+
+/// Info for NeedVm handoff from JIT to VM.
+pub struct NeedVmInfo {
+    pub func_id: u32,
+    pub arg_start: usize,
+    pub entry_pc: usize,
+    pub resume_pc: u32,
+}
+
+impl NeedVmInfo {
+    /// Push callee frame for VM to execute.
+    pub fn push_callee_frame(&self, fiber: &mut Fiber, jit_bp: usize, module: &Module) {
+        let callee_func = &module.functions[self.func_id as usize];
+        let callee_bp = fiber.sp;
+        fiber.push_frame(self.func_id, callee_func.local_slots, self.arg_start as u16, callee_func.ret_slots as u16);
+        for i in 0..callee_func.param_slots as usize {
+            fiber.stack[callee_bp + i] = fiber.stack[jit_bp + self.arg_start + i];
+        }
+        fiber.frames.last_mut().unwrap().pc = self.entry_pc;
     }
 }
 
@@ -232,23 +259,17 @@ pub fn build_jit_ctx(
 // JIT Call Methods for Vm
 // =============================================================================
 
-/// Result from JIT execution with NeedVm context.
-pub struct JitExecResult {
-    pub result: JitResult,
-    pub need_vm_entry_pc: u32,
-    pub need_vm_resume_pc: u32,
-}
-
 impl Vm {
-    /// Call a JIT function with a fresh context (raw pointer version).
-    /// Returns JitExecResult which includes NeedVm context if applicable.
-    pub(super) fn call_jit_direct(
+    /// VM-led JIT call: VM has already pushed frame, JIT operates on fiber.stack[jit_bp..].
+    /// start_pc: 0 for normal entry, resume_pc for NeedVm continuation.
+    /// Returns (ExecResult, Option<NeedVmInfo>) for NeedVm handling.
+    pub(super) fn call_jit_with_frame(
         &mut self,
+        fiber_id: crate::scheduler::FiberId,
         jit_func: JitFunc,
-        fiber_ptr: *mut std::ffi::c_void,
-        args: *mut u64,
-        ret: *mut u64,
-    ) -> JitExecResult {
+        jit_bp: usize,
+        start_pc: u32,
+    ) -> (ExecResult, Option<NeedVmInfo>) {
         let jit_mgr = self.jit_mgr.as_ref().unwrap();
         let func_table_ptr = jit_mgr.func_table_ptr();
         let func_table_len = jit_mgr.func_table_len() as u32;
@@ -260,111 +281,95 @@ impl Vm {
             .map(|m| m as *const _)
             .unwrap_or(std::ptr::null());
         
+        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+        let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
+        let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
+        
         let mut ctx = build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
         );
-        let result = jit_func(&mut ctx, args, ret);
         
-        // Set recoverable panic state if JIT triggered panic
-        if result == JitResult::Panic {
-            let fiber = unsafe { &mut *(fiber_ptr as *mut Fiber) };
-            // Only set panic_state if not already set (vm_call_sync may have set it)
-            if fiber.panic_state.is_none() {
-                if panic_flag && !panic_msg.is_nil() {
-                    // Use actual panic message from vo_panic
-                    fiber.set_recoverable_panic(panic_msg);
-                } else {
-                    // Fallback: use generic runtime error
-                    set_jit_runtime_panic(&mut self.state.gc, fiber);
-                }
-            }
-        }
+        let result = jit_func(&mut ctx, args_ptr, args_ptr, start_pc);
         
-        JitExecResult {
-            result,
-            need_vm_entry_pc: ctx.need_vm_entry_pc,
-            need_vm_resume_pc: ctx.need_vm_resume_pc,
-        }
-    }
-
-
-    /// Call a JIT function inline from VM execution (resolve_call path).
-    /// JitContext.fiber points to the current fiber for correct panic handling.
-    /// 
-    /// Returns (ExecResult, Option<(entry_pc, resume_pc)>) where the second element
-    /// contains NeedVm context if JIT returned NeedVm.
-    pub(super) fn call_jit_inline(
-        &mut self,
-        fiber_id: crate::scheduler::FiberId,
-        jit_func: JitFunc,
-        arg_start: u16,
-        arg_slots: usize,
-        func_ret_slots: usize,
-        call_ret_slots: usize,
-    ) -> (ExecResult, Option<(u32, u32)>) {
-        // Use stack-allocated buffers to avoid heap allocation on every call
-        // Most functions have <= 32 args and <= 16 returns
-        const MAX_STACK_SLOTS: usize = 32;
-        
-        // Read args from fiber stack
-        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-        let mut args_buf = [0u64; MAX_STACK_SLOTS];
-        let mut args_heap: Option<Vec<u64>> = None;
-        
-        let args_ptr = if arg_slots <= MAX_STACK_SLOTS {
-            for i in 0..arg_slots {
-                args_buf[i] = fiber.read_reg(arg_start + i as u16);
-            }
-            args_buf.as_mut_ptr()
-        } else {
-            let mut v: Vec<u64> = (0..arg_slots)
-                .map(|i| fiber.read_reg(arg_start + i as u16))
-                .collect();
-            let ptr = v.as_mut_ptr();
-            args_heap = Some(v);
-            ptr
-        };
-        
-        let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
-        
-        let mut ret_buf = [0u64; MAX_STACK_SLOTS];
-        let mut ret_heap: Option<Vec<u64>> = None;
-        
-        let ret_ptr = if func_ret_slots <= MAX_STACK_SLOTS {
-            ret_buf.as_mut_ptr()
-        } else {
-            let mut v = vec![0u64; func_ret_slots];
-            let ptr = v.as_mut_ptr();
-            ret_heap = Some(v);
-            ptr
-        };
-        
-        let jit_result = self.call_jit_direct(jit_func, fiber_ptr, args_ptr, ret_ptr);
-        
-        // Keep heap allocations alive until after call
-        drop(args_heap);
-        
-        match jit_result.result {
-            JitResult::Ok => {
-                // Write returns back to fiber stack
-                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                let ret_slice = if let Some(ref v) = ret_heap { v.as_slice() } else { &ret_buf[..] };
-                for i in 0..call_ret_slots.min(func_ret_slots) {
-                    fiber.write_reg(arg_start + i as u16, ret_slice[i]);
-                }
-                drop(ret_heap);
-                (ExecResult::FrameChanged, None)
-            }
+        match result {
+            JitResult::Ok => (ExecResult::FrameChanged, None),
             JitResult::NeedVm => {
-                drop(ret_heap);
-                (ExecResult::FrameChanged, Some((jit_result.need_vm_entry_pc, jit_result.need_vm_resume_pc)))
+                let info = NeedVmInfo {
+                    func_id: ctx.need_vm_func_id,
+                    arg_start: ctx.need_vm_arg_start as usize,
+                    entry_pc: ctx.need_vm_entry_pc as usize,
+                    resume_pc: ctx.need_vm_resume_pc,
+                };
+                (ExecResult::FrameChanged, Some(info))
             }
             JitResult::Panic => {
-                drop(ret_heap);
+                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                if fiber.panic_state.is_none() {
+                    if panic_flag && !panic_msg.is_nil() {
+                        fiber.set_recoverable_panic(panic_msg);
+                    } else {
+                        set_jit_runtime_panic(&mut self.state.gc, fiber);
+                    }
+                }
                 (ExecResult::Panic, None)
+            }
+        }
+    }
+    
+    /// Handle JIT re-entry after a NeedVm callee returns.
+    /// Called from Return when caller frame is a JIT frame with pc > 0.
+    pub(super) fn handle_jit_reentry(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        module: &Module,
+    ) -> ExecResult {
+        loop {
+            let (is_jit_frame, pc, func_id, jit_bp, call_ret_slots) = {
+                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                match fiber.frames.last() {
+                    Some(f) => (f.is_jit_frame, f.pc, f.func_id, f.bp, f.ret_count as usize),
+                    None => return ExecResult::Done,
+                }
+            };
+            
+            if !is_jit_frame || pc == 0 {
+                return ExecResult::FrameChanged;
+            }
+            
+            let resume_pc = pc as u32;
+            let jit_func = match self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(func_id)) {
+                Some(f) => f,
+                None => return ExecResult::FrameChanged,
+            };
+            
+            let target_func = &module.functions[func_id as usize];
+            let func_ret_slots = target_func.ret_slots as usize;
+            
+            let (result, need_vm) = self.call_jit_with_frame(fiber_id, jit_func, jit_bp, resume_pc);
+            
+            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+            
+            if let Some(need_vm_info) = need_vm {
+                fiber.frames.last_mut().unwrap().pc = need_vm_info.resume_pc as usize;
+                need_vm_info.push_callee_frame(fiber, jit_bp, module);
+                return ExecResult::FrameChanged;
+            } else if matches!(result, ExecResult::Panic) {
+                return ExecResult::Panic;
+            } else if matches!(result, ExecResult::FrameChanged) {
+                // JIT returned OK - copy returns and pop frame
+                let caller_bp = fiber.frames.get(fiber.frames.len().saturating_sub(2))
+                    .map(|f| f.bp).unwrap_or(0);
+                let ret_reg = fiber.frames.last().unwrap().ret_reg as usize;
+                for i in 0..call_ret_slots.min(func_ret_slots) {
+                    fiber.stack[caller_bp + ret_reg + i] = fiber.stack[jit_bp + i];
+                }
+                fiber.pop_frame();
+                continue; // Check if caller is also JIT frame
+            } else {
+                return result;
             }
         }
     }

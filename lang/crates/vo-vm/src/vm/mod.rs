@@ -836,7 +836,7 @@ impl Vm {
                 #[cfg(feature = "jit")]
                 Opcode::Call => {
                     let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                    let arg_start = inst.b;
+                    let arg_start = inst.b as usize;
                     let arg_slots = (inst.c >> 8) as usize;
                     let call_ret_slots = (inst.c & 0xFF) as usize;
                     
@@ -845,24 +845,42 @@ impl Vm {
                         .and_then(|mgr| mgr.resolve_call(target_func_id, target_func, module));
                     
                     if let Some(jit_func) = jit_func {
-                        let func_ret_slots = target_func.ret_slots as usize;
-                        let (result, need_vm) = self.call_jit_inline(fiber_id, jit_func, arg_start, arg_slots, func_ret_slots, call_ret_slots);
+                        // VM-led: VM pushes frame, JIT operates on fiber.stack[jit_bp..]
+                        let jit_bp = fiber.sp;
+                        fiber.push_frame(target_func_id, target_func.local_slots, arg_start as u16, call_ret_slots as u16);
+                        fiber.frames.last_mut().unwrap().is_jit_frame = true;
+                        // Copy args from caller to JIT frame
+                        for i in 0..arg_slots {
+                            fiber.stack[jit_bp + i] = fiber.stack[bp + arg_start + i];
+                        }
+                        stack = fiber.stack_ptr();
                         
-                        if let Some((entry_pc, _resume_pc)) = need_vm {
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            let local_slots = target_func.local_slots;
-                            let ret_reg = (bp + arg_start as usize) as u16;
-                            let new_bp = fiber.stack.len();
-                            fiber.push_frame(target_func_id, local_slots, ret_reg, call_ret_slots as u16);
-                            for i in 0..arg_slots {
-                                fiber.stack[new_bp + i] = fiber.stack[bp + arg_start as usize + i];
-                            }
-                            fiber.frames.last_mut().unwrap().pc = entry_pc as usize;
+                        let (result, need_vm) = self.call_jit_with_frame(
+                            fiber_id, jit_func, jit_bp, 0
+                        );
+                        
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        
+                        if let Some(need_vm_info) = need_vm {
+                            // NeedVm: set resume_pc and push callee frame
+                            fiber.frames.last_mut().unwrap().pc = need_vm_info.resume_pc as usize;
+                            need_vm_info.push_callee_frame(fiber, jit_bp, module);
+                            stack = fiber.stack_ptr();
                             refetch!();
                         } else if matches!(result, ExecResult::Panic) {
+                            stack = fiber.stack_ptr();
                             let r = panic_unwind(fiber, stack, module);
                             if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
-                        } else if !matches!(result, ExecResult::FrameChanged) {
+                        } else if matches!(result, ExecResult::FrameChanged) {
+                            // OK: copy returns from JIT frame to caller
+                            let func_ret_slots = target_func.ret_slots as usize;
+                            for i in 0..call_ret_slots.min(func_ret_slots) {
+                                fiber.stack[bp + arg_start + i] = fiber.stack[jit_bp + i];
+                            }
+                            fiber.pop_frame();
+                            stack = fiber.stack_ptr();
+                            refetch!();
+                        } else {
                             return result;
                         }
                     } else {
@@ -927,8 +945,23 @@ impl Vm {
                         let is_error_return = (inst.flags & 1) != 0;
                         exec::handle_return(fiber, &inst, func, module, is_error_return)
                     };
-                    stack = fiber.stack_ptr();  // Re-fetch after potential stack changes
-                    if matches!(result, ExecResult::FrameChanged) { refetch!(); } else { return result; }
+                    stack = fiber.stack_ptr();
+                    if !matches!(result, ExecResult::FrameChanged) { return result; }
+                    
+                    // Check if we need to re-enter JIT after callee returned
+                    #[cfg(feature = "jit")]
+                    {
+                        let reentry_result = self.handle_jit_reentry(fiber_id, module);
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        stack = fiber.stack_ptr();
+                        if matches!(reentry_result, ExecResult::Panic) {
+                            let r = panic_unwind(fiber, stack, module);
+                            if matches!(r, ExecResult::FrameChanged) { refetch!(); continue; } else { return r; }
+                        } else if !matches!(reentry_result, ExecResult::FrameChanged) {
+                            return reentry_result;
+                        }
+                    }
+                    refetch!();
                 }
 
                 // String operations

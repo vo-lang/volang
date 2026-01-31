@@ -94,7 +94,9 @@ pub struct CompiledFunction {
 unsafe impl Send for CompiledFunction {}
 unsafe impl Sync for CompiledFunction {}
 
-pub type JitFunc = extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64) -> JitResult;
+/// JIT function signature with start_pc for multi-entry support.
+/// start_pc=0 for normal entry, start_pc=resume_pc for NeedVm continuation.
+pub type JitFunc = extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64, start_pc: u32) -> JitResult;
 
 // =============================================================================
 // JitCache
@@ -659,7 +661,8 @@ impl JitCompiler {
         let set_need_vm = module.declare_function("vo_set_need_vm", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
             sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I32)); // entry_pc
+            sig.params.push(AbiParam::new(types::I32)); // func_id
+            sig.params.push(AbiParam::new(types::I32)); // arg_start
             sig.params.push(AbiParam::new(types::I32)); // resume_pc
             sig
         })?;
@@ -747,9 +750,10 @@ impl JitCompiler {
 
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type));
-        sig.params.push(AbiParam::new(ptr_type));
-        sig.params.push(AbiParam::new(ptr_type));
+        sig.params.push(AbiParam::new(ptr_type));  // ctx
+        sig.params.push(AbiParam::new(ptr_type));  // args
+        sig.params.push(AbiParam::new(ptr_type));  // ret
+        sig.params.push(AbiParam::new(types::I32)); // start_pc for multi-entry
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_jit_{}", func_id);

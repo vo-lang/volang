@@ -20,6 +20,8 @@ pub struct CallFrame {
     pub bp: usize,
     pub ret_reg: u16,
     pub ret_count: u16,
+    /// If true, this frame was entered via JIT and should resume JIT when pc > 0
+    pub is_jit_frame: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -201,20 +203,6 @@ pub enum ExecMode {
     Jit,
 }
 
-/// Context for a pending JIT continuation.
-/// Stored when JIT returns NeedVm to hand off to VM.
-#[derive(Debug, Clone)]
-pub struct JitCallContext {
-    /// Function ID of the JIT caller (the frame that will resume in JIT).
-    pub caller_func_id: u32,
-    /// Continuation PC where JIT should resume.
-    pub resume_pc: u32,
-    /// The expected frames.len() when the JIT caller is back at top.
-    pub caller_frame_count: usize,
-    /// VM stack depth snapshot (for cleanup on panic).
-    pub vm_stack_depth: usize,
-}
-
 impl FiberState {
     #[inline]
     pub fn is_runnable(&self) -> bool {
@@ -285,8 +273,6 @@ pub struct Fiber {
     pub state: FiberState,
     /// Execution engine (VM or JIT).
     pub exec_mode: ExecMode,
-    /// JIT call context stack for NeedVm handoffs.
-    pub jit_call_stack: Vec<JitCallContext>,
     pub stack: Vec<u64>,
     /// Stack pointer - current stack top. stack[0..sp] is in use.
     pub sp: usize,
@@ -309,7 +295,6 @@ impl Fiber {
             id,
             state: FiberState::Runnable,
             exec_mode: ExecMode::default(),
-            jit_call_stack: Vec::new(),
             stack: Vec::with_capacity(INITIAL_STACK_CAPACITY),
             sp: 0,
             frames: Vec::new(),
@@ -328,7 +313,6 @@ impl Fiber {
     pub fn reset(&mut self) {
         self.state = FiberState::Running;
         self.exec_mode = ExecMode::default();
-        self.jit_call_stack.clear();
         self.sp = 0;
         self.frames.clear();
         self.defer_stack.clear();
@@ -455,6 +439,10 @@ impl Fiber {
     }
 
     pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) {
+        self.push_frame_with_jit(func_id, local_slots, ret_reg, ret_count, false)
+    }
+    
+    pub fn push_frame_with_jit(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16, is_jit_frame: bool) {
         let bp = self.sp;
         let new_sp = bp + local_slots as usize;
         self.ensure_capacity(new_sp);
@@ -465,6 +453,7 @@ impl Fiber {
             bp,
             ret_reg,
             ret_count,
+            is_jit_frame,
         });
     }
 

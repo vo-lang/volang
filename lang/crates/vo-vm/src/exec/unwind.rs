@@ -37,7 +37,6 @@ use alloc::vec;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;
-use vo_runtime::slot::Slot;
 
 use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::{CallFrame, DeferEntry, Fiber, PanicState, PendingReturnKind, UnwindingKind, UnwindingState};
@@ -607,6 +606,7 @@ fn call_defer_entry(
         bp: args_start,
         ret_reg: 0,
         ret_count: 0,
+        is_jit_frame: false,
     });
 
     ExecResult::FrameChanged
