@@ -71,8 +71,16 @@ impl Scheduler {
 
     /// Spawn a new fiber, returns its id.
     /// Reuses dead fiber slots when available.
-    pub fn spawn(&mut self, mut fiber: Fiber) -> u32 {
-        let id = if let Some(slot) = self.free_slots.pop() {
+    pub fn spawn(&mut self, fiber: Fiber) -> u32 {
+        let id = self.spawn_not_ready(fiber);
+        self.ready_queue.push_back(id);
+        id
+    }
+    
+    /// Spawn a new fiber without adding to ready_queue.
+    /// Used by execute_closure_sync which sets current directly.
+    pub fn spawn_not_ready(&mut self, mut fiber: Fiber) -> u32 {
+        if let Some(slot) = self.free_slots.pop() {
             // Reuse dead fiber slot
             fiber.id = slot;
             *self.fibers[slot as usize] = fiber;
@@ -83,9 +91,7 @@ impl Scheduler {
             fiber.id = id;
             self.fibers.push(Box::new(fiber));
             id
-        };
-        self.ready_queue.push_back(id);
-        id
+        }
     }
 
     /// Get fiber by id (O(1) index access).

@@ -1576,8 +1576,8 @@ impl Vm {
     /// Execute a closure synchronously from extern function callback.
     /// Returns (success, panic_state) - panic_state is Some if panic occurred.
     /// 
-    /// This creates a temporary fiber, adds it to the scheduler, executes it,
-    /// then removes it. Blocking operations will fail (would deadlock).
+    /// Creates a new fiber for execution, runs it to completion, then removes it.
+    /// Blocking operations will fail (would deadlock).
     pub fn execute_closure_sync(
         &mut self,
         func_id: u32,
@@ -1604,7 +1604,8 @@ impl Vm {
             temp_fiber.stack[bp + i] = args[i];
         }
         
-        let temp_id = self.scheduler.spawn(temp_fiber);
+        // Use spawn_not_ready to avoid adding to ready_queue since we set current directly
+        let temp_id = self.scheduler.spawn_not_ready(temp_fiber);
         let temp_fiber_id = FiberId::Regular(temp_id);
 
         // Save and set current fiber.

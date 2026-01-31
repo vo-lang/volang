@@ -1,0 +1,44 @@
+// Test GC with slice growth and reallocation
+// Slice append may trigger GC
+
+package main
+
+
+import "fmt"
+func main() {
+	// Test 1: Slice growth with append
+	s := []int{}
+	for i := 0; i < 1000; i++ {
+		s = append(s, i)
+	}
+	assert(len(s) == 1000)
+	assert(s[999] == 999)
+
+	// Test 2: Slice of slices
+	matrix := [][]int{}
+	for i := 0; i < 50; i++ {
+		row := []int{}
+		for j := 0; j < 10; j++ {
+			row = append(row, i*10+j)
+		}
+		matrix = append(matrix, row)
+	}
+	assert(len(matrix) == 50)
+	assert(matrix[25][5] == 255)
+
+	// Test 3: Slice reslicing
+	original := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	sub1 := original[2:7]
+	sub2 := sub1[1:4]
+	assert(sub2[0] == 3)
+	assert(sub2[2] == 5)
+
+	// Test 4: Large allocation
+	big := make([]int, 10000)
+	for i := range big {
+		big[i] = i
+	}
+	assert(big[9999] == 9999)
+
+	fmt.Println("gc_slice_grow: PASSED")
+}
