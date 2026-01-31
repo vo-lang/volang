@@ -13,21 +13,18 @@ use super::{Vm, VmState, ExecResult};
 // JIT Panic Handling
 // =============================================================================
 
-/// Set recoverable panic state on fiber when JIT triggers a runtime panic.
-/// This is only called for runtime panics (nil pointer, bounds check, etc.)
-/// when vo_panic hasn't already set the panic message.
+const PANIC_MSG_NIL_DEREF: &str = "runtime error: invalid memory address or nil pointer dereference (JIT)";
+const PANIC_MSG_BLOCKING_OP: &str = "runtime error: extern function returned Yield/Block in JIT context (channel operations are not supported in JIT-compiled functions)";
+
+/// Set recoverable panic with a message.
 #[inline]
-fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
-    // Only set if panic_state is not already set (vo_panic may have set it for user panics)
+fn set_recoverable_panic_msg(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) {
     if fiber.panic_state.is_some() {
         return;
     }
-    let msg = vo_runtime::objects::string::new_from_string(
-        gc,
-        "runtime error: nil pointer dereference".to_string()
-    );
+    let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, msg as u64));
+    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
 }
 
 // =============================================================================
@@ -114,10 +111,10 @@ pub extern "C" fn jit_call_extern(
     
     match result {
         ExternResult::Ok => JitResult::Ok,
-        // Yield/Block shouldn't happen in extern calls - fatal error
         ExternResult::Yield | ExternResult::Block => {
             let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-            fiber.set_fatal_panic();
+            let gc = unsafe { &mut *ctx.gc };
+            set_recoverable_panic_msg(gc, fiber, PANIC_MSG_BLOCKING_OP);
             JitResult::Panic
         }
         #[cfg(feature = "std")]
@@ -330,7 +327,7 @@ impl Vm {
                     if panic_flag && !panic_msg.is_nil() {
                         fiber.set_recoverable_panic(panic_msg);
                     } else {
-                        set_jit_runtime_panic(&mut self.state.gc, fiber);
+                        set_recoverable_panic_msg(&mut self.state.gc, fiber, PANIC_MSG_NIL_DEREF);
                     }
                 }
                 (ExecResult::Panic, None)
@@ -487,7 +484,7 @@ impl Vm {
                 if !panic_msg.is_nil() {
                     fiber.set_recoverable_panic(panic_msg);
                 } else {
-                    set_jit_runtime_panic(&mut self.state.gc, fiber);
+                    set_recoverable_panic_msg(&mut self.state.gc, fiber, PANIC_MSG_NIL_DEREF);
                 }
             }
             None
