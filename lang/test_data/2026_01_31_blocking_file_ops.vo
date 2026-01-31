@@ -1,0 +1,82 @@
+package main
+
+import "os"
+
+func main() {
+	// Test blocking file operations in JIT mode
+	testPath := "/tmp/vo_blocking_test.txt"
+	
+	// Create and write to file
+	f, err := os.Create(testPath)
+	if err != nil {
+		panic("failed to create file: " + err.Error())
+	}
+	
+	content := "Hello, blocking IO!\n"
+	n, err := f.Write([]byte(content))
+	if err != nil {
+		panic("failed to write: " + err.Error())
+	}
+	if n != len(content) {
+		panic("write: wrong byte count")
+	}
+	
+	err = f.Close()
+	if err != nil {
+		panic("failed to close: " + err.Error())
+	}
+	
+	// Read file back
+	f2, err := os.Open(testPath)
+	if err != nil {
+		panic("failed to open: " + err.Error())
+	}
+	
+	buf := make([]byte, 100)
+	n, err = f2.Read(buf)
+	if err != nil {
+		panic("failed to read: " + err.Error())
+	}
+	
+	result := string(buf[:n])
+	if result != content {
+		panic("read mismatch: got '" + result + "'")
+	}
+	
+	f2.Close()
+	
+	// Test ReadAt/WriteAt
+	f3, err := os.OpenFile(testPath, os.O_RDWR, 0644)
+	if err != nil {
+		panic("failed to open for rw: " + err.Error())
+	}
+	
+	// WriteAt at offset 7
+	n, err = f3.WriteAt([]byte("JIT"), 7)
+	if err != nil {
+		panic("failed to write at: " + err.Error())
+	}
+	if n != 3 {
+		panic("writeAt: wrong byte count")
+	}
+	
+	// ReadAt from offset 0
+	buf2 := make([]byte, 20)
+	n, err = f3.ReadAt(buf2, 0)
+	if err != nil {
+		panic("failed to read at: " + err.Error())
+	}
+	
+	expected := "Hello, JITcking IO!\n"
+	result2 := string(buf2[:n])
+	if result2 != expected {
+		panic("readAt mismatch: got '" + result2 + "', expected '" + expected + "'")
+	}
+	
+	f3.Close()
+	
+	// Cleanup
+	os.Remove(testPath)
+	
+	println("PASS")
+}

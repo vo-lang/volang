@@ -195,10 +195,10 @@ func (f *File) Name() string {
 // ==================== File Operations (extern) ====================
 
 // Native functions for file operations (implemented in Rust)
-func fileRead(fd int, b []byte) (int, error)
-func fileWrite(fd int, b []byte) (int, error)
-func fileReadAt(fd int, b []byte, off int64) (int, error)
-func fileWriteAt(fd int, b []byte, off int64) (int, error)
+func blocking_fileRead(fd int, b []byte) (int, error)
+func blocking_fileWrite(fd int, b []byte) (int, error)
+func blocking_fileReadAt(fd int, b []byte, off int64) (int, error)
+func blocking_fileWriteAt(fd int, b []byte, off int64) (int, error)
 func fileSeek(fd int, offset int64, whence int) (int64, error)
 func fileClose(fd int) error
 func fileSync(fd int) error
@@ -212,7 +212,7 @@ func (f *File) Read(b []byte) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return fileRead(f.fd, b)
+	return blocking_fileRead(f.fd, b)
 }
 
 // Write writes len(b) bytes to the File.
@@ -220,7 +220,7 @@ func (f *File) Write(b []byte) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return fileWrite(f.fd, b)
+	return blocking_fileWrite(f.fd, b)
 }
 
 // WriteString writes s to the file.
@@ -233,7 +233,7 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return fileReadAt(f.fd, b, off)
+	return blocking_fileReadAt(f.fd, b, off)
 }
 
 // WriteAt writes len(b) bytes to the File starting at byte offset off.
@@ -241,7 +241,7 @@ func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return fileWriteAt(f.fd, b, off)
+	return blocking_fileWriteAt(f.fd, b, off)
 }
 
 // Seek sets the offset for the next Read or Write on file.
