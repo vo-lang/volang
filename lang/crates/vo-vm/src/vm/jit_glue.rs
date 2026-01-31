@@ -143,7 +143,7 @@ pub extern "C" fn jit_call_extern(
 // =============================================================================
 
 /// Synchronous VM call from JIT code.
-/// This uses execute_closure_sync to run VM code in a temporary fiber.
+/// Uses a separate fiber because JIT is called from within run_fiber.
 pub extern "C" fn vm_call_sync(
     vm: *mut std::ffi::c_void,
     fiber: *mut std::ffi::c_void,
@@ -161,7 +161,8 @@ pub extern "C" fn vm_call_sync(
             .map(|i| unsafe { *args.add(i) })
             .collect();
         
-        // Use execute_closure_sync which handles all the complexity
+        // Use execute_closure_sync which creates a separate fiber
+        // (JIT is called from within run_fiber, can't recurse)
         let (success, panic_state) = vm.execute_closure_sync(func_id, &args_vec, ret, ret_count);
         
         if success {

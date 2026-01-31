@@ -1573,11 +1573,9 @@ impl Vm {
         ExecResult::TimesliceExpired
     }
 
-    /// Execute a closure synchronously from extern function callback.
-    /// Returns (success, panic_state) - panic_state is Some if panic occurred.
-    /// 
-    /// Creates a new fiber for execution, runs it to completion, then removes it.
-    /// Blocking operations will fail (would deadlock).
+    /// Execute a function synchronously using a pooled callback fiber.
+    /// Used by JIT→VM calls and extern callbacks.
+    /// Returns (success, panic_state).
     pub fn execute_closure_sync(
         &mut self,
         func_id: u32,
@@ -1592,101 +1590,44 @@ impl Vm {
         let module = unsafe { &*module };
         
         let func_def = &module.functions[func_id as usize];
-        let local_slots = func_def.local_slots;
-        let param_slots = func_def.param_slots as usize;
-        let func_ret_slots = func_def.ret_slots as usize;
         
-        // Create temporary fiber and add to scheduler
-        let mut temp_fiber = Fiber::new(0); // ID will be assigned by spawn
-        temp_fiber.push_frame(func_id, local_slots, 0, func_ret_slots as u16);
-        let bp = temp_fiber.frames.last().unwrap().bp;
-        for i in 0..param_slots.min(args.len()) {
-            temp_fiber.stack[bp + i] = args[i];
-        }
-        
-        // Use spawn_not_ready to avoid adding to ready_queue since we set current directly
-        let temp_id = self.scheduler.spawn_not_ready(temp_fiber);
-        let temp_fiber_id = FiberId::Regular(temp_id);
+        // Acquire callback fiber and set up frame
+        let fid = self.scheduler.acquire_callback_fiber();
+        let fiber = self.scheduler.fiber_mut(fid);
+        fiber.state = FiberState::Running;
+        fiber.push_frame(func_id, func_def.local_slots, 0, func_def.ret_slots);
+        let bp = fiber.frames.last().unwrap().bp;
+        let n = (func_def.param_slots as usize).min(args.len());
+        fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
 
-        // Save and set current fiber.
+        // Run to completion
         let saved_current = self.scheduler.current;
-        self.scheduler.get_fiber_mut(temp_fiber_id).state = FiberState::Running;
-        self.scheduler.current = Some(temp_id);
-
-        let mut success = false;
-        let mut panic_state: Option<crate::fiber::PanicState> = None;
-
-        loop {
-            // If there is no current fiber, schedule one.
-            if self.scheduler.current.is_none() {
-                if self.scheduler.schedule_next().is_none() {
-                    break;
-                }
-            }
-
-            let current_raw = self.scheduler.current.expect("execute_closure_sync: current fiber missing");
-            let current_id = FiberId::Regular(current_raw);
-
-            let result = self.run_fiber(current_id);
-            match result {
-                ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
-                    self.scheduler.yield_current();
-                }
-                ExecResult::Block(reason) => {
-                    match reason {
-                        crate::fiber::BlockReason::Queue => self.scheduler.block_for_queue(),
-                        #[cfg(feature = "std")]
-                        crate::fiber::BlockReason::Io(token) => {
-                            // Retry the same instruction after I/O becomes ready.
-                            let fiber = self.scheduler.current_fiber_mut().unwrap();
-                            fiber.current_frame_mut().unwrap().pc -= 1;
-                            self.scheduler.block_for_io(token);
-                        }
-                    }
-                }
+        self.scheduler.current = Some(fid);
+        
+        let (success, panic_state) = loop {
+            match self.run_fiber(FiberId::Regular(fid)) {
                 ExecResult::Done => {
-                    // Capture return values if this is the temp fiber.
-                    if current_raw == temp_id {
-                        let fiber = self.scheduler.get_fiber(current_id);
-                        for i in 0..(ret_count as usize) {
-                            if i < fiber.stack.len() {
-                                unsafe { *ret.add(i) = fiber.stack[i] };
-                            }
-                        }
-                        success = true;
+                    let fiber = self.scheduler.fiber(fid);
+                    let n = (ret_count as usize).min(func_def.ret_slots as usize);
+                    for i in 0..n {
+                        unsafe { *ret.add(i) = fiber.stack[i] };
                     }
-
-                    let _ = self.scheduler.kill_current();
-
-                    if current_raw == temp_id {
-                        break;
-                    }
+                    break (true, None);
                 }
                 ExecResult::Panic => {
-                    // Capture panic state if this is the temp fiber.
-                    if current_raw == temp_id {
-                        panic_state = self.scheduler.get_fiber_mut(current_id).panic_state.take();
-                    }
-
-                    let _ = self.scheduler.kill_current();
-
-                    if current_raw == temp_id {
-                        break;
-                    }
+                    break (false, self.scheduler.fiber_mut(fid).panic_state.take());
                 }
-                ExecResult::FrameChanged => {
-                    // Shouldn't normally escape run_fiber, but if it does, yield.
-                    self.scheduler.yield_current();
+                ExecResult::Block(_) => {
+                    break (false, None);
                 }
+                _ => continue,
             }
-        }
+        };
 
-        // Restore original current fiber pointer for the caller (JIT is still running there).
         self.scheduler.current = saved_current;
-
+        self.scheduler.release_callback_fiber(fid);
         (success, panic_state)
     }
-    
 }
 
 
@@ -1698,6 +1639,7 @@ impl Default for Vm {
 
 /// Trampoline for calling closures from extern functions.
 /// This allows extern functions like dyn_call_closure to execute closures.
+/// Uses a separate fiber because we're already inside run_fiber (would recurse).
 pub extern "C" fn closure_call_trampoline(
     vm: *mut core::ffi::c_void,
     _caller_fiber: *mut core::ffi::c_void,
@@ -1722,6 +1664,8 @@ pub extern "C" fn closure_call_trampoline(
         let func_def = &module.functions[func_id as usize];
         let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
         
+        // Use execute_closure_sync which creates a separate fiber
+        // (we're already inside run_fiber, can't call it recursively)
         let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
         success
     }));
@@ -1743,6 +1687,7 @@ pub extern "C" fn closure_call_trampoline(
         let func_def = &module.functions[func_id as usize];
         let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
         
+        // Use execute_closure_sync which creates a separate fiber
         let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
         if success {
             vo_runtime::ffi::ClosureCallResult::Ok
