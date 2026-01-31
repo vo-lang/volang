@@ -703,7 +703,12 @@ impl<'a> LoopCompiler<'a> {
 impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
     fn read_var(&mut self, slot: u16) -> Value { self.builder.use_var(self.vars[slot as usize]) }
-    fn write_var(&mut self, slot: u16, val: Value) { self.builder.def_var(self.vars[slot as usize], val) }
+    fn write_var(&mut self, slot: u16, val: Value) {
+        self.builder.def_var(self.vars[slot as usize], val);
+        // Also sync to memory for var_addr access (e.g., slice_append reads element from memory)
+        let offset = (slot as i32) * 8;
+        self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+    }
     fn ctx_param(&mut self) -> Value { self.ctx_ptr }
     fn gc_ptr(&mut self) -> Value {
         self.builder.ins().load(types::I64, MemFlags::trusted(), self.ctx_ptr, 0)
