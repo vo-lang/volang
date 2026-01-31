@@ -255,10 +255,10 @@ def get_vo_embed_bin() -> Path:
 
 
 def get_vo_bench_bin(arch: str = '64') -> Path:
-    """Get the path to vo-bench binary (direct benchmark runner)."""
+    """Get the path to vo binary for benchmarks."""
     if arch == '32':
-        return PROJECT_ROOT / 'target' / TARGET_32 / 'release' / 'vo-bench'
-    return PROJECT_ROOT / 'target' / 'release' / 'vo-bench'
+        return PROJECT_ROOT / 'target' / TARGET_32 / 'release' / 'vo'
+    return PROJECT_ROOT / 'target' / 'release' / 'vo'
 
 # Legacy paths for backward compatibility
 VO_BIN_DEBUG = PROJECT_ROOT / 'target' / 'debug' / 'vo'
@@ -1015,8 +1015,8 @@ class BenchmarkRunner:
 
     def _build_vo(self):
         target_info = f" (target: {TARGET_32})" if self.arch == '32' else ""
-        print(f"Building vo-bench (release){target_info}...")
-        build_cmd = ['cargo', 'build', '--release', '-p', 'vo-bench']
+        print(f"Building vo (release){target_info}...")
+        build_cmd = ['cargo', 'build', '--release', '-p', 'vo']
         if self.arch == '32':
             build_cmd.extend(['--target', TARGET_32, '--no-default-features'])
         code, _, stderr = run_cmd(build_cmd, capture=True)
@@ -1069,12 +1069,12 @@ class BenchmarkRunner:
         names = []
 
         if vo_file:
-            # Use vo-bench for direct execution (no nested VM calls)
-            cmds.append(f"'{vo_bench_bin}' '{vo_file}'")
+            # Use vo run for benchmark execution
+            cmds.append(f"'{vo_bench_bin}' run '{vo_file}' --mode=vm")
             names.append('Vo-VM')
             # JIT not supported on 32-bit
             if self.arch != '32':
-                cmds.append(f"'{vo_bench_bin}' --jit '{vo_file}'")
+                cmds.append(f"'{vo_bench_bin}' run '{vo_file}' --mode=jit")
                 names.append('Vo-JIT')
 
         if not self.vo_only:

@@ -855,16 +855,16 @@ impl Vm {
                         }
                         stack = fiber.stack_ptr();
                         
-                        let (result, need_vm) = self.call_jit_with_frame(
+                        let (result, call_request) = self.call_jit_with_frame(
                             fiber_id, jit_func, jit_bp, 0
                         );
                         
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         
-                        if let Some(need_vm_info) = need_vm {
-                            // NeedVm: set resume_pc and push callee frame
-                            fiber.frames.last_mut().unwrap().pc = need_vm_info.resume_pc as usize;
-                            need_vm_info.push_callee_frame(fiber, jit_bp, module);
+                        if let Some(call_info) = call_request {
+                            // Call request: set resume_pc and push callee frame
+                            fiber.frames.last_mut().unwrap().pc = call_info.resume_pc as usize;
+                            call_info.push_callee_frame(fiber, jit_bp, module);
                             stack = fiber.stack_ptr();
                             refetch!();
                         } else if matches!(result, ExecResult::Panic) {

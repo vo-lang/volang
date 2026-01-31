@@ -26,6 +26,8 @@ pub struct FunctionCompiler<'a> {
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
     locals_slot: Option<StackSlot>,
+    /// Resume blocks for Call requests. Key is resume_pc (pc after Call instruction).
+    resume_blocks: HashMap<usize, Block>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -53,12 +55,14 @@ impl<'a> FunctionCompiler<'a> {
             helpers,
             reg_consts: HashMap::new(),
             locals_slot: None,
+            resume_blocks: HashMap::new(),
         }
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
         self.declare_variables();
         self.scan_jump_targets();
+        self.scan_call_requests();
         
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
@@ -68,7 +72,15 @@ impl<'a> FunctionCompiler<'a> {
         for pc in 0..self.func_def.code.len() {
             self.current_pc = pc;
             
-            if let Some(&block) = self.blocks.get(&pc) {
+            // Check if this PC has a resume block (from Call request)
+            if let Some(&resume_block) = self.resume_blocks.get(&pc) {
+                if !block_terminated {
+                    self.builder.ins().jump(resume_block, &[]);
+                }
+                self.builder.switch_to_block(resume_block);
+                self.emit_variable_restore();
+                // block_terminated will be set by translate_instruction below
+            } else if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(block, &[]);
                 }
@@ -119,27 +131,125 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
+    /// Emit code to restore all SSA variables from fiber.stack.
+    /// Called at resume points after JIT returned Call and VM executed callee.
+    fn emit_variable_restore(&mut self) {
+        let args = self.builder.block_params(self.entry_block)[1];
+        for i in 0..self.vars.len() {
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args, (i * 8) as i32);
+            self.builder.def_var(self.vars[i], val);
+            if let Some(slot) = self.locals_slot {
+                self.builder.ins().stack_store(val, slot, (i * 8) as i32);
+            }
+        }
+    }
+
+    /// Emit code to spill all SSA variables to fiber.stack.
+    /// Called before returning Call so VM can see/restore state.
+    fn emit_variable_spill(&mut self) {
+        let args = self.builder.block_params(self.entry_block)[1];
+        for i in 0..self.vars.len() {
+            let val = self.builder.use_var(self.vars[i]);
+            self.builder.ins().store(MemFlags::trusted(), val, args, (i * 8) as i32);
+        }
+    }
+
+    /// Scan for Call instructions to non-jittable callees (Call requests).
+    /// These require resume blocks for multi-entry support.
+    fn scan_call_requests(&mut self) {
+        for (pc, inst) in self.func_def.code.iter().enumerate() {
+            if inst.opcode() == Opcode::Call {
+                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                let target_func = &self.vo_module.functions[target_func_id as usize];
+                let callee_jittable = crate::is_func_jittable(target_func);
+                
+                if !callee_jittable {
+                    let resume_pc = pc + 1;
+                    // Create resume block
+                    let resume_block = self.builder.create_block();
+                    self.resume_blocks.insert(resume_pc, resume_block);
+                }
+            }
+        }
+    }
+
     fn emit_prologue(&mut self) {
         let params = self.builder.block_params(self.entry_block);
         let _ctx = params[0];
         let args = params[1];
         let _ret = params[2];
+        let start_pc = params[3];
         
         let num_slots = self.func_def.local_slots as usize;
         let param_slots = self.func_def.param_slots as usize;
         
         // Create stack slot for locals (used by SlotGet/SlotSet for stack arrays)
-        if num_slots > 0 {
+        // Always create locals_slot if we have resume blocks (for state restoration)
+        let need_locals_slot = num_slots > 0 || !self.resume_blocks.is_empty();
+        let actual_slots = if num_slots > 0 { num_slots } else if need_locals_slot { self.vars.len() } else { 0 };
+        
+        if need_locals_slot && actual_slots > 0 {
             let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                (num_slots * 8) as u32,
+                (actual_slots * 8) as u32,
                 8,
             ));
             self.locals_slot = Some(slot);
+        }
+        
+        // Generate dispatch logic if we have resume blocks
+        if !self.resume_blocks.is_empty() {
+            let normal_entry_block = self.builder.create_block();
             
+            // Check if start_pc == 0 (normal entry)
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            let is_normal = self.builder.ins().icmp(IntCC::Equal, start_pc, zero);
+            
+            // For now, use a simple if-else chain for resume dispatch
+            // In the future, could use a switch table for many resume points
+            let mut resume_pcs: Vec<usize> = self.resume_blocks.keys().copied().collect();
+            resume_pcs.sort();
+            
+            if resume_pcs.len() == 1 {
+                // Single resume point: simple branch
+                let resume_pc = resume_pcs[0];
+                let resume_block = self.resume_blocks[&resume_pc];
+                self.builder.ins().brif(is_normal, normal_entry_block, &[], resume_block, &[]);
+            } else {
+                // Multiple resume points: chain of comparisons
+                // First check normal entry
+                let first_check_block = self.builder.create_block();
+                self.builder.ins().brif(is_normal, normal_entry_block, &[], first_check_block, &[]);
+                
+                // Chain of resume PC checks
+                let mut current_block = first_check_block;
+                for (i, &resume_pc) in resume_pcs.iter().enumerate() {
+                    self.builder.switch_to_block(current_block);
+                    
+                    let resume_block = self.resume_blocks[&resume_pc];
+                    let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+                    let is_this_pc = self.builder.ins().icmp(IntCC::Equal, start_pc, pc_val);
+                    
+                    if i == resume_pcs.len() - 1 {
+                        // Last one: just branch (default to normal if no match)
+                        self.builder.ins().brif(is_this_pc, resume_block, &[], normal_entry_block, &[]);
+                    } else {
+                        let next_check = self.builder.create_block();
+                        self.builder.ins().brif(is_this_pc, resume_block, &[], next_check, &[]);
+                        current_block = next_check;
+                    }
+                }
+            }
+            
+            // Switch to normal entry block for standard initialization
+            self.builder.switch_to_block(normal_entry_block);
+        }
+        
+        // Normal entry initialization
+        if let Some(slot) = self.locals_slot {
             // Initialize all slots to 0 (important for array initial values)
             let zero = self.builder.ins().iconst(types::I64, 0);
-            for i in 0..num_slots {
+            for i in 0..actual_slots {
                 self.builder.ins().stack_store(zero, slot, (i * 8) as i32);
             }
             
@@ -157,7 +267,7 @@ impl<'a> FunctionCompiler<'a> {
                 self.builder.def_var(self.vars[i], zero);
             }
         } else {
-            // No locals, just initialize SSA vars
+            // No locals slot, just initialize SSA vars
             let zero = self.builder.ins().iconst(types::I64, 0);
             for i in 0..self.vars.len() {
                 self.builder.def_var(self.vars[i], zero);
@@ -314,10 +424,10 @@ impl<'a> FunctionCompiler<'a> {
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee is NOT jittable (has defer/channel/select/etc)
-            // Use vo_call_vm which handles blocking via temporary fiber (existing behavior)
-            // This is a compromise - full NeedVm support requires JIT/VM state sharing
+            // Use Call request mechanism: return JitResult::Call, VM executes callee,
+            // then resumes JIT at resume_pc
             self.call_via_vm(target_func_id, arg_start, arg_slots, call_ret_slots, target_func);
-            false
+            true // Block IS terminated - call_via_vm generates return instruction
         }
     }
     
@@ -394,47 +504,37 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
     
-    /// Call via VM using vo_call_vm (for non-jittable callees)
-    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
-        let call_vm_func = match self.helpers.call_vm {
+    /// Call via VM for non-jittable callees using Call request mechanism.
+    /// Instead of synchronously calling vo_call_vm, we:
+    /// 1. Set call request info in JitContext
+    /// 2. Return JitResult::Call
+    /// 3. VM executes the callee and resumes JIT at resume_pc
+    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, _arg_slots: usize, _call_ret_slots: usize, _target_func: &vo_runtime::bytecode::FunctionDef) {
+        let set_call_request_func = match self.helpers.set_call_request {
             Some(f) => f,
             None => return,
         };
         
-        let func_ret_slots = target_func.ret_slots as usize;
+        let resume_pc = self.current_pc + 1;
         
-        let arg_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-        let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (func_ret_slots.max(1) * 8) as u32,
-            8,
-        ));
+        // Spill all variables to fiber.stack before returning Call
+        self.emit_variable_spill();
         
-        for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
-            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
-        }
-        
+        // Call vo_set_call_request(ctx, func_id, arg_start, resume_pc)
         let ctx = self.builder.block_params(self.entry_block)[0];
-        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
-        let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
-        let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-        let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
+        let arg_start_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
         
-        let call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr, arg_count, ret_ptr, ret_count]);
-        let result = self.builder.inst_results(call)[0];
+        self.builder.ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val]);
         
-        self.check_call_result(result);
+        // Return JitResult::Call = 2
+        let call_result = self.builder.ins().iconst(types::I32, 2);
+        self.builder.ins().return_(&[call_result]);
         
-        for i in 0..call_ret_slots {
-            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.sync_var((arg_start + i) as u16, val);
-        }
+        // NOTE: Resume block code (variable restoration) will be generated by compile loop
+        // when it processes the resume_pc. We don't generate it here because Cranelift
+        // doesn't allow switching to a block that's already filled.
     }
     
     /// JIT-to-JIT call with runtime check for compiled callee

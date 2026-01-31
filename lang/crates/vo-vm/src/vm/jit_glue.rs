@@ -223,26 +223,26 @@ pub fn build_jit_ctx(
         sentinel_errors: &mut state.sentinel_errors as *mut _,
         #[cfg(feature = "std")]
         io: &mut state.io as *mut _,
-        need_vm_func_id: 0,
-        need_vm_arg_start: 0,
-        need_vm_entry_pc: 0,
-        need_vm_resume_pc: 0,
+        call_func_id: 0,
+        call_arg_start: 0,
+        call_entry_pc: 0,
+        call_resume_pc: 0,
     }
 }
 
 // =============================================================================
-// NeedVm Info
+// Call Request Info
 // =============================================================================
 
-/// Info for NeedVm handoff from JIT to VM.
-pub struct NeedVmInfo {
+/// Info for Call request from JIT to VM (non-jittable callee).
+pub struct CallRequestInfo {
     pub func_id: u32,
     pub arg_start: usize,
     pub entry_pc: usize,
     pub resume_pc: u32,
 }
 
-impl NeedVmInfo {
+impl CallRequestInfo {
     /// Push callee frame for VM to execute.
     pub fn push_callee_frame(&self, fiber: &mut Fiber, jit_bp: usize, module: &Module) {
         let callee_func = &module.functions[self.func_id as usize];
@@ -261,15 +261,15 @@ impl NeedVmInfo {
 
 impl Vm {
     /// VM-led JIT call: VM has already pushed frame, JIT operates on fiber.stack[jit_bp..].
-    /// start_pc: 0 for normal entry, resume_pc for NeedVm continuation.
-    /// Returns (ExecResult, Option<NeedVmInfo>) for NeedVm handling.
+    /// start_pc: 0 for normal entry, resume_pc for Call continuation.
+    /// Returns (ExecResult, Option<CallRequestInfo>) for Call handling.
     pub(super) fn call_jit_with_frame(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
         jit_func: JitFunc,
         jit_bp: usize,
         start_pc: u32,
-    ) -> (ExecResult, Option<NeedVmInfo>) {
+    ) -> (ExecResult, Option<CallRequestInfo>) {
         let jit_mgr = self.jit_mgr.as_ref().unwrap();
         let func_table_ptr = jit_mgr.func_table_ptr();
         let func_table_len = jit_mgr.func_table_len() as u32;
@@ -296,12 +296,12 @@ impl Vm {
         
         match result {
             JitResult::Ok => (ExecResult::FrameChanged, None),
-            JitResult::NeedVm => {
-                let info = NeedVmInfo {
-                    func_id: ctx.need_vm_func_id,
-                    arg_start: ctx.need_vm_arg_start as usize,
-                    entry_pc: ctx.need_vm_entry_pc as usize,
-                    resume_pc: ctx.need_vm_resume_pc,
+            JitResult::Call => {
+                let info = CallRequestInfo {
+                    func_id: ctx.call_func_id,
+                    arg_start: ctx.call_arg_start as usize,
+                    entry_pc: ctx.call_entry_pc as usize,
+                    resume_pc: ctx.call_resume_pc,
                 };
                 (ExecResult::FrameChanged, Some(info))
             }
@@ -319,7 +319,7 @@ impl Vm {
         }
     }
     
-    /// Handle JIT re-entry after a NeedVm callee returns.
+    /// Handle JIT re-entry after a Call request callee returns.
     /// Called from Return when caller frame is a JIT frame with pc > 0.
     pub(super) fn handle_jit_reentry(
         &mut self,
@@ -348,13 +348,13 @@ impl Vm {
             let target_func = &module.functions[func_id as usize];
             let func_ret_slots = target_func.ret_slots as usize;
             
-            let (result, need_vm) = self.call_jit_with_frame(fiber_id, jit_func, jit_bp, resume_pc);
+            let (result, call_request) = self.call_jit_with_frame(fiber_id, jit_func, jit_bp, resume_pc);
             
             let fiber = self.scheduler.get_fiber_mut(fiber_id);
             
-            if let Some(need_vm_info) = need_vm {
-                fiber.frames.last_mut().unwrap().pc = need_vm_info.resume_pc as usize;
-                need_vm_info.push_callee_frame(fiber, jit_bp, module);
+            if let Some(call_info) = call_request {
+                fiber.frames.last_mut().unwrap().pc = call_info.resume_pc as usize;
+                call_info.push_callee_frame(fiber, jit_bp, module);
                 return ExecResult::FrameChanged;
             } else if matches!(result, ExecResult::Panic) {
                 return ExecResult::Panic;

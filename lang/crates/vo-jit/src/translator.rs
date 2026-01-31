@@ -59,7 +59,7 @@ pub struct HelperFuncs {
     pub iface_assert: Option<FuncRef>,
     pub iface_to_iface: Option<FuncRef>,
     pub iface_eq: Option<FuncRef>,
-    pub set_need_vm: Option<FuncRef>,
+    pub set_call_request: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler

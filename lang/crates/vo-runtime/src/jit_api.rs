@@ -114,17 +114,17 @@ pub struct JitContext {
     #[cfg(feature = "std")]
     pub io: *mut crate::io::IoRuntime,
     
-    /// NeedVm: callee function ID
-    pub need_vm_func_id: u32,
+    /// Call request: callee function ID (for non-jittable calls)
+    pub call_func_id: u32,
     
-    /// NeedVm: arg_start offset in JIT's local variable area
-    pub need_vm_arg_start: u16,
+    /// Call request: arg_start offset in JIT's local variable area
+    pub call_arg_start: u16,
     
-    /// NeedVm: callee entry PC (usually 0)
-    pub need_vm_entry_pc: u16,
+    /// Call request: callee entry PC (usually 0)
+    pub call_entry_pc: u16,
     
-    /// NeedVm: resume PC where JIT should continue after VM completes
-    pub need_vm_resume_pc: u32,
+    /// Call request: resume PC where JIT should continue after VM completes
+    pub call_resume_pc: u32,
 }
 
 // =============================================================================
@@ -141,9 +141,9 @@ pub enum JitResult {
     Ok = 0,
     /// Function panicked.
     Panic = 1,
-    /// Hand off execution to VM interpreter.
-    /// need_vm_entry_pc and need_vm_resume_pc in JitContext contain the PCs.
-    NeedVm = 2,
+    /// JIT requests VM to execute a call (non-jittable callee).
+    /// call_func_id, call_arg_start, call_entry_pc, call_resume_pc in JitContext contain the info.
+    Call = 2,
 }
 
 // =============================================================================
@@ -269,18 +269,18 @@ pub extern "C" fn vo_call_vm(
     call_fn(ctx.vm, ctx.fiber, func_id, args, arg_count, ret, ret_count)
 }
 
-/// Set NeedVm state in JitContext.
+/// Set Call request state in JitContext.
 /// Called by JIT when it needs to hand off to VM for a non-jittable callee.
 /// 
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
 #[no_mangle]
-pub extern "C" fn vo_set_need_vm(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32) {
+pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32) {
     unsafe {
-        (*ctx).need_vm_func_id = func_id;
-        (*ctx).need_vm_arg_start = arg_start as u16;
-        (*ctx).need_vm_entry_pc = 0; // Callee always starts at PC 0
-        (*ctx).need_vm_resume_pc = resume_pc;
+        (*ctx).call_func_id = func_id;
+        (*ctx).call_arg_start = arg_start as u16;
+        (*ctx).call_entry_pc = 0; // Callee always starts at PC 0
+        (*ctx).call_resume_pc = resume_pc;
     }
 }
 
