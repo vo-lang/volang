@@ -31,10 +31,15 @@ fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
 }
 
 // =============================================================================
-// JIT Trampolines
+// JIT Helper Functions
 // =============================================================================
 
-pub extern "C" fn call_extern_trampoline(
+/// Handle extern function call from JIT code.
+/// 
+/// Directly operates on the fiber.stack region pointed to by `args`/`ret`,
+/// avoiding unnecessary copies. The JIT passes the same pointer for both args and ret,
+/// which points to fiber.stack[jit_bp + arg_start].
+pub extern "C" fn jit_call_extern(
     ctx: *mut vo_runtime::jit_api::JitContext,
     registry: *const std::ffi::c_void,
     gc: *mut vo_runtime::gc::Gc,
@@ -42,7 +47,7 @@ pub extern "C" fn call_extern_trampoline(
     extern_id: u32,
     args: *const u64,
     arg_count: u32,
-    ret: *mut u64,
+    _ret: *mut u64,  // Same as args in current JIT impl
     ret_slots: u32,
 ) -> JitResult {
     use vo_runtime::ffi::{ExternResult, ExternRegistry};
@@ -54,12 +59,11 @@ pub extern "C" fn call_extern_trampoline(
     let ctx = unsafe { &mut *ctx };
     let itab_cache = unsafe { &mut *ctx.itab_cache };
     
-    // Buffer must be large enough for both args and return values
+    // Directly use the fiber.stack region - no temp buffer needed.
+    // args points to fiber.stack[jit_bp + arg_start], and ret is the same pointer.
+    // registry.call will read args from [0..arg_count] and write ret to [0..ret_slots].
     let buffer_size = (arg_count as usize).max(ret_slots as usize).max(1);
-    let mut temp_stack: Vec<u64> = vec![0; buffer_size];
-    for i in 0..arg_count as usize {
-        temp_stack[i] = unsafe { *args.add(i) };
-    }
+    let stack_slice = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
     
     let program_args = unsafe { &*ctx.program_args };
     let sentinel_errors = unsafe { &mut *ctx.sentinel_errors };
@@ -73,11 +77,11 @@ pub extern "C" fn call_extern_trampoline(
     loop {
         let result = registry.call(
             extern_id,
-            &mut temp_stack,
-            0,
-            0,
+            stack_slice,
+            0,  // bp=0: slice already starts at the right position
+            0,  // arg_start=0: args are at slice[0..]
             arg_count as u16,
-            0,
+            0,  // ret_start=0: ret goes to slice[0..]
             gc,
             &module.struct_metas,
             &module.interface_metas,
@@ -100,10 +104,7 @@ pub extern "C" fn call_extern_trampoline(
         
         match result {
             ExternResult::Ok => {
-                // Copy back ret_slots (not arg_count) since extern may return more than args
-                for i in 0..ret_slots as usize {
-                    unsafe { *ret.add(i) = temp_stack[i] };
-                }
+                // Return values are already in place (stack_slice[0..ret_slots])
                 return JitResult::Ok;
             }
             ExternResult::Yield => {
@@ -215,7 +216,7 @@ pub fn build_jit_ctx(
         call_vm_fn: Some(vm_call_sync),
         itab_cache: &mut state.itab_cache as *mut _,
         extern_registry: &state.extern_registry as *const _ as *const std::ffi::c_void,
-        call_extern_fn: Some(call_extern_trampoline),
+        call_extern_fn: Some(jit_call_extern),
         module: module_ptr,
         jit_func_table,
         jit_func_count,

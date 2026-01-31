@@ -199,31 +199,27 @@ pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: 
     gc.write_barrier(parent, child);
 }
 
-/// GC safepoint.
+/// GC safepoint - intentionally a no-op.
 ///
-/// Called at loop back-edges and before function calls when safepoint_flag
-/// is set. Currently a no-op placeholder - full GC integration requires
-/// stack map support which is not yet implemented.
+/// The synchronous JIT design with non-moving GC means stack maps are NOT needed:
 ///
-/// The synchronous JIT design means GC can run when:
-/// 1. JIT calls vo_call_vm (VM will handle GC)
-/// 2. JIT calls vo_gc_alloc (checks debt)
+/// 1. **Non-moving GC**: GcRef pointers never change, so JIT's SSA variables
+///    holding GcRefs remain valid even after GC runs.
 ///
-/// # Arguments
-/// - `ctx`: JIT context
+/// 2. **Reachability**: All GcRefs in JIT code originate from `fiber.stack`
+///    (already tracked by GC) or from helper return values (already rooted).
 ///
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
+/// 3. **GC triggers only at call boundaries**:
+///    - `vo_gc_alloc` - checks debt and may trigger collection
+///    - `vo_call_vm` - enters VM context where GC can run
+///    - Other extern calls
+///
+/// This design eliminates the need for expensive stack maps while maintaining
+/// GC correctness. The trade-off is that long JIT loops without allocations
+/// will delay GC, but this only affects latency, not correctness.
 #[no_mangle]
 pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
-    // Currently no-op. GC is triggered by:
-    // - vo_gc_alloc when debt > 0
-    // - vo_call_vm which enters VM context where GC can run
-    //
-    // Full safepoint support would require:
-    // 1. Stack maps to identify GcRef locations in JIT frames
-    // 2. Cooperation with VM to scan roots
-    // For now, the synchronous JIT design ensures GC safety at call boundaries.
+    // Intentionally no-op. See doc comment for design rationale.
 }
 
 /// Call a VM-interpreted function from JIT code.
