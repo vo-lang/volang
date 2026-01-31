@@ -453,8 +453,8 @@ type TCPConn struct {
 	handle int
 }
 
-func (c *TCPConn) Read(b []byte) (int, error)  { return tcpConnRead(c.handle, b) }
-func (c *TCPConn) Write(b []byte) (int, error) { return tcpConnWrite(c.handle, b) }
+func (c *TCPConn) Read(b []byte) (int, error)  { return waitio_tcpConnRead(c.handle, b) }
+func (c *TCPConn) Write(b []byte) (int, error) { return waitio_tcpConnWrite(c.handle, b) }
 func (c *TCPConn) Close() error                { return tcpConnClose(c.handle) }
 func (c *TCPConn) LocalAddr() Addr             { return &stringAddr{"tcp", tcpConnLocalAddr(c.handle)} }
 func (c *TCPConn) RemoteAddr() Addr            { return &stringAddr{"tcp", tcpConnRemoteAddr(c.handle)} }
@@ -468,7 +468,7 @@ type TCPListener struct {
 }
 
 func (l *TCPListener) Accept() (Conn, error) {
-	h, err := tcpListenerAccept(l.handle)
+	h, err := waitio_tcpListenerAccept(l.handle)
 	if err != nil {
 		return nil, err
 	}
@@ -485,13 +485,13 @@ type UDPConn struct {
 }
 
 func (c *UDPConn) ReadFrom(p []byte) (int, Addr, error) {
-	n, addr, err := udpConnReadFrom(c.handle, p)
+	n, addr, err := waitio_udpConnReadFrom(c.handle, p)
 	if err != nil {
 		return n, nil, err
 	}
 	return n, &stringAddr{"udp", addr}, nil
 }
-func (c *UDPConn) WriteTo(p []byte, addr Addr) (int, error) { return udpConnWriteTo(c.handle, p, addr.String()) }
+func (c *UDPConn) WriteTo(p []byte, addr Addr) (int, error) { return waitio_udpConnWriteTo(c.handle, p, addr.String()) }
 func (c *UDPConn) Close() error                { return udpConnClose(c.handle) }
 func (c *UDPConn) LocalAddr() Addr             { return &stringAddr{"udp", udpConnLocalAddr(c.handle)} }
 func (c *UDPConn) SetDeadline(t time.Time) error      { return udpConnSetDeadline(c.handle, t.UnixNano()) }
@@ -505,8 +505,8 @@ type UnixConn struct {
 	handle int
 }
 
-func (c *UnixConn) Read(b []byte) (int, error)  { return unixConnRead(c.handle, b) }
-func (c *UnixConn) Write(b []byte) (int, error) { return unixConnWrite(c.handle, b) }
+func (c *UnixConn) Read(b []byte) (int, error)  { return waitio_unixConnRead(c.handle, b) }
+func (c *UnixConn) Write(b []byte) (int, error) { return waitio_unixConnWrite(c.handle, b) }
 func (c *UnixConn) Close() error                { return unixConnClose(c.handle) }
 func (c *UnixConn) LocalAddr() Addr             { return &UnixAddr{Name: "", Net: "unix"} }
 func (c *UnixConn) RemoteAddr() Addr            { return &UnixAddr{Name: "", Net: "unix"} }
@@ -521,7 +521,7 @@ type UnixListener struct {
 }
 
 func (l *UnixListener) Accept() (Conn, error) {
-	h, err := unixListenerAccept(l.handle)
+	h, err := waitio_unixListenerAccept(l.handle)
 	if err != nil {
 		return nil, err
 	}
@@ -971,8 +971,8 @@ func listen(network, address string) (int, error)
 func listenPacket(network, address string) (int, error)
 
 // TCP connection operations
-func tcpConnRead(handle int, b []byte) (int, error)
-func tcpConnWrite(handle int, b []byte) (int, error)
+func waitio_tcpConnRead(handle int, b []byte) (int, error)
+func waitio_tcpConnWrite(handle int, b []byte) (int, error)
 func tcpConnClose(handle int) error
 func tcpConnLocalAddr(handle int) string
 func tcpConnRemoteAddr(handle int) string
@@ -981,13 +981,13 @@ func tcpConnSetReadDeadline(handle int, deadlineNs int64) error
 func tcpConnSetWriteDeadline(handle int, deadlineNs int64) error
 
 // TCP listener operations
-func tcpListenerAccept(handle int) (int, error)
+func waitio_tcpListenerAccept(handle int) (int, error)
 func tcpListenerClose(handle int) error
 func tcpListenerAddr(handle int) string
 
 // UDP connection operations
-func udpConnReadFrom(handle int, p []byte) (int, string, error)
-func udpConnWriteTo(handle int, p []byte, addr string) (int, error)
+func waitio_udpConnReadFrom(handle int, p []byte) (int, string, error)
+func waitio_udpConnWriteTo(handle int, p []byte, addr string) (int, error)
 func udpConnClose(handle int) error
 func udpConnLocalAddr(handle int) string
 func udpConnSetDeadline(handle int, deadlineNs int64) error
@@ -997,10 +997,10 @@ func udpConnSetWriteDeadline(handle int, deadlineNs int64) error
 // Unix socket operations
 func unixDial(address string) (int, error)
 func unixListen(address string) (int, error)
-func unixConnRead(handle int, b []byte) (int, error)
-func unixConnWrite(handle int, b []byte) (int, error)
+func waitio_unixConnRead(handle int, b []byte) (int, error)
+func waitio_unixConnWrite(handle int, b []byte) (int, error)
 func unixConnClose(handle int) error
-func unixListenerAccept(handle int) (int, error)
+func waitio_unixListenerAccept(handle int) (int, error)
 func unixListenerClose(handle int) error
 
 // DNS

@@ -73,7 +73,7 @@ impl UnixDriver {
     /// Submit an operation. Returns Completed if it finished immediately, Pending otherwise.
     pub fn submit(&mut self, op: PendingOp) -> SubmitResult {
         let fd = op.handle as i32;
-        let is_read = matches!(op.kind, OpKind::Read | OpKind::Accept | OpKind::Connect);
+        let is_read = matches!(op.kind, OpKind::Read | OpKind::Accept | OpKind::Connect | OpKind::RecvFrom);
 
         // Check for concurrent operation on same direction
         if let Some(state) = self.fd_states.get(&fd) {
@@ -464,6 +464,103 @@ fn try_complete(op: &PendingOp) -> TryResult {
             } else {
                 TryResult::Done(CompletionData::Connect)
             }
+        }
+
+        OpKind::RecvFrom => {
+            let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            let n = unsafe {
+                libc::recvfrom(
+                    fd,
+                    op.buf_ptr as *mut core::ffi::c_void,
+                    op.buf_len,
+                    0,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut addr_len,
+                )
+            };
+
+            if n >= 0 {
+                let socket_addr = sockaddr_to_std(&addr, addr_len);
+                TryResult::Done(CompletionData::RecvFrom(n as usize, socket_addr))
+            } else {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    TryResult::WouldBlock
+                } else {
+                    TryResult::Error(e)
+                }
+            }
+        }
+
+        OpKind::SendTo => {
+            let addr = op.dest_addr.as_ref().expect("SendTo requires dest_addr");
+            let (sockaddr, socklen) = std_to_sockaddr(addr);
+            let n = unsafe {
+                libc::sendto(
+                    fd,
+                    op.buf_ptr as *const core::ffi::c_void,
+                    op.buf_len,
+                    0,
+                    &sockaddr as *const _ as *const libc::sockaddr,
+                    socklen,
+                )
+            };
+
+            if n >= 0 {
+                TryResult::Done(CompletionData::Size(n as usize))
+            } else {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    TryResult::WouldBlock
+                } else {
+                    TryResult::Error(e)
+                }
+            }
+        }
+    }
+}
+
+fn sockaddr_to_std(addr: &libc::sockaddr_storage, len: libc::socklen_t) -> std::net::SocketAddr {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+    
+    unsafe {
+        if addr.ss_family as i32 == libc::AF_INET && len as usize >= std::mem::size_of::<libc::sockaddr_in>() {
+            let addr_in = &*(addr as *const _ as *const libc::sockaddr_in);
+            let ip = Ipv4Addr::from(u32::from_be(addr_in.sin_addr.s_addr));
+            let port = u16::from_be(addr_in.sin_port);
+            SocketAddr::V4(SocketAddrV4::new(ip, port))
+        } else if addr.ss_family as i32 == libc::AF_INET6 && len as usize >= std::mem::size_of::<libc::sockaddr_in6>() {
+            let addr_in6 = &*(addr as *const _ as *const libc::sockaddr_in6);
+            let ip = Ipv6Addr::from(addr_in6.sin6_addr.s6_addr);
+            let port = u16::from_be(addr_in6.sin6_port);
+            SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0))
+        } else {
+            // Fallback to 0.0.0.0:0
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        }
+    }
+}
+
+fn std_to_sockaddr(addr: &std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    use std::net::SocketAddr;
+    
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    
+    match addr {
+        SocketAddr::V4(v4) => {
+            let addr_in = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in) };
+            addr_in.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr_in.sin_port = v4.port().to_be();
+            addr_in.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
+            (storage, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+        }
+        SocketAddr::V6(v6) => {
+            let addr_in6 = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in6) };
+            addr_in6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            addr_in6.sin6_port = v6.port().to_be();
+            addr_in6.sin6_addr.s6_addr = v6.ip().octets();
+            (storage, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
         }
     }
 }

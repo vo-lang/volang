@@ -707,10 +707,17 @@ func runShouldFailTest(job TestJob, start time.Time) TestResult {
 func runSingleFile(file string, mode string, verbose bool, configs map[string]TestConfig) int {
 	fmt.Println("[VO-TEST] Running single file: " + file)
 	
-	// Determine full path
+	// Determine full path - relative paths are under lang/test_data/
 	testPath := file
 	if !strings.HasPrefix(file, "/") && !strings.HasPrefix(file, "lang/test_data/") {
 		testPath = "lang/test_data/" + file
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(testPath); err != nil {
+		fmt.Println("Error: file not found: " + testPath)
+		fmt.Println("Hint: use relative path under lang/test_data/, e.g., net/net_conn.vo")
+		return 1
 	}
 
 	relPath := file

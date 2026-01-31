@@ -117,7 +117,7 @@ pub fn net_listen(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "tcpConnRead")]
+#[vostd_extern_ctx("net", "waitio_tcpConnRead")]
 pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -151,7 +151,7 @@ pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
     handle_rw_completion(call, c, slots::RET_0, slots::RET_1, true)
 }
 
-#[vostd_extern_ctx("net", "tcpConnWrite")]
+#[vostd_extern_ctx("net", "waitio_tcpConnWrite")]
 pub fn net_tcp_conn_write(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -289,7 +289,7 @@ pub fn net_tcp_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternRe
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "tcpListenerAccept")]
+#[vostd_extern_ctx("net", "waitio_tcpListenerAccept")]
 pub fn net_tcp_listener_accept(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
 

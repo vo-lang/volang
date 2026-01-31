@@ -114,39 +114,39 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[vo_runtime::by
             // TCP
             "net_dial" => registry.register_with_context(id, tcp::net_dial),
             "net_listen" => registry.register_with_context(id, tcp::net_listen),
-            "net_tcpConnRead" => registry.register_with_context(id, tcp::net_tcp_conn_read),
-            "net_tcpConnWrite" => registry.register_with_context(id, tcp::net_tcp_conn_write),
+            "net_waitio_tcpConnRead" => registry.register_with_context(id, tcp::net_tcp_conn_read),
+            "net_waitio_tcpConnWrite" => registry.register_with_context(id, tcp::net_tcp_conn_write),
             "net_tcpConnClose" => registry.register_with_context(id, tcp::net_tcp_conn_close),
             "net_tcpConnLocalAddr" => registry.register_with_context(id, tcp::net_tcp_conn_local_addr),
             "net_tcpConnRemoteAddr" => registry.register_with_context(id, tcp::net_tcp_conn_remote_addr),
             "net_tcpConnSetDeadline" => registry.register_with_context(id, tcp::net_tcp_conn_set_deadline),
             "net_tcpConnSetReadDeadline" => registry.register_with_context(id, tcp::net_tcp_conn_set_read_deadline),
             "net_tcpConnSetWriteDeadline" => registry.register_with_context(id, tcp::net_tcp_conn_set_write_deadline),
-            "net_tcpListenerAccept" => registry.register_with_context(id, tcp::net_tcp_listener_accept),
+            "net_waitio_tcpListenerAccept" => registry.register_with_context(id, tcp::net_tcp_listener_accept),
             "net_tcpListenerClose" => registry.register_with_context(id, tcp::net_tcp_listener_close),
             "net_tcpListenerAddr" => registry.register_with_context(id, tcp::net_tcp_listener_addr),
-            // UDP
+            // UDP (async)
             "net_listenPacket" => registry.register_with_context(id, udp::net_listen_packet),
-            "net_udpConnReadFrom" => registry.register_with_context(id, udp::net_udp_conn_read_from),
-            "net_udpConnWriteTo" => registry.register_with_context(id, udp::net_udp_conn_write_to),
+            "net_waitio_udpConnReadFrom" => registry.register_with_context(id, udp::net_udp_conn_read_from),
+            "net_waitio_udpConnWriteTo" => registry.register_with_context(id, udp::net_udp_conn_write_to),
             "net_udpConnClose" => registry.register_with_context(id, udp::net_udp_conn_close),
             "net_udpConnLocalAddr" => registry.register_with_context(id, udp::net_udp_conn_local_addr),
             "net_udpConnSetDeadline" => registry.register_with_context(id, udp::net_udp_conn_set_deadline),
             "net_udpConnSetReadDeadline" => registry.register_with_context(id, udp::net_udp_conn_set_read_deadline),
             "net_udpConnSetWriteDeadline" => registry.register_with_context(id, udp::net_udp_conn_set_write_deadline),
-            // Unix (cfg(unix) only)
+            // Unix (cfg(unix) only, async)
             #[cfg(unix)]
             "net_unixDial" => registry.register_with_context(id, unix::net_unix_dial),
             #[cfg(unix)]
             "net_unixListen" => registry.register_with_context(id, unix::net_unix_listen),
             #[cfg(unix)]
-            "net_unixConnRead" => registry.register_with_context(id, unix::net_unix_conn_read),
+            "net_waitio_unixConnRead" => registry.register_with_context(id, unix::net_unix_conn_read),
             #[cfg(unix)]
-            "net_unixConnWrite" => registry.register_with_context(id, unix::net_unix_conn_write),
+            "net_waitio_unixConnWrite" => registry.register_with_context(id, unix::net_unix_conn_write),
             #[cfg(unix)]
             "net_unixConnClose" => registry.register_with_context(id, unix::net_unix_conn_close),
             #[cfg(unix)]
-            "net_unixListenerAccept" => registry.register_with_context(id, unix::net_unix_listener_accept),
+            "net_waitio_unixListenerAccept" => registry.register_with_context(id, unix::net_unix_listener_accept),
             #[cfg(unix)]
             "net_unixListenerClose" => registry.register_with_context(id, unix::net_unix_listener_close),
             // DNS

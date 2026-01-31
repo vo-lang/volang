@@ -157,7 +157,7 @@ fn metadata_to_file_info(call: &mut ExternCallContext, name: &str, meta: &fs::Me
     file_info
 }
 
-#[vostd_extern_ctx("os", "blocking_fileRead")]
+#[vostd_extern_ctx("os", "waitio_fileRead")]
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -235,7 +235,7 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileWrite")]
+#[vostd_extern_ctx("os", "waitio_fileWrite")]
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -306,7 +306,7 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileReadAt")]
+#[vostd_extern_ctx("os", "waitio_fileReadAt")]
 fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -377,7 +377,7 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("os", "blocking_fileWriteAt")]
+#[vostd_extern_ctx("os", "waitio_fileWriteAt")]
 fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -1059,7 +1059,7 @@ fn os_native_kill_process(call: &mut ExternCallContext) -> ExternResult {
 #[cfg(feature = "std")]
 vo_runtime::stdlib_register!(os:
     getOsErrors, getOsConsts,
-    blocking_fileRead, blocking_fileWrite, blocking_fileReadAt, blocking_fileWriteAt, fileSeek, fileClose, fileSync, fileStat, fileTruncate,
+    waitio_fileRead, waitio_fileWrite, waitio_fileReadAt, waitio_fileWriteAt, fileSeek, fileClose, fileSync, fileStat, fileTruncate,
     openFile, nativeMkdir, nativeMkdirAll, nativeRemove, nativeRemoveAll, nativeRename,
     nativeStat, nativeLstat, nativeReadDir, nativeChmod, nativeChown, nativeSymlink, nativeReadlink,
     nativeLink, nativeTruncate, nativeReadFile, nativeWriteFile,

@@ -165,9 +165,9 @@ impl<'a> FunctionCompiler<'a> {
                     !crate::is_func_jittable(target_func)
                 }
                 Opcode::CallExtern => {
-                    // blocking_ extern calls may return WaitIo and need resume
+                    // waitio_ extern calls may return WaitIo and need resume
                     let extern_id = inst.b as usize;
-                    self.vo_module.externs[extern_id].name.starts_with("blocking_")
+                    self.vo_module.externs[extern_id].name.starts_with("waitio_")
                 }
                 _ => false,
             };
@@ -708,9 +708,9 @@ impl<'a> FunctionCompiler<'a> {
         let arg_start = inst.c as usize;
         let arg_count = inst.flags as usize;
         
-        // Check if this is a blocking extern (may return WaitIo)
+        // Check if this is a waitio extern (may return WaitIo)
         let extern_def = &self.vo_module.externs[extern_id as usize];
-        let is_blocking = extern_def.name.starts_with("blocking_");
+        let is_blocking = extern_def.name.starts_with("waitio_");
         let extern_ret_slots = extern_def.ret_slots as usize;
         let buffer_size = arg_count.max(extern_ret_slots).max(1);
         

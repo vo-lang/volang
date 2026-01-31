@@ -20,6 +20,8 @@ pub enum OpKind {
     Write,
     Accept,
     Connect,
+    RecvFrom,
+    SendTo,
 }
 
 /// Result of a completed I/O operation.
@@ -38,10 +40,12 @@ pub enum CompletionData {
     Accept(IoHandle),
     /// Connect: success (no additional data)
     Connect,
+    /// RecvFrom: bytes received + source address
+    RecvFrom(usize, std::net::SocketAddr),
 }
 
 /// Pending operation descriptor.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PendingOp {
     pub token: IoToken,
     pub handle: IoHandle,
@@ -49,6 +53,8 @@ pub(crate) struct PendingOp {
     pub buf_ptr: usize,
     pub buf_len: usize,
     pub offset: i64,
+    /// For SendTo: destination address
+    pub dest_addr: Option<std::net::SocketAddr>,
 }
 
 /// Async I/O runtime.
@@ -76,32 +82,42 @@ impl IoRuntime {
 
     /// Submit a read operation.
     pub fn submit_read(&mut self, handle: IoHandle, buf: *mut u8, len: usize) -> IoToken {
-        self.submit(handle, OpKind::Read, buf as usize, len, -1)
+        self.submit(handle, OpKind::Read, buf as usize, len, -1, None)
     }
 
     /// Submit a write operation.
     pub fn submit_write(&mut self, handle: IoHandle, buf: *const u8, len: usize) -> IoToken {
-        self.submit(handle, OpKind::Write, buf as usize, len, -1)
+        self.submit(handle, OpKind::Write, buf as usize, len, -1, None)
     }
 
     /// Submit an accept operation.
     pub fn submit_accept(&mut self, handle: IoHandle) -> IoToken {
-        self.submit(handle, OpKind::Accept, 0, 0, -1)
+        self.submit(handle, OpKind::Accept, 0, 0, -1, None)
     }
 
     /// Submit a read at offset operation (for files).
     pub fn submit_read_at(&mut self, handle: IoHandle, buf: *mut u8, len: usize, offset: i64) -> IoToken {
-        self.submit(handle, OpKind::Read, buf as usize, len, offset)
+        self.submit(handle, OpKind::Read, buf as usize, len, offset, None)
     }
 
     /// Submit a write at offset operation (for files).
     pub fn submit_write_at(&mut self, handle: IoHandle, buf: *const u8, len: usize, offset: i64) -> IoToken {
-        self.submit(handle, OpKind::Write, buf as usize, len, offset)
+        self.submit(handle, OpKind::Write, buf as usize, len, offset, None)
     }
 
-    fn submit(&mut self, handle: IoHandle, kind: OpKind, buf_ptr: usize, buf_len: usize, offset: i64) -> IoToken {
+    /// Submit a recvfrom operation (UDP).
+    pub fn submit_recv_from(&mut self, handle: IoHandle, buf: *mut u8, len: usize) -> IoToken {
+        self.submit(handle, OpKind::RecvFrom, buf as usize, len, -1, None)
+    }
+
+    /// Submit a sendto operation (UDP).
+    pub fn submit_send_to(&mut self, handle: IoHandle, buf: *const u8, len: usize, addr: std::net::SocketAddr) -> IoToken {
+        self.submit(handle, OpKind::SendTo, buf as usize, len, -1, Some(addr))
+    }
+
+    fn submit(&mut self, handle: IoHandle, kind: OpKind, buf_ptr: usize, buf_len: usize, offset: i64, dest_addr: Option<std::net::SocketAddr>) -> IoToken {
         let token = self.alloc_token();
-        let op = PendingOp { token, handle, kind, buf_ptr, buf_len, offset };
+        let op = PendingOp { token, handle, kind, buf_ptr, buf_len, offset, dest_addr };
 
         // Driver handles concurrent op check and registration
         match self.driver.submit(op) {

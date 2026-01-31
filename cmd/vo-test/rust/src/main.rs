@@ -14,8 +14,8 @@ fn main() {
     let mut full_args = vec!["vo-test".to_string()];
     full_args.extend(args.iter().skip(1).cloned());
     
-    // Compile cmd/vo-test with cache
-    let output = match vo_engine::compile_with_cache(vo_test_dir.to_str().unwrap()) {
+    // Compile cmd/vo-test (no cache - always use fresh stdlib)
+    let output = match vo_engine::compile(vo_test_dir.to_str().unwrap()) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Failed to compile vo-test: {}", e);
