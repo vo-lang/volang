@@ -39,6 +39,11 @@ fn set_jit_runtime_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber) {
 /// Directly operates on the fiber.stack region pointed to by `args`/`ret`,
 /// avoiding unnecessary copies. The JIT passes the same pointer for both args and ret,
 /// which points to fiber.stack[jit_bp + arg_start].
+///
+/// For blocking_ extern functions that return WaitIo:
+/// - First call: extern starts I/O, returns WaitIo, we return JitResult::WaitIo
+/// - VM blocks fiber, waits for I/O completion
+/// - Resume call: ctx.wait_io_token contains the token, passed to extern as resume_token
 pub extern "C" fn jit_call_extern(
     ctx: *mut vo_runtime::jit_api::JitContext,
     registry: *const std::ffi::c_void,
@@ -60,8 +65,6 @@ pub extern "C" fn jit_call_extern(
     let itab_cache = unsafe { &mut *ctx.itab_cache };
     
     // Directly use the fiber.stack region - no temp buffer needed.
-    // args points to fiber.stack[jit_bp + arg_start], and ret is the same pointer.
-    // registry.call will read args from [0..arg_count] and write ret to [0..ret_slots].
     let buffer_size = (arg_count as usize).max(ret_slots as usize).max(1);
     let stack_slice = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
     
@@ -70,81 +73,69 @@ pub extern "C" fn jit_call_extern(
     #[cfg(feature = "std")]
     let io = unsafe { &mut *ctx.io };
     
-    // Resume token for WaitIo - initially None
+    // Resume token: if wait_io_token is set, this is a resume after WaitIo
     #[cfg(feature = "std")]
-    let mut resume_token: Option<vo_runtime::io::IoToken> = None;
+    let resume_token = if ctx.wait_io_token != 0 {
+        let token = ctx.wait_io_token;  // IoToken is just u64
+        ctx.wait_io_token = 0;  // Clear for next call
+        Some(token)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "std"))]
+    let resume_token: Option<()> = None;
     
-    loop {
-        let result = registry.call(
-            extern_id,
-            stack_slice,
-            0,  // bp=0: slice already starts at the right position
-            0,  // arg_start=0: args are at slice[0..]
-            arg_count as u16,
-            0,  // ret_start=0: ret goes to slice[0..]
-            gc,
-            &module.struct_metas,
-            &module.interface_metas,
-            &module.named_type_metas,
-            &module.runtime_types,
-            itab_cache,
-            &module.functions,
-            module,
-            ctx.vm,
-            ctx.fiber,
-            Some(super::closure_call_trampoline),
-            &module.well_known,
-            program_args,
-            sentinel_errors,
-            #[cfg(feature = "std")]
-            io,
-            #[cfg(feature = "std")]
-            resume_token.take(),
-        );
-        
-        match result {
-            ExternResult::Ok => {
-                // Return values are already in place (stack_slice[0..ret_slots])
-                return JitResult::Ok;
-            }
-            ExternResult::Yield => {
-                // JIT doesn't support yield (async operations). This is a fatal error.
-                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-                fiber.set_fatal_panic();
-                return JitResult::Panic;
-            }
-            ExternResult::Block => {
-                // Blocking operation - need to return to VM scheduler.
-                // This shouldn't normally happen with extern functions.
-                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-                fiber.set_fatal_panic();
-                return JitResult::Panic;
-            }
-            #[cfg(feature = "std")]
-            ExternResult::WaitIo { token } => {
-                // Synchronously wait for I/O completion using shared IoRuntime, then resume.
-                // Poll until the token's completion appears in the cache.
-                // Note: Don't consume the completion here - extern will call take_completion.
-                while !io.has_completion(token) {
-                    // poll() returns Vec<Completion> for completions that just finished.
-                    // Safe to ignore: completions are cached in io.completion_cache, and
-                    // the extern will retrieve ours via take_completion(token) when resumed.
-                    let _ = io.poll();
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                }
-                resume_token = Some(token);
-                // Loop back to call the extern again with the resume token
-            }
-            ExternResult::Panic(msg) => {
-                // Extern panics are recoverable - convert to Recoverable panic
-                // Pack as interface{} with string value
-                let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
-                let gc = unsafe { &mut *ctx.gc };
-                let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
-                let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-                fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
-                return JitResult::Panic;
-            }
+    let result = registry.call(
+        extern_id,
+        stack_slice,
+        0,  // bp=0: slice already starts at the right position
+        0,  // arg_start=0: args are at slice[0..]
+        arg_count as u16,
+        0,  // ret_start=0: ret goes to slice[0..]
+        gc,
+        &module.struct_metas,
+        &module.interface_metas,
+        &module.named_type_metas,
+        &module.runtime_types,
+        itab_cache,
+        &module.functions,
+        module,
+        ctx.vm,
+        ctx.fiber,
+        Some(super::closure_call_trampoline),
+        &module.well_known,
+        program_args,
+        sentinel_errors,
+        #[cfg(feature = "std")]
+        io,
+        #[cfg(feature = "std")]
+        resume_token,
+    );
+    
+    match result {
+        ExternResult::Ok => JitResult::Ok,
+        // Yield/Block shouldn't happen in extern calls - fatal error
+        ExternResult::Yield | ExternResult::Block => {
+            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+            fiber.set_fatal_panic();
+            JitResult::Panic
+        }
+        #[cfg(feature = "std")]
+        ExternResult::WaitIo { token } => {
+            // Return WaitIo to VM scheduler for proper fiber blocking.
+            // JIT compiler emits spill before calling blocking_ extern functions,
+            // so variables are safely saved to fiber.stack before we yield.
+            ctx.wait_io_token = token;  // IoToken is just u64
+            JitResult::WaitIo
+        }
+        ExternResult::Panic(msg) => {
+            // Extern panics are recoverable - convert to Recoverable panic
+            let fiber = unsafe { &mut *(ctx.fiber as *mut crate::fiber::Fiber) };
+            let gc = unsafe { &mut *ctx.gc };
+            let panic_str = vo_runtime::objects::string::new_from_string(gc, msg);
+            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+            fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+            JitResult::Panic
         }
     }
 }
@@ -228,6 +219,8 @@ pub fn build_jit_ctx(
         call_arg_start: 0,
         call_entry_pc: 0,
         call_resume_pc: 0,
+        #[cfg(feature = "std")]
+        wait_io_token: 0,
     }
 }
 
@@ -286,12 +279,25 @@ impl Vm {
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
         
+        // Get wait_io_token from frame for I/O resume, then clear it
+        #[cfg(feature = "std")]
+        let wait_io_token = {
+            let frame = fiber.current_frame_mut().unwrap();
+            let token = frame.wait_io_token;
+            frame.wait_io_token = 0;  // Clear after reading
+            token
+        };
+        
         let mut ctx = build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
         );
+        
+        // Set wait_io_token for I/O resume (JIT will pass it to jit_call_extern)
+        #[cfg(feature = "std")]
+        { ctx.wait_io_token = wait_io_token; }
         
         let result = jit_func(&mut ctx, args_ptr, args_ptr, start_pc);
         
@@ -305,6 +311,18 @@ impl Vm {
                     resume_pc: ctx.call_resume_pc,
                 };
                 (ExecResult::FrameChanged, Some(info))
+            }
+            #[cfg(feature = "std")]
+            JitResult::WaitIo => {
+                // JIT code wants to yield for I/O - block the fiber
+                let token = ctx.wait_io_token;  // IoToken is just u64
+                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                // Set resume PC and save token so JIT can continue after I/O completes
+                let frame = fiber.current_frame_mut().unwrap();
+                frame.pc = ctx.call_resume_pc as usize;
+                frame.wait_io_token = ctx.wait_io_token;
+                self.scheduler.block_for_io(token);
+                (ExecResult::Block(crate::fiber::BlockReason::Io(token)), None)
             }
             JitResult::Panic => {
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);

@@ -600,14 +600,7 @@ fn call_defer_entry(
         }
     }
 
-    fiber.frames.push(CallFrame {
-        func_id,
-        pc: 0,
-        bp: args_start,
-        ret_reg: 0,
-        ret_count: 0,
-        is_jit_frame: false,
-    });
+    fiber.frames.push(CallFrame::new(func_id, args_start, 0, 0));
 
     ExecResult::FrameChanged
 }

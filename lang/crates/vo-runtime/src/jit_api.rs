@@ -125,6 +125,11 @@ pub struct JitContext {
     
     /// Call request: resume PC where JIT should continue after VM completes
     pub call_resume_pc: u32,
+    
+    /// I/O wait token (for WaitIo result).
+    /// Set by jit_call_extern when extern returns WaitIo.
+    #[cfg(feature = "std")]
+    pub wait_io_token: u64,
 }
 
 // =============================================================================
@@ -144,6 +149,10 @@ pub enum JitResult {
     /// JIT requests VM to execute a call (non-jittable callee).
     /// call_func_id, call_arg_start, call_entry_pc, call_resume_pc in JitContext contain the info.
     Call = 2,
+    /// JIT requests VM to wait for I/O completion.
+    /// The IoToken is stored in JitContext.wait_io_token.
+    /// After I/O completes, VM resumes JIT at call_resume_pc.
+    WaitIo = 3,
 }
 
 // =============================================================================

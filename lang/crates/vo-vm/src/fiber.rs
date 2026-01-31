@@ -22,6 +22,20 @@ pub struct CallFrame {
     pub ret_count: u16,
     /// If true, this frame was entered via JIT and should resume JIT when pc > 0
     pub is_jit_frame: bool,
+    /// I/O token for resume after WaitIo (JIT only). 0 means no pending I/O.
+    pub wait_io_token: u64,
+}
+
+impl CallFrame {
+    #[inline]
+    pub fn new(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
+        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: false, wait_io_token: 0 }
+    }
+    
+    #[inline]
+    pub fn new_jit(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
+        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: true, wait_io_token: 0 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -447,14 +461,12 @@ impl Fiber {
         let new_sp = bp + local_slots as usize;
         self.ensure_capacity(new_sp);
         self.sp = new_sp;
-        self.frames.push(CallFrame {
-            func_id,
-            pc: 0,
-            bp,
-            ret_reg,
-            ret_count,
-            is_jit_frame,
-        });
+        let frame = if is_jit_frame {
+            CallFrame::new_jit(func_id, bp, ret_reg, ret_count)
+        } else {
+            CallFrame::new(func_id, bp, ret_reg, ret_count)
+        };
+        self.frames.push(frame);
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {

@@ -46,14 +46,7 @@ pub fn exec_call(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame {
-        func_id,
-        pc: 0,
-        bp: new_bp,
-        ret_reg: inst.b,
-        ret_count: ret_slots as u16,
-        is_jit_frame: false,
-    });
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots as u16));
 
     ExecResult::FrameChanged
 }
@@ -103,14 +96,7 @@ pub fn exec_call_closure(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame {
-        func_id,
-        pc: 0,
-        bp: new_bp,
-        ret_reg: inst.b,
-        ret_count: ret_slots,
-        is_jit_frame: false,
-    });
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots));
 
     ExecResult::FrameChanged
 }
@@ -157,15 +143,7 @@ pub fn exec_call_iface(
     
     // Update sp and push frame
     fiber.sp = new_sp;
-    fiber.frames.push(CallFrame {
-        func_id,
-        pc: 0,
-        bp: new_bp,
-        ret_reg: inst.b,
-        ret_count: ret_slots as u16,
-        is_jit_frame: false,
-    });
+    fiber.frames.push(CallFrame::new(func_id, new_bp, inst.b, ret_slots as u16));
 
     ExecResult::FrameChanged
 }
-

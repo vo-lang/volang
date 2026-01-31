@@ -154,21 +154,28 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Scan for Call instructions to non-jittable callees (Call requests).
+    /// Scan for Call instructions to non-jittable callees and blocking extern calls.
     /// These require resume blocks for multi-entry support.
     fn scan_call_requests(&mut self) {
         for (pc, inst) in self.func_def.code.iter().enumerate() {
-            if inst.opcode() == Opcode::Call {
-                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                let target_func = &self.vo_module.functions[target_func_id as usize];
-                let callee_jittable = crate::is_func_jittable(target_func);
-                
-                if !callee_jittable {
-                    let resume_pc = pc + 1;
-                    // Create resume block
-                    let resume_block = self.builder.create_block();
-                    self.resume_blocks.insert(resume_pc, resume_block);
+            let needs_resume = match inst.opcode() {
+                Opcode::Call => {
+                    let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                    let target_func = &self.vo_module.functions[target_func_id as usize];
+                    !crate::is_func_jittable(target_func)
                 }
+                Opcode::CallExtern => {
+                    // blocking_ extern calls may return WaitIo and need resume
+                    let extern_id = inst.b as usize;
+                    self.vo_module.externs[extern_id].name.starts_with("blocking_")
+                }
+                _ => false,
+            };
+            
+            if needs_resume {
+                let resume_pc = pc + 1;
+                let resume_block = self.builder.create_block();
+                self.resume_blocks.insert(resume_pc, resume_block);
             }
         }
     }
@@ -289,7 +296,7 @@ impl<'a> FunctionCompiler<'a> {
             Opcode::Return => { self.ret(inst); Ok(true) }
             Opcode::Panic => { self.panic(inst); Ok(true) }
             Opcode::Call => Ok(self.call(inst)),
-            Opcode::CallExtern => { self.call_extern(inst); Ok(false) }
+            Opcode::CallExtern => { self.call_extern(inst, self.current_pc); Ok(false) }
             Opcode::CallClosure => { self.call_closure(inst); Ok(false) }
             Opcode::CallIface => { self.call_iface(inst); Ok(false) }
             _ => Err(JitError::UnsupportedOpcode(inst.opcode())),
@@ -688,7 +695,7 @@ impl<'a> FunctionCompiler<'a> {
     }
     
 
-    fn call_extern(&mut self, inst: &Instruction) {
+    fn call_extern(&mut self, inst: &Instruction, pc: usize) {
         let call_extern_func = match self.helpers.call_extern {
             Some(f) => f,
             None => return,
@@ -701,11 +708,13 @@ impl<'a> FunctionCompiler<'a> {
         let arg_start = inst.c as usize;
         let arg_count = inst.flags as usize;
         
-        // Get ret_slots from extern definition for buffer sizing
-        let extern_ret_slots = self.vo_module.externs[extern_id as usize].ret_slots as usize;
+        // Check if this is a blocking extern (may return WaitIo)
+        let extern_def = &self.vo_module.externs[extern_id as usize];
+        let is_blocking = extern_def.name.starts_with("blocking_");
+        let extern_ret_slots = extern_def.ret_slots as usize;
         let buffer_size = arg_count.max(extern_ret_slots).max(1);
         
-        // Limit copy-back to available variables (codegen allocates dst + needed slots)
+        // Limit copy-back to available variables
         let available_vars = self.vars.len().saturating_sub(dst);
         let copy_back_slots = extern_ret_slots.min(available_vars);
         
@@ -726,12 +735,48 @@ impl<'a> FunctionCompiler<'a> {
         let arg_count_val = self.builder.ins().iconst(types::I32, arg_count as i64);
         let ret_slots_val = self.builder.ins().iconst(types::I32, extern_ret_slots as i64);
         
-        let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
-        let result = self.builder.inst_results(call)[0];
+        if is_blocking {
+            // Blocking extern: spill before call, check WaitIo, restore after
+            self.emit_variable_spill();
+            
+            let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
+            let result = self.builder.inst_results(call)[0];
+            
+            // Check for WaitIo (result == 3)
+            let wait_io_val = self.builder.ins().iconst(types::I32, 3);
+            let is_wait_io = self.builder.ins().icmp(IntCC::Equal, result, wait_io_val);
+            
+            let wait_io_block = self.builder.create_block();
+            let continue_block = self.builder.create_block();
+            
+            self.builder.ins().brif(is_wait_io, wait_io_block, &[], continue_block, &[]);
+            
+            // WaitIo path: set resume_pc and return WaitIo
+            self.builder.switch_to_block(wait_io_block);
+            self.builder.seal_block(wait_io_block);
+            
+            // Set call_resume_pc in JitContext (offset 124 for call_resume_pc)
+            let resume_pc = pc + 1;
+            let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+            self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, 124);
+            
+            // Return WaitIo (3)
+            self.builder.ins().return_(&[wait_io_val]);
+            
+            // Continue path: check for panic, then restore and proceed
+            self.builder.switch_to_block(continue_block);
+            self.builder.seal_block(continue_block);
+            
+            self.check_call_result(result);
+            self.emit_variable_restore();
+        } else {
+            // Non-blocking extern: simple call
+            let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
+            let result = self.builder.inst_results(call)[0];
+            self.check_call_result(result);
+        }
         
-        self.check_call_result(result);
-        
-        // Must use write_var to sync to locals_slot for var_addr access
+        // Copy return values to destination variables
         for i in 0..copy_back_slots {
             let val = self.builder.ins().stack_load(types::I64, slot, (i * 8) as i32);
             self.sync_var((dst + i) as u16, val);
