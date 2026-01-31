@@ -10,6 +10,7 @@ mod udp;
 mod unix;
 #[cfg(feature = "std")]
 mod dns;
+pub mod http;
 
 #[cfg(feature = "std")]
 use std::collections::HashMap;

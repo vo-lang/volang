@@ -35,7 +35,6 @@ pub(crate) mod serde_toml;
 pub mod time;
 pub mod os;
 pub mod net;
-pub mod http;
 pub mod filepath;
 pub mod exec;
 
@@ -70,7 +69,7 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
         time::register_externs(registry, externs);
         os::register_externs(registry, externs);
         net::register_externs(registry, externs);
-        http::register_externs(registry, externs);
+        net::http::register_externs(registry, externs);
         filepath::register_externs(registry, externs);
         exec::register_externs(registry, externs);
     }
