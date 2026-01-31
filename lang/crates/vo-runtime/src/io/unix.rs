@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io;
 
-use super::{Completion, CompletionData, IoHandle, OpKind, PendingOp, SubmitResult};
+use super::{Completion, CompletionData, IoHandle, IoToken, OpKind, PendingOp, SubmitResult};
 
 /// Tracks pending operations for a single fd.
 #[derive(Debug, Default)]
@@ -17,10 +17,20 @@ struct FdState {
     write: Option<PendingOp>,
 }
 
+/// Pending timer operation.
+#[derive(Debug)]
+struct TimerState {
+    token: IoToken,
+    #[cfg(target_os = "linux")]
+    timerfd: i32,
+}
+
 /// Unix I/O driver.
 #[derive(Debug)]
 pub struct UnixDriver {
     fd_states: HashMap<i32, FdState>,
+    /// Pending timers (token -> TimerState)
+    timers: HashMap<IoToken, TimerState>,
 
     #[cfg(target_os = "linux")]
     epoll_fd: i32,
@@ -39,6 +49,7 @@ impl UnixDriver {
             }
             return Ok(Self {
                 fd_states: HashMap::new(),
+                timers: HashMap::new(),
                 epoll_fd,
             });
         }
@@ -51,6 +62,7 @@ impl UnixDriver {
             }
             return Ok(Self {
                 fd_states: HashMap::new(),
+                timers: HashMap::new(),
                 kqueue_fd,
             });
         }
@@ -114,12 +126,125 @@ impl UnixDriver {
         SubmitResult::Pending
     }
 
+    /// Submit a timer operation. Uses timerfd on Linux, kqueue timer on macOS/BSD.
+    pub fn submit_timer(&mut self, token: IoToken, duration_ns: i64) -> SubmitResult {
+        if duration_ns <= 0 {
+            return SubmitResult::Completed(Completion {
+                token,
+                result: Ok(CompletionData::Timer),
+            });
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Create timerfd
+            let timerfd = unsafe {
+                libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_NONBLOCK | libc::TFD_CLOEXEC)
+            };
+            if timerfd < 0 {
+                return SubmitResult::Completed(Completion {
+                    token,
+                    result: Err(io::Error::last_os_error()),
+                });
+            }
+
+            // Set timer
+            let secs = duration_ns / 1_000_000_000;
+            let nsecs = duration_ns % 1_000_000_000;
+            let its = libc::itimerspec {
+                it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+                it_value: libc::timespec { tv_sec: secs as i64, tv_nsec: nsecs as i64 },
+            };
+            let ret = unsafe { libc::timerfd_settime(timerfd, 0, &its, std::ptr::null_mut()) };
+            if ret < 0 {
+                unsafe { libc::close(timerfd) };
+                return SubmitResult::Completed(Completion {
+                    token,
+                    result: Err(io::Error::last_os_error()),
+                });
+            }
+
+            // Register with epoll for read (timer fires = readable)
+            let mut ev = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: timerfd as u64,
+            };
+            let ret = unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, timerfd, &mut ev) };
+            if ret < 0 {
+                unsafe { libc::close(timerfd) };
+                return SubmitResult::Completed(Completion {
+                    token,
+                    result: Err(io::Error::last_os_error()),
+                });
+            }
+
+            self.timers.insert(token, TimerState { token, timerfd });
+            return SubmitResult::Pending;
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        {
+            // Use kqueue EVFILT_TIMER
+            let ms = (duration_ns / 1_000_000).max(1) as isize;
+            let mut ev = libc::kevent {
+                ident: token as usize,
+                filter: libc::EVFILT_TIMER,
+                flags: libc::EV_ADD | libc::EV_ONESHOT,
+                fflags: 0,
+                data: ms,
+                udata: std::ptr::null_mut(),
+            };
+            let ret = unsafe { libc::kevent(self.kqueue_fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            if ret < 0 {
+                return SubmitResult::Completed(Completion {
+                    token,
+                    result: Err(io::Error::last_os_error()),
+                });
+            }
+            self.timers.insert(token, TimerState { token });
+            return SubmitResult::Pending;
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        )))]
+        {
+            // Fallback: synchronous sleep (not ideal but works)
+            std::thread::sleep(std::time::Duration::from_nanos(duration_ns as u64));
+            return SubmitResult::Completed(Completion {
+                token,
+                result: Ok(CompletionData::Timer),
+            });
+        }
+    }
+
     /// Poll for completed operations. Returns completions.
     pub fn poll(&mut self) -> Vec<Completion> {
-        let ready_fds = self.poll_ready();
+        let (ready_fds, ready_timers) = self.poll_ready();
         let mut completed = Vec::new();
         let mut fds_to_update = Vec::new();
         let mut fds_to_remove = Vec::new();
+
+        // Handle timer completions
+        for token in ready_timers {
+            if let Some(timer) = self.timers.remove(&token) {
+                #[cfg(target_os = "linux")]
+                {
+                    // Read to clear the timer, then close the fd
+                    let mut buf = [0u8; 8];
+                    unsafe { libc::read(timer.timerfd, buf.as_mut_ptr() as *mut _, 8) };
+                    unsafe { libc::close(timer.timerfd) };
+                }
+                completed.push(Completion {
+                    token: timer.token,
+                    result: Ok(CompletionData::Timer),
+                });
+            }
+        }
 
         for (fd, readable, writable) in ready_fds {
             let state = match self.fd_states.get_mut(&fd) {
@@ -211,23 +336,34 @@ impl UnixDriver {
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.fd_states.is_empty()
+        !self.fd_states.is_empty() || !self.timers.is_empty()
     }
 
-    fn poll_ready(&mut self) -> Vec<(i32, bool, bool)> {
+    fn poll_ready(&mut self) -> (Vec<(i32, bool, bool)>, Vec<IoToken>) {
         let mut ready = Vec::new();
+        let mut ready_timers = Vec::new();
 
         #[cfg(target_os = "linux")]
         {
+            // Build timerfd -> token map for lookup
+            let timerfd_to_token: HashMap<i32, IoToken> = self.timers.iter()
+                .map(|(token, state)| (state.timerfd, *token))
+                .collect();
+
             let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
             let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 64, 0) };
             if n > 0 {
                 for i in 0..n as usize {
                     let fd = events[i].u64 as i32;
-                    let ev = events[i].events;
-                    let readable = (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
-                    let writable = (ev & libc::EPOLLOUT as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
-                    ready.push((fd, readable, writable));
+                    // Check if this is a timer fd
+                    if let Some(&token) = timerfd_to_token.get(&fd) {
+                        ready_timers.push(token);
+                    } else {
+                        let ev = events[i].events;
+                        let readable = (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
+                        let writable = (ev & libc::EPOLLOUT as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
+                        ready.push((fd, readable, writable));
+                    }
                 }
             }
         }
@@ -250,13 +386,19 @@ impl UnixDriver {
                 // kqueue returns separate events for read/write, need to merge
                 let mut fd_events: HashMap<i32, (bool, bool)> = HashMap::new();
                 for i in 0..n as usize {
-                    let fd = events[i].ident as i32;
-                    let entry = fd_events.entry(fd).or_insert((false, false));
-                    if events[i].filter == libc::EVFILT_READ {
-                        entry.0 = true;
-                    }
-                    if events[i].filter == libc::EVFILT_WRITE {
-                        entry.1 = true;
+                    // Check if this is a timer event
+                    if events[i].filter == libc::EVFILT_TIMER {
+                        let token = events[i].ident as IoToken;
+                        ready_timers.push(token);
+                    } else {
+                        let fd = events[i].ident as i32;
+                        let entry = fd_events.entry(fd).or_insert((false, false));
+                        if events[i].filter == libc::EVFILT_READ {
+                            entry.0 = true;
+                        }
+                        if events[i].filter == libc::EVFILT_WRITE {
+                            entry.1 = true;
+                        }
                     }
                 }
                 for (fd, (r, w)) in fd_events {
@@ -265,7 +407,7 @@ impl UnixDriver {
             }
         }
 
-        ready
+        (ready, ready_timers)
     }
 
     fn update_registration(&mut self, fd: i32) {
@@ -517,6 +659,10 @@ fn try_complete(op: &PendingOp) -> TryResult {
                     TryResult::Error(e)
                 }
             }
+        }
+        OpKind::Timer => {
+            // Timer operations are handled separately via submit_timer, not through regular submit
+            unreachable!("Timer operations should not go through try_complete")
         }
     }
 }

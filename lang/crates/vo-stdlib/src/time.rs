@@ -5,10 +5,10 @@
 #[cfg(feature = "std")]
 use std::sync::OnceLock;
 #[cfg(feature = "std")]
-use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "std")]
-use vo_runtime::ffi::{ExternCall, ExternResult};
+use vo_runtime::ffi::{ExternCall, ExternCallContext, ExternResult};
 
 #[cfg(feature = "std")]
 static START_INSTANT: OnceLock<Instant> = OnceLock::new();
@@ -40,12 +40,21 @@ fn timesys_now_mono_nano(call: &mut ExternCall) -> ExternResult {
 }
 
 #[cfg(feature = "std")]
-fn timesys_sleep_nano(call: &mut ExternCall) -> ExternResult {
-    let d = call.arg_i64(0);
-    if d > 0 {
-        std::thread::sleep(StdDuration::from_nanos(d as u64));
+fn timesys_sleep_nano(ctx: &mut ExternCallContext) -> ExternResult {
+    let d = ctx.arg_i64(0);
+    if d <= 0 {
+        return ExternResult::Ok;
     }
-    ExternResult::Ok
+    
+    // Check if we're resuming from a timer completion
+    if let Some(_token) = ctx.resume_io_token() {
+        // Timer completed, return normally
+        return ExternResult::Ok;
+    }
+    
+    // Submit timer and wait for I/O
+    let token = ctx.io_mut().submit_timer(d);
+    ExternResult::WaitIo { token }
 }
 
 #[cfg(feature = "std")]
@@ -54,7 +63,7 @@ pub fn register_externs(registry: &mut vo_runtime::ffi::ExternRegistry, externs:
         match def.name.as_str() {
             "time_nowUnixNano" => registry.register(id as u32, timesys_now_unix_nano),
             "time_nowMonoNano" => registry.register(id as u32, timesys_now_mono_nano),
-            "time_sleepNano" => registry.register(id as u32, timesys_sleep_nano),
+            "time_waitio_sleepNano" => registry.register_with_context(id as u32, timesys_sleep_nano),
             _ => {}
         }
     }

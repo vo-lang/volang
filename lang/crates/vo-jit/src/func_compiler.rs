@@ -10,6 +10,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::jit_api::JitContext;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
 use crate::JitError;
@@ -73,12 +74,14 @@ impl<'a> FunctionCompiler<'a> {
             self.current_pc = pc;
             
             // Check if this PC has a resume block (from Call request)
+            // Note: resume_block is the entry point when resuming from WaitIo/Call.
+            // In the main compile loop, we just switch to it as a normal block.
+            // emit_variable_restore is done in prologue when start_pc matches.
             if let Some(&resume_block) = self.resume_blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(resume_block, &[]);
                 }
                 self.builder.switch_to_block(resume_block);
-                self.emit_variable_restore();
                 // block_terminated will be set by translate_instruction below
             } else if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
@@ -166,14 +169,18 @@ impl<'a> FunctionCompiler<'a> {
                 }
                 Opcode::CallExtern => {
                     // waitio_ extern calls may return WaitIo and need resume
+                    // Resume should re-execute the same CallExtern (not pc+1)
                     let extern_id = inst.b as usize;
-                    self.vo_module.externs[extern_id].name.starts_with("waitio_")
+                    self.vo_module.externs[extern_id].name.contains("_waitio_")
                 }
                 _ => false,
             };
             
             if needs_resume {
-                let resume_pc = pc + 1;
+                // For waitio extern: resume at same PC to re-execute and get result
+                // For Call to non-jittable: resume at pc+1 after callee returns
+                let is_waitio_extern = inst.opcode() == Opcode::CallExtern;
+                let resume_pc = if is_waitio_extern { pc } else { pc + 1 };
                 let resume_block = self.builder.create_block();
                 self.resume_blocks.insert(resume_pc, resume_block);
             }
@@ -212,40 +219,54 @@ impl<'a> FunctionCompiler<'a> {
             let zero = self.builder.ins().iconst(types::I32, 0);
             let is_normal = self.builder.ins().icmp(IntCC::Equal, start_pc, zero);
             
-            // For now, use a simple if-else chain for resume dispatch
-            // In the future, could use a switch table for many resume points
+            // Create restore wrapper blocks that do emit_variable_restore then jump to resume_block
             let mut resume_pcs: Vec<usize> = self.resume_blocks.keys().copied().collect();
             resume_pcs.sort();
             
+            // Create restore wrappers for each resume point
+            let mut restore_wrappers: HashMap<usize, Block> = HashMap::new();
+            for &resume_pc in &resume_pcs {
+                let wrapper = self.builder.create_block();
+                restore_wrappers.insert(resume_pc, wrapper);
+            }
+            
             if resume_pcs.len() == 1 {
-                // Single resume point: simple branch
+                // Single resume point: simple branch to restore wrapper
                 let resume_pc = resume_pcs[0];
-                let resume_block = self.resume_blocks[&resume_pc];
-                self.builder.ins().brif(is_normal, normal_entry_block, &[], resume_block, &[]);
+                let restore_wrapper = restore_wrappers[&resume_pc];
+                self.builder.ins().brif(is_normal, normal_entry_block, &[], restore_wrapper, &[]);
             } else {
                 // Multiple resume points: chain of comparisons
-                // First check normal entry
                 let first_check_block = self.builder.create_block();
                 self.builder.ins().brif(is_normal, normal_entry_block, &[], first_check_block, &[]);
                 
-                // Chain of resume PC checks
                 let mut current_block = first_check_block;
                 for (i, &resume_pc) in resume_pcs.iter().enumerate() {
                     self.builder.switch_to_block(current_block);
                     
-                    let resume_block = self.resume_blocks[&resume_pc];
+                    let restore_wrapper = restore_wrappers[&resume_pc];
                     let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
                     let is_this_pc = self.builder.ins().icmp(IntCC::Equal, start_pc, pc_val);
                     
                     if i == resume_pcs.len() - 1 {
-                        // Last one: just branch (default to normal if no match)
-                        self.builder.ins().brif(is_this_pc, resume_block, &[], normal_entry_block, &[]);
+                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], normal_entry_block, &[]);
                     } else {
                         let next_check = self.builder.create_block();
-                        self.builder.ins().brif(is_this_pc, resume_block, &[], next_check, &[]);
+                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], next_check, &[]);
                         current_block = next_check;
                     }
                 }
+            }
+            
+            // Generate restore wrapper blocks: restore variables then jump to resume_block
+            for &resume_pc in &resume_pcs {
+                let wrapper = restore_wrappers[&resume_pc];
+                let resume_block = self.resume_blocks[&resume_pc];
+                
+                self.builder.switch_to_block(wrapper);
+                self.emit_variable_restore();
+                self.builder.ins().jump(resume_block, &[]);
+                self.builder.seal_block(wrapper);
             }
             
             // Switch to normal entry block for standard initialization
@@ -465,8 +486,7 @@ impl<'a> FunctionCompiler<'a> {
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         
         // Load self from jit_func_table (we know it's compiled since we're executing it)
-        // JitContext offset 96 = jit_func_table pointer
-        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, 96);
+        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
         let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
         let offset = self.builder.ins().imul_imm(func_id_i64, 8);
         let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
@@ -710,7 +730,7 @@ impl<'a> FunctionCompiler<'a> {
         
         // Check if this is a waitio extern (may return WaitIo)
         let extern_def = &self.vo_module.externs[extern_id as usize];
-        let is_blocking = extern_def.name.starts_with("waitio_");
+        let is_blocking = extern_def.name.contains("_waitio_");
         let extern_ret_slots = extern_def.ret_slots as usize;
         let buffer_size = arg_count.max(extern_ret_slots).max(1);
         
@@ -755,20 +775,22 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.switch_to_block(wait_io_block);
             self.builder.seal_block(wait_io_block);
             
-            // Set call_resume_pc in JitContext (offset 124 for call_resume_pc)
-            let resume_pc = pc + 1;
+            // Set call_resume_pc in JitContext
+            // Resume at same PC to re-execute extern and get result
+            let resume_pc = pc;
             let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
-            self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, 124);
+            self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
             
             // Return WaitIo (3)
             self.builder.ins().return_(&[wait_io_val]);
             
-            // Continue path: check for panic, then restore and proceed
+            // Continue path: check for panic and proceed
+            // Note: do NOT emit_variable_restore here - that's only for resume path
+            // In normal execution, variables are already correct in SSA
             self.builder.switch_to_block(continue_block);
             self.builder.seal_block(continue_block);
             
             self.check_call_result(result);
-            self.emit_variable_restore();
         } else {
             // Non-blocking extern: simple call
             let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);

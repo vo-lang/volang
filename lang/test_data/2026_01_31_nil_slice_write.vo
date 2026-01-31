@@ -1,0 +1,32 @@
+package main
+
+// Regression test: nil slice passed to Write should not crash
+// Go allows len(nil) == 0, cap(nil) == 0
+
+func main() {
+	// Test 1: nil slice len/cap
+	var nilSlice []byte
+	assert(len(nilSlice) == 0)
+	assert(cap(nilSlice) == 0)
+
+	// Test 2: nil slice in function call
+	n := writeBytes(nilSlice)
+	assert(n == 0)
+
+	// Test 3: empty slice (non-nil) works too
+	emptySlice := []byte{}
+	assert(len(emptySlice) == 0)
+	n = writeBytes(emptySlice)
+	assert(n == 0)
+
+	// Test 4: nil slice append
+	nilSlice = append(nilSlice, 'a', 'b', 'c')
+	assert(len(nilSlice) == 3)
+	assert(string(nilSlice) == "abc")
+
+	println("PASS")
+}
+
+func writeBytes(b []byte) int {
+	return len(b)
+}

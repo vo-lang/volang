@@ -276,14 +276,9 @@ impl Vm {
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
         
-        // Get wait_io_token from frame for I/O resume, then clear it
+        // Get resume_io_token from fiber for I/O resume (set by poll_io), then clear it
         #[cfg(feature = "std")]
-        let wait_io_token = {
-            let frame = fiber.current_frame_mut().unwrap();
-            let token = frame.wait_io_token;
-            frame.wait_io_token = 0;  // Clear after reading
-            token
-        };
+        let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
         
         let mut ctx = build_jit_ctx(
             &mut self.state, func_table_ptr, func_table_len,

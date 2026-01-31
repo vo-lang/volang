@@ -38,27 +38,35 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usiz
 }
 
 #[inline]
+pub fn is_nil(arr: GcRef) -> bool { arr.is_null() }
+
+#[inline]
 pub fn len(arr: GcRef) -> usize {
+    if arr.is_null() { return 0; }
     slot_to_usize(ArrayHeader::as_ref(arr).len)
 }
 
 #[inline]
 pub fn elem_meta(arr: GcRef) -> ValueMeta {
+    if arr.is_null() { return ValueMeta::new(0, ValueKind::Void); }
     ArrayHeader::as_ref(arr).elem_meta
 }
 
 #[inline]
 pub fn elem_kind(arr: GcRef) -> ValueKind {
+    if arr.is_null() { return ValueKind::Void; }
     elem_meta(arr).value_kind()
 }
 
 #[inline]
 pub fn elem_meta_id(arr: GcRef) -> u32 {
+    if arr.is_null() { return 0; }
     elem_meta(arr).meta_id()
 }
 
 #[inline]
 pub fn elem_bytes(arr: GcRef) -> usize {
+    if arr.is_null() { return 0; }
     ArrayHeader::as_ref(arr).elem_bytes as usize
 }
 

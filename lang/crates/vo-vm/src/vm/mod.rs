@@ -341,9 +341,13 @@ impl Vm {
                         }
                         #[cfg(feature = "std")]
                         crate::fiber::BlockReason::Io(token) => {
-                            // Retry the same instruction after I/O becomes ready.
+                            // For VM frames: retry the same instruction after I/O becomes ready.
+                            // For JIT frames: pc is already set to resume_pc, don't modify.
                             let fiber = self.scheduler.current_fiber_mut().unwrap();
-                            fiber.current_frame_mut().unwrap().pc -= 1;
+                            let frame = fiber.current_frame_mut().unwrap();
+                            if !frame.is_jit_frame {
+                                frame.pc -= 1;
+                            }
                             self.scheduler.block_for_io(token);
                         }
                     }
@@ -483,6 +487,16 @@ impl Vm {
         let mut func_id: u32 = unsafe { (*frame_ptr).func_id };
         let mut bp: usize = unsafe { (*frame_ptr).bp };
         let mut code: &[Instruction] = &module.functions[func_id as usize].code;
+        
+        // Check if this is a JIT frame resume (e.g., after WaitIo completion)
+        #[cfg(feature = "jit")]
+        {
+            let frame = unsafe { &*frame_ptr };
+            if frame.is_jit_frame && frame.pc > 0 {
+                // JIT frame needs resume - delegate to handle_jit_reentry
+                return self.handle_jit_reentry(fiber_id, module);
+            }
+        }
         
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
@@ -880,6 +894,11 @@ impl Vm {
                             fiber.pop_frame();
                             stack = fiber.stack_ptr();
                             refetch!();
+                        } else if matches!(result, ExecResult::Block(_)) {
+                            // JIT returned WaitIo - fiber already blocked in call_jit_with_frame.
+                            // Return TimesliceExpired to let scheduler pick next fiber.
+                            // Don't return Block because main loop's Block handler expects current != None.
+                            return ExecResult::TimesliceExpired;
                         } else {
                             return result;
                         }

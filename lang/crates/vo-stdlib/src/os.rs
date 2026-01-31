@@ -241,7 +241,12 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     let buf_ref = call.arg_ref(slots::ARG_B);
     let buf_len = slice::len(buf_ref);
     let buf_ptr = slice::data_ptr(buf_ref);
-    let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
+    if buf_ptr.is_null() && buf_len > 0 {
+        call.ret_i64(slots::RET_0, 0);
+        write_error_to(call, slots::RET_1, "invalid buffer pointer");
+        return ExternResult::Ok;
+    }
+    let buf = if buf_len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) } };
     
     if fd == 1 || fd == 2 {
         let result = if fd == 1 { std::io::stdout().write(buf) } else { std::io::stderr().write(buf) };

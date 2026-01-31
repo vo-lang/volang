@@ -1,0 +1,32 @@
+package main
+
+import (
+	"net/http"
+	"time"
+)
+
+// Minimal reproduction: http.Server + http.Get combo fails after ~100 requests in JIT mode.
+// The program exits prematurely when JIT compilation triggers for some function.
+// Works fine in VM mode.
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("OK"))
+	})
+	srv := &http.Server{Addr: "127.0.0.1:19123", Handler: mux}
+	go func() { srv.ListenAndServe() }()
+	time.Sleep(200 * time.Millisecond)
+
+	for i := 0; i < 105; i++ {
+		resp, err := http.Get("http://127.0.0.1:19123/")
+		if err != nil {
+			println("Error at", i, ":", err.Error())
+			continue
+		}
+		resp.Body.Close()
+	}
+
+	srv.Close()
+	println("[VO:OK]")
+}

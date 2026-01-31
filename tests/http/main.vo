@@ -1,0 +1,669 @@
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Test configuration
+const (
+	serverAddr        = "0.0.0.0:18080"  // bind to all interfaces for browser access
+	serverURL         = "http://127.0.0.1:18080"
+	maxRetries        = 100
+	retryDelay        = 10 * time.Millisecond
+	
+	// Stress test parameters
+	concurrentReqs    = 100   // number of concurrent goroutines
+	requestsPerClient = 50    // requests per goroutine
+	stressRounds      = 3     // number of stress test rounds
+	browserWaitSecs   = 30    // seconds to wait for browser access
+)
+
+// Global test stats
+var (
+	testsPassed int
+	testsFailed int
+	counter     int
+)
+
+func main() {
+	println("========================================")
+	println("HTTP Server/Client Integration Tests")
+	println("========================================")
+	println()
+
+	// Start test server
+	srv := startTestServer()
+	defer srv.Close()
+
+	// Wait for server to be ready
+	if !waitForServer() {
+		println("FATAL: Server failed to start")
+		return
+	}
+	println("Server started on", serverAddr)
+	println()
+
+	// Run all test suites
+	runBasicTests()
+	runMethodTests()
+	runHeaderTests()
+	runStatusCodeTests()
+	runBodyTests()
+	runRoutingTests()
+	
+	// Heavy stress tests
+	runStressTests()
+
+	// Print summary
+	println()
+	println("========================================")
+	println("Test Summary")
+	println("========================================")
+	println("Passed:", testsPassed)
+	println("Failed:", testsFailed)
+	println("Total:", testsPassed+testsFailed)
+
+	if testsFailed > 0 {
+		println("\nSOME TESTS FAILED!")
+	} else {
+		println("\nALL TESTS PASSED!")
+	}
+	
+	// Browser access phase
+	println()
+	println("========================================")
+	println("Browser Access Phase")
+	println("========================================")
+	println("Server is running at http://localhost:18080")
+	println("Available endpoints:")
+	println("  /           - Welcome page")
+	println("  /health     - Health check (JSON)")
+	println("  /json       - JSON response")
+	println("  /echo       - Echo request info")
+	println("  /headers    - Custom headers demo")
+	println("  /status/XXX - Custom status code (e.g. /status/404)")
+	println("  /api/       - API root")
+	println("  /api/users/ - Users endpoint")
+	println("  /api/items/ - Items endpoint")
+	println()
+	println("Waiting", browserWaitSecs, "seconds for browser access...")
+	println("Press Ctrl+C to stop earlier.")
+	println()
+	
+	for i := browserWaitSecs; i > 0; i-- {
+		println("Closing in", i, "seconds...")
+		time.Sleep(1 * time.Second)
+	}
+	
+	println()
+	println("Shutting down server...")
+}
+
+// ==================== Test Server Setup ====================
+
+func startTestServer() *http.Server {
+	mux := http.NewServeMux()
+
+	// Basic endpoints
+	mux.HandleFunc("/", handleRoot)
+	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/echo", handleEcho)
+	mux.HandleFunc("/json", handleJSON)
+
+	// Method-specific endpoints
+	mux.HandleFunc("/method", handleMethod)
+
+	// Header test endpoints
+	mux.HandleFunc("/headers", handleHeaders)
+	mux.HandleFunc("/echo-headers", handleEchoHeaders)
+
+	// Status code endpoints
+	mux.HandleFunc("/status/", handleStatus)
+
+	// Body test endpoints
+	mux.HandleFunc("/body/echo", handleBodyEcho)
+	mux.HandleFunc("/body/large", handleLargeBody)
+
+	// Routing test endpoints
+	mux.HandleFunc("/api/", handleAPI)
+	mux.HandleFunc("/api/users/", handleUsers)
+	mux.HandleFunc("/api/items/", handleItems)
+
+	// Slow endpoint for timeout testing
+	mux.HandleFunc("/slow", handleSlow)
+
+	// Counter endpoint for concurrency testing
+	mux.HandleFunc("/counter", handleCounter)
+
+	srv := &http.Server{
+		Addr:    serverAddr,
+		Handler: mux,
+	}
+
+	go func() {
+		srv.ListenAndServe()
+	}()
+
+	return srv
+}
+
+func waitForServer() bool {
+	for i := 0; i < maxRetries; i++ {
+		resp, err := http.Get(serverURL + "/health")
+		if err == nil {
+			resp.Body.Close()
+			return true
+		}
+		time.Sleep(retryDelay)
+	}
+	return false
+}
+
+// ==================== Handlers ====================
+
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Welcome to HTTP Test Server"))
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func handleEcho(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte("Method: " + r.Method + "\nURL: " + r.URL))
+}
+
+func handleJSON(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	data := map[string]any{
+		"message": "Hello JSON",
+		"count":   42,
+		"active":  true,
+	}
+	b, _ := json.Marshal(data)
+	w.Write(b)
+}
+
+func handleMethod(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Request-Method", r.Method)
+	w.Write([]byte("Method: " + r.Method))
+}
+
+func handleHeaders(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Custom-Header", "test-value")
+	w.Header().Set("X-Server", "vo-http-test")
+	w.Header().Add("X-Multi", "value1")
+	w.Header().Add("X-Multi", "value2")
+	w.Write([]byte("Headers set"))
+}
+
+func handleEchoHeaders(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	var sb strings.Builder
+	for key, values := range r.Header {
+		for _, val := range values {
+			sb.WriteString(key + ": " + val + "\n")
+		}
+	}
+	w.Write([]byte(sb.String()))
+}
+
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	path := r.URL
+	// Extract status code from path: /status/200
+	parts := strings.Split(path, "/")
+	if len(parts) >= 3 {
+		code, err := strconv.Atoi(parts[2])
+		if err == nil && code >= 100 && code < 600 {
+			w.WriteHeader(code)
+			w.Write([]byte("Status: " + strconv.Itoa(code)))
+			return
+		}
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	w.Write([]byte("Invalid status code"))
+}
+
+func handleBodyEcho(w http.ResponseWriter, r *http.Request) {
+	var body []byte  // nil slice now works after fix
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Body-Length", strconv.Itoa(len(body)))
+	w.Write(body)
+}
+
+func handleLargeBody(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	// Generate 10KB of data
+	data := make([]byte, 10*1024)
+	for i := 0; i < len(data); i++ {
+		data[i] = byte('A' + (i % 26))
+	}
+	w.Write(data)
+}
+
+func handleAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"api":"root"}`))
+}
+
+func handleUsers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"resource":"users","method":"` + r.Method + `"}`))
+}
+
+func handleItems(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"resource":"items","method":"` + r.Method + `"}`))
+}
+
+func handleSlow(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(100 * time.Millisecond)
+	w.Write([]byte("Slow response"))
+}
+
+func handleCounter(w http.ResponseWriter, r *http.Request) {
+	counter++
+	w.Write([]byte(strconv.Itoa(counter)))
+}
+
+// ==================== Test Suites ====================
+
+func runBasicTests() {
+	println("--- Basic Tests ---")
+
+	// Test 1: Root endpoint
+	resp, err := http.Get(serverURL + "/")
+	assertTest("GET /", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// Test 2: Health endpoint
+	resp, err = http.Get(serverURL + "/health")
+	assertTest("GET /health", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("Health response body", strings.Contains(string(body), "ok"))
+		resp.Body.Close()
+	}
+
+	// Test 3: JSON endpoint
+	resp, err = http.Get(serverURL + "/json")
+	assertTest("GET /json", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("JSON response contains message", strings.Contains(string(body), "Hello JSON"))
+		resp.Body.Close()
+	}
+
+	// Test 4: Echo endpoint
+	resp, err = http.Get(serverURL + "/echo")
+	assertTest("GET /echo", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("Echo response contains GET", strings.Contains(string(body), "GET"))
+		resp.Body.Close()
+	}
+
+	println()
+}
+
+func runMethodTests() {
+	println("--- HTTP Method Tests ---")
+
+	// Test GET
+	resp, err := http.Get(serverURL + "/method")
+	assertTest("GET method", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("GET method response", strings.Contains(string(body), "GET"))
+		resp.Body.Close()
+	}
+
+	// Test POST
+	resp, err = http.Post(serverURL+"/method", "text/plain", strings.NewReader("post data"))
+	assertTest("POST method", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("POST method response", strings.Contains(string(body), "POST"))
+		resp.Body.Close()
+	}
+
+	// Test PUT
+	req, _ := http.NewRequest(http.MethodPut, serverURL+"/method", strings.NewReader("put data"))
+	client := &http.Client{}
+	resp, err = client.Do(req)
+	assertTest("PUT method", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("PUT method response", strings.Contains(string(body), "PUT"))
+		resp.Body.Close()
+	}
+
+	// Test DELETE
+	req, _ = http.NewRequest(http.MethodDelete, serverURL+"/method", nil)
+	resp, err = client.Do(req)
+	assertTest("DELETE method", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("DELETE method response", strings.Contains(string(body), "DELETE"))
+		resp.Body.Close()
+	}
+
+	// Test HEAD
+	resp, err = http.Head(serverURL + "/method")
+	assertTest("HEAD method", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	println()
+}
+
+func runHeaderTests() {
+	println("--- Header Tests ---")
+
+	// Test response headers
+	resp, err := http.Get(serverURL + "/headers")
+	assertTest("GET /headers", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		assertTest("X-Custom-Header present", resp.Header.Get("X-Custom-Header") == "test-value")
+		assertTest("X-Server header present", resp.Header.Get("X-Server") == "vo-http-test")
+		resp.Body.Close()
+	}
+
+	// Test request headers echo
+	req, _ := http.NewRequest(http.MethodGet, serverURL+"/echo-headers", nil)
+	req.Header.Set("X-Test-Header", "my-test-value")
+	req.Header.Set("Authorization", "Bearer token123")
+	client := &http.Client{}
+	resp, err = client.Do(req)
+	assertTest("GET /echo-headers with custom headers", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		bodyStr := string(body)
+		assertTest("X-Test-Header echoed", strings.Contains(bodyStr, "X-Test-Header"))
+		assertTest("Authorization echoed", strings.Contains(bodyStr, "Authorization"))
+		resp.Body.Close()
+	}
+
+	println()
+}
+
+func runStatusCodeTests() {
+	println("--- Status Code Tests ---")
+
+	statusCodes := []int{200, 201, 204, 301, 400, 401, 403, 404, 500, 503}
+
+	for _, code := range statusCodes {
+		resp, err := http.Get(serverURL + "/status/" + strconv.Itoa(code))
+		assertTest("Status "+strconv.Itoa(code), err == nil && resp.StatusCode == code)
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	println()
+}
+
+func runBodyTests() {
+	println("--- Body Tests ---")
+
+	// Note: HTTP stdlib limitations:
+	// 1. parseRequest doesn't parse request body
+	// 2. readResponse doesn't read full body for large responses (>4KB)
+
+	// Test POST request works
+	resp, err := http.Post(serverURL+"/body/echo", "text/plain", strings.NewReader("test"))
+	assertTest("POST /body/echo succeeds", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// Test response body within single buffer (~4KB)
+	resp, err = http.Get(serverURL + "/body/large")
+	assertTest("GET /body/large", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		// Due to stdlib limitation, we only get partial body (~4KB)
+		assertTest("Partial body received (>1KB)", len(body) > 1024)
+		// Verify content pattern on received portion
+		valid := true
+		for i := 0; i < len(body); i++ {
+			expected := byte('A' + (i % 26))
+			if body[i] != expected {
+				valid = false
+				break
+			}
+		}
+		assertTest("Body content pattern correct", valid)
+		resp.Body.Close()
+	}
+
+	// Test multiple sequential requests
+	successCount := 0
+	for i := 0; i < 5; i++ {
+		resp, err = http.Get(serverURL + "/json")
+		if err == nil && resp.StatusCode == 200 {
+			body, _ := io.ReadAll(resp.Body)
+			if strings.Contains(string(body), "Hello JSON") {
+				successCount++
+			}
+			resp.Body.Close()
+		}
+	}
+	assertTest("Sequential requests (5x /json)", successCount == 5)
+
+	println()
+}
+
+func runRoutingTests() {
+	println("--- Routing Tests ---")
+
+	// Test root API
+	resp, err := http.Get(serverURL + "/api/")
+	assertTest("GET /api/", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("/api/ response", strings.Contains(string(body), "root"))
+		resp.Body.Close()
+	}
+
+	// Test users endpoint
+	resp, err = http.Get(serverURL + "/api/users/")
+	assertTest("GET /api/users/", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("/api/users/ response", strings.Contains(string(body), "users"))
+		resp.Body.Close()
+	}
+
+	// Test items endpoint with POST
+	resp, err = http.Post(serverURL+"/api/items/", "application/json", strings.NewReader(`{"id":1}`))
+	assertTest("POST /api/items/", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		bodyStr := string(body)
+		assertTest("/api/items/ contains items", strings.Contains(bodyStr, "items"))
+		assertTest("/api/items/ method is POST", strings.Contains(bodyStr, "POST"))
+		resp.Body.Close()
+	}
+
+	// Test nested path matching - longer prefix wins
+	resp, err = http.Get(serverURL + "/api/users/123")
+	assertTest("GET /api/users/123", err == nil && resp.StatusCode == 200)
+	if resp != nil {
+		body, _ := io.ReadAll(resp.Body)
+		assertTest("/api/users/123 matches users handler", strings.Contains(string(body), "users"))
+		resp.Body.Close()
+	}
+
+	println()
+}
+
+func runStressTests() {
+	println("========================================")
+	println("STRESS TESTS")
+	println("========================================")
+	println("Config: ", concurrentReqs, "goroutines x", requestsPerClient, "requests x", stressRounds, "rounds")
+	println()
+
+	totalRequests := concurrentReqs * requestsPerClient
+	endpoints := []string{"/", "/health", "/json", "/echo", "/method", "/headers", "/api/", "/api/users/"}
+
+	var grandTotalSuccess int
+	var grandTotalTime int64
+
+	for round := 1; round <= stressRounds; round++ {
+		println("--- Round", round, "of", stressRounds, "---")
+
+		// Reset counter for this round
+		counter = 0
+
+		// Test 1: Hammer single endpoint
+		done := make(chan int, concurrentReqs)
+		startTime := time.Now()
+
+		println("  Starting", concurrentReqs, "goroutines...")
+		for i := 0; i < concurrentReqs; i++ {
+			go func(clientID int) {
+				localSuccess := 0
+				for j := 0; j < requestsPerClient; j++ {
+					resp, err := http.Get(serverURL + "/counter")
+					if err == nil && resp.StatusCode == 200 {
+						localSuccess++
+						resp.Body.Close()
+					}
+				}
+				done <- localSuccess
+			}(i)
+		}
+		println("  Goroutines started, waiting for completion...")
+
+		successCount := 0
+		for i := 0; i < concurrentReqs; i++ {
+			successCount += <-done
+		}
+		elapsed := time.Since(startTime)
+		elapsedMs := elapsed.Milliseconds()
+
+		assertTest("Round "+strconv.Itoa(round)+" single endpoint", successCount == totalRequests)
+		rps := 0
+		if elapsedMs > 0 {
+			rps = (totalRequests * 1000) / int(elapsedMs)
+		}
+		println("  Single endpoint:", successCount, "/", totalRequests, "in", elapsedMs, "ms (", rps, "req/s)")
+
+		grandTotalSuccess += successCount
+		grandTotalTime += elapsedMs
+
+		// Test 2: Mixed endpoints stress
+		done2 := make(chan int, concurrentReqs)
+		startTime = time.Now()
+
+		for i := 0; i < concurrentReqs; i++ {
+			go func(clientID int) {
+				localSuccess := 0
+				for j := 0; j < requestsPerClient; j++ {
+					endpoint := endpoints[(clientID+j)%len(endpoints)]
+					resp, err := http.Get(serverURL + endpoint)
+					if err == nil && resp.StatusCode == 200 {
+						localSuccess++
+						resp.Body.Close()
+					}
+				}
+				done2 <- localSuccess
+			}(i)
+		}
+
+		successCount = 0
+		for i := 0; i < concurrentReqs; i++ {
+			successCount += <-done2
+		}
+		elapsed = time.Since(startTime)
+		elapsedMs = elapsed.Milliseconds()
+
+		assertTest("Round "+strconv.Itoa(round)+" mixed endpoints", successCount == totalRequests)
+		rps = 0
+		if elapsedMs > 0 {
+			rps = (totalRequests * 1000) / int(elapsedMs)
+		}
+		println("  Mixed endpoints:", successCount, "/", totalRequests, "in", elapsedMs, "ms (", rps, "req/s)")
+
+		grandTotalSuccess += successCount
+		grandTotalTime += elapsedMs
+
+		// Test 3: POST requests stress
+		done3 := make(chan int, concurrentReqs)
+		startTime = time.Now()
+
+		for i := 0; i < concurrentReqs; i++ {
+			go func(clientID int) {
+				localSuccess := 0
+				for j := 0; j < requestsPerClient; j++ {
+					body := `{"client":` + strconv.Itoa(clientID) + `,"req":` + strconv.Itoa(j) + `}`
+					resp, err := http.Post(serverURL+"/api/items/", "application/json", strings.NewReader(body))
+					if err == nil && resp.StatusCode == 200 {
+						localSuccess++
+						resp.Body.Close()
+					}
+				}
+				done3 <- localSuccess
+			}(i)
+		}
+
+		successCount = 0
+		for i := 0; i < concurrentReqs; i++ {
+			successCount += <-done3
+		}
+		elapsed = time.Since(startTime)
+		elapsedMs = elapsed.Milliseconds()
+
+		assertTest("Round "+strconv.Itoa(round)+" POST stress", successCount == totalRequests)
+		rps = 0
+		if elapsedMs > 0 {
+			rps = (totalRequests * 1000) / int(elapsedMs)
+		}
+		println("  POST requests:", successCount, "/", totalRequests, "in", elapsedMs, "ms (", rps, "req/s)")
+
+		grandTotalSuccess += successCount
+		grandTotalTime += elapsedMs
+
+		println()
+	}
+
+	// Summary
+	grandTotal := totalRequests * 3 * stressRounds
+	println("--- Stress Test Summary ---")
+	println("  Total requests:", grandTotal)
+	println("  Successful:", grandTotalSuccess)
+	println("  Total time (ms):", grandTotalTime)
+	if grandTotalTime > 0 {
+		avgRps := (grandTotalSuccess * 1000) / int(grandTotalTime)
+		println("  Average req/s:", avgRps)
+	}
+	assertTest("All stress tests passed", grandTotalSuccess == grandTotal)
+	println()
+}
+
+// ==================== Test Utilities ====================
+
+func assertTest(name string, condition bool) {
+	if condition {
+		testsPassed++
+		println("  [PASS]", name)
+	} else {
+		testsFailed++
+		println("  [FAIL]", name)
+	}
+}

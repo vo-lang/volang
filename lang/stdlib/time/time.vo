@@ -3,7 +3,7 @@ package time
 // Native externs
 func nowUnixNano() int64
 func nowMonoNano() int64
-func sleepNano(d int64)
+func waitio_sleepNano(d int64)
 
 type Duration int64
 
@@ -33,7 +33,7 @@ func Since(t Time) Duration {
 }
 
 func Sleep(d Duration) {
-	sleepNano(int64(d))
+	waitio_sleepNano(int64(d))
 }
 
 func (d Duration) Nanoseconds() int64 { return int64(d) }

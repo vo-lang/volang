@@ -22,6 +22,7 @@ pub enum OpKind {
     Connect,
     RecvFrom,
     SendTo,
+    Timer,
 }
 
 /// Result of a completed I/O operation.
@@ -42,6 +43,8 @@ pub enum CompletionData {
     Connect,
     /// RecvFrom: bytes received + source address
     RecvFrom(usize, std::net::SocketAddr),
+    /// Timer: timer expired
+    Timer,
 }
 
 /// Pending operation descriptor.
@@ -113,6 +116,19 @@ impl IoRuntime {
     /// Submit a sendto operation (UDP).
     pub fn submit_send_to(&mut self, handle: IoHandle, buf: *const u8, len: usize, addr: std::net::SocketAddr) -> IoToken {
         self.submit(handle, OpKind::SendTo, buf as usize, len, -1, Some(addr))
+    }
+
+    /// Submit a timer operation (sleep).
+    /// duration_ns: sleep duration in nanoseconds
+    pub fn submit_timer(&mut self, duration_ns: i64) -> IoToken {
+        let token = self.alloc_token();
+        match self.driver.submit_timer(token, duration_ns) {
+            SubmitResult::Completed(c) => {
+                self.completions.insert(token, c);
+            }
+            SubmitResult::Pending => {}
+        }
+        token
     }
 
     fn submit(&mut self, handle: IoHandle, kind: OpKind, buf_ptr: usize, buf_len: usize, offset: i64, dest_addr: Option<std::net::SocketAddr>) -> IoToken {

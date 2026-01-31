@@ -77,13 +77,28 @@ pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
 }
 
 #[inline]
-pub fn array_ref(s: GcRef) -> GcRef { slot_to_ptr(SliceData::as_ref(s).array) }
+pub fn is_nil(s: GcRef) -> bool { s.is_null() }
+
 #[inline]
-pub fn data_ptr(s: GcRef) -> *mut u8 { slot_to_ptr(SliceData::as_ref(s).data_ptr) }
+pub fn array_ref(s: GcRef) -> GcRef {
+    if s.is_null() { return std::ptr::null_mut(); }
+    slot_to_ptr(SliceData::as_ref(s).array)
+}
 #[inline]
-pub fn len(s: GcRef) -> usize { slot_to_usize(SliceData::as_ref(s).len) }
+pub fn data_ptr(s: GcRef) -> *mut u8 {
+    if s.is_null() { return std::ptr::null_mut(); }
+    slot_to_ptr(SliceData::as_ref(s).data_ptr)
+}
 #[inline]
-pub fn cap(s: GcRef) -> usize { slot_to_usize(SliceData::as_ref(s).cap) }
+pub fn len(s: GcRef) -> usize {
+    if s.is_null() { return 0; }
+    slot_to_usize(SliceData::as_ref(s).len)
+}
+#[inline]
+pub fn cap(s: GcRef) -> usize {
+    if s.is_null() { return 0; }
+    slot_to_usize(SliceData::as_ref(s).cap)
+}
 #[inline]
 pub fn elem_kind(s: GcRef) -> ValueKind { array::elem_kind(array_ref(s)) }
 #[inline]

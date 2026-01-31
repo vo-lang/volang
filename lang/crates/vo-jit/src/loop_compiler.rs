@@ -8,6 +8,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::jit_api::JitContext;
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
@@ -399,8 +400,8 @@ impl<'a> LoopCompiler<'a> {
             self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
         }
         
-        // Load jit_func_table pointer from ctx (offset 96)
-        let jit_func_table = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), ctx, 96);
+        // Load jit_func_table pointer from ctx
+        let jit_func_table = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
         
         // Calculate address: jit_func_table + func_id * 8
         let func_id_i64 = self.builder.ins().iconst(types::I64, func_id as i64);

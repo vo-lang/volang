@@ -132,6 +132,19 @@ pub struct JitContext {
     pub wait_io_token: u64,
 }
 
+/// JitContext field offsets for JIT compiler.
+/// These must match the actual struct layout.
+impl JitContext {
+    pub const OFFSET_JIT_FUNC_TABLE: i32 = std::mem::offset_of!(JitContext, jit_func_table) as i32;
+    pub const OFFSET_JIT_FUNC_COUNT: i32 = std::mem::offset_of!(JitContext, jit_func_count) as i32;
+    pub const OFFSET_CALL_FUNC_ID: i32 = std::mem::offset_of!(JitContext, call_func_id) as i32;
+    pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
+    pub const OFFSET_CALL_ENTRY_PC: i32 = std::mem::offset_of!(JitContext, call_entry_pc) as i32;
+    pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
+    #[cfg(feature = "std")]
+    pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
+}
+
 // =============================================================================
 // JitResult
 // =============================================================================
