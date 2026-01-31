@@ -1,5 +1,8 @@
 //! Map instructions: MapNew, MapGet, MapSet, MapDelete, MapLen
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 use vo_runtime::bytecode::Module;
 use vo_runtime::ValueMeta;
 use vo_runtime::gc::{Gc, GcRef};

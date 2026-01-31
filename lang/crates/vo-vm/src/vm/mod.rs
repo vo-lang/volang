@@ -1536,7 +1536,7 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::GoIsland => {
-                    let closure_ref = stack[bp + inst.b as usize] as vo_runtime::gc::GcRef;
+                    let closure_ref = helpers::stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                     let func_id = vo_runtime::objects::closure::func_id(closure_ref);
                     let local_slots = module.functions[func_id as usize].local_slots;
                     let mut new_fiber = crate::fiber::Fiber::new(0);

@@ -6,10 +6,9 @@ members = [
   "libs/vox/rust",
   "libs/vogui/rust",
   "playground/rust",
-  "cmd/vo/rust",
+  "cmd/vo",
   "cmd/vo-embed",
   "cmd/vo-test/rust",
-  "cmd/bench",
 ]
 
 [workspace.package]

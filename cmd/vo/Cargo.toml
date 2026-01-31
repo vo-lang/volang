@@ -1,12 +1,12 @@
 [package]
-name = "vo-bench"
+name = "vo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vo benchmark runner - directly compiles and runs .vo files without nesting"
+description = "Vo CLI - Command line interface for the Vo programming language"
 
 [[bin]]
-name = "vo-bench"
+name = "vo"
 path = "src/main.rs"
 
 [features]

@@ -12,11 +12,9 @@ Usage:
     ./d.py vo <args...>
 """
 
-import argparse
 import subprocess
 import sys
 from pathlib import Path
-import shutil
 
 # Check that we're running from the correct directory (repo root)
 _script_dir = Path(__file__).resolve().parent
@@ -30,46 +28,13 @@ if Path.cwd().resolve() != _expected_cwd:
 PROJECT_ROOT = Path(__file__).parent.resolve()
 VO_TEST_BIN = PROJECT_ROOT / 'target' / 'debug' / 'vo-test'
 VO_BIN = PROJECT_ROOT / 'target' / 'debug' / 'vo'
-CLI_DIR = PROJECT_ROOT / 'cmd' / 'vo'
-CLI_CACHE_DIR = CLI_DIR / '.vo-cache'
-VOX_EXT_DIR = PROJECT_ROOT / 'libs' / 'vox'
-VOX_EXT_RUST_DIR = VOX_EXT_DIR / 'rust' / 'src'
 
 
-def get_newest_mtime(*paths: Path, pattern: str = '*') -> float:
-    newest = 0.0
-    for path in paths:
-        if not path.exists():
-            continue
-        if path.is_file():
-            newest = max(newest, path.stat().st_mtime)
-        else:
-            for f in path.rglob(pattern):
-                if f.is_file():
-                    newest = max(newest, f.stat().st_mtime)
-    return newest
 
-
-def invalidate_cli_cache_if_needed():
-    if not CLI_CACHE_DIR.exists():
-        return
-
-    cache_mtime = CLI_CACHE_DIR.stat().st_mtime
-    cli_src_mtime = get_newest_mtime(CLI_DIR, pattern='*.vo')
-    vox_vo_mtime = get_newest_mtime(VOX_EXT_DIR, pattern='*.vo')
-    vox_rust_mtime = get_newest_mtime(VOX_EXT_RUST_DIR, pattern='*.rs')
-    vox_lib = PROJECT_ROOT / 'target' / 'debug' / 'libvo_vox.so'
-    vox_lib_mtime = vox_lib.stat().st_mtime if vox_lib.exists() else 0.0
-
-    newest_src = max(cli_src_mtime, vox_vo_mtime, vox_rust_mtime, vox_lib_mtime)
-    if newest_src > cache_mtime:
-        shutil.rmtree(CLI_CACHE_DIR)
-
-
-def ensure_vo_test_built(nostd=False):
+def ensure_vo_test_built(need_embed=False):
     """Build vo-test if it doesn't exist or is outdated."""
     packages = ['vo-test', 'vo-vox']
-    if nostd:
+    if need_embed:
         packages.append('vo-embed')
     
     cmd = ['cargo', 'build']
@@ -100,22 +65,15 @@ def ensure_vo_cli_built():
         print(result.stderr, file=sys.stderr)
         sys.exit(1)
 
-    result = subprocess.run(
-        ['cargo', 'build', '-p', 'vo-vox', '--features', 'ffi'],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print("Failed to build vo-vox:", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        sys.exit(1)
-
 
 def run_test(args):
     """Run tests using vo-test."""
-    nostd = 'nostd' in args
-    ensure_vo_test_built(nostd=nostd)
+    # 'embed' is alias for 'nostd'
+    if args and args[0] == 'embed':
+        args = ['nostd'] + args[1:]
+    
+    need_embed = 'nostd' in args
+    ensure_vo_test_built(need_embed=need_embed)
     
     # Forward all arguments to vo-test
     cmd = [str(VO_TEST_BIN)] + args
@@ -125,8 +83,7 @@ def run_test(args):
 
 def run_vo_cli(args):
     ensure_vo_cli_built()
-    invalidate_cli_cache_if_needed()
-    cmd = [str(VO_BIN), '--cache', str(CLI_DIR)] + args
+    cmd = [str(VO_BIN)] + args
     result = subprocess.run(cmd, cwd=PROJECT_ROOT)
     sys.exit(result.returncode)
 
