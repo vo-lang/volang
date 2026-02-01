@@ -119,6 +119,9 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         ChanNew => { chan_new(e, inst); Ok(Completed) }
         ChanLen => { chan_len(e, inst); Ok(Completed) }
         ChanCap => { chan_cap(e, inst); Ok(Completed) }
+        PortNew => { port_new(e, inst); Ok(Completed) }
+        PortLen => { port_len(e, inst); Ok(Completed) }
+        PortCap => { port_cap(e, inst); Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1335,6 +1338,34 @@ fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = e.helpers().chan_cap.expect("chan_cap helper not registered");
     let ch = e.read_var(inst.b);
     let call = e.builder().ins().call(func, &[ch]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().port_new.expect("port_new helper not registered");
+    let gc_ptr = e.gc_ptr();
+    let elem_meta = e.read_var(inst.b);
+    let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
+    let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let cap = e.read_var(inst.c);
+    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn port_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().port_len.expect("port_len helper not registered");
+    let p = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[p]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+}
+
+fn port_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().port_cap.expect("port_cap helper not registered");
+    let p = e.read_var(inst.b);
+    let call = e.builder().ins().call(func, &[p]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
 }

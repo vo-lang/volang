@@ -767,6 +767,39 @@ pub extern "C" fn vo_chan_cap(ch: u64) -> u64 {
 }
 
 // =============================================================================
+// Port Helpers
+// =============================================================================
+
+/// Create a new port.
+#[no_mangle]
+pub extern "C" fn vo_port_new(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: u64) -> u64 {
+    use crate::objects::port;
+    use crate::ValueMeta;
+    unsafe {
+        let gc = &mut *gc;
+        port::create(gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap as usize) as u64
+    }
+}
+
+/// Get port length (number of elements in buffer).
+#[no_mangle]
+pub extern "C" fn vo_port_len(p: u64) -> u64 {
+    use crate::objects::port;
+    use crate::gc::GcRef;
+    let p = p as GcRef;
+    if p.is_null() { 0 } else { port::len(p) as u64 }
+}
+
+/// Get port capacity.
+#[no_mangle]
+pub extern "C" fn vo_port_cap(p: u64) -> u64 {
+    use crate::objects::queue_state;
+    use crate::gc::GcRef;
+    let p = p as GcRef;
+    if p.is_null() { 0 } else { queue_state::capacity(p) as u64 }
+}
+
+// =============================================================================
 // Array Helpers
 // =============================================================================
 

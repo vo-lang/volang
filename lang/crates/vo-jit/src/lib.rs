@@ -30,13 +30,22 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 // =============================================================================
 
 /// Check if a function is jittable (does not contain blocking operations).
-/// A function is NOT jittable if it uses defer, channels, select, or goroutines.
+/// A function is NOT jittable if it uses defer, channels, select, goroutines, or blocking island/port ops.
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
+            // Defer/recover
             Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-            | Opcode::GoStart | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
-            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
+            // Goroutines
+            | Opcode::GoStart
+            // Channels (send/recv/close can block)
+            | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
+            // Select
+            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec
+            // Island (cross-thread operations)
+            | Opcode::IslandNew | Opcode::GoIsland
+            // Port blocking operations (PortNew/Len/Cap are OK)
+            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose => return false,
             _ => {}
         }
     }
@@ -163,6 +172,9 @@ struct HelperFuncIds {
     chan_new: cranelift_module::FuncId,
     chan_len: cranelift_module::FuncId,
     chan_cap: cranelift_module::FuncId,
+    port_new: cranelift_module::FuncId,
+    port_len: cranelift_module::FuncId,
+    port_cap: cranelift_module::FuncId,
     array_new: cranelift_module::FuncId,
     array_len: cranelift_module::FuncId,
     slice_new: cranelift_module::FuncId,
@@ -252,6 +264,9 @@ impl JitCompiler {
         builder.symbol("vo_chan_new", vo_runtime::jit_api::vo_chan_new as *const u8);
         builder.symbol("vo_chan_len", vo_runtime::jit_api::vo_chan_len as *const u8);
         builder.symbol("vo_chan_cap", vo_runtime::jit_api::vo_chan_cap as *const u8);
+        builder.symbol("vo_port_new", vo_runtime::jit_api::vo_port_new as *const u8);
+        builder.symbol("vo_port_len", vo_runtime::jit_api::vo_port_len as *const u8);
+        builder.symbol("vo_port_cap", vo_runtime::jit_api::vo_port_cap as *const u8);
         builder.symbol("vo_array_new", vo_runtime::jit_api::vo_array_new as *const u8);
         builder.symbol("vo_array_len", vo_runtime::jit_api::vo_array_len as *const u8);
         builder.symbol("vo_slice_new", vo_runtime::jit_api::vo_slice_new as *const u8);
@@ -452,6 +467,30 @@ impl JitCompiler {
         })?;
         
         let chan_cap = module.declare_function("vo_chan_cap", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
+        let port_new = module.declare_function("vo_port_new", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
+        let port_len = module.declare_function("vo_port_len", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        })?;
+        
+        let port_cap = module.declare_function("vo_port_cap", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
@@ -668,24 +707,12 @@ impl JitCompiler {
         Ok(HelperFuncIds {
             call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
-            ptr_clone, closure_new, chan_new, chan_len, chan_cap, array_new, array_len,
+            ptr_clone, closure_new, chan_new, chan_len, chan_cap, port_new, port_len, port_cap, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
             slice_from_array, slice_from_array3,
             map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next, iface_assert, iface_to_iface, iface_eq,
             set_call_request,
         })
-    }
-
-    pub fn can_jit(&self, func: &FunctionDef, _module: &VoModule) -> bool {
-        for inst in &func.code {
-            match inst.opcode() {
-                Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-                | Opcode::GoStart | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
-                | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
-                _ => {}
-            }
-        }
-        true
     }
 
     fn get_helper_refs(&mut self) -> HelperFuncs {
@@ -710,6 +737,9 @@ impl JitCompiler {
             chan_new: Some(self.module.declare_func_in_func(self.helper_funcs.chan_new, &mut self.ctx.func)),
             chan_len: Some(self.module.declare_func_in_func(self.helper_funcs.chan_len, &mut self.ctx.func)),
             chan_cap: Some(self.module.declare_func_in_func(self.helper_funcs.chan_cap, &mut self.ctx.func)),
+            port_new: Some(self.module.declare_func_in_func(self.helper_funcs.port_new, &mut self.ctx.func)),
+            port_len: Some(self.module.declare_func_in_func(self.helper_funcs.port_len, &mut self.ctx.func)),
+            port_cap: Some(self.module.declare_func_in_func(self.helper_funcs.port_cap, &mut self.ctx.func)),
             array_new: Some(self.module.declare_func_in_func(self.helper_funcs.array_new, &mut self.ctx.func)),
             array_len: Some(self.module.declare_func_in_func(self.helper_funcs.array_len, &mut self.ctx.func)),
             slice_new: Some(self.module.declare_func_in_func(self.helper_funcs.slice_new, &mut self.ctx.func)),
@@ -735,7 +765,7 @@ impl JitCompiler {
     }
 
     pub fn compile(&mut self, func_id: u32, func: &FunctionDef, vo_module: &VoModule) -> Result<(), JitError> {
-        if !self.can_jit(func, vo_module) {
+        if !is_func_jittable(func) {
             return Err(JitError::NotJittable(func_id));
         }
         if self.cache.contains(func_id) {
