@@ -28,6 +28,7 @@ unsafe impl Sync for CompiledLoop {}
 
 pub struct LoopCompiler<'a> {
     builder: FunctionBuilder<'a>,
+    func_id: u32,
     func_def: &'a FunctionDef,
     vo_module: &'a VoModule,
     loop_info: &'a LoopInfo,
@@ -48,6 +49,7 @@ impl<'a> LoopCompiler<'a> {
     pub fn new(
         func: &'a mut Function,
         func_ctx: &'a mut FunctionBuilderContext,
+        func_id: u32,
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         loop_info: &'a LoopInfo,
@@ -60,6 +62,7 @@ impl<'a> LoopCompiler<'a> {
         
         Self {
             builder,
+            func_id,
             func_def,
             vo_module,
             loop_info,
@@ -230,6 +233,9 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn emit_prologue(&mut self) {
+        // entry_block has no predecessors
+        self.builder.seal_block(self.entry_block);
+        
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         self.locals_ptr = params[1];
@@ -264,6 +270,7 @@ impl<'a> LoopCompiler<'a> {
                 let mut current_block = first_check_block;
                 for (i, &resume_pc) in resume_pcs.iter().enumerate() {
                     self.builder.switch_to_block(current_block);
+                    self.builder.seal_block(current_block);
                     
                     let restore_wrapper = restore_wrappers[&resume_pc];
                     let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
@@ -292,6 +299,7 @@ impl<'a> LoopCompiler<'a> {
             
             // Switch to normal entry block
             self.builder.switch_to_block(normal_entry_block);
+            self.builder.seal_block(normal_entry_block);
         }
         
         // Normal entry: load all variables from memory
@@ -460,7 +468,7 @@ impl<'a> LoopCompiler<'a> {
     }
 
     /// Returns true if block is terminated.
-    /// Try JIT-to-JIT call if callee is compiled, otherwise fall back to VM.
+    /// JIT-to-JIT direct calls with fallback to VM.
     fn call(&mut self, inst: &Instruction) -> bool {
         let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
         let arg_start = inst.b as usize;
@@ -469,18 +477,17 @@ impl<'a> LoopCompiler<'a> {
         
         // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
-        let callee_jittable = crate::is_func_jittable(target_func);
+        let callee_jittable = crate::can_jit_to_jit_call(target_func, self.vo_module);
         
         if callee_jittable && self.helpers.call_vm.is_some() {
-            // Try JIT-to-JIT call with fallback to VM
-            crate::call_helpers::emit_call_with_jit_check(self, crate::call_helpers::JitCallConfig {
+            // JIT-to-JIT direct call with fallback to VM
+            crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id,
                 arg_start,
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
                 resume_pc: self.current_pc + 1,
-                use_call_request_fallback: true,
             });
             false // Block not terminated - we have a merge block
         } else {

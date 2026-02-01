@@ -283,36 +283,30 @@ pub struct CallViaVmConfig {
 }
 
 /// Configuration for JIT-to-JIT call with fallback.
-pub struct JitCallConfig {
+pub struct JitCallWithFallbackConfig {
     pub func_id: u32,
     pub arg_start: usize,
     pub arg_slots: usize,
     pub call_ret_slots: usize,
     pub func_ret_slots: usize,
     pub resume_pc: usize,
-    /// If true, use Call request for VM fallback (LoopCompiler).
-    /// If false, use call_vm helper (FunctionCompiler).
-    pub use_call_request_fallback: bool,
 }
 
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
 /// 
 /// If jit_func_table[func_id] != null: direct JIT call
-/// If jit_func_table[func_id] == null: fallback to VM (via call_vm or Call request)
+/// If jit_func_table[func_id] == null: fallback to VM via call_vm helper
 /// 
-/// IMPORTANT: This function maintains the original structure to avoid phi node explosion:
-/// - Stack slots created BEFORE branching (shared by both paths)
-/// - Arguments stored BEFORE branching
-/// - Return values written in merge_block (not in individual ok_blocks)
-pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
+/// When callee returns Call/WaitIo, we propagate it to VM. The VM-level
+/// CallDispatcher handles the resume logic.
+pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
-    config: JitCallConfig,
+    config: JitCallWithFallbackConfig,
 ) {
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
     
-    // === BEFORE BRANCHING: Create shared stack slots and store arguments ===
-    // This is critical - doing this after branching causes phi node explosion
+    // Create shared stack slots BEFORE branching to avoid phi node explosion
     let arg_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (config.arg_slots.max(1) * 8) as u32,
@@ -347,38 +341,36 @@ pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
     let zero = emitter.builder().ins().iconst(types::I64, 0);
     let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, zero);
     
-    // Create blocks for the two paths
+    // Create blocks
     let jit_call_block = emitter.builder().create_block();
     let vm_call_block = emitter.builder().create_block();
     let merge_block = emitter.builder().create_block();
     
-    // Branch based on whether function is compiled
     emitter.builder().ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
     
     // === JIT-to-JIT call path ===
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
     
-    // Use shared stack slots
     let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Create signature for JIT function: (ctx: ptr, args: ptr, ret: ptr) -> i32
+    // Create signature for JIT function: (ctx, args, ret, start_pc) -> i32
     let sig = emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32));
         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
         sig
     });
     
-    // Indirect call through function pointer
-    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+    let start_pc = emitter.builder().ins().iconst(types::I32, 0);
+    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr, start_pc]);
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
-    // Check result: only OK (result == 0) should continue, all other results propagate
-    // JitResult: Ok=0, Panic=1, Call=2, WaitIo=3
+    // Check result: only OK should continue, all others propagate
     let zero_jit = emitter.builder().ins().iconst(types::I32, 0);
     let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, zero_jit);
     
@@ -393,7 +385,7 @@ pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
     emitter.spill_all_vars();
     emitter.builder().ins().return_(&[jit_result]);
     
-    // JIT OK path - just jump to merge (return values loaded in merge_block)
+    // JIT OK path
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
     emitter.builder().ins().jump(merge_block, &[]);
@@ -402,61 +394,40 @@ pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(vm_call_block);
     emitter.builder().seal_block(vm_call_block);
     
-    if config.use_call_request_fallback {
-        // LoopCompiler path: use Call request mechanism
-        // This path returns directly, doesn't go to merge_block
-        emitter.spill_all_vars();
-        
-        let set_call_request_func = emitter.helpers().set_call_request.unwrap();
-        let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
-        let arg_start_val = emitter.builder().ins().iconst(types::I32, config.arg_start as i64);
-        let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.resume_pc as i64);
-        let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
-        
-        emitter.builder().ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val]);
-        
-        let call_result = emitter.builder().ins().iconst(types::I32, 2); // JitResult::Call
-        emitter.builder().ins().return_(&[call_result]);
-    } else {
-        // FunctionCompiler path: use call_vm helper with shared stack slots
-        let call_vm_func = emitter.helpers().call_vm.unwrap();
-        
-        // Use shared stack slots (args already stored before branching)
-        let args_ptr_vm = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
-        let ret_ptr_vm = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
-        let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
-        let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
-        let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
-        
-        let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
-        let vm_result = emitter.builder().inst_results(vm_call)[0];
-        
-        // Check VM result for panic (define one_vm here, not reuse 'one' from jit_call_block)
-        let one_vm = emitter.builder().ins().iconst(types::I32, 1);
-        let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one_vm);
-        
-        let vm_panic_block = emitter.builder().create_block();
-        let vm_ok_block = emitter.builder().create_block();
-        
-        emitter.builder().ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
-        
-        // VM panic path
-        emitter.builder().switch_to_block(vm_panic_block);
-        emitter.builder().seal_block(vm_panic_block);
-        let vm_panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
-        emitter.builder().ins().return_(&[vm_panic_val]);
-        
-        // VM OK path - just jump to merge (return values loaded in merge_block)
-        emitter.builder().switch_to_block(vm_ok_block);
-        emitter.builder().seal_block(vm_ok_block);
-        emitter.builder().ins().jump(merge_block, &[]);
-    }
+    let call_vm_func = emitter.helpers().call_vm.unwrap();
+    let args_ptr_vm = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
+    let ret_ptr_vm = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+    let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
+    let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
     
-    // === Merge block (load return values from shared ret_slot) ===
+    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
+    let vm_result = emitter.builder().inst_results(vm_call)[0];
+    
+    // Check VM result for panic
+    let one_vm = emitter.builder().ins().iconst(types::I32, 1);
+    let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one_vm);
+    
+    let vm_panic_block = emitter.builder().create_block();
+    let vm_ok_block = emitter.builder().create_block();
+    
+    emitter.builder().ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
+    
+    // VM panic path
+    emitter.builder().switch_to_block(vm_panic_block);
+    emitter.builder().seal_block(vm_panic_block);
+    let vm_panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    emitter.builder().ins().return_(&[vm_panic_val]);
+    
+    // VM OK path
+    emitter.builder().switch_to_block(vm_ok_block);
+    emitter.builder().seal_block(vm_ok_block);
+    emitter.builder().ins().jump(merge_block, &[]);
+    
+    // === Merge block ===
     emitter.builder().switch_to_block(merge_block);
     emitter.builder().seal_block(merge_block);
     
-    // Load return values and write to variables - ONLY here, not in ok_blocks
     for i in 0..config.call_ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
         emitter.write_var((config.arg_start + i) as u16, val);
@@ -495,4 +466,136 @@ fn check_call_result<'a, E: IrEmitter<'a>>(
     // Ok path - continue execution
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+}
+
+// =============================================================================
+// CallDispatcher-based Call Emission
+// =============================================================================
+
+/// Configuration for dispatcher-based call.
+pub struct DispatcherCallConfig {
+    pub func_id: u32,
+    pub arg_start: usize,
+    pub arg_slots: usize,
+    pub call_ret_slots: usize,
+    pub func_ret_slots: usize,
+    pub resume_pc: usize,
+    pub caller_func_id: u32,
+    pub caller_bp: u32,
+}
+
+/// Emit a function call via CallDispatcher trampoline.
+///
+/// # Background: Why This Exists
+///
+/// When JIT function A calls JIT function B, and B returns `Call` or `WaitIo`:
+/// - JIT-to-JIT calls don't push VM frames
+/// - VM can't resume B after executing the requested call
+/// - Previous solution: `can_jit_to_jit_call` recursive check (expensive, incorrect for cycles)
+///
+/// # Solution
+///
+/// Route ALL calls through CallDispatcher trampoline:
+/// 1. Dispatcher handles `Call` results by looping (no VM frame overhead)
+/// 2. Only `WaitIo` truly suspends and returns to VM scheduler
+/// 3. No compile-time call graph analysis needed
+///
+/// # Performance
+///
+/// - ~10-15ns overhead per call (push/pop ResumePoint + branch)
+/// - But: `Call` handled in loop without VM frame push/pop (~100ns saved)
+/// - For deep call chains with blocking, this is faster than the old approach
+pub fn emit_call_via_dispatcher<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    config: DispatcherCallConfig,
+) {
+    let ctx = emitter.ctx_param();
+    
+    // Create stack slots for args and return values
+    let arg_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (config.arg_slots.max(1) * 8) as u32,
+        8,
+    ));
+    let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (config.func_ret_slots.max(1) * 8) as u32,
+        8,
+    ));
+    
+    // Store arguments to stack slot
+    for i in 0..config.arg_slots {
+        let val = emitter.read_var((config.arg_start + i) as u16);
+        emitter.builder().ins().stack_store(val, arg_slot, (i * 8) as i32);
+    }
+    
+    // Load dispatcher pointer from ctx
+    let dispatcher = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_CALL_DISPATCHER
+    );
+    
+    // Get stack addresses
+    let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
+    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    
+    // Prepare parameters
+    let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+    let caller_func_id_val = emitter.builder().ins().iconst(types::I32, config.caller_func_id as i64);
+    let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, config.resume_pc as i64);
+    let caller_bp_val = emitter.builder().ins().iconst(types::I32, config.caller_bp as i64);
+    let caller_ret_slots_val = emitter.builder().ins().iconst(types::I16, config.call_ret_slots as i64);
+    
+    // Call dispatcher
+    let dispatch_call_func = emitter.helpers().dispatch_call.expect("dispatch_call helper not registered");
+    let call = emitter.builder().ins().call(
+        dispatch_call_func,
+        &[dispatcher, ctx, func_id_val, args_ptr, ret_ptr, 
+          caller_func_id_val, caller_resume_pc_val, caller_bp_val, caller_ret_slots_val]
+    );
+    let result = emitter.builder().inst_results(call)[0];
+    
+    // Check result: DispatchResult::Ok=0, Panic=1, Suspend=2
+    let ok_block = emitter.builder().create_block();
+    let non_ok_block = emitter.builder().create_block();
+    
+    let zero = emitter.builder().ins().iconst(types::I32, 0);
+    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, result, zero);
+    emitter.builder().ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
+    
+    // Non-Ok path: Panic or Suspend
+    emitter.builder().switch_to_block(non_ok_block);
+    emitter.builder().seal_block(non_ok_block);
+    
+    // Map DispatchResult to JitResult
+    // DispatchResult::Panic(1) -> JitResult::Panic(1)
+    // DispatchResult::Suspend(2) -> JitResult::WaitIo(3)
+    let one = emitter.builder().ins().iconst(types::I32, 1);
+    let is_panic = emitter.builder().ins().icmp(IntCC::Equal, result, one);
+    
+    let panic_block = emitter.builder().create_block();
+    let suspend_block = emitter.builder().create_block();
+    
+    emitter.builder().ins().brif(is_panic, panic_block, &[], suspend_block, &[]);
+    
+    // Panic path
+    emitter.builder().switch_to_block(panic_block);
+    emitter.builder().seal_block(panic_block);
+    let panic_result = emitter.builder().ins().iconst(types::I32, 1); // JitResult::Panic
+    emitter.builder().ins().return_(&[panic_result]);
+    
+    // Suspend path (WaitIo)
+    emitter.builder().switch_to_block(suspend_block);
+    emitter.builder().seal_block(suspend_block);
+    emitter.spill_all_vars();
+    let waitio_result = emitter.builder().ins().iconst(types::I32, 3); // JitResult::WaitIo
+    emitter.builder().ins().return_(&[waitio_result]);
+    
+    // Ok path - load return values and continue
+    emitter.builder().switch_to_block(ok_block);
+    emitter.builder().seal_block(ok_block);
+    
+    for i in 0..config.call_ret_slots {
+        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        emitter.write_var((config.arg_start + i) as u16, val);
+    }
 }

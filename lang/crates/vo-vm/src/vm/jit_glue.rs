@@ -220,6 +220,9 @@ pub fn build_jit_ctx(
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
+        call_dispatcher: &mut state.call_dispatcher as *mut _,
+        current_func_id: 0,
+        current_bp: 0,
     }
 }
 
@@ -269,12 +272,13 @@ fn handle_jit_panic(
     panic_flag: bool,
     panic_msg: &InterfaceSlot,
 ) {
-    if fiber.panic_state.is_none() {
-        if panic_flag && !panic_msg.is_nil() {
-            fiber.set_recoverable_panic(*panic_msg);
-        } else {
-            set_recoverable_panic_msg(gc, fiber, PANIC_MSG_NIL_DEREF);
-        }
+    if fiber.panic_state.is_some() {
+        return;
+    }
+    if panic_flag && !panic_msg.is_nil() {
+        fiber.set_recoverable_panic(*panic_msg);
+    } else {
+        set_recoverable_panic_msg(gc, fiber, PANIC_MSG_NIL_DEREF);
     }
 }
 
@@ -283,9 +287,174 @@ fn handle_jit_panic(
 // =============================================================================
 
 impl Vm {
+    /// Execute JIT function using CallDispatcher to handle Call/WaitIo in a loop.
+    /// 
+    /// This is the preferred entry point for JIT execution. It uses the dispatcher
+    /// to handle nested Call results internally, only returning to VM for:
+    /// - WaitIo: I/O blocked, need scheduler to wait
+    /// - Panic: Error occurred
+    /// - Ok: Execution completed
+    /// 
+    /// The dispatcher's resume_stack tracks the call chain, allowing proper resume
+    /// after WaitIo without needing VM frames for each JIT-to-JIT call.
+    #[inline(never)]
+    pub(super) fn execute_jit_with_dispatcher(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        func_id: u32,
+        jit_bp: usize,
+        start_pc: u32,
+    ) -> ExecResult {
+        use vo_runtime::call_dispatcher::DispatchResult;
+        
+        let jit_mgr = self.jit_mgr.as_ref().unwrap();
+        let func_table_ptr = jit_mgr.func_table_ptr();
+        let func_table_len = jit_mgr.func_table_len() as u32;
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut panic_msg = InterfaceSlot::default();
+        let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
+        let module = self.module.as_ref().unwrap();
+        let module_ptr = module as *const _;
+        
+        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+        let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
+        let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
+        
+        #[cfg(feature = "std")]
+        let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
+        
+        let mut ctx = build_jit_ctx(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, fiber_ptr, module_ptr,
+            &safepoint_flag, &mut panic_flag,
+            &mut panic_msg,
+        );
+        
+        #[cfg(feature = "std")]
+        { ctx.wait_io_token = wait_io_token; }
+        
+        // Get dispatcher
+        let dispatcher = unsafe { &mut *ctx.call_dispatcher };
+        
+        // Clear any stale state
+        dispatcher.clear();
+        
+        // Dispatcher loop - handle Call results internally
+        let mut target_func_id = func_id;
+        let mut target_start_pc = start_pc;
+        
+        loop {
+            // Get JIT function
+            let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
+            
+            let result = if let Some(jit_func) = jit_func {
+                // Execute JIT function
+                jit_func(&mut ctx, args_ptr, args_ptr, target_start_pc)
+            } else {
+                // No JIT version - need to use VM. Return Call request.
+                ctx.call_func_id = target_func_id;
+                ctx.call_entry_pc = target_start_pc as u16;
+                ctx.call_resume_pc = 0;
+                ctx.call_arg_start = 0;
+                JitResult::Call
+            };
+            
+            match result {
+                JitResult::Ok => {
+                    // Function completed
+                    if dispatcher.has_pending() {
+                        // Resume caller from stack
+                        let point = dispatcher.pop().unwrap();
+                        target_func_id = point.func_id;
+                        target_start_pc = point.resume_pc;
+                        continue;
+                    } else {
+                        // All done
+                        return ExecResult::FrameChanged;
+                    }
+                }
+                
+                JitResult::Panic => {
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                    handle_jit_panic(&mut self.state.gc, fiber, panic_flag, &panic_msg);
+                    dispatcher.clear();
+                    return ExecResult::Panic;
+                }
+                
+                JitResult::Call => {
+                    // JIT wants to call another function
+                    // Check if callee is jittable
+                    let callee_func = &module.functions[ctx.call_func_id as usize];
+                    let callee_jittable = vo_jit::is_func_jittable(callee_func);
+                    
+                    if callee_jittable {
+                        // Push current resume point and loop
+                        dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                            target_func_id,
+                            ctx.call_resume_pc,
+                            ctx.call_arg_start as u32,
+                            ctx.call_ret_slots,
+                        ));
+                        target_func_id = ctx.call_func_id;
+                        target_start_pc = ctx.call_entry_pc as u32;
+                        continue;
+                    } else {
+                        // Non-jittable callee - return to VM to execute
+                        // Save dispatcher state for later resume
+                        dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                            target_func_id,
+                            ctx.call_resume_pc,
+                            ctx.call_arg_start as u32,
+                            ctx.call_ret_slots,
+                        ));
+                        
+                        // Set frame PC for resume
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        fiber.frames.last_mut().unwrap().pc = ctx.call_resume_pc as usize;
+                        
+                        // Push callee frame for VM execution
+                        let call_info = CallRequestInfo {
+                            func_id: ctx.call_func_id,
+                            arg_start: ctx.call_arg_start as usize,
+                            entry_pc: ctx.call_entry_pc as usize,
+                            resume_pc: ctx.call_resume_pc,
+                        };
+                        call_info.push_callee_frame(fiber, jit_bp, module);
+                        
+                        return ExecResult::FrameChanged;
+                    }
+                }
+                
+                #[cfg(feature = "std")]
+                JitResult::WaitIo => {
+                    // I/O blocked - save state and return to scheduler
+                    let token = ctx.wait_io_token;
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                    
+                    // Save resume point
+                    dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                        target_func_id,
+                        ctx.call_resume_pc,
+                        0,
+                        0,
+                    ));
+                    
+                    let frame = fiber.current_frame_mut().unwrap();
+                    frame.pc = ctx.call_resume_pc as usize;
+                    frame.wait_io_token = token;
+                    
+                    self.scheduler.block_for_io(token);
+                    return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                }
+            }
+        }
+    }
+    
     /// VM-led JIT call: VM has already pushed frame, JIT operates on fiber.stack[jit_bp..].
     /// start_pc: 0 for normal entry, resume_pc for Call continuation.
     /// Returns (ExecResult, Option<CallRequestInfo>) for Call handling.
+    #[inline(never)]
     pub(super) fn call_jit_with_frame(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
@@ -358,11 +527,23 @@ impl Vm {
     
     /// Handle JIT re-entry after a Call request callee returns.
     /// Called from Return when caller frame is a JIT frame with pc > 0.
+    /// 
+    /// Uses CallDispatcher's resume_stack if available, otherwise falls back
+    /// to frame-based resume for backward compatibility.
     pub(super) fn handle_jit_reentry(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
         module: &Module,
     ) -> ExecResult {
+        // Check if dispatcher has pending resume points
+        let has_dispatcher_state = self.state.call_dispatcher.has_pending();
+        
+        if has_dispatcher_state {
+            // Use dispatcher-based resume
+            return self.handle_jit_reentry_with_dispatcher(fiber_id, module);
+        }
+        
+        // Fall back to original frame-based resume
         loop {
             let (is_jit_frame, pc, func_id, jit_bp, call_ret_slots) = {
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
@@ -412,6 +593,162 @@ impl Vm {
                 return ExecResult::TimesliceExpired;
             } else {
                 return result;
+            }
+        }
+    }
+    
+    /// Handle JIT re-entry using CallDispatcher's resume_stack.
+    /// 
+    /// This is called when the dispatcher has pending resume points from a previous
+    /// JIT execution that returned for VM call (non-jittable callee).
+    fn handle_jit_reentry_with_dispatcher(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        module: &Module,
+    ) -> ExecResult {
+        let jit_mgr = self.jit_mgr.as_ref().unwrap();
+        let func_table_ptr = jit_mgr.func_table_ptr();
+        let func_table_len = jit_mgr.func_table_len() as u32;
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut panic_msg = InterfaceSlot::default();
+        let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
+        let module_ptr = module as *const _;
+        
+        let (jit_bp, args_ptr, fiber_ptr, wait_io_token) = {
+            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+            let frame = fiber.frames.last().unwrap();
+            let jit_bp = frame.bp;
+            let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
+            let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
+            #[cfg(feature = "std")]
+            let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
+            #[cfg(not(feature = "std"))]
+            let wait_io_token = 0u64;
+            (jit_bp, args_ptr, fiber_ptr, wait_io_token)
+        };
+        
+        let mut ctx = build_jit_ctx(
+            &mut self.state, func_table_ptr, func_table_len,
+            vm_ptr, fiber_ptr, module_ptr,
+            &safepoint_flag, &mut panic_flag,
+            &mut panic_msg,
+        );
+        
+        #[cfg(feature = "std")]
+        { ctx.wait_io_token = wait_io_token; }
+        
+        // Get dispatcher and pop the resume point
+        let dispatcher = unsafe { &mut *ctx.call_dispatcher };
+        let resume_point = match dispatcher.pop() {
+            Some(p) => p,
+            None => return ExecResult::FrameChanged,
+        };
+        
+        let mut target_func_id = resume_point.func_id;
+        let mut target_start_pc = resume_point.resume_pc;
+        
+        // Continue dispatcher loop
+        loop {
+            let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
+            
+            let result = if let Some(jit_func) = jit_func {
+                jit_func(&mut ctx, args_ptr, args_ptr, target_start_pc)
+            } else {
+                ctx.call_func_id = target_func_id;
+                ctx.call_entry_pc = target_start_pc as u16;
+                ctx.call_resume_pc = 0;
+                ctx.call_arg_start = 0;
+                JitResult::Call
+            };
+            
+            match result {
+                JitResult::Ok => {
+                    if dispatcher.has_pending() {
+                        let point = dispatcher.pop().unwrap();
+                        target_func_id = point.func_id;
+                        target_start_pc = point.resume_pc;
+                        continue;
+                    } else {
+                        // All done - pop the JIT frame and return
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        let func_ret_slots = module.functions[fiber.frames.last().unwrap().func_id as usize].ret_slots as usize;
+                        let call_ret_slots = fiber.frames.last().unwrap().ret_count as usize;
+                        let caller_bp = fiber.frames.get(fiber.frames.len().saturating_sub(2))
+                            .map(|f| f.bp).unwrap_or(0);
+                        let ret_reg = fiber.frames.last().unwrap().ret_reg as usize;
+                        for i in 0..call_ret_slots.min(func_ret_slots) {
+                            fiber.stack[caller_bp + ret_reg + i] = fiber.stack[jit_bp + i];
+                        }
+                        fiber.pop_frame();
+                        return ExecResult::FrameChanged;
+                    }
+                }
+                
+                JitResult::Panic => {
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                    handle_jit_panic(&mut self.state.gc, fiber, panic_flag, &panic_msg);
+                    dispatcher.clear();
+                    return ExecResult::Panic;
+                }
+                
+                JitResult::Call => {
+                    let callee_func = &module.functions[ctx.call_func_id as usize];
+                    let callee_jittable = vo_jit::is_func_jittable(callee_func);
+                    
+                    if callee_jittable {
+                        dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                            target_func_id,
+                            ctx.call_resume_pc,
+                            ctx.call_arg_start as u32,
+                            ctx.call_ret_slots,
+                        ));
+                        target_func_id = ctx.call_func_id;
+                        target_start_pc = ctx.call_entry_pc as u32;
+                        continue;
+                    } else {
+                        // Non-jittable callee - return to VM
+                        dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                            target_func_id,
+                            ctx.call_resume_pc,
+                            ctx.call_arg_start as u32,
+                            ctx.call_ret_slots,
+                        ));
+                        
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        fiber.frames.last_mut().unwrap().pc = ctx.call_resume_pc as usize;
+                        
+                        let call_info = CallRequestInfo {
+                            func_id: ctx.call_func_id,
+                            arg_start: ctx.call_arg_start as usize,
+                            entry_pc: ctx.call_entry_pc as usize,
+                            resume_pc: ctx.call_resume_pc,
+                        };
+                        call_info.push_callee_frame(fiber, jit_bp, module);
+                        
+                        return ExecResult::FrameChanged;
+                    }
+                }
+                
+                #[cfg(feature = "std")]
+                JitResult::WaitIo => {
+                    let token = ctx.wait_io_token;
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                    
+                    dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
+                        target_func_id,
+                        ctx.call_resume_pc,
+                        0,
+                        0,
+                    ));
+                    
+                    let frame = fiber.current_frame_mut().unwrap();
+                    frame.pc = ctx.call_resume_pc as usize;
+                    frame.wait_io_token = token;
+                    
+                    self.scheduler.block_for_io(token);
+                    return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                }
             }
         }
     }

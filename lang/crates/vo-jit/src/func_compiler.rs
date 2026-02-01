@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::{types, Block, Function, InstBuilder, MemFlags, StackSlot, Value};
+use cranelift_codegen::ir::{types, Block, Function, FuncRef, InstBuilder, MemFlags, StackSlot, Value};
 use cranelift_codegen::ir::StackSlotData;
 use cranelift_codegen::ir::StackSlotKind;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -29,6 +29,8 @@ pub struct FunctionCompiler<'a> {
     locals_slot: Option<StackSlot>,
     /// Resume blocks for Call requests. Key is resume_pc (pc after Call instruction).
     resume_blocks: HashMap<usize, Block>,
+    /// FuncRef for self-recursive calls (direct call optimization)
+    self_func_ref: Option<FuncRef>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -39,6 +41,7 @@ impl<'a> FunctionCompiler<'a> {
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         helpers: HelperFuncs,
+        self_func_ref: Option<FuncRef>,
     ) -> Self {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
@@ -57,6 +60,7 @@ impl<'a> FunctionCompiler<'a> {
             reg_consts: HashMap::new(),
             locals_slot: None,
             resume_blocks: HashMap::new(),
+            self_func_ref,
         }
     }
 
@@ -158,14 +162,19 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Scan for instructions that need resume blocks for multi-entry support.
-    /// Includes: Call to non-jittable callees, blocking extern calls.
+    /// 
+    /// With CallDispatcher, jittable calls are handled entirely by the dispatcher
+    /// (it manages its own resume_stack). We only need resume blocks for:
+    /// 1. Calls to non-jittable functions (use Call request mechanism)
+    /// 2. Blocking extern calls (may return WaitIo)
     fn scan_call_requests(&mut self) {
         for (pc, inst) in self.func_def.code.iter().enumerate() {
             let resume_pc = match inst.opcode() {
                 Opcode::Call => {
                     let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
                     let target_func = &self.vo_module.functions[target_func_id as usize];
-                    if !crate::is_func_jittable(target_func) {
+                    // Only create resume block for calls that may return Call/WaitIo
+                    if !crate::can_jit_to_jit_call(target_func, self.vo_module) {
                         Some(pc + 1) // Resume after call returns
                     } else {
                         None
@@ -193,6 +202,9 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn emit_prologue(&mut self) {
+        // entry_block has no predecessors (it's the function entry point)
+        self.builder.seal_block(self.entry_block);
+        
         let params = self.builder.block_params(self.entry_block);
         let _ctx = params[0];
         let args = params[1];
@@ -248,6 +260,7 @@ impl<'a> FunctionCompiler<'a> {
                 let mut current_block = first_check_block;
                 for (i, &resume_pc) in resume_pcs.iter().enumerate() {
                     self.builder.switch_to_block(current_block);
+                    self.builder.seal_block(current_block);  // Seal the check block
                     
                     let restore_wrapper = restore_wrappers[&resume_pc];
                     let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
@@ -276,6 +289,7 @@ impl<'a> FunctionCompiler<'a> {
             
             // Switch to normal entry block for standard initialization
             self.builder.switch_to_block(normal_entry_block);
+            self.builder.seal_block(normal_entry_block);
         }
         
         // Normal entry initialization
@@ -456,25 +470,28 @@ impl<'a> FunctionCompiler<'a> {
         // Get target function info
         let target_func = &self.vo_module.functions[target_func_id as usize];
         
-        // Check if callee is jittable (statically known at compile time)
-        let callee_jittable = crate::is_func_jittable(target_func);
+        // Self-recursive call: skip can_jit_to_jit_call check (would fail due to depth limit)
+        // We know the current function is jittable since we're compiling it
+        if target_func_id == self.func_id {
+            self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
+            return false;
+        }
+        
+        // Check if callee can be called via JIT-to-JIT (no blocking externs, etc)
+        let callee_jittable = crate::can_jit_to_jit_call(target_func, self.vo_module);
         
         if callee_jittable {
-            // Self-recursive call optimization: direct call without jit_func_table check
-            if target_func_id == self.func_id {
-                self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
-            } else {
-                // Callee is jittable - try JIT-to-JIT call, fallback to vo_call_vm if not compiled yet
-                crate::call_helpers::emit_call_with_jit_check(self, crate::call_helpers::JitCallConfig {
-                    func_id: target_func_id,
-                    arg_start,
-                    arg_slots,
-                    call_ret_slots,
-                    func_ret_slots: target_func.ret_slots as usize,
-                    resume_pc: self.current_pc + 1,
-                    use_call_request_fallback: false,
-                });
-            }
+            // JIT-to-JIT direct call with runtime check for compiled callee
+            // If callee returns Call/WaitIo, we propagate it to VM
+            // VM uses CallDispatcher at entry level to handle the resume
+            crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
+                func_id: target_func_id,
+                arg_start,
+                arg_slots,
+                call_ret_slots,
+                func_ret_slots: target_func.ret_slots as usize,
+                resume_pc: self.current_pc + 1,
+            });
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee is NOT jittable (has defer/channel/select/etc)
@@ -490,7 +507,7 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
     
-    /// Optimized self-recursive call - load from jit_func_table without null check
+    /// Optimized self-recursive call using direct call instead of call_indirect
     fn call_self_recursive(&mut self, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
         let func_ret_slots = target_func.ret_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
@@ -515,27 +532,34 @@ impl<'a> FunctionCompiler<'a> {
         
         let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
+        let start_pc = self.builder.ins().iconst(types::I32, 0);
         
-        // Load self from jit_func_table (we know it's compiled since we're executing it)
-        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
-        let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
-        let offset = self.builder.ins().imul_imm(func_id_i64, 8);
-        let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
-        let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
-        
-        // Create signature for indirect call
-        let sig = self.builder.func.import_signature({
-            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-            sig
-        });
-        
-        // Indirect call to self (no null check needed - we know it's compiled)
-        let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
-        let result = self.builder.inst_results(call)[0];
+        // Use direct call if we have self_func_ref (much faster for recursion)
+        let result = if let Some(func_ref) = self.self_func_ref {
+            // Direct call - no function table lookup needed
+            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr, start_pc]);
+            self.builder.inst_results(call)[0]
+        } else {
+            // Fallback to indirect call via function table
+            let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
+            let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
+            let offset = self.builder.ins().imul_imm(func_id_i64, 8);
+            let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
+            let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+            
+            let sig = self.builder.func.import_signature({
+                let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+                sig
+            });
+            
+            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr, start_pc]);
+            self.builder.inst_results(call)[0]
+        };
         
         // Check result for panic
         let one = self.builder.ins().iconst(types::I32, 1);

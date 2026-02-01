@@ -52,6 +52,54 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
     true
 }
 
+/// Check if a function can be called via JIT-to-JIT direct call.
+/// Returns false if the function may return Call/WaitIo to caller.
+/// Such functions should use the Call request mechanism instead.
+/// 
+/// Note: This is a conservative check. With the CallDispatcher infrastructure,
+/// we could eventually remove this and handle all Call/WaitIo at VM level.
+/// For now, keep this to maintain compatibility.
+pub fn can_jit_to_jit_call(func: &FunctionDef, module: &VoModule) -> bool {
+    can_jit_to_jit_call_impl(func, module, 0)
+}
+
+const MAX_JIT_CHECK_DEPTH: usize = 16;
+
+fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize) -> bool {
+    if !is_func_jittable(func) {
+        return false;
+    }
+    // Depth limit - conservatively return false
+    if depth >= MAX_JIT_CHECK_DEPTH {
+        return false;
+    }
+    for inst in &func.code {
+        match inst.opcode() {
+            // Check for blocking extern calls (may return WaitIo)
+            Opcode::CallExtern => {
+                let extern_id = inst.b as usize;
+                if module.externs[extern_id].is_blocking {
+                    return false;
+                }
+            }
+            // Check Call targets recursively
+            Opcode::Call => {
+                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                let target_func = &module.functions[target_func_id as usize];
+                if !can_jit_to_jit_call_impl(target_func, module, depth + 1) {
+                    return false;
+                }
+            }
+            // CallClosure and CallIface always go through VM helpers and may return Call/WaitIo
+            Opcode::CallClosure | Opcode::CallIface => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 // =============================================================================
 // JitError
 // =============================================================================
@@ -196,6 +244,7 @@ struct HelperFuncIds {
     iface_to_iface: cranelift_module::FuncId,
     iface_eq: cranelift_module::FuncId,
     set_call_request: cranelift_module::FuncId,
+    dispatch_call: cranelift_module::FuncId,
 }
 
 // =============================================================================
@@ -283,6 +332,7 @@ impl JitCompiler {
         builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
         builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
         builder.symbol("vo_set_call_request", vo_runtime::jit_api::vo_set_call_request as *const u8);
+        builder.symbol("jit_dispatch_call", vo_runtime::call_dispatcher::jit_dispatch_call as *const u8);
     }
 
     fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
@@ -704,6 +754,23 @@ impl JitCompiler {
             sig
         })?;
         
+        // CallDispatcher trampoline for unified JIT/VM calls.
+        // Signature: (dispatcher, ctx, func_id, args, ret, caller_func_id, caller_resume_pc, caller_bp, caller_ret_slots) -> DispatchResult
+        let dispatch_call = module.declare_function("jit_dispatch_call", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));        // dispatcher
+            sig.params.push(AbiParam::new(ptr));        // ctx
+            sig.params.push(AbiParam::new(types::I32)); // func_id
+            sig.params.push(AbiParam::new(ptr));        // args
+            sig.params.push(AbiParam::new(ptr));        // ret
+            sig.params.push(AbiParam::new(types::I32)); // caller_func_id
+            sig.params.push(AbiParam::new(types::I32)); // caller_resume_pc
+            sig.params.push(AbiParam::new(types::I32)); // caller_bp
+            sig.params.push(AbiParam::new(types::I16)); // caller_ret_slots
+            sig.returns.push(AbiParam::new(types::I32)); // DispatchResult
+            sig
+        })?;
+        
         Ok(HelperFuncIds {
             call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
@@ -711,7 +778,7 @@ impl JitCompiler {
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
             slice_from_array, slice_from_array3,
             map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next, iface_assert, iface_to_iface, iface_eq,
-            set_call_request,
+            set_call_request, dispatch_call,
         })
     }
 
@@ -761,6 +828,7 @@ impl JitCompiler {
             iface_to_iface: Some(self.module.declare_func_in_func(self.helper_funcs.iface_to_iface, &mut self.ctx.func)),
             iface_eq: Some(self.module.declare_func_in_func(self.helper_funcs.iface_eq, &mut self.ctx.func)),
             set_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_call_request, &mut self.ctx.func)),
+            dispatch_call: Some(self.module.declare_func_in_func(self.helper_funcs.dispatch_call, &mut self.ctx.func)),
         }
     }
 
@@ -791,7 +859,9 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = FunctionCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, helpers);
+        // Get FuncRef for self-recursive calls optimization
+        let self_func_ref = self.module.declare_func_in_func(func_id_cl, &mut self.ctx.func);
+        let compiler = FunctionCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, helpers, Some(self_func_ref));
         compiler.compile()?;
         
         if self.debug_ir {
@@ -856,7 +926,7 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, loop_info, helpers);
+        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, loop_info, helpers);
         compiler.compile()?;
         
         // Verify IR in debug builds
