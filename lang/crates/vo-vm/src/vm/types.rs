@@ -27,7 +27,8 @@ use vo_runtime::island::IslandCommand;
 pub type IslandRegistry = Arc<Mutex<HashMap<u32, Sender<IslandCommand>>>>;
 
 /// Time slice: number of instructions before forced yield check.
-pub const TIME_SLICE: u32 = 1000;
+/// Re-export from vo-runtime for backward compatibility.
+pub use vo_runtime::TIME_SLICE;
 
 /// VM execution result - drives scheduler state transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -499,19 +499,28 @@ impl Vm {
             }
             // Check if this is a loop OSR resume (after Call/WaitIo in loop)
             if frame.loop_osr_begin_pc != 0 {
-                if let Some(new_pc) = self.handle_loop_osr_resume(fiber_id) {
-                    use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
-                    if new_pc == OSR_RESULT_FRAME_CHANGED {
-                        // Loop pushed a new frame for VM call - continue with VM
-                    } else if new_pc == OSR_RESULT_WAITIO {
-                        // Loop is waiting for I/O again
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        let token = fiber.current_frame().unwrap().wait_io_token;
-                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                    } else {
-                        // Loop exited normally - update frame.pc and continue
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        fiber.current_frame_mut().unwrap().pc = new_pc;
+                if let Some(osr_result) = self.handle_loop_osr_resume(fiber_id) {
+                    use crate::vm::jit_glue::OsrResult;
+                    match osr_result {
+                        OsrResult::FrameChanged => {
+                            // Loop pushed a new frame for VM call - continue with VM
+                        }
+                        #[cfg(feature = "std")]
+                        OsrResult::WaitIo => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            let token = fiber.current_frame().unwrap().wait_io_token;
+                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                        }
+                        OsrResult::Yield => {
+                            return ExecResult::TimesliceExpired;
+                        }
+                        OsrResult::Panic => {
+                            return ExecResult::Panic;
+                        }
+                        OsrResult::Exit(new_pc) => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            fiber.current_frame_mut().unwrap().pc = new_pc;
+                        }
                     }
                 }
             }
@@ -545,18 +554,27 @@ impl Vm {
                         let hint_kind = inst.flags;
                         if hint_kind == HINT_LOOP_BEGIN {
                             let loop_pc = frame.pc - 1;
-                            if let Some(new_pc) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
-                                use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
-                                if new_pc == OSR_RESULT_FRAME_CHANGED {
-                                    // Loop pushed a new frame for VM call - refetch everything
-                                    refetch!();
-                                } else if new_pc == OSR_RESULT_WAITIO {
-                                    // Loop is waiting for I/O - return Block
-                                    return ExecResult::Block(crate::fiber::BlockReason::Io(
-                                        self.scheduler.current_fiber().unwrap().current_frame().unwrap().wait_io_token
-                                    ));
-                                } else {
-                                    frame.pc = new_pc;
+                            if let Some(osr_result) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
+                                use crate::vm::jit_glue::OsrResult;
+                                match osr_result {
+                                    OsrResult::FrameChanged => {
+                                        refetch!();
+                                    }
+                                    #[cfg(feature = "std")]
+                                    OsrResult::WaitIo => {
+                                        return ExecResult::Block(crate::fiber::BlockReason::Io(
+                                            self.scheduler.current_fiber().unwrap().current_frame().unwrap().wait_io_token
+                                        ));
+                                    }
+                                    OsrResult::Yield => {
+                                        return ExecResult::TimesliceExpired;
+                                    }
+                                    OsrResult::Panic => {
+                                        return ExecResult::Panic;
+                                    }
+                                    OsrResult::Exit(new_pc) => {
+                                        frame.pc = new_pc;
+                                    }
                                 }
                             }
                         }
@@ -1004,23 +1022,31 @@ impl Vm {
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         if let Some(frame) = fiber.current_frame() {
                             if frame.loop_osr_begin_pc != 0 {
-                                if let Some(new_pc) = self.handle_loop_osr_resume(fiber_id) {
-                                    use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                if let Some(osr_result) = self.handle_loop_osr_resume(fiber_id) {
+                                    use crate::vm::jit_glue::OsrResult;
                                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
                                     stack = fiber.stack_ptr();
-                                    if new_pc == OSR_RESULT_FRAME_CHANGED {
-                                        // Loop pushed another Call frame - continue VM
-                                        refetch!();
-                                        continue;
-                                    } else if new_pc == OSR_RESULT_WAITIO {
-                                        // Loop waiting for I/O
-                                        let token = fiber.current_frame().unwrap().wait_io_token;
-                                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                                    } else {
-                                        // Loop exited - update pc and continue
-                                        fiber.current_frame_mut().unwrap().pc = new_pc;
-                                        refetch!();
-                                        continue;
+                                    match osr_result {
+                                        OsrResult::FrameChanged => {
+                                            refetch!();
+                                            continue;
+                                        }
+                                        #[cfg(feature = "std")]
+                                        OsrResult::WaitIo => {
+                                            let token = fiber.current_frame().unwrap().wait_io_token;
+                                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                                        }
+                                        OsrResult::Yield => {
+                                            return ExecResult::TimesliceExpired;
+                                        }
+                                        OsrResult::Panic => {
+                                            return ExecResult::Panic;
+                                        }
+                                        OsrResult::Exit(new_pc) => {
+                                            fiber.current_frame_mut().unwrap().pc = new_pc;
+                                            refetch!();
+                                            continue;
+                                        }
                                     }
                                 }
                             }

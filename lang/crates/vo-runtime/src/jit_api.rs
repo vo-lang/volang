@@ -137,6 +137,12 @@ pub struct JitContext {
     /// Loop OSR exit PC. Set by loop function on normal exit.
     /// When loop returns JitResult::Ok, this contains the PC to resume at.
     pub loop_exit_pc: u32,
+    
+    /// Instruction budget for time-slice scheduling.
+    /// JIT decrements this at loop back-edges.
+    /// When <= 0, JIT yields to scheduler.
+    /// Reset to crate::TIME_SLICE at fiber run start.
+    pub instruction_budget: i32,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -151,6 +157,7 @@ impl JitContext {
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
+    pub const OFFSET_INSTRUCTION_BUDGET: i32 = std::mem::offset_of!(JitContext, instruction_budget) as i32;
 }
 
 // =============================================================================
@@ -174,6 +181,9 @@ pub enum JitResult {
     /// The IoToken is stored in JitContext.wait_io_token.
     /// After I/O completes, VM resumes JIT at call_resume_pc.
     WaitIo = 3,
+    /// JIT instruction budget exhausted, yield to scheduler.
+    /// Similar to Call: resume_pc is set, VM should return TimesliceExpired.
+    Yield = 4,
 }
 
 // =============================================================================

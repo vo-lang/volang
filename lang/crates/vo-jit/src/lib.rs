@@ -1,5 +1,6 @@
 //! JIT compiler for Vo bytecode using Cranelift.
 
+mod call_helpers;
 mod func_compiler;
 pub mod loop_analysis;
 mod loop_compiler;
@@ -141,7 +142,6 @@ impl Default for JitCache {
 
 #[derive(Clone, Copy)]
 struct HelperFuncIds {
-    safepoint: cranelift_module::FuncId,
     call_vm: cranelift_module::FuncId,
     gc_alloc: cranelift_module::FuncId,
     write_barrier: cranelift_module::FuncId,
@@ -226,7 +226,6 @@ impl JitCompiler {
     }
 
     fn register_symbols(builder: &mut JITBuilder) {
-        builder.symbol("vo_gc_safepoint", vo_runtime::jit_api::vo_gc_safepoint as *const u8);
         builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
         builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
         builder.symbol("vo_call_vm", vo_runtime::jit_api::vo_call_vm as *const u8);
@@ -272,12 +271,6 @@ impl JitCompiler {
 
     fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
         use cranelift_module::Linkage::Import;
-        
-        let safepoint = module.declare_function("vo_gc_safepoint", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig
-        })?;
         
         let call_vm = module.declare_function("vo_call_vm", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
@@ -669,7 +662,7 @@ impl JitCompiler {
         })?;
         
         Ok(HelperFuncIds {
-            safepoint, call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
+            call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
             ptr_clone, closure_new, chan_new, chan_len, chan_cap, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
@@ -693,7 +686,6 @@ impl JitCompiler {
 
     fn get_helper_refs(&mut self) -> HelperFuncs {
         HelperFuncs {
-            safepoint: Some(self.module.declare_func_in_func(self.helper_funcs.safepoint, &mut self.ctx.func)),
             call_vm: Some(self.module.declare_func_in_func(self.helper_funcs.call_vm, &mut self.ctx.func)),
             gc_alloc: Some(self.module.declare_func_in_func(self.helper_funcs.gc_alloc, &mut self.ctx.func)),
             write_barrier: Some(self.module.declare_func_in_func(self.helper_funcs.write_barrier, &mut self.ctx.func)),

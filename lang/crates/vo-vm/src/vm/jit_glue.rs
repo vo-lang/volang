@@ -220,6 +220,7 @@ pub fn build_jit_ctx(
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
+        instruction_budget: vo_runtime::TIME_SLICE,
     }
 }
 
@@ -227,9 +228,20 @@ pub fn build_jit_ctx(
 // JIT Execution Result
 // =============================================================================
 
-/// Special PC values returned by loop OSR to signal non-normal exits.
-pub const OSR_RESULT_FRAME_CHANGED: usize = usize::MAX;
-pub const OSR_RESULT_WAITIO: usize = usize::MAX - 1;
+/// Result of loop OSR execution.
+pub enum OsrResult {
+    /// Loop exited normally at this PC.
+    Exit(usize),
+    /// Loop pushed a new frame for VM call.
+    FrameChanged,
+    /// Loop is waiting for I/O.
+    #[cfg(feature = "std")]
+    WaitIo,
+    /// Loop yielded due to time slice exhaustion.
+    Yield,
+    /// Loop panicked.
+    Panic,
+}
 
 /// Info for Call request from JIT to VM (non-jittable callee).
 pub struct CallRequestInfo {
@@ -344,6 +356,13 @@ impl Vm {
                 handle_jit_panic(&mut self.state.gc, fiber, panic_flag, &panic_msg);
                 (ExecResult::Panic, None)
             }
+            JitResult::Yield => {
+                // Time slice exhausted - set resume PC and return TimesliceExpired
+                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                let frame = fiber.current_frame_mut().unwrap();
+                frame.pc = ctx.call_resume_pc as usize;
+                (ExecResult::TimesliceExpired, None)
+            }
         }
     }
     
@@ -409,11 +428,10 @@ impl Vm {
 
     /// Handle loop OSR re-entry after a Call/WaitIo returns.
     /// Called when current frame has loop_osr_begin_pc set.
-    /// Returns (new_pc, is_frame_changed, is_waitio) for VM to handle.
     pub(super) fn handle_loop_osr_resume(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
-    ) -> Option<usize> {
+    ) -> Option<OsrResult> {
         let (func_id, bp, loop_begin_pc, resume_pc) = {
             let fiber = self.scheduler.get_fiber_mut(fiber_id);
             let frame = fiber.current_frame_mut()?;
@@ -436,14 +454,14 @@ impl Vm {
     /// Try to perform loop OSR at a back-edge.
     /// 
     /// Called when VM detects a HINT_LOOP_BEGIN instruction.
-    /// If the loop is hot and compiled, executes it via JIT and returns the new PC.
+    /// If the loop is hot and compiled, executes it via JIT and returns OsrResult.
     pub(super) fn try_osr(
         &mut self,
         fiber_id: crate::scheduler::FiberId,
         func_id: u32,
         loop_begin_pc: usize,
         bp: usize,
-    ) -> Option<usize> {
+    ) -> Option<OsrResult> {
         let module = self.module.as_ref()?;
         let func_def = &module.functions[func_id as usize];
         let jit_mgr = self.jit_mgr.as_mut()?;
@@ -487,8 +505,7 @@ impl Vm {
     }
     
     /// Execute a compiled loop function via OSR.
-    /// Returns the new PC to resume at, or None on panic/call.
-    /// When returning None due to Call, the caller should check ctx.call_func_id.
+    /// Returns OsrResult indicating what happened.
     /// start_pc: 0 for normal entry, resume_pc for Call/WaitIo continuation.
     /// loop_begin_pc: The loop's begin PC for resume tracking.
     fn execute_loop_osr(
@@ -498,7 +515,7 @@ impl Vm {
         bp: usize,
         start_pc: u32,
         loop_begin_pc: usize,
-    ) -> Option<usize> {
+    ) -> Option<OsrResult> {
         let jit_mgr = self.jit_mgr.as_ref().unwrap();
         let func_table_ptr = jit_mgr.func_table_ptr();
         let func_table_len = jit_mgr.func_table_len() as u32;
@@ -532,17 +549,17 @@ impl Vm {
         
         let result = loop_func(&mut ctx, locals_ptr, start_pc);
         
-        // Unified JitResult handling - same as function JIT
+        // Convert JitResult to OsrResult
         match result {
             JitResult::Ok => {
                 // Normal exit - exit_pc is in ctx.loop_exit_pc
-                Some(ctx.loop_exit_pc as usize)
+                Some(OsrResult::Exit(ctx.loop_exit_pc as usize))
             }
             JitResult::Panic => {
                 // Set panic state so defer/recover can work
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
                 handle_jit_panic(&mut self.state.gc, fiber, panic_flag, &panic_msg);
-                None
+                Some(OsrResult::Panic)
             }
             JitResult::Call => {
                 // Loop wants to make a VM call - set up frame and return
@@ -567,7 +584,7 @@ impl Vm {
                 // Push new frame for callee
                 fiber.push_frame(func_id, func_def.local_slots, arg_start as u16, call_ret_slots);
                 
-                Some(OSR_RESULT_FRAME_CHANGED)
+                Some(OsrResult::FrameChanged)
             }
             #[cfg(feature = "std")]
             JitResult::WaitIo => {
@@ -581,7 +598,18 @@ impl Vm {
                 frame.wait_io_token = token;
                 frame.loop_osr_begin_pc = loop_begin_pc;
                 
-                Some(OSR_RESULT_WAITIO)
+                Some(OsrResult::WaitIo)
+            }
+            JitResult::Yield => {
+                // Time slice exhausted - set resume PC and return special value
+                let resume_pc = ctx.call_resume_pc as usize;
+                
+                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                let frame = fiber.current_frame_mut().unwrap();
+                frame.pc = resume_pc;
+                frame.loop_osr_begin_pc = loop_begin_pc;
+                
+                Some(OsrResult::Yield)
             }
         }
     }

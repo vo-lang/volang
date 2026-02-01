@@ -18,7 +18,6 @@ pub enum TranslateResult {
 /// Runtime helper function references
 #[derive(Default, Clone, Copy)]
 pub struct HelperFuncs {
-    pub safepoint: Option<FuncRef>,
     pub call_vm: Option<FuncRef>,
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
@@ -88,9 +87,6 @@ pub trait IrEmitter<'a> {
     /// Get current PC
     fn current_pc(&self) -> usize;
     
-    /// Emit safepoint check
-    fn emit_safepoint(&mut self);
-    
     /// Get helper function references
     fn helpers(&self) -> &HelperFuncs;
     
@@ -106,4 +102,11 @@ pub trait IrEmitter<'a> {
     /// Get memory address of a variable slot.
     /// Used by SlotGet/SlotSet for stack array access.
     fn var_addr(&mut self, slot: u16) -> Value;
+    
+    /// Spill all SSA variables to memory.
+    /// Called before returning non-Ok JitResult so VM can see/restore state.
+    fn spill_all_vars(&mut self);
+    
+    /// Get the number of local variable slots.
+    fn local_slot_count(&self) -> usize;
 }
