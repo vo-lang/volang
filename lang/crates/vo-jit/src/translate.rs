@@ -693,10 +693,7 @@ fn emit_slice_bounds_check<'a>(e: &mut impl IrEmitter<'a>, s: Value, idx: Value)
 }
 
 fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_new_func = match e.helpers().slice_new {
-        Some(f) => f,
-        None => return,
-    };
+    let slice_new_func = e.helpers().slice_new.expect("slice_new helper not registered");
     let elem_bytes_val = emit_elem_bytes_i32(e, inst.flags, inst.c + 2);
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
@@ -790,10 +787,7 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slice_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_len_func = match e.helpers().slice_len {
-        Some(f) => f,
-        None => return,
-    };
+    let slice_len_func = e.helpers().slice_len.expect("slice_len helper not registered");
     let s = e.read_var(inst.b);
     let call = e.builder().ins().call(slice_len_func, &[s]);
     let result = e.builder().inst_results(call)[0];
@@ -801,10 +795,7 @@ fn slice_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slice_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_cap_func = match e.helpers().slice_cap {
-        Some(f) => f,
-        None => return,
-    };
+    let slice_cap_func = e.helpers().slice_cap.expect("slice_cap helper not registered");
     let s = e.read_var(inst.b);
     let call = e.builder().ins().call(slice_cap_func, &[s]);
     let result = e.builder().inst_results(call)[0];
@@ -853,10 +844,7 @@ fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_append_func = match e.helpers().slice_append {
-        Some(f) => f,
-        None => return,
-    };
+    let slice_append_func = e.helpers().slice_append.expect("slice_append helper not registered");
     let gc_ptr = e.gc_ptr();
     let s = e.read_var(inst.b);
     
@@ -900,10 +888,7 @@ fn slice_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 const ARRAY_HEADER_BYTES: i64 = 16; // 2 slots
 
 fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let array_new_func = match e.helpers().array_new {
-        Some(f) => f,
-        None => return,
-    };
+    let array_new_func = e.helpers().array_new.expect("array_new helper not registered");
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -1019,7 +1004,7 @@ fn array_addr<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 fn str_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_len { Some(f) => f, None => return };
+    let func = e.helpers().str_len.expect("str_len helper not registered");
     let s = e.read_var(inst.b);
     let call = e.builder().ins().call(func, &[s]);
     let result = e.builder().inst_results(call)[0];
@@ -1027,8 +1012,8 @@ fn str_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let str_index_func = match e.helpers().str_index { Some(f) => f, None => return };
-    let str_len_func = match e.helpers().str_len { Some(f) => f, None => return };
+    let str_index_func = e.helpers().str_index.expect("str_index helper not registered");
+    let str_len_func = e.helpers().str_len.expect("str_len helper not registered");
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     // Bounds check: get string length and compare
@@ -1042,7 +1027,7 @@ fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_concat<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_concat { Some(f) => f, None => return };
+    let func = e.helpers().str_concat.expect("str_concat helper not registered");
     let gc_ptr = e.gc_ptr();
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
@@ -1052,7 +1037,7 @@ fn str_concat<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_slice { Some(f) => f, None => return };
+    let func = e.helpers().str_slice.expect("str_slice helper not registered");
     let gc_ptr = e.gc_ptr();
     let s = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
@@ -1063,7 +1048,7 @@ fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_eq { Some(f) => f, None => return };
+    let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[a, b]);
@@ -1072,7 +1057,7 @@ fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_eq { Some(f) => f, None => return };
+    let func = e.helpers().str_eq.expect("str_eq helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[a, b]);
@@ -1084,7 +1069,7 @@ fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
-    let func = match e.helpers().str_cmp { Some(f) => f, None => return };
+    let func = e.helpers().str_cmp.expect("str_cmp helper not registered");
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[a, b]);
@@ -1096,7 +1081,7 @@ fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
 }
 
 fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().str_decode_rune { Some(f) => f, None => return };
+    let func = e.helpers().str_decode_rune.expect("str_decode_rune helper not registered");
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[s, idx]);
@@ -1113,7 +1098,7 @@ fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_new { Some(f) => f, None => return };
+    let func = e.helpers().map_new.expect("map_new helper not registered");
     let gc_ptr = e.gc_ptr();
     // b = packed_meta, b+1 = key_rttid
     let packed_meta = e.read_var(inst.b);
@@ -1130,7 +1115,7 @@ fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_len { Some(f) => f, None => return };
+    let func = e.helpers().map_len.expect("map_len helper not registered");
     let m = e.read_var(inst.b);
     let call = e.builder().ins().call(func, &[m]);
     let result = e.builder().inst_results(call)[0];
@@ -1152,10 +1137,10 @@ fn store_to_stack<'a>(e: &mut impl IrEmitter<'a>, start_reg: u16, slots: usize) 
 }
 
 fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_get { Some(f) => f, None => return };
+    let func = e.helpers().map_get.expect("map_get helper not registered");
     // MapGet: a=dst, b=map, c=meta_slot, key at c+1
     // meta: key_slots<<16 | val_slots<<1 | has_ok
-    let meta = match e.get_reg_const(inst.c) { Some(m) => m as u64, None => return };
+    let meta = e.get_reg_const(inst.c).expect("MapGet: meta not found in reg_consts") as u64;
     let key_slots = ((meta >> 16) & 0xFFFF) as usize;
     let val_slots = ((meta >> 1) & 0x7FFF) as usize;
     let has_ok = (meta & 1) != 0;
@@ -1185,10 +1170,10 @@ fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_set { Some(f) => f, None => return };
+    let func = e.helpers().map_set.expect("map_set helper not registered");
     // MapSet: a=map, b=meta_slot, c=val_start, key at b+1
     // meta: key_slots<<8 | val_slots
-    let meta = match e.get_reg_const(inst.b) { Some(m) => m as u64, None => return };
+    let meta = e.get_reg_const(inst.b).expect("MapSet: meta not found in reg_consts") as u64;
     let key_slots = ((meta >> 8) & 0xFF) as usize;
     let val_slots = (meta & 0xFF) as usize;
     
@@ -1212,9 +1197,9 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_delete { Some(f) => f, None => return };
+    let func = e.helpers().map_delete.expect("map_delete helper not registered");
     // MapDelete: a=map, b=meta_slot (=key_slots), key at b+1
-    let key_slots = match e.get_reg_const(inst.b) { Some(m) => m as usize, None => return };
+    let key_slots = e.get_reg_const(inst.b).expect("MapDelete: meta not found in reg_consts") as usize;
     
     let m = e.read_var(inst.a);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
@@ -1227,7 +1212,7 @@ const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
 const MAP_ITER_BYTES: u32 = (MAP_ITER_SLOTS * 8) as u32;
 
 fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_iter_init { Some(f) => f, None => return };
+    let func = e.helpers().map_iter_init.expect("map_iter_init helper not registered");
     let m = e.read_var(inst.b);
     let iter_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot, MAP_ITER_BYTES, 8));
@@ -1240,7 +1225,7 @@ fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().map_iter_next { Some(f) => f, None => return };
+    let func = e.helpers().map_iter_next.expect("map_iter_next helper not registered");
     let key_slots = (inst.flags & 0x0F) as usize;
     let val_slots = ((inst.flags >> 4) & 0x0F) as usize;
     
@@ -1289,7 +1274,7 @@ fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 fn closure_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().closure_new { Some(f) => f, None => return };
+    let func = e.helpers().closure_new.expect("closure_new helper not registered");
     let gc_ptr = e.gc_ptr();
     let func_id = ((inst.flags as u32) << 16) | (inst.b as u32);
     let capture_count = inst.c as u32;
@@ -1314,7 +1299,7 @@ fn closure_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().gc_alloc { Some(f) => f, None => return };
+    let func = e.helpers().gc_alloc.expect("gc_alloc helper not registered");
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -1325,7 +1310,7 @@ fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().chan_new { Some(f) => f, None => return };
+    let func = e.helpers().chan_new.expect("chan_new helper not registered");
     let gc_ptr = e.gc_ptr();
     let elem_meta = e.read_var(inst.b);
     let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
@@ -1337,7 +1322,7 @@ fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn chan_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().chan_len { Some(f) => f, None => return };
+    let func = e.helpers().chan_len.expect("chan_len helper not registered");
     let ch = e.read_var(inst.b);
     let call = e.builder().ins().call(func, &[ch]);
     let result = e.builder().inst_results(call)[0];
@@ -1345,7 +1330,7 @@ fn chan_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().chan_cap { Some(f) => f, None => return };
+    let func = e.helpers().chan_cap.expect("chan_cap helper not registered");
     let ch = e.read_var(inst.b);
     let call = e.builder().ins().call(func, &[ch]);
     let result = e.builder().inst_results(call)[0];
@@ -1358,7 +1343,7 @@ fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     use vo_runtime::bytecode::Constant;
-    let func = match e.helpers().str_new { Some(f) => f, None => return };
+    let func = e.helpers().str_new.expect("str_new helper not registered");
     let const_idx = inst.b as usize;
     let bytes: Vec<u8> = if let Constant::String(s) = &e.vo_module().constants[const_idx] {
         s.as_bytes().to_vec()
@@ -1454,7 +1439,7 @@ fn iface_assign<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = match e.helpers().iface_assert { Some(f) => f, None => return };
+    let func = e.helpers().iface_assert.expect("iface_assert helper not registered");
     let ctx = e.ctx_param();
     let slot0 = e.read_var(inst.b);
     let slot1 = e.read_var(inst.b + 1);

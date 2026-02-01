@@ -27,10 +27,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
     config: CallConfig,
 ) {
-    let call_closure_func = match emitter.helpers().call_closure {
-        Some(f) => f,
-        None => return,
-    };
+    let call_closure_func = emitter.helpers().call_closure.expect("call_closure helper not registered");
     
     let closure_ref = emitter.read_var(inst.a);
     let arg_start = inst.b as usize;
@@ -89,10 +86,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
     config: CallConfig,
 ) {
-    let call_iface_func = match emitter.helpers().call_iface {
-        Some(f) => f,
-        None => return,
-    };
+    let call_iface_func = emitter.helpers().call_iface.expect("call_iface helper not registered");
     
     let slot0 = emitter.read_var(inst.a);
     let slot1 = emitter.read_var(inst.a + 1);
@@ -157,10 +151,7 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
     config: CallExternConfig,
 ) {
-    let call_extern_func = match emitter.helpers().call_extern {
-        Some(f) => f,
-        None => return,
-    };
+    let call_extern_func = emitter.helpers().call_extern.expect("call_extern helper not registered");
     
     let dst = inst.a as usize;
     let extern_id = inst.b as u32;
@@ -265,10 +256,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     config: CallViaVmConfig,
 ) {
-    let set_call_request_func = match emitter.helpers().set_call_request {
-        Some(f) => f,
-        None => return,
-    };
+    let set_call_request_func = emitter.helpers().set_call_request.expect("set_call_request helper not registered");
     
     // Spill all variables to fiber.stack before returning Call
     emitter.spill_all_vars();
