@@ -322,9 +322,28 @@ impl<'a> FunctionCompiler<'a> {
             Opcode::Return => { self.ret(inst); Ok(true) }
             Opcode::Panic => { self.panic(inst); Ok(true) }
             Opcode::Call => Ok(self.call(inst)),
-            Opcode::CallExtern => { self.call_extern(inst, self.current_pc); Ok(false) }
-            Opcode::CallClosure => { self.call_closure(inst); Ok(false) }
-            Opcode::CallIface => { self.call_iface(inst); Ok(false) }
+            Opcode::CallExtern => {
+                crate::call_helpers::emit_call_extern(self, inst, crate::call_helpers::CallExternConfig {
+                    current_pc: self.current_pc,
+                    spill_on_non_ok: false,
+                    handle_waitio_specially: true,
+                });
+                Ok(false)
+            }
+            Opcode::CallClosure => {
+                crate::call_helpers::emit_call_closure(self, inst, crate::call_helpers::CallConfig {
+                    resume_pc: None,
+                    spill_on_non_ok: false,
+                });
+                Ok(false)
+            }
+            Opcode::CallIface => {
+                crate::call_helpers::emit_call_iface(self, inst, crate::call_helpers::CallConfig {
+                    resume_pc: None,
+                    spill_on_non_ok: false,
+                });
+                Ok(false)
+            }
             _ => Err(JitError::UnsupportedOpcode(inst.opcode())),
         }
     }
@@ -446,14 +465,27 @@ impl<'a> FunctionCompiler<'a> {
                 self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
             } else {
                 // Callee is jittable - try JIT-to-JIT call, fallback to vo_call_vm if not compiled yet
-                self.call_with_jit_check(inst, target_func_id, arg_start, arg_slots, call_ret_slots, target_func);
+                crate::call_helpers::emit_call_with_jit_check(self, crate::call_helpers::JitCallConfig {
+                    func_id: target_func_id,
+                    arg_start,
+                    arg_slots,
+                    call_ret_slots,
+                    func_ret_slots: target_func.ret_slots as usize,
+                    resume_pc: self.current_pc + 1,
+                    use_call_request_fallback: false,
+                });
             }
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee is NOT jittable (has defer/channel/select/etc)
             // Use Call request mechanism: return JitResult::Call, VM executes callee,
             // then resumes JIT at resume_pc
-            self.call_via_vm(target_func_id, arg_start, arg_slots, call_ret_slots, target_func);
+            crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
+                func_id: target_func_id,
+                arg_start,
+                resume_pc: self.current_pc + 1,
+                ret_slots: call_ret_slots,
+            });
             true // Block IS terminated - call_via_vm generates return instruction
         }
     }
@@ -529,190 +561,6 @@ impl<'a> FunctionCompiler<'a> {
             self.sync_var((arg_start + i) as u16, val);
         }
     }
-    
-    /// Call via VM for non-jittable callees using Call request mechanism.
-    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, _arg_slots: usize, call_ret_slots: usize, _target_func: &vo_runtime::bytecode::FunctionDef) {
-        crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
-            func_id,
-            arg_start,
-            resume_pc: self.current_pc + 1,
-            ret_slots: call_ret_slots,
-        });
-    }
-    
-    /// JIT-to-JIT call with runtime check for compiled callee
-    fn call_with_jit_check(
-        &mut self, 
-        _inst: &Instruction,
-        func_id: u32,
-        arg_start: usize,
-        arg_slots: usize,
-        call_ret_slots: usize,
-        target_func: &vo_runtime::bytecode::FunctionDef,
-    ) {
-        // For jittable callees, we have two paths:
-        // 1. If jit_func_table[func_id] != null: direct JIT-to-JIT call
-        // 2. If jit_func_table[func_id] == null: fallback to vo_call_vm
-        //
-        // To access jit_func_table, we need to load it from JitContext.
-        // JitContext layout (64-bit, offsets in bytes):
-        //   gc: 0, globals: 8, safepoint_flag: 16, panic_flag: 24, panic_msg: 32,
-        //   vm: 40, fiber: 48, call_vm_fn: 56, itab_cache: 64, extern_registry: 72,
-        //   call_extern_fn: 80, module: 88, jit_func_table: 96, jit_func_count: 104, ...
-        
-        let ctx = self.builder.block_params(self.entry_block)[0];
-        let func_ret_slots = target_func.ret_slots as usize;
-        
-        // Create stack slots for args and return values (shared by both paths)
-        let arg_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-        let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (func_ret_slots.max(1) * 8) as u32,
-            8,
-        ));
-        
-        // Store arguments to stack slot
-        for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
-            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
-        }
-        
-        // Load jit_func_table pointer from ctx (offset 96)
-        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, 96);
-        
-        // Calculate address: jit_func_table + func_id * 8
-        let func_id_i64 = self.builder.ins().iconst(types::I64, func_id as i64);
-        let offset = self.builder.ins().imul_imm(func_id_i64, 8);
-        let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
-        
-        // Load function pointer
-        let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
-        
-        // Check if null
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let is_null = self.builder.ins().icmp(IntCC::Equal, jit_func_ptr, zero);
-        
-        // Create blocks for the two paths
-        let jit_call_block = self.builder.create_block();
-        let vm_call_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        
-        // Branch based on whether function is compiled
-        self.builder.ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
-        
-        // === JIT-to-JIT call path ===
-        self.builder.switch_to_block(jit_call_block);
-        self.builder.seal_block(jit_call_block);
-        
-        // Prepare call arguments: (ctx, args, ret)
-        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
-        let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-        
-        // Create signature for JIT function: (ctx: ptr, args: ptr, ret: ptr) -> i32
-        let ptr_type = types::I64;
-        let sig = self.builder.func.import_signature({
-            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(ptr_type));
-            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-            sig
-        });
-        
-        // Indirect call through function pointer
-        let jit_call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
-        let jit_result = self.builder.inst_results(jit_call)[0];
-        
-        // Check result for panic (result == 1)
-        let one = self.builder.ins().iconst(types::I32, 1);
-        let is_panic = self.builder.ins().icmp(IntCC::Equal, jit_result, one);
-        
-        let jit_panic_block = self.builder.create_block();
-        let jit_ok_block = self.builder.create_block();
-        
-        self.builder.ins().brif(is_panic, jit_panic_block, &[], jit_ok_block, &[]);
-        
-        // JIT panic path
-        self.builder.switch_to_block(jit_panic_block);
-        self.builder.seal_block(jit_panic_block);
-        let panic_val = self.builder.ins().iconst(types::I32, 1);
-        self.builder.ins().return_(&[panic_val]);
-        
-        // JIT OK path - jump to merge
-        self.builder.switch_to_block(jit_ok_block);
-        self.builder.seal_block(jit_ok_block);
-        self.builder.ins().jump(merge_block, &[]);
-        
-        // === VM call path (fallback when JIT not compiled) ===
-        self.builder.switch_to_block(vm_call_block);
-        self.builder.seal_block(vm_call_block);
-        
-        let call_vm_func = self.helpers.call_vm.unwrap();
-        let args_ptr_vm = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
-        let ret_ptr_vm = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-        let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
-        let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-        let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
-        
-        let vm_call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
-        let vm_result = self.builder.inst_results(vm_call)[0];
-        
-        // Check VM result for panic
-        let vm_is_panic = self.builder.ins().icmp(IntCC::Equal, vm_result, one);
-        
-        let vm_panic_block = self.builder.create_block();
-        let vm_ok_block = self.builder.create_block();
-        
-        self.builder.ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
-        
-        // VM panic path
-        self.builder.switch_to_block(vm_panic_block);
-        self.builder.seal_block(vm_panic_block);
-        let vm_panic_val = self.builder.ins().iconst(types::I32, 1);
-        self.builder.ins().return_(&[vm_panic_val]);
-        
-        // VM OK path - jump to merge
-        self.builder.switch_to_block(vm_ok_block);
-        self.builder.seal_block(vm_ok_block);
-        self.builder.ins().jump(merge_block, &[]);
-        
-        // === Merge block (load return values) ===
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        
-        for i in 0..call_ret_slots {
-            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.sync_var((arg_start + i) as u16, val);
-        }
-    }
-    
-
-    fn call_extern(&mut self, inst: &Instruction, pc: usize) {
-        crate::call_helpers::emit_call_extern(self, inst, crate::call_helpers::CallExternConfig {
-            current_pc: pc,
-            spill_on_non_ok: false,
-            handle_waitio_specially: true,
-        });
-    }
-
-    fn call_closure(&mut self, inst: &Instruction) {
-        crate::call_helpers::emit_call_closure(self, inst, crate::call_helpers::CallConfig {
-            resume_pc: None,
-            spill_on_non_ok: false,
-        });
-    }
-
-    fn call_iface(&mut self, inst: &Instruction) {
-        crate::call_helpers::emit_call_iface(self, inst, crate::call_helpers::CallConfig {
-            resume_pc: None,
-            spill_on_non_ok: false,
-        });
-    }
-
 }
 
 impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {

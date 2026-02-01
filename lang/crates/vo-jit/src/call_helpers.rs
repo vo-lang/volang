@@ -294,6 +294,185 @@ pub struct CallViaVmConfig {
     pub ret_slots: usize,
 }
 
+/// Configuration for JIT-to-JIT call with fallback.
+pub struct JitCallConfig {
+    pub func_id: u32,
+    pub arg_start: usize,
+    pub arg_slots: usize,
+    pub call_ret_slots: usize,
+    pub func_ret_slots: usize,
+    pub resume_pc: usize,
+    /// If true, use Call request for VM fallback (LoopCompiler).
+    /// If false, use call_vm helper (FunctionCompiler).
+    pub use_call_request_fallback: bool,
+}
+
+/// Emit a JIT-to-JIT call with runtime check for compiled callee.
+/// 
+/// If jit_func_table[func_id] != null: direct JIT call
+/// If jit_func_table[func_id] == null: fallback to VM (via call_vm or Call request)
+/// 
+/// IMPORTANT: This function maintains the original structure to avoid phi node explosion:
+/// - Stack slots created BEFORE branching (shared by both paths)
+/// - Arguments stored BEFORE branching
+/// - Return values written in merge_block (not in individual ok_blocks)
+pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    config: JitCallConfig,
+) {
+    let ctx = emitter.ctx_param();
+    let panic_ret_val = emitter.panic_return_value();
+    
+    // === BEFORE BRANCHING: Create shared stack slots and store arguments ===
+    // This is critical - doing this after branching causes phi node explosion
+    let arg_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (config.arg_slots.max(1) * 8) as u32,
+        8,
+    ));
+    let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (config.func_ret_slots.max(1) * 8) as u32,
+        8,
+    ));
+    
+    // Store arguments to stack slot BEFORE branching
+    for i in 0..config.arg_slots {
+        let val = emitter.read_var((config.arg_start + i) as u16);
+        emitter.builder().ins().stack_store(val, arg_slot, (i * 8) as i32);
+    }
+    
+    // Load jit_func_table pointer from ctx
+    let jit_func_table = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE
+    );
+    
+    // Calculate address: jit_func_table + func_id * 8
+    let func_id_i64 = emitter.builder().ins().iconst(types::I64, config.func_id as i64);
+    let offset = emitter.builder().ins().imul_imm(func_id_i64, 8);
+    let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
+    
+    // Load function pointer
+    let jit_func_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+    
+    // Check if null
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, zero);
+    
+    // Create blocks for the two paths
+    let jit_call_block = emitter.builder().create_block();
+    let vm_call_block = emitter.builder().create_block();
+    let merge_block = emitter.builder().create_block();
+    
+    // Branch based on whether function is compiled
+    emitter.builder().ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
+    
+    // === JIT-to-JIT call path ===
+    emitter.builder().switch_to_block(jit_call_block);
+    emitter.builder().seal_block(jit_call_block);
+    
+    // Use shared stack slots
+    let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
+    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    
+    // Create signature for JIT function: (ctx: ptr, args: ptr, ret: ptr) -> i32
+    let sig = emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig
+    });
+    
+    // Indirect call through function pointer
+    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+    let jit_result = emitter.builder().inst_results(jit_call)[0];
+    
+    // Check result for panic (result == 1)
+    let one = emitter.builder().ins().iconst(types::I32, 1);
+    let is_panic = emitter.builder().ins().icmp(IntCC::Equal, jit_result, one);
+    
+    let jit_panic_block = emitter.builder().create_block();
+    let jit_ok_block = emitter.builder().create_block();
+    
+    emitter.builder().ins().brif(is_panic, jit_panic_block, &[], jit_ok_block, &[]);
+    
+    // JIT panic path
+    emitter.builder().switch_to_block(jit_panic_block);
+    emitter.builder().seal_block(jit_panic_block);
+    let panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    emitter.builder().ins().return_(&[panic_val]);
+    
+    // JIT OK path - just jump to merge (return values loaded in merge_block)
+    emitter.builder().switch_to_block(jit_ok_block);
+    emitter.builder().seal_block(jit_ok_block);
+    emitter.builder().ins().jump(merge_block, &[]);
+    
+    // === VM call path ===
+    emitter.builder().switch_to_block(vm_call_block);
+    emitter.builder().seal_block(vm_call_block);
+    
+    if config.use_call_request_fallback {
+        // LoopCompiler path: use Call request mechanism
+        // This path returns directly, doesn't go to merge_block
+        emitter.spill_all_vars();
+        
+        let set_call_request_func = emitter.helpers().set_call_request.unwrap();
+        let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+        let arg_start_val = emitter.builder().ins().iconst(types::I32, config.arg_start as i64);
+        let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.resume_pc as i64);
+        let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
+        
+        emitter.builder().ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val]);
+        
+        let call_result = emitter.builder().ins().iconst(types::I32, 2); // JitResult::Call
+        emitter.builder().ins().return_(&[call_result]);
+    } else {
+        // FunctionCompiler path: use call_vm helper with shared stack slots
+        let call_vm_func = emitter.helpers().call_vm.unwrap();
+        
+        // Use shared stack slots (args already stored before branching)
+        let args_ptr_vm = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
+        let ret_ptr_vm = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+        let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+        let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
+        let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
+        
+        let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
+        let vm_result = emitter.builder().inst_results(vm_call)[0];
+        
+        // Check VM result for panic
+        let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one);
+        
+        let vm_panic_block = emitter.builder().create_block();
+        let vm_ok_block = emitter.builder().create_block();
+        
+        emitter.builder().ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
+        
+        // VM panic path
+        emitter.builder().switch_to_block(vm_panic_block);
+        emitter.builder().seal_block(vm_panic_block);
+        let vm_panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
+        emitter.builder().ins().return_(&[vm_panic_val]);
+        
+        // VM OK path - just jump to merge (return values loaded in merge_block)
+        emitter.builder().switch_to_block(vm_ok_block);
+        emitter.builder().seal_block(vm_ok_block);
+        emitter.builder().ins().jump(merge_block, &[]);
+    }
+    
+    // === Merge block (load return values from shared ret_slot) ===
+    emitter.builder().switch_to_block(merge_block);
+    emitter.builder().seal_block(merge_block);
+    
+    // Load return values and write to variables - ONLY here, not in ok_blocks
+    for i in 0..config.call_ret_slots {
+        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        emitter.write_var((config.arg_start + i) as u16, val);
+    }
+}
+
 /// Check call result and handle non-Ok cases.
 /// 
 /// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3
