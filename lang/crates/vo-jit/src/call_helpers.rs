@@ -22,6 +22,9 @@ pub struct CallConfig {
 /// Emit a closure call instruction.
 /// 
 /// Both FunctionCompiler and LoopCompiler should use this to ensure consistent behavior.
+/// 
+/// IMPORTANT: Uses unified args/ret slot - VM writes return values to same location as args.
+/// This is required for WaitIo handling where VM resumes and writes results.
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -34,29 +37,24 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
     
-    let builder = emitter.builder();
-    
-    // Create stack slots for args and return values
-    let arg_slot = builder.create_sized_stack_slot(StackSlotData::new(
+    // Unified args/ret slot: size = max(args, rets)
+    // VM writes return values to same location as args
+    let buffer_size = arg_slots.max(ret_slots).max(1);
+    let args_ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (arg_slots.max(1) * 8) as u32,
-        8,
-    ));
-    let ret_slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (ret_slots.max(1) * 8) as u32,
+        (buffer_size * 8) as u32,
         8,
     ));
     
     // Store arguments to stack slot
     for i in 0..arg_slots {
         let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, arg_slot, (i * 8) as i32);
+        emitter.builder().ins().stack_store(val, args_ret_slot, (i * 8) as i32);
     }
     
     let ctx = emitter.ctx_param();
-    let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
-    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    // args_ptr and ret_ptr are the SAME pointer (unified slot)
+    let ptr = emitter.builder().ins().stack_addr(types::I64, args_ret_slot, 0);
     let arg_count = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     let ret_count = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
     
@@ -66,14 +64,15 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
     }
     
-    let call = emitter.builder().ins().call(call_closure_func, &[ctx, closure_ref, args_ptr, arg_count, ret_ptr, ret_count]);
+    // Pass ptr for BOTH args and ret - unified slot
+    let call = emitter.builder().ins().call(call_closure_func, &[ctx, closure_ref, ptr, arg_count, ptr, ret_count]);
     let result = emitter.builder().inst_results(call)[0];
     
     check_call_result(emitter, result, config.spill_on_non_ok);
     
-    // Copy return values back
+    // Load return values from unified slot
     for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        let val = emitter.builder().ins().stack_load(types::I64, args_ret_slot, (i * 8) as i32);
         emitter.write_var((arg_start + i) as u16, val);
     }
 }
@@ -81,6 +80,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
 /// Emit an interface method call instruction.
 /// 
 /// Both FunctionCompiler and LoopCompiler should use this to ensure consistent behavior.
+/// 
+/// IMPORTANT: Uses unified args/ret slot - VM writes return values to same location as args.
+/// This is required for WaitIo handling where VM resumes and writes results.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -95,29 +97,24 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let arg_slots = (inst.c >> 8) as usize;
     let ret_slots = (inst.c & 0xFF) as usize;
     
-    let builder = emitter.builder();
-    
-    // Create stack slots for args and return values
-    let arg_slot = builder.create_sized_stack_slot(StackSlotData::new(
+    // Unified args/ret slot: size = max(args, rets)
+    // VM writes return values to same location as args
+    let buffer_size = arg_slots.max(ret_slots).max(1);
+    let args_ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (arg_slots.max(1) * 8) as u32,
-        8,
-    ));
-    let ret_slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (ret_slots.max(1) * 8) as u32,
+        (buffer_size * 8) as u32,
         8,
     ));
     
     // Store arguments to stack slot
     for i in 0..arg_slots {
         let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, arg_slot, (i * 8) as i32);
+        emitter.builder().ins().stack_store(val, args_ret_slot, (i * 8) as i32);
     }
     
     let ctx = emitter.ctx_param();
-    let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
-    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    // args_ptr and ret_ptr are the SAME pointer (unified slot)
+    let ptr = emitter.builder().ins().stack_addr(types::I64, args_ret_slot, 0);
     let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
     let arg_count = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     let ret_count = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
@@ -129,16 +126,17 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
     }
     
+    // Pass ptr for BOTH args and ret - unified slot
     let call = emitter.builder().ins().call(call_iface_func, &[
-        ctx, slot0, slot1, method_idx_val, args_ptr, arg_count, ret_ptr, ret_count, func_id
+        ctx, slot0, slot1, method_idx_val, ptr, arg_count, ptr, ret_count, func_id
     ]);
     let result = emitter.builder().inst_results(call)[0];
     
     check_call_result(emitter, result, config.spill_on_non_ok);
     
-    // Copy return values back
+    // Load return values from unified slot
     for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+        let val = emitter.builder().ins().stack_load(types::I64, args_ret_slot, (i * 8) as i32);
         emitter.write_var((arg_start + i) as u16, val);
     }
 }

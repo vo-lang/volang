@@ -123,6 +123,7 @@ pub const MAX_RESUME_STACK_DEPTH: usize = 256;
 /// returns `Call`, the dispatcher pushes a ResumePoint and loops to execute
 /// the requested function. This avoids VM frame overhead for the common case
 /// where the call chain doesn't actually block.
+#[derive(Debug)]
 pub struct CallDispatcher {
     /// Stack of resume points for pending callers.
     /// When callee returns Call, we push and loop. When it returns Ok, we pop.

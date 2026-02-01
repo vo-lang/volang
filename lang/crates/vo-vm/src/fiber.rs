@@ -8,6 +8,8 @@ use alloc::vec::Vec;
 use vo_runtime::objects::interface::InterfaceSlot;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
+#[cfg(feature = "std")]
+use vo_runtime::call_dispatcher::CallDispatcher;
 
 use vo_runtime::gc::GcRef;
 
@@ -304,6 +306,8 @@ pub struct Fiber {
     pub panic_generation: u64,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
+    #[cfg(feature = "std")]
+    pub call_dispatcher: CallDispatcher,
 }
 
 impl Fiber {
@@ -323,6 +327,8 @@ impl Fiber {
             panic_generation: 0,
             #[cfg(feature = "std")]
             resume_io_token: None,
+            #[cfg(feature = "std")]
+            call_dispatcher: CallDispatcher::new(),
         }
     }
     
@@ -341,6 +347,7 @@ impl Fiber {
         #[cfg(feature = "std")]
         {
             self.resume_io_token = None;
+            self.call_dispatcher.clear();
         }
     }
     

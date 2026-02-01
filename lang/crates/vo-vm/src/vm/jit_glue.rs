@@ -184,6 +184,7 @@ pub extern "C" fn vm_call_sync(
 
 pub fn build_jit_ctx(
     state: &mut VmState,
+    dispatcher: *mut vo_runtime::call_dispatcher::CallDispatcher,
     jit_func_table: *const *const u8,
     jit_func_count: u32,
     vm_ptr: *mut std::ffi::c_void,
@@ -220,7 +221,7 @@ pub fn build_jit_ctx(
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
-        call_dispatcher: &mut state.call_dispatcher as *mut _,
+        call_dispatcher: dispatcher,
         current_func_id: 0,
         current_bp: 0,
     }
@@ -320,12 +321,17 @@ impl Vm {
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
+        let dispatcher_ptr = &mut fiber.call_dispatcher as *mut vo_runtime::call_dispatcher::CallDispatcher;
         
         #[cfg(feature = "std")]
         let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
         
+        // Get dispatcher (per-fiber) and clear any stale state
+        let dispatcher = unsafe { &mut *dispatcher_ptr };
+        dispatcher.clear();
+        
         let mut ctx = build_jit_ctx(
-            &mut self.state, func_table_ptr, func_table_len,
+            &mut self.state, dispatcher_ptr, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
@@ -334,23 +340,26 @@ impl Vm {
         #[cfg(feature = "std")]
         { ctx.wait_io_token = wait_io_token; }
         
-        // Get dispatcher
-        let dispatcher = unsafe { &mut *ctx.call_dispatcher };
-        
-        // Clear any stale state
-        dispatcher.clear();
-        
         // Dispatcher loop - handle Call results internally
+        // OFFSET DISCIPLINE: current_offset tracks the args base for each nested call.
+        // - jit_bp is fixed (the original frame's base)
+        // - current_args_ptr = args_ptr.add(current_offset)
+        // - When pushing a Call, we save current_offset as bp in ResumePoint
+        // - When resuming after Call completes, we restore current_offset from point.bp
         let mut target_func_id = func_id;
         let mut target_start_pc = start_pc;
+        let mut current_offset: usize = 0;
         
         loop {
+            // Calculate current args pointer with offset
+            let current_args_ptr = unsafe { args_ptr.add(current_offset) };
+            
             // Get JIT function
             let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
             
             let result = if let Some(jit_func) = jit_func {
-                // Execute JIT function
-                jit_func(&mut ctx, args_ptr, args_ptr, target_start_pc)
+                // Execute JIT function with offset-adjusted args_ptr
+                jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc)
             } else {
                 // No JIT version - need to use VM. Return Call request.
                 ctx.call_func_id = target_func_id;
@@ -364,10 +373,11 @@ impl Vm {
                 JitResult::Ok => {
                     // Function completed
                     if dispatcher.has_pending() {
-                        // Resume caller from stack
+                        // Resume caller from stack, restore offset
                         let point = dispatcher.pop().unwrap();
                         target_func_id = point.func_id;
                         target_start_pc = point.resume_pc;
+                        current_offset = point.bp as usize;  // Restore offset
                         continue;
                     } else {
                         // All done
@@ -389,13 +399,15 @@ impl Vm {
                     let callee_jittable = vo_jit::is_func_jittable(callee_func);
                     
                     if callee_jittable {
-                        // Push current resume point and loop
+                        // Push current resume point with CURRENT offset (not call_arg_start)
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,
                             ctx.call_resume_pc,
-                            ctx.call_arg_start as u32,
+                            current_offset as u32,  // Save current offset as bp
                             ctx.call_ret_slots,
                         ));
+                        // Move to callee: offset advances by arg_start
+                        current_offset += ctx.call_arg_start as usize;
                         target_func_id = ctx.call_func_id;
                         target_start_pc = ctx.call_entry_pc as u32;
                         continue;
@@ -405,7 +417,7 @@ impl Vm {
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,
                             ctx.call_resume_pc,
-                            ctx.call_arg_start as u32,
+                            current_offset as u32,  // Save current offset as bp
                             ctx.call_ret_slots,
                         ));
                         
@@ -414,9 +426,10 @@ impl Vm {
                         fiber.frames.last_mut().unwrap().pc = ctx.call_resume_pc as usize;
                         
                         // Push callee frame for VM execution
+                        // Note: arg_start is relative to current_offset, so we add jit_bp + current_offset
                         let call_info = CallRequestInfo {
                             func_id: ctx.call_func_id,
-                            arg_start: ctx.call_arg_start as usize,
+                            arg_start: current_offset + ctx.call_arg_start as usize,
                             entry_pc: ctx.call_entry_pc as usize,
                             resume_pc: ctx.call_resume_pc,
                         };
@@ -432,11 +445,11 @@ impl Vm {
                     let token = ctx.wait_io_token;
                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
                     
-                    // Save resume point
+                    // Save resume point with current offset
                     dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                         target_func_id,
                         ctx.call_resume_pc,
-                        0,
+                        current_offset as u32,  // Save current offset as bp
                         0,
                     ));
                     
@@ -476,13 +489,14 @@ impl Vm {
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
+        let dispatcher_ptr = &mut fiber.call_dispatcher as *mut vo_runtime::call_dispatcher::CallDispatcher;
         
         // Get resume_io_token from fiber for I/O resume (set by poll_io), then clear it
         #[cfg(feature = "std")]
         let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
         
         let mut ctx = build_jit_ctx(
-            &mut self.state, func_table_ptr, func_table_len,
+            &mut self.state, dispatcher_ptr, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
@@ -535,10 +549,19 @@ impl Vm {
         fiber_id: crate::scheduler::FiberId,
         module: &Module,
     ) -> ExecResult {
-        // Check if dispatcher has pending resume points
-        let has_dispatcher_state = self.state.call_dispatcher.has_pending();
+        // IMPORTANT: First check if top frame is a JIT frame with pc > 0
+        // Only then check dispatcher state
+        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+        match fiber.frames.last() {
+            Some(f) if !f.is_jit_frame || f.pc == 0 => {
+                return ExecResult::FrameChanged;
+            }
+            None => return ExecResult::Done,
+            _ => {}
+        }
         
-        if has_dispatcher_state {
+        // Check if dispatcher has pending resume points (per-fiber)
+        if fiber.call_dispatcher.has_pending() {
             // Use dispatcher-based resume
             return self.handle_jit_reentry_with_dispatcher(fiber_id, module);
         }
@@ -615,21 +638,29 @@ impl Vm {
         let vm_ptr = self as *mut _ as *mut std::ffi::c_void;
         let module_ptr = module as *const _;
         
-        let (jit_bp, args_ptr, fiber_ptr, wait_io_token) = {
+        let (jit_bp, args_ptr, fiber_ptr, dispatcher_ptr, wait_io_token) = {
             let fiber = self.scheduler.get_fiber_mut(fiber_id);
             let frame = fiber.frames.last().unwrap();
             let jit_bp = frame.bp;
             let args_ptr = fiber.stack[jit_bp..].as_mut_ptr();
             let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
+            let dispatcher_ptr = &mut fiber.call_dispatcher as *mut vo_runtime::call_dispatcher::CallDispatcher;
             #[cfg(feature = "std")]
             let wait_io_token = fiber.resume_io_token.take().unwrap_or(0);
             #[cfg(not(feature = "std"))]
             let wait_io_token = 0u64;
-            (jit_bp, args_ptr, fiber_ptr, wait_io_token)
+            (jit_bp, args_ptr, fiber_ptr, dispatcher_ptr, wait_io_token)
+        };
+        
+        // Get dispatcher (per-fiber) and pop the resume point
+        let dispatcher = unsafe { &mut *dispatcher_ptr };
+        let resume_point = match dispatcher.pop() {
+            Some(p) => p,
+            None => return ExecResult::FrameChanged,
         };
         
         let mut ctx = build_jit_ctx(
-            &mut self.state, func_table_ptr, func_table_len,
+            &mut self.state, dispatcher_ptr, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
@@ -638,22 +669,20 @@ impl Vm {
         #[cfg(feature = "std")]
         { ctx.wait_io_token = wait_io_token; }
         
-        // Get dispatcher and pop the resume point
-        let dispatcher = unsafe { &mut *ctx.call_dispatcher };
-        let resume_point = match dispatcher.pop() {
-            Some(p) => p,
-            None => return ExecResult::FrameChanged,
-        };
-        
         let mut target_func_id = resume_point.func_id;
         let mut target_start_pc = resume_point.resume_pc;
+        // Restore current_offset from the resume point's bp
+        let mut current_offset = resume_point.bp as usize;
         
-        // Continue dispatcher loop
+        // Continue dispatcher loop with offset discipline
         loop {
+            // Calculate current args pointer with offset
+            let current_args_ptr = unsafe { args_ptr.add(current_offset) };
+            
             let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
             
             let result = if let Some(jit_func) = jit_func {
-                jit_func(&mut ctx, args_ptr, args_ptr, target_start_pc)
+                jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc)
             } else {
                 ctx.call_func_id = target_func_id;
                 ctx.call_entry_pc = target_start_pc as u16;
@@ -668,6 +697,7 @@ impl Vm {
                         let point = dispatcher.pop().unwrap();
                         target_func_id = point.func_id;
                         target_start_pc = point.resume_pc;
+                        current_offset = point.bp as usize;  // Restore offset
                         continue;
                     } else {
                         // All done - pop the JIT frame and return
@@ -697,12 +727,15 @@ impl Vm {
                     let callee_jittable = vo_jit::is_func_jittable(callee_func);
                     
                     if callee_jittable {
+                        // Push current resume point with CURRENT offset
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,
                             ctx.call_resume_pc,
-                            ctx.call_arg_start as u32,
+                            current_offset as u32,  // Save current offset as bp
                             ctx.call_ret_slots,
                         ));
+                        // Move to callee: offset advances by arg_start
+                        current_offset += ctx.call_arg_start as usize;
                         target_func_id = ctx.call_func_id;
                         target_start_pc = ctx.call_entry_pc as u32;
                         continue;
@@ -711,7 +744,7 @@ impl Vm {
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,
                             ctx.call_resume_pc,
-                            ctx.call_arg_start as u32,
+                            current_offset as u32,  // Save current offset as bp
                             ctx.call_ret_slots,
                         ));
                         
@@ -720,7 +753,7 @@ impl Vm {
                         
                         let call_info = CallRequestInfo {
                             func_id: ctx.call_func_id,
-                            arg_start: ctx.call_arg_start as usize,
+                            arg_start: current_offset + ctx.call_arg_start as usize,
                             entry_pc: ctx.call_entry_pc as usize,
                             resume_pc: ctx.call_resume_pc,
                         };
@@ -735,10 +768,11 @@ impl Vm {
                     let token = ctx.wait_io_token;
                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
                     
+                    // Save resume point with current offset
                     dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                         target_func_id,
                         ctx.call_resume_pc,
-                        0,
+                        current_offset as u32,  // Save current offset as bp
                         0,
                     ));
                     
@@ -857,9 +891,18 @@ impl Vm {
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
         let fiber_ptr = fiber as *mut Fiber as *mut std::ffi::c_void;
         let locals_ptr = fiber.stack[bp..].as_mut_ptr();
+        let dispatcher_ptr = &mut fiber.call_dispatcher as *mut vo_runtime::call_dispatcher::CallDispatcher;
+        
+        // Get wait_io_token for resume
+        #[cfg(feature = "std")]
+        let wait_io_token = if start_pc != 0 {
+            fiber.resume_io_token.take().unwrap_or(0)
+        } else {
+            0
+        };
         
         let mut ctx = build_jit_ctx(
-            &mut self.state, func_table_ptr, func_table_len,
+            &mut self.state, dispatcher_ptr, func_table_ptr, func_table_len,
             vm_ptr, fiber_ptr, module_ptr,
             &safepoint_flag, &mut panic_flag,
             &mut panic_msg,
@@ -867,12 +910,7 @@ impl Vm {
         
         // Set wait_io_token for I/O resume (JIT will pass it to jit_call_extern)
         #[cfg(feature = "std")]
-        if start_pc != 0 {
-            let fiber = self.scheduler.get_fiber_mut(fiber_id);
-            if let Some(token) = fiber.resume_io_token.take() {
-                ctx.wait_io_token = token;
-            }
-        }
+        { ctx.wait_io_token = wait_io_token; }
         
         let result = loop_func(&mut ctx, locals_ptr, start_pc);
         

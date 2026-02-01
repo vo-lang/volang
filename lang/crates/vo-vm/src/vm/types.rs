@@ -132,10 +132,6 @@ pub struct VmState {
     pub io: vo_runtime::io::IoRuntime,
     /// Per-VM sentinel error cache (reset on each module load).
     pub sentinel_errors: SentinelErrorCache,
-    /// CallDispatcher for unified JIT/VM call handling.
-    /// Manages resume_stack for Call/WaitIo in JIT-to-JIT chains.
-    #[cfg(feature = "std")]
-    pub call_dispatcher: vo_runtime::call_dispatcher::CallDispatcher,
     /// Next island ID to assign
     pub next_island_id: u32,
     /// Active island threads (index = island_id - 1, since main island is 0)
@@ -164,8 +160,6 @@ impl VmState {
             io: vo_runtime::io::IoRuntime::new()
                 .unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e)),
             sentinel_errors: SentinelErrorCache::new(),
-            #[cfg(feature = "std")]
-            call_dispatcher: vo_runtime::call_dispatcher::CallDispatcher::new(),
             next_island_id: 1, // 0 is main island
             #[cfg(feature = "std")]
             island_threads: Vec::new(),
