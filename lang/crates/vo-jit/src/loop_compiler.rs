@@ -8,15 +8,15 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{JitContext, JitResult};
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
 use crate::JitError;
 
-pub const LOOP_RESULT_PANIC: u32 = u32::MAX;
-
-pub type LoopFunc = extern "C" fn(*mut crate::JitContext, *mut u64) -> u32;
+/// Loop function signature. Returns JitResult like function JIT.
+/// On Ok, loop_exit_pc in JitContext contains the PC to resume at.
+pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64, u32) -> JitResult;
 
 pub struct CompiledLoop {
     pub code_ptr: *const u8,
@@ -40,6 +40,8 @@ pub struct LoopCompiler<'a> {
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    /// Resume blocks for Call/WaitIo requests. Key is resume_pc.
+    resume_blocks: HashMap<usize, Block>,
 }
 
 impl<'a> LoopCompiler<'a> {
@@ -70,12 +72,14 @@ impl<'a> LoopCompiler<'a> {
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
+            resume_blocks: HashMap::new(),
         }
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
         self.declare_variables();
         self.scan_jump_targets();
+        self.scan_call_requests();
         
         // Exactly like func_compiler: entry_block -> prologue -> sequential compile
         self.builder.switch_to_block(self.entry_block);
@@ -87,7 +91,14 @@ impl<'a> LoopCompiler<'a> {
         for pc in (self.loop_info.begin_pc + 1)..(self.loop_info.end_pc + 2) {
             self.current_pc = pc;
             
-            if let Some(&block) = self.blocks.get(&pc) {
+            // Check if this PC has a resume block (from Call/WaitIo request)
+            if let Some(&resume_block) = self.resume_blocks.get(&pc) {
+                if !block_terminated {
+                    self.builder.ins().jump(resume_block, &[]);
+                }
+                self.builder.switch_to_block(resume_block);
+                block_terminated = false;
+            } else if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(block, &[]);
                 }
@@ -137,6 +148,10 @@ impl<'a> LoopCompiler<'a> {
 
     fn scan_jump_targets(&mut self) {
         let loop_end = self.loop_info.end_pc + 2;
+        
+        // Always create block for loop header (back-edge target)
+        self.ensure_block(self.loop_info.begin_pc + 1);
+        
         for pc in (self.loop_info.begin_pc + 1)..loop_end {
             let inst = &self.func_def.code[pc];
             match inst.opcode() {
@@ -169,12 +184,115 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
+    /// Scan for Call instructions and blocking extern calls that need resume blocks.
+    fn scan_call_requests(&mut self) {
+        let loop_end = self.loop_info.end_pc + 2;
+        for pc in (self.loop_info.begin_pc + 1)..loop_end {
+            let inst = &self.func_def.code[pc];
+            let needs_resume = match inst.opcode() {
+                Opcode::Call => true, // All calls in loop need resume support
+                Opcode::CallExtern => {
+                    // waitio_ extern calls may return WaitIo
+                    let extern_id = inst.b as usize;
+                    self.vo_module.externs[extern_id].name.contains("_waitio_")
+                }
+                Opcode::CallClosure | Opcode::CallIface => true,
+                _ => false,
+            };
+            
+            if needs_resume {
+                // For waitio extern: resume at same PC to re-execute
+                // For Call: resume at pc+1 after callee returns
+                let is_waitio_extern = inst.opcode() == Opcode::CallExtern 
+                    && self.vo_module.externs[inst.b as usize].name.contains("_waitio_");
+                let resume_pc = if is_waitio_extern { pc } else { pc + 1 };
+                
+                // Reuse existing jump target block if present, otherwise create new
+                let resume_block = if let Some(&existing) = self.blocks.get(&resume_pc) {
+                    existing
+                } else {
+                    self.builder.create_block()
+                };
+                self.resume_blocks.insert(resume_pc, resume_block);
+            }
+        }
+    }
+
+    /// Emit code to restore all SSA variables from locals_ptr (fiber.stack).
+    fn emit_variable_restore(&mut self) {
+        for i in 0..self.vars.len() {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
+            self.builder.def_var(self.vars[i], val);
+        }
+    }
+
     fn emit_prologue(&mut self) {
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         self.locals_ptr = params[1];
+        let start_pc = params[2];
         
-        // Load all variables from memory - like func_compiler loads from args
+        // Generate dispatch logic if we have resume blocks
+        if !self.resume_blocks.is_empty() {
+            let normal_entry_block = self.builder.create_block();
+            
+            // Check if start_pc == 0 (normal entry)
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            let is_normal = self.builder.ins().icmp(IntCC::Equal, start_pc, zero);
+            
+            // Create restore wrapper blocks
+            let mut resume_pcs: Vec<usize> = self.resume_blocks.keys().copied().collect();
+            resume_pcs.sort();
+            
+            let mut restore_wrappers: HashMap<usize, Block> = HashMap::new();
+            for &resume_pc in &resume_pcs {
+                let wrapper = self.builder.create_block();
+                restore_wrappers.insert(resume_pc, wrapper);
+            }
+            
+            if resume_pcs.len() == 1 {
+                let resume_pc = resume_pcs[0];
+                let restore_wrapper = restore_wrappers[&resume_pc];
+                self.builder.ins().brif(is_normal, normal_entry_block, &[], restore_wrapper, &[]);
+            } else {
+                let first_check_block = self.builder.create_block();
+                self.builder.ins().brif(is_normal, normal_entry_block, &[], first_check_block, &[]);
+                
+                let mut current_block = first_check_block;
+                for (i, &resume_pc) in resume_pcs.iter().enumerate() {
+                    self.builder.switch_to_block(current_block);
+                    
+                    let restore_wrapper = restore_wrappers[&resume_pc];
+                    let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+                    let is_this_pc = self.builder.ins().icmp(IntCC::Equal, start_pc, pc_val);
+                    
+                    if i == resume_pcs.len() - 1 {
+                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], normal_entry_block, &[]);
+                    } else {
+                        let next_check = self.builder.create_block();
+                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], next_check, &[]);
+                        current_block = next_check;
+                    }
+                }
+            }
+            
+            // Generate restore wrapper blocks
+            for &resume_pc in &resume_pcs {
+                let wrapper = restore_wrappers[&resume_pc];
+                let resume_block = self.resume_blocks[&resume_pc];
+                
+                self.builder.switch_to_block(wrapper);
+                self.emit_variable_restore();
+                self.builder.ins().jump(resume_block, &[]);
+                self.builder.seal_block(wrapper);
+            }
+            
+            // Switch to normal entry block
+            self.builder.switch_to_block(normal_entry_block);
+        }
+        
+        // Normal entry: load all variables from memory
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
@@ -204,14 +322,14 @@ impl<'a> LoopCompiler<'a> {
             Opcode::JumpIfNot => { self.jump_if_not(inst); Ok(false) }
             Opcode::Return => { self.ret(inst); Ok(true) }
             Opcode::Panic => { self.panic(inst); Ok(true) }
-            Opcode::Call => { self.call(inst); Ok(false) }
+            Opcode::Call => { Ok(self.call(inst)) }
             Opcode::CallExtern => { self.call_extern(inst); Ok(false) }
             Opcode::CallClosure => { self.call_closure(inst); Ok(false) }
             Opcode::CallIface => { self.call_iface(inst); Ok(false) }
             _ => {
                 // Unsupported - exit to VM (variables already in memory)
-                let ret_pc = self.builder.ins().iconst(types::I32, self.current_pc as i64);
-                self.builder.ins().return_(&[ret_pc]);
+                self.store_vars_to_memory();
+                self.emit_loop_exit(self.current_pc as u32);
                 Ok(true)
             }
         }
@@ -230,8 +348,7 @@ impl<'a> LoopCompiler<'a> {
         } else if raw_target <= self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
             self.store_vars_to_memory();
-            let ret_pc = self.builder.ins().iconst(types::I32, raw_target as i64);
-            self.builder.ins().return_(&[ret_pc]);
+            self.emit_loop_exit(raw_target as u32);
         } else {
             // Jump within loop body
             let block = self.blocks[&raw_target];
@@ -256,8 +373,7 @@ impl<'a> LoopCompiler<'a> {
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
-            let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
-            self.builder.ins().return_(&[ret_pc]);
+            self.emit_loop_exit(target as u32);
         } else {
             let target_block = self.blocks[&target];
             self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
@@ -284,8 +400,7 @@ impl<'a> LoopCompiler<'a> {
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
-            let ret_pc = self.builder.ins().iconst(types::I32, target as i64);
-            self.builder.ins().return_(&[ret_pc]);
+            self.emit_loop_exit(target as u32);
         } else {
             let target_block = self.blocks[&target];
             self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
@@ -298,8 +413,17 @@ impl<'a> LoopCompiler<'a> {
     fn ret(&mut self, _inst: &Instruction) {
         // Return inside loop - store vars and return to VM
         self.store_vars_to_memory();
-        let ret_pc = self.builder.ins().iconst(types::I32, self.current_pc as i64);
-        self.builder.ins().return_(&[ret_pc]);
+        self.emit_loop_exit(self.current_pc as u32);
+    }
+    
+    /// Emit code to exit loop normally with given exit_pc.
+    /// Stores exit_pc to ctx.loop_exit_pc and returns JitResult::Ok.
+    fn emit_loop_exit(&mut self, exit_pc: u32) {
+        let ctx = self.ctx_ptr;
+        let exit_pc_val = self.builder.ins().iconst(types::I32, exit_pc as i64);
+        self.builder.ins().store(MemFlags::trusted(), exit_pc_val, ctx, JitContext::OFFSET_LOOP_EXIT_PC);
+        let ok_val = self.builder.ins().iconst(types::I32, JitResult::Ok as i64);
+        self.builder.ins().return_(&[ok_val]);
     }
 
     fn panic(&mut self, inst: &Instruction) {
@@ -311,11 +435,13 @@ impl<'a> LoopCompiler<'a> {
             let msg_slot1 = self.read_var(inst.a + 1);
             self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
         }
-        let panic_val = self.builder.ins().iconst(types::I32, LOOP_RESULT_PANIC as i64);
+        let panic_val = self.builder.ins().iconst(types::I32, JitResult::Panic as i64);
         self.builder.ins().return_(&[panic_val]);
     }
 
-    fn call(&mut self, inst: &Instruction) {
+    /// Returns true if block is terminated.
+    /// Try JIT-to-JIT call if callee is compiled, otherwise fall back to VM.
+    fn call(&mut self, inst: &Instruction) -> bool {
         self.do_emit_safepoint();
         
         let func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
@@ -323,85 +449,37 @@ impl<'a> LoopCompiler<'a> {
         let arg_slots = (inst.c >> 8) as usize;
         let call_ret_slots = (inst.c & 0xFF) as usize;
         
-        // Get target function ret_slots for buffer sizing
+        // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
-        let func_ret_slots = target_func.ret_slots as usize;
-        
-        // Check if callee is jittable
         let callee_jittable = crate::is_func_jittable(target_func);
         
-        if callee_jittable {
-            self.call_with_jit_check(func_id, arg_start, arg_slots, call_ret_slots, func_ret_slots);
+        if callee_jittable && self.helpers.call_vm.is_some() {
+            // Try JIT-to-JIT call with fallback to VM
+            self.call_with_jit_check(func_id, arg_start, arg_slots, call_ret_slots, target_func);
+            false // Block not terminated - we have a merge block
         } else {
-            self.call_via_vm(func_id, arg_start, arg_slots, call_ret_slots, func_ret_slots);
+            // Not jittable or no call_vm helper - use Call request mechanism
+            self.call_via_vm(func_id, arg_start, call_ret_slots);
+            true // Block terminated with return
         }
     }
     
-    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, arg_slots: usize, call_ret_slots: usize, func_ret_slots: usize) {
-        let call_vm_func = match self.helpers.call_vm {
-            Some(f) => f,
-            None => return,
-        };
-        
-        let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-        let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (func_ret_slots.max(1) * 8) as u32,
-            8,
-        ));
-        
-        for i in 0..arg_slots {
-            let val = self.read_var((arg_start + i) as u16);
-            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
-        }
-        
-        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
-        let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-        let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
-        let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-        let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
-        
+    /// JIT-to-JIT call with runtime check for compiled callee.
+    /// If jit_func_table[func_id] != null: direct JIT call
+    /// If jit_func_table[func_id] == null: use Call request (cheaper than vo_call_vm)
+    fn call_with_jit_check(
+        &mut self,
+        func_id: u32,
+        arg_start: usize,
+        arg_slots: usize,
+        call_ret_slots: usize,
+        target_func: &FunctionDef,
+    ) {
         let ctx = self.ctx_ptr;
-        let call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr, arg_count, ret_ptr, ret_count]);
-        let result = self.builder.inst_results(call)[0];
-        
-        self.check_call_result(result);
-        
-        for i in 0..call_ret_slots {
-            let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-            self.write_var((arg_start + i) as u16, val);
-        }
-    }
-    
-    fn call_with_jit_check(&mut self, func_id: u32, arg_start: usize, arg_slots: usize, call_ret_slots: usize, func_ret_slots: usize) {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        
-        let ctx = self.ctx_ptr;
-        
-        // Create stack slots for args and return values
-        let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-        let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (func_ret_slots.max(1) * 8) as u32,
-            8,
-        ));
-        
-        // Store arguments
-        for i in 0..arg_slots {
-            let val = self.read_var((arg_start + i) as u16);
-            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
-        }
+        let func_ret_slots = target_func.ret_slots as usize;
         
         // Load jit_func_table pointer from ctx
-        let jit_func_table = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
+        let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
         
         // Calculate address: jit_func_table + func_id * 8
         let func_id_i64 = self.builder.ins().iconst(types::I64, func_id as i64);
@@ -409,27 +487,46 @@ impl<'a> LoopCompiler<'a> {
         let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
         
         // Load function pointer
-        let jit_func_ptr = self.builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), func_ptr_addr, 0);
+        let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
         
         // Check if null
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let is_null = self.builder.ins().icmp(IntCC::Equal, jit_func_ptr, zero);
+        let zero_i64 = self.builder.ins().iconst(types::I64, 0);
+        let is_null = self.builder.ins().icmp(IntCC::Equal, jit_func_ptr, zero_i64);
         
-        // Create blocks
+        // Create blocks for the two paths
         let jit_call_block = self.builder.create_block();
         let vm_call_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
         
+        // Branch based on whether function is compiled
         self.builder.ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
         
         // === JIT-to-JIT call path ===
         self.builder.switch_to_block(jit_call_block);
         self.builder.seal_block(jit_call_block);
         
+        // Create stack slots for args and return values (only needed for JIT path)
+        let arg_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (arg_slots.max(1) * 8) as u32,
+            8,
+        ));
+        let ret_slot = self.builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (func_ret_slots.max(1) * 8) as u32,
+            8,
+        ));
+        
+        // Copy arguments from loop variables to stack slot
+        for i in 0..arg_slots {
+            let val = self.read_var((arg_start + i) as u16);
+            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
+        }
+        
         let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         
-        // Create signature for JIT function
+        // Create signature for JIT function: (ctx: ptr, args: ptr, ret: ptr) -> i32
         let sig = self.builder.func.import_signature({
             let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
             sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -439,74 +536,95 @@ impl<'a> LoopCompiler<'a> {
             sig
         });
         
+        // Indirect call through function pointer
         let jit_call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
         let jit_result = self.builder.inst_results(jit_call)[0];
         
-        // Check for panic (create one constant in this block)
-        let jit_one = self.builder.ins().iconst(types::I32, 1);
-        let is_panic = self.builder.ins().icmp(IntCC::Equal, jit_result, jit_one);
+        // Check result for panic (result == 1)
+        let one = self.builder.ins().iconst(types::I32, 1);
+        let is_panic = self.builder.ins().icmp(IntCC::Equal, jit_result, one);
         
         let jit_panic_block = self.builder.create_block();
         let jit_ok_block = self.builder.create_block();
         
         self.builder.ins().brif(is_panic, jit_panic_block, &[], jit_ok_block, &[]);
         
-        // JIT panic - return panic code
+        // JIT panic path - propagate panic
         self.builder.switch_to_block(jit_panic_block);
         self.builder.seal_block(jit_panic_block);
-        let panic_val = self.builder.ins().iconst(types::I32, crate::LOOP_RESULT_PANIC as i64);
+        let panic_val = self.builder.ins().iconst(types::I32, JitResult::Panic as i64);
         self.builder.ins().return_(&[panic_val]);
         
-        // JIT OK - jump to merge
+        // JIT OK path - load return values and jump to merge
         self.builder.switch_to_block(jit_ok_block);
         self.builder.seal_block(jit_ok_block);
-        self.builder.ins().jump(merge_block, &[]);
         
-        // === VM call path ===
-        self.builder.switch_to_block(vm_call_block);
-        self.builder.seal_block(vm_call_block);
-        
-        if let Some(call_vm_func) = self.helpers.call_vm {
-            let args_ptr_vm = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
-            let ret_ptr_vm = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-            let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
-            let arg_count = self.builder.ins().iconst(types::I32, arg_slots as i64);
-            let ret_count = self.builder.ins().iconst(types::I32, func_ret_slots as i64);
-            
-            let vm_call = self.builder.ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
-            let vm_result = self.builder.inst_results(vm_call)[0];
-            
-            // Create one constant in this block (can't use value from jit_call_block)
-            let vm_one = self.builder.ins().iconst(types::I32, 1);
-            let vm_is_panic = self.builder.ins().icmp(IntCC::Equal, vm_result, vm_one);
-            
-            let vm_panic_block = self.builder.create_block();
-            let vm_ok_block = self.builder.create_block();
-            
-            self.builder.ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
-            
-            self.builder.switch_to_block(vm_panic_block);
-            self.builder.seal_block(vm_panic_block);
-            let vm_panic_val = self.builder.ins().iconst(types::I32, crate::LOOP_RESULT_PANIC as i64);
-            self.builder.ins().return_(&[vm_panic_val]);
-            
-            self.builder.switch_to_block(vm_ok_block);
-            self.builder.seal_block(vm_ok_block);
-            self.builder.ins().jump(merge_block, &[]);
-        } else {
-            self.builder.ins().jump(merge_block, &[]);
-        }
-        
-        // === Merge block ===
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        
+        // Load return values back to loop variables
         for i in 0..call_ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
             self.write_var((arg_start + i) as u16, val);
         }
+        self.builder.ins().jump(merge_block, &[]);
+        
+        // === VM call path (use Call request - cheaper than vo_call_vm) ===
+        self.builder.switch_to_block(vm_call_block);
+        self.builder.seal_block(vm_call_block);
+        
+        // Spill variables and use Call request mechanism
+        self.emit_variable_spill();
+        
+        let set_call_request_func = self.helpers.set_call_request.unwrap();
+        let resume_pc = self.current_pc + 1;
+        let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
+        let arg_start_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
+        
+        self.builder.ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val]);
+        
+        let call_result = self.builder.ins().iconst(types::I32, JitResult::Call as i64);
+        self.builder.ins().return_(&[call_result]);
+        
+        // === Merge block (only reached from JIT path) ===
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
     }
-
+    
+    fn call_via_vm(&mut self, func_id: u32, arg_start: usize, call_ret_slots: usize) {
+        // Use Call request mechanism - same as func_compiler.
+        let set_call_request_func = match self.helpers.set_call_request {
+            Some(f) => f,
+            None => return,
+        };
+        
+        // Spill all loop variables to fiber.stack before returning Call
+        self.emit_variable_spill();
+        
+        // Set call request: vo_set_call_request(ctx, func_id, arg_start, resume_pc, ret_slots)
+        let ctx = self.ctx_ptr;
+        let resume_pc = self.current_pc + 1;
+        let func_id_val = self.builder.ins().iconst(types::I32, func_id as i64);
+        let arg_start_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
+        
+        self.builder.ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val]);
+        
+        // Return JitResult::Call to signal VM to handle the call
+        let call_result = self.builder.ins().iconst(types::I32, JitResult::Call as i64);
+        self.builder.ins().return_(&[call_result]);
+    }
+    
+    /// Emit code to spill all SSA variables to fiber.stack.
+    /// Called before returning Call so VM can see/restore state.
+    fn emit_variable_spill(&mut self) {
+        let locals_ptr = self.locals_ptr;
+        for i in 0..self.vars.len() {
+            let val = self.builder.use_var(self.vars[i]);
+            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, (i * 8) as i32);
+        }
+    }
+    
     fn call_extern(&mut self, inst: &Instruction) {
         let call_extern_func = match self.helpers.call_extern {
             Some(f) => f,
@@ -545,6 +663,13 @@ impl<'a> LoopCompiler<'a> {
         let ret_slots_val = self.builder.ins().iconst(types::I32, extern_ret_slots as i64);
         
         let ctx = self.ctx_ptr;
+        
+        // Set resume_pc before calling extern, in case it returns WaitIo
+        // Use current_pc (not +1) so extern is re-executed on resume to get result
+        let resume_pc = self.current_pc;
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+        
         let call = self.builder.ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
         let result = self.builder.inst_results(call)[0];
         
@@ -591,6 +716,13 @@ impl<'a> LoopCompiler<'a> {
         let ret_count = self.builder.ins().iconst(types::I32, ret_slots as i64);
         
         let ctx = self.ctx_ptr;
+        
+        // Set resume_pc before calling, in case it returns WaitIo
+        // Use current_pc (not +1) so call is re-executed on resume
+        let resume_pc = self.current_pc;
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+        
         let call = self.builder.ins().call(call_closure_func, &[ctx, closure_ref, args_ptr, arg_count, ret_ptr, ret_count]);
         let result = self.builder.inst_results(call)[0];
         
@@ -644,6 +776,13 @@ impl<'a> LoopCompiler<'a> {
         let func_id = self.builder.ins().iconst(types::I32, 0);
         
         let ctx = self.ctx_ptr;
+        
+        // Set resume_pc before calling, in case it returns WaitIo
+        // Use current_pc (not +1) so call is re-executed on resume
+        let resume_pc = self.current_pc;
+        let resume_pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        self.builder.ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+        
         let call = self.builder.ins().call(call_iface_func, &[
             ctx, slot0, slot1, method_idx_val, args_ptr, arg_count, ret_ptr, ret_count, func_id
         ]);
@@ -657,18 +796,24 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
+    /// Check call result and handle non-Ok cases.
+    /// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3
+    /// For non-Ok, spill variables and return JitResult directly.
     fn check_call_result(&mut self, result: Value) {
-        let panic_block = self.builder.create_block();
+        use cranelift_codegen::ir::condcodes::IntCC;
+        
         let ok_block = self.builder.create_block();
+        let non_ok_block = self.builder.create_block();
         
         let zero = self.builder.ins().iconst(types::I32, 0);
-        let is_panic = self.builder.ins().icmp(IntCC::NotEqual, result, zero);
-        self.builder.ins().brif(is_panic, panic_block, &[], ok_block, &[]);
+        let is_ok = self.builder.ins().icmp(IntCC::Equal, result, zero);
+        self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
         
-        self.builder.switch_to_block(panic_block);
-        self.builder.seal_block(panic_block);
-        let panic_val = self.builder.ins().iconst(types::I32, LOOP_RESULT_PANIC as i64);
-        self.builder.ins().return_(&[panic_val]);
+        // Non-Ok path: spill and return JitResult as-is
+        self.builder.switch_to_block(non_ok_block);
+        self.builder.seal_block(non_ok_block);
+        self.emit_variable_spill();
+        self.builder.ins().return_(&[result]);
         
         self.builder.switch_to_block(ok_block);
         self.builder.seal_block(ok_block);
@@ -722,7 +867,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn helpers(&self) -> &HelperFuncs { &self.helpers }
     fn set_reg_const(&mut self, reg: u16, val: i64) { self.reg_consts.insert(reg, val); }
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
-    fn panic_return_value(&self) -> i32 { LOOP_RESULT_PANIC as i32 }
+    fn panic_return_value(&self) -> i32 { JitResult::Panic as i32 }
     fn var_addr(&mut self, slot: u16) -> Value {
         let offset = (slot as i64) * 8;
         self.builder.ins().iadd_imm(self.locals_ptr, offset)

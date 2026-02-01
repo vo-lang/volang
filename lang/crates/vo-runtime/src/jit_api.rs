@@ -126,10 +126,17 @@ pub struct JitContext {
     /// Call request: resume PC where JIT should continue after VM completes
     pub call_resume_pc: u32,
     
+    /// Call request: number of return slots caller expects
+    pub call_ret_slots: u16,
+    
     /// I/O wait token (for WaitIo result).
     /// Set by jit_call_extern when extern returns WaitIo.
     #[cfg(feature = "std")]
     pub wait_io_token: u64,
+    
+    /// Loop OSR exit PC. Set by loop function on normal exit.
+    /// When loop returns JitResult::Ok, this contains the PC to resume at.
+    pub loop_exit_pc: u32,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -143,6 +150,7 @@ impl JitContext {
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
+    pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
 }
 
 // =============================================================================
@@ -293,12 +301,13 @@ pub extern "C" fn vo_call_vm(
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
 #[no_mangle]
-pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32) {
+pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_start: u32, resume_pc: u32, ret_slots: u32) {
     unsafe {
         (*ctx).call_func_id = func_id;
         (*ctx).call_arg_start = arg_start as u16;
         (*ctx).call_entry_pc = 0; // Callee always starts at PC 0
         (*ctx).call_resume_pc = resume_pc;
+        (*ctx).call_ret_slots = ret_slots as u16;
     }
 }
 

@@ -342,10 +342,11 @@ impl Vm {
                         #[cfg(feature = "std")]
                         crate::fiber::BlockReason::Io(token) => {
                             // For VM frames: retry the same instruction after I/O becomes ready.
-                            // For JIT frames: pc is already set to resume_pc, don't modify.
+                            // For JIT frames or loop OSR WaitIo: pc is already set to resume_pc, don't modify.
                             let fiber = self.scheduler.current_fiber_mut().unwrap();
                             let frame = fiber.current_frame_mut().unwrap();
-                            if !frame.is_jit_frame {
+                            // If wait_io_token is already set, PC was set by loop OSR - don't modify
+                            if !frame.is_jit_frame && frame.wait_io_token == 0 {
                                 frame.pc -= 1;
                             }
                             self.scheduler.block_for_io(token);
@@ -496,6 +497,24 @@ impl Vm {
                 // JIT frame needs resume - delegate to handle_jit_reentry
                 return self.handle_jit_reentry(fiber_id, module);
             }
+            // Check if this is a loop OSR resume (after Call/WaitIo in loop)
+            if frame.loop_osr_begin_pc != 0 {
+                if let Some(new_pc) = self.handle_loop_osr_resume(fiber_id) {
+                    use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                    if new_pc == OSR_RESULT_FRAME_CHANGED {
+                        // Loop pushed a new frame for VM call - continue with VM
+                    } else if new_pc == OSR_RESULT_WAITIO {
+                        // Loop is waiting for I/O again
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        let token = fiber.current_frame().unwrap().wait_io_token;
+                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                    } else {
+                        // Loop exited normally - update frame.pc and continue
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        fiber.current_frame_mut().unwrap().pc = new_pc;
+                    }
+                }
+            }
         }
         
         // Macro to refetch frame after Call/Return - only called when frame actually changes
@@ -527,7 +546,18 @@ impl Vm {
                         if hint_kind == HINT_LOOP_BEGIN {
                             let loop_pc = frame.pc - 1;
                             if let Some(new_pc) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
-                                frame.pc = new_pc;
+                                use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                if new_pc == OSR_RESULT_FRAME_CHANGED {
+                                    // Loop pushed a new frame for VM call - refetch everything
+                                    refetch!();
+                                } else if new_pc == OSR_RESULT_WAITIO {
+                                    // Loop is waiting for I/O - return Block
+                                    return ExecResult::Block(crate::fiber::BlockReason::Io(
+                                        self.scheduler.current_fiber().unwrap().current_frame().unwrap().wait_io_token
+                                    ));
+                                } else {
+                                    frame.pc = new_pc;
+                                }
                             }
                         }
                     }
@@ -970,6 +1000,33 @@ impl Vm {
                     // Check if we need to re-enter JIT after callee returned
                     #[cfg(feature = "jit")]
                     {
+                        // First check loop OSR resume (caller was in a loop that made a Call)
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        if let Some(frame) = fiber.current_frame() {
+                            if frame.loop_osr_begin_pc != 0 {
+                                if let Some(new_pc) = self.handle_loop_osr_resume(fiber_id) {
+                                    use crate::vm::jit_glue::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    stack = fiber.stack_ptr();
+                                    if new_pc == OSR_RESULT_FRAME_CHANGED {
+                                        // Loop pushed another Call frame - continue VM
+                                        refetch!();
+                                        continue;
+                                    } else if new_pc == OSR_RESULT_WAITIO {
+                                        // Loop waiting for I/O
+                                        let token = fiber.current_frame().unwrap().wait_io_token;
+                                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                                    } else {
+                                        // Loop exited - update pc and continue
+                                        fiber.current_frame_mut().unwrap().pc = new_pc;
+                                        refetch!();
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Then check JIT frame reentry
                         let reentry_result = self.handle_jit_reentry(fiber_id, module);
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         stack = fiber.stack_ptr();

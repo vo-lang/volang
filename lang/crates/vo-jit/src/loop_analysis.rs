@@ -38,6 +38,7 @@ pub struct LoopInfo {
 
 impl LoopInfo {
     /// Check if this loop can be compiled as a loop function.
+    /// Loops with defer are not jittable because defer requires VM unwinding support.
     pub fn is_jittable(&self) -> bool {
         !self.has_defer
     }

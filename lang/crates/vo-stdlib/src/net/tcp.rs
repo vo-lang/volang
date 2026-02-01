@@ -189,7 +189,13 @@ pub fn net_tcp_conn_write(call: &mut ExternCallContext) -> ExternResult {
 pub fn net_tcp_conn_close(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     
-    if TCP_CONN_HANDLES.lock().unwrap().remove(&handle).is_some() {
+    let removed = TCP_CONN_HANDLES.lock().unwrap().remove(&handle);
+    if let Some(conn) = removed {
+        // Cancel any pending I/O operations on this fd before closing.
+        // This prevents fd reuse race conditions where a new connection gets
+        // the same fd number while old I/O ops are still pending.
+        let fd = conn.as_raw_fd() as u64;
+        call.io_mut().cancel(fd);
         write_nil_error(call, slots::RET_0);
     } else {
         write_error_to(call, slots::RET_0, "use of closed network connection");

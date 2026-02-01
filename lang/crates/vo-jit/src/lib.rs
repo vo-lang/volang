@@ -8,7 +8,7 @@ mod translator;
 
 pub use func_compiler::FunctionCompiler;
 pub use loop_analysis::LoopInfo;
-pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc, LOOP_RESULT_PANIC};
+pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
 pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
 
 use std::collections::HashMap;
@@ -664,6 +664,7 @@ impl JitCompiler {
             sig.params.push(AbiParam::new(types::I32)); // func_id
             sig.params.push(AbiParam::new(types::I32)); // arg_start
             sig.params.push(AbiParam::new(types::I32)); // resume_pc
+            sig.params.push(AbiParam::new(types::I32)); // ret_slots
             sig
         })?;
         
@@ -799,8 +800,9 @@ impl JitCompiler {
 
         let ptr_type = self.module.target_config().pointer_type();
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type));
-        sig.params.push(AbiParam::new(ptr_type));
+        sig.params.push(AbiParam::new(ptr_type));   // ctx
+        sig.params.push(AbiParam::new(ptr_type));   // locals_ptr
+        sig.params.push(AbiParam::new(types::I32)); // start_pc for resume
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);

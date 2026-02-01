@@ -24,17 +24,20 @@ pub struct CallFrame {
     pub is_jit_frame: bool,
     /// I/O token for resume after WaitIo (JIT only). 0 means no pending I/O.
     pub wait_io_token: u64,
+    /// Loop OSR begin PC. Non-zero means this frame needs loop OSR resume.
+    /// When resuming, call loop_func instead of executing bytecode.
+    pub loop_osr_begin_pc: usize,
 }
 
 impl CallFrame {
     #[inline]
     pub fn new(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
-        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: false, wait_io_token: 0 }
+        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: false, wait_io_token: 0, loop_osr_begin_pc: 0 }
     }
     
     #[inline]
     pub fn new_jit(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
-        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: true, wait_io_token: 0 }
+        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: true, wait_io_token: 0, loop_osr_begin_pc: 0 }
     }
 }
 

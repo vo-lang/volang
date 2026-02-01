@@ -90,7 +90,8 @@ impl UnixDriver {
         // Check for concurrent operation on same direction
         if let Some(state) = self.fd_states.get(&fd) {
             if is_read && state.read.is_some() {
-                panic!("concurrent read operation on fd {}", fd);
+                let existing = state.read.as_ref().unwrap();
+                panic!("concurrent read on fd {}: existing token={}, new token={}", fd, existing.token, op.token);
             }
             if !is_read && state.write.is_some() {
                 panic!("concurrent write operation on fd {}", fd);
