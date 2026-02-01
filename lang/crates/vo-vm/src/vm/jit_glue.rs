@@ -357,17 +357,17 @@ impl Vm {
             // Get JIT function
             let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
             
-            let result = if let Some(jit_func) = jit_func {
-                // Execute JIT function with offset-adjusted args_ptr
-                jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc)
-            } else {
-                // No JIT version - need to use VM. Return Call request.
-                ctx.call_func_id = target_func_id;
-                ctx.call_entry_pc = target_start_pc as u16;
-                ctx.call_resume_pc = 0;
-                ctx.call_arg_start = 0;
-                JitResult::Call
+            let jit_func = match jit_func {
+                Some(f) => f,
+                None => {
+                    // No JIT version - this shouldn't happen for initial call
+                    // (caller should have checked), but can happen for nested calls
+                    // Return FrameChanged to let VM handle with current frame
+                    return ExecResult::FrameChanged;
+                }
             };
+            
+            let result = jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc);
             
             match result {
                 JitResult::Ok => {
@@ -394,11 +394,11 @@ impl Vm {
                 
                 JitResult::Call => {
                     // JIT wants to call another function
-                    // Check if callee is jittable
-                    let callee_func = &module.functions[ctx.call_func_id as usize];
-                    let callee_jittable = vo_jit::is_func_jittable(callee_func);
+                    // Check if callee is ALREADY COMPILED (not just jittable)
+                    let callee_jit_func = self.jit_mgr.as_ref()
+                        .and_then(|mgr| mgr.get_entry(ctx.call_func_id));
                     
-                    if callee_jittable {
+                    if callee_jit_func.is_some() {
                         // Push current resume point with CURRENT offset (not call_arg_start)
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,
@@ -681,15 +681,15 @@ impl Vm {
             
             let jit_func = self.jit_mgr.as_ref().and_then(|mgr| mgr.get_entry(target_func_id));
             
-            let result = if let Some(jit_func) = jit_func {
-                jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc)
-            } else {
-                ctx.call_func_id = target_func_id;
-                ctx.call_entry_pc = target_start_pc as u16;
-                ctx.call_resume_pc = 0;
-                ctx.call_arg_start = 0;
-                JitResult::Call
+            let jit_func = match jit_func {
+                Some(f) => f,
+                None => {
+                    // No JIT version - shouldn't happen as we're resuming a JIT caller
+                    return ExecResult::FrameChanged;
+                }
             };
+            
+            let result = jit_func(&mut ctx, current_args_ptr, current_args_ptr, target_start_pc);
             
             match result {
                 JitResult::Ok => {
@@ -723,10 +723,11 @@ impl Vm {
                 }
                 
                 JitResult::Call => {
-                    let callee_func = &module.functions[ctx.call_func_id as usize];
-                    let callee_jittable = vo_jit::is_func_jittable(callee_func);
+                    // Check if callee is ALREADY COMPILED (not just jittable)
+                    let callee_jit_func = self.jit_mgr.as_ref()
+                        .and_then(|mgr| mgr.get_entry(ctx.call_func_id));
                     
-                    if callee_jittable {
+                    if callee_jit_func.is_some() {
                         // Push current resume point with CURRENT offset
                         dispatcher.push(vo_runtime::call_dispatcher::ResumePoint::new(
                             target_func_id,

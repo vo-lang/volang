@@ -1,0 +1,76 @@
+// Test JIT→JIT→WaitIo→resume chain
+// This tests that nested JIT calls with I/O correctly resume
+
+package main
+
+import (
+	"os"
+	"io"
+)
+
+func innerRead(r io.Reader) ([]byte, error) {
+	buf := make([]byte, 5)
+	n, err := r.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+func outerRead(r io.Reader) (string, error) {
+	data, err := innerRead(r)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func main() {
+	// Create a temp file with test data
+	f, err := os.CreateTemp("", "jit_test_*.txt")
+	if err != nil {
+		println("FAIL: CreateTemp:", err.Error())
+		return
+	}
+	name := f.Name()
+	
+	// Write test data
+	_, err = f.Write([]byte("hello"))
+	if err != nil {
+		println("FAIL: Write:", err.Error())
+		os.Remove(name)
+		return
+	}
+	f.Close()
+	
+	// Open for reading
+	f2, err := os.Open(name)
+	if err != nil {
+		println("FAIL: Open:", err.Error())
+		os.Remove(name)
+		return
+	}
+	
+	// Test nested read (JIT→JIT→WaitIo chain)
+	result, err := outerRead(f2)
+	if err != nil {
+		println("FAIL: outerRead:", err.Error())
+		f2.Close()
+		os.Remove(name)
+		return
+	}
+	
+	if result != "hello" {
+		println("FAIL: expected 'hello', got:", result)
+		f2.Close()
+		os.Remove(name)
+		return
+	}
+	
+	f2.Close()
+	os.Remove(name)
+	println("PASS")
+}
+
+// Output:
+// PASS

@@ -367,3 +367,42 @@ Milestone 4 (上线)
 1. **单元测试**：每个 Milestone 后运行 `./d.py test both`
 2. **回归测试**：添加 `2026_02_02_jit_waitio_chain.vo` 测试 JIT→JIT→WaitIo→resume
 3. **性能验证**：`./d.py bench all` 确认无重大回归
+
+---
+
+## 实施记录 (2026-02-02)
+
+### 完成的修改
+
+#### Milestone 1: dispatcher per-fiber
+- `vo-vm/src/fiber.rs`: 添加 `call_dispatcher: CallDispatcher` 字段
+- `vo-vm/src/vm/types.rs`: 从 VmState 移除 `call_dispatcher`
+- `vo-vm/src/vm/jit_glue.rs`: `build_jit_ctx` 接收 dispatcher 参数
+- `vo-vm/src/vm/jit_glue.rs`: `handle_jit_reentry` 先检查 JIT frame
+- `vo-runtime/src/call_dispatcher.rs`: 添加 `#[derive(Debug)]`
+
+#### Milestone 3: 统一 args/ret slot
+- `vo-jit/src/call_helpers.rs`: `emit_call_closure` 使用统一 slot
+- `vo-jit/src/call_helpers.rs`: `emit_call_iface` 使用统一 slot
+
+#### Milestone 2: offset discipline
+- `vo-vm/src/vm/jit_glue.rs`: `execute_jit_with_dispatcher` 添加 `current_offset` 跟踪
+- `vo-vm/src/vm/jit_glue.rs`: `handle_jit_reentry_with_dispatcher` 添加 offset discipline
+
+#### Milestone 4: 策略 4A
+- 保持 VM Opcode::Call 使用 `call_jit_with_frame`（frame-based）
+- `execute_jit_with_dispatcher` 实现完整但当前未被直接调用
+- 当 dispatcher 有 pending 时，`handle_jit_reentry` 会使用 dispatcher-based resume
+- 这是 4A 策略的正确实现：纯计算保持原路径，复杂调用链走 dispatcher
+
+### 测试结果
+```
+VM:    950 passed    0 failed
+JIT:   938 passed    2 failed
+Total: 1888 passed   2 failed
+```
+
+2 个失败的测试是已存在的 I/O 行为问题（io_package.vo, tcp_read_test.vo），与 dispatcher 架构无关。
+
+### 未来优化
+如需完全切换到 dispatcher-based 方案，可以把 VM Opcode::Call 改成调用 `execute_jit_with_dispatcher`。

@@ -900,8 +900,8 @@ impl Vm {
                     let jit_func = self.jit_mgr.as_mut()
                         .and_then(|mgr| mgr.resolve_call(target_func_id, target_func, module));
                     
-                    if let Some(jit_func) = jit_func {
-                        // VM-led: VM pushes frame, JIT operates on fiber.stack[jit_bp..]
+                    if let Some(_jit_func) = jit_func {
+                        // Use dispatcher-based JIT execution
                         let jit_bp = fiber.sp;
                         fiber.push_frame(target_func_id, target_func.local_slots, arg_start as u16, call_ret_slots as u16);
                         fiber.frames.last_mut().unwrap().is_jit_frame = true;
@@ -911,38 +911,40 @@ impl Vm {
                         }
                         stack = fiber.stack_ptr();
                         
-                        let (result, call_request) = self.call_jit_with_frame(
-                            fiber_id, jit_func, jit_bp, 0
+                        let result = self.execute_jit_with_dispatcher(
+                            fiber_id, target_func_id, jit_bp, 0
                         );
                         
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         
-                        if let Some(call_info) = call_request {
-                            // Call request: set resume_pc and push callee frame
-                            fiber.frames.last_mut().unwrap().pc = call_info.resume_pc as usize;
-                            call_info.push_callee_frame(fiber, jit_bp, module);
-                            stack = fiber.stack_ptr();
-                            refetch!();
-                        } else if matches!(result, ExecResult::Panic) {
-                            stack = fiber.stack_ptr();
-                            let r = panic_unwind(fiber, stack, module);
-                            if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
-                        } else if matches!(result, ExecResult::FrameChanged) {
-                            // OK: copy returns from JIT frame to caller
-                            let func_ret_slots = target_func.ret_slots as usize;
-                            for i in 0..call_ret_slots.min(func_ret_slots) {
-                                fiber.stack[bp + arg_start + i] = fiber.stack[jit_bp + i];
+                        match result {
+                            ExecResult::FrameChanged => {
+                                // Check if top frame is still our JIT frame (completed normally)
+                                // or if a new callee frame was pushed (needs VM execution)
+                                let is_our_frame = fiber.frames.last()
+                                    .map(|f| f.is_jit_frame && f.bp == jit_bp)
+                                    .unwrap_or(false);
+                                
+                                if is_our_frame {
+                                    // JIT completed - copy returns and pop frame
+                                    let func_ret_slots = target_func.ret_slots as usize;
+                                    for i in 0..call_ret_slots.min(func_ret_slots) {
+                                        fiber.stack[bp + arg_start + i] = fiber.stack[jit_bp + i];
+                                    }
+                                    fiber.pop_frame();
+                                }
+                                stack = fiber.stack_ptr();
+                                refetch!();
                             }
-                            fiber.pop_frame();
-                            stack = fiber.stack_ptr();
-                            refetch!();
-                        } else if matches!(result, ExecResult::Block(_)) {
-                            // JIT returned WaitIo - fiber already blocked in call_jit_with_frame.
-                            // Return TimesliceExpired to let scheduler pick next fiber.
-                            // Don't return Block because main loop's Block handler expects current != None.
-                            return ExecResult::TimesliceExpired;
-                        } else {
-                            return result;
+                            ExecResult::Panic => {
+                                stack = fiber.stack_ptr();
+                                let r = panic_unwind(fiber, stack, module);
+                                if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                            }
+                            ExecResult::Block(_) => {
+                                return ExecResult::TimesliceExpired;
+                            }
+                            other => return other,
                         }
                     } else {
                         exec::exec_call(fiber, &inst, module);
