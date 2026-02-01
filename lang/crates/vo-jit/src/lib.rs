@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::verifier::verify_function;
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
@@ -573,31 +574,34 @@ impl JitCompiler {
         
         let map_get = module.declare_function("vo_map_get", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));       // ctx
+            sig.params.push(AbiParam::new(types::I64)); // m
+            sig.params.push(AbiParam::new(ptr));       // key_ptr
+            sig.params.push(AbiParam::new(types::I32)); // key_slots
+            sig.params.push(AbiParam::new(ptr));       // val_ptr
+            sig.params.push(AbiParam::new(types::I32)); // val_slots
             sig.returns.push(AbiParam::new(types::I64));
             sig
         })?;
         
         let map_set = module.declare_function("vo_map_set", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));       // ctx
+            sig.params.push(AbiParam::new(types::I64)); // m
+            sig.params.push(AbiParam::new(ptr));       // key_ptr
+            sig.params.push(AbiParam::new(types::I32)); // key_slots
+            sig.params.push(AbiParam::new(ptr));       // val_ptr
+            sig.params.push(AbiParam::new(types::I32)); // val_slots
             sig.returns.push(AbiParam::new(types::I64)); // 0=ok, 1=panic (unhashable)
             sig
         })?;
         
         let map_delete = module.declare_function("vo_map_delete", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));       // ctx
+            sig.params.push(AbiParam::new(types::I64)); // m
+            sig.params.push(AbiParam::new(ptr));       // key_ptr
+            sig.params.push(AbiParam::new(types::I32)); // key_slots
             sig
         })?;
         
@@ -765,6 +769,16 @@ impl JitCompiler {
             eprintln!("{}", self.ctx.func.display());
         }
         
+        // Verify IR in debug builds (warn only, don't fail)
+        #[cfg(debug_assertions)]
+        {
+            let flags = settings::Flags::new(settings::builder());
+            if let Err(errors) = verify_function(&self.ctx.func, &flags) {
+                eprintln!("=== IR Verification FAILED for func_{} {} ===", func_id, func.name);
+                eprintln!("Errors: {}", errors);
+            }
+        }
+        
         self.module.define_function(func_id_cl, &mut self.ctx)?;
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions()?;
@@ -807,6 +821,16 @@ impl JitCompiler {
         let helpers = self.get_helper_refs();
         let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, loop_info, helpers);
         compiler.compile()?;
+        
+        // Verify IR in debug builds (warn only, don't fail)
+        #[cfg(debug_assertions)]
+        {
+            let flags = settings::Flags::new(settings::builder());
+            if let Err(errors) = verify_function(&self.ctx.func, &flags) {
+                eprintln!("=== IR Verification FAILED for loop_{}_{} ===", func_id, begin_pc);
+                eprintln!("Errors: {}", errors);
+            }
+        }
         
         self.module.define_function(func_id_cl, &mut self.ctx)?;
         self.module.clear_context(&mut self.ctx);

@@ -442,8 +442,9 @@ pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
         let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
         let vm_result = emitter.builder().inst_results(vm_call)[0];
         
-        // Check VM result for panic
-        let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one);
+        // Check VM result for panic (define one_vm here, not reuse 'one' from jit_call_block)
+        let one_vm = emitter.builder().ins().iconst(types::I32, 1);
+        let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one_vm);
         
         let vm_panic_block = emitter.builder().create_block();
         let vm_ok_block = emitter.builder().create_block();

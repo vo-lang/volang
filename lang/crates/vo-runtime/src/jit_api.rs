@@ -514,17 +514,23 @@ pub extern "C" fn vo_map_len(m: u64) -> u64 {
 /// val_ptr is output buffer for val_slots u64 values.
 /// Returns 1 if found, 0 if not found.
 #[no_mangle]
-pub extern "C" fn vo_map_get(m: u64, key_ptr: *const u64, key_slots: u32, val_ptr: *mut u64, val_slots: u32) -> u64 {
+pub extern "C" fn vo_map_get(ctx: *mut JitContext, m: u64, key_ptr: *const u64, key_slots: u32, val_ptr: *mut u64, val_slots: u32) -> u64 {
     use crate::objects::map;
     if m == 0 { return 0; }
     
+    let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    let (val_opt, ok) = map::get_with_ok(m as crate::gc::GcRef, key, None);
+    let (val_opt, ok) = map::get_with_ok(m as crate::gc::GcRef, key, module);
     
     if let Some(val) = val_opt {
         let copy_len = (val_slots as usize).min(val.len());
         unsafe {
             core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, copy_len);
+        }
+    } else {
+        // Zero out val_ptr buffer for non-existent keys
+        unsafe {
+            core::ptr::write_bytes(val_ptr, 0, val_slots as usize);
         }
     }
     ok as u64
@@ -533,11 +539,12 @@ pub extern "C" fn vo_map_get(m: u64, key_ptr: *const u64, key_slots: u32, val_pt
 /// Set value in map.
 /// Returns: 0 = success, 1 = panic (interface key with uncomparable type)
 #[no_mangle]
-pub extern "C" fn vo_map_set(m: u64, key_ptr: *const u64, key_slots: u32, val_ptr: *const u64, val_slots: u32) -> u64 {
+pub extern "C" fn vo_map_set(ctx: *mut JitContext, m: u64, key_ptr: *const u64, key_slots: u32, val_ptr: *const u64, val_slots: u32) -> u64 {
     use crate::objects::{map, interface};
     use crate::ValueKind;
     if m == 0 { return 0; }
     
+    let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
     let val = unsafe { core::slice::from_raw_parts(val_ptr, val_slots as usize) };
     
@@ -556,18 +563,19 @@ pub extern "C" fn vo_map_set(m: u64, key_ptr: *const u64, key_slots: u32, val_pt
         }
     }
     
-    map::set(m as crate::gc::GcRef, key, val, None);
+    map::set(m as crate::gc::GcRef, key, val, module);
     0
 }
 
 /// Delete key from map.
 #[no_mangle]
-pub extern "C" fn vo_map_delete(m: u64, key_ptr: *const u64, key_slots: u32) {
+pub extern "C" fn vo_map_delete(ctx: *mut JitContext, m: u64, key_ptr: *const u64, key_slots: u32) {
     use crate::objects::map;
     if m == 0 { return; }
     
+    let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    map::delete(m as crate::gc::GcRef, key, None);
+    map::delete(m as crate::gc::GcRef, key, module);
 }
 
 /// Initialize a map iterator. Writes MAP_ITER_SLOTS * SLOT_BYTES bytes to iter_ptr.

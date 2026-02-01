@@ -1,6 +1,6 @@
 //! Shared instruction translation logic.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlot, Value};
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 
 use vo_runtime::bytecode::Constant;
@@ -1137,20 +1137,61 @@ fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
+/// Helper: create stack slot and store values from consecutive registers
+fn store_to_stack<'a>(e: &mut impl IrEmitter<'a>, start_reg: u16, slots: usize) -> (StackSlot, Value, Value) {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    let stack_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot, (slots.max(1) * 8) as u32, 8));
+    for i in 0..slots {
+        let val = e.read_var(start_reg + i as u16);
+        e.builder().ins().stack_store(val, stack_slot, (i * 8) as i32);
+    }
+    let ptr = e.builder().ins().stack_addr(types::I64, stack_slot, 0);
+    let slots_i32 = e.builder().ins().iconst(types::I32, slots as i64);
+    (stack_slot, ptr, slots_i32)
+}
+
 fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = match e.helpers().map_get { Some(f) => f, None => return };
-    let m = e.read_var(inst.a);
-    let key = e.read_var(inst.b);
-    let key_bytes = e.builder().ins().iconst(types::I64, inst.c as i64);
-    let val_bytes = e.builder().ins().iconst(types::I64, inst.flags as i64);
-    let call = e.builder().ins().call(func, &[m, key, key_bytes, val_bytes]);
-    let result = e.builder().inst_results(call)[0];
-    e.write_var(inst.a, result);
+    // MapGet: a=dst, b=map, c=meta_slot, key at c+1
+    // meta: key_slots<<16 | val_slots<<1 | has_ok
+    let meta = match e.get_reg_const(inst.c) { Some(m) => m as u64, None => return };
+    let key_slots = ((meta >> 16) & 0xFFFF) as usize;
+    let val_slots = ((meta >> 1) & 0x7FFF) as usize;
+    let has_ok = (meta & 1) != 0;
+    
+    let m = e.read_var(inst.b);
+    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.c + 1, key_slots);
+    
+    // Create output buffer for val (+ ok flag if needed)
+    let out_slots = val_slots + if has_ok { 1 } else { 0 };
+    let val_slot = e.builder().create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (out_slots.max(1) * 8) as u32, 8));
+    let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
+    let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
+    
+    let ctx = e.ctx_param();
+    let call = e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
+    let found = e.builder().inst_results(call)[0];
+    
+    // Load results to dst registers
+    for i in 0..val_slots {
+        let val = e.builder().ins().stack_load(types::I64, val_slot, (i * 8) as i32);
+        e.write_var(inst.a + i as u16, val);
+    }
+    if has_ok {
+        e.write_var(inst.a + val_slots as u16, found);
+    }
 }
 
 fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = match e.helpers().map_set { Some(f) => f, None => return };
-    let gc_ptr = e.gc_ptr();
+    // MapSet: a=map, b=meta_slot, c=val_start, key at b+1
+    // meta: key_slots<<8 | val_slots
+    let meta = match e.get_reg_const(inst.b) { Some(m) => m as u64, None => return };
+    let key_slots = ((meta >> 8) & 0xFF) as usize;
+    let val_slots = (meta & 0xFF) as usize;
+    
     let m = e.read_var(inst.a);
     
     // nil map write panics (Go semantics)
@@ -1158,11 +1199,11 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
     emit_panic_if(e, is_nil, false);
     
-    let key = e.read_var(inst.b);
-    let val = e.read_var(inst.c);
-    let key_bytes = e.builder().ins().iconst(types::I64, (inst.flags & 0x0F) as i64);
-    let val_bytes = e.builder().ins().iconst(types::I64, (inst.flags >> 4) as i64);
-    let call = e.builder().ins().call(func, &[gc_ptr, m, key, val, key_bytes, val_bytes]);
+    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
+    let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
+    
+    let ctx = e.ctx_param();
+    let call = e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32]);
     let result = e.builder().inst_results(call)[0];
     
     // Check if vo_map_set returned panic (unhashable interface key)
@@ -1172,10 +1213,14 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let func = match e.helpers().map_delete { Some(f) => f, None => return };
+    // MapDelete: a=map, b=meta_slot (=key_slots), key at b+1
+    let key_slots = match e.get_reg_const(inst.b) { Some(m) => m as usize, None => return };
+    
     let m = e.read_var(inst.a);
-    let key = e.read_var(inst.b);
-    let key_bytes = e.builder().ins().iconst(types::I64, inst.c as i64);
-    e.builder().ins().call(func, &[m, key, key_bytes]);
+    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
+    
+    let ctx = e.ctx_param();
+    e.builder().ins().call(func, &[ctx, m, key_ptr, key_slots_i32]);
 }
 
 const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
