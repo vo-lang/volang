@@ -511,9 +511,6 @@ impl Vm {
                             let token = fiber.current_frame().unwrap().wait_io_token;
                             return ExecResult::Block(crate::fiber::BlockReason::Io(token));
                         }
-                        OsrResult::Yield => {
-                            return ExecResult::TimesliceExpired;
-                        }
                         OsrResult::Panic => {
                             return ExecResult::Panic;
                         }
@@ -565,9 +562,6 @@ impl Vm {
                                         return ExecResult::Block(crate::fiber::BlockReason::Io(
                                             self.scheduler.current_fiber().unwrap().current_frame().unwrap().wait_io_token
                                         ));
-                                    }
-                                    OsrResult::Yield => {
-                                        return ExecResult::TimesliceExpired;
                                     }
                                     OsrResult::Panic => {
                                         return ExecResult::Panic;
@@ -1035,9 +1029,6 @@ impl Vm {
                                         OsrResult::WaitIo => {
                                             let token = fiber.current_frame().unwrap().wait_io_token;
                                             return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                                        }
-                                        OsrResult::Yield => {
-                                            return ExecResult::TimesliceExpired;
                                         }
                                         OsrResult::Panic => {
                                             return ExecResult::Panic;

@@ -184,36 +184,38 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
-    /// Scan for Call instructions and blocking extern calls that need resume blocks.
+    /// Scan for instructions that need resume blocks for multi-entry support.
+    /// Includes: all call types and blocking extern calls (waitio_).
     fn scan_call_requests(&mut self) {
         let loop_end = self.loop_info.end_pc + 2;
         for pc in (self.loop_info.begin_pc + 1)..loop_end {
             let inst = &self.func_def.code[pc];
-            let needs_resume = match inst.opcode() {
-                Opcode::Call => true, // All calls in loop need resume support
+            let resume_pc = match inst.opcode() {
+                Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
+                    Some(pc + 1) // Resume after call returns
+                }
                 Opcode::CallExtern => {
                     // waitio_ extern calls may return WaitIo
                     let extern_id = inst.b as usize;
-                    self.vo_module.externs[extern_id].name.contains("_waitio_")
+                    if self.vo_module.externs[extern_id].name.contains("_waitio_") {
+                        Some(pc) // Resume at same PC to re-execute
+                    } else {
+                        None
+                    }
                 }
-                Opcode::CallClosure | Opcode::CallIface => true,
-                _ => false,
+                _ => None,
             };
             
-            if needs_resume {
-                // For waitio extern: resume at same PC to re-execute
-                // For Call: resume at pc+1 after callee returns
-                let is_waitio_extern = inst.opcode() == Opcode::CallExtern 
-                    && self.vo_module.externs[inst.b as usize].name.contains("_waitio_");
-                let resume_pc = if is_waitio_extern { pc } else { pc + 1 };
-                
-                // Reuse existing jump target block if present, otherwise create new
-                let resume_block = if let Some(&existing) = self.blocks.get(&resume_pc) {
-                    existing
-                } else {
-                    self.builder.create_block()
-                };
-                self.resume_blocks.insert(resume_pc, resume_block);
+            if let Some(resume_pc) = resume_pc {
+                if !self.resume_blocks.contains_key(&resume_pc) {
+                    // Reuse existing jump target block if present, otherwise create new
+                    let resume_block = if let Some(&existing) = self.blocks.get(&resume_pc) {
+                        existing
+                    } else {
+                        self.builder.create_block()
+                    };
+                    self.resume_blocks.insert(resume_pc, resume_block);
+                }
             }
         }
     }
@@ -342,11 +344,6 @@ impl<'a> LoopCompiler<'a> {
         
         // Back-edge: jump to loop header (condition check)
         if raw_target == self.loop_info.begin_pc || raw_target == self.loop_info.begin_pc + 1 {
-            // Budget check for time-slice scheduling
-            // TODO: Enable after debugging JIT reentry issue
-            // let loop_body_cost = (self.loop_info.end_pc - self.loop_info.begin_pc) as u32;
-            // crate::call_helpers::emit_budget_check(self, loop_body_cost, self.current_pc + 1);
-            
             let loop_header = self.blocks[&(self.loop_info.begin_pc + 1)];
             self.builder.ins().jump(loop_header, &[]);
         } else if raw_target <= self.loop_info.begin_pc || raw_target >= loop_end {

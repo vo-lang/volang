@@ -157,32 +157,37 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Scan for Call instructions to non-jittable callees and blocking extern calls.
-    /// These require resume blocks for multi-entry support.
+    /// Scan for instructions that need resume blocks for multi-entry support.
+    /// Includes: Call to non-jittable callees, blocking extern calls (waitio_).
     fn scan_call_requests(&mut self) {
         for (pc, inst) in self.func_def.code.iter().enumerate() {
-            let needs_resume = match inst.opcode() {
+            let resume_pc = match inst.opcode() {
                 Opcode::Call => {
                     let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
                     let target_func = &self.vo_module.functions[target_func_id as usize];
-                    !crate::is_func_jittable(target_func)
+                    if !crate::is_func_jittable(target_func) {
+                        Some(pc + 1) // Resume after call returns
+                    } else {
+                        None
+                    }
                 }
                 Opcode::CallExtern => {
                     // waitio_ extern calls may return WaitIo and need resume
-                    // Resume should re-execute the same CallExtern (not pc+1)
                     let extern_id = inst.b as usize;
-                    self.vo_module.externs[extern_id].name.contains("_waitio_")
+                    if self.vo_module.externs[extern_id].name.contains("_waitio_") {
+                        Some(pc) // Resume at same PC to re-execute and get result
+                    } else {
+                        None
+                    }
                 }
-                _ => false,
+                _ => None,
             };
             
-            if needs_resume {
-                // For waitio extern: resume at same PC to re-execute and get result
-                // For Call to non-jittable: resume at pc+1 after callee returns
-                let is_waitio_extern = inst.opcode() == Opcode::CallExtern;
-                let resume_pc = if is_waitio_extern { pc } else { pc + 1 };
-                let resume_block = self.builder.create_block();
-                self.resume_blocks.insert(resume_pc, resume_block);
+            if let Some(resume_pc) = resume_pc {
+                if !self.resume_blocks.contains_key(&resume_pc) {
+                    let resume_block = self.builder.create_block();
+                    self.resume_blocks.insert(resume_pc, resume_block);
+                }
             }
         }
     }
@@ -328,13 +333,6 @@ impl<'a> FunctionCompiler<'a> {
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
         let block = self.blocks[&target];
-        
-        // Back-edge: budget check for time-slice scheduling
-        // TODO: Enable after debugging JIT reentry issue
-        // if offset < 0 {
-        //     let cost = (-offset) as u32;
-        //     crate::call_helpers::emit_budget_check(self, cost, self.current_pc + 1);
-        // }
         
         self.builder.ins().jump(block, &[]);
     }

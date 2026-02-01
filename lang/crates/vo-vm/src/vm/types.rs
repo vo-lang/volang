@@ -27,8 +27,14 @@ use vo_runtime::island::IslandCommand;
 pub type IslandRegistry = Arc<Mutex<HashMap<u32, Sender<IslandCommand>>>>;
 
 /// Time slice: number of instructions before forced yield check.
-/// Re-export from vo-runtime for backward compatibility.
-pub use vo_runtime::TIME_SLICE;
+/// VM executes at most TIME_SLICE instructions per fiber before yielding to scheduler.
+/// 
+/// Note: JIT-compiled code does not check this budget at loop back-edges.
+/// Instead, JIT naturally yields at function call boundaries (Call, CallClosure, CallIface
+/// to non-jittable callees return to VM). This is the standard "cooperative preemption"
+/// approach used by Go before 1.14. Tight loops without function calls will not yield,
+/// but such loops are rare in practice.
+pub const TIME_SLICE: u32 = 1000;
 
 /// VM execution result - drives scheduler state transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]

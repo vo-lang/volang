@@ -220,7 +220,6 @@ pub fn build_jit_ctx(
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
-        instruction_budget: vo_runtime::TIME_SLICE,
     }
 }
 
@@ -237,8 +236,6 @@ pub enum OsrResult {
     /// Loop is waiting for I/O.
     #[cfg(feature = "std")]
     WaitIo,
-    /// Loop yielded due to time slice exhaustion.
-    Yield,
     /// Loop panicked.
     Panic,
 }
@@ -355,13 +352,6 @@ impl Vm {
                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
                 handle_jit_panic(&mut self.state.gc, fiber, panic_flag, &panic_msg);
                 (ExecResult::Panic, None)
-            }
-            JitResult::Yield => {
-                // Time slice exhausted - set resume PC and return TimesliceExpired
-                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                let frame = fiber.current_frame_mut().unwrap();
-                frame.pc = ctx.call_resume_pc as usize;
-                (ExecResult::TimesliceExpired, None)
             }
         }
     }
@@ -599,17 +589,6 @@ impl Vm {
                 frame.loop_osr_begin_pc = loop_begin_pc;
                 
                 Some(OsrResult::WaitIo)
-            }
-            JitResult::Yield => {
-                // Time slice exhausted - set resume PC and return special value
-                let resume_pc = ctx.call_resume_pc as usize;
-                
-                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                let frame = fiber.current_frame_mut().unwrap();
-                frame.pc = resume_pc;
-                frame.loop_osr_begin_pc = loop_begin_pc;
-                
-                Some(OsrResult::Yield)
             }
         }
     }
