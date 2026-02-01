@@ -37,7 +37,7 @@ fn set_recoverable_panic_msg(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg
 /// avoiding unnecessary copies. The JIT passes the same pointer for both args and ret,
 /// which points to fiber.stack[jit_bp + arg_start].
 ///
-/// For waitio_ extern functions that return WaitIo:
+/// For blocking_ extern functions that return WaitIo:
 /// - First call: extern starts I/O, returns WaitIo, we return JitResult::WaitIo
 /// - VM blocks fiber, waits for I/O completion
 /// - Resume call: ctx.wait_io_token contains the token, passed to extern as resume_token

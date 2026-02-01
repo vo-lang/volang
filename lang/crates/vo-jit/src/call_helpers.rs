@@ -169,7 +169,7 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     
     // Get extern info
     let extern_def = &emitter.vo_module().externs[extern_id as usize];
-    let is_blocking = extern_def.name.contains("_waitio_");
+    let is_blocking = extern_def.is_blocking;
     let extern_ret_slots = extern_def.ret_slots as usize;
     let buffer_size = arg_count.max(extern_ret_slots).max(1);
     

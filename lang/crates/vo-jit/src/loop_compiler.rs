@@ -185,7 +185,7 @@ impl<'a> LoopCompiler<'a> {
     }
 
     /// Scan for instructions that need resume blocks for multi-entry support.
-    /// Includes: all call types and blocking extern calls (waitio_).
+    /// Includes: all call types and blocking extern calls.
     fn scan_call_requests(&mut self) {
         let loop_end = self.loop_info.end_pc + 2;
         for pc in (self.loop_info.begin_pc + 1)..loop_end {
@@ -195,9 +195,9 @@ impl<'a> LoopCompiler<'a> {
                     Some(pc + 1) // Resume after call returns
                 }
                 Opcode::CallExtern => {
-                    // waitio_ extern calls may return WaitIo
+                    // Blocking extern calls may return WaitIo
                     let extern_id = inst.b as usize;
-                    if self.vo_module.externs[extern_id].name.contains("_waitio_") {
+                    if self.vo_module.externs[extern_id].is_blocking {
                         Some(pc) // Resume at same PC to re-execute
                     } else {
                         None

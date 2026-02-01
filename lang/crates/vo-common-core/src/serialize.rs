@@ -555,6 +555,7 @@ impl Module {
             w.write_string(&e.name);
             w.write_u16(e.param_slots);
             w.write_u16(e.ret_slots);
+            w.write_u8(e.is_blocking as u8);
         });
 
         w.write_u32(self.entry_func);
@@ -745,10 +746,12 @@ impl Module {
             let name = r.read_string()?;
             let param_slots = r.read_u16()?;
             let ret_slots = r.read_u16()?;
+            let is_blocking = r.read_u8()? != 0;
             Ok(ExternDef {
                 name,
                 param_slots,
                 ret_slots,
+                is_blocking,
             })
         })?;
 

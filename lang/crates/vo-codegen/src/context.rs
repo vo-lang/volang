@@ -737,6 +737,7 @@ impl CodegenContext {
             name: name.to_string(),
             param_slots: 0,
             ret_slots,
+            is_blocking: name.contains("_blocking_"),
         });
         self.extern_names.insert(name.to_string(), id);
         id

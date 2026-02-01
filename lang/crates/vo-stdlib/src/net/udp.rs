@@ -46,7 +46,7 @@ pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "waitio_udpConnReadFrom")]
+#[vostd_extern_ctx("net", "blocking_udpConnReadFrom")]
 pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_P);
@@ -105,7 +105,7 @@ fn handle_recv_from_completion(
     ExternResult::Ok
 }
 
-#[vostd_extern_ctx("net", "waitio_udpConnWriteTo")]
+#[vostd_extern_ctx("net", "blocking_udpConnWriteTo")]
 pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
     let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
     let buf_ref = call.arg_ref(slots::ARG_P);

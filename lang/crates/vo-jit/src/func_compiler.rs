@@ -158,7 +158,7 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Scan for instructions that need resume blocks for multi-entry support.
-    /// Includes: Call to non-jittable callees, blocking extern calls (waitio_).
+    /// Includes: Call to non-jittable callees, blocking extern calls.
     fn scan_call_requests(&mut self) {
         for (pc, inst) in self.func_def.code.iter().enumerate() {
             let resume_pc = match inst.opcode() {
@@ -172,9 +172,9 @@ impl<'a> FunctionCompiler<'a> {
                     }
                 }
                 Opcode::CallExtern => {
-                    // waitio_ extern calls may return WaitIo and need resume
+                    // Blocking extern calls may return WaitIo and need resume
                     let extern_id = inst.b as usize;
-                    if self.vo_module.externs[extern_id].name.contains("_waitio_") {
+                    if self.vo_module.externs[extern_id].is_blocking {
                         Some(pc) // Resume at same PC to re-execute and get result
                     } else {
                         None

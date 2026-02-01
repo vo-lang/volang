@@ -67,6 +67,8 @@ pub struct ExternDef {
     pub name: String,
     pub param_slots: u16,
     pub ret_slots: u16,
+    /// True if extern may block and return WaitIo (name contains "blocking_").
+    pub is_blocking: bool,
 }
 
 #[derive(Debug, Clone)]

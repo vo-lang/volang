@@ -63,7 +63,7 @@ pub fn register_externs(registry: &mut vo_runtime::ffi::ExternRegistry, externs:
         match def.name.as_str() {
             "time_nowUnixNano" => registry.register(id as u32, timesys_now_unix_nano),
             "time_nowMonoNano" => registry.register(id as u32, timesys_now_mono_nano),
-            "time_waitio_sleepNano" => registry.register_with_context(id as u32, timesys_sleep_nano),
+            "time_blocking_sleepNano" => registry.register_with_context(id as u32, timesys_sleep_nano),
             _ => {}
         }
     }
