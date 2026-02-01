@@ -564,6 +564,9 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 
 func testWorker(jobs <-chan TestJob, results chan<- TestResult, verbose bool) {
 	for job := range jobs {
+		if !job.skipped {
+			fmt.Println(colorize("  ▶ "+displayPath(job.file)+" ["+job.mode+"]", ansiDim))
+		}
 		result := runSingleTest(job, verbose)
 		results <- result
 	}

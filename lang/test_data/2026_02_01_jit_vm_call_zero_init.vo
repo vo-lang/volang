@@ -1,0 +1,22 @@
+// Test: JIT -> VM call with named return values must be zero-initialized
+// Bug: execute_closure_sync didn't zero-initialize local slots before copying args,
+//      causing named return values to contain garbage values.
+package main
+
+import "fmt"
+
+func main() {
+	// Test named return with loop (relies on n starting at 0)
+	n := loopReturn(5)
+	if n != 5 {
+		panic(fmt.Sprintf("FAIL loopReturn: expected 5, got %d", n))
+	}
+	fmt.Println("PASS")
+}
+
+func loopReturn(max int) (n int) {
+	for n < max {
+		n++
+	}
+	return
+}

@@ -516,7 +516,11 @@ pub extern "C" fn vo_map_len(m: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_map_get(ctx: *mut JitContext, m: u64, key_ptr: *const u64, key_slots: u32, val_ptr: *mut u64, val_slots: u32) -> u64 {
     use crate::objects::map;
-    if m == 0 { return 0; }
+    if m == 0 {
+        // nil map read returns zero value (Go semantics)
+        unsafe { core::ptr::write_bytes(val_ptr, 0, val_slots as usize); }
+        return 0;
+    }
     
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };

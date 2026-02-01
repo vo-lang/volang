@@ -34,7 +34,7 @@ use helpers::panic_unwind;
 
 use crate::bytecode::Module;
 use crate::exec;
-use crate::fiber::{Fiber, FiberState};
+use crate::fiber::{CallFrame, Fiber, FiberState};
 use crate::scheduler::FiberId;
 use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
@@ -1669,12 +1669,25 @@ impl Vm {
         let fid = self.scheduler.acquire_callback_fiber();
         let fiber = self.scheduler.fiber_mut(fid);
         fiber.state = FiberState::Running;
-        fiber.push_frame(func_id, func_def.local_slots, 0, func_def.ret_slots);
-        let bp = fiber.frames.last().unwrap().bp;
+        
+        // Set up frame similar to exec_call
+        let bp = fiber.sp;
+        let local_slots = func_def.local_slots as usize;
+        let new_sp = bp + local_slots;
+        fiber.ensure_capacity(new_sp);
+        
+        // Zero the entire local slots area first (important for named returns and local vars)
+        unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots * 8) };
+        
+        // Copy args (overwrites the zeros for arg slots)
         let n = (func_def.param_slots as usize).min(args.len());
         fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
+        
+        // Update sp and push frame
+        fiber.sp = new_sp;
+        fiber.frames.push(CallFrame::new(func_id, bp, 0, func_def.ret_slots));
 
-        // Run to completion
+        // Run to completion, with goroutine scheduling support
         let saved_current = self.scheduler.current;
         self.scheduler.current = Some(fid);
         
@@ -1692,7 +1705,36 @@ impl Vm {
                     break (false, self.scheduler.fiber_mut(fid).panic_state.take());
                 }
                 ExecResult::Block(_) => {
-                    break (false, None);
+                    // Callback fiber blocked (e.g., channel receive).
+                    // Run other fibers (goroutines) until callback is unblocked.
+                    self.scheduler.block_for_queue();
+                    
+                    let is_callback_runnable = |sched: &crate::scheduler::Scheduler| {
+                        sched.fibers.get(fid as usize)
+                            .map(|f| matches!(f.state, FiberState::Runnable))
+                            .unwrap_or(false)
+                    };
+                    
+                    while let Some(next_id) = self.scheduler.schedule_next() {
+                        match self.run_fiber(FiberId::Regular(next_id)) {
+                            ExecResult::Done | ExecResult::Panic => {
+                                let _ = self.scheduler.kill_current();
+                            }
+                            ExecResult::Block(_) => self.scheduler.block_for_queue(),
+                            ExecResult::TimesliceExpired => self.scheduler.yield_current(),
+                            _ => {}
+                        }
+                        if is_callback_runnable(&self.scheduler) {
+                            self.scheduler.current = Some(fid);
+                            break;
+                        }
+                    }
+                    
+                    if is_callback_runnable(&self.scheduler) {
+                        continue; // Resume callback fiber
+                    } else {
+                        break (false, None); // Deadlock or still blocked
+                    }
                 }
                 _ => continue,
             }

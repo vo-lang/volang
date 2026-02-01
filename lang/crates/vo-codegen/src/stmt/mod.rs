@@ -43,6 +43,54 @@ fn compile_stmt_with_label(
     info: &TypeInfoWrapper,
     label: Option<vo_common::Symbol>,
 ) -> Result<(), CodegenError> {
+    // Temp slot reuse: reclaim temp slots after statement completes.
+    // This significantly reduces local_slots count, improving JIT compile time.
+    //
+    // Safe for all statements EXCEPT:
+    // - Variable definitions (Var, ShortVar) - their slots must persist
+    // - Compound statements that may contain variable definitions:
+    //   If, For, Switch, TypeSwitch, Select, Block, Labeled
+    //
+    // Note: Defer, Go, ErrDefer are safe because they only compile a call expression
+    // and register it for later execution - they don't define variables.
+    let can_reclaim = matches!(
+        stmt.kind,
+        StmtKind::Expr(_)
+            | StmtKind::Assign(_)
+            | StmtKind::IncDec(_)
+            | StmtKind::Send(_)
+            | StmtKind::Return(_)
+            | StmtKind::Fail(_)
+            | StmtKind::Break(_)
+            | StmtKind::Continue(_)
+            | StmtKind::Goto(_)
+            | StmtKind::Empty
+            | StmtKind::Fallthrough
+            | StmtKind::Const(_)
+            | StmtKind::Type(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Go(_)
+            | StmtKind::ErrDefer(_)
+    );
+    
+    if can_reclaim {
+        func.begin_temp_region();
+        let result = compile_stmt_inner(stmt, ctx, func, info, label);
+        func.end_temp_region();
+        result
+    } else {
+        compile_stmt_inner(stmt, ctx, func, info, label)
+    }
+}
+
+/// Inner statement compilation - separated for temp region management.
+fn compile_stmt_inner(
+    stmt: &Stmt,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    label: Option<vo_common::Symbol>,
+) -> Result<(), CodegenError> {
     match &stmt.kind {
         // === Variable declaration ===
         StmtKind::Var(var_decl) => {
@@ -58,7 +106,6 @@ fn compile_stmt_with_label(
                     let escapes = info.is_escaped(obj_key);
                     let init = spec.values.get(i);
 
-                    // define_local returns deferred alloc for loop vars, but VarDecl is not in a loop
                     sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?.0;
                 }
             }

@@ -81,10 +81,15 @@ def run_test(args):
     sys.exit(result.returncode)
 
 
-def run_vo_cli(args):
+def run_vo_cli(args, jit_mode=False):
     ensure_vo_cli_built()
     cmd = [str(VO_BIN)] + args
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    env = None
+    if jit_mode:
+        import os
+        env = os.environ.copy()
+        env['VO_JIT_CALL_THRESHOLD'] = '1'
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env)
     sys.exit(result.returncode)
 
 
@@ -115,7 +120,8 @@ def main():
         else:
             run_test(rest_args)
     elif command == 'run':
-        run_vo_cli(['run'] + rest_args)
+        jit_mode = '--mode=jit' in rest_args or '-mode=jit' in rest_args
+        run_vo_cli(['run'] + rest_args, jit_mode=jit_mode)
     elif command == 'vo':
         run_vo_cli(rest_args)
     elif command in ('bench', 'loc', 'clean', 'play'):

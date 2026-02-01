@@ -152,6 +152,11 @@ pub struct FuncBuilder {
     // Parameter types for cross-island transfer.
     // Each entry: (ValueMeta raw, slot_count) for one parameter.
     param_types: Vec<(u32, u16)>,
+    // Temporary slot reuse: checkpoint stack for nested temp regions.
+    // Each statement/expression can save next_slot and restore it when done,
+    // allowing subsequent statements to reuse the same temp slots.
+    // slot_types is kept at high-water mark (never shrinks) for JIT.
+    temp_checkpoint_stack: Vec<u16>,
 }
 
 impl FuncBuilder {
@@ -177,6 +182,7 @@ impl FuncBuilder {
             error_ret_slot: -1,
             capture_types: Vec::new(),
             param_types: Vec::new(),
+            temp_checkpoint_stack: Vec::new(),
         }
     }
 
@@ -189,6 +195,39 @@ impl FuncBuilder {
         builder.param_slots = 1;  // closure ref is the first param slot
         builder.is_closure = true;
         builder
+    }
+
+    // =========================================================================
+    // Temporary Slot Reuse
+    // =========================================================================
+    //
+    // Slots are reused at statement boundaries. Each statement:
+    // 1. Calls begin_temp_region() at start
+    // 2. Allocates temp slots for expression evaluation
+    // 3. Calls end_temp_region() at end, restoring next_slot
+    //
+    // Variable definitions (Var, ShortVar) call commit_temp_region() instead,
+    // which keeps the allocated slots permanent.
+    //
+    // slot_types is kept at high-water mark (never shrinks) because:
+    // - JIT needs type info for all slots that may be used
+    // - Same slot may have different types in different statements
+    // =========================================================================
+
+    /// Begin a temporary slot region. Call at statement/expression start.
+    /// Returns a handle used by end_temp_region or commit_temp_region.
+    #[inline]
+    pub fn begin_temp_region(&mut self) {
+        self.temp_checkpoint_stack.push(self.next_slot);
+    }
+
+    /// End a temporary slot region, restoring next_slot to checkpoint.
+    /// Temp slots allocated since begin_temp_region are now available for reuse.
+    #[inline]
+    pub fn end_temp_region(&mut self) {
+        if let Some(checkpoint) = self.temp_checkpoint_stack.pop() {
+            self.next_slot = checkpoint;
+        }
     }
 
     /// Define a capture variable (for closure)
@@ -381,8 +420,25 @@ impl FuncBuilder {
 
     pub fn alloc_temp_typed(&mut self, types: &[SlotType]) -> u16 {
         let slot = self.next_slot;
-        self.slot_types.extend_from_slice(types);
-        self.next_slot += types.len() as u16;
+        let end_slot = slot as usize + types.len();
+        
+        // Handle slot reuse: if next_slot was restored by end_temp_region,
+        // we may be reallocating slots that already exist in slot_types.
+        // In that case, overwrite existing entries; otherwise extend.
+        if end_slot <= self.slot_types.len() {
+            // All slots already exist - overwrite with new types
+            self.slot_types[slot as usize..end_slot].copy_from_slice(types);
+        } else if (slot as usize) < self.slot_types.len() {
+            // Partial overlap - overwrite existing, extend for new
+            let existing_end = self.slot_types.len();
+            self.slot_types[slot as usize..existing_end].copy_from_slice(&types[..existing_end - slot as usize]);
+            self.slot_types.extend_from_slice(&types[existing_end - slot as usize..]);
+        } else {
+            // No overlap - just extend
+            self.slot_types.extend_from_slice(types);
+        }
+        
+        self.next_slot = end_slot as u16;
         slot
     }
 
@@ -398,13 +454,12 @@ impl FuncBuilder {
 
     /// Allocate N interface slots (2N slots total)
     pub fn alloc_interfaces(&mut self, count: u16) -> u16 {
-        let slot = self.next_slot;
+        let mut types = Vec::with_capacity(count as usize * 2);
         for _ in 0..count {
-            self.slot_types.push(SlotType::Interface0);
-            self.slot_types.push(SlotType::Interface1);
+            types.push(SlotType::Interface0);
+            types.push(SlotType::Interface1);
         }
-        self.next_slot += count * 2;
-        slot
+        self.alloc_temp_typed(&types)
     }
 
     pub fn next_slot(&self) -> u16 {
@@ -1028,8 +1083,8 @@ impl FuncBuilder {
             self.patch_jump(jump_pc, target_pc);
         }
         
-        // Ensure local_slots is at least ret_slots (for return value)
-        let local_slots = self.next_slot.max(self.ret_slots);
+        // Use slot_types.len() as high-water mark (not next_slot which gets restored by end_temp_region)
+        let local_slots = (self.slot_types.len() as u16).max(self.ret_slots);
         
         // Count heap-allocated named returns (escaped = true)
         // Used by panic recovery to return named return values after recover()

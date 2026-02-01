@@ -557,7 +557,9 @@ fn conv_f64_f32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let f64v = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
     let f32v = e.builder().ins().fdemote(types::F32, f64v);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), f32v);
+    // f32 is 32-bit, bitcast to i32 first, then extend to i64
+    let i32v = e.builder().ins().bitcast(types::I32, MemFlags::new(), f32v);
+    let r = e.builder().ins().uextend(types::I64, i32v);
     e.write_var(inst.a, r);
 }
 

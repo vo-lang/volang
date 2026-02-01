@@ -377,20 +377,21 @@ pub fn emit_call_with_jit_check<'a, E: IrEmitter<'a>>(
     let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
-    // Check result for panic (result == 1)
-    let one = emitter.builder().ins().iconst(types::I32, 1);
-    let is_panic = emitter.builder().ins().icmp(IntCC::Equal, jit_result, one);
+    // Check result: only OK (result == 0) should continue, all other results propagate
+    // JitResult: Ok=0, Panic=1, Call=2, WaitIo=3
+    let zero_jit = emitter.builder().ins().iconst(types::I32, 0);
+    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, zero_jit);
     
-    let jit_panic_block = emitter.builder().create_block();
+    let jit_non_ok_block = emitter.builder().create_block();
     let jit_ok_block = emitter.builder().create_block();
     
-    emitter.builder().ins().brif(is_panic, jit_panic_block, &[], jit_ok_block, &[]);
+    emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
-    // JIT panic path
-    emitter.builder().switch_to_block(jit_panic_block);
-    emitter.builder().seal_block(jit_panic_block);
-    let panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    emitter.builder().ins().return_(&[panic_val]);
+    // JIT non-OK path - propagate result (Panic, Call, or WaitIo)
+    emitter.builder().switch_to_block(jit_non_ok_block);
+    emitter.builder().seal_block(jit_non_ok_block);
+    emitter.spill_all_vars();
+    emitter.builder().ins().return_(&[jit_result]);
     
     // JIT OK path - just jump to merge (return values loaded in merge_block)
     emitter.builder().switch_to_block(jit_ok_block);

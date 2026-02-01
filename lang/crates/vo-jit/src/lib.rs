@@ -769,13 +769,20 @@ impl JitCompiler {
             eprintln!("{}", self.ctx.func.display());
         }
         
-        // Verify IR in debug builds (warn only, don't fail)
+        // Verify IR in debug builds
         #[cfg(debug_assertions)]
         {
             let flags = settings::Flags::new(settings::builder());
-            if let Err(errors) = verify_function(&self.ctx.func, &flags) {
-                eprintln!("=== IR Verification FAILED for func_{} {} ===", func_id, func.name);
-                eprintln!("Errors: {}", errors);
+            match verify_function(&self.ctx.func, &flags) {
+                Ok(()) => {
+                    if self.debug_ir {
+                        eprintln!("[JIT VERIFY OK] func_{} {}", func_id, func.name);
+                    }
+                }
+                Err(errors) => {
+                    eprintln!("=== IR Verification FAILED for func_{} {} ===", func_id, func.name);
+                    eprintln!("Errors: {}", errors);
+                }
             }
         }
         
@@ -822,13 +829,20 @@ impl JitCompiler {
         let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, loop_info, helpers);
         compiler.compile()?;
         
-        // Verify IR in debug builds (warn only, don't fail)
+        // Verify IR in debug builds
         #[cfg(debug_assertions)]
         {
             let flags = settings::Flags::new(settings::builder());
-            if let Err(errors) = verify_function(&self.ctx.func, &flags) {
-                eprintln!("=== IR Verification FAILED for loop_{}_{} ===", func_id, begin_pc);
-                eprintln!("Errors: {}", errors);
+            match verify_function(&self.ctx.func, &flags) {
+                Ok(()) => {
+                    if self.debug_ir {
+                        eprintln!("[JIT VERIFY OK] loop_{}_{}", func_id, begin_pc);
+                    }
+                }
+                Err(errors) => {
+                    eprintln!("=== IR Verification FAILED for loop_{}_{} ===", func_id, begin_pc);
+                    eprintln!("Errors: {}", errors);
+                }
             }
         }
         
