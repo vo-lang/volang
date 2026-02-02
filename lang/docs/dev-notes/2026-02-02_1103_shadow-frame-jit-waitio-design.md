@@ -293,10 +293,9 @@ Add tests:
 - Implement closure and iface calls through the same unified protocol.
 - Ensure `WaitIo` works through these paths.
 
-### Phase 5 — OSR (optional)
+### Phase 5 — OSR 
 
 - OSR must obey the same protocol.
-- OSR is an optional optimization. Correctness must not depend on re-entering a suspended JIT frame.
 
 
 ## Notes on Deletion/Refactor Strategy

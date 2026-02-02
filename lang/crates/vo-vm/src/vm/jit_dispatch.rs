@@ -385,12 +385,13 @@ fn handle_jit_result(
             
             // Update frame PC to resume_pc for when we come back
             let resume_pc = ctx.call_resume_pc();
+            let io_token = ctx.wait_io_token();
+            
             if let Some(frame) = fiber.frames.last_mut() {
                 frame.pc = resume_pc as usize;
             }
             
             // Store IO token for scheduler
-            let io_token = ctx.wait_io_token();
             fiber.resume_io_token = Some(io_token);
             
             ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
@@ -469,6 +470,10 @@ pub extern "C" fn jit_call_extern(
     let sentinel_errors = unsafe { &mut *ctx_ref.sentinel_errors };
     let io = unsafe { &mut *ctx_ref.io };
     
+    // Get resume_io_token from fiber (for replay-at-PC semantics)
+    let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
+    let resume_io_token = fiber.resume_io_token.take();
+    
     let result = registry.call(
         extern_id,
         buffer,
@@ -491,7 +496,7 @@ pub extern "C" fn jit_call_extern(
         program_args,
         sentinel_errors,
         io,
-        None, // resume_io_token - first call, not resuming
+        resume_io_token, // Pass fiber's resume_io_token for replay-at-PC semantics
     );
     
     // Return values already in buffer (same as ret pointer), no copy needed
