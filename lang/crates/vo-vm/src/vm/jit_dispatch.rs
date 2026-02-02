@@ -170,6 +170,10 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         call_arg_start: 0,
         call_resume_pc: 0,
         call_ret_slots: 0,
+        call_kind: 0,
+        call_arg_slots: 0,
+        call_closure_ref: 0,
+        call_iface_recv: 0,
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
@@ -235,6 +239,14 @@ fn handle_jit_result(
             helpers::panic_unwind(fiber, stack_ptr, module)
         }
         JitResult::Call => {
+            // Check for special call_kind values that don't need frame setup
+            let call_kind = ctx.ctx.call_kind;
+            match call_kind {
+                JitContext::CALL_KIND_YIELD => return ExecResult::TimesliceExpired,
+                JitContext::CALL_KIND_BLOCK => return ExecResult::Block(crate::fiber::BlockReason::Queue),
+                _ => {} // Regular, closure, or iface call - continue to frame setup
+            }
+            
             // JIT requests VM to execute a non-JIT function.
             // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
             // 
@@ -267,10 +279,50 @@ fn handle_jit_result(
             let stack = fiber.stack_ptr();
             unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
             
-            // Copy args from JIT caller (at actual_jit_bp + call_arg_start) to callee_bp
-            let arg_slots = callee_func_def.param_slots as usize;
-            for i in 0..arg_slots {
-                fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
+            // Copy args based on call kind
+            match call_kind {
+                0 => {
+                    // Regular call: direct copy
+                    let arg_slots = callee_func_def.param_slots as usize;
+                    for i in 0..arg_slots {
+                        fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
+                    }
+                }
+                1 => {
+                    // Closure call: use call_layout for slot0 and arg_offset
+                    use vo_runtime::objects::closure;
+                    use vo_runtime::gc::GcRef;
+                    
+                    let closure_ref = ctx.ctx.call_closure_ref;
+                    let closure_gcref = closure_ref as GcRef;
+                    let recv_slots = callee_func_def.recv_slots as usize;
+                    let is_closure = callee_func_def.is_closure;
+                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
+                    
+                    let layout = closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure);
+                    
+                    if let Some(slot0_val) = layout.slot0 {
+                        fiber.stack[callee_bp] = slot0_val;
+                    }
+                    
+                    // Copy user args at arg_offset
+                    for i in 0..user_arg_slots {
+                        fiber.stack[callee_bp + layout.arg_offset + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
+                    }
+                }
+                2 => {
+                    // Interface call: set receiver in slot0, copy args at recv_slots
+                    let recv = ctx.ctx.call_iface_recv;
+                    let recv_slots = callee_func_def.recv_slots as usize;
+                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
+                    
+                    fiber.stack[callee_bp] = recv;
+                    
+                    for i in 0..user_arg_slots {
+                        fiber.stack[callee_bp + recv_slots + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
+                    }
+                }
+                _ => unreachable!("invalid call_kind"),
             }
             
             fiber.sp = new_sp;
@@ -356,7 +408,6 @@ pub extern "C" fn jit_call_extern(
     ret_slots: u32,
 ) -> JitResult {
     use vo_runtime::ffi::{ExternRegistry, ExternResult};
-    
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
@@ -392,7 +443,7 @@ pub extern "C" fn jit_call_extern(
         module,
         ctx_ref.vm,
         ctx_ref.fiber,
-        None, // call_closure_fn - not needed for most externs
+        Some(super::closure_call_trampoline), // call_closure_fn for dyn_call_closure etc
         &module.well_known,
         program_args,
         sentinel_errors,
@@ -402,7 +453,7 @@ pub extern "C" fn jit_call_extern(
     
     // Return values already in buffer (same as ret pointer), no copy needed
     
-    match result {
+    let jit_result = match result {
         ExternResult::Ok => JitResult::Ok,
         ExternResult::Panic(_msg) => {
             // Set panic message in context
@@ -412,11 +463,11 @@ pub extern "C" fn jit_call_extern(
             JitResult::Panic
         }
         ExternResult::Yield => {
-            // Treat yield like Call - VM will handle scheduling
+            ctx_ref.call_kind = JitContext::CALL_KIND_YIELD;
             JitResult::Call
         }
         ExternResult::Block => {
-            // Queue blocking - treat like Call
+            ctx_ref.call_kind = JitContext::CALL_KIND_BLOCK;
             JitResult::Call
         }
         ExternResult::WaitIo { token } => {
@@ -424,7 +475,8 @@ pub extern "C" fn jit_call_extern(
             ctx_ref.wait_io_token = token;
             JitResult::WaitIo
         }
-    }
+    };
+    jit_result
 }
 
 /// Push a new frame for JIT-to-JIT call.

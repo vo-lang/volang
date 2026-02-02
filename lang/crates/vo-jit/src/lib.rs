@@ -46,9 +46,8 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
             // Island (cross-thread operations)
             | Opcode::IslandNew | Opcode::GoIsland
             // Port blocking operations (PortNew/Len/Cap are OK)
-            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose
-            // Closure/interface calls - not supported until Phase 5 unified dispatch
-            | Opcode::CallClosure | Opcode::CallIface => return false,
+            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose => return false,
+            // CallClosure and CallIface supported via unified call protocol (Phase 4)
             // CallExtern supported via jit_call_extern callback (Step 3)
             _ => {}
         }
@@ -204,8 +203,10 @@ struct HelperFuncIds {
     call_vm: cranelift_module::FuncId,
     gc_alloc: cranelift_module::FuncId,
     write_barrier: cranelift_module::FuncId,
-    call_closure: cranelift_module::FuncId,
-    call_iface: cranelift_module::FuncId,
+    closure_get_func_id: cranelift_module::FuncId,
+    iface_get_func_id: cranelift_module::FuncId,
+    set_closure_call_request: cranelift_module::FuncId,
+    set_iface_call_request: cranelift_module::FuncId,
     panic: cranelift_module::FuncId,
     call_extern: cranelift_module::FuncId,
     str_new: cranelift_module::FuncId,
@@ -291,8 +292,10 @@ impl JitCompiler {
         builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
         builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
         builder.symbol("vo_call_vm", vo_runtime::jit_api::vo_call_vm as *const u8);
-        builder.symbol("vo_call_closure", vo_runtime::jit_api::vo_call_closure as *const u8);
-        builder.symbol("vo_call_iface", vo_runtime::jit_api::vo_call_iface as *const u8);
+        builder.symbol("vo_closure_get_func_id", vo_runtime::jit_api::vo_closure_get_func_id as *const u8);
+        builder.symbol("vo_iface_get_func_id", vo_runtime::jit_api::vo_iface_get_func_id as *const u8);
+        builder.symbol("vo_set_closure_call_request", vo_runtime::jit_api::vo_set_closure_call_request as *const u8);
+        builder.symbol("vo_set_iface_call_request", vo_runtime::jit_api::vo_set_iface_call_request as *const u8);
         builder.symbol("vo_str_new", vo_runtime::jit_api::vo_str_new as *const u8);
         builder.symbol("vo_str_len", vo_runtime::jit_api::vo_str_len as *const u8);
         builder.symbol("vo_str_index", vo_runtime::jit_api::vo_str_index as *const u8);
@@ -367,30 +370,47 @@ impl JitCompiler {
             sig
         })?;
         
-        let call_closure = module.declare_function("vo_call_closure", Import, &{
+        // vo_closure_get_func_id(closure_ref) -> func_id
+        let closure_get_func_id = module.declare_function("vo_closure_get_func_id", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(types::I64)); // closure_ref
+            sig.returns.push(AbiParam::new(types::I32)); // func_id
             sig
         })?;
         
-        let call_iface = module.declare_function("vo_call_iface", Import, &{
+        // vo_iface_get_func_id(ctx, slot0, method_idx) -> func_id
+        let iface_get_func_id = module.declare_function("vo_iface_get_func_id", Import, &{
             let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));        // ctx
+            sig.params.push(AbiParam::new(types::I64)); // slot0
+            sig.params.push(AbiParam::new(types::I32)); // method_idx
+            sig.returns.push(AbiParam::new(types::I32)); // func_id
+            sig
+        })?;
+        
+        // vo_set_closure_call_request(ctx, func_id, arg_start, resume_pc, ret_slots, arg_slots, closure_ref)
+        let set_closure_call_request = module.declare_function("vo_set_closure_call_request", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));        // ctx
+            sig.params.push(AbiParam::new(types::I32)); // func_id
+            sig.params.push(AbiParam::new(types::I32)); // arg_start
+            sig.params.push(AbiParam::new(types::I32)); // resume_pc
+            sig.params.push(AbiParam::new(types::I32)); // ret_slots
+            sig.params.push(AbiParam::new(types::I32)); // arg_slots
+            sig.params.push(AbiParam::new(types::I64)); // closure_ref
+            sig
+        })?;
+        
+        // vo_set_iface_call_request(ctx, func_id, arg_start, resume_pc, ret_slots, arg_slots, iface_recv)
+        let set_iface_call_request = module.declare_function("vo_set_iface_call_request", Import, &{
+            let mut sig = Signature::new(module.target_config().default_call_conv);
+            sig.params.push(AbiParam::new(ptr));        // ctx
+            sig.params.push(AbiParam::new(types::I32)); // func_id
+            sig.params.push(AbiParam::new(types::I32)); // arg_start
+            sig.params.push(AbiParam::new(types::I32)); // resume_pc
+            sig.params.push(AbiParam::new(types::I32)); // ret_slots
+            sig.params.push(AbiParam::new(types::I32)); // arg_slots
+            sig.params.push(AbiParam::new(types::I64)); // iface_recv
             sig
         })?;
         
@@ -754,7 +774,7 @@ impl JitCompiler {
         })?;
         
         Ok(HelperFuncIds {
-            call_vm, gc_alloc, write_barrier, call_closure, call_iface, panic, call_extern,
+            call_vm, gc_alloc, write_barrier, closure_get_func_id, iface_get_func_id, set_closure_call_request, set_iface_call_request, panic, call_extern,
             str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
             ptr_clone, closure_new, chan_new, chan_len, chan_cap, port_new, port_len, port_cap, array_new, array_len,
             slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
@@ -769,8 +789,10 @@ impl JitCompiler {
             call_vm: Some(self.module.declare_func_in_func(self.helper_funcs.call_vm, &mut self.ctx.func)),
             gc_alloc: Some(self.module.declare_func_in_func(self.helper_funcs.gc_alloc, &mut self.ctx.func)),
             write_barrier: Some(self.module.declare_func_in_func(self.helper_funcs.write_barrier, &mut self.ctx.func)),
-            call_closure: Some(self.module.declare_func_in_func(self.helper_funcs.call_closure, &mut self.ctx.func)),
-            call_iface: Some(self.module.declare_func_in_func(self.helper_funcs.call_iface, &mut self.ctx.func)),
+            closure_get_func_id: Some(self.module.declare_func_in_func(self.helper_funcs.closure_get_func_id, &mut self.ctx.func)),
+            iface_get_func_id: Some(self.module.declare_func_in_func(self.helper_funcs.iface_get_func_id, &mut self.ctx.func)),
+            set_closure_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_closure_call_request, &mut self.ctx.func)),
+            set_iface_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_iface_call_request, &mut self.ctx.func)),
             panic: Some(self.module.declare_func_in_func(self.helper_funcs.panic, &mut self.ctx.func)),
             call_extern: Some(self.module.declare_func_in_func(self.helper_funcs.call_extern, &mut self.ctx.func)),
             str_new: Some(self.module.declare_func_in_func(self.helper_funcs.str_new, &mut self.ctx.func)),

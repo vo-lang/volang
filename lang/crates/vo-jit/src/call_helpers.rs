@@ -65,34 +65,132 @@ pub struct CallConfig {
 
 /// Emit a closure call instruction.
 /// 
-/// NOTE: CallClosure is currently NOT jittable (see is_func_jittable).
-/// This function exists as a placeholder for Phase 5 unified dispatch implementation.
-/// Until then, functions with CallClosure will fall back to VM execution.
-#[allow(dead_code)]
+/// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
+/// 
+/// Strategy (Phase 4 MVP): Always use VM fallback via Call mechanism.
+/// JIT-to-JIT direct calls for closures will be Phase 5.
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
-    _emitter: &mut E,
-    _inst: &Instruction,
+    emitter: &mut E,
+    inst: &Instruction,
     _config: CallConfig,
 ) {
-    // CallClosure is excluded from JIT in is_func_jittable() until Phase 5.
-    // If we reach here, something is wrong with the jittability check.
-    unreachable!("CallClosure should not be JIT-compiled until Phase 5 unified dispatch")
+    let closure_slot = inst.a as usize;
+    let arg_start = inst.b as usize;
+    let arg_slots = (inst.c >> 8) as usize;
+    let ret_slots = (inst.c & 0xFF) as usize;
+    
+    let ctx = emitter.ctx_param();
+    
+    // Read closure_ref
+    let closure_ref = emitter.read_var(closure_slot as u16);
+    
+    // Check nil closure
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let is_nil = emitter.builder().ins().icmp(IntCC::Equal, closure_ref, zero);
+    let nil_block = emitter.builder().create_block();
+    let continue_block = emitter.builder().create_block();
+    emitter.builder().ins().brif(is_nil, nil_block, &[], continue_block, &[]);
+    
+    // Nil closure -> panic
+    emitter.builder().switch_to_block(nil_block);
+    emitter.builder().seal_block(nil_block);
+    let panic_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
+    emitter.builder().ins().return_(&[panic_result]);
+    
+    emitter.builder().switch_to_block(continue_block);
+    emitter.builder().seal_block(continue_block);
+    
+    // Spill all variables to fiber.stack before returning Call
+    // This ensures args are in memory where VM expects them
+    emitter.spill_all_vars();
+    
+    // Get func_id from closure
+    let closure_get_func_id = emitter.helpers().closure_get_func_id.expect("closure_get_func_id helper not registered");
+    let call = emitter.builder().ins().call(closure_get_func_id, &[closure_ref]);
+    let func_id = emitter.builder().inst_results(call)[0];
+    
+    // Call vo_set_closure_call_request to set up VM fallback
+    let set_closure_call_request = emitter.helpers().set_closure_call_request.expect("set_closure_call_request helper not registered");
+    let arg_start_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
+    let resume_pc = emitter.current_pc() + 1;
+    let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
+    let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
+    let arg_slots_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
+    
+    emitter.builder().ins().call(
+        set_closure_call_request,
+        &[ctx, func_id, arg_start_val, resume_pc_val, ret_slots_val, arg_slots_val, closure_ref]
+    );
+    
+    // Return Call to let VM handle the closure call
+    let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
+    emitter.builder().ins().return_(&[call_result]);
+    
+    // Create a dummy continuation block for any instructions after this call.
+    // This block is unreachable since we always return Call.
+    // VM will handle those instructions after closure call completes.
+    let continuation = emitter.builder().create_block();
+    emitter.builder().switch_to_block(continuation);
+    emitter.builder().seal_block(continuation);
 }
 
 /// Emit an interface method call instruction.
 /// 
-/// NOTE: CallIface is currently NOT jittable (see is_func_jittable).
-/// This function exists as a placeholder for Phase 5 unified dispatch implementation.
-/// Until then, functions with CallIface will fall back to VM execution.
-#[allow(dead_code)]
+/// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
+///            inst.flags = method_idx
+/// 
+/// Strategy (Phase 4 MVP): Always use VM fallback via Call mechanism.
+/// JIT-to-JIT direct calls for interface methods will be Phase 5.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
-    _emitter: &mut E,
-    _inst: &Instruction,
+    emitter: &mut E,
+    inst: &Instruction,
     _config: CallConfig,
 ) {
-    // CallIface is excluded from JIT in is_func_jittable() until Phase 5.
-    // If we reach here, something is wrong with the jittability check.
-    unreachable!("CallIface should not be JIT-compiled until Phase 5 unified dispatch")
+    let iface_slot = inst.a as usize;
+    let arg_start = inst.b as usize;
+    let arg_slots = (inst.c >> 8) as usize;
+    let ret_slots = (inst.c & 0xFF) as usize;
+    let method_idx = inst.flags as u32;
+    
+    let ctx = emitter.ctx_param();
+    
+    // Read interface slots
+    let slot0 = emitter.read_var(iface_slot as u16);
+    let slot1 = emitter.read_var((iface_slot + 1) as u16);
+    
+    // Spill all variables to fiber.stack before returning Call
+    emitter.spill_all_vars();
+    
+    // Get func_id from itab
+    let iface_get_func_id = emitter.helpers().iface_get_func_id.expect("iface_get_func_id helper not registered");
+    let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
+    let call = emitter.builder().ins().call(iface_get_func_id, &[ctx, slot0, method_idx_val]);
+    let func_id = emitter.builder().inst_results(call)[0];
+    
+    // Call vo_set_iface_call_request to set up VM fallback
+    // slot1 is the receiver value
+    let set_iface_call_request = emitter.helpers().set_iface_call_request.expect("set_iface_call_request helper not registered");
+    let arg_start_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
+    let resume_pc = emitter.current_pc() + 1;
+    let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
+    let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
+    let arg_slots_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
+    
+    emitter.builder().ins().call(
+        set_iface_call_request,
+        &[ctx, func_id, arg_start_val, resume_pc_val, ret_slots_val, arg_slots_val, slot1]
+    );
+    
+    // Return Call to let VM handle the interface call
+    let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
+    emitter.builder().ins().return_(&[call_result]);
+    
+    // Create a dummy continuation block for any instructions after this call.
+    // This block is unreachable since we always return Call.
+    // VM will handle those instructions after interface call completes.
+    let continuation = emitter.builder().create_block();
+    emitter.builder().switch_to_block(continuation);
+    emitter.builder().seal_block(continuation);
 }
 
 /// Emit an extern function call instruction.

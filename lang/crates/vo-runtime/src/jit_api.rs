@@ -141,6 +141,19 @@ pub struct JitContext {
     /// Call request: number of return slots caller expects
     pub call_ret_slots: u16,
     
+    /// Call request: call kind (0=regular, 1=closure, 2=iface, 253=yield, 254=block)
+    pub call_kind: u8,
+    
+    /// Call request: actual number of arg slots passed by caller
+    pub call_arg_slots: u16,
+    
+    /// Call request: for closure calls, the closure GcRef
+    /// Used to compute call_layout for slot0 and arg_offset
+    pub call_closure_ref: u64,
+    
+    /// Call request: for iface calls, the receiver value (slot1)
+    pub call_iface_recv: u64,
+    
     /// I/O wait token (for WaitIo result).
     /// Set by jit_call_extern when extern returns WaitIo.
     #[cfg(feature = "std")]
@@ -184,10 +197,26 @@ impl JitContext {
     pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
     pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
+    pub const OFFSET_CALL_KIND: i32 = std::mem::offset_of!(JitContext, call_kind) as i32;
+    pub const OFFSET_CALL_CLOSURE_REF: i32 = std::mem::offset_of!(JitContext, call_closure_ref) as i32;
+    pub const OFFSET_CALL_IFACE_RECV: i32 = std::mem::offset_of!(JitContext, call_iface_recv) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
     
+    // JitResult constants for Call infrastructure
+    pub const JIT_RESULT_OK: u32 = 0;
+    pub const JIT_RESULT_PANIC: u32 = 1;
+    pub const JIT_RESULT_CALL: u32 = 2;
+    pub const JIT_RESULT_WAIT_IO: u32 = 3;
+
+    // call_kind constants
+    pub const CALL_KIND_REGULAR: u8 = 0;
+    pub const CALL_KIND_CLOSURE: u8 = 1;
+    pub const CALL_KIND_IFACE: u8 = 2;
+    pub const CALL_KIND_YIELD: u8 = 253;
+    pub const CALL_KIND_BLOCK: u8 = 254;
+
     // Fiber stack access offsets
     pub const OFFSET_STACK_PTR: i32 = std::mem::offset_of!(JitContext, stack_ptr) as i32;
     pub const OFFSET_STACK_CAP: i32 = std::mem::offset_of!(JitContext, stack_cap) as i32;
@@ -350,6 +379,57 @@ pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_st
         (*ctx).call_arg_start = arg_start as u16;
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
+        (*ctx).call_kind = JitContext::CALL_KIND_REGULAR;
+    }
+}
+
+/// Called by JIT for closure call that needs VM fallback.
+/// 
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+#[no_mangle]
+pub extern "C" fn vo_set_closure_call_request(
+    ctx: *mut JitContext,
+    func_id: u32,
+    arg_start: u32,
+    resume_pc: u32,
+    ret_slots: u32,
+    arg_slots: u32,
+    closure_ref: u64,
+) {
+    unsafe {
+        (*ctx).call_func_id = func_id;
+        (*ctx).call_arg_start = arg_start as u16;
+        (*ctx).call_resume_pc = resume_pc;
+        (*ctx).call_ret_slots = ret_slots as u16;
+        (*ctx).call_kind = JitContext::CALL_KIND_CLOSURE;
+        (*ctx).call_arg_slots = arg_slots as u16;
+        (*ctx).call_closure_ref = closure_ref;
+    }
+}
+
+/// Called by JIT for interface call that needs VM fallback.
+/// 
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+#[no_mangle]
+pub extern "C" fn vo_set_iface_call_request(
+    ctx: *mut JitContext,
+    func_id: u32,
+    arg_start: u32,
+    resume_pc: u32,
+    ret_slots: u32,
+    arg_slots: u32,
+    iface_recv: u64,
+) {
+    unsafe {
+        (*ctx).call_func_id = func_id;
+        (*ctx).call_arg_start = arg_start as u16;
+        (*ctx).call_resume_pc = resume_pc;
+        (*ctx).call_ret_slots = ret_slots as u16;
+        (*ctx).call_kind = JitContext::CALL_KIND_IFACE;
+        (*ctx).call_arg_slots = arg_slots as u16;
+        (*ctx).call_iface_recv = iface_recv;
     }
 }
 
@@ -450,22 +530,29 @@ pub extern "C" fn vo_call_extern(
     call_fn(ctx, ctx_ref.extern_registry, ctx_ref.gc, ctx_ref.module as *const c_void, extern_id, args, arg_count, ret, ret_slots)
 }
 
-/// STUB: CallClosure excluded from JIT until Phase 5.
+/// Get func_id from closure. Returns 0 if closure_ref is nil.
 #[no_mangle]
-pub extern "C" fn vo_call_closure(
-    _ctx: *mut JitContext, _closure_ref: u64, _args: *const u64, _arg_count: u32,
-    _ret: *mut u64, _ret_count: u32,
-) -> JitResult {
-    unreachable!("vo_call_closure: CallClosure excluded from JIT")
+pub extern "C" fn vo_closure_get_func_id(closure_ref: u64) -> u32 {
+    use crate::objects::closure;
+    use crate::gc::GcRef;
+    
+    if closure_ref == 0 {
+        return 0; // Will cause nil pointer panic in JIT
+    }
+    
+    closure::func_id(closure_ref as GcRef)
 }
 
-/// STUB: CallIface excluded from JIT until Phase 5.
+/// Get func_id from interface method. Looks up via itab cache.
 #[no_mangle]
-pub extern "C" fn vo_call_iface(
-    _ctx: *mut JitContext, _iface_slot0: u64, _iface_slot1: u64, _method_idx: u32,
-    _args: *const u64, _arg_count: u32, _ret: *mut u64, _ret_count: u32, _func_id_hint: u32,
-) -> JitResult {
-    unreachable!("vo_call_iface: CallIface excluded from JIT")
+pub extern "C" fn vo_iface_get_func_id(ctx: *mut JitContext, slot0: u64, method_idx: u32) -> u32 {
+    use crate::objects::interface;
+    
+    let ctx_ref = unsafe { &*ctx };
+    let itab_cache = unsafe { &*ctx_ref.itab_cache };
+    
+    let itab_id = interface::unpack_itab_id(slot0);
+    itab_cache.lookup_method(itab_id, method_idx as usize)
 }
 
 // =============================================================================
@@ -1203,8 +1290,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
         ("vo_call_vm", vo_call_vm as *const u8),
-        ("vo_call_closure", vo_call_closure as *const u8),
-        ("vo_call_iface", vo_call_iface as *const u8),
+        ("vo_closure_get_func_id", vo_closure_get_func_id as *const u8),
+        ("vo_iface_get_func_id", vo_iface_get_func_id as *const u8),
+        ("vo_set_closure_call_request", vo_set_closure_call_request as *const u8),
+        ("vo_set_iface_call_request", vo_set_iface_call_request as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),
