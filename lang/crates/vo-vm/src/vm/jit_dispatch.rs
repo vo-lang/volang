@@ -3,15 +3,18 @@
 //! ## Overview
 //!
 //! When VM encounters a `Call` instruction for a JIT-compiled function:
-//! 1. `dispatch_jit_call` prepares args/ret buffers and VM frame
-//! 2. JIT function executes natively
-//! 3. Results (Ok/Panic) are translated back to VM state
+//! 1. `dispatch_jit_call` allocates frame in fiber.stack and prepares JitContext
+//! 2. JIT function executes natively, using fiber.stack directly
+//! 3. Results (Ok/Panic/Call/WaitIo) are translated back to VM state
 //!
-//! ## Current Limitations (Step 1)
+//! ## fiber.stack ABI
 //!
-//! - `JitResult::Call` not yet handled (needs Step 2: resume stack)
-//! - `JitResult::WaitIo` not yet handled (needs Step 3: shadow frames)
-//! - `CallExtern` excluded from JIT compilation
+//! JIT functions store all locals in `fiber.stack[jit_bp..]`, not in separate buffers.
+//! This enables seamless continuation when JIT returns `Call` (VM fallback needed).
+//!
+//! Key functions:
+//! - `jit_push_frame`: Push callee frame, also sets caller's resume PC
+//! - `jit_pop_frame`: Pop callee frame after successful return
 
 use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Instruction;

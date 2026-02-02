@@ -411,18 +411,7 @@ impl<'a> FunctionCompiler<'a> {
         
         // Call vo_jit_push_frame to allocate callee frame in fiber.stack
         // Also passes caller_resume_pc to update caller's frame.pc for nested Call handling
-        // Returns: callee_args_ptr (pointer to new frame in fiber.stack)
-        let push_frame_sig = self.builder.func.import_signature({
-            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
-            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
-            sig
-        });
+        let push_frame_sig = crate::call_helpers::import_push_frame_sig(self);
         
         let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
         let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
@@ -461,22 +450,15 @@ impl<'a> FunctionCompiler<'a> {
             let func_ptr_addr = self.builder.ins().iadd(jit_func_table, offset);
             let jit_func_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
             
-            let sig = self.builder.func.import_signature({
-                let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-                sig
-            });
+            let sig = crate::call_helpers::import_jit_func_sig(self);
             
             let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
         
-        // Check result: OK=0, Panic=1, Call=2, WaitIo=3
-        let zero = self.builder.ins().iconst(types::I32, 0);
-        let is_ok = self.builder.ins().icmp(IntCC::Equal, result, zero);
+        // Check result: only OK should continue, all others propagate
+        let ok_val = self.builder.ins().iconst(types::I32, crate::call_helpers::JIT_RESULT_OK as i64);
+        let is_ok = self.builder.ins().icmp(IntCC::Equal, result, ok_val);
         
         let non_ok_block = self.builder.create_block();
         let ok_block = self.builder.create_block();
@@ -497,11 +479,7 @@ impl<'a> FunctionCompiler<'a> {
         let pop_frame_fn_ptr = self.builder.ins().load(
             types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
         );
-        let pop_frame_sig = self.builder.func.import_signature({
-            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-            sig
-        });
+        let pop_frame_sig = crate::call_helpers::import_pop_frame_sig(self);
         self.builder.ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
         
         // Copy return values to caller's frame

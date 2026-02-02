@@ -3,7 +3,7 @@
 //! This module consolidates call_closure, call_iface, and related logic
 //! to ensure consistent behavior and reduce bug risk from code duplication.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
 
 use vo_runtime::instruction::Instruction;
@@ -11,7 +11,51 @@ use vo_runtime::jit_api::JitContext;
 
 use crate::translator::IrEmitter;
 
+// JitResult constants for readability
+pub const JIT_RESULT_OK: i32 = 0;
+pub const JIT_RESULT_PANIC: i32 = 1;
+pub const JIT_RESULT_CALL: i32 = 2;
+pub const JIT_RESULT_WAIT_IO: i32 = 3;
+
+/// Create signature for vo_jit_push_frame: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
+pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
+        sig
+    })
+}
+
+/// Create signature for vo_jit_pop_frame: (ctx) -> ()
+pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig
+    })
+}
+
+/// Create signature for JIT function: (ctx, args_ptr, ret_ptr) -> JitResult
+pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // args_ptr
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
+        sig
+    })
+}
+
 /// Configuration for call emission - captures the differences between compilers.
+/// NOTE: Currently only used by placeholder functions (emit_call_closure, emit_call_iface).
+#[allow(dead_code)]
 pub struct CallConfig {
     /// Resume PC to store before call (for WaitIo handling). None = don't set.
     pub resume_pc: Option<usize>,
@@ -103,8 +147,8 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         let call = emitter.builder().ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
         let result = emitter.builder().inst_results(call)[0];
         
-        // Check for WaitIo (result == 3)
-        let wait_io_val = emitter.builder().ins().iconst(types::I32, 3);
+        // Check for WaitIo
+        let wait_io_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_WAIT_IO as i64);
         let is_wait_io = emitter.builder().ins().icmp(IntCC::Equal, result, wait_io_val);
         
         let wait_io_block = emitter.builder().create_block();
@@ -177,8 +221,8 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     
     emitter.builder().ins().call(set_call_request_func, &[ctx, func_id_val, arg_start_val, resume_pc_val, ret_slots_val]);
     
-    // Return JitResult::Call = 2
-    let call_result = emitter.builder().ins().iconst(types::I32, 2);
+    // Return JitResult::Call
+    let call_result = emitter.builder().ins().iconst(types::I32, JIT_RESULT_CALL as i64);
     emitter.builder().ins().return_(&[call_result]);
 }
 
@@ -235,17 +279,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     
     // Call vo_jit_push_frame to allocate callee frame in fiber.stack
     // Also passes caller_resume_pc to update caller's frame.pc for nested Call handling
-    let push_frame_sig = emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
-        sig
-    });
+    let push_frame_sig = import_push_frame_sig(emitter);
     
     let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
     let local_slots_val = emitter.builder().ins().iconst(types::I32, config.callee_local_slots as i64);
@@ -302,22 +336,15 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
     
-    // Create signature for JIT function: (ctx, args, ret) -> i32
-    let sig = emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-        sig
-    });
+    // Create signature for JIT function: (ctx, args, ret) -> JitResult
+    let sig = import_jit_func_sig(emitter);
     
     let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]);
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
     // Check result: only OK should continue, all others propagate
-    let zero_jit = emitter.builder().ins().iconst(types::I32, 0);
-    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, zero_jit);
+    let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, ok_val);
     
     let jit_non_ok_block = emitter.builder().create_block();
     let jit_ok_block = emitter.builder().create_block();
@@ -350,8 +377,8 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let vm_result = emitter.builder().inst_results(vm_call)[0];
     
     // Check VM result for panic
-    let one_vm = emitter.builder().ins().iconst(types::I32, 1);
-    let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, one_vm);
+    let panic_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
+    let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, panic_val);
     
     let vm_panic_block = emitter.builder().create_block();
     let vm_ok_block = emitter.builder().create_block();
@@ -377,11 +404,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let pop_frame_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
     );
-    let pop_frame_sig = emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-        sig
-    });
+    let pop_frame_sig = import_pop_frame_sig(emitter);
     emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
     
     // Copy return values to caller's frame
@@ -406,8 +429,8 @@ fn check_call_result<'a, E: IrEmitter<'a>>(
     let ok_block = emitter.builder().create_block();
     let non_ok_block = emitter.builder().create_block();
     
-    let zero = emitter.builder().ins().iconst(types::I32, 0);
-    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, result, zero);
+    let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, result, ok_val);
     emitter.builder().ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
     
     // Non-Ok path
