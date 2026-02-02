@@ -52,48 +52,181 @@ Redesign the JIT calling convention so that *all JIT frames live in `fiber.stack
 
 ## Milestone 1: Freeze ABI + invariants
 
-- Define a strict ABI for JIT functions:
-  - `args_ptr` points to the beginning of the current JIT frame region in `fiber.stack`.
-  - Decide whether `ret_ptr` is also in `fiber.stack` (recommended).
-- Define invariants:
-  - If a JIT function returns `Call/WaitIo`, the VM can reconstruct everything from `fiber.stack` + `fiber.frames` + fields in `JitContext`.
-  - No Cranelift-only stack slots may be used as the source of truth for state that must be visible to the VM.
+### JIT Function Signature (unchanged)
+```c
+JitResult jit_func(JitContext* ctx, u64* args_ptr, u64* ret_ptr);
+```
 
-Deliverable: this note (and code asserts/unreachable points enforcing invariants).
+### ABI Rules
+
+1. **`args_ptr` MUST point to `fiber.stack[frame.bp]`**
+   - For top-level JIT call: VM sets `args_ptr = fiber.stack_ptr + jit_bp`
+   - For nested JIT-to-JIT call: caller allocates frame via runtime helper, gets new `args_ptr`
+
+2. **`ret_ptr` points to a temporary buffer**
+   - Caller allocates (Cranelift stack slot or heap)
+   - Return values copied to `fiber.stack[caller_bp + ret_reg]` after call completes
+
+3. **`fiber.stack` is the single source of truth for locals**
+   - No Cranelift `locals_slot` as authoritative storage
+   - `read_var(slot)` = `load(args_ptr + slot * 8)`
+   - `write_var(slot, val)` = `store(val, args_ptr + slot * 8)`
+
+### Invariants
+
+- If JIT returns `Call/WaitIo`, VM can restore state from `fiber.stack` + `fiber.frames` alone
+- JIT-to-JIT calls MUST push a frame via runtime helper (not use private Cranelift slots)
+- `emit_variable_spill()` becomes a no-op (already in `fiber.stack`)
+
+Deliverable: this note + code implementation.
 
 ## Milestone 2: Extend `JitContext` (vo-runtime)
 
-- Add the minimal fields needed for the JIT to reason about fiber stack layout:
-  - `stack_ptr: *mut u64` (base pointer to `fiber.stack`)
-  - `jit_bp: u32` (current JIT frame base)
-  - `jit_sp: u32` (current fiber.sp)
-- Add corresponding `OFFSET_*` constants.
-- Consider adding runtime helpers to manage frames from JIT (if JIT-to-JIT calls need to push/pop frames safely):
-  - `vo_jit_push_frame(...)`
-  - `vo_jit_pop_frame(...)`
+Add fields for JIT to access fiber stack:
+
+```rust
+// In JitContext:
+pub stack_ptr: *mut u64,      // fiber.stack.as_mut_ptr()
+pub stack_cap: u32,           // fiber.stack.len() (capacity)
+pub jit_bp: u32,              // current frame base pointer
+```
+
+Add runtime helper for JIT-to-JIT frame management:
+
+```rust
+/// Push a new frame for JIT-to-JIT call.
+/// Returns: args_ptr for the new frame (fiber.stack_ptr + new_bp)
+/// 
+/// This function:
+/// 1. Ensures fiber.stack has capacity for local_slots
+/// 2. Zeros the new frame region
+/// 3. Updates fiber.sp
+/// 4. Pushes CallFrame to fiber.frames
+/// 5. Updates ctx.jit_bp
+#[no_mangle]
+pub extern "C" fn vo_jit_push_frame(
+    ctx: *mut JitContext,
+    func_id: u32,
+    local_slots: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+) -> *mut u64;
+
+/// Pop the current JIT frame after callee returns.
+/// Restores ctx.jit_bp to caller's bp.
+#[no_mangle]
+pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext);
+```
+
+Note: `stack_cap` allows JIT to do inline capacity check before pushing frame.
 
 ## Milestone 3: Refactor VM JIT dispatch (vo-vm)
 
-- In `dispatch_jit_call`:
-  - Stop building `args: Vec<u64>` as the execution state.
-  - Allocate a JIT frame region directly in `fiber.stack` (`jit_bp = fiber.sp`, `sp += local_slots`).
-  - Copy caller args into the correct positions inside `fiber.stack[jit_bp + ...]`.
-  - Pass `args_ptr = fiber.stack_ptr().add(jit_bp)` to the JIT function.
-  - Fill `JitContext.stack_ptr/jit_bp/jit_sp` before calling.
-- In `handle_jit_result(Call/WaitIo)`:
-  - Remove the "copy args buffer back" step (state is already in `fiber.stack`).
-  - Use `ctx.call_*` fields to push a real VM call frame (like `exec_call`).
+### `dispatch_jit_call` changes:
+
+```rust
+// Before (wrong):
+let mut args: Vec<u64> = vec![0u64; local_slots];
+// copy caller args to args buffer
+jit_func(ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+
+// After (correct):
+let jit_bp = fiber.sp;
+fiber.ensure_capacity(jit_bp + local_slots);
+fiber.sp = jit_bp + local_slots;
+// copy caller args directly to fiber.stack[jit_bp..]
+let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
+// fill ctx fields
+ctx.stack_ptr = fiber.stack_ptr();
+ctx.stack_cap = fiber.stack.len() as u32;
+ctx.jit_bp = jit_bp as u32;
+jit_func(ctx, args_ptr, ret.as_mut_ptr());
+```
+
+### `handle_jit_result(Call)` changes:
+
+```rust
+// Before: copy args back to fiber.stack (no longer needed)
+// for (i, &val) in args.iter().enumerate() {
+//     fiber.stack[jit_bp + i] = val;
+// }
+
+// After: state is already in fiber.stack, just push callee frame
+// (existing code for pushing CallFrame is mostly unchanged)
+```
+
+### `handle_jit_result(WaitIo)` changes:
+
+Same as Call - no copy needed, state already in fiber.stack.
 
 ## Milestone 4: Refactor JIT codegen (vo-jit)
 
-- Remove the reliance on Cranelift `locals_slot` as the authoritative state.
-- Update variable accessors:
-  - `read_var(slot)` loads from `args_ptr + slot*8`.
-  - `write_var(slot,val)` stores to `args_ptr + slot*8` (and optionally keeps SSA var for performance).
-  - `var_addr(slot)` returns `args_ptr + slot*8`.
-- Update call paths:
-  - JIT-to-JIT calls must use VM-visible stack regions for callee args/locals.
-  - Self-recursive optimization must also allocate a callee frame region rather than using Cranelift stack slots.
+### Remove `locals_slot` as source of truth
+
+```rust
+// Before: locals_slot is a Cranelift stack slot
+fn emit_prologue(&mut self) {
+    let slot = self.builder.create_sized_stack_slot(...);
+    self.locals_slot = Some(slot);
+    // Load params from args into locals_slot
+}
+
+// After: args_ptr IS the frame in fiber.stack, no separate locals_slot needed
+fn emit_prologue(&mut self) {
+    // args_ptr (param[1]) already points to fiber.stack[bp]
+    // Params are already there, nothing to copy
+    // Just initialize SSA vars from args_ptr for register allocation
+}
+```
+
+### Variable access changes
+
+```rust
+// read_var: load from fiber.stack via args_ptr
+fn read_var(&mut self, slot: u16) -> Value {
+    let args_ptr = self.args_ptr_param();  // block_params[1]
+    self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+}
+
+// write_var: store to fiber.stack via args_ptr
+fn write_var(&mut self, slot: u16, val: Value) {
+    let args_ptr = self.args_ptr_param();
+    self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+}
+
+// var_addr: compute address in fiber.stack
+fn var_addr(&mut self, slot: u16) -> Value {
+    let args_ptr = self.args_ptr_param();
+    self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
+}
+```
+
+### JIT-to-JIT call changes
+
+```rust
+// Before: use Cranelift stack slots for callee args
+let arg_slot = builder.create_sized_stack_slot(...);
+let args_ptr = builder.ins().stack_addr(arg_slot, 0);
+call_indirect(jit_func_ptr, [ctx, args_ptr, ret_ptr]);
+
+// After: use runtime helper to allocate frame in fiber.stack
+let push_frame_func = self.helpers.push_frame.unwrap();
+let callee_args_ptr = builder.ins().call(push_frame_func, [ctx, func_id, local_slots, ret_reg, ret_slots]);
+// Copy args to callee_args_ptr
+call_indirect(jit_func_ptr, [ctx, callee_args_ptr, ret_ptr]);
+// Pop frame after call
+let pop_frame_func = self.helpers.pop_frame.unwrap();
+builder.ins().call(pop_frame_func, [ctx]);
+```
+
+### `emit_variable_spill` becomes no-op
+
+```rust
+fn emit_variable_spill(&mut self) {
+    // No-op: variables are already in fiber.stack
+    // (Previously: copy locals_slot to args buffer)
+}
+```
 
 ## Milestone 5: Tests + validation
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::{types, Block, Function, FuncRef, InstBuilder, MemFlags, StackSlot, Value};
+use cranelift_codegen::ir::{types, Block, Function, FuncRef, InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::StackSlotData;
 use cranelift_codegen::ir::StackSlotKind;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -26,9 +26,10 @@ pub struct FunctionCompiler<'a> {
     current_pc: usize,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
-    locals_slot: Option<StackSlot>,
     /// FuncRef for self-recursive calls (direct call optimization)
     self_func_ref: Option<FuncRef>,
+    /// Saved jit_bp from function entry, used to recompute args_ptr after stack reallocation
+    saved_jit_bp: Option<Variable>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -56,8 +57,8 @@ impl<'a> FunctionCompiler<'a> {
             current_pc: 0,
             helpers,
             reg_consts: HashMap::new(),
-            locals_slot: None,
             self_func_ref,
+            saved_jit_bp: None,
         }
     }
 
@@ -124,23 +125,26 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Emit code to spill all variables to args buffer (fiber.stack).
-    /// Called before returning Call so VM can see/restore state.
+    /// Spill all variables to fiber.stack.
     /// 
-    /// IMPORTANT: We read from locals_slot instead of SSA variables because
-    /// some operations mutate locals via var_addr/SlotSet (memory) without
-    /// updating SSA variables. The locals_slot is the source of truth.
+    /// With the new fiber.stack ABI, args_ptr points directly to fiber.stack[jit_bp],
+    /// so all writes via write_var already go to fiber.stack. This is now a no-op.
     fn emit_variable_spill(&mut self) {
-        let args = self.builder.block_params(self.entry_block)[1];
-        if self.vars.is_empty() {
-            return;
-        }
-
-        let locals_slot = self.locals_slot.expect("spill_all_vars requires locals_slot");
-        for i in 0..self.vars.len() {
-            let val = self.builder.ins().stack_load(types::I64, locals_slot, (i * 8) as i32);
-            self.builder.ins().store(MemFlags::trusted(), val, args, (i * 8) as i32);
-        }
+        // No-op: variables are already stored in fiber.stack via args_ptr.
+        // The old design used a separate locals_slot that needed to be copied back.
+    }
+    
+    /// Compute args_ptr dynamically from ctx.stack_ptr + saved_jit_bp.
+    /// This is necessary because fiber.stack may reallocate during nested calls.
+    fn args_ptr(&mut self) -> Value {
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        let stack_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_STACK_PTR
+        );
+        let jit_bp = self.builder.use_var(self.saved_jit_bp.unwrap());
+        // args_ptr = stack_ptr + jit_bp * 8
+        let bp_offset = self.builder.ins().imul_imm(jit_bp, 8);
+        self.builder.ins().iadd(stack_ptr, bp_offset)
     }
 
     fn emit_prologue(&mut self) {
@@ -148,53 +152,44 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.seal_block(self.entry_block);
         
         let params = self.builder.block_params(self.entry_block);
-        let _ctx = params[0];
-        let args = params[1];
+        let ctx = params[0];
+        let args_ptr = params[1];  // Points directly to fiber.stack[jit_bp] at entry
         let _ret = params[2];
         
-        let num_slots = self.func_def.local_slots as usize;
+        // Save jit_bp from ctx at function entry.
+        // This is needed to recompute args_ptr after stack reallocation.
+        let jit_bp_var = Variable::from_u32((self.vars.len() + 1000) as u32);
+        self.builder.declare_var(jit_bp_var, types::I64);
+        // jit_bp is u32 in JitContext, load as i32 and extend to i64
+        let jit_bp_i32 = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+        );
+        let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
+        self.builder.def_var(jit_bp_var, jit_bp_i64);
+        self.saved_jit_bp = Some(jit_bp_var);
+        
         let param_slots = self.func_def.param_slots as usize;
         
-        // Create stack slot for locals (used by SlotGet/SlotSet for stack arrays)
-        let need_locals_slot = num_slots > 0;
-        let actual_slots = if need_locals_slot { num_slots } else { 0 };
+        // With the new fiber.stack ABI:
+        // - args_ptr points to fiber.stack[jit_bp]
+        // - VM has already zeroed the frame and copied params
+        // - No separate locals_slot needed
+        //
+        // We still use SSA variables for Cranelift register allocation.
+        // Initialize them by loading from args_ptr (fiber.stack).
+        // Use the entry args_ptr here since stack hasn't reallocated yet.
         
-        if need_locals_slot && actual_slots > 0 {
-            let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                (actual_slots * 8) as u32,
-                8,
-            ));
-            self.locals_slot = Some(slot);
+        // Load params from fiber.stack into SSA vars
+        for i in 0..param_slots {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+            self.builder.def_var(self.vars[i], val);
         }
         
-        // Normal entry initialization
-        if let Some(slot) = self.locals_slot {
-            // Initialize all slots to 0 (important for array initial values)
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            for i in 0..actual_slots {
-                self.builder.ins().stack_store(zero, slot, (i * 8) as i32);
-            }
-            
-            // Load params from args into both SSA vars and stack_slot
-            for i in 0..param_slots {
-                let offset = (i * 8) as i32;
-                let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args, offset);
-                self.builder.def_var(self.vars[i], val);
-                self.builder.ins().stack_store(val, slot, offset);
-            }
-            
-            // Initialize non-param SSA vars to 0
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            for i in param_slots..self.vars.len() {
-                self.builder.def_var(self.vars[i], zero);
-            }
-        } else {
-            // No locals slot, just initialize SSA vars
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            for i in 0..self.vars.len() {
-                self.builder.def_var(self.vars[i], zero);
-            }
+        // Initialize non-param SSA vars to 0 (fiber.stack is already zeroed by VM)
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        for i in param_slots..self.vars.len() {
+            self.builder.def_var(self.vars[i], zero);
         }
     }
 
@@ -254,20 +249,19 @@ impl<'a> FunctionCompiler<'a> {
         self.conditional_jump(inst, IntCC::Equal);
     }
 
-    /// Sync value to both SSA variable and locals_slot (for var_addr access after calls)
+    /// Sync value to both SSA variable and fiber.stack (via args_ptr).
     fn sync_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
-        if let Some(locals_slot) = self.locals_slot {
-            self.builder.ins().stack_store(val, locals_slot, (slot as i32) * 8);
-        }
+        // Store to fiber.stack via args_ptr
+        let args_ptr = self.args_ptr();
+        self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
     }
 
+    /// Load variable from fiber.stack via args_ptr.
+    /// This is the source of truth - always read from memory.
     fn load_var_from_locals(&mut self, slot: u16) -> Value {
-        if let Some(locals_slot) = self.locals_slot {
-            self.builder.ins().stack_load(types::I64, locals_slot, (slot as i32) * 8)
-        } else {
-            self.builder.use_var(self.vars[slot as usize])
-        }
+        let args_ptr = self.args_ptr();
+        self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
     }
 
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
@@ -298,12 +292,8 @@ impl<'a> FunctionCompiler<'a> {
             
             let mut ret_offset = 0i32;
             for i in 0..gcref_count {
-                // Read GcRef from locals_slot (must use stack because SSA may be corrupted after calls)
-                let gcref = if let Some(locals_slot) = self.locals_slot {
-                    self.builder.ins().stack_load(types::I64, locals_slot, ((gcref_start + i) * 8) as i32)
-                } else {
-                    self.builder.use_var(self.vars[gcref_start + i])
-                };
+                // Read GcRef from fiber.stack via args_ptr
+                let gcref = self.load_var_from_locals((gcref_start + i) as u16);
                 
                 // Get per-ref slot count from FunctionDef (supports mixed sizes)
                 let slots_for_this_ref = self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
@@ -316,7 +306,7 @@ impl<'a> FunctionCompiler<'a> {
                 }
             }
         } else {
-            // Normal return: read values directly from SSA variables
+            // Normal return: read values from fiber.stack via args_ptr
             let ret_slots = self.func_def.ret_slots as usize;
             let ret_reg = inst.a as usize;
             
@@ -373,6 +363,7 @@ impl<'a> FunctionCompiler<'a> {
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
+                callee_local_slots: target_func.local_slots as usize,
             });
             false // Block not terminated - we have a merge block for continuation
         } else {
@@ -389,35 +380,81 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
     
-    /// Optimized self-recursive call using direct call instead of call_indirect
+    /// Optimized self-recursive call using direct call instead of call_indirect.
+    /// 
+    /// With the new fiber.stack ABI, we must:
+    /// 1. Push a new frame in fiber.stack via vo_jit_push_frame
+    /// 2. Copy args from caller's frame to callee's frame
+    /// 3. Call the callee
+    /// 4. Pop the frame via vo_jit_pop_frame
+    /// 5. Copy return values back to caller's frame
     fn call_self_recursive(&mut self, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
         let func_ret_slots = target_func.ret_slots as usize;
+        let callee_local_slots = target_func.local_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
+        let caller_args_ptr = self.args_ptr();
         
-        // Use locals_slot for args and return values (not separate stack slots)
-        // This is critical: when callee returns Call and spills, the spilled data
-        // goes into callee's args buffer. If we used separate arg_slot, that data
-        // would be inaccessible to VM. By using locals_slot at arg_start, the
-        // spilled data will be in the correct location for VM to restore.
-        let locals_slot = self.locals_slot.expect("call_self_recursive requires locals_slot");
+        // IMPORTANT: Read args BEFORE calling push_frame, because push_frame may
+        // reallocate fiber.stack, making caller's args_ptr a dangling pointer.
+        let mut arg_values = Vec::with_capacity(arg_slots);
+        for i in 0..arg_slots {
+            let val = self.builder.ins().load(
+                types::I64, MemFlags::trusted(), caller_args_ptr, ((arg_start + i) * 8) as i32
+            );
+            arg_values.push(val);
+        }
         
-        // Create ret_slot for return values (this is OK since it's only used locally)
+        // Load push_frame_fn from JitContext
+        let push_frame_fn_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+        );
+        
+        // Call vo_jit_push_frame to allocate callee frame in fiber.stack
+        // Also passes caller_resume_pc to update caller's frame.pc for nested Call handling
+        // Returns: callee_args_ptr (pointer to new frame in fiber.stack)
+        let push_frame_sig = self.builder.func.import_signature({
+            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
+            sig
+        });
+        
+        let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
+        let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
+        let ret_reg_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
+        // Resume at current_pc + 1 (after this call instruction)
+        let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
+        
+        let push_call = self.builder.ins().call_indirect(
+            push_frame_sig, push_frame_fn_ptr,
+            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
+        );
+        let callee_args_ptr = self.builder.inst_results(push_call)[0];
+        
+        // Copy pre-read args to callee's frame
+        for (i, val) in arg_values.iter().enumerate() {
+            self.builder.ins().store(MemFlags::trusted(), *val, callee_args_ptr, (i * 8) as i32);
+        }
+        
+        // Create ret_slot for return values (temporary Cranelift slot, OK for local use)
         let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (func_ret_slots.max(1) * 8) as u32,
             8,
         ));
-        
-        let args_ptr = self.builder.ins().stack_addr(types::I64, locals_slot, (arg_start * 8) as i32);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         
-        // Use direct call if we have self_func_ref (much faster for recursion)
+        // Call callee (direct or indirect)
         let result = if let Some(func_ref) = self.self_func_ref {
-            // Direct call - no function table lookup needed
-            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
+            let call = self.builder.ins().call(func_ref, &[ctx, callee_args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         } else {
-            // Fallback to indirect call via function table
             let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
             let func_id_i64 = self.builder.ins().iconst(types::I64, self.func_id as i64);
             let offset = self.builder.ins().imul_imm(func_id_i64, 8);
@@ -433,12 +470,11 @@ impl<'a> FunctionCompiler<'a> {
                 sig
             });
             
-            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
         
         // Check result: OK=0, Panic=1, Call=2, WaitIo=3
-        // Only OK should continue, all others should be propagated
         let zero = self.builder.ins().iconst(types::I32, 0);
         let is_ok = self.builder.ins().icmp(IntCC::Equal, result, zero);
         
@@ -448,18 +484,27 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
         
         // Non-OK path: propagate result (Panic, Call, or WaitIo)
-        // We MUST spill here to copy our locals_slot (which contains callee's spilled data
-        // at arg_start..arg_start+callee_vars) to our args buffer. This ensures
-        // dispatch_jit_call can restore the complete state.
+        // Callee's frame is already in fiber.stack, VM will handle it
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
-        self.emit_variable_spill();
         self.builder.ins().return_(&[result]);
         
-        // OK path - load return values
+        // OK path - pop frame and copy return values
         self.builder.switch_to_block(ok_block);
         self.builder.seal_block(ok_block);
         
+        // Pop callee's frame
+        let pop_frame_fn_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
+        );
+        let pop_frame_sig = self.builder.func.import_signature({
+            let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+            sig
+        });
+        self.builder.ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
+        
+        // Copy return values to caller's frame
         for i in 0..call_ret_slots {
             let val = self.builder.ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
             self.sync_var((arg_start + i) as u16, val);
@@ -472,10 +517,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value { self.load_var_from_locals(slot) }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
-        // Also sync to stack_slot for SlotGet/SlotSet operations
-        if let Some(locals_slot) = self.locals_slot {
-            self.builder.ins().stack_store(val, locals_slot, (slot as i32) * 8);
-        }
+        // Store to fiber.stack via args_ptr
+        let args_ptr = self.args_ptr();
+        self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
     }
     fn ctx_param(&mut self) -> Value { self.builder.block_params(self.entry_block)[0] }
     fn gc_ptr(&mut self) -> Value {
@@ -493,8 +537,9 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { 1 }
     fn var_addr(&mut self, slot: u16) -> Value {
-        let locals_slot = self.locals_slot.expect("var_addr called but no locals_slot");
-        self.builder.ins().stack_addr(types::I64, locals_slot, (slot as i32) * 8)
+        // Return address in fiber.stack via args_ptr
+        let args_ptr = self.args_ptr();
+        self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
     }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();

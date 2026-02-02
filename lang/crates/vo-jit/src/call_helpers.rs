@@ -197,9 +197,18 @@ pub struct JitCallWithFallbackConfig {
     pub arg_slots: usize,
     pub call_ret_slots: usize,
     pub func_ret_slots: usize,
+    /// Callee's local_slots (from FunctionDef.local_slots)
+    pub callee_local_slots: usize,
 }
 
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
+/// 
+/// With the fiber.stack ABI, we must:
+/// 1. Push a new frame in fiber.stack via vo_jit_push_frame
+/// 2. Copy args from caller's frame to callee's frame
+/// 3. Call the callee (JIT or VM)
+/// 4. Pop the frame via vo_jit_pop_frame on success
+/// 5. Copy return values back to caller's frame
 /// 
 /// If jit_func_table[func_id] != null: direct JIT call
 /// If jit_func_table[func_id] == null: fallback to VM via call_vm helper
@@ -212,23 +221,58 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
     
-    // Create shared stack slots BEFORE branching to avoid phi node explosion
-    let arg_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (config.arg_slots.max(1) * 8) as u32,
-        8,
-    ));
+    // IMPORTANT: Read args BEFORE calling push_frame, because push_frame may
+    // reallocate fiber.stack, making caller's args_ptr a dangling pointer.
+    let mut arg_values = Vec::with_capacity(config.arg_slots);
+    for i in 0..config.arg_slots {
+        arg_values.push(emitter.read_var((config.arg_start + i) as u16));
+    }
+    
+    // Load push_frame_fn from JitContext
+    let push_frame_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+    );
+    
+    // Call vo_jit_push_frame to allocate callee frame in fiber.stack
+    // Also passes caller_resume_pc to update caller's frame.pc for nested Call handling
+    let push_frame_sig = emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // local_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
+        sig
+    });
+    
+    let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+    let local_slots_val = emitter.builder().ins().iconst(types::I32, config.callee_local_slots as i64);
+    let ret_reg_val = emitter.builder().ins().iconst(types::I32, config.arg_start as i64);
+    let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
+    // Resume at current_pc + 1 (after this call instruction)
+    let current_pc = emitter.current_pc();
+    let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, (current_pc + 1) as i64);
+    
+    let push_call = emitter.builder().ins().call_indirect(
+        push_frame_sig, push_frame_fn_ptr,
+        &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
+    );
+    let callee_args_ptr = emitter.builder().inst_results(push_call)[0];
+    
+    // Copy pre-read args to callee's frame
+    for (i, val) in arg_values.iter().enumerate() {
+        emitter.builder().ins().store(MemFlags::trusted(), *val, callee_args_ptr, (i * 8) as i32);
+    }
+    
+    // Create ret_slot for return values (temporary Cranelift slot, OK for local use)
     let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (config.func_ret_slots.max(1) * 8) as u32,
         8,
     ));
-    
-    // Store arguments to stack slot BEFORE branching
-    for i in 0..config.arg_slots {
-        let val = emitter.read_var((config.arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, arg_slot, (i * 8) as i32);
-    }
+    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
     // Load jit_func_table pointer from ctx
     let jit_func_table = emitter.builder().ins().load(
@@ -258,9 +302,6 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
     
-    let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
-    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
-    
     // Create signature for JIT function: (ctx, args, ret) -> i32
     let sig = emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -271,7 +312,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         sig
     });
     
-    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]);
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
     // Check result: only OK should continue, all others propagate
@@ -284,11 +325,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
     // JIT non-OK path - propagate result (Panic, Call, or WaitIo)
-    // We MUST spill here so that our state (including any callee spilled data
-    // in our locals_slot) gets copied to our args buffer for VM to restore.
+    // Callee's frame is already in fiber.stack, VM will handle it.
+    // NOTE: Caller's frame.pc was already set by push_frame to caller_resume_pc,
+    // so VM can continue at the right place after callee returns.
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
-    emitter.spill_all_vars();
     emitter.builder().ins().return_(&[jit_result]);
     
     // JIT OK path
@@ -301,13 +342,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(vm_call_block);
     
     let call_vm_func = emitter.helpers().call_vm.unwrap();
-    let args_ptr_vm = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
-    let ret_ptr_vm = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
-    let func_id_val = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+    let func_id_val_vm = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
     let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
     let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
     
-    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, args_ptr_vm, arg_count, ret_ptr_vm, ret_count]);
+    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val_vm, callee_args_ptr, arg_count, ret_ptr, ret_count]);
     let vm_result = emitter.builder().inst_results(vm_call)[0];
     
     // Check VM result for panic
@@ -330,10 +369,22 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(vm_ok_block);
     emitter.builder().ins().jump(merge_block, &[]);
     
-    // === Merge block ===
+    // === Merge block - pop frame and copy return values ===
     emitter.builder().switch_to_block(merge_block);
     emitter.builder().seal_block(merge_block);
     
+    // Pop callee's frame
+    let pop_frame_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
+    );
+    let pop_frame_sig = emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig
+    });
+    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
+    
+    // Copy return values to caller's frame
     for i in 0..config.call_ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
         emitter.write_var((config.arg_start + i) as u16, val);

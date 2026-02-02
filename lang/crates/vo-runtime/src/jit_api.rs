@@ -52,6 +52,21 @@ pub type VmCallFn = extern "C" fn(
     ret_count: u32,
 ) -> JitResult;
 
+/// Function pointer type for pushing a JIT frame.
+/// Also updates caller's frame.pc to caller_resume_pc for nested Call handling.
+/// Returns: args_ptr for the new frame (fiber.stack_ptr + new_bp)
+pub type JitPushFrameFn = extern "C" fn(
+    ctx: *mut JitContext,
+    func_id: u32,
+    local_slots: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+    caller_resume_pc: u32,
+) -> *mut u64;
+
+/// Function pointer type for popping a JIT frame.
+pub type JitPopFrameFn = extern "C" fn(ctx: *mut JitContext);
+
 #[repr(C)]
 pub struct JitContext {
     /// Pointer to the GC instance.
@@ -134,6 +149,30 @@ pub struct JitContext {
     /// Loop OSR exit PC. Set by loop function on normal exit.
     /// When loop returns JitResult::Ok, this contains the PC to resume at.
     pub loop_exit_pc: u32,
+    
+    // =========================================================================
+    // Fiber stack access (for JIT-to-JIT calls with proper frame management)
+    // =========================================================================
+    
+    /// Pointer to fiber.stack base (fiber.stack.as_mut_ptr()).
+    /// Updated by VM before each JIT call.
+    pub stack_ptr: *mut u64,
+    
+    /// Capacity of fiber.stack (fiber.stack.len()).
+    /// Allows JIT to check if frame push needs reallocation.
+    pub stack_cap: u32,
+    
+    /// Current JIT frame base pointer (index into fiber.stack).
+    /// Updated by vo_jit_push_frame / vo_jit_pop_frame.
+    pub jit_bp: u32,
+    
+    /// Callback to push a JIT frame for nested JIT-to-JIT calls.
+    /// Set by VM when creating JitContext.
+    pub push_frame_fn: Option<JitPushFrameFn>,
+    
+    /// Callback to pop a JIT frame after callee returns.
+    /// Set by VM when creating JitContext.
+    pub pop_frame_fn: Option<JitPopFrameFn>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -144,9 +183,17 @@ impl JitContext {
     pub const OFFSET_CALL_FUNC_ID: i32 = std::mem::offset_of!(JitContext, call_func_id) as i32;
     pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
+    pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
+    
+    // Fiber stack access offsets
+    pub const OFFSET_STACK_PTR: i32 = std::mem::offset_of!(JitContext, stack_ptr) as i32;
+    pub const OFFSET_STACK_CAP: i32 = std::mem::offset_of!(JitContext, stack_cap) as i32;
+    pub const OFFSET_JIT_BP: i32 = std::mem::offset_of!(JitContext, jit_bp) as i32;
+    pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
+    pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
 }
 
 // =============================================================================
@@ -303,6 +350,51 @@ pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_st
         (*ctx).call_arg_start = arg_start as u16;
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
+    }
+}
+
+/// Push a new frame for JIT-to-JIT call.
+/// 
+/// This function:
+/// 1. Ensures fiber.stack has capacity for local_slots
+/// 2. Zeros the new frame region
+/// 3. Updates fiber.sp
+/// 4. Pushes CallFrame to fiber.frames
+/// 5. Updates ctx.jit_bp and ctx.stack_ptr (in case of reallocation)
+///
+/// # Returns
+/// args_ptr for the new frame (fiber.stack_ptr + new_bp)
+///
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+/// - `ctx.push_frame_fn` must be set
+#[no_mangle]
+pub extern "C" fn vo_jit_push_frame(
+    ctx: *mut JitContext,
+    func_id: u32,
+    local_slots: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+    caller_resume_pc: u32,
+) -> *mut u64 {
+    let ctx_ref = unsafe { &*ctx };
+    match ctx_ref.push_frame_fn {
+        Some(f) => f(ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc),
+        None => core::ptr::null_mut(),
+    }
+}
+
+/// Pop the current JIT frame after callee returns.
+/// Restores ctx.jit_bp to caller's bp.
+///
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+/// - `ctx.pop_frame_fn` must be set
+#[no_mangle]
+pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext) {
+    let ctx_ref = unsafe { &*ctx };
+    if let Some(f) = ctx_ref.pop_frame_fn {
+        f(ctx);
     }
 }
 

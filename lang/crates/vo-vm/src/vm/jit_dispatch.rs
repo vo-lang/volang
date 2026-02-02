@@ -44,31 +44,47 @@ pub fn dispatch_jit_call(
     let ret_slots = (inst.c & 0xFF) as usize;
 
     let func_def = &module.functions[func_id as usize];
+    let local_slots = func_def.local_slots as usize;
     
-    // Prepare args buffer (copy from caller's stack)
-    let mut args: Vec<u64> = vec![0u64; func_def.local_slots as usize];
-    for i in 0..arg_slots {
-        args[i] = fiber.stack[caller_bp + arg_start + i];
-    }
-
-    // Prepare ret buffer
-    let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)];
-
-    // Build JitContext
-    let mut ctx = build_jit_context(vm, fiber, module);
-
-    // Push a temporary frame so panic_unwind has correct frame info
-    // ret_reg = arg_start so if JIT returns Call and interpreter executes Return,
-    // return values go to correct location in caller's stack
+    // Allocate JIT frame directly in fiber.stack (not a separate Vec)
     let jit_bp = fiber.sp;
-    fiber.ensure_capacity(jit_bp + func_def.local_slots as usize);
-    fiber.sp = jit_bp + func_def.local_slots as usize;
+    fiber.ensure_capacity(jit_bp + local_slots);
+    
+    // Zero the frame region first
+    let stack_ptr = fiber.stack_ptr();
+    unsafe {
+        core::ptr::write_bytes(stack_ptr.add(jit_bp), 0, local_slots);
+    }
+    
+    // Copy caller args directly to fiber.stack[jit_bp..]
+    for i in 0..arg_slots {
+        fiber.stack[jit_bp + i] = fiber.stack[caller_bp + arg_start + i];
+    }
+    
+    fiber.sp = jit_bp + local_slots;
+    
+    // Push frame so panic_unwind has correct frame info
+    // ret_reg = arg_start so return values go to correct location in caller's stack
     fiber.frames.push(CallFrame::new(func_id, jit_bp, arg_start as u16, ret_slots as u16));
 
-    // Call JIT function
-    let result = jit_func(ctx.as_ptr(), args.as_mut_ptr(), ret.as_mut_ptr());
+    // Build JitContext with fiber stack access
+    let mut ctx = build_jit_context(vm, fiber, module);
+    
+    // Update ctx with current frame info
+    ctx.ctx.stack_ptr = fiber.stack_ptr();
+    ctx.ctx.stack_cap = fiber.stack.len() as u32;
+    ctx.ctx.jit_bp = jit_bp as u32;
 
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret, &args)
+    // Prepare ret buffer (still separate - return values copied back after call)
+    let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)];
+
+    // args_ptr points directly to fiber.stack[jit_bp]
+    let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
+    
+    // Call JIT function
+    let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
+
+    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret)
 }
 
 /// JIT context with owned storage for mutable fields.
@@ -154,6 +170,12 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
+        // Fiber stack access fields - will be updated before JIT call
+        stack_ptr: fiber.stack_ptr(),
+        stack_cap: fiber.stack.len() as u32,
+        jit_bp: 0, // Will be set in dispatch_jit_call
+        push_frame_fn: Some(jit_push_frame),
+        pop_frame_fn: Some(jit_pop_frame),
     };
 
     JitContextWrapper {
@@ -175,7 +197,6 @@ fn handle_jit_result(
     ret_slots: usize,
     jit_bp: usize,
     ret: &[u64],
-    args: &[u64],
 ) -> ExecResult {
     match result {
         JitResult::Ok => {
@@ -212,29 +233,27 @@ fn handle_jit_result(
         }
         JitResult::Call => {
             // JIT requests VM to execute a non-JIT function.
-            // Must follow same calling convention as exec_call:
-            // - callee_bp = fiber.sp (stack top)
-            // - args copied from caller to callee_bp
-            // - ret_reg = arg_start (relative to caller_bp)
+            // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
+            // 
+            // IMPORTANT: Use ctx.jit_bp, not the passed jit_bp parameter!
+            // If nested JIT calls happened (via emit_jit_call_with_fallback), 
+            // ctx.jit_bp points to the actual caller's frame that returned Call,
+            // while the passed jit_bp is the original dispatch_jit_call's frame.
+            let actual_jit_bp = ctx.ctx.jit_bp as usize;
+            
             let callee_func_id = ctx.call_func_id();
             let call_arg_start = ctx.call_arg_start() as usize;
             let resume_pc = ctx.call_resume_pc();
             let callee_ret_slots = ctx.call_ret_slots() as usize;
             let callee_func_def = &module.functions[callee_func_id as usize];
 
-            // First, copy JIT's args buffer to fiber.stack at jit_bp
-            // (this restores JIT caller's stack state)
-            for (i, &val) in args.iter().enumerate() {
-                fiber.stack[jit_bp + i] = val;
-            }
-
             // Update JIT caller's frame PC for resume after callee returns
             if let Some(frame) = fiber.frames.last_mut() {
                 frame.pc = resume_pc as usize;
             }
 
-            // Now set up callee frame like exec_call does:
-            // callee_bp = current sp (which is jit_bp + jit's local_slots)
+            // Set up callee frame like exec_call does:
+            // callee_bp = current sp (which is actual_jit_bp + jit's local_slots)
             let callee_bp = fiber.sp;
             let callee_local_slots = callee_func_def.local_slots as usize;
             let new_sp = callee_bp + callee_local_slots;
@@ -245,11 +264,10 @@ fn handle_jit_result(
             let stack = fiber.stack_ptr();
             unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
             
-            // Copy args from JIT caller (at jit_bp + call_arg_start) to callee_bp
-            // Get arg_slots from bytecode instruction encoding
+            // Copy args from JIT caller (at actual_jit_bp + call_arg_start) to callee_bp
             let arg_slots = callee_func_def.param_slots as usize;
             for i in 0..arg_slots {
-                fiber.stack[callee_bp + i] = fiber.stack[jit_bp + call_arg_start + i];
+                fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
             }
             
             fiber.sp = new_sp;
@@ -265,10 +283,7 @@ fn handle_jit_result(
         #[cfg(feature = "std")]
         JitResult::WaitIo => {
             // JIT hit a blocking I/O operation.
-            // Copy JIT's args buffer back to fiber.stack and set up for resume.
-            for (i, &val) in args.iter().enumerate() {
-                fiber.stack[jit_bp + i] = val;
-            }
+            // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
             
             // Update frame PC to resume_pc for when we come back
             let resume_pc = ctx.call_resume_pc();
@@ -405,6 +420,89 @@ pub extern "C" fn jit_call_extern(
             // Store IO token in context for VM to handle
             ctx_ref.wait_io_token = token;
             JitResult::WaitIo
+        }
+    }
+}
+
+/// Push a new frame for JIT-to-JIT call.
+/// 
+/// This function:
+/// 1. Updates CALLER's frame.pc to caller_resume_pc (for nested Call handling)
+/// 2. Ensures fiber.stack has capacity for local_slots
+/// 3. Zeros the new frame region
+/// 4. Updates fiber.sp
+/// 5. Pushes CallFrame to fiber.frames
+/// 6. Updates ctx.jit_bp and ctx.stack_ptr (in case of reallocation)
+///
+/// # Returns
+/// args_ptr for the new frame (fiber.stack_ptr + new_bp)
+///
+/// # Safety
+/// All pointers must be valid. Called from JIT-generated code.
+pub extern "C" fn jit_push_frame(
+    ctx: *mut JitContext,
+    func_id: u32,
+    local_slots: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+    caller_resume_pc: u32,
+) -> *mut u64 {
+    let ctx_ref = unsafe { &mut *ctx };
+    let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
+    
+    // IMPORTANT: Update caller's frame.pc BEFORE pushing new frame.
+    // This ensures that if the callee returns Call/WaitIo/Panic and VM takes over,
+    // when the callee eventually returns, the caller continues at the right PC.
+    if let Some(caller_frame) = fiber.frames.last_mut() {
+        caller_frame.pc = caller_resume_pc as usize;
+    }
+    
+    // New frame base is current sp
+    let new_bp = fiber.sp;
+    let new_sp = new_bp + local_slots as usize;
+    
+    // Ensure capacity (may reallocate fiber.stack)
+    fiber.ensure_capacity(new_sp);
+    
+    // Zero the new frame region
+    let stack_ptr = fiber.stack_ptr();
+    unsafe {
+        core::ptr::write_bytes(stack_ptr.add(new_bp), 0, local_slots as usize);
+    }
+    
+    // Update fiber.sp
+    fiber.sp = new_sp;
+    
+    // Push CallFrame
+    fiber.frames.push(CallFrame::new(func_id, new_bp, ret_reg as u16, ret_slots as u16));
+    
+    // Update ctx fields (stack_ptr may have changed due to reallocation)
+    ctx_ref.stack_ptr = fiber.stack_ptr();
+    ctx_ref.stack_cap = fiber.stack.len() as u32;
+    ctx_ref.jit_bp = new_bp as u32;
+    
+    // Return args_ptr for the new frame
+    unsafe { ctx_ref.stack_ptr.add(new_bp) }
+}
+
+/// Pop the current JIT frame after callee returns.
+/// Restores ctx.jit_bp to caller's bp.
+///
+/// # Safety
+/// All pointers must be valid. Called from JIT-generated code.
+pub extern "C" fn jit_pop_frame(ctx: *mut JitContext) {
+    let ctx_ref = unsafe { &mut *ctx };
+    let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
+    
+    // Pop the frame
+    if let Some(frame) = fiber.frames.pop() {
+        fiber.sp = frame.bp;
+        
+        // Restore jit_bp to caller's bp
+        if let Some(caller_frame) = fiber.frames.last() {
+            ctx_ref.jit_bp = caller_frame.bp as u32;
+        } else {
+            ctx_ref.jit_bp = 0;
         }
     }
 }
