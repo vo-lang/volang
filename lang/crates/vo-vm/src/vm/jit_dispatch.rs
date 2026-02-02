@@ -220,6 +220,7 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         stack_ptr: fiber.stack_ptr(),
         stack_cap: fiber.stack.len() as u32,
         jit_bp: 0, // Will be set in dispatch_jit_call
+        fiber_sp: fiber.sp as u32,
         push_frame_fn: Some(jit_push_frame),
         pop_frame_fn: Some(jit_pop_frame),
         push_resume_point_fn: Some(jit_push_resume_point),
@@ -651,6 +652,7 @@ pub extern "C" fn jit_push_frame(
     ctx_ref.stack_ptr = fiber.stack_ptr();
     ctx_ref.stack_cap = fiber.stack.len() as u32;
     ctx_ref.jit_bp = new_bp as u32;
+    ctx_ref.fiber_sp = new_sp as u32;
     
     // Return args_ptr for the new frame
     unsafe { ctx_ref.stack_ptr.add(new_bp) }
@@ -669,6 +671,7 @@ pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
     
     // Restore fiber.sp to caller's sp (which is callee's bp, stored in ctx.jit_bp)
     fiber.sp = ctx_ref.jit_bp as usize;
+    ctx_ref.fiber_sp = ctx_ref.jit_bp;
     
     // Restore jit_bp to caller's bp (passed as parameter)
     ctx_ref.jit_bp = caller_bp;

@@ -394,23 +394,19 @@ impl<'a> FunctionCompiler<'a> {
     
     /// Optimized self-recursive call using direct call instead of call_indirect.
     /// 
-    /// With the new fiber.stack ABI, we must:
-    /// 1. Push a new frame in fiber.stack via vo_jit_push_frame
-    /// 2. Copy args from caller's frame to callee's frame
-    /// 3. Call the callee
-    /// 4. Pop the frame via vo_jit_pop_frame
-    /// 5. Copy return values back to caller's frame
+    /// Fast path: args passed via native stack slot, no push_frame/pop_frame.
+    /// Slow path (Call/WaitIo): materialize callee frame to fiber.stack.
     fn call_self_recursive(&mut self, arg_start: usize, arg_slots: usize, call_ret_slots: usize, target_func: &vo_runtime::bytecode::FunctionDef) {
         let func_ret_slots = target_func.ret_slots as usize;
         let callee_local_slots = target_func.local_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
         
-        // Save caller_bp BEFORE push_frame changes ctx.jit_bp
+        // Save caller_bp for slow path
         let caller_bp = self.builder.ins().load(
             types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
         );
         
-        // Read args from locals_slot (native stack) BEFORE calling push_frame
+        // Read args from locals_slot
         let locals_slot = self.locals_slot.unwrap();
         let mut arg_values = Vec::with_capacity(arg_slots);
         for i in 0..arg_slots {
@@ -420,34 +416,20 @@ impl<'a> FunctionCompiler<'a> {
             arg_values.push(val);
         }
         
-        // Load push_frame_fn from JitContext
-        let push_frame_fn_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
-        );
+        // Create args_slot on native stack for passing args to callee
+        let args_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (callee_local_slots.max(1) * 8) as u32,
+            8,
+        ));
+        let args_ptr = self.builder.ins().stack_addr(types::I64, args_slot, 0);
         
-        // Call vo_jit_push_frame to allocate callee frame in fiber.stack
-        // Also passes caller_resume_pc to update caller's frame.pc for nested Call handling
-        let push_frame_sig = crate::call_helpers::import_push_frame_sig(self);
-        
-        let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
-        let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
-        let ret_reg_val = self.builder.ins().iconst(types::I32, arg_start as i64);
-        let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
-        // Resume at current_pc + 1 (after this call instruction)
-        let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
-        
-        let push_call = self.builder.ins().call_indirect(
-            push_frame_sig, push_frame_fn_ptr,
-            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
-        );
-        let callee_args_ptr = self.builder.inst_results(push_call)[0];
-        
-        // Copy pre-read args to callee's frame
+        // Copy args to native stack slot
         for (i, val) in arg_values.iter().enumerate() {
-            self.builder.ins().store(MemFlags::trusted(), *val, callee_args_ptr, (i * 8) as i32);
+            self.builder.ins().stack_store(*val, args_slot, (i * 8) as i32);
         }
         
-        // Create ret_slot for return values (temporary Cranelift slot, OK for local use)
+        // Create ret_slot for return values
         let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (func_ret_slots.max(1) * 8) as u32,
@@ -455,9 +437,27 @@ impl<'a> FunctionCompiler<'a> {
         ));
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         
-        // Call callee (direct or indirect)
+        // Constants for slow path
+        let func_id_val = self.builder.ins().iconst(types::I32, self.func_id as i64);
+        let local_slots_val = self.builder.ins().iconst(types::I32, callee_local_slots as i64);
+        let ret_reg_val = self.builder.ins().iconst(types::I32, arg_start as i64);
+        let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
+        let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
+        
+        // Save old fiber_sp for restoration after call
+        let old_fiber_sp = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
+        );
+        
+        // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
+        let new_bp = old_fiber_sp;
+        let new_sp = self.builder.ins().iadd_imm(new_bp, callee_local_slots as i64);
+        self.builder.ins().store(MemFlags::trusted(), new_bp, ctx, JitContext::OFFSET_JIT_BP);
+        self.builder.ins().store(MemFlags::trusted(), new_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        
+        // Call callee with args on native stack (FAST PATH)
         let result = if let Some(func_ref) = self.self_func_ref {
-            let call = self.builder.ins().call(func_ref, &[ctx, callee_args_ptr, ret_ptr]);
+            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         } else {
             let jit_func_table = self.builder.ins().load(types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE);
@@ -468,11 +468,11 @@ impl<'a> FunctionCompiler<'a> {
             
             let sig = crate::call_helpers::import_jit_func_sig(self);
             
-            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]);
+            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
         
-        // Check result: only OK should continue, all others propagate
+        // Check result
         let ok_val = self.builder.ins().iconst(types::I32, crate::call_helpers::JIT_RESULT_OK as i64);
         let is_ok = self.builder.ins().icmp(IntCC::Equal, result, ok_val);
         
@@ -481,45 +481,54 @@ impl<'a> FunctionCompiler<'a> {
         
         self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
         
-        // Non-OK path: propagate result (Panic, Call, or WaitIo)
-        // Spill all variables to fiber.stack so VM can see them, then push resume point
+        // Non-OK path (SLOW PATH): materialize frames to fiber.stack
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
         
-        // Spill all SSA variables to fiber.stack (slow path only)
+        // Spill caller's variables to fiber.stack
         self.emit_variable_spill();
         
-        // Load push_resume_point_fn and call it
+        // Materialize callee's frame in fiber.stack
+        let push_frame_fn_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+        );
+        let push_frame_sig = crate::call_helpers::import_push_frame_sig(self);
+        let push_call = self.builder.ins().call_indirect(
+            push_frame_sig, push_frame_fn_ptr,
+            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
+        );
+        let callee_fiber_args_ptr = self.builder.inst_results(push_call)[0];
+        
+        // Copy args from native stack to fiber.stack
+        for i in 0..arg_slots {
+            let val = self.builder.ins().stack_load(types::I64, args_slot, (i * 8) as i32);
+            self.builder.ins().store(MemFlags::trusted(), val, callee_fiber_args_ptr, (i * 8) as i32);
+        }
+        
+        // Push resume point
         let push_resume_point_fn_ptr = self.builder.ins().load(
             types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
         );
         let push_resume_point_sig = crate::call_helpers::import_push_resume_point_sig(self);
         
-        // ResumePoint stores callee's frame info (func_id, bp) with caller's resume info
-        // For self-recursive call, callee func_id is same as caller (self.func_id)
-        let callee_func_id = self.builder.ins().iconst(types::I32, self.func_id as i64);
-        // callee's bp is current ctx.jit_bp (set by push_frame)
         let callee_bp = self.builder.ins().load(
             types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
         );
         
         self.builder.ins().call_indirect(
             push_resume_point_sig, push_resume_point_fn_ptr,
-            &[ctx, callee_func_id, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
+            &[ctx, func_id_val, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
         );
         
         self.builder.ins().return_(&[result]);
         
-        // OK path - pop frame and copy return values
+        // OK path (FAST PATH) - restore ctx.jit_bp and ctx.fiber_sp
         self.builder.switch_to_block(ok_block);
         self.builder.seal_block(ok_block);
         
-        // Pop callee's frame (pass caller_bp to restore)
-        let pop_frame_fn_ptr = self.builder.ins().load(
-            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
-        );
-        let pop_frame_sig = crate::call_helpers::import_pop_frame_sig(self);
-        self.builder.ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
+        // Restore ctx.jit_bp and ctx.fiber_sp (inline pop)
+        self.builder.ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+        self.builder.ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
         
         // Copy return values to caller's locals_slot
         for i in 0..call_ret_slots {

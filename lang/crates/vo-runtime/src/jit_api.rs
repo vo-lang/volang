@@ -193,6 +193,10 @@ pub struct JitContext {
     /// Updated by vo_jit_push_frame / vo_jit_pop_frame.
     pub jit_bp: u32,
     
+    /// Current stack pointer (fiber.sp). JIT uses this for fast path frame management.
+    /// Updated inline by JIT code on fast path, or by push_frame/pop_frame on slow path.
+    pub fiber_sp: u32,
+    
     /// Callback to push a JIT frame for nested JIT-to-JIT calls.
     /// Set by VM when creating JitContext.
     pub push_frame_fn: Option<JitPushFrameFn>,
@@ -239,6 +243,7 @@ impl JitContext {
     pub const OFFSET_STACK_PTR: i32 = std::mem::offset_of!(JitContext, stack_ptr) as i32;
     pub const OFFSET_STACK_CAP: i32 = std::mem::offset_of!(JitContext, stack_cap) as i32;
     pub const OFFSET_JIT_BP: i32 = std::mem::offset_of!(JitContext, jit_bp) as i32;
+    pub const OFFSET_FIBER_SP: i32 = std::mem::offset_of!(JitContext, fiber_sp) as i32;
     pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
     pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
     pub const OFFSET_PUSH_RESUME_POINT_FN: i32 = std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
