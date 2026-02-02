@@ -261,6 +261,22 @@ impl PanicState {
 /// Initial stack capacity in slots (64KB = 8192 slots).
 const INITIAL_STACK_CAPACITY: usize = 8192;
 
+/// Resume point for JIT call chain suspension.
+///
+/// When JIT returns `Call` or `WaitIo`, this captures the minimal state
+/// needed to resume execution after the VM handles the request.
+#[derive(Debug, Clone, Copy)]
+pub struct ResumePoint {
+    /// Function to resume in.
+    pub func_id: u32,
+    /// Bytecode PC to resume from (replay-at-PC model).
+    pub resume_pc: u32,
+    /// Base pointer for this frame's stack window.
+    pub bp: usize,
+    /// Return slots expected by this caller.
+    pub ret_slots: u16,
+}
+
 #[derive(Debug)]
 pub struct Fiber {
     pub id: u32,
@@ -280,6 +296,11 @@ pub struct Fiber {
     pub panic_generation: u64,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
+    /// JIT resume stack for suspended call chains.
+    /// When JIT returns Call/WaitIo, resume points are pushed here.
+    /// On resume, they are popped and converted to VM frames.
+    #[cfg(feature = "jit")]
+    pub resume_stack: Vec<ResumePoint>,
 }
 
 impl Fiber {
@@ -298,6 +319,8 @@ impl Fiber {
             panic_generation: 0,
             #[cfg(feature = "std")]
             resume_io_token: None,
+            #[cfg(feature = "jit")]
+            resume_stack: Vec::with_capacity(8),
         }
     }
     
@@ -316,6 +339,8 @@ impl Fiber {
         {
             self.resume_io_token = None;
         }
+        #[cfg(feature = "jit")]
+        self.resume_stack.clear();
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.

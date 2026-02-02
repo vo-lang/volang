@@ -225,7 +225,7 @@ impl<'a> FunctionCompiler<'a> {
                 });
                 Ok(false)
             }
-            _ => Err(JitError::UnsupportedOpcode(inst.opcode())),
+            other => Err(JitError::UnsupportedOpcode(other)),
         }
     }
 

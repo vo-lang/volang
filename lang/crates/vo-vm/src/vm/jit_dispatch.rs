@@ -58,15 +58,17 @@ pub fn dispatch_jit_call(
     let mut ctx = build_jit_context(vm, fiber, module);
 
     // Push a temporary frame so panic_unwind has correct frame info
+    // ret_reg = arg_start so if JIT returns Call and interpreter executes Return,
+    // return values go to correct location in caller's stack
     let jit_bp = fiber.sp;
     fiber.ensure_capacity(jit_bp + func_def.local_slots as usize);
     fiber.sp = jit_bp + func_def.local_slots as usize;
-    fiber.frames.push(CallFrame::new(func_id, jit_bp, 0, func_def.ret_slots));
+    fiber.frames.push(CallFrame::new(func_id, jit_bp, arg_start as u16, ret_slots as u16));
 
     // Call JIT function
     let result = jit_func(ctx.as_ptr(), args.as_mut_ptr(), ret.as_mut_ptr());
 
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret)
+    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret, &args)
 }
 
 /// JIT context with owned storage for mutable fields.
@@ -88,6 +90,22 @@ impl JitContextWrapper {
 
     fn panic_msg(&self) -> InterfaceSlot {
         *self._panic_msg
+    }
+
+    fn call_func_id(&self) -> u32 {
+        self.ctx.call_func_id
+    }
+
+    fn call_arg_start(&self) -> u16 {
+        self.ctx.call_arg_start
+    }
+
+    fn call_resume_pc(&self) -> u32 {
+        self.ctx.call_resume_pc
+    }
+
+    fn call_ret_slots(&self) -> u16 {
+        self.ctx.call_ret_slots
     }
 }
 
@@ -149,6 +167,7 @@ fn handle_jit_result(
     ret_slots: usize,
     jit_bp: usize,
     ret: &[u64],
+    args: &[u64],
 ) -> ExecResult {
     match result {
         JitResult::Ok => {
@@ -184,8 +203,56 @@ fn handle_jit_result(
             helpers::panic_unwind(fiber, stack_ptr, module)
         }
         JitResult::Call => {
-            // TODO(Step 2): Handle JIT returning Call for VM fallback
-            panic!("JIT returned Call - not yet implemented (Step 2)")
+            // JIT requests VM to execute a non-JIT function.
+            // Must follow same calling convention as exec_call:
+            // - callee_bp = fiber.sp (stack top)
+            // - args copied from caller to callee_bp
+            // - ret_reg = arg_start (relative to caller_bp)
+            let callee_func_id = ctx.call_func_id();
+            let call_arg_start = ctx.call_arg_start() as usize;
+            let resume_pc = ctx.call_resume_pc();
+            let callee_ret_slots = ctx.call_ret_slots() as usize;
+            let callee_func_def = &module.functions[callee_func_id as usize];
+
+            // First, copy JIT's args buffer to fiber.stack at jit_bp
+            // (this restores JIT caller's stack state)
+            for (i, &val) in args.iter().enumerate() {
+                fiber.stack[jit_bp + i] = val;
+            }
+
+            // Update JIT caller's frame PC for resume after callee returns
+            if let Some(frame) = fiber.frames.last_mut() {
+                frame.pc = resume_pc as usize;
+            }
+
+            // Now set up callee frame like exec_call does:
+            // callee_bp = current sp (which is jit_bp + jit's local_slots)
+            let callee_bp = fiber.sp;
+            let callee_local_slots = callee_func_def.local_slots as usize;
+            let new_sp = callee_bp + callee_local_slots;
+            
+            fiber.ensure_capacity(new_sp);
+            
+            // Zero callee's local slots
+            let stack = fiber.stack_ptr();
+            unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
+            
+            // Copy args from JIT caller (at jit_bp + call_arg_start) to callee_bp
+            // Get arg_slots from bytecode instruction encoding
+            let arg_slots = callee_func_def.param_slots as usize;
+            for i in 0..arg_slots {
+                fiber.stack[callee_bp + i] = fiber.stack[jit_bp + call_arg_start + i];
+            }
+            
+            fiber.sp = new_sp;
+            fiber.frames.push(CallFrame::new(
+                callee_func_id,
+                callee_bp,
+                call_arg_start as u16, // ret_reg: where caller expects returns (relative to caller_bp)
+                callee_ret_slots as u16,
+            ));
+
+            ExecResult::FrameChanged
         }
         JitResult::WaitIo => {
             // TODO(Step 3): Handle JIT returning WaitIo for blocking IO

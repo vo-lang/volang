@@ -1,0 +1,26 @@
+// Test JIT calling a non-JIT function (JitResult::Call path)
+// The inner function has defer, so it won't be JIT-compiled.
+// The outer function should be JIT-compiled and return Call when calling inner.
+
+package main
+
+func inner(x int) int {
+	defer func() {}()  // defer prevents JIT
+	return x * 2
+}
+
+func outer(x int) int {
+	return inner(x) + 1
+}
+
+func main() {
+	result := outer(10)
+	if result != 21 {
+		println("FAIL: expected 21, got", result)
+		return
+	}
+	println("PASS")
+}
+
+// Output:
+// PASS
