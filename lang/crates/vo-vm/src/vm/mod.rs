@@ -22,6 +22,8 @@ pub mod helpers;
 mod types;
 #[cfg(feature = "std")]
 pub mod island_thread;
+#[cfg(feature = "jit")]
+mod jit_dispatch;
 
 pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
@@ -374,6 +376,7 @@ impl Vm {
 
         Ok(SchedulingOutcome::Completed)
     }
+    
     
     /// Report deadlock with detailed fiber state.
     fn report_deadlock(&self) -> Result<(), VmError> {
@@ -823,6 +826,29 @@ impl Vm {
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
+                    #[cfg(feature = "jit")]
+                    {
+                        let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+                            let target_func = &module.functions[target_func_id as usize];
+                            if let Some(jit_func) = jit_mgr.resolve_call(target_func_id, target_func, module) {
+                                // Execute via JIT
+                                let result = jit_dispatch::dispatch_jit_call(
+                                    self, fiber, &inst, module, jit_func, target_func_id
+                                );
+                                stack = fiber.stack_ptr();
+                                match result {
+                                    ExecResult::FrameChanged => {
+                                        // JIT returned Ok or panic_unwind needs to execute defer
+                                        refetch!();
+                                    }
+                                    other => return other,
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    // VM fallback path
                     exec::exec_call(fiber, &inst, module);
                     stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
                     refetch!();
@@ -1637,4 +1663,5 @@ pub extern "C" fn closure_call_trampoline(
         }
     }
 }
+
 

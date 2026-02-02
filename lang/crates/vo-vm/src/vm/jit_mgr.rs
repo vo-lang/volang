@@ -264,8 +264,9 @@ impl JitManager {
             return Ok(());
         }
         
-        // Check if can JIT
-        if !vo_jit::is_func_jittable(func_def) {
+        // Check if can JIT - use can_jit_to_jit_call for Step 1 to ensure
+        // all called functions are also JIT-compiled (no JitResult::Call)
+        if !vo_jit::can_jit_to_jit_call(func_def, module) {
             info.state = CompileState::Unsupported;
             return Err(JitError::NotJittable(func_id));
         }
