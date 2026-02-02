@@ -471,9 +471,12 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
     // JIT non-OK path - propagate result (Panic, Call, or WaitIo)
-    // Push resume point for this caller frame before propagating
+    // Spill all variables to fiber.stack so VM can see them, then push resume point
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
+    
+    // Spill all SSA variables to fiber.stack (slow path only)
+    emitter.spill_all_vars();
     
     // Load push_resume_point_fn and call it
     let push_resume_point_fn_ptr = emitter.builder().ins().load(

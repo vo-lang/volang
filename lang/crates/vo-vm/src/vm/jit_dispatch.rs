@@ -636,11 +636,9 @@ pub extern "C" fn jit_push_frame(
     // Ensure capacity (may reallocate fiber.stack)
     fiber.ensure_capacity(new_sp);
     
-    // Zero the new frame region
-    let stack_ptr = fiber.stack_ptr();
-    unsafe {
-        core::ptr::write_bytes(stack_ptr.add(new_bp), 0, local_slots as usize);
-    }
+    // NOTE: No zeroing here! With mixed stack, callee initializes its own
+    // locals_slot in prologue. fiber.stack is only used for parameter passing
+    // and spilling on slow path.
     
     // Update fiber.sp
     fiber.sp = new_sp;
