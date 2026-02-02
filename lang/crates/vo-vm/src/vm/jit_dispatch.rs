@@ -12,9 +12,14 @@
 //! JIT functions store all locals in `fiber.stack[jit_bp..]`, not in separate buffers.
 //! This enables seamless continuation when JIT returns `Call` (VM fallback needed).
 //!
-//! Key functions:
-//! - `jit_push_frame`: Push callee frame, also sets caller's resume PC
-//! - `jit_pop_frame`: Pop callee frame after successful return
+//! ## Shadow Frame Design
+//!
+//! JIT-to-JIT calls use lightweight `resume_stack` (shadow frames) instead of `fiber.frames`:
+//! - `jit_push_frame`: Push ResumePoint to resume_stack (not fiber.frames)
+//! - `jit_pop_frame`: Pop ResumePoint and restore caller's bp
+//! - On Call/WaitIo: `convert_resume_stack_to_frames` converts shadow frames to real CallFrames
+//!
+//! This avoids redundant frame management during pure JIT execution.
 
 use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Instruction;
@@ -300,15 +305,9 @@ fn handle_jit_result(
             let callee_ret_slots = ctx.call_ret_slots() as usize;
             let callee_func_def = &module.functions[callee_func_id as usize];
 
-            // Convert resume_stack to fiber.frames before VM takes over
-            // This ensures GC can scan all frames correctly
+            // Convert shadow frames to real CallFrames before VM takes over
             #[cfg(feature = "jit")]
-            convert_resume_stack_to_frames(fiber, resume_pc);
-
-            // Update JIT caller's frame PC for resume after callee returns
-            if let Some(frame) = fiber.frames.last_mut() {
-                frame.pc = resume_pc as usize;
-            }
+            materialize_jit_frames(fiber, resume_pc);
             
             // Set up callee frame like exec_call does:
             // callee_bp = current sp (which is actual_jit_bp + jit's local_slots)
@@ -396,15 +395,9 @@ fn handle_jit_result(
             let resume_pc = ctx.call_resume_pc();
             let io_token = ctx.wait_io_token();
             
-            // Convert resume_stack to fiber.frames before VM parks fiber
-            // This ensures GC can scan all frames correctly during blocking
+            // Convert shadow frames to real CallFrames before VM parks fiber
             #[cfg(feature = "jit")]
-            convert_resume_stack_to_frames(fiber, resume_pc);
-            
-            // Update frame PC for resume
-            if let Some(frame) = fiber.frames.last_mut() {
-                frame.pc = resume_pc as usize;
-            }
+            materialize_jit_frames(fiber, resume_pc);
             
             // Store IO token for scheduler
             fiber.resume_io_token = Some(io_token);
@@ -424,6 +417,9 @@ fn handle_jit_result(
 /// shadow frames for the JIT call chain. We convert them to real CallFrames
 /// so the VM can continue execution and GC can scan them.
 ///
+/// Also updates the entry frame's pc (fiber.frames.last()) when resume_stack is empty,
+/// ensuring the caller can resume from the correct pc.
+///
 /// ResumePoint layout: {func_id, resume_pc (caller's), bp (this frame's), ret_slots}
 /// 
 /// Example: main -> a -> b (b returns Call)
@@ -433,31 +429,34 @@ fn handle_jit_result(
 /// After conversion:
 /// - fiber.frames = [main, a, b]
 #[cfg(feature = "jit")]
-fn convert_resume_stack_to_frames(fiber: &mut Fiber, current_pc: u32) {
+fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
     let len = fiber.resume_stack.len();
     
     if len == 0 {
+        // No shadow frames, but still update entry frame's pc for resume
+        if let Some(frame) = fiber.frames.last_mut() {
+            frame.pc = resume_pc as usize;
+        }
         return;
     }
     
     // Convert each ResumePoint to a CallFrame
-    // ResumePoint stores: func_id, caller's resume_pc, this frame's bp, ret_slots
     for i in 0..len {
         let rp = &fiber.resume_stack[i];
         
         // pc: for frames except the last, use the next frame's resume_pc
         // (which is this frame's resume point when it called the next)
-        // For the last frame, use current_pc
+        // For the last frame, use resume_pc (current suspension point)
         let pc = if i + 1 < len {
             fiber.resume_stack[i + 1].resume_pc as usize
         } else {
-            current_pc as usize
+            resume_pc as usize
         };
         
         let mut frame = CallFrame::new(
             rp.func_id,
-            rp.bp,  // This frame's bp (stored directly in ResumePoint)
-            rp.ret_reg,  // ret_reg from ResumePoint
+            rp.bp,
+            rp.ret_reg,
             rp.ret_slots,
         );
         frame.pc = pc;
@@ -594,13 +593,12 @@ pub extern "C" fn jit_call_extern(
 }
 
 /// Push a new frame for JIT-to-JIT call.
-/// 
-/// This function:
-/// 1. Updates CALLER's frame.pc to caller_resume_pc (for nested Call handling)
+/// Called by JIT code for JIT-to-JIT calls:
+/// 1. Updates entry function's frame.pc (only on first call when resume_stack is empty)
 /// 2. Ensures fiber.stack has capacity for local_slots
 /// 3. Zeros the new frame region
 /// 4. Updates fiber.sp
-/// 5. Pushes CallFrame to fiber.frames
+/// 5. Pushes ResumePoint to resume_stack (shadow frame, not fiber.frames)
 /// 6. Updates ctx.jit_bp and ctx.stack_ptr (in case of reallocation)
 ///
 /// # Returns
