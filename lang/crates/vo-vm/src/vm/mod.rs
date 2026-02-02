@@ -509,6 +509,36 @@ impl Vm {
             match inst.opcode() {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
                 Opcode::Hint => {
+                    #[cfg(feature = "jit")]
+                    {
+                        use vo_common_core::instruction::HINT_LOOP_BEGIN;
+                        if inst.flags == HINT_LOOP_BEGIN {
+                            let loop_pc = frame.pc - 1;
+                            if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, loop_pc, bp) {
+                                use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                if result_pc == OSR_RESULT_FRAME_CHANGED {
+                                    // Loop made a Call - callee frame pushed, VM continues
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    stack = fiber.stack_ptr();
+                                    refetch!();
+                                    continue;
+                                } else if result_pc == OSR_RESULT_WAITIO {
+                                    // Loop needs WaitIo
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    if let Some(token) = fiber.resume_io_token {
+                                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                                    }
+                                } else {
+                                    // Normal exit - update PC and continue
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    fiber.current_frame_mut().unwrap().pc = result_pc;
+                                    stack = fiber.stack_ptr();
+                                    refetch!();
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Opcode::LoadInt => {
@@ -1595,6 +1625,60 @@ impl Vm {
         self.scheduler.current = saved_current;
         self.scheduler.release_callback_fiber(fid);
         (success, panic_state)
+    }
+    
+    // =========================================================================
+    // Loop OSR
+    // =========================================================================
+    
+    /// Try loop OSR at backedge. Returns result PC or None to continue VM.
+    #[cfg(feature = "jit")]
+    pub(crate) fn try_loop_osr(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        func_id: u32,
+        loop_pc: usize,
+        bp: usize,
+    ) -> Option<usize> {
+        let loop_func = self.get_or_compile_loop(func_id, loop_pc)?;
+        jit_dispatch::dispatch_loop_osr(self, fiber_id, loop_func, bp)
+    }
+    
+    /// Get compiled loop or compile if hot. Returns None if not ready.
+    #[cfg(feature = "jit")]
+    fn get_or_compile_loop(&mut self, func_id: u32, loop_pc: usize) -> Option<vo_jit::LoopFunc> {
+        let module = self.module.as_ref()?;
+        let func_def = &module.functions[func_id as usize];
+        let jit_mgr = self.jit_mgr.as_mut()?;
+        
+        // Already compiled?
+        if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
+            return Some(lf);
+        }
+        
+        // Already failed?
+        if jit_mgr.is_loop_failed(func_id, loop_pc) {
+            return None;
+        }
+        
+        // Not hot yet?
+        if !jit_mgr.record_backedge(func_id, loop_pc) {
+            return None;
+        }
+        
+        // Hot - try to compile
+        let loop_info = jit_mgr.find_loop(func_id, func_def, loop_pc)?;
+        if !loop_info.is_jittable() {
+            return None;
+        }
+        
+        match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
+            Ok(_) => unsafe { jit_mgr.get_loop_func(func_id, loop_pc) },
+            Err(_) => {
+                jit_mgr.mark_loop_failed(func_id, loop_pc);
+                None
+            }
+        }
     }
 }
 

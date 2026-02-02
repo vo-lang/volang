@@ -604,3 +604,187 @@ pub extern "C" fn jit_pop_frame(ctx: *mut JitContext) {
         }
     }
 }
+
+// =============================================================================
+// Loop OSR Dispatch
+// =============================================================================
+
+/// Special return values from loop OSR execution.
+pub const OSR_RESULT_FRAME_CHANGED: usize = usize::MAX;
+pub const OSR_RESULT_WAITIO: usize = usize::MAX - 1;
+
+/// Execute a compiled loop via OSR.
+/// Returns:
+/// - Some(exit_pc) for normal exit
+/// - Some(OSR_RESULT_FRAME_CHANGED) if loop made a Call (VM should continue)
+/// - Some(OSR_RESULT_WAITIO) if loop needs WaitIo
+/// - None for panic
+pub fn dispatch_loop_osr(
+    vm: &mut Vm,
+    fiber_id: crate::scheduler::FiberId,
+    loop_func: vo_jit::LoopFunc,
+    bp: usize,
+) -> Option<usize> {
+    // Use raw pointers to avoid borrow conflicts
+    let module_ptr = vm.module.as_ref().unwrap() as *const Module;
+    let fiber_ptr = vm.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
+    
+    let (result, ctx) = unsafe {
+        let module = &*module_ptr;
+        let fiber = &mut *fiber_ptr;
+        
+        // Build JitContext
+        let mut ctx = build_jit_context(vm, fiber, module);
+        ctx.ctx.stack_ptr = fiber.stack_ptr();
+        ctx.ctx.stack_cap = fiber.stack.len() as u32;
+        ctx.ctx.jit_bp = bp as u32;
+        
+        // locals_ptr points to fiber.stack[bp..]
+        let locals_ptr = fiber.stack_ptr().add(bp);
+        
+        // Call loop function
+        let result = loop_func(ctx.as_ptr(), locals_ptr);
+        (result, ctx)
+    };
+    
+    let fiber = unsafe { &mut *fiber_ptr };
+    let module = unsafe { &*module_ptr };
+    
+    match result {
+        JitResult::Ok => {
+            // Normal exit - exit_pc is in ctx.loop_exit_pc
+            Some(ctx.ctx.loop_exit_pc as usize)
+        }
+        JitResult::Panic => {
+            let mut panic_msg = ctx.panic_msg();
+            
+            // Check if panic_msg is nil (runtime panic like nil pointer)
+            if panic_msg.slot0 == 0 {
+                let msg_str = vo_runtime::objects::string::new_from_string(
+                    &mut vm.state.gc,
+                    helpers::ERR_NIL_POINTER.to_string(),
+                );
+                let slot0 = vo_runtime::objects::interface::pack_slot0(
+                    0, 0, vo_runtime::ValueKind::String
+                );
+                panic_msg = InterfaceSlot::new(slot0, msg_str as u64);
+            }
+            
+            fiber.set_recoverable_panic(panic_msg);
+            None
+        }
+        JitResult::Call => {
+            // Loop wants to make a VM call
+            let callee_func_id = ctx.call_func_id();
+            let call_arg_start = ctx.call_arg_start() as usize;
+            let resume_pc = ctx.call_resume_pc();
+            let callee_ret_slots = ctx.call_ret_slots();
+            let call_kind = ctx.ctx.call_kind;
+            
+            // Check for special call_kind values (Yield/Block)
+            match call_kind {
+                JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
+                    // Update frame PC for resume
+                    if let Some(frame) = fiber.current_frame_mut() {
+                        frame.pc = resume_pc as usize;
+                    }
+                    return Some(OSR_RESULT_FRAME_CHANGED);
+                }
+                _ => {}
+            }
+            
+            let callee_func_def = &module.functions[callee_func_id as usize];
+            
+            // Update current frame PC for resume after callee returns
+            if let Some(frame) = fiber.current_frame_mut() {
+                frame.pc = resume_pc as usize;
+            }
+            
+            // Set up callee frame
+            let callee_bp = fiber.sp;
+            let callee_local_slots = callee_func_def.local_slots as usize;
+            let new_sp = callee_bp + callee_local_slots;
+            
+            fiber.ensure_capacity(new_sp);
+            
+            // Zero callee's local slots
+            let stack = fiber.stack_ptr();
+            unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
+            
+            // Copy args based on call kind
+            match call_kind {
+                0 => {
+                    // Regular call
+                    let arg_slots = callee_func_def.param_slots as usize;
+                    for i in 0..arg_slots {
+                        fiber.stack[callee_bp + i] = fiber.stack[bp + call_arg_start + i];
+                    }
+                }
+                1 => {
+                    // Closure call
+                    use vo_runtime::objects::closure;
+                    use vo_runtime::gc::GcRef;
+                    
+                    let closure_ref = ctx.ctx.call_closure_ref;
+                    let closure_gcref = closure_ref as GcRef;
+                    let recv_slots = callee_func_def.recv_slots as usize;
+                    let is_closure = callee_func_def.is_closure;
+                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
+                    
+                    let layout = closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure);
+                    
+                    if let Some(slot0_val) = layout.slot0 {
+                        fiber.stack[callee_bp] = slot0_val;
+                    }
+                    
+                    for i in 0..user_arg_slots {
+                        fiber.stack[callee_bp + layout.arg_offset + i] = fiber.stack[bp + call_arg_start + i];
+                    }
+                }
+                2 => {
+                    // Interface call
+                    let recv = ctx.ctx.call_iface_recv;
+                    let recv_slots = callee_func_def.recv_slots as usize;
+                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
+                    
+                    fiber.stack[callee_bp] = recv;
+                    
+                    for i in 0..user_arg_slots {
+                        fiber.stack[callee_bp + recv_slots + i] = fiber.stack[bp + call_arg_start + i];
+                    }
+                }
+                _ => unreachable!("invalid call_kind"),
+            }
+            
+            fiber.sp = new_sp;
+            fiber.frames.push(CallFrame::new(
+                callee_func_id,
+                callee_bp,
+                call_arg_start as u16,
+                callee_ret_slots,
+            ));
+            
+            Some(OSR_RESULT_FRAME_CHANGED)
+        }
+        #[cfg(feature = "std")]
+        JitResult::WaitIo => {
+            let token = ctx.wait_io_token();
+            let resume_pc = ctx.call_resume_pc();
+            
+            // Update frame for resume
+            if let Some(frame) = fiber.current_frame_mut() {
+                frame.pc = resume_pc as usize;
+            }
+            
+            // Store token for scheduler
+            fiber.resume_io_token = Some(token);
+            
+            Some(OSR_RESULT_WAITIO)
+        }
+        #[cfg(not(feature = "std"))]
+        JitResult::WaitIo => {
+            panic!("Loop OSR returned WaitIo but std feature not enabled")
+        }
+    }
+}
+

@@ -289,6 +289,42 @@ impl JitManager {
         Ok(())
     }
     
+    /// Check if function is already compiled.
+    pub fn is_compiled(&self, func_id: u32) -> bool {
+        self.funcs.get(func_id as usize)
+            .map(|info| info.state == CompileState::FullyCompiled)
+            .unwrap_or(false)
+    }
+    
+    /// Check if function is marked as unsupported.
+    pub fn is_unsupported(&self, func_id: u32) -> bool {
+        self.funcs.get(func_id as usize)
+            .map(|info| info.state == CompileState::Unsupported)
+            .unwrap_or(false)
+    }
+    
+    /// Mark function as unsupported.
+    pub fn mark_unsupported(&mut self, func_id: u32) {
+        if let Some(info) = self.funcs.get_mut(func_id as usize) {
+            info.state = CompileState::Unsupported;
+        }
+    }
+    
+    /// Check if function can be JIT compiled.
+    pub fn can_jit(&self, _func_id: u32, func_def: &FunctionDef, _module: &VoModule) -> bool {
+        vo_jit::is_func_jittable(func_def)
+    }
+    
+    /// Compile function (alias for compile_full).
+    pub fn compile_function(
+        &mut self,
+        func_id: u32,
+        func_def: &FunctionDef,
+        module: &VoModule,
+    ) -> Result<(), JitError> {
+        self.compile_full(func_id, func_def, module)
+    }
+    
     /// Check if a loop has failed compilation.
     pub fn is_loop_failed(&self, func_id: u32, begin_pc: usize) -> bool {
         self.funcs.get(func_id as usize)

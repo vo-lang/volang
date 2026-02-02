@@ -25,7 +25,13 @@ pub struct CallFrame {
 impl CallFrame {
     #[inline]
     pub fn new(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
-        Self { func_id, pc: 0, bp, ret_reg, ret_count }
+        Self {
+            func_id,
+            pc: 0,
+            bp,
+            ret_reg,
+            ret_count,
+        }
     }
 }
 
