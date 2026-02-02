@@ -27,8 +27,6 @@ pub struct FunctionCompiler<'a> {
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
     locals_slot: Option<StackSlot>,
-    /// Resume blocks for Call requests. Key is resume_pc (pc after Call instruction).
-    resume_blocks: HashMap<usize, Block>,
     /// FuncRef for self-recursive calls (direct call optimization)
     self_func_ref: Option<FuncRef>,
 }
@@ -59,7 +57,6 @@ impl<'a> FunctionCompiler<'a> {
             helpers,
             reg_consts: HashMap::new(),
             locals_slot: None,
-            resume_blocks: HashMap::new(),
             self_func_ref,
         }
     }
@@ -67,7 +64,6 @@ impl<'a> FunctionCompiler<'a> {
     pub fn compile(mut self) -> Result<(), JitError> {
         self.declare_variables();
         self.scan_jump_targets();
-        self.scan_call_requests();
         
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
@@ -77,17 +73,7 @@ impl<'a> FunctionCompiler<'a> {
         for pc in 0..self.func_def.code.len() {
             self.current_pc = pc;
             
-            // Check if this PC has a resume block (from Call request)
-            // Note: resume_block is the entry point when resuming from WaitIo/Call.
-            // In the main compile loop, we just switch to it as a normal block.
-            // emit_variable_restore is done in prologue when start_pc matches.
-            if let Some(&resume_block) = self.resume_blocks.get(&pc) {
-                if !block_terminated {
-                    self.builder.ins().jump(resume_block, &[]);
-                }
-                self.builder.switch_to_block(resume_block);
-                // block_terminated will be set by translate_instruction below
-            } else if let Some(&block) = self.blocks.get(&pc) {
+            if let Some(&block) = self.blocks.get(&pc) {
                 if !block_terminated {
                     self.builder.ins().jump(block, &[]);
                 }
@@ -138,19 +124,6 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Emit code to restore all SSA variables from fiber.stack.
-    /// Called at resume points after JIT returned Call and VM executed callee.
-    fn emit_variable_restore(&mut self) {
-        let args = self.builder.block_params(self.entry_block)[1];
-        for i in 0..self.vars.len() {
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args, (i * 8) as i32);
-            self.builder.def_var(self.vars[i], val);
-            if let Some(slot) = self.locals_slot {
-                self.builder.ins().stack_store(val, slot, (i * 8) as i32);
-            }
-        }
-    }
-
     /// Emit code to spill all SSA variables to fiber.stack.
     /// Called before returning Call so VM can see/restore state.
     fn emit_variable_spill(&mut self) {
@@ -158,44 +131,6 @@ impl<'a> FunctionCompiler<'a> {
         for i in 0..self.vars.len() {
             let val = self.builder.use_var(self.vars[i]);
             self.builder.ins().store(MemFlags::trusted(), val, args, (i * 8) as i32);
-        }
-    }
-
-    /// Scan for instructions that need resume blocks for multi-entry support.
-    ///
-    /// Resume blocks are used when generated code may return Call/WaitIo and the VM
-    /// needs to re-enter the function at a specific program point.
-    fn scan_call_requests(&mut self) {
-        for (pc, inst) in self.func_def.code.iter().enumerate() {
-            let resume_pc = match inst.opcode() {
-                Opcode::Call => {
-                    let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                    let target_func = &self.vo_module.functions[target_func_id as usize];
-                    // Only create resume block for calls that may return Call/WaitIo
-                    if !crate::can_jit_to_jit_call(target_func, self.vo_module) {
-                        Some(pc + 1) // Resume after call returns
-                    } else {
-                        None
-                    }
-                }
-                Opcode::CallExtern => {
-                    // Blocking extern calls may return WaitIo and need resume
-                    let extern_id = inst.b as usize;
-                    if self.vo_module.externs[extern_id].is_blocking {
-                        Some(pc) // Resume at same PC to re-execute and get result
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            
-            if let Some(resume_pc) = resume_pc {
-                if !self.resume_blocks.contains_key(&resume_pc) {
-                    let resume_block = self.builder.create_block();
-                    self.resume_blocks.insert(resume_pc, resume_block);
-                }
-            }
         }
     }
 
@@ -207,15 +142,13 @@ impl<'a> FunctionCompiler<'a> {
         let _ctx = params[0];
         let args = params[1];
         let _ret = params[2];
-        let start_pc = params[3];
         
         let num_slots = self.func_def.local_slots as usize;
         let param_slots = self.func_def.param_slots as usize;
         
         // Create stack slot for locals (used by SlotGet/SlotSet for stack arrays)
-        // Always create locals_slot if we have resume blocks (for state restoration)
-        let need_locals_slot = num_slots > 0 || !self.resume_blocks.is_empty();
-        let actual_slots = if num_slots > 0 { num_slots } else if need_locals_slot { self.vars.len() } else { 0 };
+        let need_locals_slot = num_slots > 0;
+        let actual_slots = if need_locals_slot { num_slots } else { 0 };
         
         if need_locals_slot && actual_slots > 0 {
             let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
@@ -224,70 +157,6 @@ impl<'a> FunctionCompiler<'a> {
                 8,
             ));
             self.locals_slot = Some(slot);
-        }
-        
-        // Generate dispatch logic if we have resume blocks
-        if !self.resume_blocks.is_empty() {
-            let normal_entry_block = self.builder.create_block();
-            
-            // Check if start_pc == 0 (normal entry)
-            let zero = self.builder.ins().iconst(types::I32, 0);
-            let is_normal = self.builder.ins().icmp(IntCC::Equal, start_pc, zero);
-            
-            // Create restore wrapper blocks that do emit_variable_restore then jump to resume_block
-            let mut resume_pcs: Vec<usize> = self.resume_blocks.keys().copied().collect();
-            resume_pcs.sort();
-            
-            // Create restore wrappers for each resume point
-            let mut restore_wrappers: HashMap<usize, Block> = HashMap::new();
-            for &resume_pc in &resume_pcs {
-                let wrapper = self.builder.create_block();
-                restore_wrappers.insert(resume_pc, wrapper);
-            }
-            
-            if resume_pcs.len() == 1 {
-                // Single resume point: simple branch to restore wrapper
-                let resume_pc = resume_pcs[0];
-                let restore_wrapper = restore_wrappers[&resume_pc];
-                self.builder.ins().brif(is_normal, normal_entry_block, &[], restore_wrapper, &[]);
-            } else {
-                // Multiple resume points: chain of comparisons
-                let first_check_block = self.builder.create_block();
-                self.builder.ins().brif(is_normal, normal_entry_block, &[], first_check_block, &[]);
-                
-                let mut current_block = first_check_block;
-                for (i, &resume_pc) in resume_pcs.iter().enumerate() {
-                    self.builder.switch_to_block(current_block);
-                    self.builder.seal_block(current_block);  // Seal the check block
-                    
-                    let restore_wrapper = restore_wrappers[&resume_pc];
-                    let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
-                    let is_this_pc = self.builder.ins().icmp(IntCC::Equal, start_pc, pc_val);
-                    
-                    if i == resume_pcs.len() - 1 {
-                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], normal_entry_block, &[]);
-                    } else {
-                        let next_check = self.builder.create_block();
-                        self.builder.ins().brif(is_this_pc, restore_wrapper, &[], next_check, &[]);
-                        current_block = next_check;
-                    }
-                }
-            }
-            
-            // Generate restore wrapper blocks: restore variables then jump to resume_block
-            for &resume_pc in &resume_pcs {
-                let wrapper = restore_wrappers[&resume_pc];
-                let resume_block = self.resume_blocks[&resume_pc];
-                
-                self.builder.switch_to_block(wrapper);
-                self.emit_variable_restore();
-                self.builder.ins().jump(resume_block, &[]);
-                self.builder.seal_block(wrapper);
-            }
-            
-            // Switch to normal entry block for standard initialization
-            self.builder.switch_to_block(normal_entry_block);
-            self.builder.seal_block(normal_entry_block);
         }
         
         // Normal entry initialization
@@ -481,20 +350,18 @@ impl<'a> FunctionCompiler<'a> {
         if callee_jittable {
             // JIT-to-JIT direct call with runtime check for compiled callee
             // If callee returns Call/WaitIo, we propagate it to VM
-            // VM uses CallDispatcher at entry level to handle the resume
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id: target_func_id,
                 arg_start,
                 arg_slots,
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
-                resume_pc: self.current_pc + 1,
             });
             false // Block not terminated - we have a merge block for continuation
         } else {
             // Callee is NOT jittable (has defer/channel/select/etc)
             // Use Call request mechanism: return JitResult::Call, VM executes callee,
-            // then resumes JIT at resume_pc
+            // then continues execution in interpreter
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
                 func_id: target_func_id,
                 arg_start,
@@ -530,12 +397,11 @@ impl<'a> FunctionCompiler<'a> {
         
         let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
-        let start_pc = self.builder.ins().iconst(types::I32, 0);
         
         // Use direct call if we have self_func_ref (much faster for recursion)
         let result = if let Some(func_ref) = self.self_func_ref {
             // Direct call - no function table lookup needed
-            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr, start_pc]);
+            let call = self.builder.ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         } else {
             // Fallback to indirect call via function table
@@ -550,12 +416,11 @@ impl<'a> FunctionCompiler<'a> {
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
                 sig
             });
             
-            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr, start_pc]);
+            let call = self.builder.ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
             self.builder.inst_results(call)[0]
         };
         

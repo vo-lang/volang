@@ -21,124 +21,34 @@ pub struct CallConfig {
 
 /// Emit a closure call instruction.
 /// 
-/// Both FunctionCompiler and LoopCompiler should use this to ensure consistent behavior.
-/// 
-/// IMPORTANT: Uses unified args/ret slot - VM writes return values to same location as args.
-/// This is required for WaitIo handling where VM resumes and writes results.
+/// NOTE: CallClosure is currently NOT jittable (see is_func_jittable).
+/// This function exists as a placeholder for Phase 5 unified dispatch implementation.
+/// Until then, functions with CallClosure will fall back to VM execution.
+#[allow(dead_code)]
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    inst: &Instruction,
-    config: CallConfig,
+    _emitter: &mut E,
+    _inst: &Instruction,
+    _config: CallConfig,
 ) {
-    let call_closure_func = emitter.helpers().call_closure.expect("call_closure helper not registered");
-    
-    let closure_ref = emitter.read_var(inst.a);
-    let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
-    
-    // Unified args/ret slot: size = max(args, rets)
-    // VM writes return values to same location as args
-    let buffer_size = arg_slots.max(ret_slots).max(1);
-    let args_ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (buffer_size * 8) as u32,
-        8,
-    ));
-    
-    // Store arguments to stack slot
-    for i in 0..arg_slots {
-        let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, args_ret_slot, (i * 8) as i32);
-    }
-    
-    let ctx = emitter.ctx_param();
-    // args_ptr and ret_ptr are the SAME pointer (unified slot)
-    let ptr = emitter.builder().ins().stack_addr(types::I64, args_ret_slot, 0);
-    let arg_count = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
-    let ret_count = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    
-    // Set resume_pc if configured (for WaitIo handling)
-    if let Some(resume_pc) = config.resume_pc {
-        let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
-        emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
-    }
-    
-    // Pass ptr for BOTH args and ret - unified slot
-    let call = emitter.builder().ins().call(call_closure_func, &[ctx, closure_ref, ptr, arg_count, ptr, ret_count]);
-    let result = emitter.builder().inst_results(call)[0];
-    
-    check_call_result(emitter, result, config.spill_on_non_ok);
-    
-    // Load return values from unified slot
-    for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, args_ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
-    }
+    // CallClosure is excluded from JIT in is_func_jittable() until Phase 5.
+    // If we reach here, something is wrong with the jittability check.
+    unreachable!("CallClosure should not be JIT-compiled until Phase 5 unified dispatch")
 }
 
 /// Emit an interface method call instruction.
 /// 
-/// Both FunctionCompiler and LoopCompiler should use this to ensure consistent behavior.
-/// 
-/// IMPORTANT: Uses unified args/ret slot - VM writes return values to same location as args.
-/// This is required for WaitIo handling where VM resumes and writes results.
+/// NOTE: CallIface is currently NOT jittable (see is_func_jittable).
+/// This function exists as a placeholder for Phase 5 unified dispatch implementation.
+/// Until then, functions with CallIface will fall back to VM execution.
+#[allow(dead_code)]
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    inst: &Instruction,
-    config: CallConfig,
+    _emitter: &mut E,
+    _inst: &Instruction,
+    _config: CallConfig,
 ) {
-    let call_iface_func = emitter.helpers().call_iface.expect("call_iface helper not registered");
-    
-    let slot0 = emitter.read_var(inst.a);
-    let slot1 = emitter.read_var(inst.a + 1);
-    let method_idx = inst.flags as u32;
-    let arg_start = inst.b as usize;
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
-    
-    // Unified args/ret slot: size = max(args, rets)
-    // VM writes return values to same location as args
-    let buffer_size = arg_slots.max(ret_slots).max(1);
-    let args_ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (buffer_size * 8) as u32,
-        8,
-    ));
-    
-    // Store arguments to stack slot
-    for i in 0..arg_slots {
-        let val = emitter.read_var((arg_start + i) as u16);
-        emitter.builder().ins().stack_store(val, args_ret_slot, (i * 8) as i32);
-    }
-    
-    let ctx = emitter.ctx_param();
-    // args_ptr and ret_ptr are the SAME pointer (unified slot)
-    let ptr = emitter.builder().ins().stack_addr(types::I64, args_ret_slot, 0);
-    let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
-    let arg_count = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
-    let ret_count = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    let func_id = emitter.builder().ins().iconst(types::I32, 0);
-    
-    // Set resume_pc if configured (for WaitIo handling)
-    if let Some(resume_pc) = config.resume_pc {
-        let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
-        emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
-    }
-    
-    // Pass ptr for BOTH args and ret - unified slot
-    let call = emitter.builder().ins().call(call_iface_func, &[
-        ctx, slot0, slot1, method_idx_val, ptr, arg_count, ptr, ret_count, func_id
-    ]);
-    let result = emitter.builder().inst_results(call)[0];
-    
-    check_call_result(emitter, result, config.spill_on_non_ok);
-    
-    // Load return values from unified slot
-    for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, args_ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
-    }
+    // CallIface is excluded from JIT in is_func_jittable() until Phase 5.
+    // If we reach here, something is wrong with the jittability check.
+    unreachable!("CallIface should not be JIT-compiled until Phase 5 unified dispatch")
 }
 
 /// Emit an extern function call instruction.
@@ -249,7 +159,7 @@ pub struct CallExternConfig {
 /// Instead of synchronously calling vo_call_vm, we:
 /// 1. Set call request info in JitContext
 /// 2. Return JitResult::Call
-/// 3. VM executes the callee and resumes JIT at resume_pc
+/// 3. VM executes the callee and continues in the interpreter
 pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     config: CallViaVmConfig,
@@ -287,7 +197,6 @@ pub struct JitCallWithFallbackConfig {
     pub arg_slots: usize,
     pub call_ret_slots: usize,
     pub func_ret_slots: usize,
-    pub resume_pc: usize,
 }
 
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
@@ -352,19 +261,17 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let args_ptr = emitter.builder().ins().stack_addr(types::I64, arg_slot, 0);
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Create signature for JIT function: (ctx, args, ret, start_pc) -> i32
+    // Create signature for JIT function: (ctx, args, ret) -> i32
     let sig = emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32));
         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
         sig
     });
     
-    let start_pc = emitter.builder().ins().iconst(types::I32, 0);
-    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr, start_pc]);
+    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
     // Check result: only OK should continue, all others propagate

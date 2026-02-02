@@ -156,6 +156,8 @@ After `WaitIo`, the VM must resume:
 
 Before returning `WaitIo`/`Call` to the VM, any live GC references must be made visible to the VM/GC root set.
 
+**Implementation**: When JIT returns `WaitIo`/`Call`, the VM immediately converts shadow frames to interpreter frames before parking. This ensures `fiber.sp` correctly reflects all live stack windows, making GC scanning safe during the parked period.
+
 Fail-fast rule:
 
 - If the JIT cannot provide correct GC roots at a suspension boundary, it must not attempt to suspend.
@@ -184,9 +186,10 @@ When JIT returns `WaitIo(token)`:
 
 On I/O readiness:
 
-1. scheduler moves fiber to runnable,
-2. VM re-enters JIT execution with the resume token set in the context,
-3. VM uses the resume stack to continue from the top resume point.
+1. Scheduler moves fiber to runnable.
+2. Fiber already has interpreter frames (converted at park time).
+3. VM resumes execution in the interpreter at the top frame's `resume_pc`.
+4. Blocking extern receives `resume_token`, completes, returns `Ok`.
 
 
 ## Unified Call Handling
@@ -214,12 +217,20 @@ No other behavior is acceptable.
 
 This design intentionally keeps the public surface small.
 
+### JitFunc signature
+
+```c
+JitResult jit_func(JitContext* ctx, u64* args, u64* ret)
+```
+
+No `start_pc` parameter. JIT functions always start from entry. Resumption happens via interpreter.
+
 ### JitContext (minimum fields)
 
 - pointers to VM/fiber/module runtime state
 - `wait_io_token: u64` (resume token)
-- `call_request: { func_id, arg_start, entry_pc, resume_pc, ret_slots }`
-- optional pointer to per-fiber call dispatcher/resume stack
+- `call_request: { func_id, arg_start, resume_pc, ret_slots }`
+- optional pointer to per-fiber resume stack
 
 ### JitResult
 
@@ -227,7 +238,7 @@ This design intentionally keeps the public surface small.
 
 ### ResumePoint
 
-- `func_id, resume_pc, bp_or_offset`
+- `func_id, resume_pc, bp`
 
 
 ## Failure Modes (Expected)
@@ -271,7 +282,7 @@ Add regression tests:
 ### Phase 3 — VM fallback via `Call`
 
 - Any unsupported callee returns `Call`.
-- VM executes callee (VM frames) then resumes JIT.
+- VM executes the callee and continues execution in the interpreter.
 
 Add tests:
 
@@ -285,7 +296,7 @@ Add tests:
 ### Phase 5 — OSR (optional)
 
 - OSR must obey the same protocol.
-- OSR resume must interact correctly with resume stack.
+- OSR is an optional optimization. Correctness must not depend on re-entering a suspended JIT frame.
 
 
 ## Notes on Deletion/Refactor Strategy

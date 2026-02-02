@@ -29,8 +29,9 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 // Shared Utilities
 // =============================================================================
 
-/// Check if a function is jittable (does not contain blocking operations).
-/// A function is NOT jittable if it uses defer, channels, select, goroutines, or blocking island/port ops.
+/// Check if a function is jittable (does not contain blocking operations or dynamic dispatch).
+/// A function is NOT jittable if it uses defer, channels, select, goroutines, blocking island/port ops,
+/// or closure/interface calls (until Phase 5 unified dispatch is implemented).
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
@@ -45,7 +46,11 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
             // Island (cross-thread operations)
             | Opcode::IslandNew | Opcode::GoIsland
             // Port blocking operations (PortNew/Len/Cap are OK)
-            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose => return false,
+            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose
+            // Closure/interface calls - not supported until Phase 5 unified dispatch
+            // Current vo_call_closure/vo_call_iface do synchronous VM calls which violates
+            // the "VM is sole authority" principle for Call/WaitIo handling
+            | Opcode::CallClosure | Opcode::CallIface => return false,
             _ => {}
         }
     }
@@ -56,8 +61,8 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
 /// Returns false if the function may return Call/WaitIo to caller.
 /// Such functions should use the Call request mechanism instead.
 ///
-/// Note: This is a conservative check. VM execution is currently interpreter-only and the
-/// previous dispatcher-based JIT scheduling has been removed.
+/// Note: This is a conservative check. When Call/WaitIo is returned, VM continues
+/// execution in the interpreter (shadow-frame design).
 pub fn can_jit_to_jit_call(func: &FunctionDef, module: &VoModule) -> bool {
     can_jit_to_jit_call_impl(func, module, 0)
 }
@@ -152,9 +157,7 @@ pub struct CompiledFunction {
 unsafe impl Send for CompiledFunction {}
 unsafe impl Sync for CompiledFunction {}
 
-/// JIT function signature with start_pc for multi-entry support.
-/// start_pc=0 for normal entry, start_pc=resume_pc for NeedVm continuation.
-pub type JitFunc = extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64, start_pc: u32) -> JitResult;
+pub type JitFunc = extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64) -> JitResult;
 
 // =============================================================================
 // JitCache
@@ -827,7 +830,6 @@ impl JitCompiler {
         sig.params.push(AbiParam::new(ptr_type));  // ctx
         sig.params.push(AbiParam::new(ptr_type));  // args
         sig.params.push(AbiParam::new(ptr_type));  // ret
-        sig.params.push(AbiParam::new(types::I32)); // start_pc for multi-entry
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_jit_{}", func_id);
@@ -894,7 +896,6 @@ impl JitCompiler {
         let mut sig = Signature::new(self.module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type));   // ctx
         sig.params.push(AbiParam::new(ptr_type));   // locals_ptr
-        sig.params.push(AbiParam::new(types::I32)); // start_pc for resume
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);
@@ -905,7 +906,7 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, loop_info, helpers);
+        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, loop_info, helpers);
         compiler.compile()?;
         
         // Verify IR in debug builds

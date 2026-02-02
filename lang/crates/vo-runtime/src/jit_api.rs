@@ -120,10 +120,7 @@ pub struct JitContext {
     /// Call request: arg_start offset in JIT's local variable area
     pub call_arg_start: u16,
     
-    /// Call request: callee entry PC (usually 0)
-    pub call_entry_pc: u16,
-    
-    /// Call request: resume PC where JIT should continue after VM completes
+    /// Call request: resume PC for VM to continue execution
     pub call_resume_pc: u32,
     
     /// Call request: number of return slots caller expects
@@ -146,7 +143,6 @@ impl JitContext {
     pub const OFFSET_JIT_FUNC_COUNT: i32 = std::mem::offset_of!(JitContext, jit_func_count) as i32;
     pub const OFFSET_CALL_FUNC_ID: i32 = std::mem::offset_of!(JitContext, call_func_id) as i32;
     pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
-    pub const OFFSET_CALL_ENTRY_PC: i32 = std::mem::offset_of!(JitContext, call_entry_pc) as i32;
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
@@ -168,11 +164,11 @@ pub enum JitResult {
     /// Function panicked.
     Panic = 1,
     /// JIT requests VM to execute a call (non-jittable callee).
-    /// call_func_id, call_arg_start, call_entry_pc, call_resume_pc in JitContext contain the info.
+    /// call_func_id, call_arg_start, call_resume_pc in JitContext contain the info.
     Call = 2,
     /// JIT requests VM to wait for I/O completion.
     /// The IoToken is stored in JitContext.wait_io_token.
-    /// After I/O completes, VM resumes JIT at call_resume_pc.
+    /// After I/O completes, VM resumes execution in interpreter at call_resume_pc.
     WaitIo = 3,
 }
 
@@ -254,8 +250,8 @@ pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
 
 /// Call a VM-interpreted function from JIT code.
 ///
-/// This is the trampoline from JIT to VM. All function calls from JIT
-/// go through this (for simplicity - we don't inline JIT->JIT calls yet).
+/// This is the fallback path when callee is not JIT-compiled.
+/// JIT-to-JIT calls go directly through function pointers when available.
 ///
 /// # Arguments
 /// - `ctx`: JIT context
@@ -305,7 +301,6 @@ pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_st
     unsafe {
         (*ctx).call_func_id = func_id;
         (*ctx).call_arg_start = arg_start as u16;
-        (*ctx).call_entry_pc = 0; // Callee always starts at PC 0
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
     }
@@ -363,127 +358,22 @@ pub extern "C" fn vo_call_extern(
     call_fn(ctx, ctx_ref.extern_registry, ctx_ref.gc, ctx_ref.module as *const c_void, extern_id, args, arg_count, ret, ret_slots)
 }
 
-/// Call a closure from JIT code.
-///
-/// # Arguments
-/// - `ctx`: JIT context
-/// - `closure_ref`: GcRef to the closure object
-/// - `args`: Pointer to argument slots (closure_ref is NOT included)
-/// - `arg_count`: Number of argument slots
-/// - `ret`: Pointer to return value slots
-/// - `ret_count`: Number of return value slots
-///
-/// # Returns
-/// - `JitResult::Ok` if function completed normally
-/// - `JitResult::Panic` if function panicked
+/// STUB: CallClosure excluded from JIT until Phase 5.
 #[no_mangle]
 pub extern "C" fn vo_call_closure(
-    ctx: *mut JitContext,
-    closure_ref: u64,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
+    _ctx: *mut JitContext, _closure_ref: u64, _args: *const u64, _arg_count: u32,
+    _ret: *mut u64, _ret_count: u32,
 ) -> JitResult {
-    use crate::objects::closure;
-    
-    let ctx_ref = unsafe { &*ctx };
-    let closure_gcref = closure_ref as crate::gc::GcRef;
-    let func_id = closure::func_id(closure_gcref);
-    
-    // Get func_def to check recv_slots (for method closures)
-    let module = unsafe { &*ctx_ref.module };
-    let func_def = &module.functions[func_id as usize];
-    let recv_slots = func_def.recv_slots as usize;
-    
-    // Use common closure call layout logic
-    let layout = closure::call_layout(
-        closure_ref,
-        closure_gcref,
-        recv_slots,
-        func_def.is_closure,
-    );
-    
-    let mut full_args = Vec::with_capacity(layout.slot0.is_some() as usize + arg_count as usize);
-    full_args.extend(layout.slot0);
-    for i in 0..arg_count {
-        full_args.push(unsafe { *args.add(i as usize) });
-    }
-    
-    let call_fn = match ctx_ref.call_vm_fn {
-        Some(f) => f,
-        None => return JitResult::Panic,
-    };
-    
-    call_fn(
-        ctx_ref.vm,
-        ctx_ref.fiber,
-        func_id,
-        full_args.as_ptr(),
-        full_args.len() as u32,
-        ret,
-        ret_count,
-    )
+    unreachable!("vo_call_closure: CallClosure excluded from JIT")
 }
 
-/// Call an interface method from JIT code.
-///
-/// # Arguments
-/// - `ctx`: JIT context
-/// - `iface_slot0`: Interface slot0 (itab_id << 32 | value_meta)
-/// - `iface_slot1`: Interface slot1 (data: immediate or GcRef)
-/// - `method_idx`: Method index in the interface
-/// - `args`: Pointer to argument slots (receiver is NOT included)
-/// - `arg_count`: Number of argument slots (excluding receiver)
-/// - `ret`: Pointer to return value slots
-/// - `ret_count`: Number of return value slots
-///
-/// # Returns
-/// - `JitResult::Ok` if function completed normally
-/// - `JitResult::Panic` if function panicked
+/// STUB: CallIface excluded from JIT until Phase 5.
 #[no_mangle]
 pub extern "C" fn vo_call_iface(
-    ctx: *mut JitContext,
-    iface_slot0: u64,
-    iface_slot1: u64,
-    method_idx: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-    _func_id_hint: u32, // Reserved for future optimization
+    _ctx: *mut JitContext, _iface_slot0: u64, _iface_slot1: u64, _method_idx: u32,
+    _args: *const u64, _arg_count: u32, _ret: *mut u64, _ret_count: u32, _func_id_hint: u32,
 ) -> JitResult {
-    let ctx_ref = unsafe { &*ctx };
-    
-    // Extract itab_id from slot0 (high 32 bits)
-    let itab_id = (iface_slot0 >> 32) as u32;
-    
-    // Lookup func_id from itab directly
-    let func_id = unsafe {
-        let itab_cache = &*ctx_ref.itab_cache;
-        itab_cache.lookup_method(itab_id, method_idx as usize)
-    };
-    
-    // Prepare args with receiver as first slot
-    let mut full_args = vec![iface_slot1];
-    for i in 0..arg_count {
-        full_args.push(unsafe { *args.add(i as usize) });
-    }
-    
-    let call_fn = match ctx_ref.call_vm_fn {
-        Some(f) => f,
-        None => return JitResult::Panic,
-    };
-    
-    call_fn(
-        ctx_ref.vm,
-        ctx_ref.fiber,
-        func_id,
-        full_args.as_ptr(),
-        arg_count + 1,
-        ret,
-        ret_count,
-    )
+    unreachable!("vo_call_iface: CallIface excluded from JIT")
 }
 
 // =============================================================================
