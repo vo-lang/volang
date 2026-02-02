@@ -55,18 +55,13 @@ fn scan_globals(gc: &mut Gc, globals: &[u64], global_defs: &[GlobalDef]) {
 fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
     for fiber in fibers {
         // Scan stack frames (VM frames)
+        // Note: resume_stack (JIT shadow frames) doesn't need scanning because
+        // GC cannot trigger during pure JIT execution (no safepoints).
+        // When JIT returns Call/WaitIo, materialize_jit_frames converts
+        // resume_stack to fiber.frames before VM takes over.
         for frame in &fiber.frames {
             let func = &functions[frame.func_id as usize];
             let stack_slice = &fiber.stack[frame.bp..];
-            scan_slots_by_types(gc, stack_slice, &func.slot_types);
-        }
-        
-        // Scan resume_stack (JIT shadow frames)
-        // These are JIT-to-JIT call frames not yet converted to fiber.frames
-        #[cfg(feature = "jit")]
-        for rp in &fiber.resume_stack {
-            let func = &functions[rp.func_id as usize];
-            let stack_slice = &fiber.stack[rp.bp..];
             scan_slots_by_types(gc, stack_slice, &func.slot_types);
         }
 
