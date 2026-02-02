@@ -114,4 +114,7 @@ pub trait IrEmitter<'a> {
     
     /// Get the number of local variable slots.
     fn local_slot_count(&self) -> usize;
+    
+    /// Get the function ID being compiled.
+    fn func_id(&self) -> u32;
 }

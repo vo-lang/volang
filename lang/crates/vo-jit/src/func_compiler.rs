@@ -394,6 +394,11 @@ impl<'a> FunctionCompiler<'a> {
         let ctx = self.builder.block_params(self.entry_block)[0];
         let caller_args_ptr = self.args_ptr();
         
+        // Save caller_bp BEFORE push_frame changes ctx.jit_bp
+        let caller_bp = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+        );
+        
         // IMPORTANT: Read args BEFORE calling push_frame, because push_frame may
         // reallocate fiber.stack, making caller's args_ptr a dangling pointer.
         let mut arg_values = Vec::with_capacity(arg_slots);
@@ -466,21 +471,41 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
         
         // Non-OK path: propagate result (Panic, Call, or WaitIo)
-        // Callee's frame is already in fiber.stack, VM will handle it
+        // Push resume point for this caller frame before propagating
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
+        
+        // Load push_resume_point_fn and call it
+        let push_resume_point_fn_ptr = self.builder.ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
+        );
+        let push_resume_point_sig = crate::call_helpers::import_push_resume_point_sig(self);
+        
+        // ResumePoint stores callee's frame info (func_id, bp) with caller's resume info
+        // For self-recursive call, callee func_id is same as caller (self.func_id)
+        let callee_func_id = self.builder.ins().iconst(types::I32, self.func_id as i64);
+        // callee's bp is current ctx.jit_bp (set by push_frame)
+        let callee_bp = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+        );
+        
+        self.builder.ins().call_indirect(
+            push_resume_point_sig, push_resume_point_fn_ptr,
+            &[ctx, callee_func_id, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
+        );
+        
         self.builder.ins().return_(&[result]);
         
         // OK path - pop frame and copy return values
         self.builder.switch_to_block(ok_block);
         self.builder.seal_block(ok_block);
         
-        // Pop callee's frame
+        // Pop callee's frame (pass caller_bp to restore)
         let pop_frame_fn_ptr = self.builder.ins().load(
             types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
         );
         let pop_frame_sig = crate::call_helpers::import_pop_frame_sig(self);
-        self.builder.ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
+        self.builder.ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
         
         // Copy return values to caller's frame
         for i in 0..call_ret_slots {
@@ -524,5 +549,8 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     }
     fn local_slot_count(&self) -> usize {
         self.vars.len()
+    }
+    fn func_id(&self) -> u32 {
+        self.func_id
     }
 }

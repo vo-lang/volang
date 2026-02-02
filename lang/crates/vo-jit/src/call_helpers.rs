@@ -32,11 +32,27 @@ pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
-/// Create signature for vo_jit_pop_frame: (ctx) -> ()
+/// Create signature for vo_jit_pop_frame: (ctx, caller_bp) -> ()
 pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_bp
+        sig
+    })
+}
+
+/// Create signature for vo_jit_push_resume_point: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
+pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // resume_pc
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // bp
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_bp
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
         sig
     })
 }
@@ -363,6 +379,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
     
+    // Save caller_bp BEFORE push_frame changes ctx.jit_bp
+    let caller_bp = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+    );
+    
     // IMPORTANT: Read args BEFORE calling push_frame, because push_frame may
     // reallocate fiber.stack, making caller's args_ptr a dangling pointer.
     let mut arg_values = Vec::with_capacity(config.arg_slots);
@@ -450,11 +471,29 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
     // JIT non-OK path - propagate result (Panic, Call, or WaitIo)
-    // Callee's frame is already in fiber.stack, VM will handle it.
-    // NOTE: Caller's frame.pc was already set by push_frame to caller_resume_pc,
-    // so VM can continue at the right place after callee returns.
+    // Push resume point for this caller frame before propagating
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
+    
+    // Load push_resume_point_fn and call it
+    let push_resume_point_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
+    );
+    let push_resume_point_sig = import_push_resume_point_sig(emitter);
+    
+    // ResumePoint stores callee's frame info (func_id, bp) with caller's resume info (resume_pc, ret_reg)
+    // func_id should be callee's func_id (config.func_id), not caller's!
+    let callee_func_id = emitter.builder().ins().iconst(types::I32, config.func_id as i64);
+    // callee's bp is current ctx.jit_bp (set by push_frame)
+    let callee_bp = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+    );
+    
+    emitter.builder().ins().call_indirect(
+        push_resume_point_sig, push_resume_point_fn_ptr,
+        &[ctx, callee_func_id, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
+    );
+    
     emitter.builder().ins().return_(&[jit_result]);
     
     // JIT OK path
@@ -498,12 +537,12 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(merge_block);
     emitter.builder().seal_block(merge_block);
     
-    // Pop callee's frame
+    // Pop callee's frame (pass caller_bp to restore)
     let pop_frame_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
     );
     let pop_frame_sig = import_pop_frame_sig(emitter);
-    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx]);
+    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
     
     // Copy return values to caller's frame
     for i in 0..config.call_ret_slots {

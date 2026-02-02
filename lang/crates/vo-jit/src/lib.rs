@@ -927,7 +927,7 @@ impl JitCompiler {
 
         let mut func_ctx = FunctionBuilderContext::new();
         let helpers = self.get_helper_refs();
-        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func, vo_module, loop_info, helpers);
+        let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, loop_info, helpers);
         compiler.compile()?;
         
         // Verify IR in debug builds

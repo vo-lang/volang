@@ -65,7 +65,21 @@ pub type JitPushFrameFn = extern "C" fn(
 ) -> *mut u64;
 
 /// Function pointer type for popping a JIT frame.
-pub type JitPopFrameFn = extern "C" fn(ctx: *mut JitContext);
+/// Takes caller_bp as parameter since we don't store it in resume_stack anymore.
+pub type JitPopFrameFn = extern "C" fn(ctx: *mut JitContext, caller_bp: u32);
+
+/// Function pointer type for pushing a resume point on side-exit (Call/WaitIo).
+/// Called by JIT code when callee returns non-OK, before propagating the result.
+/// This is the "lazy push" - only called on the slow path.
+pub type JitPushResumePointFn = extern "C" fn(
+    ctx: *mut JitContext,
+    func_id: u32,
+    resume_pc: u32,
+    bp: u32,
+    caller_bp: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+);
 
 #[repr(C)]
 pub struct JitContext {
@@ -186,6 +200,10 @@ pub struct JitContext {
     /// Callback to pop a JIT frame after callee returns.
     /// Set by VM when creating JitContext.
     pub pop_frame_fn: Option<JitPopFrameFn>,
+    
+    /// Callback to push a resume point on side-exit (Call/WaitIo).
+    /// Only called on the slow path when callee returns non-OK.
+    pub push_resume_point_fn: Option<JitPushResumePointFn>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -223,6 +241,7 @@ impl JitContext {
     pub const OFFSET_JIT_BP: i32 = std::mem::offset_of!(JitContext, jit_bp) as i32;
     pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
     pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
+    pub const OFFSET_PUSH_RESUME_POINT_FN: i32 = std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
 }
 
 // =============================================================================
@@ -471,10 +490,10 @@ pub extern "C" fn vo_jit_push_frame(
 /// - `ctx` must be a valid pointer to JitContext
 /// - `ctx.pop_frame_fn` must be set
 #[no_mangle]
-pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext) {
+pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
     let ctx_ref = unsafe { &*ctx };
     if let Some(f) = ctx_ref.pop_frame_fn {
-        f(ctx);
+        f(ctx, caller_bp);
     }
 }
 

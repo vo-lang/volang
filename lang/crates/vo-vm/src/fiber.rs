@@ -330,7 +330,7 @@ impl Fiber {
             #[cfg(feature = "std")]
             resume_io_token: None,
             #[cfg(feature = "jit")]
-            resume_stack: Vec::with_capacity(8),
+            resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
         }
     }
     

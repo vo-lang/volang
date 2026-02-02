@@ -28,6 +28,7 @@ unsafe impl Sync for CompiledLoop {}
 
 pub struct LoopCompiler<'a> {
     builder: FunctionBuilder<'a>,
+    func_id: u32,
     func_def: &'a FunctionDef,
     vo_module: &'a VoModule,
     loop_info: &'a LoopInfo,
@@ -46,6 +47,7 @@ impl<'a> LoopCompiler<'a> {
     pub fn new(
         func: &'a mut Function,
         func_ctx: &'a mut FunctionBuilderContext,
+        func_id: u32,
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         loop_info: &'a LoopInfo,
@@ -58,6 +60,7 @@ impl<'a> LoopCompiler<'a> {
         
         Self {
             builder,
+            func_id,
             func_def,
             vo_module,
             loop_info,
@@ -422,5 +425,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn local_slot_count(&self) -> usize {
         self.vars.len()
+    }
+    fn func_id(&self) -> u32 {
+        self.func_id
     }
 }
