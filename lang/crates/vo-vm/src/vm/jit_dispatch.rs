@@ -244,6 +244,10 @@ fn handle_jit_result(
             // Pop the JIT frame
             fiber.frames.pop();
             fiber.sp = jit_bp;
+            
+            // Clear resume_stack - JIT completed normally, no shadow frames should remain
+            #[cfg(feature = "jit")]
+            fiber.resume_stack.clear();
 
             // Copy return values back to caller's stack
             for i in 0..ret_slots {
@@ -296,11 +300,16 @@ fn handle_jit_result(
             let callee_ret_slots = ctx.call_ret_slots() as usize;
             let callee_func_def = &module.functions[callee_func_id as usize];
 
+            // Convert resume_stack to fiber.frames before VM takes over
+            // This ensures GC can scan all frames correctly
+            #[cfg(feature = "jit")]
+            convert_resume_stack_to_frames(fiber, resume_pc);
+
             // Update JIT caller's frame PC for resume after callee returns
             if let Some(frame) = fiber.frames.last_mut() {
                 frame.pc = resume_pc as usize;
             }
-
+            
             // Set up callee frame like exec_call does:
             // callee_bp = current sp (which is actual_jit_bp + jit's local_slots)
             let callee_bp = fiber.sp;
@@ -387,6 +396,12 @@ fn handle_jit_result(
             let resume_pc = ctx.call_resume_pc();
             let io_token = ctx.wait_io_token();
             
+            // Convert resume_stack to fiber.frames before VM parks fiber
+            // This ensures GC can scan all frames correctly during blocking
+            #[cfg(feature = "jit")]
+            convert_resume_stack_to_frames(fiber, resume_pc);
+            
+            // Update frame PC for resume
             if let Some(frame) = fiber.frames.last_mut() {
                 frame.pc = resume_pc as usize;
             }
@@ -401,6 +416,57 @@ fn handle_jit_result(
             panic!("JIT returned WaitIo but std feature not enabled")
         }
     }
+}
+
+/// Convert resume_stack to fiber.frames when VM takes over from JIT.
+///
+/// This is called when JIT returns Call/WaitIo. The resume_stack contains
+/// shadow frames for the JIT call chain. We convert them to real CallFrames
+/// so the VM can continue execution and GC can scan them.
+///
+/// ResumePoint layout: {func_id, resume_pc (caller's), bp (this frame's), ret_slots}
+/// 
+/// Example: main -> a -> b (b returns Call)
+/// - fiber.frames = [main]
+/// - resume_stack = [{a, main.pc, a.bp, a.ret}, {b, a.pc, b.bp, b.ret}]
+///
+/// After conversion:
+/// - fiber.frames = [main, a, b]
+#[cfg(feature = "jit")]
+fn convert_resume_stack_to_frames(fiber: &mut Fiber, current_pc: u32) {
+    let len = fiber.resume_stack.len();
+    
+    if len == 0 {
+        return;
+    }
+    
+    // Convert each ResumePoint to a CallFrame
+    // ResumePoint stores: func_id, caller's resume_pc, this frame's bp, ret_slots
+    for i in 0..len {
+        let rp = &fiber.resume_stack[i];
+        
+        // pc: for frames except the last, use the next frame's resume_pc
+        // (which is this frame's resume point when it called the next)
+        // For the last frame, use current_pc
+        let pc = if i + 1 < len {
+            fiber.resume_stack[i + 1].resume_pc as usize
+        } else {
+            current_pc as usize
+        };
+        
+        let mut frame = CallFrame::new(
+            rp.func_id,
+            rp.bp,  // This frame's bp (stored directly in ResumePoint)
+            rp.ret_reg,  // ret_reg from ResumePoint
+            rp.ret_slots,
+        );
+        frame.pc = pc;
+        
+        fiber.frames.push(frame);
+    }
+    
+    // Clear resume_stack since VM now owns the frames
+    fiber.resume_stack.clear();
 }
 
 /// Trampoline for JIT code to call VM-interpreted functions.
@@ -553,11 +619,14 @@ pub extern "C" fn jit_push_frame(
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     
-    // IMPORTANT: Update caller's frame.pc BEFORE pushing new frame.
-    // This ensures that if the callee returns Call/WaitIo/Panic and VM takes over,
-    // when the callee eventually returns, the caller continues at the right PC.
-    if let Some(caller_frame) = fiber.frames.last_mut() {
-        caller_frame.pc = caller_resume_pc as usize;
+    // Update entry function's frame.pc in fiber.frames ONLY on first JIT-to-JIT call
+    // (when resume_stack is empty). Subsequent calls store pc in resume_stack instead.
+    // This prevents overwriting entry's correct pc with nested caller's pc.
+    #[cfg(feature = "jit")]
+    if fiber.resume_stack.is_empty() {
+        if let Some(entry_frame) = fiber.frames.last_mut() {
+            entry_frame.pc = caller_resume_pc as usize;
+        }
     }
     
     // New frame base is current sp
@@ -576,8 +645,17 @@ pub extern "C" fn jit_push_frame(
     // Update fiber.sp
     fiber.sp = new_sp;
     
-    // Push CallFrame
-    fiber.frames.push(CallFrame::new(func_id, new_bp, ret_reg as u16, ret_slots as u16));
+    // Push ResumePoint to resume_stack for shadow-frame tracking
+    // ResumePoint stores both callee's bp and caller's bp
+    #[cfg(feature = "jit")]
+    fiber.resume_stack.push(crate::fiber::ResumePoint {
+        func_id,
+        resume_pc: caller_resume_pc,
+        bp: new_bp,                       // callee's bp (for convert_resume_stack_to_frames)
+        caller_bp: ctx_ref.jit_bp as usize, // caller's bp (for jit_pop_frame)
+        ret_reg: ret_reg as u16,          // return register in caller's frame
+        ret_slots: ret_slots as u16,
+    });
     
     // Update ctx fields (stack_ptr may have changed due to reallocation)
     ctx_ref.stack_ptr = fiber.stack_ptr();
@@ -597,17 +675,18 @@ pub extern "C" fn jit_pop_frame(ctx: *mut JitContext) {
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     
-    // Pop the frame
-    if let Some(frame) = fiber.frames.pop() {
-        fiber.sp = frame.bp;
+    // Pop ResumePoint from resume_stack and restore caller's state
+    #[cfg(feature = "jit")]
+    if let Some(popped) = fiber.resume_stack.pop() {
+        // Restore fiber.sp to callee's bp (releasing callee's frame)
+        fiber.sp = popped.bp;
         
-        // Restore jit_bp to caller's bp
-        if let Some(caller_frame) = fiber.frames.last() {
-            ctx_ref.jit_bp = caller_frame.bp as u32;
-        } else {
-            ctx_ref.jit_bp = 0;
-        }
+        // Restore jit_bp to caller's bp (stored in ResumePoint)
+        ctx_ref.jit_bp = popped.caller_bp as u32;
     }
+    
+    // NOTE: Do NOT pop fiber.frames here - only resume_stack is used.
+    // fiber.frames is managed by the VM, not by JIT-to-JIT calls.
 }
 
 // =============================================================================

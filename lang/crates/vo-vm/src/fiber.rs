@@ -273,13 +273,17 @@ const INITIAL_STACK_CAPACITY: usize = 8192;
 /// needed to resume execution after the VM handles the request.
 #[derive(Debug, Clone, Copy)]
 pub struct ResumePoint {
-    /// Function to resume in.
+    /// Function id (callee).
     pub func_id: u32,
-    /// Bytecode PC to resume from (replay-at-PC model).
+    /// Bytecode PC to resume from (caller's resume_pc).
     pub resume_pc: u32,
-    /// Base pointer for this frame's stack window.
+    /// Base pointer for this frame (callee's bp).
     pub bp: usize,
-    /// Return slots expected by this caller.
+    /// Caller's base pointer (needed for jit_pop_frame to restore ctx.jit_bp).
+    pub caller_bp: usize,
+    /// Return register in caller's frame where return values should go.
+    pub ret_reg: u16,
+    /// Return slots expected.
     pub ret_slots: u16,
 }
 
