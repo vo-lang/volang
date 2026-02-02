@@ -1078,8 +1078,8 @@ fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = e.builder().ins().call(func, &[a, b]);
-    let cmp_result = e.builder().inst_results(call)[0];
-    let zero = e.builder().ins().iconst(types::I64, 0);
+    let cmp_result = e.builder().inst_results(call)[0]; // i32
+    let zero = e.builder().ins().iconst(types::I32, 0);
     let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
     let result = e.builder().ins().uextend(types::I64, cmp);
     e.write_var(inst.a, result);

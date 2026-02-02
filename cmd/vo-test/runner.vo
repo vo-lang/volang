@@ -94,19 +94,11 @@ func timeStyleCode(elapsedSec float64) string {
 	return ansiDim
 }
 
-func printTestLine(result TestResult, verbose bool) {
+func printResultLine(result TestResult, verbose bool) {
 	file := displayPath(result.file)
-
-	if result.skipped {
-		if !verbose {
-			return
-		}
-		fmt.Println("  " + statusSymbol(result) + " " + file + " [" + result.mode + " skipped]")
-		return
-	}
-
 	elapsed := formatElapsedSeconds(result.elapsedMs)
 	timeStr := colorize(fmt.Sprintf("(%.2fs)", elapsed), timeStyleCode(elapsed))
+	writeProgress("\r\x1b[K")
 	fmt.Println("  " + statusSymbol(result) + " " + file + " [" + result.mode + "] " + timeStr)
 
 	if verbose && result.output != "" {
@@ -115,6 +107,16 @@ func printTestLine(result TestResult, verbose bool) {
 
 	if verbose && !result.passed && result.errorMsg != "" {
 		fmt.Println(result.errorMsg)
+	}
+}
+
+func printTestLine(result TestResult, verbose bool) {
+	if result.skipped {
+		if !verbose {
+			return
+		}
+		file := displayPath(result.file)
+		fmt.Println("  " + statusSymbol(result) + " " + file + " [" + result.mode + " skipped]")
 	}
 }
 
@@ -533,6 +535,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 	jobChan := make(chan TestJob, len(jobs))
 	resultChan := make(chan TestResult, len(jobs))
+	printLock := make(chan struct{}, 1)
 
 	for i := 0; i < len(jobs); i++ {
 		jobs[i].index = i
@@ -540,7 +543,7 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 
 	// Start workers
 	for i := 0; i < workers; i++ {
-		go testWorker(jobChan, resultChan, verbose)
+		go testWorker(jobChan, resultChan, verbose, printLock)
 	}
 
 	// Send jobs (in a separate goroutine) so we can start receiving results immediately.
@@ -562,12 +565,17 @@ func runTestsParallel(jobs []TestJob, workers int, verbose bool) []TestResult {
 	return results
 }
 
-func testWorker(jobs <-chan TestJob, results chan<- TestResult, verbose bool) {
+func testWorker(jobs <-chan TestJob, results chan<- TestResult, verbose bool, printLock chan struct{}) {
 	for job := range jobs {
 		if !job.skipped {
-			fmt.Println(colorize("  ▶ "+displayPath(job.file)+" ["+job.mode+"]", ansiDim))
+			printLock <- struct{}{}
+			writeProgress("  " + colorize("▶", ansiDim) + " " + displayPath(job.file) + " [" + job.mode + "]")
 		}
 		result := runSingleTest(job, verbose)
+		if !job.skipped {
+			printResultLine(result, verbose)
+			<-printLock
+		}
 		results <- result
 	}
 }
