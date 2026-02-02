@@ -1,0 +1,45 @@
+package main
+
+import "time"
+
+// Test mixed JIT/VM call chain with WaitIo
+// withDefer contains defer -> not jittable -> VM fallback
+// Call chain: main(JIT) -> a(JIT) -> withDefer(VM) -> b(JIT) -> time.Sleep
+
+var counter int
+
+func b() int {
+	time.Sleep(time.Millisecond * 5)
+	counter++
+	return counter
+}
+
+func withDefer() int {
+	defer func() {
+		counter += 10
+	}()
+	return b()
+}
+
+func a() int {
+	return withDefer() + 100
+}
+
+func main() {
+	counter = 0
+	
+	start := time.Now()
+	result := a()
+	elapsed := time.Since(start)
+	
+	// b() returns 1, defer adds 10, a() adds 100
+	// But counter is modified by b() first (1), then defer (+10) = 11
+	assert(result == 101) // 1 + 100
+	assert(counter == 11) // 1 (from b) + 10 (from defer)
+	assert(elapsed >= time.Millisecond*5)
+	
+	// Second call
+	result2 := a()
+	assert(result2 == 112) // 12 + 100 (counter was 11, b() makes it 12)
+	assert(counter == 22)  // 12 + 10 (defer)
+}

@@ -90,6 +90,40 @@ pub fn dispatch_jit_call(
     handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret)
 }
 
+/// Execute a JIT callee when frame is already set up (from Call request).
+///
+/// This is called recursively from handle_jit_result when the callee can be JIT-executed.
+/// The callee's frame has already been pushed to fiber.frames.
+fn execute_jit_callee(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    jit_func: vo_jit::JitFunc,
+    callee_func_id: u32,
+    callee_bp: usize,
+    callee_ret_slots: usize,
+    caller_bp: usize,
+    caller_arg_start: usize,
+) -> ExecResult {
+    // Build JitContext
+    let mut ctx = build_jit_context(vm, fiber, module);
+    ctx.ctx.stack_ptr = fiber.stack_ptr();
+    ctx.ctx.stack_cap = fiber.stack.len() as u32;
+    ctx.ctx.jit_bp = callee_bp as u32;
+    
+    // Prepare ret buffer
+    let mut ret: Vec<u64> = vec![0u64; callee_ret_slots.max(1)];
+    
+    // args_ptr points to callee's frame
+    let args_ptr = unsafe { fiber.stack_ptr().add(callee_bp) };
+    
+    // Call JIT function
+    let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
+    
+    // Handle result (may recurse again)
+    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, callee_ret_slots, callee_bp, &ret)
+}
+
 /// JIT context with owned storage for mutable fields.
 ///
 /// The JitContext contains pointers to mutable state (panic_flag, panic_msg).
@@ -332,6 +366,15 @@ fn handle_jit_result(
                 call_arg_start as u16, // ret_reg: where caller expects returns (relative to caller_bp)
                 callee_ret_slots as u16,
             ));
+
+            // Check if callee can be JIT-executed instead of interpreter fallback
+            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
+                    // Execute callee via JIT recursively
+                    // Pass caller's bp and arg_start so return values go to the right place
+                    return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots, actual_jit_bp, call_arg_start);
+                }
+            }
 
             ExecResult::FrameChanged
         }

@@ -1,0 +1,36 @@
+package main
+
+import "time"
+
+// Test nested JIT call chain with WaitIo (time.Sleep)
+// Call chain: main -> a -> b -> c -> time.Sleep
+// All functions should be JIT-compiled, and WaitIo should work correctly.
+
+func c() int {
+	time.Sleep(time.Millisecond * 10)
+	return 3
+}
+
+func b() int {
+	return c() + 2
+}
+
+func a() int {
+	return b() + 1
+}
+
+func main() {
+	start := time.Now()
+	result := a()
+	elapsed := time.Since(start)
+	
+	assert(result == 6) // 3 + 2 + 1
+	assert(elapsed >= time.Millisecond*10)
+	
+	// Test multiple nested calls
+	sum := 0
+	for i := 0; i < 3; i++ {
+		sum += a()
+	}
+	assert(sum == 18) // 6 * 3
+}
