@@ -8,8 +8,6 @@ use alloc::vec::Vec;
 use vo_runtime::objects::interface::InterfaceSlot;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
-#[cfg(feature = "std")]
-use vo_runtime::call_dispatcher::CallDispatcher;
 
 use vo_runtime::gc::GcRef;
 
@@ -22,24 +20,12 @@ pub struct CallFrame {
     pub bp: usize,
     pub ret_reg: u16,
     pub ret_count: u16,
-    /// If true, this frame was entered via JIT and should resume JIT when pc > 0
-    pub is_jit_frame: bool,
-    /// I/O token for resume after WaitIo (JIT only). 0 means no pending I/O.
-    pub wait_io_token: u64,
-    /// Loop OSR begin PC. Non-zero means this frame needs loop OSR resume.
-    /// When resuming, call loop_func instead of executing bytecode.
-    pub loop_osr_begin_pc: usize,
 }
 
 impl CallFrame {
     #[inline]
     pub fn new(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
-        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: false, wait_io_token: 0, loop_osr_begin_pc: 0 }
-    }
-    
-    #[inline]
-    pub fn new_jit(func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) -> Self {
-        Self { func_id, pc: 0, bp, ret_reg, ret_count, is_jit_frame: true, wait_io_token: 0, loop_osr_begin_pc: 0 }
+        Self { func_id, pc: 0, bp, ret_reg, ret_count }
     }
 }
 
@@ -204,22 +190,12 @@ pub struct SelectState {
 pub enum FiberState {
     /// In ready_queue, waiting to be scheduled.
     Runnable,
-    /// Currently being executed (VM or JIT, distinguished by exec_mode).
+    /// Currently being executed.
     Running,
     /// Blocked waiting for external event.
     Blocked(BlockReason),
     /// Finished, slot can be recycled.
     Dead,
-}
-
-/// Execution engine for a fiber.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExecMode {
-    /// VM interpreter mode.
-    #[default]
-    Vm,
-    /// JIT compiled code mode.
-    Jit,
 }
 
 impl FiberState {
@@ -262,8 +238,8 @@ pub enum PanicState {
     /// Can be caught by recover() in a defer.
     /// Stores full interface{} value as InterfaceSlot.
     Recoverable(InterfaceSlot),
-    /// Fatal panic (internal VM/JIT errors that cannot be recovered).
-    /// Examples: blocking operation in JIT, unsupported operation.
+    /// Fatal panic (internal runtime errors that cannot be recovered).
+    /// Examples: unsupported operation.
     Fatal,
 }
 
@@ -290,8 +266,6 @@ pub struct Fiber {
     pub id: u32,
     /// Unified state machine (single source of truth).
     pub state: FiberState,
-    /// Execution engine (VM or JIT).
-    pub exec_mode: ExecMode,
     pub stack: Vec<u64>,
     /// Stack pointer - current stack top. stack[0..sp] is in use.
     pub sp: usize,
@@ -306,8 +280,6 @@ pub struct Fiber {
     pub panic_generation: u64,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
-    #[cfg(feature = "std")]
-    pub call_dispatcher: CallDispatcher,
 }
 
 impl Fiber {
@@ -315,7 +287,6 @@ impl Fiber {
         Self {
             id,
             state: FiberState::Runnable,
-            exec_mode: ExecMode::default(),
             stack: Vec::with_capacity(INITIAL_STACK_CAPACITY),
             sp: 0,
             frames: Vec::new(),
@@ -327,15 +298,12 @@ impl Fiber {
             panic_generation: 0,
             #[cfg(feature = "std")]
             resume_io_token: None,
-            #[cfg(feature = "std")]
-            call_dispatcher: CallDispatcher::new(),
         }
     }
     
     /// Reset fiber for reuse.
     pub fn reset(&mut self) {
         self.state = FiberState::Running;
-        self.exec_mode = ExecMode::default();
         self.sp = 0;
         self.frames.clear();
         self.defer_stack.clear();
@@ -347,7 +315,6 @@ impl Fiber {
         #[cfg(feature = "std")]
         {
             self.resume_io_token = None;
-            self.call_dispatcher.clear();
         }
     }
     
@@ -463,20 +430,11 @@ impl Fiber {
     }
 
     pub fn push_frame(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16) {
-        self.push_frame_with_jit(func_id, local_slots, ret_reg, ret_count, false)
-    }
-    
-    pub fn push_frame_with_jit(&mut self, func_id: u32, local_slots: u16, ret_reg: u16, ret_count: u16, is_jit_frame: bool) {
         let bp = self.sp;
         let new_sp = bp + local_slots as usize;
         self.ensure_capacity(new_sp);
         self.sp = new_sp;
-        let frame = if is_jit_frame {
-            CallFrame::new_jit(func_id, bp, ret_reg, ret_count)
-        } else {
-            CallFrame::new(func_id, bp, ret_reg, ret_count)
-        };
-        self.frames.push(frame);
+        self.frames.push(CallFrame::new(func_id, bp, ret_reg, ret_count));
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {

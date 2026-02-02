@@ -162,11 +162,9 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Scan for instructions that need resume blocks for multi-entry support.
-    /// 
-    /// With CallDispatcher, jittable calls are handled entirely by the dispatcher
-    /// (it manages its own resume_stack). We only need resume blocks for:
-    /// 1. Calls to non-jittable functions (use Call request mechanism)
-    /// 2. Blocking extern calls (may return WaitIo)
+    ///
+    /// Resume blocks are used when generated code may return Call/WaitIo and the VM
+    /// needs to re-enter the function at a specific program point.
     fn scan_call_requests(&mut self) {
         for (pc, inst) in self.func_def.code.iter().enumerate() {
             let resume_pc = match inst.opcode() {

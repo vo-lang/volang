@@ -26,8 +26,6 @@ pub mod builtins;
 // Std-only modules
 #[cfg(feature = "std")]
 pub mod jit_api;
-#[cfg(feature = "std")]
-pub mod call_dispatcher;
 #[cfg(feature = "gc-debug")]
 pub mod gc_debug;
 #[cfg(feature = "std")]

@@ -29,8 +29,6 @@ pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, Schedul
 pub use types::IslandThread;
 
 use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, runtime_panic, runtime_panic_msg, runtime_trap, user_panic};
-#[cfg(feature = "jit")]
-use helpers::panic_unwind;
 
 use crate::bytecode::Module;
 use crate::exec;
@@ -41,9 +39,6 @@ use crate::scheduler::Scheduler;
 use vo_runtime::itab::ItabCache;
 
 #[cfg(feature = "jit")]
-mod jit_glue;
-
-#[cfg(feature = "jit")]
 pub mod jit_mgr;
 
 #[cfg(feature = "jit")]
@@ -51,6 +46,9 @@ pub use jit_mgr::{JitManager, JitConfig};
 
 pub struct Vm {
     /// JIT manager (only available with "jit" feature).
+    ///
+    /// Note: VM runtime execution is currently interpreter-only. The JIT manager is kept for
+    /// compilation/codegen purposes while the execution integration is being rebuilt.
     /// IMPORTANT: Must be first field so it's dropped LAST (Rust drops in reverse order).
     /// JIT code memory must remain valid while scheduler/fibers are being dropped.
     #[cfg(feature = "jit")]
@@ -91,6 +89,8 @@ impl Vm {
     }
     
     /// Create a VM with custom JIT thresholds.
+    ///
+    /// Note: thresholds currently affect compilation bookkeeping only.
     #[cfg(feature = "jit")]
     pub fn with_jit_thresholds(call_threshold: u32, loop_threshold: u32) -> Self {
         Self::with_jit_config(JitConfig {
@@ -119,7 +119,7 @@ impl Vm {
     /// Initialize JIT compiler (if jit feature is enabled).
     ///
     /// Call this after creating the VM to enable JIT compilation.
-    /// If JIT initialization fails, the VM will continue with interpretation only.
+    /// Note: VM runtime execution remains interpreter-only.
     /// Note: Does nothing if JIT manager already exists (e.g., from with_jit_thresholds).
     #[cfg(feature = "jit")]
     pub fn init_jit(&mut self) {
@@ -204,7 +204,7 @@ impl Vm {
         // Reset sentinel error cache for new module (prevents cross-module corruption)
         self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
         
-        // Initialize JIT manager for this module
+        // Initialize JIT manager state for this module
         #[cfg(feature = "jit")]
         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
             jit_mgr.init(module.functions.len());
@@ -341,14 +341,9 @@ impl Vm {
                         }
                         #[cfg(feature = "std")]
                         crate::fiber::BlockReason::Io(token) => {
-                            // For VM frames: retry the same instruction after I/O becomes ready.
-                            // For JIT frames or loop OSR WaitIo: pc is already set to resume_pc, don't modify.
                             let fiber = self.scheduler.current_fiber_mut().unwrap();
                             let frame = fiber.current_frame_mut().unwrap();
-                            // If wait_io_token is already set, PC was set by loop OSR - don't modify
-                            if !frame.is_jit_frame && frame.wait_io_token == 0 {
-                                frame.pc -= 1;
-                            }
+                            frame.pc -= 1;
                             self.scheduler.block_for_io(token);
                         }
                     }
@@ -489,40 +484,6 @@ impl Vm {
         let mut bp: usize = unsafe { (*frame_ptr).bp };
         let mut code: &[Instruction] = &module.functions[func_id as usize].code;
         
-        // Check if this is a JIT frame resume (e.g., after WaitIo completion)
-        #[cfg(feature = "jit")]
-        {
-            let frame = unsafe { &*frame_ptr };
-            if frame.is_jit_frame && frame.pc > 0 {
-                // JIT frame needs resume - delegate to handle_jit_reentry
-                return self.handle_jit_reentry(fiber_id, module);
-            }
-            // Check if this is a loop OSR resume (after Call/WaitIo in loop)
-            if frame.loop_osr_begin_pc != 0 {
-                if let Some(osr_result) = self.handle_loop_osr_resume(fiber_id) {
-                    use crate::vm::jit_glue::OsrResult;
-                    match osr_result {
-                        OsrResult::FrameChanged => {
-                            // Loop pushed a new frame for VM call - continue with VM
-                        }
-                        #[cfg(feature = "std")]
-                        OsrResult::WaitIo => {
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            let token = fiber.current_frame().unwrap().wait_io_token;
-                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                        }
-                        OsrResult::Panic => {
-                            return ExecResult::Panic;
-                        }
-                        OsrResult::Exit(new_pc) => {
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            fiber.current_frame_mut().unwrap().pc = new_pc;
-                        }
-                    }
-                }
-            }
-        }
-        
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
             () => {{
@@ -545,34 +506,6 @@ impl Vm {
             match inst.opcode() {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
                 Opcode::Hint => {
-                    #[cfg(feature = "jit")]
-                    {
-                        use vo_common_core::instruction::HINT_LOOP_BEGIN;
-                        let hint_kind = inst.flags;
-                        if hint_kind == HINT_LOOP_BEGIN {
-                            let loop_pc = frame.pc - 1;
-                            if let Some(osr_result) = self.try_osr(fiber_id, func_id, loop_pc, bp) {
-                                use crate::vm::jit_glue::OsrResult;
-                                match osr_result {
-                                    OsrResult::FrameChanged => {
-                                        refetch!();
-                                    }
-                                    #[cfg(feature = "std")]
-                                    OsrResult::WaitIo => {
-                                        return ExecResult::Block(crate::fiber::BlockReason::Io(
-                                            self.scheduler.current_fiber().unwrap().current_frame().unwrap().wait_io_token
-                                        ));
-                                    }
-                                    OsrResult::Panic => {
-                                        return ExecResult::Panic;
-                                    }
-                                    OsrResult::Exit(new_pc) => {
-                                        frame.pc = new_pc;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 Opcode::LoadInt => {
@@ -889,70 +822,6 @@ impl Vm {
                 }
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
-                #[cfg(feature = "jit")]
-                Opcode::Call => {
-                    let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                    let arg_start = inst.b as usize;
-                    let arg_slots = (inst.c >> 8) as usize;
-                    let call_ret_slots = (inst.c & 0xFF) as usize;
-                    
-                    let target_func = &module.functions[target_func_id as usize];
-                    let jit_func = self.jit_mgr.as_mut()
-                        .and_then(|mgr| mgr.resolve_call(target_func_id, target_func, module));
-                    
-                    if let Some(_jit_func) = jit_func {
-                        // Use dispatcher-based JIT execution
-                        let jit_bp = fiber.sp;
-                        fiber.push_frame(target_func_id, target_func.local_slots, arg_start as u16, call_ret_slots as u16);
-                        fiber.frames.last_mut().unwrap().is_jit_frame = true;
-                        // Copy args from caller to JIT frame
-                        for i in 0..arg_slots {
-                            fiber.stack[jit_bp + i] = fiber.stack[bp + arg_start + i];
-                        }
-                        stack = fiber.stack_ptr();
-                        
-                        let result = self.execute_jit_with_dispatcher(
-                            fiber_id, target_func_id, jit_bp, 0
-                        );
-                        
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        
-                        match result {
-                            ExecResult::FrameChanged => {
-                                // Check if top frame is still our JIT frame (completed normally)
-                                // or if a new callee frame was pushed (needs VM execution)
-                                let is_our_frame = fiber.frames.last()
-                                    .map(|f| f.is_jit_frame && f.bp == jit_bp)
-                                    .unwrap_or(false);
-                                
-                                if is_our_frame {
-                                    // JIT completed - copy returns and pop frame
-                                    let func_ret_slots = target_func.ret_slots as usize;
-                                    for i in 0..call_ret_slots.min(func_ret_slots) {
-                                        fiber.stack[bp + arg_start + i] = fiber.stack[jit_bp + i];
-                                    }
-                                    fiber.pop_frame();
-                                }
-                                stack = fiber.stack_ptr();
-                                refetch!();
-                            }
-                            ExecResult::Panic => {
-                                stack = fiber.stack_ptr();
-                                let r = panic_unwind(fiber, stack, module);
-                                if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
-                            }
-                            ExecResult::Block(_) => {
-                                return ExecResult::TimesliceExpired;
-                            }
-                            other => return other,
-                        }
-                    } else {
-                        exec::exec_call(fiber, &inst, module);
-                        stack = fiber.stack_ptr();
-                        refetch!();
-                    }
-                }
-                #[cfg(not(feature = "jit"))]
                 Opcode::Call => {
                     exec::exec_call(fiber, &inst, module);
                     stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
@@ -1010,52 +879,6 @@ impl Vm {
                     };
                     stack = fiber.stack_ptr();
                     if !matches!(result, ExecResult::FrameChanged) { return result; }
-                    
-                    // Check if we need to re-enter JIT after callee returned
-                    #[cfg(feature = "jit")]
-                    {
-                        // First check loop OSR resume (caller was in a loop that made a Call)
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        if let Some(frame) = fiber.current_frame() {
-                            if frame.loop_osr_begin_pc != 0 {
-                                if let Some(osr_result) = self.handle_loop_osr_resume(fiber_id) {
-                                    use crate::vm::jit_glue::OsrResult;
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    stack = fiber.stack_ptr();
-                                    match osr_result {
-                                        OsrResult::FrameChanged => {
-                                            refetch!();
-                                            continue;
-                                        }
-                                        #[cfg(feature = "std")]
-                                        OsrResult::WaitIo => {
-                                            let token = fiber.current_frame().unwrap().wait_io_token;
-                                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                                        }
-                                        OsrResult::Panic => {
-                                            return ExecResult::Panic;
-                                        }
-                                        OsrResult::Exit(new_pc) => {
-                                            fiber.current_frame_mut().unwrap().pc = new_pc;
-                                            refetch!();
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Then check JIT frame reentry
-                        let reentry_result = self.handle_jit_reentry(fiber_id, module);
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        stack = fiber.stack_ptr();
-                        if matches!(reentry_result, ExecResult::Panic) {
-                            let r = panic_unwind(fiber, stack, module);
-                            if matches!(r, ExecResult::FrameChanged) { refetch!(); continue; } else { return r; }
-                        } else if !matches!(reentry_result, ExecResult::FrameChanged) {
-                            return reentry_result;
-                        }
-                    }
                     refetch!();
                 }
 
@@ -1650,7 +1473,7 @@ impl Vm {
     }
 
     /// Execute a function synchronously using a pooled callback fiber.
-    /// Used by JIT→VM calls and extern callbacks.
+    /// Used by extern callbacks.
     /// Returns (success, panic_state).
     pub fn execute_closure_sync(
         &mut self,

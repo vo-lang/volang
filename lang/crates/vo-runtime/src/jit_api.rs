@@ -137,17 +137,6 @@ pub struct JitContext {
     /// Loop OSR exit PC. Set by loop function on normal exit.
     /// When loop returns JitResult::Ok, this contains the PC to resume at.
     pub loop_exit_pc: u32,
-    
-    /// Pointer to CallDispatcher for unified JIT/VM call handling.
-    /// The dispatcher manages a resume_stack for handling Call/WaitIo in JIT-to-JIT chains.
-    /// See call_dispatcher.rs for design rationale.
-    pub call_dispatcher: *mut crate::call_dispatcher::CallDispatcher,
-    
-    /// Current function ID (for dispatcher to track caller)
-    pub current_func_id: u32,
-    
-    /// Current base pointer (for dispatcher to track caller's bp)
-    pub current_bp: u32,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -162,9 +151,6 @@ impl JitContext {
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
-    pub const OFFSET_CALL_DISPATCHER: i32 = std::mem::offset_of!(JitContext, call_dispatcher) as i32;
-    pub const OFFSET_CURRENT_FUNC_ID: i32 = std::mem::offset_of!(JitContext, current_func_id) as i32;
-    pub const OFFSET_CURRENT_BP: i32 = std::mem::offset_of!(JitContext, current_bp) as i32;
 }
 
 // =============================================================================

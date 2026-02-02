@@ -62,9 +62,6 @@ pub struct HelperFuncs {
     pub iface_to_iface: Option<FuncRef>,
     pub iface_eq: Option<FuncRef>,
     pub set_call_request: Option<FuncRef>,
-    /// CallDispatcher trampoline for unified JIT/VM calls.
-    /// Signature: (dispatcher, ctx, func_id, args, ret, caller_func_id, caller_resume_pc, caller_bp, caller_ret_slots) -> DispatchResult
-    pub dispatch_call: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler
