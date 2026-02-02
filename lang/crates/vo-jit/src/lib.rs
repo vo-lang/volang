@@ -48,9 +48,8 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
             // Port blocking operations (PortNew/Len/Cap are OK)
             | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose
             // Closure/interface calls - not supported until Phase 5 unified dispatch
-            | Opcode::CallClosure | Opcode::CallIface
-            // Extern calls - not supported in Step 1 (need proper trampoline)
-            | Opcode::CallExtern => return false,
+            | Opcode::CallClosure | Opcode::CallIface => return false,
+            // CallExtern supported via jit_call_extern callback (Step 3)
             _ => {}
         }
     }

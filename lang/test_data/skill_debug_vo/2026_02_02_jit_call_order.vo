@@ -1,0 +1,38 @@
+// Debug: test call order hypothesis
+package main
+
+import (
+	"dyn"
+	"encoding/toml"
+	"fmt"
+)
+
+func doDecode() {
+	input := `name = "test"`
+	result, err := toml.Decode([]byte(input))
+	if err != nil { panic(err.Error()) }
+	_ = result
+}
+
+func doMarshal() []byte {
+	inner := make(dyn.MapObject)
+	inner["port"] = 8080
+	obj := make(dyn.MapObject)
+	obj["server"] = inner
+	data, err := toml.Marshal(obj)
+	if err != nil { panic("marshal error") }
+	return data
+}
+
+func main() {
+	// Case A: Decode first, then Marshal (FAILS in original)
+	fmt.Println("=== Case A: Decode FIRST ===")
+	doDecode()
+	dataA := doMarshal()
+	fmt.Println("dataA len:", len(dataA))
+	if len(dataA) == 0 {
+		panic("Case A failed: Marshal returned empty after Decode!")
+	}
+	
+	fmt.Println("[VO:OK]")
+}

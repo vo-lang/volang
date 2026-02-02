@@ -191,11 +191,13 @@ impl<'a> LoopCompiler<'a> {
     
     fn store_vars_to_memory(&mut self) {
         // Write modified variables back to memory
-        for &slot in &self.loop_info.live_out {
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            let offset = (slot as i32) * 8;
-            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
-        }
+        // No-op: locals_ptr is the source of truth and is updated on every write_var
+        // and SlotSet/SlotSetN (via var_addr).
+    }
+
+    fn load_var_from_memory(&mut self, slot: u16) -> Value {
+        let offset = (slot as i32) * 8;
+        self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset)
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -383,18 +385,14 @@ impl<'a> LoopCompiler<'a> {
     /// Emit code to spill all SSA variables to fiber.stack.
     /// Called before returning Call so VM can see/restore state.
     fn emit_variable_spill(&mut self) {
-        let locals_ptr = self.locals_ptr;
-        for i in 0..self.vars.len() {
-            let val = self.builder.use_var(self.vars[i]);
-            self.builder.ins().store(MemFlags::trusted(), val, locals_ptr, (i * 8) as i32);
-        }
+        // No-op: locals_ptr is already kept up-to-date by write_var and SlotSet/SlotSetN.
     }
     
 }
 
 impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
-    fn read_var(&mut self, slot: u16) -> Value { self.builder.use_var(self.vars[slot as usize]) }
+    fn read_var(&mut self, slot: u16) -> Value { self.load_var_from_memory(slot) }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
         // Also sync to memory for var_addr access (e.g., slice_append reads element from memory)

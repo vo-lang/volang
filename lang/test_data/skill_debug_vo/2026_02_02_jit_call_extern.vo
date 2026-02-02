@@ -1,0 +1,21 @@
+// Test JIT CallExtern path
+// Simple extern calls should work through jit_call_extern callback
+
+package main
+
+import "fmt"
+
+func simpleExtern() {
+	// fmt.Println uses CallExtern
+	fmt.Println("hello from JIT extern")
+}
+
+func main() {
+	simpleExtern()
+	fmt.Println("done")
+}
+
+/* Expected output:
+hello from JIT extern
+done
+*/

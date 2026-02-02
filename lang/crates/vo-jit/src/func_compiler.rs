@@ -124,12 +124,21 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Emit code to spill all SSA variables to fiber.stack.
+    /// Emit code to spill all variables to args buffer (fiber.stack).
     /// Called before returning Call so VM can see/restore state.
+    /// 
+    /// IMPORTANT: We read from locals_slot instead of SSA variables because
+    /// some operations mutate locals via var_addr/SlotSet (memory) without
+    /// updating SSA variables. The locals_slot is the source of truth.
     fn emit_variable_spill(&mut self) {
         let args = self.builder.block_params(self.entry_block)[1];
+        if self.vars.is_empty() {
+            return;
+        }
+
+        let locals_slot = self.locals_slot.expect("spill_all_vars requires locals_slot");
         for i in 0..self.vars.len() {
-            let val = self.builder.use_var(self.vars[i]);
+            let val = self.builder.ins().stack_load(types::I64, locals_slot, (i * 8) as i32);
             self.builder.ins().store(MemFlags::trusted(), val, args, (i * 8) as i32);
         }
     }
@@ -253,8 +262,16 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
+    fn load_var_from_locals(&mut self, slot: u16) -> Value {
+        if let Some(locals_slot) = self.locals_slot {
+            self.builder.ins().stack_load(types::I64, locals_slot, (slot as i32) * 8)
+        } else {
+            self.builder.use_var(self.vars[slot as usize])
+        }
+    }
+
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
-        let cond = self.builder.use_var(self.vars[inst.a as usize]);
+        let cond = self.load_var_from_locals(inst.a);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
         let target_block = self.blocks[&target];
@@ -304,7 +321,7 @@ impl<'a> FunctionCompiler<'a> {
             let ret_reg = inst.a as usize;
             
             for i in 0..ret_slots {
-                let val = self.builder.use_var(self.vars[ret_reg + i]);
+                let val = self.load_var_from_locals((ret_reg + i) as u16);
                 let offset = (i * 8) as i32;
                 self.builder.ins().store(MemFlags::trusted(), val, ret_ptr, offset);
             }
@@ -319,8 +336,8 @@ impl<'a> FunctionCompiler<'a> {
             let ctx = self.builder.block_params(self.entry_block)[0];
             // Panic message is an interface (2 slots): slot0=metadata, slot1=data
             // Note: Panic instruction uses inst.a for the register (not inst.b)
-            let msg_slot0 = self.builder.use_var(self.vars[inst.a as usize]);
-            let msg_slot1 = self.builder.use_var(self.vars[inst.a as usize + 1]);
+            let msg_slot0 = self.load_var_from_locals(inst.a);
+            let msg_slot1 = self.load_var_from_locals(inst.a + 1);
             self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
         }
         let panic_val = self.builder.ins().iconst(types::I32, 1);
@@ -377,25 +394,21 @@ impl<'a> FunctionCompiler<'a> {
         let func_ret_slots = target_func.ret_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
         
-        // Create stack slots for args and return values
-        let arg_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
+        // Use locals_slot for args and return values (not separate stack slots)
+        // This is critical: when callee returns Call and spills, the spilled data
+        // goes into callee's args buffer. If we used separate arg_slot, that data
+        // would be inaccessible to VM. By using locals_slot at arg_start, the
+        // spilled data will be in the correct location for VM to restore.
+        let locals_slot = self.locals_slot.expect("call_self_recursive requires locals_slot");
+        
+        // Create ret_slot for return values (this is OK since it's only used locally)
         let ret_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (func_ret_slots.max(1) * 8) as u32,
             8,
         ));
         
-        // Store arguments to stack slot
-        for i in 0..arg_slots {
-            let val = self.builder.use_var(self.vars[arg_start + i]);
-            self.builder.ins().stack_store(val, arg_slot, (i * 8) as i32);
-        }
-        
-        let args_ptr = self.builder.ins().stack_addr(types::I64, arg_slot, 0);
+        let args_ptr = self.builder.ins().stack_addr(types::I64, locals_slot, (arg_start * 8) as i32);
         let ret_ptr = self.builder.ins().stack_addr(types::I64, ret_slot, 0);
         
         // Use direct call if we have self_func_ref (much faster for recursion)
@@ -424,20 +437,24 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.inst_results(call)[0]
         };
         
-        // Check result for panic
-        let one = self.builder.ins().iconst(types::I32, 1);
-        let is_panic = self.builder.ins().icmp(IntCC::Equal, result, one);
+        // Check result: OK=0, Panic=1, Call=2, WaitIo=3
+        // Only OK should continue, all others should be propagated
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let is_ok = self.builder.ins().icmp(IntCC::Equal, result, zero);
         
-        let panic_block = self.builder.create_block();
+        let non_ok_block = self.builder.create_block();
         let ok_block = self.builder.create_block();
         
-        self.builder.ins().brif(is_panic, panic_block, &[], ok_block, &[]);
+        self.builder.ins().brif(is_ok, ok_block, &[], non_ok_block, &[]);
         
-        // Panic path
-        self.builder.switch_to_block(panic_block);
-        self.builder.seal_block(panic_block);
-        let panic_val = self.builder.ins().iconst(types::I32, 1);
-        self.builder.ins().return_(&[panic_val]);
+        // Non-OK path: propagate result (Panic, Call, or WaitIo)
+        // We MUST spill here to copy our locals_slot (which contains callee's spilled data
+        // at arg_start..arg_start+callee_vars) to our args buffer. This ensures
+        // dispatch_jit_call can restore the complete state.
+        self.builder.switch_to_block(non_ok_block);
+        self.builder.seal_block(non_ok_block);
+        self.emit_variable_spill();
+        self.builder.ins().return_(&[result]);
         
         // OK path - load return values
         self.builder.switch_to_block(ok_block);
@@ -452,7 +469,7 @@ impl<'a> FunctionCompiler<'a> {
 
 impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
-    fn read_var(&mut self, slot: u16) -> Value { self.builder.use_var(self.vars[slot as usize]) }
+    fn read_var(&mut self, slot: u16) -> Value { self.load_var_from_locals(slot) }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
         // Also sync to stack_slot for SlotGet/SlotSet operations

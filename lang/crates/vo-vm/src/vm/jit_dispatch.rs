@@ -44,7 +44,7 @@ pub fn dispatch_jit_call(
     let ret_slots = (inst.c & 0xFF) as usize;
 
     let func_def = &module.functions[func_id as usize];
-
+    
     // Prepare args buffer (copy from caller's stack)
     let mut args: Vec<u64> = vec![0u64; func_def.local_slots as usize];
     for i in 0..arg_slots {
@@ -107,6 +107,11 @@ impl JitContextWrapper {
     fn call_ret_slots(&self) -> u16 {
         self.ctx.call_ret_slots
     }
+
+    #[cfg(feature = "std")]
+    fn wait_io_token(&self) -> u64 {
+        self.ctx.wait_io_token
+    }
 }
 
 fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitContextWrapper {
@@ -131,7 +136,10 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         call_vm_fn: Some(jit_call_vm_trampoline),
         itab_cache: &mut vm.state.itab_cache as *mut _,
         extern_registry: &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-        call_extern_fn: None, // CallExtern excluded from JIT in Step 1
+        #[cfg(feature = "std")]
+        call_extern_fn: Some(jit_call_extern),
+        #[cfg(not(feature = "std"))]
+        call_extern_fn: None,
         module: module as *const Module as *const vo_runtime::bytecode::Module,
         jit_func_table,
         jit_func_count,
@@ -254,9 +262,29 @@ fn handle_jit_result(
 
             ExecResult::FrameChanged
         }
+        #[cfg(feature = "std")]
         JitResult::WaitIo => {
-            // TODO(Step 3): Handle JIT returning WaitIo for blocking IO
-            panic!("JIT returned WaitIo - not yet implemented (Step 3)")
+            // JIT hit a blocking I/O operation.
+            // Copy JIT's args buffer back to fiber.stack and set up for resume.
+            for (i, &val) in args.iter().enumerate() {
+                fiber.stack[jit_bp + i] = val;
+            }
+            
+            // Update frame PC to resume_pc for when we come back
+            let resume_pc = ctx.call_resume_pc();
+            if let Some(frame) = fiber.frames.last_mut() {
+                frame.pc = resume_pc as usize;
+            }
+            
+            // Store IO token for scheduler
+            let io_token = ctx.wait_io_token();
+            fiber.resume_io_token = Some(io_token);
+            
+            ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
+        }
+        #[cfg(not(feature = "std"))]
+        JitResult::WaitIo => {
+            panic!("JIT returned WaitIo but std feature not enabled")
         }
     }
 }
@@ -287,5 +315,96 @@ pub extern "C" fn jit_call_vm_trampoline(
         JitResult::Ok
     } else {
         JitResult::Panic
+    }
+}
+
+/// Callback for JIT code to call extern functions.
+///
+/// This is set as `call_extern_fn` in JitContext and invoked by `vo_call_extern`.
+/// Returns JitResult::WaitIo if extern function blocks on I/O.
+///
+/// # Safety
+/// All pointers must be valid. Called from JIT-generated code.
+#[cfg(feature = "std")]
+pub extern "C" fn jit_call_extern(
+    ctx: *mut JitContext,
+    extern_registry: *const core::ffi::c_void,
+    gc: *mut vo_runtime::gc::Gc,
+    module: *const core::ffi::c_void,
+    extern_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_slots: u32,
+) -> JitResult {
+    use vo_runtime::ffi::{ExternRegistry, ExternResult};
+    
+    let ctx_ref = unsafe { &mut *ctx };
+    let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
+    let gc = unsafe { &mut *gc };
+    let module = unsafe { &*(module as *const Module) };
+    
+    // JIT passes same buffer for args and ret (args_ptr used twice in call_helpers.rs)
+    // buffer_size = max(arg_count, ret_slots)
+    let buffer_size = (arg_count as usize).max(ret_slots as usize).max(1);
+    
+    // Use the args buffer directly as our temp_stack (it's the same as ret buffer)
+    let buffer = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
+    
+    // Get additional context needed for extern calls
+    let itab_cache = unsafe { &mut *ctx_ref.itab_cache };
+    let program_args = unsafe { &*ctx_ref.program_args };
+    let sentinel_errors = unsafe { &mut *ctx_ref.sentinel_errors };
+    let io = unsafe { &mut *ctx_ref.io };
+    
+    let result = registry.call(
+        extern_id,
+        buffer,
+        0, // bp = 0 (start of buffer)
+        0, // arg_start = 0
+        arg_count as u16,
+        0, // ret_start = 0 (returns overwrite args in same buffer)
+        gc,
+        &module.struct_metas,
+        &module.interface_metas,
+        &module.named_type_metas,
+        &module.runtime_types,
+        itab_cache,
+        &module.functions,
+        module,
+        ctx_ref.vm,
+        ctx_ref.fiber,
+        None, // call_closure_fn - not needed for most externs
+        &module.well_known,
+        program_args,
+        sentinel_errors,
+        io,
+        None, // resume_io_token - first call, not resuming
+    );
+    
+    // Return values already in buffer (same as ret pointer), no copy needed
+    
+    match result {
+        ExternResult::Ok => JitResult::Ok,
+        ExternResult::Panic(_msg) => {
+            // Set panic message in context
+            unsafe {
+                *ctx_ref.panic_flag = true;
+            }
+            JitResult::Panic
+        }
+        ExternResult::Yield => {
+            // Treat yield like Call - VM will handle scheduling
+            JitResult::Call
+        }
+        ExternResult::Block => {
+            // Queue blocking - treat like Call
+            JitResult::Call
+        }
+        ExternResult::WaitIo { token } => {
+            // Store IO token in context for VM to handle
+            ctx_ref.wait_io_token = token;
+            JitResult::WaitIo
+        }
     }
 }

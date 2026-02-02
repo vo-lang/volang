@@ -1,0 +1,50 @@
+// Debug: test complex control flow in JIT
+package main
+
+import "fmt"
+
+func complexFlow(buf []byte, n int) []byte {
+	// Simulate writeTable-like logic with loops and branches
+	for i := 0; i < n; i++ {
+		if i%2 == 0 {
+			buf = append(buf, 'a')
+		} else {
+			buf = append(buf, 'b')
+		}
+	}
+	return buf
+}
+
+func trigger() {
+	// Trigger some JIT compilation
+	s := ""
+	for i := 0; i < 10; i++ {
+		s = s + "x"
+	}
+	_ = s
+}
+
+func main() {
+	// Test 1: Before trigger
+	fmt.Println("=== Test 1: Before trigger ===")
+	buf1 := make([]byte, 0, 10)
+	result1 := complexFlow(buf1, 4)
+	fmt.Println("result1 len:", len(result1))
+	if len(result1) != 4 {
+		panic("Test 1 failed!")
+	}
+	
+	// Trigger
+	trigger()
+	
+	// Test 2: After trigger
+	fmt.Println("=== Test 2: After trigger ===")
+	buf2 := make([]byte, 0, 10)
+	result2 := complexFlow(buf2, 4)
+	fmt.Println("result2 len:", len(result2))
+	if len(result2) != 4 {
+		panic("Test 2 failed!")
+	}
+	
+	fmt.Println("[VO:OK]")
+}

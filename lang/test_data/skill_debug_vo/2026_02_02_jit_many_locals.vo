@@ -1,0 +1,77 @@
+// Debug: test function with many local variables
+package main
+
+import "fmt"
+
+func manyLocals(buf []byte) []byte {
+	// Create many local variables to simulate parse function
+	var a1, a2, a3, a4, a5, a6, a7, a8, a9, a10 int
+	var b1, b2, b3, b4, b5, b6, b7, b8, b9, b10 int
+	var c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 int
+	var d1, d2, d3, d4, d5, d6, d7, d8, d9, d10 int
+	var e1, e2, e3, e4, e5, e6, e7, e8, e9, e10 int
+	var f1, f2, f3, f4, f5, f6, f7, f8, f9, f10 int
+	var g1, g2, g3, g4, g5, g6, g7, g8, g9, g10 int
+	var h1, h2, h3, h4, h5, h6, h7, h8, h9, h10 int
+	var i1, i2, i3, i4, i5, i6, i7, i8, i9, i10 int
+	var j1, j2, j3, j4, j5, j6, j7, j8, j9, j10 int
+	
+	// Use them to prevent optimization
+	a1 = 1; a2 = 2; a3 = 3; a4 = 4; a5 = 5; a6 = 6; a7 = 7; a8 = 8; a9 = 9; a10 = 10
+	b1 = 1; b2 = 2; b3 = 3; b4 = 4; b5 = 5; b6 = 6; b7 = 7; b8 = 8; b9 = 9; b10 = 10
+	c1 = 1; c2 = 2; c3 = 3; c4 = 4; c5 = 5; c6 = 6; c7 = 7; c8 = 8; c9 = 9; c10 = 10
+	d1 = 1; d2 = 2; d3 = 3; d4 = 4; d5 = 5; d6 = 6; d7 = 7; d8 = 8; d9 = 9; d10 = 10
+	e1 = 1; e2 = 2; e3 = 3; e4 = 4; e5 = 5; e6 = 6; e7 = 7; e8 = 8; e9 = 9; e10 = 10
+	f1 = 1; f2 = 2; f3 = 3; f4 = 4; f5 = 5; f6 = 6; f7 = 7; f8 = 8; f9 = 9; f10 = 10
+	g1 = 1; g2 = 2; g3 = 3; g4 = 4; g5 = 5; g6 = 6; g7 = 7; g8 = 8; g9 = 9; g10 = 10
+	h1 = 1; h2 = 2; h3 = 3; h4 = 4; h5 = 5; h6 = 6; h7 = 7; h8 = 8; h9 = 9; h10 = 10
+	i1 = 1; i2 = 2; i3 = 3; i4 = 4; i5 = 5; i6 = 6; i7 = 7; i8 = 8; i9 = 9; i10 = 10
+	j1 = 1; j2 = 2; j3 = 3; j4 = 4; j5 = 5; j6 = 6; j7 = 7; j8 = 8; j9 = 9; j10 = 10
+	
+	sum := a1+a2+a3+a4+a5+a6+a7+a8+a9+a10
+	sum += b1+b2+b3+b4+b5+b6+b7+b8+b9+b10
+	sum += c1+c2+c3+c4+c5+c6+c7+c8+c9+c10
+	sum += d1+d2+d3+d4+d5+d6+d7+d8+d9+d10
+	sum += e1+e2+e3+e4+e5+e6+e7+e8+e9+e10
+	sum += f1+f2+f3+f4+f5+f6+f7+f8+f9+f10
+	sum += g1+g2+g3+g4+g5+g6+g7+g8+g9+g10
+	sum += h1+h2+h3+h4+h5+h6+h7+h8+h9+h10
+	sum += i1+i2+i3+i4+i5+i6+i7+i8+i9+i10
+	sum += j1+j2+j3+j4+j5+j6+j7+j8+j9+j10
+	
+	for x := 0; x < sum/100; x++ {
+		buf = append(buf, 'x')
+	}
+	
+	return buf
+}
+
+func simpleAppend(buf []byte, n int) []byte {
+	for i := 0; i < n; i++ {
+		buf = append(buf, 'a')
+	}
+	return buf
+}
+
+func main() {
+	// Test 1: simpleAppend before manyLocals
+	fmt.Println("=== Test 1: simpleAppend FIRST ===")
+	buf1 := make([]byte, 0, 10)
+	result1 := simpleAppend(buf1, 4)
+	fmt.Println("result1 len:", len(result1))
+	
+	// Now call manyLocals
+	manyLocals(make([]byte, 0, 10))
+	
+	// Test 2: simpleAppend after manyLocals
+	fmt.Println("=== Test 2: simpleAppend AFTER manyLocals ===")
+	buf2 := make([]byte, 0, 10)
+	result2 := simpleAppend(buf2, 4)
+	fmt.Println("result2 len:", len(result2))
+	
+	if len(result2) != 4 {
+		panic("simpleAppend failed after manyLocals!")
+	}
+	
+	fmt.Println("[VO:OK]")
+}

@@ -284,6 +284,8 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
     // JIT non-OK path - propagate result (Panic, Call, or WaitIo)
+    // We MUST spill here so that our state (including any callee spilled data
+    // in our locals_slot) gets copied to our args buffer for VM to restore.
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
     emitter.spill_all_vars();

@@ -1547,8 +1547,9 @@ impl Vm {
                 ExecResult::Done => {
                     let fiber = self.scheduler.fiber(fid);
                     let n = (ret_count as usize).min(func_def.ret_slots as usize);
+                    // Return values are at bp (start of function's local slots)
                     for i in 0..n {
-                        unsafe { *ret.add(i) = fiber.stack[i] };
+                        unsafe { *ret.add(i) = fiber.stack[bp + i] };
                     }
                     break (true, None);
                 }
