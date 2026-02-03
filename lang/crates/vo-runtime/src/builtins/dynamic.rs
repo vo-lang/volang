@@ -34,6 +34,104 @@ vo_errors! {
     }
 }
 
+fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
+    use vo_common_core::types::ValueMeta;
+
+    let arg_count = call.arg_u64(0) as usize;
+    let spread_flag = call.arg_u64(1) != 0;
+    let args_start = 2u16;
+
+    let mut spread_len = 0usize;
+    let mut spread_slice_ref: crate::gc::GcRef = core::ptr::null_mut();
+
+    if spread_flag && arg_count > 0 {
+        let last_idx = arg_count - 1;
+        let last_slot0 = call.arg_u64(args_start + (last_idx * 2) as u16);
+        let last_slot1 = call.arg_u64(args_start + (last_idx * 2) as u16 + 1);
+        let last_vk = interface::unpack_value_kind(last_slot0);
+        if last_vk != ValueKind::Slice {
+            call.ret_ref(0, core::ptr::null_mut());
+            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+            let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
+            call.ret_u64(1, slot0);
+            call.ret_u64(2, slot1);
+            return ExternResult::Ok;
+        }
+
+        let slice_rttid = interface::unpack_rttid(last_slot0);
+        let elem = match call.get_slice_elem(slice_rttid) {
+            Some(e) => e,
+            None => {
+                call.ret_ref(0, core::ptr::null_mut());
+                let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+                let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg is not a slice type", cause0, cause1);
+                call.ret_u64(1, slot0);
+                call.ret_u64(2, slot1);
+                return ExternResult::Ok;
+            }
+        };
+        if elem.value_kind() != ValueKind::Interface {
+            call.ret_ref(0, core::ptr::null_mut());
+            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+            let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
+            call.ret_u64(1, slot0);
+            call.ret_u64(2, slot1);
+            return ExternResult::Ok;
+        }
+
+        spread_slice_ref = last_slot1 as crate::gc::GcRef;
+        spread_len = slice::len(spread_slice_ref);
+        if !spread_slice_ref.is_null() {
+            let arr = slice::array_ref(spread_slice_ref);
+            if array::elem_kind(arr) != ValueKind::Interface || array::elem_bytes(arr) != 16 {
+                call.ret_ref(0, core::ptr::null_mut());
+                let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+                let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
+                call.ret_u64(1, slot0);
+                call.ret_u64(2, slot1);
+                return ExternResult::Ok;
+            }
+        }
+    }
+
+    let out_len = if spread_flag && arg_count > 0 {
+        (arg_count - 1) + spread_len
+    } else {
+        arg_count
+    };
+
+    let elem_meta = ValueMeta::new(0, ValueKind::Interface);
+    let new_slice = slice::create(call.gc(), elem_meta, 16, out_len, out_len);
+
+    if out_len > 0 {
+        let dst_ptr = slice::data_ptr(new_slice) as *mut u64;
+        let mut out_i = 0usize;
+
+        let direct_count = if spread_flag && arg_count > 0 { arg_count - 1 } else { arg_count };
+        for i in 0..direct_count {
+            let slot0 = call.arg_u64(args_start + (i * 2) as u16);
+            let slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
+            unsafe {
+                *dst_ptr.add(out_i * 2) = slot0;
+                *dst_ptr.add(out_i * 2 + 1) = slot1;
+            }
+            out_i += 1;
+        }
+
+        if spread_flag && arg_count > 0 && spread_len > 0 {
+            let src_ptr = slice::data_ptr(spread_slice_ref) as *const u64;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr.add(out_i * 2), spread_len * 2);
+            }
+        }
+    }
+
+    call.ret_ref(0, new_slice);
+    call.ret_nil(1);
+    call.ret_nil(2);
+    ExternResult::Ok
+}
+
 // ==================== Helper functions ====================
 
 /// Check if a ValueKind is an integer type (Int, Int64, Int32, Int16, Int8).
@@ -1470,6 +1568,7 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
         ("dyn_set_attr", dyn_set_attr),
         ("dyn_set_index", dyn_set_index),
         ("dyn_call_prepare", dyn_call_prepare),
+        ("dyn_pack_any_slice", dyn_pack_any_slice),
         ("dyn_repack_args", dyn_repack_args),
         ("dyn_call_closure", dyn_call_closure),
         ("dyn_type_assert_error", dyn_type_assert_error),

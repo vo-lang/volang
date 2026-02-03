@@ -46,6 +46,8 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "dyn_get_attr" | "dyn_get_index" | "dyn_GetAttr" | "dyn_GetIndex" => 4,
         // error[2] = 2 slots
         "dyn_set_attr" | "dyn_set_index" | "dyn_SetAttr" | "dyn_SetIndex" => 2,
+        // (slice_ref[1], error[2]) = 3 slots
+        "dyn_pack_any_slice" => 3,
         // error[2] = 2 slots
         "dyn_type_assert_error" => 2,
         

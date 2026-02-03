@@ -314,47 +314,41 @@ fn compile_dyn_op(
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
                 // Protocol method call: DynCall(args ...any) (any, error)
-                // Build variadic slice of any from args
+                // Build variadic []any slice via a dedicated extern.
+                // This avoids SliceNew + per-arg boxing + SliceSet overhead.
                 let arg_count = args.len();
                 let any_type = info.any_type();
+                let pack_extern = ctx.get_or_register_extern("dyn_pack_any_slice");
                 
-                // any is interface: 16 bytes (2 slots)
-                let elem_bytes = 16usize;
-                let elem_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-                let elem_vk = ValueKind::Interface;
-                
-                // Get element meta for any
-                let elem_meta_idx = ctx.get_or_create_value_meta(any_type, info);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
-                
-                // Create slice: SliceNew with flags, dst, meta_reg, len_cap_reg
-                let slice_reg = func.alloc_temp_typed(&[SlotType::GcRef]);
-                let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-                let num_regs = if flags == 0 { 3 } else { 2 };
-                let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
-                let (b, c) = crate::type_info::encode_i32(arg_count as i32);
-                func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
-                func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
-                if flags == 0 {
-                    let eb_idx = ctx.const_int(elem_bytes as i64);
-                    func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
+                // Args: (arg_count[1], spread_flag[1], args[N*2]...) -> (slice_ref[1], error[2])
+                let mut pack_arg_types = vec![SlotType::Value, SlotType::Value];
+                for _ in 0..arg_count {
+                    pack_arg_types.push(SlotType::Interface0);
+                    pack_arg_types.push(SlotType::Interface1);
                 }
-                func.emit_with_flags(Opcode::SliceNew, flags, slice_reg, meta_reg, len_cap_reg);
+                let pack_args = func.alloc_temp_typed(&pack_arg_types);
+                func.emit_op(Opcode::LoadInt, pack_args, arg_count as u16, (arg_count >> 16) as u16);
+                func.emit_op(Opcode::LoadInt, pack_args + 1, if *spread { 1 } else { 0 }, 0);
                 
-                // Set each element via SliceSet
                 for (i, arg) in args.iter().enumerate() {
-                    let val_reg = func.alloc_temp_typed(&elem_slot_types);
+                    let dst_slot = pack_args + 2 + (i as u16) * 2;
                     let arg_type = info.expr_type(arg.id);
                     if info.is_interface(arg_type) {
-                        compile_expr_to(arg, val_reg, ctx, func, info)?;
+                        compile_expr_to(arg, dst_slot, ctx, func, info)?;
                     } else {
-                        crate::assign::emit_assign(val_reg, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
+                        crate::assign::emit_assign(dst_slot, crate::assign::AssignSource::Expr(arg), any_type, ctx, func, info)?;
                     }
-                    let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
-                    func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-                    func.emit_slice_set(slice_reg, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
                 }
+                
+                let pack_result = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
+                let pack_arg_count = (2 + arg_count * 2) as u8;
+                func.emit_with_flags(Opcode::CallExtern, pack_arg_count, pack_result, pack_extern as u16, pack_args);
+                
+                // If pack failed, propagate the error.
+                let skip_pack_error = func.emit_jump(Opcode::JumpIfNot, pack_result + 1);
+                let pack_error_done = func.emit_error_propagation(pack_result + 1, dst, info.dyn_access_dst_slots(ret_types));
+                func.patch_jump(skip_pack_error, func.current_pc());
+                let slice_reg = pack_result;
                 
                 // Allocate args for CallIface: slice[1], but returns overwrite starting at args_start
                 // Need max(arg_slots, ret_slots) = max(1, 4) = 4 slots
@@ -371,6 +365,7 @@ fn compile_dyn_op(
                 
                 // Unbox result with type check (result starts at protocol_args)
                 emit_unbox_with_type_check(ret_type, dst, protocol_args, error_slot, ctx, func, info);
+                func.patch_jump(pack_error_done, func.current_pc());
                 let end_jump = func.emit_jump(Opcode::Jump, 0);
                 
                 func.patch_jump(fallback_jump, func.current_pc());
