@@ -302,8 +302,8 @@ def run_vo_file(file: str, mode: str = 'vm', codegen: bool = False):
         print(result.stderr)
         sys.exit(1)
     
-    # Build command: vo --cache CLI_DIR run <file> [--codegen] [--mode=jit]
-    cmd = [str(vo_bin), '--cache', str(CLI_DIR), 'run', file]
+    # Build command: vo run <file> [--codegen] [--mode=jit]
+    cmd = [str(vo_bin), 'run', file]
     if codegen:
         cmd.append('--codegen')
     elif mode == 'jit':
@@ -342,8 +342,8 @@ class TestRunner:
             self.cli_cache = CLI_DIR
 
     def _make_vo_cmd(self, *args) -> list[str]:
-        """Build vo command: vo --cache <cli_path> <cli_args...>"""
-        base = [str(self.vo_bin), '--cache', str(self.cli_cache)] + list(args)
+        """Build vo command: vo <cli_args...>"""
+        base = [str(self.vo_bin)] + list(args)
         if self.arch == '32':
             return [QEMU_ARM, '-L', QEMU_ARM_LD_PREFIX] + base
         return base

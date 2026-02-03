@@ -58,7 +58,7 @@ pub fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 
         let val = key[i];
         
         match slot_types[i] {
-            SlotType::Value => {
+            SlotType::Value | SlotType::Float => {
                 h = h.wrapping_add(val).wrapping_mul(HASH_K);
             }
             SlotType::GcRef => {
@@ -171,7 +171,7 @@ where
         let (a_val, b_val, a_next, b_next) = get_slot(i);
         
         match slot_types[i] {
-            SlotType::Value => {
+            SlotType::Value | SlotType::Float => {
                 if a_val != b_val {
                     return false;
                 }

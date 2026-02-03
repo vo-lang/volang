@@ -206,8 +206,8 @@ impl FuncBuilder {
     // 2. Allocates temp slots for expression evaluation
     // 3. Calls end_temp_region() at end, restoring next_slot
     //
-    // Variable definitions (Var, ShortVar) call commit_temp_region() instead,
-    // which keeps the allocated slots permanent.
+    // Variable definitions (Var, ShortVar) don't call begin/end_temp_region,
+    // so their slots are permanent.
     //
     // slot_types is kept at high-water mark (never shrinks) because:
     // - JIT needs type info for all slots that may be used
@@ -215,7 +215,6 @@ impl FuncBuilder {
     // =========================================================================
 
     /// Begin a temporary slot region. Call at statement/expression start.
-    /// Returns a handle used by end_temp_region or commit_temp_region.
     #[inline]
     pub fn begin_temp_region(&mut self) {
         self.temp_checkpoint_stack.push(self.next_slot);
@@ -228,6 +227,51 @@ impl FuncBuilder {
         if let Some(checkpoint) = self.temp_checkpoint_stack.pop() {
             self.next_slot = checkpoint;
         }
+    }
+
+    /// Allocate slots with the given type sequence.
+    /// 
+    /// Static type principle: slot types are immutable after allocation.
+    /// When reusing slots (after end_temp_region), types must match exactly.
+    /// If types don't match, fresh slots are allocated at the end.
+    pub fn alloc_slots(&mut self, types: &[SlotType]) -> u16 {
+        if types.is_empty() { return 0; }
+        let len = types.len();
+        let slot = self.next_slot as usize;
+        let end_slot = slot + len;
+        
+        // Helper: allocate fresh slots at the end of slot_types
+        let alloc_fresh = |this: &mut Self| -> u16 {
+            let fresh = this.slot_types.len() as u16;
+            this.slot_types.extend_from_slice(types);
+            this.next_slot = fresh + len as u16;
+            fresh
+        };
+        
+        // Case 1: Fully within existing slot_types (reuse region)
+        if end_slot <= self.slot_types.len() {
+            if self.slot_types[slot..end_slot] == *types {
+                self.next_slot = end_slot as u16;
+                return slot as u16;
+            }
+            return alloc_fresh(self);
+        }
+        
+        // Case 2: Partial overlap with existing slot_types
+        if slot < self.slot_types.len() {
+            let overlap_len = self.slot_types.len() - slot;
+            if self.slot_types[slot..] != types[..overlap_len] {
+                return alloc_fresh(self);
+            }
+            // Extend with non-overlapping part
+            self.slot_types.extend_from_slice(&types[overlap_len..]);
+        } else {
+            // Case 3: No overlap - just extend
+            self.slot_types.extend_from_slice(types);
+        }
+        
+        self.next_slot = end_slot as u16;
+        slot as u16
     }
 
     /// Define a capture variable (for closure)
@@ -309,14 +353,6 @@ impl FuncBuilder {
     /// This is the unified entry point - all type decisions are made by the caller.
     pub fn define_local(&mut self, sym: Symbol, storage: StorageKind) {
         self.bind_local(sym, storage);
-    }
-
-    /// Allocate slots and extend slot_types. Returns the starting slot.
-    fn alloc_slots(&mut self, types: &[SlotType]) -> u16 {
-        let slot = self.next_slot;
-        self.slot_types.extend_from_slice(types);
-        self.next_slot += types.len() as u16;
-        slot
     }
 
     /// Stack allocation (non-escaping) for values (struct/primitive).
@@ -419,27 +455,7 @@ impl FuncBuilder {
     }
 
     pub fn alloc_temp_typed(&mut self, types: &[SlotType]) -> u16 {
-        let slot = self.next_slot;
-        let end_slot = slot as usize + types.len();
-        
-        // Handle slot reuse: if next_slot was restored by end_temp_region,
-        // we may be reallocating slots that already exist in slot_types.
-        // In that case, overwrite existing entries; otherwise extend.
-        if end_slot <= self.slot_types.len() {
-            // All slots already exist - overwrite with new types
-            self.slot_types[slot as usize..end_slot].copy_from_slice(types);
-        } else if (slot as usize) < self.slot_types.len() {
-            // Partial overlap - overwrite existing, extend for new
-            let existing_end = self.slot_types.len();
-            self.slot_types[slot as usize..existing_end].copy_from_slice(&types[..existing_end - slot as usize]);
-            self.slot_types.extend_from_slice(&types[existing_end - slot as usize..]);
-        } else {
-            // No overlap - just extend
-            self.slot_types.extend_from_slice(types);
-        }
-        
-        self.next_slot = end_slot as u16;
-        slot
+        self.alloc_slots(types)
     }
 
     /// Allocate a single GcRef slot (for closure refs, etc.)

@@ -213,11 +213,15 @@ impl ValueKind {
     }
 }
 
-/// Slot type for GC stack scanning.
+/// Slot type for GC stack scanning and JIT type optimization.
 ///
 /// Interface0 and Interface1 are paired:
 /// - Interface0: header slot (contains value_kind)
 /// - Interface1: data slot (scan depends on Interface0's value_kind)
+///
+/// Float is separate from Value for JIT optimization:
+/// - Value slots use I64 registers
+/// - Float slots use F64 registers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SlotType {
@@ -226,6 +230,7 @@ pub enum SlotType {
     GcRef = 1,
     Interface0 = 2,
     Interface1 = 3,
+    Float = 4,
 }
 
 impl SlotType {

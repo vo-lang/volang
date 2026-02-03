@@ -97,7 +97,7 @@ pub fn compile_slot_comparison(
                 func.emit_op(Opcode::And, dst, dst, tmp_cmp);
                 i += 1;
             }
-            SlotType::Value => {
+            SlotType::Value | SlotType::Float => {
                 func.emit_op(Opcode::EqI, tmp_cmp, left_val, right_val);
                 func.emit_op(Opcode::And, dst, dst, tmp_cmp);
                 i += 1;
