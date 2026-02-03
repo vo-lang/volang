@@ -98,15 +98,14 @@ pub fn exec_call_extern(
         #[cfg(feature = "std")]
         ExternResult::WaitIo { token } => ExecResult::Block(crate::fiber::BlockReason::Io(token)),
         ExternResult::Panic(msg) => {
-            // Enhance error message with function name if it's a "not found" error
-            if msg.contains("not found") || msg.contains("not registered") {
-                *fiber_panic_msg = Some(format!(
-                    "extern function '{}' (id={}) not registered",
-                    extern_def.name, extern_id
-                ));
-            } else {
-                *fiber_panic_msg = Some(msg);
-            }
+            *fiber_panic_msg = Some(msg);
+            ExecResult::Panic
+        }
+        ExternResult::NotRegistered(id) => {
+            *fiber_panic_msg = Some(format!(
+                "extern function '{}' (id={}) not registered",
+                extern_def.name, id
+            ));
             ExecResult::Panic
         }
     }

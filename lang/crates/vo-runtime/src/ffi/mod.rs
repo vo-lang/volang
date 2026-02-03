@@ -102,6 +102,8 @@ pub enum ExternResult {
     WaitIo { token: IoToken },
     /// Panic with error message.
     Panic(String),
+    /// Extern function not registered.
+    NotRegistered(u32),
 }
 
 /// Extern function signature.
@@ -1351,7 +1353,7 @@ impl ExternRegistry {
                 );
                 f(&mut call)
             }
-            _ => ExternResult::Panic(format!("extern function {} not found", id)),
+            _ => ExternResult::NotRegistered(id),
         }
     }
 

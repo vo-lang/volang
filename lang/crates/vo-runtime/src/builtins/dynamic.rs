@@ -957,7 +957,7 @@ fn get_method(
     method_name: &str,
 ) -> DynResult<(u64, u64)> {
     let (func_id, _is_pointer_receiver, signature_rttid) = call.lookup_method(rttid, method_name)
-        .ok_or((DynErr::BadField, "no such field or method"))?;
+        .ok_or((DynErr::BadField, "method not found"))?;
     
     let closure_ref = closure::create(call.gc(), func_id, 1);
     closure::set_capture(closure_ref, 0, receiver_slot1);

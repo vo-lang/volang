@@ -597,6 +597,12 @@ pub extern "C" fn jit_call_extern(
             ctx_ref.wait_io_token = token;
             JitResult::WaitIo
         }
+        ExternResult::NotRegistered(_) => {
+            unsafe {
+                *ctx_ref.panic_flag = true;
+            }
+            JitResult::Panic
+        }
     };
     jit_result
 }
