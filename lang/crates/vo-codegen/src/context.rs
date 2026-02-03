@@ -37,12 +37,16 @@ enum MethodValueWrapperKey {
 /// Get ret_slots for builtin extern functions.
 /// 
 /// All externs registered via `get_or_register_extern` MUST be listed here.
-/// For variable-size externs (dyn_call_prepare, dyn_repack_args, dyn_call_closure),
+/// For variable-size externs (dyn_call, dyn_method),
 /// use `get_or_register_extern_with_ret_slots` with explicit size at each call site.
 fn builtin_extern_ret_slots(name: &str) -> u16 {
     match name {
         // === Dynamic access ===
-        // (data[2], error[2]) = 4 slots
+        "dyn_field" => 4,  // Unified field access: (value[2], error[2])
+        "dyn_index" => 4,  // Unified index access: (value[2], error[2])
+        "dyn_set_field" => 2,  // Unified field set: error[2]
+        "dyn_set_index_unified" => 2,  // Unified index set: error[2]
+        // (data[2], error[2]) = 4 slots (legacy, kept for compatibility)
         "dyn_get_attr" | "dyn_get_index" | "dyn_GetAttr" | "dyn_GetIndex" => 4,
         // error[2] = 2 slots
         "dyn_set_attr" | "dyn_set_index" | "dyn_SetAttr" | "dyn_SetIndex" => 2,
@@ -414,6 +418,12 @@ impl CodegenContext {
             error_ptr_rttid,
             error_struct_meta_id,
             error_field_offsets,
+            // Protocol interface meta IDs
+            attr_object_iface_id: self.builtin_protocols.attr_object_meta_id,
+            set_attr_object_iface_id: self.builtin_protocols.set_attr_object_meta_id,
+            index_object_iface_id: self.builtin_protocols.index_object_meta_id,
+            set_index_object_iface_id: self.builtin_protocols.set_index_object_meta_id,
+            call_object_iface_id: self.builtin_protocols.call_object_meta_id,
         };
     }
 

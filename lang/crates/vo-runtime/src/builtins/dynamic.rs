@@ -43,6 +43,10 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
 
     let mut spread_len = 0usize;
     let mut spread_slice_ref: crate::gc::GcRef = core::ptr::null_mut();
+    let mut spread_elem_rttid = 0u32;
+    let mut spread_elem_vk = ValueKind::Void;
+    let mut spread_elem_slots = 0usize;
+    let mut spread_is_any = false;
 
     if spread_flag && arg_count > 0 {
         let last_idx = arg_count - 1;
@@ -52,7 +56,7 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
         if last_vk != ValueKind::Slice {
             call.ret_ref(0, core::ptr::null_mut());
             let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
-            let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
+            let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be a slice", cause0, cause1);
             call.ret_u64(1, slot0);
             call.ret_u64(2, slot1);
             return ExternResult::Ok;
@@ -70,28 +74,14 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        if elem.value_kind() != ValueKind::Interface {
-            call.ret_ref(0, core::ptr::null_mut());
-            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
-            let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
-            call.ret_u64(1, slot0);
-            call.ret_u64(2, slot1);
-            return ExternResult::Ok;
-        }
+        
+        spread_elem_rttid = elem.rttid();
+        spread_elem_vk = elem.value_kind();
+        spread_elem_slots = call.get_type_slot_count(spread_elem_rttid) as usize;
+        spread_is_any = spread_elem_vk == ValueKind::Interface;
 
         spread_slice_ref = last_slot1 as crate::gc::GcRef;
-        spread_len = slice::len(spread_slice_ref);
-        if !spread_slice_ref.is_null() {
-            let arr = slice::array_ref(spread_slice_ref);
-            if array::elem_kind(arr) != ValueKind::Interface || array::elem_bytes(arr) != 16 {
-                call.ret_ref(0, core::ptr::null_mut());
-                let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
-                let (slot0, slot1) = create_error_with_cause(call, "dyn call spread arg must be []any", cause0, cause1);
-                call.ret_u64(1, slot0);
-                call.ret_u64(2, slot1);
-                return ExternResult::Ok;
-            }
-        }
+        spread_len = if spread_slice_ref.is_null() { 0 } else { slice::len(spread_slice_ref) };
     }
 
     let out_len = if spread_flag && arg_count > 0 {
@@ -118,10 +108,36 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
             out_i += 1;
         }
 
-        if spread_flag && arg_count > 0 && spread_len > 0 {
-            let src_ptr = slice::data_ptr(spread_slice_ref) as *const u64;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr.add(out_i * 2), spread_len * 2);
+        // Handle spread slice - convert typed elements to any format
+        if spread_flag && arg_count > 0 && spread_len > 0 && !spread_slice_ref.is_null() {
+            if spread_is_any {
+                // Already []any - direct copy
+                let src_ptr = slice::data_ptr(spread_slice_ref) as *const u64;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src_ptr, dst_ptr.add(out_i * 2), spread_len * 2);
+                }
+            } else {
+                // Typed slice - box each element to any format
+                let arr = slice::array_ref(spread_slice_ref);
+                let elem_bytes = array::elem_bytes(arr);
+                let src_base = slice::data_ptr(spread_slice_ref);
+                
+                for j in 0..spread_len {
+                    let elem_ptr = unsafe { src_base.add(j * elem_bytes) };
+                    
+                    // Read raw slots from element
+                    let raw_slots: Vec<u64> = (0..spread_elem_slots)
+                        .map(|k| unsafe { *(elem_ptr as *const u64).add(k) })
+                        .collect();
+                    
+                    // Box to interface format
+                    let boxed = call.box_to_interface(spread_elem_rttid, spread_elem_vk, &raw_slots);
+                    unsafe {
+                        *dst_ptr.add(out_i * 2) = boxed.slot0;
+                        *dst_ptr.add(out_i * 2 + 1) = boxed.slot1;
+                    }
+                    out_i += 1;
+                }
             }
         }
     }
@@ -310,211 +326,31 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     let slot1 = call.arg_u64(1);
     let name_ref = call.arg_ref(2);
     
-    // Check if interface is nil
     if interface::is_nil(slot0) {
         return dyn_error(call, DynErr::NilBase, "cannot access field on nil");
     }
     
-    // Get field name
     let field_name = if name_ref.is_null() {
         return dyn_error(call, DynErr::NilBase, "field name is nil");
     } else {
         str_obj::as_str(name_ref)
     };
     
-    // Get value kind
-    let vk = interface::unpack_value_kind(slot0);
-    let rttid = interface::unpack_rttid(slot0);
-    
-    // For Map types with string keys, treat field_name as map key
-    // But first check if it's a named type with methods (e.g., type StringMap map[string]int)
-    if vk == ValueKind::Map {
-        // For named map types, check for method first
-        if call.get_named_type_id_from_rttid(rttid, false).is_some() {
-            if let Some(_) = call.lookup_method(rttid, field_name) {
-                return try_get_method(call, rttid, slot1, field_name);
-            }
-        }
-        
-        let base_ref = slot1 as GcRef;
-        
-        // Check for nil map
-        if base_ref.is_null() {
-            return dyn_error(call, DynErr::NilBase, "cannot access field on nil map");
-        }
-        
-        let map_key_vk = map::key_kind(base_ref);
-        
-        // Only allow field access on string-keyed or any-keyed maps
-        if map_key_vk != ValueKind::String && map_key_vk != ValueKind::Interface {
-            return dyn_error(call, DynErr::BadField,
-                &format!("cannot use field access on map with non-string key type {:?}", map_key_vk));
-        }
-        
-        // Allocate string for field_name as key
-        let key_ref = call.alloc_str(field_name);
-        
-        let val_meta = map::val_meta(base_ref);
-        let val_vk = val_meta.value_kind();
-        let val_value_rttid = call.get_elem_value_rttid_from_base(rttid);
-        
-        // For map[any]T, keys are stored as 2-slot interface values
-        let found = if map_key_vk == ValueKind::Interface {
-            // Box string key to interface format
-            let key_slot0 = interface::pack_slot0(0, ValueKind::String as u32, ValueKind::String);
-            let key_data = [key_slot0, key_ref as u64];
-            map::get(base_ref, &key_data, Some(call.module()))
-        } else {
-            let key_data = [key_ref as u64];
-            map::get(base_ref, &key_data, Some(call.module()))
-        };
-        
-        // For map[string]any (val_vk == Interface), the value is already boxed
-        // Just return it directly without re-boxing
-        if val_vk == ValueKind::Interface {
-            if let Some(val_slice) = found {
-                call.ret_u64(0, val_slice[0]);
-                call.ret_u64(1, val_slice[1]);
-            } else {
-                // Key not found - return nil interface
-                call.ret_u64(0, 0);
-                call.ret_u64(1, 0);
-            }
+    // Reuse unified implementation
+    match get_field_as_interface(call, slot0, slot1, field_name) {
+        Ok((data0, data1)) => {
+            call.ret_u64(0, data0);
+            call.ret_u64(1, data1);
             call.ret_nil(2);
             call.ret_nil(3);
-            return ExternResult::Ok;
+            ExternResult::Ok
         }
-        
-        // Get raw slots from map value (or zeros if not found)
-        let raw_slots: Vec<u64> = if let Some(val_slice) = found {
-            val_slice.to_vec()
-        } else {
-            let val_slots = call.get_type_slot_count(val_value_rttid.rttid()) as usize;
-            vec![0u64; val_slots]
-        };
-        
-        // Box to interface format
-        let boxed = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
-        call.ret_u64(0, boxed.slot0);
-        call.ret_u64(1, boxed.slot1);
-        call.ret_nil(2);
-        call.ret_nil(3);
-        
-        return ExternResult::Ok;
+        Err((err, msg)) => dyn_error(call, err, msg),
     }
-    
-    // For Pointer types, dereference to access struct fields (Go auto-dereference)
-    // slot1 is the pointer value (GcRef to struct data)
-    // For non-struct types (named basic types like `type MyInt int`), try method lookup directly
-    let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
-        // Get pointed-to type's rttid
-        let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
-        (elem_value_rttid.rttid(), slot1 as GcRef)
-    } else if vk == ValueKind::Struct {
-        (rttid, slot1 as GcRef)
-    } else {
-        // Non-struct, non-pointer type - check if it's a Named type (has methods)
-        // Named types like `type MyInt int` should try method lookup
-        // Plain types like `int` should return type mismatch error
-        if call.get_named_type_id_from_rttid(rttid, false).is_some() {
-            // Named basic type - try method lookup
-            // slot1 contains the value itself (not a GcRef)
-            return try_get_method(call, rttid, slot1, field_name);
-        } else {
-            // Plain type without methods
-            return dyn_error(call, DynErr::TypeMismatch, &format!("cannot access field on type {:?}", vk));
-        }
-    };
-    
-    // For Named struct types, rttid points to runtime_types which contains Named(id)
-    // We need to get the struct_meta_id from named_type_meta.underlying_meta
-    let struct_meta_id = call.get_struct_meta_id_from_rttid(effective_rttid);
-    
-    let struct_meta_id = match struct_meta_id {
-        Some(id) => id as usize,
-        None => {
-            // Not a struct type, try to get method instead
-            return try_get_method(call, rttid, slot1, field_name);
-        }
-    };
-    
-    // Find field by name, searching through embedded structs recursively
-    let mut ptr_derefs = Vec::new();
-    let field_result = match lookup_field_recursive(&call, struct_meta_id, field_name, 0, &mut ptr_derefs) {
-        Some(r) => r,
-        None => {
-            // Field not found - check if it's a method
-            return try_get_method(call, rttid, slot1, field_name);
-        }
-    };
-    
-    // Read field value from struct data (data_ref already set above)
-    if data_ref.is_null() {
-        return dyn_error(call, DynErr::NilBase, "struct data is nil");
-    }
-    
-    // Follow pointer dereferences to reach the final struct
-    let final_data_ref = match follow_ptr_derefs(&field_result.ptr_derefs, data_ref) {
-        Some(r) => r,
-        None => return dyn_error(call, DynErr::NilBase, "nil pointer in embedding path"),
-    };
-    
-    // Read raw slots from struct field
-    let raw_slots: Vec<u64> = (0..field_result.slot_count)
-        .map(|i| unsafe { Gc::read_slot(final_data_ref, field_result.final_offset + i) })
-        .collect();
-    
-    // Box to interface format using unified boxing logic
-    let boxed = call.box_to_interface(field_result.rttid, field_result.value_kind, &raw_slots);
-    
-    // Return (data, nil)
-    call.ret_u64(0, boxed.slot0);
-    call.ret_u64(1, boxed.slot1);
-    call.ret_nil(2);
-    call.ret_nil(3);
-    
-    ExternResult::Ok
-}
-
-/// Try to get a method as a closure binding the receiver.
-/// Returns closure with receiver as first capture.
-/// Always returns in interface format.
-///
-/// # Design: Why `receiver_slot1` works for both Pointer and Struct
-///
-/// When a value is stored in an interface:
-/// - **Pointer** (`*T`): slot1 = GcRef pointing to T's data
-/// - **Struct** (`T`): slot1 = GcRef pointing to boxed T's data (structs are boxed in interface)
-///
-/// In both cases, slot1 is a GcRef to the struct data. This is exactly what methods need:
-/// - For **pointer receiver** methods `(t *T)`: the GcRef IS the pointer
-/// - For **value receiver** methods `(t T)`: the GcRef points to the data, VM copies it on call
-///
-/// So we pass `receiver_slot1` directly without needing to distinguish Pointer vs Struct.
-fn try_get_method(call: &mut ExternCallContext, rttid: u32, receiver_slot1: u64, method_name: &str) -> ExternResult {
-    use crate::objects::closure;
-    
-    // Lookup method by name - returns (func_id, is_pointer_receiver, signature_rttid)
-    let (func_id, _is_pointer_receiver, signature_rttid) = match call.lookup_method(rttid, method_name) {
-        Some(info) => info,
-        None => return dyn_error(call, DynErr::BadField, &format!("field or method '{}' not found", method_name)),
-    };
-    
-    // Create closure with receiver as capture (see design note above for why this works)
-    let closure_ref = closure::create(call.gc(), func_id, 1);
-    closure::set_capture(closure_ref, 0, receiver_slot1);
-    
-    // Always return as interface format (meta, GcRef)
-    let result_slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
-    call.ret_u64(0, result_slot0);
-    call.ret_u64(1, closure_ref as u64);
-    call.ret_nil(2);
-    call.ret_nil(3);
-    
-    ExternResult::Ok
 }
 
 /// Sentinel error types for dyn operations.
+#[derive(Clone, Copy)]
 enum DynErr {
     NilBase,
     BadField,
@@ -539,6 +375,71 @@ impl From<DynErr> for DynErrorKind {
     }
 }
 
+/// Check if type implements a protocol interface.
+/// Returns Some(iface_id) if the type implements the protocol, None otherwise.
+fn check_protocol(
+    call: &ExternCallContext,
+    rttid: u32,
+    vk: ValueKind,
+    iface_id: Option<u32>,
+) -> Option<u32> {
+    let iface_id = iface_id?;
+    let is_named = call.get_named_type_id_from_rttid(rttid, true).is_some();
+    if is_named && call.check_interface_satisfaction(rttid, vk, iface_id) {
+        Some(iface_id)
+    } else {
+        None
+    }
+}
+
+/// Get func_id for a protocol method (method index 0) via itab lookup.
+/// Common helper for all protocol dispatch functions.
+fn get_protocol_func_id(
+    call: &mut ExternCallContext,
+    rttid: u32,
+    vk: ValueKind,
+    iface_id: u32,
+    err_kind: DynErr,
+) -> Result<u32, (DynErr, &'static str)> {
+    let named_type_id = call.get_named_type_id_from_rttid(rttid, true)
+        .ok_or((err_kind, "type has no methods"))?;
+    
+    let src_is_pointer = vk == ValueKind::Pointer;
+    let itab_id = call.try_get_or_create_itab(named_type_id, iface_id, src_is_pointer)
+        .ok_or((err_kind, "type does not implement protocol"))?;
+    
+    let itab = call.get_itab(itab_id)
+        .ok_or((err_kind, "invalid itab"))?;
+    
+    itab.methods.first().copied()
+        .ok_or((err_kind, "protocol has no methods"))
+}
+
+/// Call a protocol method and check for error in return value.
+/// Returns the non-error portion of the return buffer.
+fn call_protocol_method<const RET_SLOTS: usize>(
+    call: &mut ExternCallContext,
+    func_id: u32,
+    args: &[u64],
+    err_kind: DynErr,
+) -> Result<[u64; RET_SLOTS], (DynErr, &'static str)> {
+    use crate::objects::closure;
+    let closure_ref = closure::create(call.gc(), func_id, 0);
+    
+    let mut ret_buffer = [0u64; RET_SLOTS];
+    match call.call_closure(closure_ref, args, &mut ret_buffer) {
+        Ok(_) => {
+            // Error is always in last 2 slots
+            let err_start = RET_SLOTS.saturating_sub(2);
+            if ret_buffer[err_start] != 0 || ret_buffer.get(err_start + 1).copied().unwrap_or(0) != 0 {
+                return Err((err_kind, "protocol returned error"));
+            }
+            Ok(ret_buffer)
+        }
+        Err(_) => Err((DynErr::BadCall, "protocol call failed")),
+    }
+}
+
 /// Return a sentinel error for dyn operations (2 nil data slots + 2 error slots).
 fn dyn_error(call: &mut ExternCallContext, err: DynErr, _fallback_msg: &str) -> ExternResult {
     call.ret_nil(0);
@@ -547,6 +448,54 @@ fn dyn_error(call: &mut ExternCallContext, err: DynErr, _fallback_msg: &str) -> 
     call.ret_u64(2, slot0);
     call.ret_u64(3, slot1);
     ExternResult::Ok
+}
+
+/// Unbox interface value and write to return slots 0-1, with type check.
+/// Returns Ok(()) on success, Err on type mismatch.
+/// Caller is responsible for writing error slots (2-3) on success (nil) or failure.
+fn unbox_and_write_value(
+    call: &mut ExternCallContext,
+    data_slot0: u64,
+    data_slot1: u64,
+    expected_rttid: u32,
+) -> Result<(), DynErr> {
+    let actual_vk = interface::unpack_value_kind(data_slot0);
+    let actual_rttid = interface::unpack_rttid(data_slot0);
+    
+    // Type check
+    if expected_rttid != 0 && actual_rttid != expected_rttid {
+        return Err(DynErr::TypeMismatch);
+    }
+    
+    let expected_slots = call.get_type_slot_count(expected_rttid) as usize;
+    
+    if expected_slots <= 2 {
+        if actual_vk == ValueKind::Struct || actual_vk == ValueKind::Array {
+            let data_ref = data_slot1 as GcRef;
+            if data_ref.is_null() {
+                call.ret_u64(0, 0);
+                call.ret_u64(1, 0);
+            } else {
+                let slot0 = unsafe { Gc::read_slot(data_ref, 0) };
+                let slot1 = if expected_slots > 1 {
+                    unsafe { Gc::read_slot(data_ref, 1) }
+                } else { 0 };
+                call.ret_u64(0, slot0);
+                call.ret_u64(1, slot1);
+            }
+        } else {
+            call.ret_u64(0, data_slot1);
+            call.ret_u64(1, 0);
+        }
+    } else {
+        if actual_vk == ValueKind::Struct || actual_vk == ValueKind::Array {
+            call.ret_u64(0, 0);
+            call.ret_u64(1, data_slot1);
+        } else {
+            return Err(DynErr::TypeMismatch);
+        }
+    }
+    Ok(())
 }
 
 /// Return a sentinel error for dyn operations (error only, 2 slots).
@@ -558,170 +507,32 @@ fn dyn_error_only(call: &mut ExternCallContext, err: DynErr, _fallback_msg: &str
 }
 
 /// dyn_get_index: Get an element from an interface value by index/key.
-///
 /// Args: (base: any[2], key: any[2]) -> (data[2], error[2])
-/// - base slot 0-1: interface value (slot0=meta, slot1=data)
-/// - key slot 2-3: key interface value
-///
-/// Returns (fixed 4 slots):
-/// - slot 0-1: data in interface format (slot0=packed meta, slot1=value or GcRef)
-/// - slot 2-3: error (nil if success)
-///
-/// Note: Always returns interface format. Codegen is responsible for unboxing to concrete types.
 fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
     let base_slot0 = call.arg_u64(0);
     let base_slot1 = call.arg_u64(1);
     let key_slot0 = call.arg_u64(2);
     let key_slot1 = call.arg_u64(3);
     
-    // Check if base is nil
     if interface::is_nil(base_slot0) {
         return dyn_error(call, DynErr::NilBase, "cannot index nil");
     }
     
-    let base_vk = interface::unpack_value_kind(base_slot0);
-    let base_rttid = interface::unpack_rttid(base_slot0);
-    let base_ref = base_slot1 as GcRef;
-    
-    match base_vk {
-        ValueKind::Slice => {
-            // Check for nil slice
-            if base_ref.is_null() {
-                return dyn_error(call, DynErr::NilBase, "cannot index nil slice");
-            }
-            let len = crate::objects::slice::len(base_ref);
-            let idx = match check_int_index(key_slot0, key_slot1, len) {
-                Ok(i) => i,
-                Err(IndexError::BadType) => return dyn_error(call, DynErr::BadIndex, "index must be integer"),
-                Err(IndexError::OutOfBounds) => return dyn_error(call, DynErr::OutOfBounds, "slice index out of bounds"),
-            };
-            
-            let elem_meta = crate::objects::slice::elem_meta(base_ref);
-            let elem_vk = elem_meta.value_kind();
-            let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-            let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
-            
-            // Read all element slots
-            let raw_slots: Vec<u64> = (0..elem_slots)
-                .map(|i| crate::objects::slice::get(base_ref, idx as usize * elem_slots + i, 8))
-                .collect();
-            
-            // Box to interface format
-            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
-            call.ret_u64(0, boxed.slot0);
-            call.ret_u64(1, boxed.slot1);
+    // Reuse unified implementation
+    match get_index_as_interface(call, base_slot0, base_slot1, key_slot0, key_slot1) {
+        Ok((data0, data1)) => {
+            call.ret_u64(0, data0);
+            call.ret_u64(1, data1);
             call.ret_nil(2);
             call.ret_nil(3);
+            ExternResult::Ok
         }
-        ValueKind::Array => {
-            // Check for nil array
-            if base_ref.is_null() {
-                return dyn_error(call, DynErr::NilBase, "cannot index nil array");
-            }
-            
-            // Boxed array preserves ArrayHeader: [GcHeader][ArrayHeader][elems...]
-            // Use array:: API to access elements correctly (handles packed storage).
-            let len = crate::objects::array::len(base_ref);
-            let idx = match check_int_index(key_slot0, key_slot1, len) {
-                Ok(i) => i,
-                Err(IndexError::BadType) => return dyn_error(call, DynErr::BadIndex, "index must be integer"),
-                Err(IndexError::OutOfBounds) => return dyn_error(call, DynErr::OutOfBounds, "array index out of bounds"),
-            };
-            
-            let elem_meta = crate::objects::array::elem_meta(base_ref);
-            let elem_vk = elem_meta.value_kind();
-            let elem_bytes = crate::objects::array::elem_bytes(base_ref);
-            let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-            let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
-            
-            // Read element using array API (handles packed storage correctly)
-            let mut raw_slots: Vec<u64> = vec![0u64; elem_slots];
-            crate::objects::array::get_n(base_ref, idx as usize, &mut raw_slots, elem_bytes);
-            
-            // Box to interface format
-            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
-            call.ret_u64(0, boxed.slot0);
-            call.ret_u64(1, boxed.slot1);
-            call.ret_nil(2);
-            call.ret_nil(3);
-        }
-        ValueKind::String => {
-            let s = str_obj::as_str(base_ref);
-            let bytes = s.as_bytes();
-            let idx = match check_int_index(key_slot0, key_slot1, bytes.len()) {
-                Ok(i) => i,
-                Err(IndexError::BadType) => return dyn_error(call, DynErr::BadIndex, "index must be integer"),
-                Err(IndexError::OutOfBounds) => return dyn_error(call, DynErr::OutOfBounds, "string index out of bounds"),
-            };
-            let boxed = call.box_to_interface(
-                ValueKind::Uint8 as u32,
-                ValueKind::Uint8,
-                &[bytes[idx as usize] as u64],
-            );
-            call.ret_u64(0, boxed.slot0);
-            call.ret_u64(1, boxed.slot1);
-            call.ret_nil(2);
-            call.ret_nil(3);
-        }
-        ValueKind::Map => {
-            // Check for nil map
-            if base_ref.is_null() {
-                return dyn_error(call, DynErr::NilBase, "cannot index nil map");
-            }
-            let key_vk = interface::unpack_value_kind(key_slot0);
-            let map_key_vk = crate::objects::map::key_kind(base_ref);
-            
-            let key_compatible = match (map_key_vk, key_vk) {
-                (a, b) if a == b => true,
-                // map[any]T accepts any key type
-                (ValueKind::Interface, _) => true,
-                (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
-                _ => false,
-            };
-            if !key_compatible {
-                return dyn_error(call, DynErr::BadIndex, &format!("map key type mismatch: expected {:?}, got {:?}", map_key_vk, key_vk));
-            }
-            
-            let val_meta = crate::objects::map::val_meta(base_ref);
-            let val_vk = val_meta.value_kind();
-            let val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-            
-            // For map[any]T, keys are stored as 2-slot interface values
-            let found = if map_key_vk == ValueKind::Interface {
-                let key_data = [key_slot0, key_slot1];
-                crate::objects::map::get(base_ref, &key_data, Some(call.module()))
-            } else {
-                let key_data = [key_slot1];
-                crate::objects::map::get(base_ref, &key_data, Some(call.module()))
-            };
-            
-            // Dynamic access: missing key returns error
-            let raw_slots: Vec<u64> = match found {
-                Some(val_slice) => val_slice.to_vec(),
-                None => return dyn_error(call, DynErr::BadField, "map key not found"),
-            };
-            
-            // Box to interface format
-            let boxed = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
-            call.ret_u64(0, boxed.slot0);
-            call.ret_u64(1, boxed.slot1);
-            call.ret_nil(2);
-            call.ret_nil(3);
-        }
-        _ => {
-            return dyn_error(call, DynErr::TypeMismatch, &format!("cannot index type {:?}", base_vk));
-        }
+        Err((err, msg)) => dyn_error(call, err, msg),
     }
-    
-    ExternResult::Ok
 }
 
 /// dyn_set_attr: Set a struct field on an interface value by name.
-///
 /// Args: (base: any[2], name: string[1], value: any[2]) -> error[2]
-/// - base slot 0-1: interface value (slot0=meta, slot1=data)
-/// - name slot 2: field name string
-/// - value slot 3-4: value (boxed as any)
 fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     let base_slot0 = call.arg_u64(0);
     let base_slot1 = call.arg_u64(1);
@@ -737,174 +548,18 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     }
     let field_name = str_obj::as_str(name_ref);
 
-    let base_vk = interface::unpack_value_kind(base_slot0);
-    let base_rttid = interface::unpack_rttid(base_slot0);
-
-    // Note: Protocol method dispatch (DynSetAttr) is handled at codegen level
-    // via IfaceAssert + CallIface. This extern only handles reflection fallback.
-
-    // For Map types with string keys, treat field_name as map key
-    if base_vk == ValueKind::Map {
-        let base_ref = base_slot1 as GcRef;
-        let map_key_vk = map::key_kind(base_ref);
-        
-        if map_key_vk != ValueKind::String {
-            return dyn_error_only(call, DynErr::BadField,
-                &format!("cannot use field access on map with non-string key type {:?}", map_key_vk));
+    // Reuse unified implementation
+    match set_field_impl(call, base_slot0, base_slot1, field_name, val_slot0, val_slot1) {
+        Ok(()) => {
+            call.ret_nil(0);
+            call.ret_nil(1);
+            ExternResult::Ok
         }
-        
-        // Allocate string for field_name as key
-        let key_ref = call.alloc_str(field_name);
-        let key_buf = [key_ref as u64];
-        
-        let val_meta = map::val_meta(base_ref);
-        let map_val_vk = val_meta.value_kind();
-        let map_val_slots = map::val_slots(base_ref) as usize;
-        let map_val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-        
-        let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
-        if map_val_vk == ValueKind::Interface {
-            // Get iface_meta_id from ValueRttid (which stores rttid for type resolution)
-            let iface_meta_id = call.get_interface_meta_id_from_rttid(map_val_value_rttid.rttid())
-                .unwrap_or(0);  // 0 for empty interface (any)
-            let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
-                Ok(v) => v,
-                Err(e) => return dyn_error_only(call, DynErr::TypeMismatch, e),
-            };
-            val_buf.push(stored_slot0);
-            val_buf.push(stored_slot1);
-        } else {
-            let val_vk = interface::unpack_value_kind(val_slot0);
-            let val_rttid = interface::unpack_rttid(val_slot0);
-            if val_vk != map_val_vk || val_rttid != map_val_value_rttid.rttid() {
-                return dyn_error_only(
-                    call,
-                    DynErr::TypeMismatch,
-                    &format!(
-                        "map value type mismatch: expected {:?} (rttid {}), got {:?} (rttid {})",
-                        map_val_vk,
-                        map_val_value_rttid.rttid(),
-                        val_vk,
-                        val_rttid
-                    ),
-                );
-            }
-            
-            match map_val_vk {
-                ValueKind::Struct | ValueKind::Array => {
-                    let src_ref = val_slot1 as GcRef;
-                    if src_ref.is_null() {
-                        return dyn_error_only(call, DynErr::NilBase, "struct/array value is nil");
-                    }
-                    for i in 0..map_val_slots {
-                        val_buf.push(unsafe { Gc::read_slot(src_ref, i) });
-                    }
-                }
-                _ => {
-                    val_buf.push(val_slot1);
-                }
-            }
-        }
-        
-        map::set(base_ref, &key_buf, &val_buf, None);
-        call.ret_nil(0);
-        call.ret_nil(1);
-        return ExternResult::Ok;
+        Err((err, msg)) => dyn_error_only(call, err, msg),
     }
-
-    let (effective_rttid, data_ref) = if base_vk == ValueKind::Pointer {
-        let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-        (elem_value_rttid.rttid(), base_slot1 as GcRef)
-    } else if base_vk == ValueKind::Struct {
-        (base_rttid, base_slot1 as GcRef)
-    } else {
-        return dyn_error_only(call, DynErr::BadField, &format!("cannot set field on type {:?}", base_vk));
-    };
-
-    if data_ref.is_null() {
-        return dyn_error_only(call, DynErr::NilBase, "struct data is nil");
-    }
-
-    let struct_meta_id = call.get_struct_meta_id_from_rttid(effective_rttid);
-    let struct_meta_id = match struct_meta_id {
-        Some(id) => id as usize,
-        None => return dyn_error_only(call, DynErr::BadField, "cannot set field on non-struct type"),
-    };
-
-    // Find field by name, searching through embedded structs recursively
-    let mut ptr_derefs = Vec::new();
-    let field_result = match lookup_field_recursive(&call, struct_meta_id, field_name, 0, &mut ptr_derefs) {
-        Some(r) => r,
-        None => return dyn_error_only(call, DynErr::BadField, &format!("field '{}' not found", field_name)),
-    };
-    
-    // Follow pointer dereferences to reach the final struct
-    let final_data_ref = match follow_ptr_derefs(&field_result.ptr_derefs, data_ref) {
-        Some(r) => r,
-        None => return dyn_error_only(call, DynErr::NilBase, "nil pointer in embedding path"),
-    };
-    
-    let field_offset = field_result.final_offset;
-    let field_slots = field_result.slot_count;
-    let expected_vk = field_result.value_kind;
-    let expected_rttid = field_result.rttid;
-    let val_vk = interface::unpack_value_kind(val_slot0);
-    let val_rttid = interface::unpack_rttid(val_slot0);
-
-    if expected_vk == ValueKind::Interface {
-        // Get iface_meta_id from expected_rttid (which points to RuntimeType::Interface)
-        let iface_meta_id = match call.get_interface_meta_id_from_rttid(expected_rttid) {
-            Some(id) => id,
-            None => return dyn_error_only(call, DynErr::TypeMismatch, "field type is not a valid interface"),
-        };
-        
-        let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
-            Ok(v) => v,
-            Err(e) => return dyn_error_only(call, DynErr::TypeMismatch, e),
-        };
-
-        struct_ops::set_field(final_data_ref, field_offset, stored_slot0);
-        struct_ops::set_field(final_data_ref, field_offset + 1, stored_slot1);
-
-        call.ret_nil(0);
-        call.ret_nil(1);
-        return ExternResult::Ok;
-    }
-
-    if expected_vk != val_vk || expected_rttid != val_rttid {
-        return dyn_error_only(
-            call,
-            DynErr::TypeMismatch,
-            &format!(
-                "field '{}' type mismatch: expected {:?} (rttid {}), got {:?} (rttid {})",
-                field_name, expected_vk, expected_rttid, val_vk, val_rttid
-            ),
-        );
-    }
-
-    match expected_vk {
-        ValueKind::Struct | ValueKind::Array => {
-            let src_ref = val_slot1 as GcRef;
-            if src_ref.is_null() {
-                return dyn_error_only(call, DynErr::NilBase, "struct/array value is nil");
-            }
-            for i in 0..field_slots {
-                let v = unsafe { Gc::read_slot(src_ref, i) };
-                unsafe { Gc::write_slot(final_data_ref, field_offset + i, v) };
-            }
-        }
-        _ => {
-            struct_ops::set_field(final_data_ref, field_offset, val_slot1);
-        }
-    }
-
-    call.ret_nil(0);
-    call.ret_nil(1);
-    ExternResult::Ok
 }
 
 /// dyn_set_index: Set an element in a map or slice by key/index.
-///
 /// Args: (base: any[2], key: any[2], value: any[2]) -> error[2]
 fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
     let base_slot0 = call.arg_u64(0);
@@ -918,606 +573,15 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
         return dyn_error_only(call, DynErr::NilBase, "cannot set index on nil");
     }
 
-    let base_vk = interface::unpack_value_kind(base_slot0);
-    let base_rttid = interface::unpack_rttid(base_slot0);
-    let base_ref = base_slot1 as GcRef;
-
-    match base_vk {
-        ValueKind::Slice => {
-            let len = slice::len(base_ref);
-            let idx = match check_int_index(key_slot0, key_slot1, len) {
-                Ok(i) => i,
-                Err(IndexError::BadType) => return dyn_error_only(call, DynErr::BadIndex, "index must be integer"),
-                Err(IndexError::OutOfBounds) => return dyn_error_only(call, DynErr::OutOfBounds, "slice index out of bounds"),
-            };
-
-            let elem_meta = slice::elem_meta(base_ref);
-            let elem_vk = elem_meta.value_kind();
-            let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));
-            let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-
-            if elem_vk == ValueKind::Interface {
-                // For slice elements of interface type, just store the value directly
-                // The value is already in interface format (slot0=type info, slot1=data)
-                let src = [val_slot0, val_slot1];
-                slice::set_n(base_ref, idx as usize, &src, elem_bytes);
-
-                call.ret_nil(0);
-                call.ret_nil(1);
-                return ExternResult::Ok;
-            }
-
-            let val_vk = interface::unpack_value_kind(val_slot0);
-            let val_rttid = interface::unpack_rttid(val_slot0);
-            if val_vk != elem_vk || val_rttid != elem_value_rttid.rttid() {
-                return dyn_error_only(
-                    call,
-                    DynErr::TypeMismatch,
-                    &format!(
-                        "slice element type mismatch: expected {:?} (rttid {}), got {:?} (rttid {})",
-                        elem_vk,
-                        elem_value_rttid.rttid(),
-                        val_vk,
-                        val_rttid
-                    ),
-                );
-            }
-
-            match elem_vk {
-                ValueKind::Struct | ValueKind::Array => {
-                    let src_ref = val_slot1 as GcRef;
-                    if src_ref.is_null() {
-                        return dyn_error_only(call, DynErr::NilBase, "struct/array value is nil");
-                    }
-                    let elem_slots = elem_bytes / SLOT_BYTES;
-                    let mut buf: Vec<u64> = Vec::with_capacity(elem_slots);
-                    for i in 0..elem_slots {
-                        buf.push(unsafe { Gc::read_slot(src_ref, i) });
-                    }
-                    slice::set_n(base_ref, idx as usize, &buf, elem_bytes);
-                }
-                _ => {
-                    slice::set_auto(slice::data_ptr(base_ref), idx as usize, val_slot1, elem_bytes, elem_vk);
-                }
-            }
-
+    // Reuse unified implementation
+    match set_index_impl(call, base_slot0, base_slot1, key_slot0, key_slot1, val_slot0, val_slot1) {
+        Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
             ExternResult::Ok
         }
-        ValueKind::Map => {
-            let map_key_vk = map::key_kind(base_ref);
-            let key_vk = interface::unpack_value_kind(key_slot0);
-
-            // # Design: Why ValueKind check is sufficient for basic type keys
-            //
-            // For basic types (int, string, bool, etc.), ValueKind uniquely identifies the type.
-            // We don't need rttid checks because:
-            // - Same ValueKind means same underlying type (e.g., String is always string)
-            // - Integer types (Int, Int64, Int32, etc.) are intentionally compatible
-            //
-            // For Struct/Array keys, we DO check rttid below because different structs
-            // can have the same ValueKind but different layouts.
-            let key_compatible = match (map_key_vk, key_vk) {
-                (a, b) if a == b => true,
-                // map[any]T accepts any key type
-                (ValueKind::Interface, _) => true,
-                (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
-                _ => false,
-            };
-            if !key_compatible {
-                return dyn_error_only(call, DynErr::BadIndex, &format!("map key type mismatch: expected {:?}, got {:?}", map_key_vk, key_vk));
-            }
-
-            let val_meta = map::val_meta(base_ref);
-            let map_val_vk = val_meta.value_kind();
-            let map_val_slots = map::val_slots(base_ref) as usize;
-            let map_val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
-
-            let mut key_buf: Vec<u64> = Vec::new();
-            match map_key_vk {
-                // For map[any]T, keys are stored as 2-slot interface values
-                ValueKind::Interface => {
-                    key_buf.push(key_slot0);
-                    key_buf.push(key_slot1);
-                }
-                // For Struct/Array keys, we need full rttid validation (see design note above)
-                ValueKind::Struct | ValueKind::Array => {
-                    let expected_key_vr = match call.runtime_types().get(base_rttid as usize) {
-                        Some(RuntimeType::Map { key, .. }) => *key,
-                        _ => return dyn_error_only(call, DynErr::TypeMismatch, "invalid map runtime type"),
-                    };
-                    let key_rttid = interface::unpack_rttid(key_slot0);
-                    if expected_key_vr.value_kind() != key_vk || expected_key_vr.rttid() != key_rttid {
-                        return dyn_error_only(call, DynErr::BadIndex, "map key type mismatch");
-                    }
-                    let src_ref = key_slot1 as GcRef;
-                    if src_ref.is_null() {
-                        return dyn_error_only(call, DynErr::NilBase, "map key is nil");
-                    }
-                    let key_slots = map::key_slots(base_ref) as usize;
-                    key_buf.reserve(key_slots);
-                    for i in 0..key_slots {
-                        key_buf.push(unsafe { Gc::read_slot(src_ref, i) });
-                    }
-                }
-                _ => {
-                    key_buf.push(key_slot1);
-                }
-            }
-
-            let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
-            if map_val_vk == ValueKind::Interface {
-                // Get iface_meta_id from ValueRttid (which stores rttid for type resolution)
-                let iface_meta_id = call.get_interface_meta_id_from_rttid(map_val_value_rttid.rttid())
-                    .unwrap_or(0);  // 0 for empty interface (any)
-                let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
-                    Ok(v) => v,
-                    Err(e) => return dyn_error_only(call, DynErr::TypeMismatch, e),
-                };
-                val_buf.push(stored_slot0);
-                val_buf.push(stored_slot1);
-            } else {
-                let val_vk = interface::unpack_value_kind(val_slot0);
-                let val_rttid = interface::unpack_rttid(val_slot0);
-                if val_vk != map_val_vk || val_rttid != map_val_value_rttid.rttid() {
-                    return dyn_error_only(
-                        call,
-                        DynErr::TypeMismatch,
-                        &format!(
-                            "map value type mismatch: expected {:?} (rttid {}), got {:?} (rttid {})",
-                            map_val_vk,
-                            map_val_value_rttid.rttid(),
-                            val_vk,
-                            val_rttid
-                        ),
-                    );
-                }
-
-                match map_val_vk {
-                    ValueKind::Struct | ValueKind::Array => {
-                        let src_ref = val_slot1 as GcRef;
-                        if src_ref.is_null() {
-                            return dyn_error_only(call, DynErr::NilBase, "struct/array value is nil");
-                        }
-                        for i in 0..map_val_slots {
-                            val_buf.push(unsafe { Gc::read_slot(src_ref, i) });
-                        }
-                    }
-                    _ => {
-                        val_buf.push(val_slot1);
-                    }
-                }
-            }
-
-            map::set(base_ref, &key_buf, &val_buf, Some(call.module()));
-            call.ret_nil(0);
-            call.ret_nil(1);
-            ExternResult::Ok
-        }
-        ValueKind::String => dyn_error_only(call, DynErr::TypeMismatch, "string index assignment is not supported"),
-        ValueKind::Array => dyn_error_only(call, DynErr::TypeMismatch, "array index assignment is not supported"),
-        _ => dyn_error_only(call, DynErr::TypeMismatch, &format!("cannot set index on type {:?}", base_vk)),
+        Err((err, msg)) => dyn_error_only(call, err, msg),
     }
-}
-
-/// dyn_call_prepare: Combined signature check + get ret meta + ret_slots limit check + variadic info.
-///
-/// # Design: LHS determines expected signature
-///
-/// Dynamic calls require explicit LHS (left-hand side) variables, and the LHS count
-/// must exactly match the function's return count. This is enforced by:
-/// 1. Codegen builds `expected_sig_rttid` from LHS types (including return count)
-/// 2. This function checks closure signature against expected signature
-/// 3. If return count mismatches, `check_func_signature_compatible` returns error
-///
-/// This design avoids runtime ambiguity about how many values to return.
-///
-/// Args: (callee: any[2], expected_sig_rttid: int[1], expected_ret_count: int[1])
-/// Returns: (ret_slots: int[1], ret_meta_0..N: int[N], variadic_info: int[1], closure_sig_rttid: int[1], error: error[2])
-///
-/// Return layout: [ret_slots, metas[N], variadic_info, closure_sig_rttid, error[2]] = 1 + N + 1 + 1 + 2 slots
-/// - ret_slots = 0 indicates error (variadic_info and metas are undefined)
-/// - ret_slots > 0 indicates success, error = nil
-/// - variadic_info encoding:
-///   - 0: non-variadic
-///   - non-zero: (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
-///     where variadic_elem_meta = (rttid << 8) | value_kind
-fn dyn_call_prepare(call: &mut ExternCallContext) -> ExternResult {
-    let callee_slot0 = call.arg_u64(0);
-    let _callee_slot1 = call.arg_u64(1);
-    let expected_sig_rttid = call.arg_u64(2) as u32;
-    let expected_ret_count = call.arg_u64(3) as u16;
-    
-    // Result layout: [ret_slots, ret_meta_0..N, variadic_info, closure_sig_rttid, error[2]]
-    let variadic_info_slot = 1 + expected_ret_count;
-    let sig_rttid_slot = variadic_info_slot + 1;
-    let error_slot = sig_rttid_slot + 1;
-    
-    // Helper macro to return sentinel error (ret_slots=0 indicates error)
-    macro_rules! return_sentinel_error {
-        ($err:expr, $_msg:expr) => {{
-            call.ret_u64(0, 0);  // ret_slots = 0
-            for i in 0..expected_ret_count {
-                call.ret_u64(1 + i, 0);
-            }
-            call.ret_u64(variadic_info_slot, 0);
-            call.ret_u64(sig_rttid_slot, 0);
-            let (slot0, slot1) = dyn_sentinel_error(call, $err.into());
-            call.ret_u64(error_slot, slot0);
-            call.ret_u64(error_slot + 1, slot1);
-            return ExternResult::Ok;
-        }};
-    }
-
-    macro_rules! return_wrapped_sentinel_error {
-        ($err:expr, $msg:expr) => {{
-            call.ret_u64(0, 0);  // ret_slots = 0
-            for i in 0..expected_ret_count {
-                call.ret_u64(1 + i, 0);
-            }
-            call.ret_u64(variadic_info_slot, 0);
-            call.ret_u64(sig_rttid_slot, 0);
-            let (cause0, cause1) = dyn_sentinel_error(call, $err.into());
-            let (slot0, slot1) = create_error_with_cause(call, $msg, cause0, cause1);
-            call.ret_u64(error_slot, slot0);
-            call.ret_u64(error_slot + 1, slot1);
-            return ExternResult::Ok;
-        }};
-    }
-    
-    // 1. Check nil
-    if interface::is_nil(callee_slot0) {
-        return_sentinel_error!(DynErr::NilBase, "cannot call nil");
-    }
-    
-    // 2. Check is Closure type
-    let vk = interface::unpack_value_kind(callee_slot0);
-    if vk != ValueKind::Closure {
-        return_sentinel_error!(DynErr::BadCall, &format!("cannot call non-function type {:?}", vk));
-    }
-    
-    // 3. Check signature compatibility
-    let closure_sig_rttid = interface::unpack_rttid(callee_slot0);
-    if let Err(msg) = call.check_func_signature_compatible(closure_sig_rttid, expected_sig_rttid) {
-        return_wrapped_sentinel_error!(DynErr::SigMismatch, &msg);
-    }
-    
-    // 4. Get function signature info (including variadic)
-    let (closure_params, ret_value_rttids, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
-        Some((p, r, v)) => (p, r.clone(), v),
-        None => return_sentinel_error!(DynErr::BadCall, "closure is not a function type"),
-    };
-    
-    let ret_slots: u16 = ret_value_rttids.iter().map(|vr| {
-        call.get_type_slot_count(vr.rttid())
-    }).sum();
-    
-    // 5. Build variadic_info
-    let variadic_info: u64 = if is_variadic && !closure_params.is_empty() {
-        let non_variadic_count = (closure_params.len() - 1) as u64;
-        // Get variadic element meta from the last param (which is a slice type)
-        let variadic_slice_rttid = closure_params.last().unwrap().rttid();
-        let variadic_elem_meta = match call.get_slice_elem(variadic_slice_rttid) {
-            Some(elem_rttid) => elem_rttid.to_raw() as u64,
-            None => return_sentinel_error!(DynErr::SigMismatch, "variadic parameter is not a slice type"),
-        };
-        // Encode: (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
-        (variadic_elem_meta << 16) | (non_variadic_count << 1) | 1
-    } else {
-        0
-    };
-    
-    // Success: return ret_slots, metas, variadic_info, closure_sig_rttid, nil error
-    call.ret_u64(0, ret_slots as u64);
-    for (i, vr) in ret_value_rttids.iter().enumerate().take(expected_ret_count as usize) {
-        call.ret_u64(1 + i as u16, vr.to_raw() as u64);
-    }
-    call.ret_u64(variadic_info_slot, variadic_info);
-    call.ret_u64(sig_rttid_slot, closure_sig_rttid as u64);
-    call.ret_nil(error_slot);
-    call.ret_nil(error_slot + 1);
-    
-    ExternResult::Ok
-}
-
-/// Unbox an interface-format argument to the expected parameter format.
-/// Returns the number of slots written.
-fn unbox_interface_arg(
-    call: &mut ExternCallContext,
-    arg_slot0: u64,
-    arg_slot1: u64,
-    param_vk: ValueKind,
-    param_slots: u16,
-    ret_offset: u16,
-) -> u16 {
-    if param_vk == ValueKind::Interface {
-        // Param expects interface - copy both slots
-        call.ret_u64(ret_offset, arg_slot0);
-        call.ret_u64(ret_offset + 1, arg_slot1);
-    } else if param_slots == 1 {
-        // Single-slot param - extract from interface data slot
-        call.ret_u64(ret_offset, arg_slot1);
-    } else {
-        // Multi-slot param - interface slot1 is GcRef to boxed data
-        let src_ref = arg_slot1 as crate::gc::GcRef;
-        for j in 0..param_slots {
-            let val = if !src_ref.is_null() {
-                unsafe { crate::gc::Gc::read_slot(src_ref, j as usize) }
-            } else { 0 };
-            call.ret_u64(ret_offset + j, val);
-        }
-    }
-    param_slots
-}
-
-/// Set a slice element from interface-format data.
-fn set_slice_elem_from_interface(
-    slice_ref: crate::gc::GcRef,
-    idx: usize,
-    arg_slot0: u64,
-    arg_slot1: u64,
-    elem_vk: ValueKind,
-    elem_slots: u16,
-    elem_bytes: usize,
-) {
-    if elem_vk == ValueKind::Interface || elem_slots == 2 {
-        // Interface or 2-slot types: copy both slots
-        slice::set_n(slice_ref, idx, &[arg_slot0, arg_slot1], elem_bytes);
-    } else if elem_slots == 1 {
-        // Single-slot: use data slot directly
-        slice::set(slice_ref, idx, arg_slot1, elem_bytes);
-    } else {
-        // Multi-slot (>2): unbox from GcRef
-        let src_ref = arg_slot1 as crate::gc::GcRef;
-        if !src_ref.is_null() {
-            let mut vals = vec![0u64; elem_slots as usize];
-            for j in 0..elem_slots as usize {
-                vals[j] = unsafe { crate::gc::Gc::read_slot(src_ref, j) };
-            }
-            slice::set_n(slice_ref, idx, &vals, elem_bytes);
-        }
-    }
-}
-
-/// dyn_repack_args: Unified argument repacking for dynamic calls.
-///
-/// Converts interface-format arguments to the format expected by the closure.
-/// Handles both non-variadic and variadic functions in a single path.
-///
-/// Args: (closure_sig_rttid: int[1], variadic_info: int[1], arg_count: int[1], spread_flag: int[1], args[N*2]...)
-/// - closure_sig_rttid: the closure's signature rttid (from dyn_call_prepare)
-/// - variadic_info: 0 for non-variadic, or encoded variadic info from dyn_call_prepare
-/// - arg_count: number of arguments passed (each as interface = 2 slots)
-/// - spread_flag: 1 if the last argument is a slice to spread, 0 otherwise
-/// - args: all arguments in interface format (2 slots each)
-///
-/// Returns: (arg_slots: int[1], converted_args[...]...)
-/// - arg_slots: number of slots in converted args
-/// - converted_args: arguments in the format expected by closure
-fn dyn_repack_args(call: &mut ExternCallContext) -> ExternResult {
-    use vo_common_core::types::ValueMeta;
-    
-    let closure_sig_rttid = call.arg_u64(0) as u32;
-    let variadic_info = call.arg_u64(1);
-    let arg_count = call.arg_u64(2) as usize;
-    let spread_flag = call.arg_u64(3) != 0;
-    let args_start = 4u16;
-    
-    // Get closure signature (clone to avoid borrow issues)
-    let (params, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
-        Some((p, _, v)) => (p.clone(), v),
-        None => {
-            // Should not happen if dyn_call_prepare succeeded
-            call.ret_u64(0, 0);
-            return ExternResult::Ok;
-        }
-    };
-    
-    if is_variadic && variadic_info != 0 {
-        // === Variadic path ===
-        let non_variadic_count = ((variadic_info >> 1) & 0x7FFF) as usize;
-        
-        // Unbox non-variadic args, then append variadic slice
-        let mut total_arg_slots = 1u16;  // +1 for slice ref
-        let mut ret_offset = 1u16;
-        
-        for i in 0..non_variadic_count {
-            let param = &params[i];
-            let param_slots = call.get_type_slot_count(param.rttid());
-            let arg_slot0 = call.arg_u64(args_start + (i * 2) as u16);
-            let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
-            
-            unbox_interface_arg(call, arg_slot0, arg_slot1, param.value_kind(), param_slots, ret_offset);
-            ret_offset += param_slots;
-            total_arg_slots += param_slots;
-        }
-        
-        // Handle variadic portion
-        let slice_ref = if spread_flag && arg_count > non_variadic_count {
-            // Spread: last argument is already a slice
-            let last_arg_idx = arg_count - 1;
-            call.arg_u64(args_start + (last_arg_idx * 2) as u16 + 1) as crate::gc::GcRef
-        } else {
-            // Non-spread: create slice from individual args
-            let elem_meta_raw = (variadic_info >> 16) as u32;
-            let elem_rttid = elem_meta_raw >> 8;
-            let elem_vk = ValueKind::from_u8((elem_meta_raw & 0xFF) as u8);
-            let elem_slots = call.get_type_slot_count(elem_rttid);
-            let elem_bytes = elem_slots as usize * SLOT_BYTES;
-            let variadic_arg_count = arg_count.saturating_sub(non_variadic_count);
-            
-            let elem_meta = ValueMeta::new(elem_rttid, elem_vk);
-            let new_slice = slice::create(call.gc(), elem_meta, elem_bytes, variadic_arg_count, variadic_arg_count);
-            
-            for i in 0..variadic_arg_count {
-                let arg_idx = non_variadic_count + i;
-                let arg_slot0 = call.arg_u64(args_start + (arg_idx * 2) as u16);
-                let arg_slot1 = call.arg_u64(args_start + (arg_idx * 2) as u16 + 1);
-                set_slice_elem_from_interface(new_slice, i, arg_slot0, arg_slot1, elem_vk, elem_slots, elem_bytes);
-            }
-            new_slice
-        };
-        
-        call.ret_ref(ret_offset, slice_ref);
-        call.ret_u64(0, total_arg_slots as u64);
-    } else {
-        // === Non-variadic path ===
-        let mut total_arg_slots = 0u16;
-        let mut ret_offset = 1u16;
-        
-        for (i, param) in params.iter().enumerate() {
-            if i >= arg_count { break; }
-            
-            let param_slots = call.get_type_slot_count(param.rttid());
-            let arg_slot0 = call.arg_u64(args_start + (i * 2) as u16);
-            let arg_slot1 = call.arg_u64(args_start + (i * 2) as u16 + 1);
-            
-            unbox_interface_arg(call, arg_slot0, arg_slot1, param.value_kind(), param_slots, ret_offset);
-            ret_offset += param_slots;
-            total_arg_slots += param_slots;
-        }
-        
-        call.ret_u64(0, total_arg_slots as u64);
-    }
-    
-    ExternResult::Ok
-}
-
-/// dyn_call_closure: Call a closure and unpack returns in one step.
-///
-/// Dynamically allocates buffer based on actual closure return slots at runtime.
-///
-/// Args: (closure_ref[1], arg_slots[1], max_arg_slots[1], args[N], ret_count[1], metas[M], is_any[M])
-/// - closure_ref: GcRef to closure
-/// - arg_slots: actual number of argument slots to pass
-/// - max_arg_slots: compile-time buffer size for args (used for layout calculation)
-/// - args[0..max_arg_slots]: converted arguments for closure (only first arg_slots are used)
-/// - ret_count: number of return values expected
-/// - metas[i]: (rttid << 8 | vk) for return value i
-/// - is_any[i]: 1 if LHS is any (needs boxing), 0 if typed
-///
-/// Returns: (result_slots..., error[2]) - layout determined at compile time based on LHS types
-/// - result_slots: return values in LHS format
-/// - error[2]: nil on success, error on panic/failure
-fn dyn_call_closure(call: &mut ExternCallContext) -> ExternResult {
-    use crate::gc::GcRef;
-    use crate::objects::closure;
-    
-    // Calculate output slot count for a return value
-    #[inline]
-    fn output_slots(is_any: bool, vk: ValueKind, width: usize) -> u16 {
-        if is_any {
-            2
-        } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
-            2  // Large struct/array: (0, GcRef)
-        } else {
-            width.min(2) as u16
-        }
-    }
-    
-    // Parse args layout
-    let closure_ref = call.arg_u64(0) as GcRef;
-    let arg_slots = call.arg_u64(1) as usize;
-    let max_arg_slots = call.arg_u64(2) as usize;
-    let ret_count_offset = 3 + max_arg_slots;
-    let ret_count = call.arg_u64(ret_count_offset as u16) as usize;
-    let metas_start = ret_count_offset + 1;
-    let is_any_start = metas_start + ret_count;
-    
-    // Calculate total output slots (for error position)
-    let mut error_slot_offset: u16 = 0;
-    for i in 0..ret_count {
-        let meta_raw = call.arg_u64((metas_start + i) as u16) as u32;
-        let is_any = call.arg_u64((is_any_start + i) as u16) != 0;
-        let rttid = meta_raw >> 8;
-        let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
-        // Determine width from ValueKind directly
-        let width = match vk {
-            ValueKind::Interface => 2,
-            ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
-            _ => 1,
-        };
-        error_slot_offset += output_slots(is_any, vk, width);
-    }
-    
-    // Helper macro to return error
-    macro_rules! return_error {
-        ($msg:expr) => {{
-            for i in 0..error_slot_offset {
-                call.ret_u64(i, 0);
-            }
-            write_error_to(call, error_slot_offset, $msg);
-            return ExternResult::Ok;
-        }};
-    }
-    
-    if !call.can_call_closure() {
-        return_error!("closure calling not available");
-    }
-    if closure_ref.is_null() {
-        return_error!("closure is null");
-    }
-    
-    // Get function definition
-    let func_id = closure::func_id(closure_ref);
-    let func_def = match call.get_func_def(func_id) {
-        Some(fd) => fd,
-        None => return_error!("function not found"),
-    };
-    let actual_ret_slots = func_def.ret_slots as usize;
-    
-    // Read arguments and call closure
-    let args: Vec<u64> = (0..arg_slots).map(|i| call.arg_u64((3 + i) as u16)).collect();
-    let mut ret_buffer = vec![0u64; actual_ret_slots];
-    
-    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
-        return_error!(&msg);
-    }
-    
-    // Unpack return values to LHS format
-    let mut src_off = 0usize;
-    let mut ret_off: u16 = 0;
-    
-    for i in 0..ret_count {
-        let meta_raw = call.arg_u64((metas_start + i) as u16) as u32;
-        let is_any = call.arg_u64((is_any_start + i) as u16) != 0;
-        let rttid = meta_raw >> 8;
-        let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
-        // Determine width from ValueKind directly, not rttid
-        // This is more reliable because metas comes from closure's actual return type,
-        // and get_type_slot_count may misinterpret Named types
-        let width = match vk {
-            ValueKind::Interface => 2,
-            ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
-            _ => 1,
-        };
-        
-        let raw_slots = &ret_buffer[src_off..src_off + width];
-        src_off += width;
-        
-        if is_any {
-            let boxed = call.box_to_interface(rttid, vk, raw_slots);
-            call.ret_u64(ret_off, boxed.slot0);
-            call.ret_u64(ret_off + 1, boxed.slot1);
-            ret_off += 2;
-        } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
-            let new_ref = call.alloc_and_copy_slots(raw_slots);
-            call.ret_u64(ret_off, 0);
-            call.ret_u64(ret_off + 1, new_ref as u64);
-            ret_off += 2;
-        } else {
-            call.ret_u64(ret_off, raw_slots.get(0).copied().unwrap_or(0));
-            if width > 1 {
-                call.ret_u64(ret_off + 1, raw_slots.get(1).copied().unwrap_or(0));
-            }
-            ret_off += width.min(2) as u16;
-        }
-    }
-    
-    call.ret_nil(error_slot_offset);
-    call.ret_nil(error_slot_offset + 1);
-    ExternResult::Ok
 }
 
 /// dyn_type_assert_error: Create a type assertion error for dynamic access.
@@ -1555,6 +619,1655 @@ fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
 // These extern entries use Vo package naming convention (dyn_FuncName)
 // to match the generated extern names from `dyn.FuncName()` calls.
 
+// =============================================================================
+// Unified dyn_field: Get field with type assertion in one step
+// =============================================================================
+
+/// dyn_field: Get a field and optionally unbox to expected type.
+///
+/// This combines dyn_get_attr + type assertion into one extern call,
+/// eliminating the need for IfaceAssert/CallIface bytecode in codegen.
+///
+/// Args: (base[2], field_name[1], expected_rttid[1], expected_vk[1]) = 5 slots
+/// - base[0-1]: interface value
+/// - field_name[2]: string ref for field name
+/// - expected_rttid[3]: expected type rttid (0 = any, no unboxing)
+/// - expected_vk[4]: expected value kind
+///
+/// Returns: (value[2], error[2]) = 4 slots fixed
+/// - If expected_vk == Interface: returns raw interface format (no unboxing)
+/// - If expected_vk is 1-slot: slot0=value, slot1=0
+/// - If expected_vk is 2-slot: slot0, slot1 = value
+/// - If expected_vk is >2-slot: slot0=0, slot1=GcRef (heap allocated)
+/// - error[2-3]: nil on success, error on failure
+fn dyn_field(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let field_name_ref = call.arg_ref(2);
+    let expected_rttid = call.arg_u64(3) as u32;
+    let expected_vk = ValueKind::from_u8(call.arg_u64(4) as u8);
+    
+    // Check if interface is nil
+    if interface::is_nil(base_slot0) {
+        return dyn_value_error(call, DynErr::NilBase, "cannot access field on nil");
+    }
+    
+    // Get field name
+    let field_name = if field_name_ref.is_null() {
+        return dyn_value_error(call, DynErr::NilBase, "field name is nil");
+    } else {
+        str_obj::as_str(field_name_ref)
+    };
+    
+    // Get the field value as interface format using existing logic
+    let (data_slot0, data_slot1) = match get_field_as_interface(call, base_slot0, base_slot1, field_name) {
+        Ok(v) => v,
+        Err((err, msg)) => return dyn_value_error(call, err, msg),
+    };
+    
+    // If expected_vk is Interface (any), return as-is without unboxing
+    if expected_vk == ValueKind::Interface {
+        call.ret_u64(0, data_slot0);
+        call.ret_u64(1, data_slot1);
+        call.ret_nil(2);
+        call.ret_nil(3);
+        return ExternResult::Ok;
+    }
+    
+    // Unbox and write value with type check
+    if let Err(err) = unbox_and_write_value(call, data_slot0, data_slot1, expected_rttid) {
+        return dyn_value_error(call, err, "type assertion failed");
+    }
+    
+    call.ret_nil(2);
+    call.ret_nil(3);
+    ExternResult::Ok
+}
+
+/// Helper: get field value as interface format.
+/// Returns (slot0, slot1) on success, or (DynErr, message) on failure.
+/// 
+/// Protocol-first: If the type implements AttrObject, call its DynAttr method.
+/// Otherwise, fall back to reflection-based field access.
+fn get_field_as_interface(
+    call: &mut ExternCallContext,
+    slot0: u64,
+    slot1: u64,
+    field_name: &str,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let vk = interface::unpack_value_kind(slot0);
+    let rttid = interface::unpack_rttid(slot0);
+    
+    // Protocol-first: check if type implements AttrObject
+    if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().attr_object_iface_id) {
+        return call_dyn_attr_protocol(call, slot0, slot1, rttid, vk, iface_id, field_name);
+    }
+    
+    // Handle Map types with string keys
+    if vk == ValueKind::Map {
+        return get_map_field(call, slot1 as GcRef, rttid, field_name);
+    }
+    
+    // Handle Pointer and Struct types
+    let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
+        let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+        (elem_value_rttid.rttid(), slot1 as GcRef)
+    } else if vk == ValueKind::Struct {
+        (rttid, slot1 as GcRef)
+    } else {
+        // Try method lookup for named basic types
+        if call.get_named_type_id_from_rttid(rttid, false).is_some() {
+            return get_method_as_interface(call, rttid, slot1, field_name);
+        }
+        return Err((DynErr::TypeMismatch, "cannot access field on this type"));
+    };
+    
+    // Get struct field
+    let struct_meta_id = match call.get_struct_meta_id_from_rttid(effective_rttid) {
+        Some(id) => id as usize,
+        None => return get_method_as_interface(call, rttid, slot1, field_name),
+    };
+    
+    let mut ptr_derefs = Vec::new();
+    let field_result = match lookup_field_recursive(call, struct_meta_id, field_name, 0, &mut ptr_derefs) {
+        Some(r) => r,
+        None => return get_method_as_interface(call, rttid, slot1, field_name),
+    };
+    
+    if data_ref.is_null() {
+        return Err((DynErr::NilBase, "struct data is nil"));
+    }
+    
+    let final_data_ref = match follow_ptr_derefs(&field_result.ptr_derefs, data_ref) {
+        Some(r) => r,
+        None => return Err((DynErr::NilBase, "nil pointer in embedding path")),
+    };
+    
+    let raw_slots: Vec<u64> = (0..field_result.slot_count)
+        .map(|i| unsafe { Gc::read_slot(final_data_ref, field_result.final_offset + i) })
+        .collect();
+    
+    let boxed = call.box_to_interface(field_result.rttid, field_result.value_kind, &raw_slots);
+    Ok((boxed.slot0, boxed.slot1))
+}
+
+/// Helper: get map field (string key access).
+fn get_map_field(
+    call: &mut ExternCallContext,
+    base_ref: GcRef,
+    rttid: u32,
+    field_name: &str,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    if base_ref.is_null() {
+        return Err((DynErr::NilBase, "cannot access field on nil map"));
+    }
+    
+    let map_key_vk = map::key_kind(base_ref);
+    if map_key_vk != ValueKind::String && map_key_vk != ValueKind::Interface {
+        return Err((DynErr::BadField, "cannot use field access on map with non-string key"));
+    }
+    
+    let key_ref = call.alloc_str(field_name);
+    let val_meta = map::val_meta(base_ref);
+    let val_vk = val_meta.value_kind();
+    let val_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+    
+    let found = if map_key_vk == ValueKind::Interface {
+        let key_slot0 = interface::pack_slot0(0, ValueKind::String as u32, ValueKind::String);
+        let key_data = [key_slot0, key_ref as u64];
+        map::get(base_ref, &key_data, Some(call.module()))
+    } else {
+        let key_data = [key_ref as u64];
+        map::get(base_ref, &key_data, Some(call.module()))
+    };
+    
+    if val_vk == ValueKind::Interface {
+        if let Some(val_slice) = found {
+            return Ok((val_slice[0], val_slice[1]));
+        }
+        return Ok((0, 0)); // nil interface for missing key
+    }
+    
+    let raw_slots: Vec<u64> = if let Some(val_slice) = found {
+        val_slice.to_vec()
+    } else {
+        let val_slots = call.get_type_slot_count(val_value_rttid.rttid()) as usize;
+        vec![0u64; val_slots]
+    };
+    
+    let boxed = call.box_to_interface(val_value_rttid.rttid(), val_vk, &raw_slots);
+    Ok((boxed.slot0, boxed.slot1))
+}
+
+/// Helper: get method as closure in interface format.
+fn get_method_as_interface(
+    call: &mut ExternCallContext,
+    rttid: u32,
+    receiver_slot1: u64,
+    method_name: &str,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    use crate::objects::closure;
+    
+    let (func_id, _is_pointer_receiver, signature_rttid) = match call.lookup_method(rttid, method_name) {
+        Some(info) => info,
+        None => return Err((DynErr::BadField, "field or method not found")),
+    };
+    
+    let closure_ref = closure::create(call.gc(), func_id, 1);
+    closure::set_capture(closure_ref, 0, receiver_slot1);
+    
+    let result_slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
+    Ok((result_slot0, closure_ref as u64))
+}
+
+/// Helper: call AttrObject.DynAttr protocol method.
+/// Returns (slot0, slot1) on success, or (DynErr, message) on failure.
+fn call_dyn_attr_protocol(
+    call: &mut ExternCallContext,
+    _base_slot0: u64,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    attr_iface_id: u32,
+    field_name: &str,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let func_id = get_protocol_func_id(call, rttid, vk, attr_iface_id, DynErr::BadField)?;
+    let name_ref = call.alloc_str(field_name);
+    let ret = call_protocol_method::<4>(call, func_id, &[base_slot1, name_ref as u64], DynErr::BadField)?;
+    Ok((ret[0], ret[1]))
+}
+
+// =============================================================================
+// Unified dyn_index: Get index with type assertion in one step
+// =============================================================================
+
+/// dyn_index: Index access with optional type unboxing.
+///
+/// Args: (base[2], key[2], expected_rttid[1], expected_vk[1]) = 6 slots
+/// - base[0-1]: interface value (slice, array, map, string, or IndexObject)
+/// - key[2-3]: interface value for key
+/// - expected_rttid[4]: expected type rttid (0 = any, no unboxing)
+/// - expected_vk[5]: expected value kind
+///
+/// Returns: (value[2], error[2]) = 4 slots fixed
+fn dyn_index(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let key_slot0 = call.arg_u64(2);
+    let key_slot1 = call.arg_u64(3);
+    let expected_rttid = call.arg_u64(4) as u32;
+    let expected_vk = ValueKind::from_u8(call.arg_u64(5) as u8);
+    
+    // Check if interface is nil
+    if interface::is_nil(base_slot0) {
+        return dyn_value_error(call, DynErr::NilBase, "cannot index nil");
+    }
+    
+    // Get the indexed value as interface format
+    let (data_slot0, data_slot1) = match get_index_as_interface(call, base_slot0, base_slot1, key_slot0, key_slot1) {
+        Ok(v) => v,
+        Err((err, msg)) => return dyn_value_error(call, err, msg),
+    };
+    
+    // If expected_vk is Interface (any), return as-is without unboxing
+    if expected_vk == ValueKind::Interface {
+        call.ret_u64(0, data_slot0);
+        call.ret_u64(1, data_slot1);
+        call.ret_nil(2);
+        call.ret_nil(3);
+        return ExternResult::Ok;
+    }
+    
+    // Unbox and write value with type check
+    if let Err(err) = unbox_and_write_value(call, data_slot0, data_slot1, expected_rttid) {
+        return dyn_value_error(call, err, "type assertion failed");
+    }
+    
+    call.ret_nil(2);
+    call.ret_nil(3);
+    ExternResult::Ok
+}
+
+/// Helper: get indexed value as interface format.
+/// Protocol-first: checks IndexObject protocol before reflection fallback.
+fn get_index_as_interface(
+    call: &mut ExternCallContext,
+    base_slot0: u64,
+    base_slot1: u64,
+    key_slot0: u64,
+    key_slot1: u64,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let vk = interface::unpack_value_kind(base_slot0);
+    let rttid = interface::unpack_rttid(base_slot0);
+    
+    // Protocol-first: check if type implements IndexObject
+    if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().index_object_iface_id) {
+        return call_dyn_index_protocol(call, base_slot0, base_slot1, rttid, vk, iface_id, key_slot0, key_slot1);
+    }
+    
+    // Reflection fallback: handle built-in indexable types
+    let base_ref = base_slot1 as GcRef;
+    
+    match vk {
+        ValueKind::Slice => {
+            if base_ref.is_null() {
+                return Err((DynErr::NilBase, "cannot index nil slice"));
+            }
+            let len = crate::objects::slice::len(base_ref);
+            let idx = match check_int_index(key_slot0, key_slot1, len) {
+                Ok(i) => i,
+                Err(IndexError::BadType) => return Err((DynErr::BadIndex, "index must be integer")),
+                Err(IndexError::OutOfBounds) => return Err((DynErr::OutOfBounds, "slice index out of bounds")),
+            };
+            
+            let elem_meta = crate::objects::slice::elem_meta(base_ref);
+            let elem_vk = elem_meta.value_kind();
+            let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+            let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
+            
+            let raw_slots: Vec<u64> = (0..elem_slots)
+                .map(|i| crate::objects::slice::get(base_ref, idx as usize * elem_slots + i, 8))
+                .collect();
+            
+            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
+            Ok((boxed.slot0, boxed.slot1))
+        }
+        ValueKind::Array => {
+            if base_ref.is_null() {
+                return Err((DynErr::NilBase, "cannot index nil array"));
+            }
+            let len = crate::objects::array::len(base_ref);
+            let idx = match check_int_index(key_slot0, key_slot1, len) {
+                Ok(i) => i,
+                Err(IndexError::BadType) => return Err((DynErr::BadIndex, "index must be integer")),
+                Err(IndexError::OutOfBounds) => return Err((DynErr::OutOfBounds, "array index out of bounds")),
+            };
+            
+            let elem_meta = crate::objects::array::elem_meta(base_ref);
+            let elem_vk = elem_meta.value_kind();
+            let elem_bytes = crate::objects::array::elem_bytes(base_ref);
+            let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+            let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
+            
+            let mut raw_slots: Vec<u64> = vec![0u64; elem_slots];
+            crate::objects::array::get_n(base_ref, idx as usize, &mut raw_slots, elem_bytes);
+            
+            let boxed = call.box_to_interface(elem_value_rttid.rttid(), elem_vk, &raw_slots);
+            Ok((boxed.slot0, boxed.slot1))
+        }
+        ValueKind::String => {
+            let s = str_obj::as_str(base_ref);
+            let bytes = s.as_bytes();
+            let idx = match check_int_index(key_slot0, key_slot1, bytes.len()) {
+                Ok(i) => i,
+                Err(IndexError::BadType) => return Err((DynErr::BadIndex, "index must be integer")),
+                Err(IndexError::OutOfBounds) => return Err((DynErr::OutOfBounds, "string index out of bounds")),
+            };
+            let boxed = call.box_to_interface(
+                ValueKind::Uint8 as u32,
+                ValueKind::Uint8,
+                &[bytes[idx as usize] as u64],
+            );
+            Ok((boxed.slot0, boxed.slot1))
+        }
+        ValueKind::Map => {
+            if base_ref.is_null() {
+                return Err((DynErr::NilBase, "cannot index nil map"));
+            }
+            get_map_index(call, base_ref, rttid, key_slot0, key_slot1)
+        }
+        _ => Err((DynErr::TypeMismatch, "type does not support indexing")),
+    }
+}
+
+/// Helper: get map value by key.
+fn get_map_index(
+    call: &mut ExternCallContext,
+    base_ref: GcRef,
+    base_rttid: u32,
+    key_slot0: u64,
+    key_slot1: u64,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let key_vk = interface::unpack_value_kind(key_slot0);
+    let map_key_vk = crate::objects::map::key_kind(base_ref);
+    
+    let key_compatible = match (map_key_vk, key_vk) {
+        (a, b) if a == b => true,
+        (ValueKind::Interface, _) => true,
+        (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
+        _ => false,
+    };
+    
+    if !key_compatible {
+        return Err((DynErr::BadIndex, "map key type mismatch"));
+    }
+    
+    // map::get takes &[u64] as key, and needs Module for InterfaceKey maps
+    // For interface keys (map[any]T), pass both slots; for single-slot keys, just one
+    let key_slots = if map_key_vk == ValueKind::Interface {
+        vec![key_slot0, key_slot1]
+    } else {
+        vec![key_slot1]
+    };
+    let val_opt = crate::objects::map::get(base_ref, &key_slots, Some(call.module()));
+    
+    let elem_rttid = call.get_elem_value_rttid_from_base(base_rttid);
+    let elem_vk = crate::objects::map::val_kind(base_ref);
+    
+    // Dynamic access: missing key returns error (unlike Go's zero value)
+    match val_opt {
+        None => Err((DynErr::BadField, "map key not found")),
+        Some(raw_slots) => {
+            let boxed = call.box_to_interface(elem_rttid.rttid(), elem_vk, raw_slots);
+            Ok((boxed.slot0, boxed.slot1))
+        }
+    }
+}
+
+/// Helper: call IndexObject.DynIndex protocol method.
+fn call_dyn_index_protocol(
+    call: &mut ExternCallContext,
+    _base_slot0: u64,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    index_iface_id: u32,
+    key_slot0: u64,
+    key_slot1: u64,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let func_id = get_protocol_func_id(call, rttid, vk, index_iface_id, DynErr::BadIndex)?;
+    let ret = call_protocol_method::<4>(call, func_id, &[base_slot1, key_slot0, key_slot1], DynErr::BadIndex)?;
+    Ok((ret[0], ret[1]))
+}
+
+// =============================================================================
+// Unified dyn_set_field: Set field with protocol support
+// =============================================================================
+
+/// dyn_set_field: Set a field with protocol-first dispatch.
+///
+/// Args: (base[2], field_name[1], value[2]) = 5 slots
+/// Returns: error[2]
+fn dyn_set_field(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let field_name_ref = call.arg_ref(2);
+    let val_slot0 = call.arg_u64(3);
+    let val_slot1 = call.arg_u64(4);
+    
+    if interface::is_nil(base_slot0) {
+        return dyn_error_only(call, DynErr::NilBase, "cannot set field on nil");
+    }
+    
+    let field_name = if field_name_ref.is_null() {
+        return dyn_error_only(call, DynErr::NilBase, "field name is nil");
+    } else {
+        str_obj::as_str(field_name_ref)
+    };
+    
+    match set_field_impl(call, base_slot0, base_slot1, field_name, val_slot0, val_slot1) {
+        Ok(()) => {
+            call.ret_nil(0);
+            call.ret_nil(1);
+            ExternResult::Ok
+        }
+        Err((err, _msg)) => dyn_error_only(call, err, _msg),
+    }
+}
+
+/// Helper: set field implementation with protocol-first dispatch.
+fn set_field_impl(
+    call: &mut ExternCallContext,
+    base_slot0: u64,
+    base_slot1: u64,
+    field_name: &str,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let vk = interface::unpack_value_kind(base_slot0);
+    let rttid = interface::unpack_rttid(base_slot0);
+    
+    // Protocol-first: check if type implements SetAttrObject
+    if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().set_attr_object_iface_id) {
+        return call_dyn_set_attr_protocol(call, base_slot1, rttid, vk, iface_id, field_name, val_slot0, val_slot1);
+    }
+    
+    // Reflection fallback: delegate to existing dyn_set_attr logic
+    // For Map types with string keys, treat field_name as map key
+    if vk == ValueKind::Map {
+        let base_ref = base_slot1 as GcRef;
+        let map_key_vk = crate::objects::map::key_kind(base_ref);
+        
+        if map_key_vk != ValueKind::String {
+            return Err((DynErr::BadField, "cannot use field access on map with non-string key"));
+        }
+        
+        return set_map_field(call, base_ref, rttid, field_name, val_slot0, val_slot1);
+    }
+    
+    // Handle Pointer and Struct types
+    let (effective_rttid, data_ref) = if vk == ValueKind::Pointer {
+        let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
+        (elem_value_rttid.rttid(), base_slot1 as GcRef)
+    } else if vk == ValueKind::Struct {
+        (rttid, base_slot1 as GcRef)
+    } else {
+        return Err((DynErr::BadField, "cannot set field on this type"));
+    };
+    
+    if data_ref.is_null() {
+        return Err((DynErr::NilBase, "struct data is nil"));
+    }
+    
+    set_struct_field(call, data_ref, effective_rttid, field_name, val_slot0, val_slot1)
+}
+
+/// Helper: set struct field by name.
+fn set_struct_field(
+    call: &mut ExternCallContext,
+    data_ref: GcRef,
+    effective_rttid: u32,
+    field_name: &str,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let struct_meta_id = match call.get_struct_meta_id_from_rttid(effective_rttid) {
+        Some(id) => id as usize,
+        None => return Err((DynErr::BadField, "cannot set field on non-struct type")),
+    };
+    
+    // Find field by name
+    let mut ptr_derefs = Vec::new();
+    let field_result = match lookup_field_recursive(&call, struct_meta_id, field_name, 0, &mut ptr_derefs) {
+        Some(r) => r,
+        None => return Err((DynErr::BadField, "field not found")),
+    };
+    
+    // Get effective data pointer (handle embedded pointer fields)
+    let mut effective_ref = data_ref;
+    for deref in &field_result.ptr_derefs {
+        let ptr_val = unsafe { Gc::read_slot(effective_ref, deref.offset as usize) } as GcRef;
+        if ptr_val.is_null() {
+            return Err((DynErr::NilBase, "embedded pointer is nil"));
+        }
+        effective_ref = ptr_val;
+    }
+    
+    // Write value to field
+    let field_vk = field_result.value_kind;
+    let field_slots = field_result.slot_count;
+    let val_vk = interface::unpack_value_kind(val_slot0);
+    
+    // Write value
+    if field_vk == ValueKind::Interface {
+        // Interface field: need to prepare the interface value with correct itab
+        // Get the target interface's meta_id from the field's rttid
+        let iface_meta_id = call.get_interface_meta_id_from_rttid(field_result.rttid)
+            .unwrap_or(0);  // 0 for empty interface (any)
+        let (stored_slot0, stored_slot1) = match prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id) {
+            Ok(v) => v,
+            Err(_) => return Err((DynErr::TypeMismatch, "value does not implement interface")),
+        };
+        unsafe {
+            Gc::write_slot(effective_ref, field_result.final_offset, stored_slot0);
+            Gc::write_slot(effective_ref, field_result.final_offset + 1, stored_slot1);
+        }
+    } else if field_vk != val_vk {
+        // Type check for non-interface fields
+        return Err((DynErr::TypeMismatch, "field type mismatch"));
+    } else if field_vk == ValueKind::Struct || field_vk == ValueKind::Array {
+        // Multi-slot value: copy from source ref
+        let src_ref = val_slot1 as GcRef;
+        if src_ref.is_null() {
+            for i in 0..field_slots {
+                unsafe { Gc::write_slot(effective_ref, field_result.final_offset + i, 0); }
+            }
+        } else {
+            for i in 0..field_slots {
+                let slot = unsafe { Gc::read_slot(src_ref, i) };
+                unsafe { Gc::write_slot(effective_ref, field_result.final_offset + i, slot); }
+            }
+        }
+    } else {
+        // Single-slot value
+        unsafe { Gc::write_slot(effective_ref, field_result.final_offset, val_slot1); }
+    }
+    
+    Ok(())
+}
+
+/// Helper: set map field (field_name as key).
+fn set_map_field(
+    call: &mut ExternCallContext,
+    base_ref: GcRef,
+    base_rttid: u32,
+    field_name: &str,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let key_ref = call.alloc_str(field_name);
+    let key_buf = [key_ref as u64];
+    
+    let val_meta = crate::objects::map::val_meta(base_ref);
+    let map_val_vk = val_meta.value_kind();
+    let map_val_slots = crate::objects::map::val_slots(base_ref) as usize;
+    let map_val_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
+    
+    let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
+    if map_val_vk == ValueKind::Interface {
+        val_buf.push(val_slot0);
+        val_buf.push(val_slot1);
+    } else {
+        let val_vk = interface::unpack_value_kind(val_slot0);
+        if val_vk != map_val_vk {
+            return Err((DynErr::TypeMismatch, "map value type mismatch"));
+        }
+        
+        match map_val_vk {
+            ValueKind::Struct | ValueKind::Array => {
+                let src_ref = val_slot1 as GcRef;
+                if src_ref.is_null() {
+                    for _ in 0..map_val_slots {
+                        val_buf.push(0);
+                    }
+                } else {
+                    for i in 0..map_val_slots {
+                        val_buf.push(unsafe { Gc::read_slot(src_ref, i) });
+                    }
+                }
+            }
+            _ => {
+                val_buf.push(val_slot1);
+            }
+        }
+    }
+    
+    crate::objects::map::set(base_ref, &key_buf, &val_buf, Some(call.module()));
+    Ok(())
+}
+
+/// Helper: call SetAttrObject.DynSetAttr protocol method.
+fn call_dyn_set_attr_protocol(
+    call: &mut ExternCallContext,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    set_attr_iface_id: u32,
+    field_name: &str,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let func_id = get_protocol_func_id(call, rttid, vk, set_attr_iface_id, DynErr::BadField)?;
+    let name_ref = call.alloc_str(field_name);
+    let _ = call_protocol_method::<2>(call, func_id, &[base_slot1, name_ref as u64, val_slot0, val_slot1], DynErr::BadField)?;
+    Ok(())
+}
+
+// =============================================================================
+// Unified dyn_set_index: Set index with protocol support
+// =============================================================================
+
+/// dyn_set_index: Set an indexed value with protocol-first dispatch.
+///
+/// Args: (base[2], key[2], value[2]) = 6 slots
+/// Returns: error[2]
+fn dyn_set_index_unified(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let key_slot0 = call.arg_u64(2);
+    let key_slot1 = call.arg_u64(3);
+    let val_slot0 = call.arg_u64(4);
+    let val_slot1 = call.arg_u64(5);
+    
+    if interface::is_nil(base_slot0) {
+        return dyn_error_only(call, DynErr::NilBase, "cannot set index on nil");
+    }
+    
+    match set_index_impl(call, base_slot0, base_slot1, key_slot0, key_slot1, val_slot0, val_slot1) {
+        Ok(()) => {
+            call.ret_nil(0);
+            call.ret_nil(1);
+            ExternResult::Ok
+        }
+        Err((err, _msg)) => dyn_error_only(call, err, _msg),
+    }
+}
+
+/// Helper: set index implementation with protocol-first dispatch.
+fn set_index_impl(
+    call: &mut ExternCallContext,
+    base_slot0: u64,
+    base_slot1: u64,
+    key_slot0: u64,
+    key_slot1: u64,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let vk = interface::unpack_value_kind(base_slot0);
+    let rttid = interface::unpack_rttid(base_slot0);
+    
+    // Protocol-first: check if type implements SetIndexObject
+    if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().set_index_object_iface_id) {
+        return call_dyn_set_index_protocol(call, base_slot1, rttid, vk, iface_id, key_slot0, key_slot1, val_slot0, val_slot1);
+    }
+    
+    // Reflection fallback - only Slice and Map support index assignment
+    // Array and String are value types and cannot be modified through dynamic access
+    let base_ref = base_slot1 as GcRef;
+    
+    match vk {
+        ValueKind::Slice => {
+            if base_ref.is_null() {
+                return Err((DynErr::NilBase, "cannot set index on nil slice"));
+            }
+            set_slice_index(call, base_ref, rttid, key_slot0, key_slot1, val_slot0, val_slot1)
+        }
+        ValueKind::Map => {
+            if base_ref.is_null() {
+                return Err((DynErr::NilBase, "cannot set index on nil map"));
+            }
+            set_map_index(call, base_ref, rttid, key_slot0, key_slot1, val_slot0, val_slot1)
+        }
+        ValueKind::Array => Err((DynErr::TypeMismatch, "cannot set index on value-type array")),
+        ValueKind::String => Err((DynErr::TypeMismatch, "cannot set index on string")),
+        _ => Err((DynErr::TypeMismatch, "type does not support index assignment")),
+    }
+}
+
+/// Helper: set slice index.
+fn set_slice_index(
+    call: &mut ExternCallContext,
+    base_ref: GcRef,
+    base_rttid: u32,
+    key_slot0: u64,
+    key_slot1: u64,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let len = crate::objects::slice::len(base_ref);
+    let idx = match check_int_index(key_slot0, key_slot1, len) {
+        Ok(i) => i as usize,
+        Err(IndexError::BadType) => return Err((DynErr::BadIndex, "index must be integer")),
+        Err(IndexError::OutOfBounds) => return Err((DynErr::OutOfBounds, "slice index out of bounds")),
+    };
+    
+    let elem_meta = crate::objects::slice::elem_meta(base_ref);
+    let elem_vk = elem_meta.value_kind();
+    let elem_value_rttid = call.get_elem_value_rttid_from_base(base_rttid);
+    let elem_slots = call.get_type_slot_count(elem_value_rttid.rttid()) as usize;
+    
+    // Type check
+    let val_vk = interface::unpack_value_kind(val_slot0);
+    if elem_vk != val_vk && elem_vk != ValueKind::Interface {
+        return Err((DynErr::TypeMismatch, "slice element type mismatch"));
+    }
+    
+    // Write value
+    if elem_vk == ValueKind::Interface {
+        crate::objects::slice::set(base_ref, idx * elem_slots, val_slot0, 8);
+        crate::objects::slice::set(base_ref, idx * elem_slots + 1, val_slot1, 8);
+    } else if elem_vk == ValueKind::Struct || elem_vk == ValueKind::Array {
+        let src_ref = val_slot1 as GcRef;
+        for i in 0..elem_slots {
+            let slot = if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } };
+            crate::objects::slice::set(base_ref, idx * elem_slots + i, slot, 8);
+        }
+    } else {
+        crate::objects::slice::set(base_ref, idx * elem_slots, val_slot1, 8);
+    }
+    
+    Ok(())
+}
+
+/// Helper: set map index.
+fn set_map_index(
+    call: &mut ExternCallContext,
+    base_ref: GcRef,
+    base_rttid: u32,
+    key_slot0: u64,
+    key_slot1: u64,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let key_vk = interface::unpack_value_kind(key_slot0);
+    let map_key_vk = crate::objects::map::key_kind(base_ref);
+    
+    let key_compatible = match (map_key_vk, key_vk) {
+        (a, b) if a == b => true,
+        (ValueKind::Interface, _) => true,
+        (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
+        _ => false,
+    };
+    
+    if !key_compatible {
+        return Err((DynErr::BadIndex, "map key type mismatch"));
+    }
+    
+    // Prepare key
+    let key_slots = if map_key_vk == ValueKind::Interface {
+        vec![key_slot0, key_slot1]
+    } else {
+        vec![key_slot1]
+    };
+    
+    // Prepare value
+    let val_meta = crate::objects::map::val_meta(base_ref);
+    let map_val_vk = val_meta.value_kind();
+    let map_val_slots = crate::objects::map::val_slots(base_ref) as usize;
+    
+    let mut val_buf: Vec<u64> = Vec::with_capacity(map_val_slots);
+    if map_val_vk == ValueKind::Interface {
+        val_buf.push(val_slot0);
+        val_buf.push(val_slot1);
+    } else {
+        let val_vk = interface::unpack_value_kind(val_slot0);
+        if val_vk != map_val_vk && map_val_vk != ValueKind::Interface {
+            return Err((DynErr::TypeMismatch, "map value type mismatch"));
+        }
+        
+        match map_val_vk {
+            ValueKind::Struct | ValueKind::Array => {
+                let src_ref = val_slot1 as GcRef;
+                for i in 0..map_val_slots {
+                    val_buf.push(if src_ref.is_null() { 0 } else { unsafe { Gc::read_slot(src_ref, i) } });
+                }
+            }
+            _ => {
+                val_buf.push(val_slot1);
+            }
+        }
+    }
+    
+    crate::objects::map::set(base_ref, &key_slots, &val_buf, Some(call.module()));
+    Ok(())
+}
+
+/// Helper: call SetIndexObject.DynSetIndex protocol method.
+fn call_dyn_set_index_protocol(
+    call: &mut ExternCallContext,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    set_index_iface_id: u32,
+    key_slot0: u64,
+    key_slot1: u64,
+    val_slot0: u64,
+    val_slot1: u64,
+) -> Result<(), (DynErr, &'static str)> {
+    let func_id = get_protocol_func_id(call, rttid, vk, set_index_iface_id, DynErr::BadIndex)?;
+    let _ = call_protocol_method::<2>(call, func_id, &[base_slot1, key_slot0, key_slot1, val_slot0, val_slot1], DynErr::BadIndex)?;
+    Ok(())
+}
+
+/// Helper: return error for dyn_field/dyn_index (4 slots: value[2] + error[2]).
+fn dyn_value_error(call: &mut ExternCallContext, err: DynErr, _msg: &str) -> ExternResult {
+    call.ret_u64(0, 0);
+    call.ret_u64(1, 0);
+    let (slot0, slot1) = dyn_sentinel_error(call, err.into());
+    call.ret_u64(2, slot0);
+    call.ret_u64(3, slot1);
+    ExternResult::Ok
+}
+
+// ============================================================================
+// Unified dyn_call extern
+// ============================================================================
+
+/// dyn_call: Unified dynamic call with protocol-first dispatch.
+///
+/// Handles both CallObject protocol and closure calls in a single extern.
+/// Protocol path is tried first; if type doesn't implement CallObject, falls back to closure call.
+///
+/// Args: (base[2], args_slice[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
+/// - base[2]: the callable value as interface
+/// - args_slice[1]: GcRef to []any slice containing packed arguments
+/// - expected_ret_count[1]: number of expected return values (from LHS)
+/// - expected_metas[N]: ValueRttid raw values for each expected return
+/// - is_any_flags[N]: 1 if LHS expects any, 0 otherwise
+///
+/// Returns: (results[variable], error[2])
+/// - results: return values in format matching LHS types
+/// - error[2]: nil on success, error on failure
+fn dyn_call(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let args_slice_ref = call.arg_u64(2) as GcRef;
+    let expected_ret_count = call.arg_u64(3) as usize;
+    let metas_start = 4u16;
+    let is_any_start = metas_start + expected_ret_count as u16;
+    
+    // Calculate error slot offset based on expected return types
+    let error_slot_offset = compute_dyn_call_error_offset(call, expected_ret_count, metas_start, is_any_start);
+    
+    // Helper macro to return error
+    macro_rules! return_error {
+        ($err:expr, $msg:expr) => {{
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let (cause0, cause1) = dyn_sentinel_error(call, $err.into());
+            let (slot0, slot1) = create_error_with_cause(call, $msg, cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        }};
+    }
+    
+    // 1. Check nil
+    if interface::is_nil(base_slot0) {
+        return_error!(DynErr::NilBase, "cannot call nil");
+    }
+    
+    let vk = interface::unpack_value_kind(base_slot0);
+    let rttid = interface::unpack_rttid(base_slot0);
+    
+    // 2. Protocol-first: check if type implements CallObject
+    if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().call_object_iface_id) {
+        return dyn_call_via_protocol(
+            call, base_slot1, rttid, vk, iface_id, args_slice_ref,
+            expected_ret_count, metas_start, is_any_start, error_slot_offset,
+        );
+    }
+    
+    // 3. Fallback: check if it's a closure
+    if vk != ValueKind::Closure {
+        return_error!(DynErr::BadCall, &format!("cannot call non-function type {:?}", vk));
+    }
+    
+    // 4. Closure call path
+    dyn_call_closure_impl(
+        call, base_slot1 as GcRef, rttid, args_slice_ref,
+        expected_ret_count, metas_start, is_any_start, error_slot_offset,
+    )
+}
+
+/// Compute the error slot offset for dyn_call based on expected return types.
+fn compute_dyn_call_error_offset(
+    call: &ExternCallContext,
+    expected_ret_count: usize,
+    metas_start: u16,
+    is_any_start: u16,
+) -> u16 {
+    let mut offset: u16 = 0;
+    for i in 0..expected_ret_count {
+        let meta_raw = call.arg_u64(metas_start + i as u16) as u32;
+        let is_any = call.arg_u64(is_any_start + i as u16) != 0;
+        let rttid = meta_raw >> 8;
+        let vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
+        let width = match vk {
+            ValueKind::Interface => 2,
+            ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
+            _ => 1,
+        };
+        offset += dyn_call_output_slots(is_any, vk, width);
+    }
+    offset
+}
+
+/// Calculate output slot count for a return value in dyn_call.
+#[inline]
+fn dyn_call_output_slots(is_any: bool, vk: ValueKind, width: usize) -> u16 {
+    if is_any {
+        2
+    } else if (vk == ValueKind::Struct || vk == ValueKind::Array) && width > 2 {
+        2  // Large struct/array: (0, GcRef)
+    } else {
+        width.min(2) as u16
+    }
+}
+
+/// Call via CallObject protocol: DynCall(args []any) (any, error)
+fn dyn_call_via_protocol(
+    call: &mut ExternCallContext,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    call_iface_id: u32,
+    args_slice_ref: GcRef,
+    expected_ret_count: usize,
+    metas_start: u16,
+    is_any_start: u16,
+    error_slot_offset: u16,
+) -> ExternResult {
+    // Helper macro to return error
+    macro_rules! return_error {
+        ($err:expr, $msg:expr) => {{
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let (cause0, cause1) = dyn_sentinel_error(call, $err.into());
+            let (slot0, slot1) = create_error_with_cause(call, $msg, cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        }};
+    }
+    
+    // Protocol only supports single return
+    if expected_ret_count > 1 {
+        return_error!(DynErr::SigMismatch, "CallObject protocol only supports single return value");
+    }
+    
+    // Get named_type_id and create itab
+    let named_type_id = match call.get_named_type_id_from_rttid(rttid, true) {
+        Some(id) => id,
+        None => return_error!(DynErr::BadCall, "type has no methods"),
+    };
+    
+    let src_is_pointer = vk == ValueKind::Pointer;
+    let itab_id = match call.try_get_or_create_itab(named_type_id, call_iface_id, src_is_pointer) {
+        Some(id) => id,
+        None => return_error!(DynErr::BadCall, "failed to create itab for CallObject"),
+    };
+    
+    let itab = match call.get_itab(itab_id) {
+        Some(t) => t,
+        None => return_error!(DynErr::BadCall, "invalid itab"),
+    };
+    
+    // DynCall is method index 0 in CallObject interface
+    let func_id = match itab.methods.first() {
+        Some(&id) => id,
+        None => return_error!(DynErr::BadCall, "CallObject has no methods"),
+    };
+    
+    // Create closure and call
+    use crate::objects::closure;
+    let closure_ref = closure::create(call.gc(), func_id, 0);
+    
+    // Prepare args: receiver (base_slot1) + args_slice
+    let args = [base_slot1, args_slice_ref as u64];
+    
+    // Call returns (any[2], error[2]) = 4 slots
+    let mut ret_buffer = vec![0u64; 4];
+    
+    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
+        return_error!(DynErr::BadCall, &msg);
+    }
+    
+    // ret_buffer: [any_slot0, any_slot1, error_slot0, error_slot1]
+    let result_slot0 = ret_buffer[0];
+    let result_slot1 = ret_buffer[1];
+    let proto_error_slot0 = ret_buffer[2];
+    let proto_error_slot1 = ret_buffer[3];
+    
+    // Check protocol error
+    if proto_error_slot0 != 0 || proto_error_slot1 != 0 {
+        // Propagate protocol error
+        for i in 0..error_slot_offset {
+            call.ret_u64(i, 0);
+        }
+        call.ret_u64(error_slot_offset, proto_error_slot0);
+        call.ret_u64(error_slot_offset + 1, proto_error_slot1);
+        return ExternResult::Ok;
+    }
+    
+    // Unbox result to expected type
+    if expected_ret_count == 0 {
+        // No return expected, just return nil error
+        call.ret_nil(error_slot_offset);
+        call.ret_nil(error_slot_offset + 1);
+    } else {
+        // Single return expected
+        let meta_raw = call.arg_u64(metas_start) as u32;
+        let is_any = call.arg_u64(is_any_start) != 0;
+        let expected_rttid = meta_raw >> 8;
+        let expected_vk = ValueKind::from_u8((meta_raw & 0xFF) as u8);
+        
+        unbox_protocol_result(
+            call, result_slot0, result_slot1,
+            expected_rttid, expected_vk, is_any,
+            0, error_slot_offset,
+        );
+    }
+    
+    ExternResult::Ok
+}
+
+/// Unbox protocol result (any) to expected type.
+fn unbox_protocol_result(
+    call: &mut ExternCallContext,
+    result_slot0: u64,
+    result_slot1: u64,
+    expected_rttid: u32,
+    expected_vk: ValueKind,
+    is_any: bool,
+    dst_offset: u16,
+    error_slot_offset: u16,
+) {
+    if is_any || expected_vk == ValueKind::Interface {
+        // Expect any/interface: copy both slots
+        call.ret_u64(dst_offset, result_slot0);
+        call.ret_u64(dst_offset + 1, result_slot1);
+        call.ret_nil(error_slot_offset);
+        call.ret_nil(error_slot_offset + 1);
+        return;
+    }
+    
+    // Type check
+    let got_vk = interface::unpack_value_kind(result_slot0);
+    let got_rttid = interface::unpack_rttid(result_slot0);
+    
+    // Allow nil for pointer/reference types
+    if interface::is_nil(result_slot0) {
+        match expected_vk {
+            ValueKind::Pointer | ValueKind::Slice | ValueKind::Map | 
+            ValueKind::String | ValueKind::Closure | ValueKind::Channel => {
+                call.ret_u64(dst_offset, 0);
+                call.ret_nil(error_slot_offset);
+                call.ret_nil(error_slot_offset + 1);
+                return;
+            }
+            _ => {}
+        }
+    }
+    
+    // Check type compatibility
+    let type_ok = if expected_rttid == 0 {
+        // Only check ValueKind
+        got_vk == expected_vk
+    } else {
+        got_vk == expected_vk && got_rttid == expected_rttid
+    };
+    
+    if !type_ok {
+        // Type mismatch - return error
+        for i in 0..error_slot_offset {
+            call.ret_u64(i, 0);
+        }
+        let msg = format!(
+            "type assertion failed: expected {:?} (rttid {}), got {:?} (rttid {})",
+            expected_vk, expected_rttid, got_vk, got_rttid
+        );
+        write_error_to(call, error_slot_offset, &msg);
+        return;
+    }
+    
+    // Unbox value
+    let width = match expected_vk {
+        ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(expected_rttid) as usize,
+        _ => 1,
+    };
+    
+    if width == 1 {
+        call.ret_u64(dst_offset, result_slot1);
+    } else if width == 2 {
+        // 2-slot type stored directly in interface
+        call.ret_u64(dst_offset, result_slot0);
+        call.ret_u64(dst_offset + 1, result_slot1);
+    } else {
+        // Large struct/array: result_slot1 is GcRef, return as (0, GcRef)
+        call.ret_u64(dst_offset, 0);
+        call.ret_u64(dst_offset + 1, result_slot1);
+    }
+    
+    call.ret_nil(error_slot_offset);
+    call.ret_nil(error_slot_offset + 1);
+}
+
+/// Closure call implementation for dyn_call.
+fn dyn_call_closure_impl(
+    call: &mut ExternCallContext,
+    closure_ref: GcRef,
+    closure_sig_rttid: u32,
+    args_slice_ref: GcRef,
+    expected_ret_count: usize,
+    metas_start: u16,
+    is_any_start: u16,
+    error_slot_offset: u16,
+) -> ExternResult {
+    use crate::objects::closure;
+    
+    // Helper macro to return error
+    macro_rules! return_error {
+        ($msg:expr) => {{
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            write_error_to(call, error_slot_offset, $msg);
+            return ExternResult::Ok;
+        }};
+    }
+    
+    if !call.can_call_closure() {
+        return_error!("closure calling not available");
+    }
+    if closure_ref.is_null() {
+        return_error!("closure is null");
+    }
+    
+    // Get function signature
+    let (params, ret_value_rttids, is_variadic) = match call.get_func_signature(closure_sig_rttid) {
+        Some((p, r, v)) => (p.clone(), r.clone(), v),
+        None => return_error!("invalid closure signature"),
+    };
+    
+    // Check return count mismatch
+    let actual_ret_count = ret_value_rttids.len();
+    if expected_ret_count != actual_ret_count {
+        for i in 0..error_slot_offset {
+            call.ret_u64(i, 0);
+        }
+        let msg = format!(
+            "return count mismatch: expected {} return value(s), function returns {} (hint: adjust LHS variable count to match function signature)",
+            expected_ret_count, actual_ret_count
+        );
+        let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+        let (slot0, slot1) = create_error_with_cause(call, &msg, cause0, cause1);
+        call.ret_u64(error_slot_offset, slot0);
+        call.ret_u64(error_slot_offset + 1, slot1);
+        return ExternResult::Ok;
+    }
+    
+    // Check parameter count mismatch
+    let arg_count = if args_slice_ref.is_null() { 0 } else { slice::len(args_slice_ref) as usize };
+    let expected_param_count = if is_variadic && !params.is_empty() {
+        params.len() - 1  // Non-variadic params count
+    } else {
+        params.len()
+    };
+    
+    if !is_variadic {
+        // Non-variadic: exact match required
+        if arg_count != expected_param_count {
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let msg = format!(
+                "parameter count mismatch: expected {} argument(s), got {}",
+                expected_param_count, arg_count
+            );
+            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+            let (slot0, slot1) = create_error_with_cause(call, &msg, cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        }
+    } else {
+        // Variadic: at least non-variadic params required
+        if arg_count < expected_param_count {
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let msg = format!(
+                "parameter count mismatch: expected at least {} argument(s), got {}",
+                expected_param_count, arg_count
+            );
+            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+            let (slot0, slot1) = create_error_with_cause(call, &msg, cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        }
+    }
+    
+    // Unpack args from []any slice and repack for closure
+    let args = match unpack_args_for_closure(call, args_slice_ref, &params, is_variadic) {
+        Ok(a) => a,
+        Err(_) => {
+            // Type mismatch during argument unpacking
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let (cause0, cause1) = dyn_sentinel_error(call, DynErr::SigMismatch.into());
+            let (slot0, slot1) = create_error_with_cause(call, "argument type mismatch", cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        },
+    };
+    
+    // Get function def and call
+    let func_id = closure::func_id(closure_ref);
+    let func_def = match call.get_func_def(func_id) {
+        Some(fd) => fd,
+        None => return_error!("function not found"),
+    };
+    let actual_ret_slots = func_def.ret_slots as usize;
+    
+    let mut ret_buffer = vec![0u64; actual_ret_slots];
+    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
+        return_error!(&msg);
+    }
+    
+    // Unpack return values to LHS format
+    unpack_closure_returns(
+        call, &ret_buffer, &ret_value_rttids,
+        expected_ret_count, metas_start, is_any_start, error_slot_offset,
+    );
+    
+    ExternResult::Ok
+}
+
+/// Set a slice element from interface-format data.
+fn set_slice_elem_from_interface(
+    slice_ref: crate::gc::GcRef,
+    idx: usize,
+    arg_slot0: u64,
+    arg_slot1: u64,
+    elem_vk: ValueKind,
+    elem_slots: u16,
+    elem_bytes: usize,
+) {
+    if elem_vk == ValueKind::Interface || elem_slots == 2 {
+        slice::set_n(slice_ref, idx, &[arg_slot0, arg_slot1], elem_bytes);
+    } else if elem_slots == 1 {
+        slice::set(slice_ref, idx, arg_slot1, elem_bytes);
+    } else {
+        let src_ref = arg_slot1 as crate::gc::GcRef;
+        if !src_ref.is_null() {
+            let mut vals = vec![0u64; elem_slots as usize];
+            for j in 0..elem_slots as usize {
+                vals[j] = unsafe { crate::gc::Gc::read_slot(src_ref, j) };
+            }
+            slice::set_n(slice_ref, idx, &vals, elem_bytes);
+        }
+    }
+}
+
+/// Unpack args from []any slice for closure call.
+fn unpack_args_for_closure(
+    call: &mut ExternCallContext,
+    args_slice_ref: GcRef,
+    params: &[vo_common_core::types::ValueRttid],
+    is_variadic: bool,
+) -> Result<Vec<u64>, ExternResult> {
+    use vo_common_core::types::ValueMeta;
+    
+    let mut args = Vec::new();
+    
+    if args_slice_ref.is_null() {
+        // No args - check if that's valid
+        if !params.is_empty() && !is_variadic {
+            // Need args but none provided - will fail at call time
+        }
+        return Ok(args);
+    }
+    
+    let arg_count = slice::len(args_slice_ref) as usize;
+    let elem_bytes = array::elem_bytes(slice::array_ref(args_slice_ref));
+    
+    // For variadic: non_variadic_count = params.len() - 1
+    let non_variadic_count = if is_variadic && !params.is_empty() {
+        params.len() - 1
+    } else {
+        params.len()
+    };
+    
+    // Unpack non-variadic args
+    for i in 0..non_variadic_count.min(arg_count) {
+        let param = &params[i];
+        let param_vk = param.value_kind();
+        let param_rttid = param.rttid();
+        let param_slots = call.get_type_slot_count(param_rttid) as usize;
+        
+        // Read interface-format arg from slice (each element is 2 slots = 16 bytes)
+        let base_ptr = slice::data_ptr(args_slice_ref);
+        let elem_ptr = unsafe { base_ptr.add(i * elem_bytes) };
+        let arg_slot0 = unsafe { *(elem_ptr as *const u64) };
+        let arg_slot1 = if elem_bytes >= 16 {
+            unsafe { *((elem_ptr as *const u64).add(1)) }
+        } else {
+            0
+        };
+        
+        // Type check: verify arg type matches param type (unless param is interface/any)
+        if param_vk != ValueKind::Interface {
+            let arg_vk = interface::unpack_value_kind(arg_slot0);
+            let arg_rttid = interface::unpack_rttid(arg_slot0);
+            
+            // Allow nil for pointer/reference types
+            if interface::is_nil(arg_slot0) {
+                if matches!(param_vk, 
+                    ValueKind::Pointer | ValueKind::Slice | ValueKind::Map | 
+                    ValueKind::String | ValueKind::Closure | ValueKind::Channel) {
+                    // nil is valid for these types
+                } else {
+                    return Err(ExternResult::Ok); // nil not valid for value types
+                }
+            } else {
+                // Check ValueKind compatibility
+                if arg_vk != param_vk {
+                    return Err(ExternResult::Ok); // Type mismatch
+                }
+                
+                // For composite types, also check rttid to catch e.g. []int vs []string
+                if matches!(param_vk, ValueKind::Struct | ValueKind::Array | 
+                           ValueKind::Slice | ValueKind::Map | ValueKind::Pointer) {
+                    if arg_rttid != param_rttid {
+                        return Err(ExternResult::Ok); // Type mismatch
+                    }
+                }
+            }
+        }
+        
+        // Unbox to param type
+        if param_vk == ValueKind::Interface {
+            args.push(arg_slot0);
+            args.push(arg_slot1);
+        } else if param_slots == 1 {
+            args.push(arg_slot1);
+        } else {
+            // Multi-slot: arg_slot1 is GcRef to boxed data
+            let src_ref = arg_slot1 as GcRef;
+            for j in 0..param_slots {
+                let val = if !src_ref.is_null() {
+                    unsafe { Gc::read_slot(src_ref, j) }
+                } else { 0 };
+                args.push(val);
+            }
+        }
+    }
+    
+    // Handle variadic args
+    if is_variadic && !params.is_empty() {
+        let variadic_param = params.last().unwrap();
+        let variadic_slice_rttid = variadic_param.rttid();
+        
+        // Get variadic element type
+        let elem_vr = match call.get_slice_elem(variadic_slice_rttid) {
+            Some(vr) => vr,
+            None => return Ok(args), // Error will be caught at call time
+        };
+        let elem_vk = elem_vr.value_kind();
+        let elem_slots = call.get_type_slot_count(elem_vr.rttid()) as usize;
+        let elem_meta = ValueMeta::new(elem_vr.rttid(), elem_vk);
+        
+        // Remaining args become the variadic slice
+        let variadic_count = arg_count.saturating_sub(non_variadic_count);
+        if variadic_count == 0 {
+            // Empty variadic slice
+            args.push(core::ptr::null::<u8>() as u64);
+        } else {
+            // Create new slice for variadic args
+            let new_slice = slice::create(call.gc(), elem_meta, elem_slots * 8, variadic_count, variadic_count);
+            for i in 0..variadic_count {
+                let src_idx = non_variadic_count + i;
+                let base_ptr = slice::data_ptr(args_slice_ref);
+                let elem_ptr = unsafe { base_ptr.add(src_idx * elem_bytes) };
+                let arg_slot0 = unsafe { *(elem_ptr as *const u64) };
+                let arg_slot1 = if elem_bytes >= 16 {
+                    unsafe { *((elem_ptr as *const u64).add(1)) }
+                } else {
+                    0
+                };
+                
+                set_slice_elem_from_interface(new_slice, i, arg_slot0, arg_slot1, elem_vk, elem_slots as u16, elem_slots * 8);
+            }
+            args.push(new_slice as u64);
+        }
+    }
+    
+    Ok(args)
+}
+
+/// Unpack closure returns to LHS format.
+fn unpack_closure_returns(
+    call: &mut ExternCallContext,
+    ret_buffer: &[u64],
+    ret_value_rttids: &[vo_common_core::types::ValueRttid],
+    expected_ret_count: usize,
+    metas_start: u16,
+    is_any_start: u16,
+    error_slot_offset: u16,
+) {
+    let mut src_off = 0usize;
+    let mut ret_off: u16 = 0;
+    
+    for i in 0..expected_ret_count {
+        let expected_meta_raw = call.arg_u64(metas_start + i as u16) as u32;
+        let is_any = call.arg_u64(is_any_start + i as u16) != 0;
+        let expected_rttid = expected_meta_raw >> 8;
+        let expected_vk = ValueKind::from_u8((expected_meta_raw & 0xFF) as u8);
+        
+        // Get actual return type from closure signature
+        let (actual_rttid, actual_vk, actual_width) = if i < ret_value_rttids.len() {
+            let vr = &ret_value_rttids[i];
+            let rttid = vr.rttid();
+            let vk = vr.value_kind();
+            let width = match vk {
+                ValueKind::Interface => 2,
+                ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
+                _ => 1,
+            };
+            (rttid, vk, width)
+        } else {
+            // More expected returns than actual - use zeros
+            (0, ValueKind::Int, 1)
+        };
+        
+        let raw_slots = if src_off + actual_width <= ret_buffer.len() {
+            &ret_buffer[src_off..src_off + actual_width]
+        } else {
+            &[][..]
+        };
+        src_off += actual_width;
+        
+        let output_slots = dyn_call_output_slots(is_any, expected_vk, actual_width);
+        
+        if is_any {
+            // Box to interface
+            let boxed = call.box_to_interface(actual_rttid, actual_vk, raw_slots);
+            call.ret_u64(ret_off, boxed.slot0);
+            call.ret_u64(ret_off + 1, boxed.slot1);
+        } else if (expected_vk == ValueKind::Struct || expected_vk == ValueKind::Array) && actual_width > 2 {
+            // Large struct/array: allocate and copy
+            let new_ref = call.alloc_and_copy_slots(raw_slots);
+            call.ret_u64(ret_off, 0);
+            call.ret_u64(ret_off + 1, new_ref as u64);
+        } else {
+            // Direct copy
+            call.ret_u64(ret_off, raw_slots.get(0).copied().unwrap_or(0));
+            if output_slots > 1 {
+                call.ret_u64(ret_off + 1, raw_slots.get(1).copied().unwrap_or(0));
+            }
+        }
+        
+        ret_off += output_slots;
+    }
+    
+    call.ret_nil(error_slot_offset);
+    call.ret_nil(error_slot_offset + 1);
+}
+
+// ============================================================================
+// Unified dyn_method extern
+// ============================================================================
+
+/// dyn_method: Unified dynamic method call with protocol-first dispatch.
+///
+/// Combines getting the method (via AttrObject protocol or reflection) and calling it.
+/// This is equivalent to `a~>method(args)`.
+///
+/// Args: (base[2], method_name[1], args_slice[1], expected_ret_count[1], expected_metas[N], is_any_flags[N])
+/// - base[2]: the receiver value as interface
+/// - method_name[1]: GcRef to string containing method name
+/// - args_slice[1]: GcRef to []any slice containing packed arguments
+/// - expected_ret_count[1]: number of expected return values (from LHS)
+/// - expected_metas[N]: ValueRttid raw values for each expected return
+/// - is_any_flags[N]: 1 if LHS expects any, 0 otherwise
+///
+/// Returns: (results[variable], error[2])
+fn dyn_method(call: &mut ExternCallContext) -> ExternResult {
+    let base_slot0 = call.arg_u64(0);
+    let base_slot1 = call.arg_u64(1);
+    let method_name_ref = call.arg_u64(2) as GcRef;
+    let args_slice_ref = call.arg_u64(3) as GcRef;
+    let expected_ret_count = call.arg_u64(4) as usize;
+    let metas_start = 5u16;
+    let is_any_start = metas_start + expected_ret_count as u16;
+    
+    // Calculate error slot offset based on expected return types
+    let error_slot_offset = compute_dyn_call_error_offset(call, expected_ret_count, metas_start, is_any_start);
+    
+    // Helper macro to return error
+    macro_rules! return_error {
+        ($err:expr, $msg:expr) => {{
+            for i in 0..error_slot_offset {
+                call.ret_u64(i, 0);
+            }
+            let (cause0, cause1) = dyn_sentinel_error(call, $err.into());
+            let (slot0, slot1) = create_error_with_cause(call, $msg, cause0, cause1);
+            call.ret_u64(error_slot_offset, slot0);
+            call.ret_u64(error_slot_offset + 1, slot1);
+            return ExternResult::Ok;
+        }};
+    }
+    
+    // 1. Check nil
+    if interface::is_nil(base_slot0) {
+        return_error!(DynErr::NilBase, "cannot call method on nil");
+    }
+    
+    // Get method name string
+    let method_name = crate::objects::string::as_str(method_name_ref);
+    
+    let vk = interface::unpack_value_kind(base_slot0);
+    let rttid = interface::unpack_rttid(base_slot0);
+    
+    // 2. Protocol-first: check if type implements AttrObject to get method
+    let method_closure: Option<(u64, u64)> = if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().attr_object_iface_id) {
+        match call_dyn_attr_protocol_for_method(call, base_slot1, rttid, vk, iface_id, method_name) {
+            Ok((slot0, slot1)) => Some((slot0, slot1)),
+            Err((err, msg)) => {
+                return_error!(err, msg);
+            }
+        }
+    } else {
+        None
+    };
+    
+    // 3. Fallback to reflection if protocol not available
+    let (closure_slot0, closure_slot1) = if let Some((s0, s1)) = method_closure {
+        (s0, s1)
+    } else {
+        // Try reflection: get method from struct
+        match get_method_by_reflection(call, base_slot0, base_slot1, rttid, vk, method_name) {
+            Ok((s0, s1)) => (s0, s1),
+            Err(msg) => {
+                return_error!(DynErr::BadField, msg);
+            }
+        }
+    };
+    
+    // 4. Check if we got a valid closure
+    let closure_vk = interface::unpack_value_kind(closure_slot0);
+    if closure_vk != ValueKind::Closure {
+        return_error!(DynErr::BadCall, &format!("{} is not a callable method", method_name));
+    }
+    
+    let closure_rttid = interface::unpack_rttid(closure_slot0);
+    let closure_ref = closure_slot1 as GcRef;
+    
+    // 5. Call the closure
+    dyn_call_closure_impl(
+        call, closure_ref, closure_rttid, args_slice_ref,
+        expected_ret_count, metas_start, is_any_start, error_slot_offset,
+    )
+}
+
+/// Helper: call AttrObject.DynAttr protocol method to get a method closure.
+fn call_dyn_attr_protocol_for_method(
+    call: &mut ExternCallContext,
+    base_slot1: u64,
+    rttid: u32,
+    vk: ValueKind,
+    attr_iface_id: u32,
+    method_name: &str,
+) -> Result<(u64, u64), (DynErr, &'static str)> {
+    let func_id = get_protocol_func_id(call, rttid, vk, attr_iface_id, DynErr::BadField)?;
+    let name_ref = call.alloc_str(method_name);
+    let ret = call_protocol_method::<4>(call, func_id, &[base_slot1, name_ref as u64], DynErr::BadField)?;
+    Ok((ret[0], ret[1]))
+}
+
+/// Helper: get method by reflection (for types without AttrObject protocol).
+/// Reuses the same logic as try_get_method but returns Result.
+fn get_method_by_reflection(
+    call: &mut ExternCallContext,
+    _base_slot0: u64,
+    base_slot1: u64,
+    rttid: u32,
+    _vk: ValueKind,
+    method_name: &str,
+) -> Result<(u64, u64), &'static str> {
+    use crate::objects::closure;
+    
+    // Lookup method by name - returns (func_id, is_pointer_receiver, signature_rttid)
+    let (func_id, _is_pointer_receiver, signature_rttid) = match call.lookup_method(rttid, method_name) {
+        Some(info) => info,
+        None => return Err("method not found"),
+    };
+    
+    // Create closure with receiver as capture
+    let closure_ref = closure::create(call.gc(), func_id, 1);
+    closure::set_capture(closure_ref, 0, base_slot1);
+    
+    // Return as interface format (meta, GcRef)
+    let result_slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
+    Ok((result_slot0, closure_ref as u64))
+}
+
 /// Register dynamic extern functions (for no_std mode).
 /// Note: dynamic functions use ExternCallContext directly, not wrapper functions.
 pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[crate::bytecode::ExternDef]) {
@@ -1563,15 +2276,19 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
     // Dynamic functions take ExternCallContext directly - no wrapper needed
     const TABLE: &[(&str, ExternFnWithContext)] = &[
         ("dyn_getDynErrors", get_dyn_errors),
+        ("dyn_field", dyn_field),  // Unified field access
+        ("dyn_index", dyn_index),  // Unified index access
+        ("dyn_set_field", dyn_set_field),  // Unified field set
+        ("dyn_set_index_unified", dyn_set_index_unified),  // Unified index set
+        ("dyn_call", dyn_call),  // Unified call (protocol + closure)
+        ("dyn_method", dyn_method),  // Unified method call
+        ("dyn_pack_any_slice", dyn_pack_any_slice),  // Used by dyn_call/dyn_method codegen
+        ("dyn_type_assert_error", dyn_type_assert_error),
+        // Legacy externs (kept for compatibility)
         ("dyn_get_attr", dyn_get_attr),
         ("dyn_get_index", dyn_get_index),
         ("dyn_set_attr", dyn_set_attr),
         ("dyn_set_index", dyn_set_index),
-        ("dyn_call_prepare", dyn_call_prepare),
-        ("dyn_pack_any_slice", dyn_pack_any_slice),
-        ("dyn_repack_args", dyn_repack_args),
-        ("dyn_call_closure", dyn_call_closure),
-        ("dyn_type_assert_error", dyn_type_assert_error),
         // Also register dyn package names (dyn.GetAttr, etc.)
         ("dyn_GetAttr", dyn_get_attr),
         ("dyn_GetIndex", dyn_get_index),

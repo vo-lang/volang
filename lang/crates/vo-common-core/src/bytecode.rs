@@ -161,6 +161,18 @@ pub struct WellKnownTypes {
     pub error_struct_meta_id: Option<u32>,
     /// Field offsets in errors.Error: [msg, cause]
     pub error_field_offsets: Option<[u16; 2]>,
+    
+    // Builtin protocol interface meta IDs for dynamic access
+    /// AttrObject protocol iface_meta_id
+    pub attr_object_iface_id: Option<u32>,
+    /// SetAttrObject protocol iface_meta_id
+    pub set_attr_object_iface_id: Option<u32>,
+    /// IndexObject protocol iface_meta_id
+    pub index_object_iface_id: Option<u32>,
+    /// SetIndexObject protocol iface_meta_id
+    pub set_index_object_iface_id: Option<u32>,
+    /// CallObject protocol iface_meta_id
+    pub call_object_iface_id: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

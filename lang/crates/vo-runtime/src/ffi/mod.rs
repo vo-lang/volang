@@ -1187,6 +1187,26 @@ impl<'a> ExternCallContext<'a> {
         self.call_closure_fn
     }
 
+    // ==================== Protocol/Interface Support ====================
+
+    /// Check if a source type implements a target interface.
+    /// Used for protocol-first dispatch in dynamic access.
+    #[inline]
+    pub fn check_interface_satisfaction(
+        &self,
+        src_rttid: u32,
+        src_vk: ValueKind,
+        target_iface_id: u32,
+    ) -> bool {
+        crate::itab::check_interface_satisfaction(src_rttid, src_vk, target_iface_id, self.module)
+    }
+
+    /// Get itab by ID.
+    #[inline]
+    pub fn get_itab(&self, itab_id: u32) -> Option<&vo_common_core::bytecode::Itab> {
+        self.itab_cache.get_itab(itab_id)
+    }
+
 }
 
 // ==================== Extern Registry ====================

@@ -13,7 +13,7 @@ mod assign_stmt;
 mod return_stmt;
 
 pub use var_def::LocalDefiner;
-pub use dyn_assign::{IFACE_ASSERT_WITH_OK, PROTOCOL_METHOD_IDX};
+pub use dyn_assign::IFACE_ASSERT_WITH_OK;
 pub use return_stmt::emit_error_return;
 
 use vo_runtime::SlotType;

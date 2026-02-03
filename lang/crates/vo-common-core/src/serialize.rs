@@ -490,6 +490,12 @@ impl Module {
             }
             None => w.write_u8(0),
         }
+        // Protocol interface meta IDs
+        write_option_u32(&mut w, self.well_known.attr_object_iface_id);
+        write_option_u32(&mut w, self.well_known.set_attr_object_iface_id);
+        write_option_u32(&mut w, self.well_known.index_object_iface_id);
+        write_option_u32(&mut w, self.well_known.set_index_object_iface_id);
+        write_option_u32(&mut w, self.well_known.call_object_iface_id);
 
         w.write_vec(&self.constants, |w, c| match c {
             Constant::Nil => w.write_u8(0),
@@ -660,6 +666,12 @@ impl Module {
             } else {
                 None
             },
+            // Protocol interface meta IDs
+            attr_object_iface_id: read_option_u32(&mut r)?,
+            set_attr_object_iface_id: read_option_u32(&mut r)?,
+            index_object_iface_id: read_option_u32(&mut r)?,
+            set_index_object_iface_id: read_option_u32(&mut r)?,
+            call_object_iface_id: read_option_u32(&mut r)?,
         };
 
         let constants = r.read_vec(|r| {
