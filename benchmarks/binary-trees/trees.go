@@ -26,7 +26,7 @@ func check(n *Node) int {
 
 func main() {
 	minDepth := 4
-	maxDepth := 10
+	maxDepth := 14
 	stretchDepth := maxDepth + 1
 
 	stretchTree := make_(stretchDepth)

@@ -5,6 +5,6 @@ local function fib(n)
     return fib(n - 1) + fib(n - 2)
 end
 
-local n = 32
+local n = 35
 local result = fib(n)
 print(string.format("fib(%d) = %d", n, result))

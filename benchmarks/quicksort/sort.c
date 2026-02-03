@@ -40,7 +40,7 @@ bool isSorted(int *arr, int n) {
 
 int main() {
     int size = 3000;
-    int iterations = 20;
+    int iterations = 200;
     long checksum = 0;
 
     for (int iter = 0; iter < iterations; iter++) {

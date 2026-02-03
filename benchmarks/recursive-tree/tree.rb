@@ -82,7 +82,7 @@ def matrix_multiply(a, b)
 end
 
 def main
-  iterations = 500
+  iterations = 3500
   tree_size = 100
   matrix_size = 20
   

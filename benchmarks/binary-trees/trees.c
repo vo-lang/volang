@@ -34,7 +34,7 @@ void free_tree(Node* n) {
 
 int main() {
     int minDepth = 4;
-    int maxDepth = 10;
+    int maxDepth = 14;
     int stretchDepth = maxDepth + 1;
 
     Node* stretchTree = make_tree(stretchDepth);

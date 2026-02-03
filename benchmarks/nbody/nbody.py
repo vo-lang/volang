@@ -87,7 +87,7 @@ def main():
     offset_momentum(bodies)
     print(f"{energy(bodies):.9f}")
 
-    n = 50000
+    n = 170000
     for _ in range(n):
         advance(bodies, 0.01)
 

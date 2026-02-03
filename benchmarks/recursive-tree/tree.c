@@ -96,7 +96,7 @@ void matrixMultiply(int **a, int **b, int **result, int n) {
 }
 
 int main() {
-    int iterations = 500;
+    int iterations = 3500;
     int treeSize = 100;
     int matrixSize = 20;
     

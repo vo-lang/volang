@@ -119,7 +119,7 @@ func matrixMultiply(a [][]int, b [][]int) [][]int {
 }
 
 func main() {
-	iterations := 500
+	iterations := 3500
 	treeSize := 100
 	matrixSize := 20
 	

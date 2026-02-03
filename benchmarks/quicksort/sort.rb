@@ -32,7 +32,7 @@ end
 
 def main
   size = 3000
-  iterations = 20
+  iterations = 200
   checksum = 0
 
   iterations.times do |iter|

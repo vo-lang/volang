@@ -47,6 +47,6 @@ def fannkuch(n):
             r += 1
 
 if __name__ == "__main__":
-    n = 8
+    n = 10
     result = fannkuch(n)
     print(f"Pfannkuchen({n}) = {result}")

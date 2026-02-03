@@ -3,6 +3,6 @@ def fib(n)
   fib(n - 1) + fib(n - 2)
 end
 
-n = 32
+n = 35
 result = fib(n)
 puts "fib(#{n}) = #{result}"

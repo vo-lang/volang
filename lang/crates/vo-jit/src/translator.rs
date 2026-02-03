@@ -3,6 +3,7 @@
 use cranelift_codegen::ir::{FuncRef, Value};
 use cranelift_frontend::FunctionBuilder;
 use vo_runtime::bytecode::Module as VoModule;
+use vo_runtime::SlotType;
 
 /// Translation result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,4 +118,13 @@ pub trait IrEmitter<'a> {
     
     /// Get the function ID being compiled.
     fn func_id(&self) -> u32;
+    
+    /// Get slot type for a variable.
+    fn slot_type(&self, slot: u16) -> SlotType;
+    
+    /// Read variable as F64. Load F64 directly from memory.
+    fn read_var_f64(&mut self, slot: u16) -> Value;
+    
+    /// Write variable as F64. Store F64 directly to memory.
+    fn write_var_f64(&mut self, slot: u16, val: Value);
 }

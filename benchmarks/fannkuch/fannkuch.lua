@@ -66,6 +66,6 @@ local function fannkuch(n)
     end
 end
 
-local n = 8
+local n = 10
 local result = fannkuch(n)
 print(string.format("Pfannkuchen(%d) = %d", n, result))

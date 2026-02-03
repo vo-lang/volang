@@ -49,6 +49,6 @@ def fannkuch(n)
   end
 end
 
-n = 8
+n = 10
 result = fannkuch(n)
 puts "Pfannkuchen(#{n}) = #{result}"

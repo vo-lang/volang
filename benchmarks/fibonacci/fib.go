@@ -10,7 +10,7 @@ func fib(n int) int {
 }
 
 func main() {
-	n := 32
+	n := 35
 	result := fib(n)
 	fmt.Printf("fib(%d) = %d\n", n, result)
 }

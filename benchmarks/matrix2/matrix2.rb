@@ -28,7 +28,7 @@ tmp = {
   m20: 0, m21: 0, m22: 0,
 }
 
-300000.times do
+1000000.times do
   mat_mul_into(tmp, result, a)
   mat_mul_into(result, tmp, a)
 end

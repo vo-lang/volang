@@ -27,7 +27,7 @@ tmp = {
     'm20': 0, 'm21': 0, 'm22': 0,
 }
 
-for i in range(300000):
+for i in range(1000000):
     mat_mul_into(tmp, result, a)
     mat_mul_into(result, tmp, a)
 

@@ -25,7 +25,7 @@ public class Sieve {
     }
 
     public static void main(String[] args) {
-        int n = 300000;
+        int n = 6000000;
         int count = sieve(n);
         System.out.printf("primes up to %d: %d%n", n, count);
     }

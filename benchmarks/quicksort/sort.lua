@@ -34,7 +34,7 @@ end
 
 local function main()
     local size = 3000
-    local iterations = 20
+    local iterations = 200
     local checksum = 0
 
     for iter = 0, iterations - 1 do

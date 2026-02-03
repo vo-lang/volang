@@ -115,7 +115,7 @@ local function matrixMultiply(a, b)
 end
 
 local function main()
-    local iterations = 500
+    local iterations = 3500
     local treeSize = 100
     local matrixSize = 20
     

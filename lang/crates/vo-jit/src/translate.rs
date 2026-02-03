@@ -143,17 +143,28 @@ fn load_int<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn load_const<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let const_idx = inst.b as usize;
-    let module = e.vo_module();
-    let (val, reg_const) = match &module.constants[const_idx] {
-        Constant::Nil => (0i64, Some(0i64)),
-        Constant::Bool(b) => (*b as i64, Some(*b as i64)),
-        Constant::Int(i) => (*i, Some(*i)),
-        Constant::Float(f) => (f.to_bits() as i64, Some(f.to_bits() as i64)),
-        Constant::String(_) => (0, None),
-    };
-    if let Some(c) = reg_const { e.set_reg_const(inst.a, c); }
-    let v = e.builder().ins().iconst(types::I64, val);
-    e.write_var(inst.a, v);
+    // Clone the constant to avoid borrow conflict
+    let constant = e.vo_module().constants[const_idx].clone();
+    match &constant {
+        Constant::Float(f) => {
+            // Float constant: load as F64 directly, no bitcast needed
+            e.set_reg_const(inst.a, f.to_bits() as i64);
+            let v = e.builder().ins().f64const(*f);
+            e.write_var_f64(inst.a, v);
+        }
+        constant => {
+            let (val, reg_const) = match constant {
+                Constant::Nil => (0i64, Some(0i64)),
+                Constant::Bool(b) => (*b as i64, Some(*b as i64)),
+                Constant::Int(i) => (*i, Some(*i)),
+                Constant::String(_) => (0, None),
+                Constant::Float(_) => unreachable!(),
+            };
+            if let Some(c) = reg_const { e.set_reg_const(inst.a, c); }
+            let v = e.builder().ins().iconst(types::I64, val);
+            e.write_var(inst.a, v);
+        }
+    }
 }
 
 fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -245,47 +256,37 @@ fn neg_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn add_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
-    let fb = e.builder().ins().bitcast(types::F64, MemFlags::new(), b);
+    let fa = e.read_var_f64(inst.b);
+    let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fadd(fa, fb);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), fr);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, fr);
 }
 
 fn sub_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
-    let fb = e.builder().ins().bitcast(types::F64, MemFlags::new(), b);
+    let fa = e.read_var_f64(inst.b);
+    let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fsub(fa, fb);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), fr);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, fr);
 }
 
 fn mul_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
-    let fb = e.builder().ins().bitcast(types::F64, MemFlags::new(), b);
+    let fa = e.read_var_f64(inst.b);
+    let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fmul(fa, fb);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), fr);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, fr);
 }
 
 fn div_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
-    let fb = e.builder().ins().bitcast(types::F64, MemFlags::new(), b);
+    let fa = e.read_var_f64(inst.b);
+    let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fdiv(fa, fb);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), fr);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, fr);
 }
 
 fn neg_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
+    let fa = e.read_var_f64(inst.b);
     let fr = e.builder().ins().fneg(fa);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), fr);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, fr);
 }
 
 fn cmp_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
@@ -296,11 +297,11 @@ fn cmp_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
 }
 
 fn cmp_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: FloatCC) {
-    let a = e.read_var(inst.b); let b = e.read_var(inst.c);
-    let fa = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
-    let fb = e.builder().ins().bitcast(types::F64, MemFlags::new(), b);
+    let fa = e.read_var_f64(inst.b);
+    let fb = e.read_var_f64(inst.c);
     let cmp = e.builder().ins().fcmp(cc, fa, fb);
     let r = e.builder().ins().uextend(types::I64, cmp);
+    // Result is bool (I64), not F64
     e.write_var(inst.a, r);
 }
 
@@ -543,22 +544,22 @@ fn slot_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn conv_i2f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    // Input is I64 (int), output is F64 (float)
     let a = e.read_var(inst.b);
     let f = e.builder().ins().fcvt_from_sint(types::F64, a);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), f);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, f);
 }
 
 fn conv_f2i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b);
-    let f = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
+    // Input is F64 (float), output is I64 (int)
+    let f = e.read_var_f64(inst.b);
     let r = e.builder().ins().fcvt_to_sint(types::I64, f);
     e.write_var(inst.a, r);
 }
 
 fn conv_f64_f32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let a = e.read_var(inst.b);
-    let f64v = e.builder().ins().bitcast(types::F64, MemFlags::new(), a);
+    // Input is F64, output is F32 stored as I64 (low 32 bits)
+    let f64v = e.read_var_f64(inst.b);
     let f32v = e.builder().ins().fdemote(types::F32, f64v);
     // f32 is 32-bit, bitcast to i32 first, then extend to i64
     let i32v = e.builder().ins().bitcast(types::I32, MemFlags::new(), f32v);
@@ -567,12 +568,12 @@ fn conv_f64_f32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    // Input is F32 stored as I64 (low 32 bits), output is F64
     let a = e.read_var(inst.b);
     let i32v = e.builder().ins().ireduce(types::I32, a);
     let f32v = e.builder().ins().bitcast(types::F32, MemFlags::new(), i32v);
     let f64v = e.builder().ins().fpromote(types::F64, f32v);
-    let r = e.builder().ins().bitcast(types::I64, MemFlags::new(), f64v);
-    e.write_var(inst.a, r);
+    e.write_var_f64(inst.a, f64v);
 }
 
 fn trunc<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -625,6 +626,47 @@ fn resolve_elem_bytes<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> (us
         0x84 => (4, true),   // int32
         0x44 => (4, false),  // float32
         f => (f as usize, false),
+    }
+}
+
+/// Load a single element (1/2/4/8 bytes) from memory address, with optional sign extension.
+fn load_element<'a>(e: &mut impl IrEmitter<'a>, addr: Value, elem_bytes: usize, needs_sext: bool) -> Value {
+    match elem_bytes {
+        1 => {
+            let v = e.builder().ins().load(types::I8, MemFlags::trusted(), addr, 0);
+            if needs_sext { e.builder().ins().sextend(types::I64, v) }
+            else { e.builder().ins().uextend(types::I64, v) }
+        }
+        2 => {
+            let v = e.builder().ins().load(types::I16, MemFlags::trusted(), addr, 0);
+            if needs_sext { e.builder().ins().sextend(types::I64, v) }
+            else { e.builder().ins().uextend(types::I64, v) }
+        }
+        4 => {
+            let v = e.builder().ins().load(types::I32, MemFlags::trusted(), addr, 0);
+            if needs_sext { e.builder().ins().sextend(types::I64, v) }
+            else { e.builder().ins().uextend(types::I64, v) }
+        }
+        _ => e.builder().ins().load(types::I64, MemFlags::trusted(), addr, 0),
+    }
+}
+
+/// Store a single element (1/2/4/8 bytes) to memory address.
+fn store_element<'a>(e: &mut impl IrEmitter<'a>, addr: Value, val: Value, elem_bytes: usize) {
+    match elem_bytes {
+        1 => {
+            let v = e.builder().ins().ireduce(types::I8, val);
+            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+        }
+        2 => {
+            let v = e.builder().ins().ireduce(types::I16, val);
+            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+        }
+        4 => {
+            let v = e.builder().ins().ireduce(types::I32, val);
+            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+        }
+        _ => { e.builder().ins().store(MemFlags::trusted(), val, addr, 0); }
     }
 }
 
@@ -716,33 +758,15 @@ fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
     
     let data_ptr = emit_slice_bounds_check(e, s, idx);
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
+    let off = e.builder().ins().imul(idx, eb);
+    
     if elem_bytes <= 8 {
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
         let addr = e.builder().ins().iadd(data_ptr, off);
-        let val = match elem_bytes {
-            1 => {
-                let v8 = e.builder().ins().load(types::I8, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v8) }
-                else { e.builder().ins().uextend(types::I64, v8) }
-            }
-            2 => {
-                let v16 = e.builder().ins().load(types::I16, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v16) }
-                else { e.builder().ins().uextend(types::I64, v16) }
-            }
-            4 => {
-                let v32 = e.builder().ins().load(types::I32, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v32) }
-                else { e.builder().ins().uextend(types::I64, v32) }
-            }
-            _ => e.builder().ins().load(types::I64, MemFlags::trusted(), addr, 0),
-        };
+        let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
         for i in 0..elem_slots {
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(data_ptr, slot_off);
@@ -755,33 +779,18 @@ fn slice_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let s = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
-    let val = e.read_var(inst.c);
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
     
     let data_ptr = emit_slice_bounds_check(e, s, idx);
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
+    let off = e.builder().ins().imul(idx, eb);
+    
     if elem_bytes <= 8 {
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
+        let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(data_ptr, off);
-        match elem_bytes {
-            1 => {
-                let v8 = e.builder().ins().ireduce(types::I8, val);
-                e.builder().ins().store(MemFlags::trusted(), v8, addr, 0);
-            }
-            2 => {
-                let v16 = e.builder().ins().ireduce(types::I16, val);
-                e.builder().ins().store(MemFlags::trusted(), v16, addr, 0);
-            }
-            4 => {
-                let v32 = e.builder().ins().ireduce(types::I32, val);
-                e.builder().ins().store(MemFlags::trusted(), v32, addr, 0);
-            }
-            _ => { e.builder().ins().store(MemFlags::trusted(), val, addr, 0); }
-        }
+        store_element(e, addr, val, elem_bytes);
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
@@ -911,36 +920,18 @@ fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let len = e.builder().ins().load(types::I64, MemFlags::trusted(), arr, 0);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds, true);
+    
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
+    let off = e.builder().ins().imul(idx, eb);
+    let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
+    
     if elem_bytes <= 8 {
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
-        let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
         let addr = e.builder().ins().iadd(arr, off);
-        let val = match elem_bytes {
-            1 => {
-                let v8 = e.builder().ins().load(types::I8, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v8) }
-                else { e.builder().ins().uextend(types::I64, v8) }
-            }
-            2 => {
-                let v16 = e.builder().ins().load(types::I16, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v16) }
-                else { e.builder().ins().uextend(types::I64, v16) }
-            }
-            4 => {
-                let v32 = e.builder().ins().load(types::I32, MemFlags::trusted(), addr, 0);
-                if needs_sext { e.builder().ins().sextend(types::I64, v32) }
-                else { e.builder().ins().uextend(types::I64, v32) }
-            }
-            _ => e.builder().ins().load(types::I64, MemFlags::trusted(), addr, 0),
-        };
+        let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
-        let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
         for i in 0..elem_slots {
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(arr, slot_off);
@@ -957,33 +948,18 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let len = e.builder().ins().load(types::I64, MemFlags::trusted(), arr, 0);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds, true);
-    let val = e.read_var(inst.c);
+    
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
+    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
+    let off = e.builder().ins().imul(idx, eb);
+    let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
+    
     if elem_bytes <= 8 {
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
-        let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
+        let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(arr, off);
-        match elem_bytes {
-            1 => {
-                let v8 = e.builder().ins().ireduce(types::I8, val);
-                e.builder().ins().store(MemFlags::trusted(), v8, addr, 0);
-            }
-            2 => {
-                let v16 = e.builder().ins().ireduce(types::I16, val);
-                e.builder().ins().store(MemFlags::trusted(), v16, addr, 0);
-            }
-            4 => {
-                let v32 = e.builder().ins().ireduce(types::I32, val);
-                e.builder().ins().store(MemFlags::trusted(), v32, addr, 0);
-            }
-            _ => { e.builder().ins().store(MemFlags::trusted(), val, addr, 0); }
-        }
+        store_element(e, addr, val, elem_bytes);
     } else {
         let elem_slots = (elem_bytes + 7) / 8;
-        let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-        let off = e.builder().ins().imul(idx, eb);
-        let off = e.builder().ins().iadd_imm(off, ARRAY_HEADER_BYTES);
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);

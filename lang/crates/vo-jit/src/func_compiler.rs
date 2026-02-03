@@ -564,4 +564,19 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn func_id(&self) -> u32 {
         self.func_id
     }
+    fn slot_type(&self, slot: u16) -> vo_runtime::SlotType {
+        self.func_def.slot_types.get(slot as usize).copied().unwrap_or_default()
+    }
+    fn read_var_f64(&mut self, slot: u16) -> Value {
+        let args_ptr = self.args_ptr_val.unwrap();
+        self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+    }
+    fn write_var_f64(&mut self, slot: u16, val: Value) {
+        // Store directly as F64 to memory, no bitcast needed
+        let args_ptr = self.args_ptr_val.unwrap();
+        self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+        // SSA var is I64, need bitcast for def_var
+        let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+        self.builder.def_var(self.vars[slot as usize], i64_val);
+    }
 }

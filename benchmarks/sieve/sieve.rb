@@ -22,6 +22,6 @@ def sieve(n)
   count
 end
 
-n = 300000
+n = 6000000
 count = sieve(n)
 puts "primes up to #{n}: #{count}"

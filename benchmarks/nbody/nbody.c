@@ -92,7 +92,7 @@ int main() {
     offsetMomentum(bodies, n);
     printf("%.9f\n", energy(bodies, n));
 
-    int iterations = 50000;
+    int iterations = 170000;
     for (int i = 0; i < iterations; i++) {
         advance(bodies, n, 0.01);
     }

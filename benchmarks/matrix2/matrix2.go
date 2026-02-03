@@ -35,7 +35,7 @@ func main() {
 
 	tmp := Mat3{}
 
-	for i := 0; i < 300000; i++ {
+	for i := 0; i < 1000000; i++ {
 		matMulInto(&tmp, &result, &a)
 		matMulInto(&result, &tmp, &a)
 	}

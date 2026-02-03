@@ -83,7 +83,7 @@ local bodies = {
 offsetMomentum(bodies)
 print(string.format("%.9f", energy(bodies)))
 
-local n = 50000
+local n = 170000
 for i = 1, n do
     advance(bodies, 0.01)
 end

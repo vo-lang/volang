@@ -108,7 +108,7 @@ public class Tree {
     }
     
     public static void main(String[] args) {
-        int iterations = 500;
+        int iterations = 3500;
         int treeSize = 100;
         int matrixSize = 20;
         

@@ -38,7 +38,7 @@ func isSorted(arr []int) bool {
 
 func main() {
 	size := 3000
-	iterations := 20
+	iterations := 200
 	checksum := 0
 
 	for iter := 0; iter < iterations; iter++ {
