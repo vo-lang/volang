@@ -1,0 +1,15 @@
+package main
+
+import "fmt"
+
+type Empty struct{ i int }
+
+func test3() {
+	var arr [3390]Empty
+	_ = arr
+	fmt.Println("Test")
+}
+
+func main() {
+	test3()
+}

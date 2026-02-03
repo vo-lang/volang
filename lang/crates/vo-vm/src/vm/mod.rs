@@ -1558,7 +1558,8 @@ impl Vm {
         fiber.ensure_capacity(new_sp);
         
         // Zero the entire local slots area first (important for named returns and local vars)
-        unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots * 8) };
+        // write_bytes writes count * size_of::<T>() bytes, so pass local_slots (not * 8)
+        unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots) };
         
         // Copy args (overwrites the zeros for arg slots)
         let n = (func_def.param_slots as usize).min(args.len());
