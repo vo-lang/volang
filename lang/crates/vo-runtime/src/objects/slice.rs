@@ -81,12 +81,12 @@ pub fn is_nil(s: GcRef) -> bool { s.is_null() }
 
 #[inline]
 pub fn array_ref(s: GcRef) -> GcRef {
-    if s.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() { return core::ptr::null_mut(); }
     slot_to_ptr(SliceData::as_ref(s).array)
 }
 #[inline]
 pub fn data_ptr(s: GcRef) -> *mut u8 {
-    if s.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() { return core::ptr::null_mut(); }
     slot_to_ptr(SliceData::as_ref(s).data_ptr)
 }
 #[inline]
