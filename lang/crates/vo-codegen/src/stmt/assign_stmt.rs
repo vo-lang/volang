@@ -27,6 +27,25 @@ pub(super) fn compile_short_var(
         info.project.interner.resolve(name.symbol) == Some("_")
     };
     
+    // Fast path: single new variable definition (x := expr)
+    // NOT for shadowing (i := i) - must read old value before defining new
+    // NOT for escaped vars - need heap boxing which has different flow
+    if short_var.names.len() == 1 && short_var.values.len() == 1 {
+        let name = &short_var.names[0];
+        if !is_blank(name) && info.is_def(name) {
+            let obj_key = info.get_def(name);
+            let is_shadowing = func.lookup_local(name.symbol).is_some();
+            let escapes = info.is_escaped(obj_key);
+            if !is_shadowing && !escapes {
+                let expr = &short_var.values[0];
+                let type_key = info.expr_type(expr.id);
+                let mut sc = LocalDefiner::new(ctx, func, info);
+                sc.define_local(name.symbol, type_key, false, Some(expr), Some(obj_key))?;
+                return Ok(());
+            }
+        }
+    }
+    
     // Check for multi-value case: v1, v2, ... := f() where f() returns a tuple
     let is_multi_value = short_var.values.len() == 1 
         && short_var.names.len() >= 2
