@@ -2284,12 +2284,7 @@ pub fn register_externs(registry: &mut crate::ffi::ExternRegistry, externs: &[cr
         ("dyn_method", dyn_method),  // Unified method call
         ("dyn_pack_any_slice", dyn_pack_any_slice),  // Used by dyn_call/dyn_method codegen
         ("dyn_type_assert_error", dyn_type_assert_error),
-        // Legacy externs (kept for compatibility)
-        ("dyn_get_attr", dyn_get_attr),
-        ("dyn_get_index", dyn_get_index),
-        ("dyn_set_attr", dyn_set_attr),
-        ("dyn_set_index", dyn_set_index),
-        // Also register dyn package names (dyn.GetAttr, etc.)
+        // User API: dyn.GetAttr/GetIndex/SetAttr/SetIndex - always return (any, error)
         ("dyn_GetAttr", dyn_get_attr),
         ("dyn_GetIndex", dyn_get_index),
         ("dyn_SetAttr", dyn_set_attr),

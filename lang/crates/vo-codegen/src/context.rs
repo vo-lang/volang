@@ -46,10 +46,10 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "dyn_index" => 4,  // Unified index access: (value[2], error[2])
         "dyn_set_field" => 2,  // Unified field set: error[2]
         "dyn_set_index_unified" => 2,  // Unified index set: error[2]
-        // (data[2], error[2]) = 4 slots (legacy, kept for compatibility)
-        "dyn_get_attr" | "dyn_get_index" | "dyn_GetAttr" | "dyn_GetIndex" => 4,
-        // error[2] = 2 slots
-        "dyn_set_attr" | "dyn_set_index" | "dyn_SetAttr" | "dyn_SetIndex" => 2,
+        // User API: dyn.GetAttr/GetIndex - (data[2], error[2]) = 4 slots
+        "dyn_GetAttr" | "dyn_GetIndex" => 4,
+        // User API: dyn.SetAttr/SetIndex - error[2] = 2 slots
+        "dyn_SetAttr" | "dyn_SetIndex" => 2,
         // (slice_ref[1], error[2]) = 3 slots
         "dyn_pack_any_slice" => 3,
         // error[2] = 2 slots
