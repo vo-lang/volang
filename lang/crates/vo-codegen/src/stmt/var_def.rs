@@ -82,23 +82,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         let is_loop_var = obj_key.map_or(false, |k| self.info.is_loop_var(k));
         let slot_types = self.info.type_slot_types(type_key);
         
-        // Optimization: if not shadowing and will be StackValue, compile directly to variable slot
-        let is_shadowing = self.func.lookup_local(sym).is_some();
-        let will_be_stack_value = !escapes 
-            && !self.info.is_array(type_key) 
-            && !self.info.is_reference_type(type_key)
-            && !obj_key.map_or(false, |k| self.info.needs_boxing(k, type_key));
-        
-        if !is_shadowing && will_be_stack_value && init.is_some() {
-            // Fast path: allocate storage first, compile directly to it
-            let slots = self.info.type_slot_count(type_key);
-            let slot = self.func.define_local_stack(sym, slots, &slot_types);
-            let storage = StorageKind::StackValue { slot, slots };
-            crate::assign::emit_assign(slot, crate::assign::AssignSource::Expr(init.unwrap()), type_key, self.ctx, self.func, self.info)?;
-            return Ok((storage, None));
-        }
-        
-        // Standard path: compile init to temp first (for shadowing safety)
+        // Compile init FIRST (for shadowing: `i := i` references outer `i`)
         let init_slot = if let Some(expr) = init {
             let tmp = self.func.alloc_slots(&slot_types);
             crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(expr), type_key, self.ctx, self.func, self.info)?;
