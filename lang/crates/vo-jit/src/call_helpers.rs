@@ -3,7 +3,7 @@
 //! This module consolidates call_closure, call_iface, and related logic
 //! to ensure consistent behavior and reduce bug risk from code duplication.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
 
 use vo_runtime::instruction::Instruction;
@@ -357,6 +357,8 @@ pub struct JitCallWithFallbackConfig {
     pub func_ret_slots: usize,
     /// Callee's local_slots (from FunctionDef.local_slots)
     pub callee_local_slots: usize,
+    /// Optional FuncRef for direct call (if callee is known at compile time)
+    pub callee_func_ref: Option<FuncRef>,
 }
 
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
@@ -417,54 +419,166 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let current_pc = emitter.current_pc();
     let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, (current_pc + 1) as i64);
     
-    // Load jit_func_table pointer from ctx
-    let jit_func_table = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE
-    );
-    
-    // Calculate address: jit_func_table + func_id * 8
-    let func_id_i64 = emitter.builder().ins().iconst(types::I64, config.func_id as i64);
-    let offset = emitter.builder().ins().imul_imm(func_id_i64, 8);
-    let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
-    
-    // Load function pointer
-    let jit_func_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
-    
-    // Check if null
-    let zero = emitter.builder().ins().iconst(types::I64, 0);
-    let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, zero);
-    
-    // Create blocks
-    let jit_call_block = emitter.builder().create_block();
-    let vm_call_block = emitter.builder().create_block();
-    let merge_block = emitter.builder().create_block();
-    
-    emitter.builder().ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
-    
-    // === JIT-to-JIT call path (FAST PATH) ===
-    emitter.builder().switch_to_block(jit_call_block);
-    emitter.builder().seal_block(jit_call_block);
-    
-    // Save old fiber_sp for restoration after call
+    // Save old fiber_sp for restoration after call (needed for both direct and indirect paths)
     let old_fiber_sp = emitter.builder().ins().load(
         types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
     );
     
     // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
-    // new_bp = old_fiber_sp, new_sp = new_bp + callee_local_slots
     let new_bp = old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd_imm(new_bp, config.callee_local_slots as i64);
     emitter.builder().ins().store(MemFlags::trusted(), new_bp, ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), new_sp, ctx, JitContext::OFFSET_FIBER_SP);
     
-    // Create signature for JIT function: (ctx, args, ret) -> JitResult
-    let sig = import_jit_func_sig(emitter);
+    // Create blocks
+    let merge_block = emitter.builder().create_block();
     
-    // Call with args on native stack (args_ptr points to args_slot)
-    let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
-    let jit_result = emitter.builder().inst_results(jit_call)[0];
+    // Call callee - direct or indirect based on whether we have a FuncRef
+    let jit_result = if let Some(func_ref) = config.callee_func_ref {
+        // Direct call (fast path - no null check needed)
+        let call = emitter.builder().ins().call(func_ref, &[ctx, args_ptr, ret_ptr]);
+        emitter.builder().inst_results(call)[0]
+    } else {
+        // Indirect call with null check and VM fallback
+        let jit_func_table = emitter.builder().ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_FUNC_TABLE
+        );
+        let func_id_i64 = emitter.builder().ins().iconst(types::I64, config.func_id as i64);
+        let offset = emitter.builder().ins().imul_imm(func_id_i64, 8);
+        let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
+        let jit_func_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+        
+        // Check if null
+        let zero = emitter.builder().ins().iconst(types::I64, 0);
+        let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, zero);
+        
+        let jit_call_block = emitter.builder().create_block();
+        let vm_call_block = emitter.builder().create_block();
+        
+        emitter.builder().ins().brif(is_null, vm_call_block, &[], jit_call_block, &[]);
+        
+        // JIT call block
+        emitter.builder().switch_to_block(jit_call_block);
+        emitter.builder().seal_block(jit_call_block);
+        
+        let sig = import_jit_func_sig(emitter);
+        let jit_call = emitter.builder().ins().call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
+        let jit_result_indirect = emitter.builder().inst_results(jit_call)[0];
+        
+        // Check result for indirect path
+        let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+        let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result_indirect, ok_val);
+        
+        let jit_non_ok_block = emitter.builder().create_block();
+        let jit_ok_block = emitter.builder().create_block();
+        
+        emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
+        
+        // JIT non-OK path
+        emitter.builder().switch_to_block(jit_non_ok_block);
+        emitter.builder().seal_block(jit_non_ok_block);
+        emitter.spill_all_vars();
+        
+        let push_frame_fn_ptr = emitter.builder().ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+        );
+        let push_frame_sig = import_push_frame_sig(emitter);
+        let push_call = emitter.builder().ins().call_indirect(
+            push_frame_sig, push_frame_fn_ptr,
+            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
+        );
+        let callee_fiber_args_ptr = emitter.builder().inst_results(push_call)[0];
+        
+        for i in 0..config.arg_slots {
+            let val = emitter.builder().ins().stack_load(types::I64, args_slot, (i * 8) as i32);
+            emitter.builder().ins().store(MemFlags::trusted(), val, callee_fiber_args_ptr, (i * 8) as i32);
+        }
+        
+        let push_resume_point_fn_ptr = emitter.builder().ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
+        );
+        let push_resume_point_sig = import_push_resume_point_sig(emitter);
+        let callee_bp = emitter.builder().ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+        );
+        emitter.builder().ins().call_indirect(
+            push_resume_point_sig, push_resume_point_fn_ptr,
+            &[ctx, func_id_val, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
+        );
+        emitter.builder().ins().return_(&[jit_result_indirect]);
+        
+        // JIT OK path - restore ctx and jump to merge
+        emitter.builder().switch_to_block(jit_ok_block);
+        emitter.builder().seal_block(jit_ok_block);
+        emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+        emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        emitter.builder().ins().jump(merge_block, &[]);
+        
+        // VM call block
+        emitter.builder().switch_to_block(vm_call_block);
+        emitter.builder().seal_block(vm_call_block);
+        
+        // Restore ctx before VM call (VM path doesn't need the JIT bp/sp updates)
+        emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+        emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        
+        let vm_push_frame_fn_ptr = emitter.builder().ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
+        );
+        let vm_push_call = emitter.builder().ins().call_indirect(
+            push_frame_sig, vm_push_frame_fn_ptr,
+            &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
+        );
+        let vm_callee_args_ptr = emitter.builder().inst_results(vm_push_call)[0];
+        
+        for i in 0..config.arg_slots {
+            let val = emitter.builder().ins().stack_load(types::I64, args_slot, (i * 8) as i32);
+            emitter.builder().ins().store(MemFlags::trusted(), val, vm_callee_args_ptr, (i * 8) as i32);
+        }
+        
+        let call_vm_func = emitter.helpers().call_vm.unwrap();
+        let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
+        let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
+        
+        let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, vm_callee_args_ptr, arg_count, ret_ptr, ret_count]);
+        let vm_result = emitter.builder().inst_results(vm_call)[0];
+        
+        let panic_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
+        let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, panic_val);
+        
+        let vm_panic_block = emitter.builder().create_block();
+        let vm_ok_block = emitter.builder().create_block();
+        
+        emitter.builder().ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
+        
+        emitter.builder().switch_to_block(vm_panic_block);
+        emitter.builder().seal_block(vm_panic_block);
+        let vm_panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
+        emitter.builder().ins().return_(&[vm_panic_val]);
+        
+        emitter.builder().switch_to_block(vm_ok_block);
+        emitter.builder().seal_block(vm_ok_block);
+        
+        let pop_frame_fn_ptr = emitter.builder().ins().load(
+            types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
+        );
+        let pop_frame_sig = import_pop_frame_sig(emitter);
+        emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
+        emitter.builder().ins().jump(merge_block, &[]);
+        
+        // Switch to merge block for return value copy
+        emitter.builder().switch_to_block(merge_block);
+        emitter.builder().seal_block(merge_block);
+        
+        // Copy return values and return early for indirect path
+        for i in 0..config.call_ret_slots {
+            let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
+            emitter.write_var((config.arg_start + i) as u16, val);
+        }
+        return;
+    };
     
-    // Check result: only OK should continue, all others propagate
+    // === Direct call path: check result and handle ===
     let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
     let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, ok_val);
     
@@ -473,16 +587,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
-    // JIT non-OK path (SLOW PATH) - propagate result (Panic, Call, or WaitIo)
-    // Need to materialize caller and callee frames to fiber.stack for VM
+    // Non-OK path (SLOW PATH)
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
-    
-    // Spill caller's variables to fiber.stack
     emitter.spill_all_vars();
     
-    // Materialize callee's frame in fiber.stack (slow path only)
-    // This calls push_frame to create the callee frame that VM expects
     let push_frame_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
     );
@@ -493,100 +602,30 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     );
     let callee_fiber_args_ptr = emitter.builder().inst_results(push_call)[0];
     
-    // Copy args from native stack to fiber.stack (callee needs them there)
     for i in 0..config.arg_slots {
         let val = emitter.builder().ins().stack_load(types::I64, args_slot, (i * 8) as i32);
         emitter.builder().ins().store(MemFlags::trusted(), val, callee_fiber_args_ptr, (i * 8) as i32);
     }
     
-    // Push resume point
     let push_resume_point_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
     );
     let push_resume_point_sig = import_push_resume_point_sig(emitter);
-    
-    // callee's bp is current ctx.jit_bp (set by push_frame we just called)
     let callee_bp = emitter.builder().ins().load(
         types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
     );
-    
     emitter.builder().ins().call_indirect(
         push_resume_point_sig, push_resume_point_fn_ptr,
         &[ctx, func_id_val, caller_resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
     );
-    
     emitter.builder().ins().return_(&[jit_result]);
     
-    // JIT OK path (FAST PATH) - restore ctx.jit_bp and ctx.fiber_sp
+    // OK path - restore ctx and copy return values
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
-    
-    // Restore ctx.jit_bp and ctx.fiber_sp (inline pop)
     emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
     emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
     
-    emitter.builder().ins().jump(merge_block, &[]);
-    
-    // === VM call path ===
-    // VM needs args in fiber.stack, so we call push_frame here
-    emitter.builder().switch_to_block(vm_call_block);
-    emitter.builder().seal_block(vm_call_block);
-    
-    // Push frame for VM (VM expects fiber.stack layout)
-    let vm_push_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_FRAME_FN
-    );
-    let vm_push_call = emitter.builder().ins().call_indirect(
-        push_frame_sig, vm_push_frame_fn_ptr,
-        &[ctx, func_id_val, local_slots_val, ret_reg_val, ret_slots_val, caller_resume_pc_val]
-    );
-    let vm_callee_args_ptr = emitter.builder().inst_results(vm_push_call)[0];
-    
-    // Copy args from native stack to fiber.stack for VM
-    for i in 0..config.arg_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, args_slot, (i * 8) as i32);
-        emitter.builder().ins().store(MemFlags::trusted(), val, vm_callee_args_ptr, (i * 8) as i32);
-    }
-    
-    let call_vm_func = emitter.helpers().call_vm.unwrap();
-    let arg_count = emitter.builder().ins().iconst(types::I32, config.arg_slots as i64);
-    let ret_count = emitter.builder().ins().iconst(types::I32, config.func_ret_slots as i64);
-    
-    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id_val, vm_callee_args_ptr, arg_count, ret_ptr, ret_count]);
-    let vm_result = emitter.builder().inst_results(vm_call)[0];
-    
-    // Check VM result for panic
-    let panic_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
-    let vm_is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, panic_val);
-    
-    let vm_panic_block = emitter.builder().create_block();
-    let vm_ok_block = emitter.builder().create_block();
-    
-    emitter.builder().ins().brif(vm_is_panic, vm_panic_block, &[], vm_ok_block, &[]);
-    
-    // VM panic path
-    emitter.builder().switch_to_block(vm_panic_block);
-    emitter.builder().seal_block(vm_panic_block);
-    let vm_panic_val = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    emitter.builder().ins().return_(&[vm_panic_val]);
-    
-    // VM OK path - need to pop_frame since VM path called push_frame
-    emitter.builder().switch_to_block(vm_ok_block);
-    emitter.builder().seal_block(vm_ok_block);
-    
-    let pop_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
-    );
-    let pop_frame_sig = import_pop_frame_sig(emitter);
-    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
-    
-    emitter.builder().ins().jump(merge_block, &[]);
-    
-    // === Merge block - copy return values (no pop_frame for JIT fast path) ===
-    emitter.builder().switch_to_block(merge_block);
-    emitter.builder().seal_block(merge_block);
-    
-    // Copy return values to caller's locals_slot
     for i in 0..config.call_ret_slots {
         let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
         emitter.write_var((config.arg_start + i) as u16, val);

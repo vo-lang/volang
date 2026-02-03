@@ -376,6 +376,7 @@ impl<'a> FunctionCompiler<'a> {
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
                 callee_local_slots: target_func.local_slots as usize,
+                callee_func_ref: None, // TODO: pass FuncRef for direct call when available
             });
             false // Block not terminated - we have a merge block for continuation
         } else {

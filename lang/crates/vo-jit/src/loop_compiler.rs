@@ -372,6 +372,7 @@ impl<'a> LoopCompiler<'a> {
                 call_ret_slots,
                 func_ret_slots: target_func.ret_slots as usize,
                 callee_local_slots: target_func.local_slots as usize,
+                callee_func_ref: None,
             });
             false // Block not terminated - we have a merge block
         } else {
