@@ -89,9 +89,9 @@ fn emit_box_value(
     info: &TypeInfoWrapper,
 ) -> u16 {
     let meta_idx = ctx.get_or_create_value_meta(value_type, info);
-    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-    let boxed = func.alloc_temp_typed(&[SlotType::GcRef]);
+    let boxed = func.alloc_slots(&[SlotType::GcRef]);
     func.emit_with_flags(Opcode::PtrNew, slots as u8, boxed, meta_reg, 0);
     func.emit_ptr_set(boxed, 0, reg, slots);
     boxed
@@ -184,7 +184,7 @@ fn compile_method_value_embedded_iface(
     
     let recv_is_ptr = info.is_pointer(recv_type);
     let recv_reg = compile_expr(&sel.expr, ctx, func, info)?;
-    let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
     call_info.emit_target(func, start, iface_reg);
     
@@ -205,7 +205,7 @@ fn compile_interface_method_value(
         recv_type, method_name, &info.project.tc_objs, &info.project.interner
     );
     
-    let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     compile_expr_to(&sel.expr, iface_reg, ctx, func, info)?;
     
     emit_iface_method_value_closure(recv_type, method_idx, method_name, iface_reg, dst, ctx, func, info)

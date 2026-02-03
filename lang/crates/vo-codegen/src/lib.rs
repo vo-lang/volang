@@ -1091,7 +1091,7 @@ fn compile_func_body(
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
         let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
-        let meta_reg = builder.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
+        let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
         builder.emit_with_flags(vo_vm::instruction::Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
     }
@@ -1141,9 +1141,9 @@ fn compile_global_array_init(
     let elem_vk = info.type_value_kind(elem_type);
     
     // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
-    let gcref_slot = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
-    let meta_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
-    let len_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
+    let gcref_slot = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+    let meta_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
+    let len_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
     
     // Get elem_meta: (rttid << 8) | elem_vk
     let elem_rttid = ctx.intern_type_key(elem_type, info);
@@ -1167,8 +1167,8 @@ fn compile_global_array_init(
     // Compile array elements and set them
     if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
         let elem_slot_types = info.type_slot_types(elem_type);
-        let tmp_elem = func.alloc_temp_typed(&elem_slot_types);
-        let idx_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::Value]);
+        let tmp_elem = func.alloc_slots(&elem_slot_types);
+        let idx_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
         
         for (i, elem) in lit.elems.iter().enumerate() {
             crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
@@ -1212,7 +1212,7 @@ fn compile_package_globals(
                     
                     // Special handling for interface: use emit_assign for proper itab setup
                     if info.is_interface(tk) {
-                        let tmp = init_builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
+                        let tmp = init_builder.alloc_slots(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
                         crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&initializer.rhs), tk, ctx, init_builder, info)?;
                         emit_global_set(init_builder, global_idx, tmp, 2);
                         continue;
@@ -1224,7 +1224,7 @@ fn compile_package_globals(
                     .map(|t| info.type_slot_types(t))
                     .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
                 
-                let tmp = init_builder.alloc_temp_typed(&slot_types);
+                let tmp = init_builder.alloc_slots(&slot_types);
                 crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
                 emit_global_set(init_builder, global_idx, tmp, slots);
             }
@@ -1243,7 +1243,7 @@ fn compile_package_globals(
                     
                     // For multi-var, compile rhs once and extract values
                     // For now, just compile rhs for each (inefficient but correct)
-                    let tmp = init_builder.alloc_temp_typed(&slot_types);
+                    let tmp = init_builder.alloc_slots(&slot_types);
                     crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
                     emit_global_set(init_builder, global_idx, tmp, slots);
                 }

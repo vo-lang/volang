@@ -137,7 +137,7 @@ pub fn compile_addr_of(
         let type_key = info.expr_type(operand.id);
         let slots = info.type_slot_count(type_key);
         let meta_idx = ctx.get_or_create_value_meta(type_key, info);
-        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, slots as u8, dst, meta_reg, 0);
         
@@ -156,13 +156,13 @@ pub fn compile_addr_of(
             
             if info.is_interface(field_type) {
                 let field_slot_types = info.type_slot_types(field_type);
-                let tmp = func.alloc_temp_typed(&field_slot_types);
+                let tmp = func.alloc_slots(&field_slot_types);
                 crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(&elem.value), field_type, ctx, func, info)?;
                 func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, true);
             } else {
                 let may_gc_ref = info.type_value_kind(field_type).may_contain_gc_refs();
                 let field_slot_types = info.type_slot_types(field_type);
-                let tmp = func.alloc_temp_typed(&field_slot_types);
+                let tmp = func.alloc_slots(&field_slot_types);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
                 func.emit_ptr_set_with_barrier(dst, offset, tmp, field_slots, may_gc_ref);
             }

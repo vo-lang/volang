@@ -28,7 +28,7 @@ pub struct DeferredHeapAlloc {
 impl DeferredHeapAlloc {
     /// Emit the PtrNew instruction for this deferred allocation.
     pub fn emit(&self, func: &mut FuncBuilder) {
-        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, self.meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, self.value_slots as u8, self.gcref_slot, meta_reg, 0);
     }
@@ -84,7 +84,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         
         // Compile init FIRST (for shadowing: `i := i` references outer `i`)
         let init_slot = if let Some(expr) = init {
-            let tmp = self.func.alloc_temp_typed(&slot_types);
+            let tmp = self.func.alloc_slots(&slot_types);
             crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(expr), type_key, self.ctx, self.func, self.info)?;
             Some(tmp)
         } else {
@@ -177,13 +177,13 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         let elem_meta_idx = self.ctx.get_or_create_array_elem_meta(type_key, self.info);
 
         // emit ArrayNew: a=dst, b=elem_meta_idx, c=len, flags=elem_flags
-        let meta_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
+        let meta_reg = self.func.alloc_slots(&[SlotType::Value]);
         self.func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         // When flags=0 (dynamic), put len and elem_bytes in consecutive registers
         let num_regs = if flags == 0 { 2 } else { 1 };
-        let len_reg = self.func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
+        let len_reg = self.func.alloc_slots(&vec![SlotType::Value; num_regs]);
         let (b, c) = crate::type_info::encode_i32(arr_len as i32);
         self.func.emit_op(Opcode::LoadInt, len_reg, b, c);
         if flags == 0 {
@@ -268,7 +268,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             StorageKind::HeapArray { gcref_slot, elem_slots, elem_bytes, elem_vk } => {
                 let arr_len = slot_types.len() as u16 / elem_slots;
                 for i in 0..arr_len {
-                    let idx_reg = self.func.alloc_temp_typed(&[SlotType::Value]);
+                    let idx_reg = self.func.alloc_slots(&[SlotType::Value]);
                     self.func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
                     let src_offset = src_slot + i * elem_slots;
                     self.func.emit_array_set(gcref_slot, idx_reg, src_offset, elem_bytes as usize, elem_vk, self.ctx);

@@ -334,7 +334,7 @@ impl FuncBuilder {
         
         // Emit PtrNew + PtrSet
         use vo_vm::instruction::Opcode;
-        let meta_reg = self.alloc_temp_typed(&[SlotType::Value]);
+        let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         self.emit_with_flags(Opcode::PtrNew, value_slots as u8, gcref_slot, meta_reg, 0);
         self.emit_ptr_set(gcref_slot, 0, param_slot, value_slots);
@@ -451,21 +451,17 @@ impl FuncBuilder {
     /// Allocate temp slots for function arguments. Returns 0 if slots == 0.
     #[inline]
     pub fn alloc_args(&mut self, slots: u16) -> u16 {
-        if slots > 0 { self.alloc_temp_typed(&vec![SlotType::Value; slots as usize]) } else { 0 }
-    }
-
-    pub fn alloc_temp_typed(&mut self, types: &[SlotType]) -> u16 {
-        self.alloc_slots(types)
+        if slots > 0 { self.alloc_slots(&vec![SlotType::Value; slots as usize]) } else { 0 }
     }
 
     /// Allocate a single GcRef slot (for closure refs, etc.)
     pub fn alloc_gcref(&mut self) -> u16 {
-        self.alloc_temp_typed(&[SlotType::GcRef])
+        self.alloc_slots(&[SlotType::GcRef])
     }
 
     /// Allocate an interface slot (2 slots: Interface0, Interface1)
     pub fn alloc_interface(&mut self) -> u16 {
-        self.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1])
+        self.alloc_slots(&[SlotType::Interface0, SlotType::Interface1])
     }
 
     /// Allocate N interface slots (2N slots total)
@@ -475,7 +471,7 @@ impl FuncBuilder {
             types.push(SlotType::Interface0);
             types.push(SlotType::Interface1);
         }
-        self.alloc_temp_typed(&types)
+        self.alloc_slots(&types)
     }
 
     pub fn next_slot(&self) -> u16 {
@@ -596,7 +592,7 @@ impl FuncBuilder {
             StorageKind::StackArray { base_slot, elem_slots, len } => {
                 // Copy element by element using SlotGet
                 for i in 0..len {
-                    let idx_reg = self.alloc_temp_typed(&[SlotType::Value]);
+                    let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
                     self.emit_slot_get(dst + i * elem_slots, base_slot, idx_reg, elem_slots);
                 }
@@ -630,7 +626,7 @@ impl FuncBuilder {
             StorageKind::StackArray { base_slot, elem_slots, len } => {
                 // Copy element by element using SlotSet
                 for i in 0..len {
-                    let idx_reg = self.alloc_temp_typed(&[SlotType::Value]);
+                    let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
                     self.emit_slot_set(base_slot, idx_reg, src + i * elem_slots, elem_slots);
                 }
@@ -693,7 +689,7 @@ impl FuncBuilder {
     ) {
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         if flags == 0 {
-            let index_and_eb = self.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
@@ -715,7 +711,7 @@ impl FuncBuilder {
     ) {
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         if flags == 0 {
-            let index_and_eb = self.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
@@ -737,7 +733,7 @@ impl FuncBuilder {
     ) {
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         if flags == 0 {
-            let index_and_eb = self.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
@@ -759,7 +755,7 @@ impl FuncBuilder {
     ) {
         let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
         if flags == 0 {
-            let index_and_eb = self.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem_bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);

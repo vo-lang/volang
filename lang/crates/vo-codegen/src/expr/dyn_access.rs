@@ -22,7 +22,7 @@ fn emit_dyn_get_attr(
     func: &mut FuncBuilder,
 ) -> u16 {
     let extern_id = ctx.get_or_register_extern("dyn_get_attr");
-    let attr_args = func.alloc_temp_typed(&[
+    let attr_args = func.alloc_slots(&[
         SlotType::Interface0, SlotType::Interface1,  // base
         SlotType::GcRef,  // name string
     ]);
@@ -31,7 +31,7 @@ fn emit_dyn_get_attr(
     let name_idx = ctx.const_string(name);
     func.emit_op(Opcode::StrNew, attr_args + 2, name_idx, 0);
     
-    let result = func.alloc_temp_typed(&[
+    let result = func.alloc_slots(&[
         SlotType::Interface0, SlotType::Interface1,  // data any
         SlotType::Interface0, SlotType::Interface1,  // error
     ]);
@@ -128,7 +128,7 @@ pub fn compile_dyn_access(
     let base_type = info.expr_type(dyn_access.base.id);
     // Base is typically an interface (any), so use proper slot types for GC tracking
     let base_slot_types = info.type_slot_types(base_type);
-    let base_reg = func.alloc_temp_typed(&base_slot_types);
+    let base_reg = func.alloc_slots(&base_slot_types);
     compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
     
     // Check if base is (any, error) tuple - need short-circuit
@@ -190,14 +190,14 @@ fn compile_dyn_op(
             // Use builtin protocol meta_id (no dependency on user imports)
             let end_jump = if let Some(attr_iface_meta_id) = ctx.builtin_protocols().attr_object_meta_id {
                 // IfaceAssert result: (interface[2], ok[1])
-                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
+                let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, base_reg, attr_iface_meta_id as u16);
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
                 // Protocol method call: DynAttr(name string) (any, error)
                 // Args: string[1], result overwrites args starting at args_start
                 // Result layout: (any[2], error[2]) = 4 slots
-                let args_start = func.alloc_temp_typed(&[
+                let args_start = func.alloc_slots(&[
                     SlotType::Interface0, SlotType::Interface1,  // result any (overwrites string arg)
                     SlotType::Interface0, SlotType::Interface1,  // result error
                 ]);
@@ -234,13 +234,13 @@ fn compile_dyn_op(
             // Protocol-first: check if base implements IndexObject via IfaceAssert
             let end_jump = if let Some(index_iface_meta_id) = ctx.builtin_protocols().index_object_meta_id {
                 // IfaceAssert with has_ok flag
-                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
+                let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, base_reg, index_iface_meta_id as u16);
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
                 // Protocol method call: DynIndex(key any) (any, error)
                 // Allocate max(args, returns) = max(2, 4) = 4 slots
-                let args_start = func.alloc_temp_typed(&[
+                let args_start = func.alloc_slots(&[
                     SlotType::Interface0, SlotType::Interface1,
                     SlotType::Interface0, SlotType::Interface1,
                 ]);
@@ -274,7 +274,7 @@ fn compile_dyn_op(
             let key_slots = info.type_slot_count(key_type);
             
             // Args: base[2] + key[2] = 4 slots
-            let args_start = func.alloc_temp_typed(&[
+            let args_start = func.alloc_slots(&[
                 SlotType::Interface0, SlotType::Interface1,
                 SlotType::Interface0, SlotType::Interface1,
             ]);
@@ -290,7 +290,7 @@ fn compile_dyn_op(
             }
             
             // Call: 4 arg slots, 4 ret slots (data[2], error[2])
-            let result = func.alloc_temp_typed(&[
+            let result = func.alloc_slots(&[
                 SlotType::Interface0, SlotType::Interface1,
                 SlotType::Interface0, SlotType::Interface1,
             ]);
@@ -309,7 +309,7 @@ fn compile_dyn_op(
                 let error_slot = dst + ret_slots;
                 
                 // IfaceAssert result: (interface[2], ok[1])
-                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
+                let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, base_reg, call_iface_meta_id as u16);
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
@@ -326,7 +326,7 @@ fn compile_dyn_op(
                     pack_arg_types.push(SlotType::Interface0);
                     pack_arg_types.push(SlotType::Interface1);
                 }
-                let pack_args = func.alloc_temp_typed(&pack_arg_types);
+                let pack_args = func.alloc_slots(&pack_arg_types);
                 func.emit_op(Opcode::LoadInt, pack_args, arg_count as u16, (arg_count >> 16) as u16);
                 func.emit_op(Opcode::LoadInt, pack_args + 1, if *spread { 1 } else { 0 }, 0);
                 
@@ -340,7 +340,7 @@ fn compile_dyn_op(
                     }
                 }
                 
-                let pack_result = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
+                let pack_result = func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
                 let pack_arg_count = (2 + arg_count * 2) as u8;
                 func.emit_with_flags(Opcode::CallExtern, pack_arg_count, pack_result, pack_extern as u16, pack_args);
                 
@@ -352,7 +352,7 @@ fn compile_dyn_op(
                 
                 // Allocate args for CallIface: slice[1], but returns overwrite starting at args_start
                 // Need max(arg_slots, ret_slots) = max(1, 4) = 4 slots
-                let protocol_args = func.alloc_temp_typed(&[
+                let protocol_args = func.alloc_slots(&[
                     SlotType::Interface0, SlotType::Interface1,  // result any (overwrites slice arg)
                     SlotType::Interface0, SlotType::Interface1,  // result error
                 ]);
@@ -389,13 +389,13 @@ fn compile_dyn_op(
             // Protocol-first: check if base implements AttrObject via IfaceAssert
             let (get_result, protocol_done_jump) = if let Some(attr_iface_meta_id) = ctx.builtin_protocols().attr_object_meta_id {
                 // IfaceAssert result: (interface[2], ok[1])
-                let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
+                let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
                 func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, base_reg, attr_iface_meta_id as u16);
                 let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
                 
                 // Protocol method call: DynAttr(name string) (any, error)
                 // Args: string[1], result is (any[2], error[2])
-                let protocol_args = func.alloc_temp_typed(&[
+                let protocol_args = func.alloc_slots(&[
                     SlotType::GcRef,  // string arg
                     SlotType::Interface0, SlotType::Interface1,  // result any
                     SlotType::Interface0, SlotType::Interface1,  // result error
@@ -472,7 +472,7 @@ fn compile_dyn_closure_call(
     // Returns: (ret_slots[1], metas[N], variadic_info[1], closure_sig_rttid[1], error[2])
     let prepare_ret_slots = 1 + expected_ret_count + 1 + 1 + 2;  // ret_slots + metas + variadic_info + sig_rttid + error
     let prepare_extern_id = ctx.get_or_register_extern_with_ret_slots("dyn_call_prepare", prepare_ret_slots);
-    let prepare_args = func.alloc_temp_typed(&[
+    let prepare_args = func.alloc_slots(&[
         SlotType::Interface0, SlotType::Interface1,  // callee (any)
         SlotType::Value, SlotType::Value,  // sig_rttid, expected_ret_count
     ]);
@@ -492,7 +492,7 @@ fn compile_dyn_closure_call(
     result_types.push(SlotType::Value);  // closure_sig_rttid
     result_types.push(SlotType::Interface0);  // error slot0
     result_types.push(SlotType::Interface1);  // error slot1
-    let prepare_result = func.alloc_temp_typed(&result_types);
+    let prepare_result = func.alloc_slots(&result_types);
     func.emit_with_flags(Opcode::CallExtern, 4, prepare_result, prepare_extern_id as u16, prepare_args);
     let metas_start = prepare_result + 1;
     let variadic_info_reg = prepare_result + 1 + expected_ret_count;
@@ -529,7 +529,7 @@ fn compile_dyn_closure_call(
         repack_arg_types.push(SlotType::Interface0);
         repack_arg_types.push(SlotType::Interface1);
     }
-    let repack_args = func.alloc_temp_typed(&repack_arg_types);
+    let repack_args = func.alloc_slots(&repack_arg_types);
     
     // Set repack args
     func.emit_op(Opcode::Copy, repack_args, closure_sig_rttid_reg, 0);
@@ -550,7 +550,7 @@ fn compile_dyn_closure_call(
     for _ in 0..max_converted_arg_slots {
         repack_result_types.push(SlotType::GcRef);
     }
-    let repack_result = func.alloc_temp_typed(&repack_result_types);
+    let repack_result = func.alloc_slots(&repack_result_types);
     let repack_arg_count = (4 + arg_count * 2) as u8;  // 4 = sig_rttid + variadic_info + arg_count + spread_flag
     func.emit_with_flags(Opcode::CallExtern, repack_arg_count, repack_result, repack_extern_id as u16, repack_args);
     
@@ -572,7 +572,7 @@ fn compile_dyn_closure_call(
     for _ in 0..expected_ret_count {
         call_args_types.push(SlotType::Value);  // is_any flags
     }
-    let call_args = func.alloc_temp_typed(&call_args_types);
+    let call_args = func.alloc_slots(&call_args_types);
     
     // Set closure_ref
     func.emit_op(Opcode::Copy, call_args, closure_slot, 0);
@@ -628,7 +628,7 @@ fn compile_dyn_closure_call(
     call_result_types.push(SlotType::Interface0);
     call_result_types.push(SlotType::Interface1);
     
-    let call_result = func.alloc_temp_typed(&call_result_types);
+    let call_result = func.alloc_slots(&call_result_types);
     let call_error_slot = call_result + call_error_offset;
     // Args: closure_ref[1] + arg_slots[1] + max_arg_slots[1] + args[N] + ret_count[1] + metas[M] + is_any[M]
     let total_call_arg_count = (3 + max_converted_arg_slots + 1 + 2 * expected_ret_count) as u8;
@@ -736,7 +736,7 @@ fn emit_unbox_interface(
     // result + ok bool
     let mut assert_slot_types = info.type_slot_types(ret_type);
     assert_slot_types.push(SlotType::Value); // ok bool
-    let assert_result = func.alloc_temp_typed(&assert_slot_types);
+    let assert_result = func.alloc_slots(&assert_slot_types);
     let ok_slot = assert_result + target_slots;
     
     let flags = assert_kind | (1 << 2) | ((target_slots as u8) << 3);
@@ -784,7 +784,7 @@ fn emit_type_assert_error(
     func: &mut FuncBuilder,
 ) {
     let extern_id = ctx.get_or_register_extern("dyn_type_assert_error");
-    let args = func.alloc_temp_typed(&[SlotType::Value, SlotType::Value, SlotType::Value]);
+    let args = func.alloc_slots(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     
     // Expected: (rttid, vk)
     let expected_rttid = if assert_kind == 1 { 0 } else { target_id };

@@ -187,11 +187,11 @@ fn emit_nested_stack_array_index(
     nested_info: &NestedStackArrayInfo,
     func: &mut FuncBuilder,
 ) -> u16 {
-    let flattened_idx = func.alloc_temp_typed(&[SlotType::Value]);
+    let flattened_idx = func.alloc_slots(&[SlotType::Value]);
     
     for (i, (index_reg, _elem_slots, array_len)) in nested_info.levels.iter().enumerate() {
         // Bounds check
-        let len_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let len_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, len_reg, *array_len, 0);
         func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
         
@@ -201,7 +201,7 @@ fn emit_nested_stack_array_index(
         } else {
             let (_, prev_elem_slots, _) = nested_info.levels[i - 1];
             if prev_elem_slots > 1 {
-                let scale_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                let scale_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadInt, scale_reg, prev_elem_slots, 0);
                 func.emit_op(Opcode::MulI, flattened_idx, flattened_idx, scale_reg);
             }
@@ -434,7 +434,7 @@ fn resolve_index_field_lvalue(
         let (key_slots, val_slots) = info.map_key_val_slots(container_type);
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let val_slot_types = info.type_slot_types(val_type);
-        let tmp = func.alloc_temp_typed(&val_slot_types);
+        let tmp = func.alloc_slots(&val_slot_types);
         
         // Compile map get: container first, then index (Go evaluation order)
         let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
@@ -443,7 +443,7 @@ fn resolve_index_field_lvalue(
         let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
         let mut meta_slot_types = vec![SlotType::Value];
         meta_slot_types.extend(info.type_slot_types(key_type));
-        let meta_reg = func.alloc_temp_typed(&meta_slot_types);
+        let meta_reg = func.alloc_slots(&meta_slot_types);
         let meta_idx = ctx.const_int(meta as i64);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_copy(meta_reg + 1, index_reg, key_slots);
@@ -516,7 +516,7 @@ fn resolve_array_index_lvalue(
             // Check if this is a captured array - capture access has no side effects
             if let ExprKind::Ident(ident) = &idx.expr.kind {
                 if let Some(cap_idx) = func.lookup_capture(ident.symbol).map(|c| c.index) {
-                    let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                    let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
                     func.emit_op(Opcode::ClosureGet, gcref_slot, cap_idx, 0);
                     let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                     return Ok(LValue::Index {
@@ -537,7 +537,7 @@ fn resolve_array_index_lvalue(
                 let elem_slots = info.type_slot_count(elem_type);
                 let len = info.array_len(container_type) as u16;
                 let slot_types = info.type_slot_types(container_type);
-                let base_slot = func.alloc_temp_typed(&slot_types);
+                let base_slot = func.alloc_slots(&slot_types);
                 crate::expr::compile_expr_to(&idx.expr, base_slot, ctx, func, info)?;
                 let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 return Ok(LValue::Index {
@@ -573,7 +573,7 @@ fn resolve_heap_struct_array_index(
     
     let (struct_ptr, base_offset) = match base {
         FlattenedBase::Capture { capture_index, offset } => {
-            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             (gcref_slot, *offset)
         }
@@ -595,30 +595,30 @@ fn resolve_heap_struct_array_index(
     // Dynamic index: compile index expression, then compute element address
     let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
     
-    let offset_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let offset_reg = func.alloc_slots(&[SlotType::Value]);
     if elem_slots == 1 {
         if base_offset == 0 {
             func.emit_copy(offset_reg, index_reg, 1);
         } else {
-            let base_reg = func.alloc_temp_typed(&[SlotType::Value]);
+            let base_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, base_reg, base_offset, 0);
             func.emit_op(Opcode::AddI, offset_reg, base_reg, index_reg);
         }
     } else {
-        let elem_slots_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let elem_slots_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, elem_slots_reg, elem_slots, 0);
-        let scaled_idx = func.alloc_temp_typed(&[SlotType::Value]);
+        let scaled_idx = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::MulI, scaled_idx, index_reg, elem_slots_reg);
         if base_offset == 0 {
             func.emit_copy(offset_reg, scaled_idx, 1);
         } else {
-            let base_reg = func.alloc_temp_typed(&[SlotType::Value]);
+            let base_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, base_reg, base_offset, 0);
             func.emit_op(Opcode::AddI, offset_reg, base_reg, scaled_idx);
         }
     }
     
-    let elem_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+    let elem_ptr = func.alloc_slots(&[SlotType::GcRef]);
     func.emit_ptr_add(elem_ptr, struct_ptr, offset_reg);
     
     Ok(LValue::Deref {
@@ -654,7 +654,7 @@ pub fn emit_lvalue_load(
             match kind {
                 ContainerKind::StackArray { base_slot, elem_slots, len } => {
                     // Bounds check: emit IndexCheck before SlotGet
-                    let len_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let len_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
                     func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
                     func.emit_slot_get(dst, *base_slot, *index_reg, *elem_slots);
@@ -668,7 +668,7 @@ pub fn emit_lvalue_load(
                 ContainerKind::Map { key_slots, val_slots, key_may_gc, .. } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
                     let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
-                    let meta_reg = func.alloc_temp_typed(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
+                    let meta_reg = func.alloc_slots(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
@@ -682,14 +682,14 @@ pub fn emit_lvalue_load(
         
         LValue::Capture { capture_index, value_slots } => {
             // ClosureGet gets the GcRef, then PtrGet to read value
-            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, 0, *value_slots);
         }
         
         LValue::StackArrayField { base_slot, elem_slots, index_reg, field_offset, field_slots } => {
             // Read element to temp, then copy field to dst
-            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; *elem_slots as usize]);
+            let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
             func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
             func.emit_copy(dst, tmp + *field_offset, *field_slots);
         }
@@ -724,7 +724,7 @@ pub fn emit_lvalue_store(
             match kind {
                 ContainerKind::StackArray { base_slot, elem_slots, len } => {
                     // Bounds check: emit IndexCheck before SlotSet
-                    let len_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let len_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
                     func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
                     func.emit_slot_set(*base_slot, *index_reg, src, *elem_slots);
@@ -739,7 +739,7 @@ pub fn emit_lvalue_store(
                     // MapSet: a=map, b=meta_and_key, c=val
                     // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
                     let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
-                    let meta_and_key_reg = func.alloc_temp_typed(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
+                    let meta_and_key_reg = func.alloc_slots(&build_map_meta_key_slot_types(*key_slots, *key_may_gc));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
                     func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
@@ -755,14 +755,14 @@ pub fn emit_lvalue_store(
         
         LValue::Capture { capture_index, value_slots: _ } => {
             // ClosureGet gets the GcRef, then PtrSet to write value
-            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
         }
         
         LValue::StackArrayField { base_slot, elem_slots, index_reg, field_offset, field_slots } => {
             // Read element to temp, modify field, write back
-            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; *elem_slots as usize]);
+            let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
             func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
             func.emit_copy(tmp + *field_offset, src, *field_slots);
             func.emit_slot_set(*base_slot, *index_reg, tmp, *elem_slots);
@@ -784,12 +784,12 @@ pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
             };
             // Only snapshot if index_reg might be a variable slot that could be modified
             // Always copy to be safe - the cost is minimal (one copy instruction)
-            let tmp = func.alloc_temp_typed(&vec![SlotType::Value; key_slots as usize]);
+            let tmp = func.alloc_slots(&vec![SlotType::Value; key_slots as usize]);
             func.emit_copy(tmp, *index_reg, key_slots);
             *index_reg = tmp;
         }
         LValue::StackArrayField { index_reg, .. } => {
-            let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+            let tmp = func.alloc_slots(&[SlotType::Value]);
             func.emit_copy(tmp, *index_reg, 1);
             *index_reg = tmp;
         }
@@ -846,7 +846,7 @@ fn emit_flattened_load(flat: &FlattenedBase, dst: u16, slots: u16, func: &mut Fu
             func.emit_with_flags(Opcode::GlobalGetN, slots as u8, dst, index + offset, 0);
         }
         FlattenedBase::Capture { capture_index, offset } => {
-            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, *offset, slots);
         }
@@ -875,7 +875,7 @@ fn emit_flattened_store(
             func.emit_with_flags(Opcode::GlobalSetN, slots as u8, index + offset, src, 0);
         }
         FlattenedBase::Capture { capture_index, offset } => {
-            let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, *offset, src, slot_types);
         }
@@ -938,7 +938,7 @@ pub fn compile_index_addr_to_reg(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let addr_reg = func.alloc_temp_typed(&[SlotType::GcRef]);
+    let addr_reg = func.alloc_slots(&[SlotType::GcRef]);
     compile_index_addr(container_expr, index_expr, addr_reg, ctx, func, info)?;
     Ok(addr_reg)
 }

@@ -84,7 +84,7 @@ fn emit_string_conversion(
     };
     
     let extern_id = ctx.get_or_register_extern(extern_name);
-    let args_start = func.alloc_temp_typed(&[SlotType::Value]);
+    let args_start = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::Copy, args_start, src_reg, 0);
     func.emit_with_flags(Opcode::CallExtern, 1, dst, extern_id as u16, args_start);
     true
@@ -115,7 +115,7 @@ fn emit_numeric_conversion(
     } else if src_is_float && dst_is_int {
         // ConvF2I: maybe f32 -> f64, then f64 -> int
         if info.is_float32(src_type) {
-            let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+            let tmp = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::ConvF32F64, tmp, src_reg, 0);
             func.emit_op(Opcode::ConvF2I, dst, tmp, 0);
         } else {

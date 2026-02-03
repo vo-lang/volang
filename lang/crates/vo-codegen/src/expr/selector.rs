@@ -122,7 +122,7 @@ pub fn traverse_indirect_field(
         ExprSource::Location(StorageKind::HeapBoxed { gcref_slot, stores_pointer, .. }) => {
             if *stores_pointer {
                 // HeapBoxed stores a pointer - read pointer first, then access fields
-                let ptr_reg = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+                let ptr_reg = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
                 func.emit_ptr_get(ptr_reg, *gcref_slot, 0, 1);
                 (ptr_reg, true, 0u16)
             } else {
@@ -153,7 +153,7 @@ pub fn traverse_indirect_field(
         
         if info.is_pointer(field_type) {
             // Pointer field: load pointer value, reset offset
-            let tmp = func.alloc_temp_typed(&[vo_runtime::SlotType::GcRef]);
+            let tmp = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
             if is_ptr {
                 func.emit_ptr_get(tmp, current_reg, accumulated_offset + field_offset, 1);
             } else {

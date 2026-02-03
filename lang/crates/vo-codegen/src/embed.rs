@@ -402,7 +402,7 @@ pub fn emit_embed_path_traversal(
         
         if step.is_pointer {
             // Read the pointer field
-            let temp_ptr = builder.alloc_temp_typed(&[SlotType::GcRef]);
+            let temp_ptr = builder.alloc_slots(&[SlotType::GcRef]);
             if current_is_ptr {
                 builder.emit_ptr_get(temp_ptr, current_reg, accumulated_offset, 1);
             } else {
@@ -439,7 +439,7 @@ fn emit_final_receiver(
                 builder.emit_copy(dst, reg, 1);
             } else {
                 // Need to compute ptr + offset to get pointer to embedded field
-                let offset_reg = builder.alloc_temp_typed(&[SlotType::Value]);
+                let offset_reg = builder.alloc_slots(&[SlotType::Value]);
                 builder.emit_op(vo_vm::instruction::Opcode::LoadInt, offset_reg, offset, 0);
                 builder.emit_ptr_add(dst, reg, offset_reg);
             }
@@ -503,7 +503,7 @@ pub fn extract_receiver(
     if has_embedding && embed_path.has_pointer_step {
         let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
         let start = TraverseStart::new(base_reg, expr_is_ptr);
-        let final_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+        let final_ptr = func.alloc_slots(&[SlotType::GcRef]);
         emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
         return Ok(ReceiverValue::Pointer { 
             reg: final_ptr, 
@@ -528,7 +528,7 @@ pub fn extract_receiver(
         
         if has_embedding && need_pointer {
             // HeapBoxed with embed path, need pointer - traverse to get embedded field address
-            let final_ptr = func.alloc_temp_typed(&[SlotType::GcRef]);
+            let final_ptr = func.alloc_slots(&[SlotType::GcRef]);
             let start = TraverseStart::new(gcref_slot, true);
             emit_embed_path_traversal(func, start, &embed_path.steps, true, 1, final_ptr);
             return Ok(ReceiverValue::Pointer { 
@@ -550,7 +550,7 @@ pub fn extract_receiver(
         let base_reg = crate::expr::compile_expr(expr, ctx, func, info)?;
         let value_slots = info.type_slot_count(embed_path.final_type);
         let value_slot_types = info.type_slot_types(embed_path.final_type);
-        let value_reg = func.alloc_temp_typed(&value_slot_types);
+        let value_reg = func.alloc_slots(&value_slot_types);
         func.emit_copy(value_reg, base_reg + embed_path.total_offset, value_slots);
         Ok(ReceiverValue::Value { 
             reg: value_reg, 
@@ -560,7 +560,7 @@ pub fn extract_receiver(
     } else {
         let recv_slots = info.type_slot_count(recv_type);
         let recv_slot_types = info.type_slot_types(recv_type);
-        let recv_reg = func.alloc_temp_typed(&recv_slot_types);
+        let recv_reg = func.alloc_slots(&recv_slot_types);
         crate::expr::compile_expr_to(expr, recv_reg, ctx, func, info)?;
         Ok(ReceiverValue::Value { 
             reg: recv_reg, 

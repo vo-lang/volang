@@ -60,7 +60,7 @@ pub(crate) fn compile_select(
                 
                 // Allocate destination: elem slots + optional ok bool
                 let total_slots = elem_slots + if has_ok { 1 } else { 0 };
-                let dst_reg = func.alloc_temp_typed(&vec![SlotType::Value; total_slots as usize]);
+                let dst_reg = func.alloc_slots(&vec![SlotType::Value; total_slots as usize]);
                 
                 let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
                 func.emit_with_flags(Opcode::SelectRecv, flags, dst_reg, chan_reg, case_idx as u16);
@@ -70,12 +70,12 @@ pub(crate) fn compile_select(
     }
     
     // SelectExec: returns chosen case index (-1 for default)
-    let result_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let result_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::SelectExec, result_reg, 0, 0);
     
     // Phase 2: Generate dispatch jumps
     let mut case_jumps: Vec<usize> = Vec::with_capacity(case_count);
-    let cmp_tmp = func.alloc_temp_typed(&[SlotType::Value]);
+    let cmp_tmp = func.alloc_slots(&[SlotType::Value]);
     
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
         let target_idx = if case.comm.is_none() { -1i32 } else { case_idx as i32 };

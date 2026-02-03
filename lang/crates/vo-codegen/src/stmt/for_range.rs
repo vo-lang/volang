@@ -24,14 +24,14 @@ pub(crate) struct IndexLoop {
 impl IndexLoop {
     /// Begin: __idx := 0, HINT_LOOP_BEGIN, loop: if __idx >= __len { goto end }
     pub fn begin(func: &mut FuncBuilder, len_slot: u16, label: Option<vo_common::Symbol>) -> Self {
-        let idx_slot = func.alloc_temp_typed(&[SlotType::Value]);
+        let idx_slot = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
         
         let loop_start = func.current_pc();
         // Pass 0 for continue_pc - it will be patched in end() to point to idx++
         func.enter_loop(0, label);
         
-        let cmp_slot = func.alloc_temp_typed(&[SlotType::Value]);
+        let cmp_slot = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::GeI, cmp_slot, idx_slot, len_slot);
         let end_jump = func.emit_jump(Opcode::JumpIf, cmp_slot);
         
@@ -53,7 +53,7 @@ impl IndexLoop {
     /// End: __idx++, HINT_LOOP_END, goto loop, patch breaks/continues, finalize HINT_LOOP_BEGIN
     pub fn end(self, func: &mut FuncBuilder) {
         let post_pc = func.current_pc();
-        let one = func.alloc_temp_typed(&[SlotType::Value]);
+        let one = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, one, 1, 0);
         func.emit_op(Opcode::AddI, self.idx_slot, self.idx_slot, one);
         
@@ -105,7 +105,7 @@ pub(crate) fn range_var_info(
                 let is_blank = sc.info.project.interner.resolve(ident.symbol) == Some("_");
                 if is_blank {
                     let slot_types = sc.info.type_slot_types(fallback_type);
-                    let slot = sc.func.alloc_temp_typed(&slot_types);
+                    let slot = sc.func.alloc_slots(&slot_types);
                     return Ok(RangeVarInfo { slot, storage: None, src_type: fallback_type, lhs_type: fallback_type, deferred_alloc: None });
                 }
                 
@@ -120,7 +120,7 @@ pub(crate) fn range_var_info(
                     // For HeapBoxed with deferred alloc, we need a temp slot to receive the value
                     let slot = if deferred_alloc.is_some() {
                         let slot_types = sc.info.type_slot_types(lhs_type);
-                        sc.func.alloc_temp_typed(&slot_types)
+                        sc.func.alloc_slots(&slot_types)
                     } else {
                         storage.slot()
                     };
@@ -139,7 +139,7 @@ pub(crate) fn range_var_info(
                         || sc.info.is_interface(lhs_type);
                     let slot = if needs_temp {
                         let slot_types = sc.info.type_slot_types(fallback_type);
-                        sc.func.alloc_temp_typed(&slot_types)
+                        sc.func.alloc_slots(&slot_types)
                     } else {
                         storage.slot()
                     };
@@ -147,7 +147,7 @@ pub(crate) fn range_var_info(
                 }
             } else if define {
                 let slot_types = sc.info.type_slot_types(fallback_type);
-                let slot = sc.func.alloc_temp_typed(&slot_types);
+                let slot = sc.func.alloc_slots(&slot_types);
                 Ok(RangeVarInfo { slot, storage: None, src_type: fallback_type, lhs_type: fallback_type, deferred_alloc: None })
             } else {
                 let slot = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
@@ -156,7 +156,7 @@ pub(crate) fn range_var_info(
         }
         None => {
             let slot_types = sc.info.type_slot_types(fallback_type);
-            let slot = sc.func.alloc_temp_typed(&slot_types);
+            let slot = sc.func.alloc_slots(&slot_types);
             Ok(RangeVarInfo { slot, storage: None, src_type: fallback_type, lhs_type: fallback_type, deferred_alloc: None })
         }
     }
@@ -218,7 +218,7 @@ pub(crate) fn compile_for_range(
         let evk = sc.info.type_value_kind(et);
         let key_info = range_var_info(&mut sc, key.as_ref(), et, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), et, define)?;
-        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
+        let ls = sc.func.alloc_slots(&[SlotType::Value]);
         sc.func.emit_op(Opcode::LoadInt, ls, len as u16, (len >> 16) as u16);
         let lp = IndexLoop::begin(sc.func, ls, label);
         // Emit per-iteration heap allocation for escaped vars (must be inside loop)
@@ -248,7 +248,7 @@ pub(crate) fn compile_for_range(
         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
         let key_info = range_var_info(&mut sc, key.as_ref(), et, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), et, define)?;
-        let ls = sc.func.alloc_temp_typed(&[SlotType::Value]);
+        let ls = sc.func.alloc_slots(&[SlotType::Value]);
         sc.func.emit_op(Opcode::SliceLen, ls, reg, 0);
         let lp = IndexLoop::begin(sc.func, ls, label);
         // Emit per-iteration heap allocation for escaped vars (must be inside loop)
@@ -273,9 +273,9 @@ pub(crate) fn compile_for_range(
         let reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
         let key_info = range_var_info(&mut sc, key.as_ref(), int_type, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), rune_type, define)?;
-        let (pos, len, cmp) = (sc.func.alloc_temp_typed(&[SlotType::Value]), sc.func.alloc_temp_typed(&[SlotType::Value]), sc.func.alloc_temp_typed(&[SlotType::Value]));
+        let (pos, len, cmp) = (sc.func.alloc_slots(&[SlotType::Value]), sc.func.alloc_slots(&[SlotType::Value]), sc.func.alloc_slots(&[SlotType::Value]));
         // StrDecodeRune writes (rune, width) to consecutive slots
-        let rune_width = sc.func.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+        let rune_width = sc.func.alloc_slots(&[SlotType::Value, SlotType::Value]);
         
         sc.func.emit_op(Opcode::LoadInt, pos, 0, 0);
         sc.func.emit_op(Opcode::StrLen, len, reg, 0);
@@ -328,8 +328,8 @@ pub(crate) fn compile_for_range(
         let key_info = range_var_info(&mut sc, key.as_ref(), kt, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), vt, define)?;
         
-        let iter_slot = sc.func.alloc_temp_typed(&[SlotType::Value; MAP_ITER_SLOTS]);
-        let ok_slot = sc.func.alloc_temp_typed(&[SlotType::Value]);
+        let iter_slot = sc.func.alloc_slots(&[SlotType::Value; MAP_ITER_SLOTS]);
+        let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
         
         // MapIterInit: a=iter_slot, b=map_reg
         sc.func.emit_op(Opcode::MapIterInit, iter_slot, map_reg, 0);
@@ -388,7 +388,7 @@ pub(crate) fn compile_for_range(
         let val_info = range_var_info(&mut sc, var_expr, elem_type, define)?;
         
         // ok slot
-        let ok_slot = sc.func.alloc_temp_typed(&[SlotType::Value]);
+        let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
         
         // loop:
         let loop_start = sc.func.current_pc();
@@ -438,7 +438,7 @@ pub(crate) fn compile_for_range(
         // Integer range: for i := range n { } iterates i = 0..n-1
         let n_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
         // Copy n to a dedicated slot to prevent it from being overwritten in loop body
-        let len_slot = sc.func.alloc_temp_typed(&[SlotType::Value]);
+        let len_slot = sc.func.alloc_slots(&[SlotType::Value]);
         sc.func.emit_op(Opcode::Copy, len_slot, n_reg, 0);
         let key_info = range_var_info(&mut sc, key.as_ref(), range_type, define)?;
         let lp = IndexLoop::begin(sc.func, len_slot, label);

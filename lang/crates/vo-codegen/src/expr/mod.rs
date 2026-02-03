@@ -49,7 +49,7 @@ impl CompiledTuple {
     ) -> Result<Self, CodegenError> {
         let tuple_type = info.expr_type(expr.id);
         let slot_types = info.type_slot_types(tuple_type);
-        let base = func.alloc_temp_typed(&slot_types);
+        let base = func.alloc_slots(&slot_types);
         compile_expr_to(expr, base, ctx, func, info)?;
         Ok(Self { base, tuple_type })
     }
@@ -173,7 +173,7 @@ pub fn compile_map_key_expr(
     if needs_boxing {
         let src_reg = compile_expr(index_expr, ctx, func, info)?;
         let key_slot_types = info.type_slot_types(key_type);
-        let iface_reg = func.alloc_temp_typed(&key_slot_types);
+        let iface_reg = func.alloc_slots(&key_slot_types);
         crate::assign::emit_iface_assign_from_concrete(
             iface_reg, src_reg, index_type, key_type, ctx, func, info
         )?;
@@ -257,7 +257,7 @@ pub fn compile_expr(
     // Use expression type's slot types to ensure GcRefs (strings, pointers, etc.) are tracked by GC
     let expr_type = info.expr_type(expr.id);
     let slot_types = info.type_slot_types(expr_type);
-    let dst = func.alloc_temp_typed(&slot_types);
+    let dst = func.alloc_slots(&slot_types);
     compile_expr_to(expr, dst, ctx, func, info)?;
     // Truncate narrow integer types to ensure Go semantics (operations in 64-bit, result in type width)
     emit_int_trunc(dst, expr_type, func, info);
@@ -277,7 +277,7 @@ pub fn compile_expr_to_type(
     
     // Check if implicit interface conversion is needed
     if info.is_interface(target_type) && !info.is_interface(src_type) {
-        let dst = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]); // interface is 2 slots
+        let dst = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]); // interface is 2 slots
         crate::assign::emit_assign(dst, crate::assign::AssignSource::Expr(expr), target_type, ctx, func, info)?;
         Ok(dst)
     } else {
@@ -529,7 +529,7 @@ fn compile_try_unwrap(
     let inner_type = info.expr_type(inner.id);
     let inner_slots = info.type_slot_count(inner_type);
     let inner_slot_types = info.type_slot_types(inner_type);
-    let inner_start = func.alloc_temp_typed(&inner_slot_types);
+    let inner_start = func.alloc_slots(&inner_slot_types);
     compile_expr_to(inner, inner_start, ctx, func, info)?;
     
     let error_slots = 2u16;

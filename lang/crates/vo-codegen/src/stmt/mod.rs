@@ -269,10 +269,10 @@ fn compile_stmt_inner(
             use crate::lvalue::{emit_lvalue_load, emit_lvalue_store};
             
             let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
-            let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+            let tmp = func.alloc_slots(&[SlotType::Value]);
             emit_lvalue_load(&lv, tmp, ctx, func);
             
-            let one = func.alloc_temp_typed(&[SlotType::Value]);
+            let one = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, one, 1, 0);
             
             if inc_dec.is_inc {

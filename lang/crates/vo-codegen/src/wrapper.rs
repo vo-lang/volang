@@ -110,7 +110,7 @@ pub fn generate_iface_wrapper(
     let forwarded_param_slots: u16 = wrapper_param_slots.iter().map(|(_, s)| *s).sum();
     let total_arg_slots = recv_slots + forwarded_param_slots;
     let alloc_slots = total_arg_slots.max(ret_slots);
-    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     if needs_unbox {
         // Struct/Array: dereference GcRef to get value
@@ -205,7 +205,7 @@ pub fn generate_method_expr_promoted_wrapper(
     // Allocate args area for call
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
     let alloc_slots = total_arg_slots.max(ret_slots);
-    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver extraction based on path
     let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
@@ -278,7 +278,7 @@ pub fn generate_promoted_wrapper(
     // Allocate args area for call (ensure enough space for return values)
     let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
     let alloc_slots = total_arg_slots.max(ret_slots);
-    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; alloc_slots as usize]);
     
     // Emit receiver loading based on embedding type
     // For promoted wrapper, outer is always GcRef (outer_is_pointer = true)
@@ -372,12 +372,12 @@ fn generate_embedded_iface_wrapper_impl(
     let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
     // Load embedded interface (2 slots)
-    let iface_slot = builder.alloc_temp_typed(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
+    let iface_slot = builder.alloc_slots(&[vo_runtime::SlotType::Interface0, vo_runtime::SlotType::Interface1]);
     let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
     crate::embed::emit_embed_path_traversal(&mut builder, start, &embed_path.steps, false, 2, iface_slot);
     
     // Allocate args and copy forwarded params
-    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
@@ -417,7 +417,7 @@ fn generate_iface_call_wrapper(
     let first_param_slot = define_forwarded_params(&mut builder, param_slots);
     
     // Allocate args buffer
-    let args_start = builder.alloc_temp_typed(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
+    let args_start = builder.alloc_slots(&vec![vo_runtime::SlotType::Value; param_slots.max(ret_slots).max(1) as usize]);
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }

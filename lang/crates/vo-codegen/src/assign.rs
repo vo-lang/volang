@@ -222,8 +222,8 @@ fn emit_concrete_to_iface_from_slot(
         let src_slots = info.type_slot_count(src_type);
         let meta_idx = ctx.get_or_create_value_meta(src_type, info);
         
-        let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-        let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+        let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
         func.emit_ptr_set(gcref_slot, 0, src_slot, src_slots);
@@ -273,7 +273,7 @@ fn compile_iface_assign_internal(
             }
             ExprSource::Location(StorageKind::Global { index, slots: 1 }) if src_vk == vo_runtime::ValueKind::Array => {
                 // Global array: stored as 1 slot GcRef, load and pass directly
-                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
+                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
                 func.emit_op(Opcode::GlobalGet, gcref_slot, index, 0);
                 func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst, gcref_slot, const_idx);
             }
@@ -283,11 +283,11 @@ fn compile_iface_assign_internal(
                 let src_slot_types = info.type_slot_types(src_type);
                 let meta_idx = ctx.get_or_create_value_meta(src_type, info);
                 
-                let tmp_data = func.alloc_temp_typed(&src_slot_types);
+                let tmp_data = func.alloc_slots(&src_slot_types);
                 crate::expr::compile_expr_to(expr, tmp_data, ctx, func, info)?;
                 
-                let gcref_slot = func.alloc_temp_typed(&[SlotType::GcRef]);
-                let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                let meta_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                 func.emit_with_flags(Opcode::PtrNew, src_slots as u8, gcref_slot, meta_reg, 0);
                 func.emit_ptr_set(gcref_slot, 0, tmp_data, src_slots);
@@ -319,7 +319,7 @@ pub fn emit_store_to_storage(
 ) -> Result<(), CodegenError> {
     if info.is_interface(dst_type) {
         // Interface assignment: convert value to interface format first
-        let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+        let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
         emit_assign_from_slot(iface_tmp, src_slot, src_type, dst_type, ctx, func, info)?;
         func.emit_storage_store(storage, iface_tmp, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
     } else {

@@ -68,8 +68,8 @@ pub fn compile_binary(
 
     // float32 arithmetic: convert f32 bits -> f64, operate, convert back
     let (actual_left, actual_right) = if is_float32 {
-        let tmp_left = func.alloc_temp_typed(&[SlotType::Value]);
-        let tmp_right = func.alloc_temp_typed(&[SlotType::Value]);
+        let tmp_left = func.alloc_slots(&[SlotType::Value]);
+        let tmp_right = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::ConvF32F64, tmp_left, left_reg, 0);
         func.emit_op(Opcode::ConvF32F64, tmp_right, right_reg, 0);
         (tmp_left, tmp_right)

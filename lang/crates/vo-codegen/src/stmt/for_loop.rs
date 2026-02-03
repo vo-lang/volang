@@ -53,7 +53,7 @@ fn define_loop_var(
     if needs_go122 {
         let slot_types = sc.info.type_slot_types(type_key);
         let value_slots = slot_types.len() as u16;
-        let ctrl_slot = sc.func.alloc_temp_typed(&slot_types);
+        let ctrl_slot = sc.func.alloc_slots(&slot_types);
         
         // Initialize control slot
         match init {

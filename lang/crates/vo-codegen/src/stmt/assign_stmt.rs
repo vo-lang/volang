@@ -78,7 +78,7 @@ pub(super) fn compile_short_var(
             } else {
                 let type_key = info.expr_type(expr.id);
                 let slot_types = info.type_slot_types(type_key);
-                let tmp = func.alloc_temp_typed(&slot_types);
+                let tmp = func.alloc_slots(&slot_types);
                 compile_expr_to(expr, tmp, ctx, func, info)?;
                 // Apply truncation for narrow integer types (Go semantics)
                 emit_int_trunc(tmp, type_key, func, info);
@@ -189,7 +189,7 @@ fn compile_multi_value_assign(
         if info.is_interface(lhs_type) {
             // Interface assignment: convert value to interface format
             let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
-            let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+            let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
             crate::assign::emit_assign(iface_tmp, crate::assign::AssignSource::Slot { slot: tuple.base + offset, type_key: elem_type }, lhs_type, ctx, func, info)?;
             emit_lvalue_store(&lv, iface_tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
         } else {
@@ -239,7 +239,7 @@ fn compile_parallel_assign(
         let rhs_type = info.expr_type(rhs.id);
         let rhs_slots = info.expr_slots(rhs.id);
         let rhs_slot_types = info.type_slot_types(rhs_type);
-        let tmp = func.alloc_temp_typed(&rhs_slot_types);
+        let tmp = func.alloc_slots(&rhs_slot_types);
         compile_expr_to(rhs, tmp, ctx, func, info)?;
         rhs_temps.push((tmp, rhs_slots, rhs_type));
     }
@@ -250,7 +250,7 @@ fn compile_parallel_assign(
             // Handle interface assignment specially
             if info.is_interface(lhs_type) {
                 // Convert concrete/interface value to interface format
-                let iface_tmp = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+                let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
                 crate::assign::emit_assign(iface_tmp, crate::assign::AssignSource::Slot { slot: *tmp, type_key: *rhs_type }, lhs_type, ctx, func, info)?;
                 // Store interface value (slot1 may contain GcRef)
                 emit_lvalue_store(&lv, iface_tmp, ctx, func, &[vo_runtime::SlotType::Value, vo_runtime::SlotType::Interface1]);
@@ -289,7 +289,7 @@ fn compile_assign(
     
     // Compile RHS to temp with automatic type conversion (handles interface boxing)
     let slot_types = info.type_slot_types(lhs_type);
-    let tmp = func.alloc_temp_typed(&slot_types);
+    let tmp = func.alloc_slots(&slot_types);
     crate::assign::emit_assign(tmp, crate::assign::AssignSource::Expr(rhs), lhs_type, ctx, func, info)?;
     
     // Store to LValue (interface data slot may contain GcRef)
@@ -359,7 +359,7 @@ fn compile_compound_assign(
     // General path: read current value, apply operation, write back
     // Use proper slot type for strings (GcRef) vs numeric types (Value)
     let slot_type = if is_string { vo_runtime::SlotType::GcRef } else { vo_runtime::SlotType::Value };
-    let tmp = func.alloc_temp_typed(&[slot_type]);
+    let tmp = func.alloc_slots(&[slot_type]);
     emit_lvalue_load(&lv, tmp, ctx, func);
     func.emit_op(opcode, tmp, tmp, rhs_reg);
     // Apply truncation for narrow integer types (Go semantics)

@@ -51,7 +51,7 @@ fn compile_args_as_interfaces(
         .sum();
     
     // Each arg is an interface (2 slots)
-    let args_start = func.alloc_temp_typed(&vec![SlotType::Interface0, SlotType::Interface1].repeat(total_args));
+    let args_start = func.alloc_slots(&vec![SlotType::Interface0, SlotType::Interface1].repeat(total_args));
     let mut slot_offset = 0u16;
     
     for arg in args.iter() {
@@ -65,7 +65,7 @@ fn compile_args_as_interfaces(
                 Ok(())
             })?;
         } else {
-            let tmp = func.alloc_temp_typed(&info.type_slot_types(arg_type));
+            let tmp = func.alloc_slots(&info.type_slot_types(arg_type));
             compile_expr_to(arg, tmp, ctx, func, info)?;
             emit_boxed_interface(args_start + slot_offset, tmp, arg_type, ctx, func, info)?;
             slot_offset += 2;
@@ -170,13 +170,13 @@ fn compile_builtin_call_impl(
                     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
                     
                     // Load elem_meta into register
-                    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let meta_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
                     
                     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                     // When flags=0 (elem_bytes > 63), put elem_bytes in c+2
                     let num_regs = if flags == 0 { 3 } else { 2 };
-                    let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
+                    let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
                     
                     if call.args.len() > 1 {
                         compile_expr_to(&call.args[1], len_cap_reg, ctx, func, info)?;
@@ -203,12 +203,12 @@ fn compile_builtin_call_impl(
                     
                     // Pack key_meta and val_meta: (key_meta << 32) | val_meta
                     // packed_reg[0] = packed_meta, packed_reg[1] = key_rttid
-                    let packed_reg = func.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+                    let packed_reg = func.alloc_slots(&[SlotType::Value, SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, packed_reg, key_meta_idx, 0);
-                    let shift_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let shift_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, shift_reg, 32, 0);
                     func.emit_op(Opcode::Shl, packed_reg, packed_reg, shift_reg);
-                    let val_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let val_meta_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
                     func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
                     // Load key_rttid into packed_reg+1
@@ -224,13 +224,13 @@ fn compile_builtin_call_impl(
                     let elem_slots = info.type_slot_count(elem_type_key);
                     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type_key, info);
                     
-                    let elem_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let elem_meta_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
                     
                     let cap_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], ctx, func, info)?
                     } else {
-                        let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+                        let tmp = func.alloc_slots(&[SlotType::Value]);
                         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                         tmp
                     };
@@ -242,13 +242,13 @@ fn compile_builtin_call_impl(
                     let elem_slots = info.type_slot_count(elem_type_key);
                     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type_key, info);
                     
-                    let elem_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+                    let elem_meta_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, elem_meta_reg, elem_meta_idx, 0);
                     
                     let cap_reg = if call.args.len() > 1 {
                         compile_expr(&call.args[1], ctx, func, info)?
                     } else {
-                        let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+                        let tmp = func.alloc_slots(&[SlotType::Value]);
                         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                         tmp
                     };
@@ -293,7 +293,7 @@ fn compile_builtin_call_impl(
                 // String and slice have identical memory layout, so vo_slice_append_slice works for both
                 let other_reg = compile_expr(&call.args[1], ctx, func, info)?;
                 let extern_id = ctx.get_or_register_extern("vo_slice_append_slice");
-                let args_reg = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]);
+                let args_reg = func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]);
                 func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
                 func.emit_op(Opcode::Copy, args_reg + 1, other_reg, 0);
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
@@ -306,7 +306,7 @@ fn compile_builtin_call_impl(
                 let extra_slot = if flags == 0 { 1 } else { 0 };
                 let mut meta_elem_slot_types = vec![SlotType::Value; 1 + extra_slot as usize];
                 meta_elem_slot_types.extend(elem_slot_types.iter().cloned());
-                let meta_and_elem_reg = func.alloc_temp_typed(&meta_elem_slot_types);
+                let meta_and_elem_reg = func.alloc_slots(&meta_elem_slot_types);
                 
                 // Current slice (updated after each append)
                 let mut current_slice = slice_reg;
@@ -314,7 +314,7 @@ fn compile_builtin_call_impl(
                 // Append each element (args[1], args[2], ...)
                 for (i, arg) in call.args.iter().skip(1).enumerate() {
                     let is_last = i == call.args.len() - 2;
-                    let append_dst = if is_last { dst } else { func.alloc_temp_typed(&[SlotType::GcRef]) };
+                    let append_dst = if is_last { dst } else { func.alloc_slots(&[SlotType::GcRef]) };
                     
                     func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
                     if flags == 0 {
@@ -333,7 +333,7 @@ fn compile_builtin_call_impl(
         "copy" => {
             // copy(dst, src) - use extern for now
             let extern_id = ctx.get_or_register_extern("vo_copy");
-            let args_start = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::GcRef]);
+            let args_start = func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef]);
             compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
             compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;
             func.emit_with_flags(Opcode::CallExtern, 2, dst, extern_id as u16, args_start);
@@ -353,7 +353,7 @@ fn compile_builtin_call_impl(
             
             let mut delete_slot_types = vec![SlotType::Value]; // meta
             delete_slot_types.extend(info.type_slot_types(key_type)); // key
-            let meta_and_key_reg = func.alloc_temp_typed(&delete_slot_types);
+            let meta_and_key_reg = func.alloc_slots(&delete_slot_types);
             let meta_idx = ctx.const_int(key_slots as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
             

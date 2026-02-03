@@ -46,7 +46,7 @@ fn compile_ident_as_map_key(
         if needs_boxing {
             return emit_boxed_bool(bool_val, ctx, func);
         } else {
-            let dst = func.alloc_temp_typed(&[SlotType::Value]);
+            let dst = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, dst, bool_val, 0);
             return Ok(dst);
         }
@@ -57,14 +57,14 @@ fn compile_ident_as_map_key(
         .map(|l| l.storage)
         .ok_or_else(|| CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol)))?;
     let value_slots = storage.value_slots();
-    let src_reg = func.alloc_temp_typed(&vec![SlotType::Value; value_slots as usize]);
+    let src_reg = func.alloc_slots(&vec![SlotType::Value; value_slots as usize]);
     func.emit_storage_load(storage, src_reg);
     
     if needs_boxing {
         let src_type = info.ident_type(ident)
             .ok_or_else(|| CodegenError::Internal(format!("cannot get type for ident: {:?}", ident.symbol)))?;
         let key_slot_types = info.type_slot_types(key_type);
-        let iface_reg = func.alloc_temp_typed(&key_slot_types);
+        let iface_reg = func.alloc_slots(&key_slot_types);
         crate::assign::emit_iface_assign_from_concrete(iface_reg, src_reg, src_type, key_type, ctx, func, info)?;
         Ok(iface_reg)
     } else {
@@ -74,7 +74,7 @@ fn compile_ident_as_map_key(
 
 /// Emit a bool value boxed as interface.
 fn emit_boxed_bool(val: u16, ctx: &mut CodegenContext, func: &mut FuncBuilder) -> Result<u16, CodegenError> {
-    let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     let slot0 = vo_runtime::objects::interface::pack_slot0(
         0, vo_runtime::ValueKind::Bool as u32, vo_runtime::ValueKind::Bool
     );
@@ -309,14 +309,14 @@ fn compile_slice_lit(
     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
     
     // Load elem_meta into register
-    let meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
     
     // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     // When flags=0 (dynamic), put len, cap, elem_bytes in consecutive registers
     let num_regs = if flags == 0 { 3 } else { 2 };
-    let len_cap_reg = func.alloc_temp_typed(&vec![SlotType::Value; num_regs]);
+    let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
     let (b, c) = encode_i32(len as i32);
     func.emit_op(Opcode::LoadInt, len_cap_reg, b, c);      // len
     func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c);  // cap = len
@@ -330,9 +330,9 @@ fn compile_slice_lit(
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
         let index = resolve_elem_index(elem, &mut current_index, info);
-        let val_reg = func.alloc_temp_typed(&elem_slot_types);
+        let val_reg = func.alloc_slots(&elem_slot_types);
         super::compile_elem_to(&elem.value, val_reg, elem_type, ctx, func, info)?;
-        let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
+        let idx_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, index as u16, 0);
         func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
     }
@@ -354,12 +354,12 @@ fn compile_map_lit(
     // MapNew: a=dst, b=packed_and_rttid, c=(key_slots<<8)|val_slots
     // packed_and_rttid[0] = (key_meta << 32) | val_meta
     // packed_and_rttid[1] = key_rttid (for struct key deep hash/eq)
-    let packed_reg = func.alloc_temp_typed(&[SlotType::Value, SlotType::Value]);
+    let packed_reg = func.alloc_slots(&[SlotType::Value, SlotType::Value]);
     func.emit_op(Opcode::LoadConst, packed_reg, key_meta_idx, 0);
-    let shift_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let shift_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadInt, shift_reg, 32, 0);
     func.emit_op(Opcode::Shl, packed_reg, packed_reg, shift_reg);
-    let val_meta_reg = func.alloc_temp_typed(&[SlotType::Value]);
+    let val_meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, val_meta_reg, val_meta_idx, 0);
     func.emit_op(Opcode::Or, packed_reg, packed_reg, val_meta_reg);
     // Load key_rttid into packed_reg+1
@@ -379,7 +379,7 @@ fn compile_map_lit(
             // meta_and_key: slots[b] = (key_slots << 8) | val_slots, key=slots[b+1..]
             let mut map_set_slot_types = vec![SlotType::Value]; // meta
             map_set_slot_types.extend(key_slot_types.iter().cloned()); // key
-            let meta_and_key_reg = func.alloc_temp_typed(&map_set_slot_types);
+            let meta_and_key_reg = func.alloc_slots(&map_set_slot_types);
             let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
             let meta_idx = ctx.const_int(meta as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
@@ -390,7 +390,7 @@ fn compile_map_lit(
             
             // Compile value
             let (_, val_type) = info.map_key_val_types(type_key);
-            let val_reg = func.alloc_temp_typed(&val_slot_types);
+            let val_reg = func.alloc_slots(&val_slot_types);
             super::compile_elem_to(&elem.value, val_reg, val_type, ctx, func, info)?;
             
             // MapSet: a=map, b=meta_and_key, c=val
@@ -528,7 +528,7 @@ pub fn compile_func_lit(
     // Emit PtrNew for escaped returns
     for er in escaped_returns {
         let meta_idx = ctx.get_or_create_value_meta(er.result_type, info);
-        let meta_reg = closure_builder.alloc_temp_typed(&[SlotType::Value]);
+        let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         closure_builder.emit_with_flags(Opcode::PtrNew, er.slots as u8, er.gcref_slot, meta_reg, 0);
     }
@@ -561,7 +561,7 @@ pub fn compile_func_lit(
             } else if let Some(capture) = parent_func.lookup_capture(sym) {
                 // Variable is a capture in parent - get it via ClosureGet first
                 let capture_index = capture.index;
-                let temp = parent_func.alloc_temp_typed(&[SlotType::GcRef]);
+                let temp = parent_func.alloc_slots(&[SlotType::GcRef]);
                 parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
                 parent_func.emit_ptr_set_with_barrier(dst, offset, temp, 1, true);
             }

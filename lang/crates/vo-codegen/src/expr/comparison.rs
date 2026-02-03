@@ -50,10 +50,10 @@ pub fn compile_slot_comparison(
     }
     
     // Reusable temp registers
-    let left_val = func.alloc_temp_typed(&[SlotType::Value]);
-    let right_val = func.alloc_temp_typed(&[SlotType::Value]);
-    let idx_reg = func.alloc_temp_typed(&[SlotType::Value]);
-    let tmp_cmp = func.alloc_temp_typed(&[SlotType::Value]);
+    let left_val = func.alloc_slots(&[SlotType::Value]);
+    let right_val = func.alloc_slots(&[SlotType::Value]);
+    let idx_reg = func.alloc_slots(&[SlotType::Value]);
+    let tmp_cmp = func.alloc_slots(&[SlotType::Value]);
     
     func.emit_op(Opcode::LoadInt, dst, 1, 0);
     

@@ -56,7 +56,7 @@ fn compile_base_to_any(
     
     if info.is_tuple_any_error(base_type) {
         // (any, error) tuple: 4 slots with interface types
-        let base_reg = func.alloc_temp_typed(&[
+        let base_reg = func.alloc_slots(&[
             SlotType::Interface0, SlotType::Interface1,  // any
             SlotType::Interface0, SlotType::Interface1,  // error
         ]);
@@ -64,11 +64,11 @@ fn compile_base_to_any(
         emit_dyn_assign_error_short_circuit(base_reg, ctx, func);
         Ok(base_reg)  // first 2 slots are the any value
     } else if info.is_interface(base_type) {
-        let base_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+        let base_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
         compile_expr_to(base, base_reg, ctx, func, info)?;
         Ok(base_reg)
     } else {
-        let any_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+        let any_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
         crate::assign::emit_assign(any_reg, crate::assign::AssignSource::Expr(base), any_type, ctx, func, info)?;
         Ok(any_reg)
     }
@@ -90,7 +90,7 @@ fn emit_protocol_and_fallback(
     // Protocol-first: check if base implements protocol via IfaceAssert
     let end_jump = if let Some(iface_meta_id) = protocol_meta_id {
         // IfaceAssert with has_ok flag to check interface implementation
-        let iface_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
+        let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1, SlotType::Value]);
         func.emit_with_flags(Opcode::IfaceAssert, IFACE_ASSERT_WITH_OK, iface_reg, any_base_reg, iface_meta_id as u16);
         let fallback_jump = func.emit_jump(Opcode::JumpIfNot, iface_reg + 2);
 
@@ -114,7 +114,7 @@ fn emit_protocol_and_fallback(
     // Fallback: extern call for types not implementing protocol
     let args_start = compile_extern_args(func, ctx)?;
     let extern_id = ctx.get_or_register_extern(extern_name);
-    let err_reg = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    let err_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     func.emit_with_flags(Opcode::CallExtern, extern_arg_slots, err_reg, extern_id as u16, args_start);
 
     let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
@@ -151,7 +151,7 @@ pub(crate) fn compile_dyn_field_assign(
         protocol_meta_id,
         // Protocol args: name string, value any
         |func, ctx| {
-            let args_start = func.alloc_temp_typed(&[
+            let args_start = func.alloc_slots(&[
                 SlotType::GcRef,  // string
                 SlotType::Interface0, SlotType::Interface1,  // any value
             ]);
@@ -162,7 +162,7 @@ pub(crate) fn compile_dyn_field_assign(
         3,  // protocol_arg_slots
         // Extern args: base any, name string, value any
         |func, ctx| {
-            let args_start = func.alloc_temp_typed(&[
+            let args_start = func.alloc_slots(&[
                 SlotType::Interface0, SlotType::Interface1,  // base any
                 SlotType::GcRef,  // name string
                 SlotType::Interface0, SlotType::Interface1,  // value any
@@ -198,7 +198,7 @@ pub(crate) fn compile_dyn_index_assign(
         protocol_meta_id,
         // Protocol args: key any, value any
         |func, ctx| {
-            let args_start = func.alloc_temp_typed(&[
+            let args_start = func.alloc_slots(&[
                 SlotType::Interface0, SlotType::Interface1,
                 SlotType::Interface0, SlotType::Interface1,
             ]);
@@ -209,7 +209,7 @@ pub(crate) fn compile_dyn_index_assign(
         4,  // protocol_arg_slots
         // Extern args: base any, key any, value any
         |func, ctx| {
-            let args_start = func.alloc_temp_typed(&[
+            let args_start = func.alloc_slots(&[
                 SlotType::Interface0, SlotType::Interface1,  // base
                 SlotType::Interface0, SlotType::Interface1,  // key
                 SlotType::Interface0, SlotType::Interface1,  // value

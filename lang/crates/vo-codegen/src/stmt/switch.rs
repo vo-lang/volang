@@ -64,7 +64,7 @@ fn emit_type_switch_binding(
     
     // Emit value extraction to temp or directly to var slot
     let value_slot = if needs_boxing {
-        func.alloc_temp_typed(&slot_types)
+        func.alloc_slots(&slot_types)
     } else {
         func.define_local_stack(name, slots, &slot_types)
     };
@@ -113,7 +113,7 @@ pub(crate) fn compile_type_switch(
     let expr_reg = crate::expr::compile_expr(inner_expr, ctx, func, info)?;
     
     // Store interface for case comparisons
-    let iface_slot = func.alloc_temp_typed(&[SlotType::Interface0, SlotType::Interface1]);
+    let iface_slot = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
     func.emit_copy(iface_slot, expr_reg, 2);
     
     // Enter breakable context for break support
@@ -136,9 +136,9 @@ pub(crate) fn compile_type_switch(
             if is_nil_only_case {
                 // case nil: check if interface is nil (value_kind == Void)
                 // nil interface has slot0 with value_kind = 0 (Void) in low 8 bits
-                let ok_slot = func.alloc_temp_typed(&[SlotType::Value]);
-                let mask_slot = func.alloc_temp_typed(&[SlotType::Value]);
-                let vk_slot = func.alloc_temp_typed(&[SlotType::Value]);
+                let ok_slot = func.alloc_slots(&[SlotType::Value]);
+                let mask_slot = func.alloc_slots(&[SlotType::Value]);
+                let vk_slot = func.alloc_slots(&[SlotType::Value]);
                 
                 // Load mask 0xFF to extract value_kind
                 func.emit_op(Opcode::LoadInt, mask_slot, 0xFF, 0);
@@ -164,7 +164,7 @@ pub(crate) fn compile_type_switch(
                         // result + ok bool
                         let mut assert_result_types = info.type_slot_types(type_key);
                         assert_result_types.push(SlotType::Value); // ok bool
-                        let result_reg = func.alloc_temp_typed(&assert_result_types); // +1 for ok bool
+                        let result_reg = func.alloc_slots(&assert_result_types); // +1 for ok bool
                         let ok_slot = result_reg + result_slots;
                         
                         // IfaceAssert: a=dst, b=src_iface, c=target_id
@@ -257,7 +257,7 @@ fn emit_switch_case_comparison(
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     let case_val = crate::expr::compile_expr(case_expr, ctx, func, info)?;
-    let cmp_result = func.alloc_temp_typed(&[SlotType::Value]);
+    let cmp_result = func.alloc_slots(&[SlotType::Value]);
     
     if info.is_interface(tag_type) {
         // Interface comparison: box case value to interface and use IfaceEq

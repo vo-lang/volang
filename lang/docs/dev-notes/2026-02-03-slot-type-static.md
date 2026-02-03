@@ -110,16 +110,15 @@ Dyn 调用增幅较大是因为 Value 和 Interface 类型频繁交替。
 - JIT 优化：Float 类型可直接映射 F64 寄存器
 - 调试友好：slot 类型在整个函数生命周期内不变
 
-## 7. 迁移策略
+## 7. 迁移完成
 
-### 现有 API 保持兼容
+### 已删除 alloc_temp_typed
+
+`alloc_temp_typed` 已被全局替换为 `alloc_slots`（216 处调用点）。
+
+### 保留的便捷方法
 
 ```rust
-// 这些便捷方法内部调用 alloc_slots
-pub fn alloc_temp_typed(&mut self, types: &[SlotType]) -> u16 {
-    self.alloc_slots(types)
-}
-
 pub fn alloc_args(&mut self, n: usize) -> u16 {
     self.alloc_slots(&vec![SlotType::Value; n])
 }
@@ -139,10 +138,6 @@ pub fn alloc_interfaces(&mut self, n: usize) -> u16 {
     self.alloc_slots(&types)
 }
 ```
-
-### 调用点无需修改
-
-现有的 ~300 个调用点无需修改，因为便捷方法签名不变。
 
 ## 8. 实现细节
 

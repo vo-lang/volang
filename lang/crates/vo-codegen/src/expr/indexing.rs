@@ -32,7 +32,7 @@ pub fn compile_index(
         let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, is_comma_ok);
         let mut map_get_slot_types = vec![SlotType::Value]; // meta
         map_get_slot_types.extend(info.type_slot_types(key_type)); // key
-        let meta_reg = func.alloc_temp_typed(&map_get_slot_types);
+        let meta_reg = func.alloc_slots(&map_get_slot_types);
         let meta_idx = ctx.const_int(meta as i64);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_copy(meta_reg + 1, key_reg, key_slots);
@@ -63,7 +63,7 @@ pub fn compile_slice_expr(
     let lo_reg = if let Some(lo) = &slice_expr.low {
         compile_expr(lo, ctx, func, info)?
     } else {
-        let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+        let tmp = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, tmp, 0, 0);
         tmp
     };
@@ -72,7 +72,7 @@ pub fn compile_slice_expr(
     let hi_reg = if let Some(hi) = &slice_expr.high {
         compile_expr(hi, ctx, func, info)?
     } else {
-        let tmp = func.alloc_temp_typed(&[SlotType::Value]);
+        let tmp = func.alloc_slots(&[SlotType::Value]);
         if info.is_string(container_type) {
             func.emit_op(Opcode::StrLen, tmp, container_reg, 0);
         } else if info.is_slice(container_type) {
@@ -96,7 +96,7 @@ pub fn compile_slice_expr(
     
     // Prepare params: slots[c]=lo, slots[c+1]=hi, slots[c+2]=max (if present)
     let param_count = if has_max { 3 } else { 2 };
-    let params_start = func.alloc_temp_typed(&vec![SlotType::Value; param_count as usize]);
+    let params_start = func.alloc_slots(&vec![SlotType::Value; param_count as usize]);
     func.emit_op(Opcode::Copy, params_start, lo_reg, 0);
     func.emit_op(Opcode::Copy, params_start + 1, hi_reg, 0);
     if let Some(max_r) = max_reg {

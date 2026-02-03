@@ -134,7 +134,7 @@ pub fn emit_error_return(
         for ret_type in &ret_types {
             ret_slot_types.extend(info.type_slot_types(*ret_type));
         }
-        let ret_start = func.alloc_temp_typed(&ret_slot_types);
+        let ret_start = func.alloc_slots(&ret_slot_types);
         
         // Use unified helper to read all named returns with error override
         emit_read_all_named_returns(func, info, ret_start, &named_return_slots, &ret_types, Some(error_slot));
@@ -150,7 +150,7 @@ pub fn emit_error_return(
         for ret_type in &ret_types {
             ret_slot_types.extend(info.type_slot_types(*ret_type));
         }
-        let ret_start = func.alloc_temp_typed(&ret_slot_types);
+        let ret_start = func.alloc_slots(&ret_slot_types);
         for i in 0..total_ret_slots {
             func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
         }
@@ -194,7 +194,7 @@ pub(super) fn compile_return(
                         ret_slot_types.push(SlotType::Value);
                     }
                 }
-                let ret_start = func.alloc_temp_typed(&ret_slot_types);
+                let ret_start = func.alloc_slots(&ret_slot_types);
                 
                 // Read all named returns (no error override for normal return)
                 for &(slot, slots, escaped) in &named_return_slots {
@@ -227,7 +227,7 @@ pub(super) fn compile_return(
                 
                 // Compile value to temp, then store to heap
                 let temp_slot_types = ret_type.map(|rt| info.type_slot_types(rt)).unwrap_or_else(|| vec![SlotType::Value; slots as usize]);
-                let temp = func.alloc_temp_typed(&temp_slot_types);
+                let temp = func.alloc_slots(&temp_slot_types);
                 if let Some(rt) = ret_type {
                     crate::assign::emit_assign(temp, crate::assign::AssignSource::Expr(result), rt, ctx, func, info)?;
                 } else {
@@ -283,7 +283,7 @@ pub(super) fn compile_return(
                 for ret_type in &ret_types {
                     ret_slot_types.extend(info.type_slot_types(*ret_type));
                 }
-                let ret_start = func.alloc_temp_typed(&ret_slot_types);
+                let ret_start = func.alloc_slots(&ret_slot_types);
                 
                 // Check for multi-value case: return f() where f() returns a tuple
                 let is_multi_value = ret.values.len() == 1 
@@ -328,7 +328,7 @@ pub(super) fn compile_fail(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Compile error expression to temp slot (error is always 2 slots: interface)
-    let error_slot = func.alloc_temp_typed(&[SlotType::GcRef, SlotType::Value]);
+    let error_slot = func.alloc_slots(&[SlotType::GcRef, SlotType::Value]);
     let error_expr_type = info.expr_type(fail_stmt.error.id);
     crate::assign::emit_assign(error_slot, crate::assign::AssignSource::Expr(&fail_stmt.error), error_expr_type, ctx, func, info)?;
     
