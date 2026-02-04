@@ -228,6 +228,12 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         create_island_fn: Some(jit_create_island),
         chan_close_fn: Some(jit_chan_close),
         port_close_fn: Some(jit_port_close),
+        // Batch 2 callbacks
+        chan_send_fn: Some(jit_chan_send),
+        chan_recv_fn: Some(jit_chan_recv),
+        // Batch 3 callbacks
+        port_send_fn: Some(jit_port_send),
+        port_recv_fn: Some(jit_port_recv),
     };
 
     JitContextWrapper {
@@ -394,10 +400,9 @@ fn handle_jit_result(
         }
         #[cfg(feature = "std")]
         JitResult::WaitIo => {
-            // JIT hit a blocking I/O operation.
+            // JIT hit a blocking operation (channel or I/O).
             // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
             
-            // Update frame PC to resume_pc for when we come back
             let resume_pc = ctx.call_resume_pc();
             let io_token = ctx.wait_io_token();
             
@@ -405,14 +410,23 @@ fn handle_jit_result(
             #[cfg(feature = "jit")]
             materialize_jit_frames(fiber, resume_pc);
             
-            // Store IO token for scheduler
-            fiber.resume_io_token = Some(io_token);
-            
-            ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
+            // Distinguish channel ops (Queue) vs real I/O (Io):
+            // - Channel ops: wait_io_token == 0, use Queue (no pc -= 1 in scheduler)
+            // - I/O ops: wait_io_token != 0, use Io (scheduler does pc -= 1)
+            if io_token == 0 {
+                ExecResult::Block(crate::fiber::BlockReason::Queue)
+            } else {
+                fiber.resume_io_token = Some(io_token);
+                ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
+            }
         }
         #[cfg(not(feature = "std"))]
         JitResult::WaitIo => {
-            panic!("JIT returned WaitIo but std feature not enabled")
+            // In no_std, only Queue-based blocking is supported
+            let resume_pc = ctx.call_resume_pc();
+            #[cfg(feature = "jit")]
+            materialize_jit_frames(fiber, resume_pc);
+            ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
     }
 }
@@ -1056,3 +1070,257 @@ extern "C" fn jit_port_close(_ctx: *mut JitContext, _port: u64) -> JitResult {
     JitResult::Ok
 }
 
+// =============================================================================
+// Batch 2: JIT Callbacks for Channel Send/Recv
+// =============================================================================
+
+/// JIT callback to send on a channel.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel,
+/// or JitResult::WaitIo if the send would block.
+extern "C" fn jit_chan_send(
+    ctx: *mut JitContext,
+    chan: u64,
+    val_ptr: *const u64,
+    val_slots: u32,
+) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::channel::{self, SendResult};
+    use vo_runtime::objects::queue_state;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let ch = chan as GcRef;
+    
+    if ch.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_NIL);
+    }
+    
+    // Read value slots from val_ptr
+    let value: Box<[u64]> = (0..val_slots as usize)
+        .map(|i| unsafe { *val_ptr.add(i) })
+        .collect();
+    
+    let cap = queue_state::capacity(ch);
+    let state = channel::get_state(ch);
+    
+    match state.try_send(value, cap) {
+        SendResult::DirectSend(receiver_id) => {
+            // Wake the receiver
+            let fiber_id = crate::scheduler::FiberId::from_raw(receiver_id as u32);
+            vm.scheduler.wake_fiber(fiber_id);
+            JitResult::Ok
+        }
+        SendResult::Buffered => JitResult::Ok,
+        SendResult::WouldBlock(value) => {
+            // Register sender and block
+            let fiber_id = fiber.id as u64;
+            state.register_sender(fiber_id, value);
+            JitResult::WaitIo
+        }
+        SendResult::Closed => {
+            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
+        }
+    }
+}
+
+/// JIT callback to receive from a channel.
+/// Returns JitResult::Ok on success (including closed channel case),
+/// JitResult::Panic on nil channel, or JitResult::WaitIo if would block.
+/// 
+/// dst_ptr points to where the received value should be written.
+/// If has_ok is true, writes 1/0 to dst_ptr[elem_slots] indicating success.
+extern "C" fn jit_chan_recv(
+    ctx: *mut JitContext,
+    chan: u64,
+    dst_ptr: *mut u64,
+    elem_slots: u32,
+    has_ok: u32,
+) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::channel::{self, RecvResult};
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let ch = chan as GcRef;
+    let has_ok = has_ok != 0;
+    
+    if ch.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_RECV_ON_NIL);
+    }
+    
+    let state = channel::get_state(ch);
+    let (result, value) = state.try_recv();
+    
+    match result {
+        RecvResult::Success(woke_sender) => {
+            // Write received value to dst_ptr
+            if let Some(val) = value {
+                for (i, &v) in val.iter().enumerate() {
+                    if i < elem_slots as usize {
+                        unsafe { *dst_ptr.add(i) = v; }
+                    }
+                }
+            }
+            if has_ok {
+                unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
+            }
+            // Wake sender if any
+            if let Some(id) = woke_sender {
+                let fiber_id = crate::scheduler::FiberId::from_raw(id as u32);
+                vm.scheduler.wake_fiber(fiber_id);
+            }
+            JitResult::Ok
+        }
+        RecvResult::WouldBlock => {
+            // Register receiver and block
+            let fiber_id = fiber.id as u64;
+            state.register_receiver(fiber_id);
+            JitResult::WaitIo
+        }
+        RecvResult::Closed => {
+            // Zero out the destination and set ok=false
+            for i in 0..elem_slots as usize {
+                unsafe { *dst_ptr.add(i) = 0; }
+            }
+            if has_ok {
+                unsafe { *dst_ptr.add(elem_slots as usize) = 0; }
+            }
+            JitResult::Ok
+        }
+    }
+}
+
+
+// =============================================================================
+// Batch 3: JIT Callbacks for Port Send/Recv
+// =============================================================================
+
+/// JIT callback to send on a port.
+/// Returns JitResult::Ok on success, JitResult::Panic on closed port,
+/// or JitResult::WaitIo if the send would block.
+#[cfg(feature = "std")]
+extern "C" fn jit_port_send(
+    ctx: *mut JitContext,
+    port: u64,
+    val_ptr: *const u64,
+    val_slots: u32,
+) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::port::{self, SendResult};
+    use vo_runtime::objects::queue_state;
+    use vo_runtime::pack::pack_slots;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    let p = port as GcRef;
+    
+    if port::is_closed(p) {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED);
+    }
+    
+    // Read value slots from val_ptr
+    let src: Vec<u64> = (0..val_slots as usize)
+        .map(|i| unsafe { *val_ptr.add(i) })
+        .collect();
+    
+    // Pack the value for cross-island transfer
+    let elem_meta = queue_state::elem_meta(p);
+    let packed = pack_slots(&vm.state.gc, &src, elem_meta, &module.struct_metas, &module.runtime_types);
+    
+    let cap = queue_state::capacity(p);
+    match port::try_send(p, packed) {
+        SendResult::DirectSend(receiver) => {
+            // Wake the receiver on remote island
+            vm.state.wake_waiter(&receiver, &mut vm.scheduler);
+            JitResult::Ok
+        }
+        SendResult::Buffered => JitResult::Ok,
+        SendResult::WouldBlock(value) => {
+            // Register sender and block
+            let island_id = vm.state.current_island_id;
+            let waiter = vo_runtime::objects::port::WaiterInfo { island_id, fiber_id: fiber.id as u64 };
+            port::register_sender(p, waiter, value);
+            JitResult::WaitIo
+        }
+        SendResult::Closed => {
+            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+extern "C" fn jit_port_send(_ctx: *mut JitContext, _port: u64, _val_ptr: *const u64, _val_slots: u32) -> JitResult {
+    panic!("Port not supported in no_std mode")
+}
+
+/// JIT callback to receive from a port.
+/// Returns JitResult::Ok on success (including closed port),
+/// or JitResult::WaitIo if would block.
+#[cfg(feature = "std")]
+extern "C" fn jit_port_recv(
+    ctx: *mut JitContext,
+    port: u64,
+    dst_ptr: *mut u64,
+    elem_slots: u32,
+    has_ok: u32,
+) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::port::{self, RecvResult};
+    use vo_runtime::pack::unpack_slots;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    let p = port as GcRef;
+    let has_ok = has_ok != 0;
+    
+    let (result, packed_opt) = port::try_recv(p);
+    
+    match result {
+        RecvResult::Success(woke_sender) => {
+            // Unpack the value into destination
+            if let Some(packed) = packed_opt {
+                let mut dst: Vec<u64> = vec![0; elem_slots as usize];
+                unpack_slots(&mut vm.state.gc, &packed, &mut dst, &module.struct_metas, &module.runtime_types);
+                for i in 0..elem_slots as usize {
+                    unsafe { *dst_ptr.add(i) = dst[i]; }
+                }
+            }
+            if has_ok {
+                unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
+            }
+            // Wake sender if any
+            if let Some(sender) = woke_sender {
+                vm.state.wake_waiter(&sender, &mut vm.scheduler);
+            }
+            JitResult::Ok
+        }
+        RecvResult::WouldBlock => {
+            // Register receiver and block
+            let island_id = vm.state.current_island_id;
+            let waiter = vo_runtime::objects::port::WaiterInfo { island_id, fiber_id: fiber.id as u64 };
+            port::register_receiver(p, waiter);
+            JitResult::WaitIo
+        }
+        RecvResult::Closed => {
+            // Zero out the destination and set ok=false
+            for i in 0..elem_slots as usize {
+                unsafe { *dst_ptr.add(i) = 0; }
+            }
+            if has_ok {
+                unsafe { *dst_ptr.add(elem_slots as usize) = 0; }
+            }
+            JitResult::Ok
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+extern "C" fn jit_port_recv(_ctx: *mut JitContext, _port: u64, _dst_ptr: *mut u64, _elem_slots: u32, _has_ok: u32) -> JitResult {
+    panic!("Port not supported in no_std mode")
+}

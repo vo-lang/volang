@@ -68,6 +68,12 @@ pub struct HelperFuncIds {
     pub island_new: cranelift_module::FuncId,
     pub chan_close: cranelift_module::FuncId,
     pub port_close: cranelift_module::FuncId,
+    // Batch 2: Channel Send/Recv
+    pub chan_send: cranelift_module::FuncId,
+    pub chan_recv: cranelift_module::FuncId,
+    // Batch 3: Port Send/Recv
+    pub port_send: cranelift_module::FuncId,
+    pub port_recv: cranelift_module::FuncId,
 }
 
 // =============================================================================
@@ -125,6 +131,12 @@ pub fn register_symbols(builder: &mut JITBuilder) {
     builder.symbol("vo_island_new", vo_runtime::jit_api::vo_island_new as *const u8);
     builder.symbol("vo_chan_close", vo_runtime::jit_api::vo_chan_close as *const u8);
     builder.symbol("vo_port_close", vo_runtime::jit_api::vo_port_close as *const u8);
+    // Batch 2: Channel Send/Recv
+    builder.symbol("vo_chan_send", vo_runtime::jit_api::vo_chan_send as *const u8);
+    builder.symbol("vo_chan_recv", vo_runtime::jit_api::vo_chan_recv as *const u8);
+    // Batch 3: Port Send/Recv
+    builder.symbol("vo_port_send", vo_runtime::jit_api::vo_port_send as *const u8);
+    builder.symbol("vo_port_recv", vo_runtime::jit_api::vo_port_recv as *const u8);
 }
 
 // =============================================================================
@@ -587,6 +599,50 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
+    // Batch 2: Channel Send/Recv
+    let chan_send = module.declare_function("vo_chan_send", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I64)); // chan
+        sig.params.push(AbiParam::new(ptr));        // val_ptr
+        sig.params.push(AbiParam::new(types::I32)); // val_slots
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+    
+    let chan_recv = module.declare_function("vo_chan_recv", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I64)); // chan
+        sig.params.push(AbiParam::new(ptr));        // dst_ptr
+        sig.params.push(AbiParam::new(types::I32)); // elem_slots
+        sig.params.push(AbiParam::new(types::I32)); // has_ok (0 or 1)
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+    
+    // Batch 3: Port Send/Recv (same signature as Channel)
+    let port_send = module.declare_function("vo_port_send", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I64)); // port
+        sig.params.push(AbiParam::new(ptr));        // val_ptr
+        sig.params.push(AbiParam::new(types::I32)); // val_slots
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+    
+    let port_recv = module.declare_function("vo_port_recv", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I64)); // port
+        sig.params.push(AbiParam::new(ptr));        // dst_ptr
+        sig.params.push(AbiParam::new(types::I32)); // elem_slots
+        sig.params.push(AbiParam::new(types::I32)); // has_ok (0 or 1)
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+    
     Ok(HelperFuncIds {
         call_vm, gc_alloc, write_barrier, closure_get_func_id, iface_get_func_id,
         set_closure_call_request, set_iface_call_request, panic, call_extern,
@@ -597,6 +653,8 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next,
         iface_assert, iface_to_iface, iface_eq, set_call_request,
         island_new, chan_close, port_close,
+        chan_send, chan_recv,
+        port_send, port_recv,
     })
 }
 
@@ -659,5 +717,9 @@ pub fn get_helper_refs(
         island_new: Some(module.declare_func_in_func(ids.island_new, func)),
         chan_close: Some(module.declare_func_in_func(ids.chan_close, func)),
         port_close: Some(module.declare_func_in_func(ids.port_close, func)),
+        chan_send: Some(module.declare_func_in_func(ids.chan_send, func)),
+        chan_recv: Some(module.declare_func_in_func(ids.chan_recv, func)),
+        port_send: Some(module.declare_func_in_func(ids.port_send, func)),
+        port_recv: Some(module.declare_func_in_func(ids.port_recv, func)),
     }
 }

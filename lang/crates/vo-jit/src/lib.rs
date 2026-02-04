@@ -32,8 +32,8 @@ use helpers::HelperFuncIds;
 // Shared Utilities
 // =============================================================================
 
-/// Check if a function is jittable (does not contain blocking operations).
-/// A function is NOT jittable if it uses defer, channels, select, goroutines, or blocking port ops.
+/// Check if a function is jittable (does not contain unsupported operations).
+/// A function is NOT jittable if it uses defer, select, or goroutines.
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
@@ -41,15 +41,13 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
             Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
             // Goroutines
             | Opcode::GoStart | Opcode::GoIsland
-            // Channels (send/recv can block)
-            | Opcode::ChanSend | Opcode::ChanRecv
-            // Select
-            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec
-            // Port blocking operations (PortNew/Len/Cap are OK, PortClose supported in Batch 1)
-            | Opcode::PortSend | Opcode::PortRecv => return false,
-            // Batch 1: IslandNew, ChanClose, PortClose - now supported
-            // CallClosure and CallIface supported via unified call protocol (Phase 4)
-            // CallExtern supported via jit_call_extern callback (Step 3)
+            // Select (complex control flow)
+            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
+            // Batch 1: IslandNew, ChanClose, PortClose - supported
+            // Batch 2: ChanSend, ChanRecv - supported (may return WaitIo)
+            // Batch 3: PortSend, PortRecv - supported (may return WaitIo)
+            // CallClosure and CallIface supported via unified call protocol
+            // CallExtern supported via jit_call_extern callback
             _ => {}
         }
     }

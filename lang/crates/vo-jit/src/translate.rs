@@ -126,6 +126,12 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         IslandNew => { island_new(e, inst); Ok(Completed) }
         ChanClose => { chan_close(e, inst)?; Ok(Completed) }
         PortClose => { port_close(e, inst)?; Ok(Completed) }
+        // Batch 2: Channel Send/Recv
+        ChanSend => { chan_send(e, inst)?; Ok(Completed) }
+        ChanRecv => { chan_recv(e, inst)?; Ok(Completed) }
+        // Batch 3: Port Send/Recv
+        PortSend => { port_send(e, inst)?; Ok(Completed) }
+        PortRecv => { port_recv(e, inst)?; Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1636,4 +1642,121 @@ fn emit_close_with_panic_check<'a>(
     e.builder().seal_block(continue_block);
     
     Ok(())
+}
+
+// =============================================================================
+// Batch 2+3: Channel/Port Send/Recv (unified implementation)
+// =============================================================================
+
+/// Emit queue send operation (used by ChanSend and PortSend).
+/// queue[a] <- val[b:b+flags]
+fn emit_queue_send<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+    send_func: cranelift_codegen::ir::FuncRef,
+) -> Result<(), JitError> {
+    use vo_runtime::jit_api::JitContext;
+    
+    // Set resume_pc for WaitIo case (VM re-executes this instruction)
+    let resume_pc = e.current_pc() as i32;
+    let ctx = e.ctx_param();
+    let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
+    e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+    
+    let queue = e.read_var(inst.a);
+    let val_slots = inst.flags as u32;
+    let val_ptr = e.var_addr(inst.b);
+    let val_slots_val = e.builder().ins().iconst(types::I32, val_slots as i64);
+    
+    let call = e.builder().ins().call(send_func, &[ctx, queue, val_ptr, val_slots_val]);
+    let result = e.builder().inst_results(call)[0];
+    
+    // Branch on result
+    let ok_val = e.builder().ins().iconst(types::I32, 0);
+    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
+    let ok_block = e.builder().create_block();
+    let not_ok_block = e.builder().create_block();
+    e.builder().ins().brif(is_ok, ok_block, &[], not_ok_block, &[]);
+    
+    // Not-ok: spill and return
+    e.builder().switch_to_block(not_ok_block);
+    e.builder().seal_block(not_ok_block);
+    e.spill_all_vars();
+    e.builder().ins().return_(&[result]);
+    
+    // Ok: continue
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+    Ok(())
+}
+
+/// Emit queue recv operation (used by ChanRecv and PortRecv).
+/// val[a:a+elem_slots], ok[a+elem_slots] <- queue[b]
+/// flags: bit0 = has_ok, bits 1-7 = elem_slots
+fn emit_queue_recv<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+    recv_func: cranelift_codegen::ir::FuncRef,
+) -> Result<(), JitError> {
+    use vo_runtime::jit_api::JitContext;
+    
+    // Set resume_pc for WaitIo case
+    let resume_pc = e.current_pc() as i32;
+    let ctx = e.ctx_param();
+    let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
+    e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+    
+    let queue = e.read_var(inst.b);
+    let elem_slots = ((inst.flags >> 1) & 0x7F) as u32;
+    let has_ok = (inst.flags & 1) as u32;
+    let dst_start = inst.a;
+    
+    let dst_ptr = e.var_addr(dst_start);
+    let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
+    let has_ok_val = e.builder().ins().iconst(types::I32, has_ok as i64);
+    
+    let call = e.builder().ins().call(recv_func, &[ctx, queue, dst_ptr, elem_slots_val, has_ok_val]);
+    let result = e.builder().inst_results(call)[0];
+    
+    // Branch on result
+    let ok_val = e.builder().ins().iconst(types::I32, 0);
+    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
+    let ok_block = e.builder().create_block();
+    let not_ok_block = e.builder().create_block();
+    e.builder().ins().brif(is_ok, ok_block, &[], not_ok_block, &[]);
+    
+    // Not-ok: spill and return
+    e.builder().switch_to_block(not_ok_block);
+    e.builder().seal_block(not_ok_block);
+    e.spill_all_vars();
+    e.builder().ins().return_(&[result]);
+    
+    // Ok: reload received values into SSA vars
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+    for i in 0..elem_slots {
+        let val = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, (i * 8) as i32);
+        e.write_var(dst_start + i as u16, val);
+    }
+    if has_ok != 0 {
+        let ok_flag = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, (elem_slots * 8) as i32);
+        e.write_var(dst_start + elem_slots as u16, ok_flag);
+    }
+    Ok(())
+}
+
+fn chan_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    emit_queue_send(e, inst, e.helpers().chan_send.expect("chan_send not registered"))
+}
+
+fn chan_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    emit_queue_recv(e, inst, e.helpers().chan_recv.expect("chan_recv not registered"))
+}
+
+fn port_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    emit_queue_send(e, inst, e.helpers().port_send.expect("port_send not registered"))
+}
+
+fn port_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    emit_queue_recv(e, inst, e.helpers().port_recv.expect("port_recv not registered"))
 }

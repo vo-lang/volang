@@ -224,6 +224,24 @@ pub struct JitContext {
     /// Callback to close a port.
     /// Returns JitResult (Ok or Panic).
     pub port_close_fn: Option<extern "C" fn(*mut JitContext, port: u64) -> JitResult>,
+    
+    // Batch 2: Channel Send/Recv
+    /// Callback to send on a channel.
+    /// Returns JitResult (Ok, Panic, or WaitIo).
+    pub chan_send_fn: Option<extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
+    
+    /// Callback to receive from a channel.
+    /// Returns JitResult (Ok, Panic, or WaitIo).
+    pub chan_recv_fn: Option<extern "C" fn(*mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
+    
+    // Batch 3: Port Send/Recv
+    /// Callback to send on a port.
+    /// Returns JitResult (Ok, Panic, or WaitIo).
+    pub port_send_fn: Option<extern "C" fn(*mut JitContext, port: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
+    
+    /// Callback to receive from a port.
+    /// Returns JitResult (Ok, Panic, or WaitIo).
+    pub port_recv_fn: Option<extern "C" fn(*mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -268,6 +286,12 @@ impl JitContext {
     pub const OFFSET_CREATE_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, create_island_fn) as i32;
     pub const OFFSET_CHAN_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, chan_close_fn) as i32;
     pub const OFFSET_PORT_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, port_close_fn) as i32;
+    // Batch 2
+    pub const OFFSET_CHAN_SEND_FN: i32 = std::mem::offset_of!(JitContext, chan_send_fn) as i32;
+    pub const OFFSET_CHAN_RECV_FN: i32 = std::mem::offset_of!(JitContext, chan_recv_fn) as i32;
+    // Batch 3
+    pub const OFFSET_PORT_SEND_FN: i32 = std::mem::offset_of!(JitContext, port_send_fn) as i32;
+    pub const OFFSET_PORT_RECV_FN: i32 = std::mem::offset_of!(JitContext, port_recv_fn) as i32;
 }
 
 // =============================================================================
@@ -1382,6 +1406,12 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_island_new", vo_island_new as *const u8),
         ("vo_chan_close", vo_chan_close as *const u8),
         ("vo_port_close", vo_port_close as *const u8),
+        // Batch 2: Channel Send/Recv
+        ("vo_chan_send", vo_chan_send as *const u8),
+        ("vo_chan_recv", vo_chan_recv as *const u8),
+        // Batch 3: Port Send/Recv
+        ("vo_port_send", vo_port_send as *const u8),
+        ("vo_port_recv", vo_port_recv as *const u8),
     ]
 }
 
@@ -1415,5 +1445,53 @@ pub extern "C" fn vo_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let close_fn = ctx.port_close_fn.expect("port_close_fn not set");
     close_fn(ctx, port)
+}
+
+// =============================================================================
+// Batch 2: Channel Send/Recv
+// =============================================================================
+
+/// Send on a channel.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel,
+/// or JitResult::WaitIo if the send would block.
+#[no_mangle]
+pub extern "C" fn vo_chan_send(ctx: *mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let send_fn = ctx.chan_send_fn.expect("chan_send_fn not set");
+    send_fn(ctx, chan, val_ptr, val_slots)
+}
+
+/// Receive from a channel.
+/// Returns JitResult::Ok on success (including closed channel),
+/// JitResult::Panic on nil channel, or JitResult::WaitIo if would block.
+#[no_mangle]
+pub extern "C" fn vo_chan_recv(ctx: *mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let recv_fn = ctx.chan_recv_fn.expect("chan_recv_fn not set");
+    recv_fn(ctx, chan, dst_ptr, elem_slots, has_ok)
+}
+
+// =============================================================================
+// Batch 3: Port Send/Recv
+// =============================================================================
+
+/// Send on a port.
+/// Returns JitResult::Ok on success, JitResult::Panic on closed port,
+/// or JitResult::WaitIo if the send would block.
+#[no_mangle]
+pub extern "C" fn vo_port_send(ctx: *mut JitContext, port: u64, val_ptr: *const u64, val_slots: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let send_fn = ctx.port_send_fn.expect("port_send_fn not set");
+    send_fn(ctx, port, val_ptr, val_slots)
+}
+
+/// Receive from a port.
+/// Returns JitResult::Ok on success (including closed port),
+/// or JitResult::WaitIo if would block.
+#[no_mangle]
+pub extern "C" fn vo_port_recv(ctx: *mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let recv_fn = ctx.port_recv_fn.expect("port_recv_fn not set");
+    recv_fn(ctx, port, dst_ptr, elem_slots, has_ok)
 }
 

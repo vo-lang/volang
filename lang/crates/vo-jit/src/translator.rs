@@ -69,6 +69,12 @@ pub struct HelperFuncs {
     pub island_new: Option<FuncRef>,
     pub chan_close: Option<FuncRef>,
     pub port_close: Option<FuncRef>,
+    // Batch 2: Channel Send/Recv
+    pub chan_send: Option<FuncRef>,
+    pub chan_recv: Option<FuncRef>,
+    // Batch 3: Port Send/Recv
+    pub port_send: Option<FuncRef>,
+    pub port_recv: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler
