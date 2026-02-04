@@ -1,0 +1,369 @@
+// Test all for loop patterns - ForLoop optimization and fallback cases
+//
+// ForLoop Optimizable Patterns:
+// - Increment exclusive: for i := expr; i < n; i++
+// - Increment inclusive: for i := expr; i <= n; i++
+// - Decrement exclusive: for i := expr; i > n; i--
+// - Decrement inclusive: for i := expr; i >= n; i--
+// - Post can be i++/i-- or i+=1/i-=1
+// - Limit must be single variable or constant
+// - Loop var must not escape (Go 1.22 semantics)
+//
+// NOT Optimizable (fallback to traditional loop):
+// - Complex limit expressions (n-1, len(arr)): evaluated once
+// - Function calls in limit (getLimit()): side effects
+// - Escaped loop variables: need per-iteration heap alloc
+
+package main
+
+func main() {
+	testForLoopOptimizable()
+	testForLoopNotOptimizable()
+	testForRange()
+	testEdgeCases()
+	println("PASS")
+}
+
+// ============================================================================
+// 1. ForLoop Optimizable Patterns
+// ============================================================================
+
+func testForLoopOptimizable() {
+	// --- Increment patterns (i++) ---
+	
+	// 1.1 Basic: for i := 0; i < n; i++
+	sum := 0
+	for i := 0; i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "1.1 basic increment")
+	
+	// 1.2 Inclusive: for i := 0; i <= n; i++
+	sum = 0
+	for i := 0; i <= 4; i++ {
+		sum += i
+	}
+	assert(sum == 10, "1.2 inclusive increment")
+	
+	// 1.3 Non-zero start: for i := start; i < end; i++
+	sum = 0
+	for i := 2; i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 9, "1.3 non-zero start")
+	
+	// 1.4 Variable start: for i := expr; i < n; i++
+	start := 1
+	sum = 0
+	for i := start; i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "1.4 variable start")
+	
+	// 1.5 Expression start: for i := f(); i < n; i++
+	sum = 0
+	for i := getStart(); i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "1.5 expression start")
+	
+	// --- Decrement patterns (i--) ---
+	
+	// 1.6 Basic decrement: for i := n-1; i >= 0; i--
+	sum = 0
+	for i := 4; i >= 0; i-- {
+		sum += i
+	}
+	assert(sum == 10, "1.6 basic decrement")
+	
+	// 1.7 Exclusive decrement: for i := n; i > 0; i--
+	sum = 0
+	for i := 5; i > 0; i-- {
+		sum += i
+	}
+	assert(sum == 15, "1.7 exclusive decrement")
+	
+	// 1.8 Variable limit decrement: for i := n-1; i >= limit; i--
+	limit := 2
+	sum = 0
+	for i := 4; i >= limit; i-- {
+		sum += i
+	}
+	assert(sum == 9, "1.8 variable limit decrement")
+	
+	// 1.9 Expression init decrement: for i := len(arr)-1; i >= 0; i--
+	arr := []int{1, 2, 3, 4, 5}
+	sum = 0
+	for i := len(arr) - 1; i >= 0; i-- {
+		sum += arr[i]
+	}
+	assert(sum == 15, "1.9 array reverse iteration")
+	
+	// --- Alternative post expressions ---
+	
+	// 1.10 i += 1 instead of i++
+	sum = 0
+	for i := 0; i < 5; i += 1 {
+		sum += i
+	}
+	assert(sum == 10, "1.10 i += 1")
+	
+	// 1.11 i -= 1 instead of i--
+	sum = 0
+	for i := 4; i >= 0; i -= 1 {
+		sum += i
+	}
+	assert(sum == 10, "1.11 i -= 1")
+}
+
+// ============================================================================
+// 2. NOT Optimizable Patterns (fallback to traditional loop)
+// ============================================================================
+
+func testForLoopNotOptimizable() {
+	// --- Step != 1 ---
+	
+	// 2.1 Step of 2: for i := 0; i < n; i += 2
+	sum := 0
+	for i := 0; i < 10; i += 2 {
+		sum += i
+	}
+	assert(sum == 20, "2.1 step of 2")
+	
+	// 2.2 Step of 3 decrement: for i := 9; i >= 0; i -= 3
+	sum = 0
+	for i := 9; i >= 0; i -= 3 {
+		sum += i
+	}
+	assert(sum == 18, "2.2 step of 3 decrement")
+	
+	// --- Complex conditions ---
+	
+	// 2.3 Multiple conditions: for i := 0; i < n && someCondition; i++
+	sum = 0
+	for i := 0; i < 10 && i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "2.3 multiple conditions")
+	
+	// 2.4 Condition on different variable
+	sum = 0
+	j := 0
+	for i := 0; j < 5; i++ {
+		sum += i
+		j++
+	}
+	assert(sum == 10, "2.4 condition on different var")
+	
+	// --- Complex post ---
+	
+	// 2.5 Multiple statements in post (not supported in Go, skip)
+	
+	// 2.6 Post modifies different variable than init
+	sum = 0
+	k := 0
+	for i := 0; i < 5; k++ {
+		sum += i
+		i++
+	}
+	assert(sum == 10, "2.6 post modifies different var")
+	
+	// --- Escaped loop variable (Go 1.22) ---
+	
+	// 2.7 Loop var captured by closure
+	var funcs []func() int
+	for i := 0; i < 3; i++ {
+		i := i // shadow to capture
+		funcs = append(funcs, func() int { return i })
+	}
+	assert(funcs[0]() == 0, "2.7a closure capture")
+	assert(funcs[1]() == 1, "2.7b closure capture")
+	assert(funcs[2]() == 2, "2.7c closure capture")
+	
+	// --- No init ---
+	
+	// 2.8 for ; cond; post
+	sum = 0
+	i := 0
+	for ; i < 5; i++ {
+		sum += i
+	}
+	assert(sum == 10, "2.8 no init")
+	
+	// --- No cond (infinite loop style) ---
+	
+	// 2.9 for init; ; post (with break)
+	sum = 0
+	for i := 0; ; i++ {
+		if i >= 5 {
+			break
+		}
+		sum += i
+	}
+	assert(sum == 10, "2.9 no cond with break")
+	
+	// --- No post ---
+	
+	// 2.10 for init; cond; (manual increment)
+	sum = 0
+	for i := 0; i < 5; {
+		sum += i
+		i++
+	}
+	assert(sum == 10, "2.10 no post")
+}
+
+// ============================================================================
+// 3. For-Range Patterns (all use ForLoop via IndexLoop)
+// ============================================================================
+
+func testForRange() {
+	// 3.1 for i := range n
+	sum := 0
+	for i := range 5 {
+		sum += i
+	}
+	assert(sum == 10, "3.1 range int")
+	
+	// 3.2 for i := range slice (index only)
+	arr := []int{10, 20, 30}
+	sum = 0
+	for i := range arr {
+		sum += i
+	}
+	assert(sum == 3, "3.2 range slice index")
+	
+	// 3.3 for i, v := range slice
+	sum = 0
+	for _, v := range arr {
+		sum += v
+	}
+	assert(sum == 60, "3.3 range slice value")
+	
+	// 3.4 for i := range array
+	arr2 := [3]int{1, 2, 3}
+	sum = 0
+	for i := range arr2 {
+		sum += i
+	}
+	assert(sum == 3, "3.4 range array index")
+	
+	// 3.5 for i := range string
+	s := "abc"
+	count := 0
+	for range s {
+		count++
+	}
+	assert(count == 3, "3.5 range string")
+	
+	// 3.6 for k := range map
+	m := map[string]int{"a": 1, "b": 2}
+	count = 0
+	for range m {
+		count++
+	}
+	assert(count == 2, "3.6 range map")
+}
+
+// ============================================================================
+// 4. Edge Cases
+// ============================================================================
+
+func testEdgeCases() {
+	// 4.1 Empty loop (n <= 0)
+	sum := 0
+	for i := 0; i < 0; i++ {
+		sum += i
+	}
+	assert(sum == 0, "4.1 empty loop")
+	
+	// 4.2 Single iteration
+	sum = 0
+	for i := 0; i < 1; i++ {
+		sum += i
+	}
+	assert(sum == 0, "4.2 single iteration")
+	
+	// 4.3 Negative limit (empty for increment)
+	sum = 0
+	for i := 0; i < -5; i++ {
+		sum += i
+	}
+	assert(sum == 0, "4.3 negative limit increment")
+	
+	// 4.4 Negative range for decrement
+	sum = 0
+	for i := -1; i >= -3; i-- {
+		sum += i
+	}
+	assert(sum == -6, "4.4 negative range decrement")
+	
+	// 4.5 Nested loops
+	sum = 0
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			sum += i * 10 + j
+		}
+	}
+	assert(sum == 99, "4.5 nested loops")
+	
+	// 4.6 Break in loop
+	sum = 0
+	for i := 0; i < 10; i++ {
+		if i == 5 {
+			break
+		}
+		sum += i
+	}
+	assert(sum == 10, "4.6 break")
+	
+	// 4.7 Continue in loop
+	sum = 0
+	for i := 0; i < 5; i++ {
+		if i == 2 {
+			continue
+		}
+		sum += i
+	}
+	assert(sum == 8, "4.7 continue")
+	
+	// 4.8 Labeled break
+	sum = 0
+outer:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if j == 1 {
+				break outer
+			}
+			sum += 1
+		}
+	}
+	assert(sum == 1, "4.8 labeled break")
+	
+	// 4.9 Labeled continue
+	sum = 0
+outer2:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if j == 1 {
+				continue outer2
+			}
+			sum += 1
+		}
+	}
+	assert(sum == 3, "4.9 labeled continue")
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+func getStart() int {
+	return 1
+}
+
+func assert(cond bool, msg string) {
+	if !cond {
+		panic("FAIL: " + msg)
+	}
+}

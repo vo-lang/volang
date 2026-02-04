@@ -303,10 +303,10 @@ impl<'a> FunctionCompiler<'a> {
     fn forloop(&mut self, inst: &Instruction) {
         let idx = self.load_local(inst.a);
         let limit = self.load_local(inst.b);
-        let (is_decrement, is_unsigned) = inst.forloop_flags();
+        let (is_decrement, is_unsigned, is_inclusive) = inst.forloop_flags();
         
         let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
-            &mut self.builder, idx, limit, is_decrement, is_unsigned
+            &mut self.builder, idx, limit, is_decrement, is_unsigned, is_inclusive
         );
         self.store_local(inst.a, next_idx);
         

@@ -16,20 +16,63 @@ use crate::type_info::TypeInfoWrapper;
 use super::var_def::{DeferredHeapAlloc, LocalDefiner};
 use super::{compile_block, compile_block_no_scope, compile_stmt};
 
-/// Pattern match result for simple for loop: `for i := 0; i < n; i++`
+/// Check if limit expression is safe for ForLoop optimization.
+/// 
+/// ForLoop stores limit in a slot and reads it each iteration.
+/// This means:
+/// - Single variable: SAFE (if modified in loop body, ForLoop sees the change)
+/// - Constant literal: SAFE (never changes)
+/// - Expressions (n-1, len(arr)): NOT SAFE (evaluated once, stored in temp slot)
+/// 
+/// Go semantics: condition is re-evaluated every iteration.
+/// So `for i := 0; i < n-1; i++ { n = 10 }` should see updated n-1 each time.
+/// ForLoop can't do this - it evaluates n-1 once and stores in a slot.
+fn is_safe_limit_expr(expr: &Expr) -> bool {
+    match &expr.kind {
+        // Single variable: ForLoop reads the slot each iteration
+        // If loop body modifies it, we'll see the change
+        ExprKind::Ident(_) => true,
+        // Constant literals: never change, always safe
+        ExprKind::IntLit(_) => true,
+        // Parenthesized: check inner
+        ExprKind::Paren(inner) => is_safe_limit_expr(inner),
+        // Everything else: NOT safe
+        // - Binary (n-1): evaluated once, stored in temp
+        // - Call (len(arr)): evaluated once
+        // - Selector, Conversion, etc: may involve computation
+        _ => false,
+    }
+}
+
+/// Pattern match result for simple for loop.
+/// Supports: `for i := expr; i < n; i++` and `for i := expr; i >= n; i--`
 struct SimpleForPattern<'a> {
     /// The loop variable name
     var_name: Symbol,
     /// The loop variable object key
     obj_key: ObjKey,
-    /// The limit expression (n in `i < n`)
+    /// The init expression (any integer expression)
+    init_expr: &'a Expr,
+    /// The limit expression (n in `i < n` or `i >= n`)
     limit_expr: &'a Expr,
-    /// Comparison operator (Lt or LtEq)
-    cmp_op: BinaryOp,
+    /// true = decrement (i--), false = increment (i++)
+    is_decrement: bool,
+    /// true = inclusive (<=, >=), false = exclusive (<, >)
+    is_inclusive: bool,
 }
 
-/// Try to match the pattern: `for i := 0; i < n; i++`
-/// Returns None if pattern doesn't match or loop var escapes (Go 1.22 semantics).
+/// Try to match simple for loop patterns:
+/// - Increment: `for i := expr; i < n; i++` or `for i := expr; i <= n; i++`
+/// - Decrement: `for i := expr; i > n; i--` or `for i := expr; i >= n; i--`
+/// 
+/// Also supports `i += 1` and `i -= 1` as post expressions.
+/// 
+/// NOT supported (fallback to traditional loop):
+/// - Complex limit expressions (n-1, len(arr)): evaluated once, won't update
+/// - Function calls in limit (getLimit()): side effects
+/// - Escaped loop vars: Go 1.22 per-iteration heap alloc
+/// 
+/// Returns None if pattern doesn't match.
 fn try_match_simple_for<'a>(
     init: Option<&'a Stmt>,
     cond: Option<&'a Expr>,
@@ -37,33 +80,36 @@ fn try_match_simple_for<'a>(
     info: &TypeInfoWrapper,
 ) -> Option<SimpleForPattern<'a>> {
     // Must have all three parts
-    let init = init?;
+    let init_stmt = init?;
     let cond = cond?;
     let post = post?;
     
-    // init must be: i := 0
-    let (var_name, obj_key) = match &init.kind {
+    // init must be: i := expr (single variable, single expression)
+    let (var_name, obj_key, init_expr) = match &init_stmt.kind {
         StmtKind::ShortVar(sv) if sv.names.len() == 1 && sv.values.len() == 1 => {
             let name = &sv.names[0];
-            // Check init value is 0
-            if info.try_const_int(&sv.values[0]) != Some(0) {
-                return None;
-            }
             let obj_key = info.get_def(name);
             // Skip if loop var escapes (Go 1.22 needs per-iteration heap alloc)
             if info.is_escaped(obj_key) {
                 return None;
             }
-            (name.symbol, obj_key)
+            (name.symbol, obj_key, &sv.values[0])
         }
         _ => return None,
     };
     
-    // cond must be: i < n or i <= n
-    let (cmp_var, limit_expr, cmp_op) = match &cond.kind {
-        ExprKind::Binary(bin) if bin.op == BinaryOp::Lt || bin.op == BinaryOp::LtEq => {
+    // cond must be: i < n, i <= n, i > n, or i >= n
+    let (cmp_var, limit_expr, is_decrement, is_inclusive) = match &cond.kind {
+        ExprKind::Binary(bin) => {
+            let (is_dec, is_inc) = match bin.op {
+                BinaryOp::Lt => (false, false),   // i < n (increment, exclusive)
+                BinaryOp::LtEq => (false, true),  // i <= n (increment, inclusive)
+                BinaryOp::Gt => (true, false),    // i > n (decrement, exclusive)
+                BinaryOp::GtEq => (true, true),   // i >= n (decrement, inclusive)
+                _ => return None,
+            };
             match &bin.left.kind {
-                ExprKind::Ident(id) => (id.symbol, &bin.right, bin.op),
+                ExprKind::Ident(id) => (id.symbol, &bin.right, is_dec, is_inc),
                 _ => return None,
             }
         }
@@ -75,32 +121,59 @@ fn try_match_simple_for<'a>(
         return None;
     }
     
-    // post must be: i++
-    let post_var = match &post.kind {
-        StmtKind::IncDec(inc_dec) if inc_dec.is_inc => {
+    // Limit must be single variable or constant (not expression)
+    if !is_safe_limit_expr(limit_expr) {
+        return None;
+    }
+    
+    // post must be: i++/i-- or i += 1/i -= 1
+    let (post_var, post_is_decrement) = match &post.kind {
+        // i++ or i--
+        StmtKind::IncDec(inc_dec) => {
             match &inc_dec.expr.kind {
-                ExprKind::Ident(id) => id.symbol,
+                ExprKind::Ident(id) => (id.symbol, !inc_dec.is_inc),
+                _ => return None,
+            }
+        }
+        // i += 1 or i -= 1
+        StmtKind::Assign(assign) if assign.lhs.len() == 1 && assign.rhs.len() == 1 => {
+            use vo_syntax::ast::AssignOp;
+            let is_sub = match assign.op {
+                AssignOp::Add => false,
+                AssignOp::Sub => true,
+                _ => return None,
+            };
+            // RHS must be 1
+            if info.try_const_int(&assign.rhs[0]) != Some(1) {
+                return None;
+            }
+            match &assign.lhs[0].kind {
+                ExprKind::Ident(id) => (id.symbol, is_sub),
                 _ => return None,
             }
         }
         _ => return None,
     };
     
-    // Ensure post uses same variable
-    if post_var != var_name {
+    // Ensure post uses same variable and direction matches condition
+    if post_var != var_name || post_is_decrement != is_decrement {
         return None;
     }
     
     Some(SimpleForPattern {
         var_name,
         obj_key,
+        init_expr,
         limit_expr,
-        cmp_op,
+        is_decrement,
+        is_inclusive,
     })
 }
 
 /// Compile simple for loop using ForLoop instruction.
-/// Pattern: `for i := 0; i < n; i++` or `for i := 0; i <= n-1; i++`
+/// 
+/// Increment: `for i := expr; i < n; i++` or `i <= n`
+/// Decrement: `for i := expr; i > n; i--` or `i >= n`
 fn compile_simple_for(
     for_stmt: &vo_syntax::ast::ForStmt,
     pattern: SimpleForPattern,
@@ -111,31 +184,32 @@ fn compile_simple_for(
 ) -> Result<(), CodegenError> {
     func.enter_scope();
     
-    // Allocate idx slot and initialize to 0
+    // Compile init expression
+    let init_val = crate::expr::compile_expr(pattern.init_expr, ctx, func, info)?;
+    
+    // Allocate a dedicated slot for the loop variable and copy init value
+    // This is important: we can't reuse init_val directly because:
+    // 1. It might be a reference to another variable (e.g., commonLen)
+    // 2. ForLoop modifies the idx slot, so we'd corrupt the original variable
     let idx_slot = func.alloc_slots(&[SlotType::Value]);
-    func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
+    func.emit_op(Opcode::Copy, idx_slot, init_val, 0);
     
     // Define loop variable
-    let type_key = info.obj_type(pattern.obj_key, "loop var must have type");
+    let _type_key = info.obj_type(pattern.obj_key, "loop var must have type");
     func.define_local(pattern.var_name, StorageKind::StackValue { slot: idx_slot, slots: 1 });
     
-    // Compile limit expression
+    // Compile limit expression (must be single variable or constant)
     let limit_slot = crate::expr::compile_expr(pattern.limit_expr, ctx, func, info)?;
     
-    // For i <= n, we need limit = n + 1 for ForLoop (which uses <)
-    let effective_limit = if pattern.cmp_op == BinaryOp::LtEq {
-        let adjusted = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, adjusted, 1, 0);
-        let result = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::AddI, result, limit_slot, adjusted);
-        result
-    } else {
-        limit_slot
-    };
-    
     // Initial bounds check BEFORE HINT_LOOP (executed once)
+    // Must match ForLoop comparison logic
     let cmp_slot = func.alloc_slots(&[SlotType::Value]);
-    func.emit_op(Opcode::LtI, cmp_slot, idx_slot, effective_limit);
+    match (pattern.is_decrement, pattern.is_inclusive) {
+        (false, false) => func.emit_op(Opcode::LtI, cmp_slot, idx_slot, limit_slot), // i < n
+        (false, true) => func.emit_op(Opcode::LeI, cmp_slot, idx_slot, limit_slot),  // i <= n
+        (true, false) => func.emit_op(Opcode::GtI, cmp_slot, idx_slot, limit_slot),  // i > n
+        (true, true) => func.emit_op(Opcode::GeI, cmp_slot, idx_slot, limit_slot),   // i >= n
+    }
     let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
     
     // HINT_LOOP after bounds check
@@ -157,9 +231,14 @@ fn compile_simple_for(
     // end_pc is the ForLoop instruction position
     let end_pc = func.current_pc();
     
-    // Emit ForLoop: idx++; if idx < limit goto body_start
-    // flags = 0: signed, increment
-    func.emit_forloop(idx_slot, effective_limit, body_start, 0);
+    // Emit ForLoop with appropriate flags
+    // flags bit 0: 0=signed (always signed for now)
+    // flags bit 1: 0=increment, 1=decrement
+    // flags bit 2: 0=exclusive, 1=inclusive
+    let mut flags: u8 = 0;
+    if pattern.is_decrement { flags |= 0x02; }
+    if pattern.is_inclusive { flags |= 0x04; }
+    func.emit_forloop(idx_slot, limit_slot, body_start, flags);
     
     let exit_pc = func.current_pc();
     func.patch_jump(end_jump, exit_pc);

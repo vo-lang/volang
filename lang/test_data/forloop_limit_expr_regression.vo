@@ -1,0 +1,48 @@
+// Regression test: ForLoop limit must be single variable or constant
+//
+// Go semantics: condition is re-evaluated every iteration
+// ForLoop evaluates expressions once, so complex limits must fallback
+
+package main
+
+func main() {
+	testBinaryLimitModified()
+	testSimpleLimitModified()
+	println("PASS")
+}
+
+// Binary expression limit (n-1) - must NOT use ForLoop
+// because Go re-evaluates n-1 each iteration
+func testBinaryLimitModified() {
+	n := 5
+	count := 0
+	for i := 0; i < n-1; i++ {
+		count++
+		if i == 0 {
+			n = 10 // Modify n, should affect limit
+		}
+	}
+	// After i=0: n=10, so n-1=9
+	// Loop should run until i=9, so count=9
+	if count != 9 {
+		panic("testBinaryLimitModified failed")
+	}
+}
+
+// Simple variable limit - ForLoop is OK
+// because ForLoop reads the slot each iteration
+func testSimpleLimitModified() {
+	n := 5
+	count := 0
+	for i := 0; i < n; i++ {
+		count++
+		if i == 2 {
+			n = 4 // Modify limit mid-loop
+		}
+	}
+	// At i=3: n=4, so i < 4 is false, loop exits
+	// count should be 4
+	if count != 4 {
+		panic("testSimpleLimitModified failed")
+	}
+}

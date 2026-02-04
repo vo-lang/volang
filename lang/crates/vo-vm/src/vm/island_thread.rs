@@ -31,23 +31,46 @@ pub fn run_island_thread(
     vm.state.current_island_id = island_id;
     
     loop {
-        // Process pending commands
-        match cmd_rx.try_recv() {
-            Ok(cmd) => {
-                if handle_command(&mut vm, cmd) { break; }
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if vm.scheduler.has_work() {
-                    let _ = vm.run_scheduled();
-                } else {
-                    // Block waiting for command
-                    match cmd_rx.recv() {
-                        Ok(cmd) => { if handle_command(&mut vm, cmd) { break; } }
-                        Err(_) => break,
-                    }
+        // 1. Process all pending commands first
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => {
+                    if handle_command(&mut vm, cmd) { return; }
                 }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+        
+        // 2. Run scheduler if there's work
+        if vm.scheduler.has_work() {
+            let _ = vm.run_scheduled();
+            continue; // Check for new commands after running
+        }
+        
+        // 3. No runnable fibers - decide how to wait for next event
+        let has_waiters = vm.scheduler.has_io_waiters() || vm.scheduler.has_blocked();
+        
+        if has_waiters {
+            // Has pending I/O or blocked fibers - use timeout to allow periodic polling
+            match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(cmd) => {
+                    if handle_command(&mut vm, cmd) { return; }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Poll I/O to check for completions
+                    vm.scheduler.poll_io(&mut vm.state.io);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            // Completely idle - block until command arrives
+            match cmd_rx.recv() {
+                Ok(cmd) => {
+                    if handle_command(&mut vm, cmd) { return; }
+                }
+                Err(_) => return,
+            }
         }
     }
     

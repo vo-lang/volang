@@ -82,11 +82,13 @@ impl Instruction {
     /// ForLoop flags: (is_decrement, is_unsigned)
     /// - bit 0: unsigned comparison (default: signed)
     /// - bit 1: decrement (default: increment)
+    /// - bit 2: inclusive comparison (default: exclusive)
     #[inline]
-    pub fn forloop_flags(&self) -> (bool, bool) {
+    pub fn forloop_flags(&self) -> (bool, bool, bool) {
         let is_decrement = (self.flags & 0x02) != 0;
         let is_unsigned = (self.flags & 0x01) != 0;
-        (is_decrement, is_unsigned)
+        let is_inclusive = (self.flags & 0x04) != 0;
+        (is_decrement, is_unsigned, is_inclusive)
     }
 }
 

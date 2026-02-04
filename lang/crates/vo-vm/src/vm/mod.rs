@@ -307,8 +307,12 @@ impl Vm {
                 // Check if there are I/O waiters or blocked fibers - if so, keep polling
                 #[cfg(feature = "std")]
                 if self.scheduler.has_io_waiters() || self.scheduler.has_blocked() {
-                    // Island VMs (current_island_id != 0) should return to let run_island_thread handle wake commands
-                    if self.state.current_island_id != 0 && !self.scheduler.has_io_waiters() {
+                    // Island VMs (current_island_id != 0) should return to let run_island_thread
+                    // handle commands. Poll I/O once before returning to wake any ready fibers.
+                    if self.state.current_island_id != 0 {
+                        if self.scheduler.has_io_waiters() {
+                            self.scheduler.poll_io(&mut self.state.io);
+                        }
                         break;
                     }
                     // All fibers blocked, no I/O waiters, no island communication
@@ -858,6 +862,7 @@ impl Vm {
                 }
                 
                 // ForLoop: idx++; if idx < limit goto offset
+                // flags: bit0=unsigned, bit1=decrement, bit2=inclusive
                 Opcode::ForLoop => {
                     let idx = stack_get(stack, bp + inst.a as usize);
                     let limit = stack_get(stack, bp + inst.b as usize);
@@ -873,14 +878,21 @@ impl Vm {
                     };
                     stack_set(stack, bp + inst.a as usize, next_idx);
                     
-                    // Compare
-                    let signed = (flags & 0x01) == 0;
-                    let continue_loop = if decrement {
-                        if signed { (next_idx as i64) > (limit as i64) }
-                        else { next_idx > limit }
-                    } else {
-                        if signed { (next_idx as i64) < (limit as i64) }
-                        else { next_idx < limit }
+                    // Compare: flags bit0=unsigned, bit2=inclusive
+                    let unsigned = (flags & 0x01) != 0;
+                    let inclusive = (flags & 0x04) != 0;
+                    let (ni, li) = (next_idx as i64, limit as i64);
+                    let continue_loop = match (decrement, unsigned, inclusive) {
+                        // Increment: i < limit or i <= limit
+                        (false, false, false) => ni < li,
+                        (false, false, true)  => ni <= li,
+                        (false, true, false)  => next_idx < limit,
+                        (false, true, true)   => next_idx <= limit,
+                        // Decrement: i > limit or i >= limit
+                        (true, false, false)  => ni > li,
+                        (true, false, true)   => ni >= li,
+                        (true, true, false)   => next_idx > limit,
+                        (true, true, true)    => next_idx >= limit,
                     };
                     
                     if continue_loop {

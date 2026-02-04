@@ -1,0 +1,53 @@
+// Regression test: ForLoop should not optimize loops where limit has side effects
+// 
+// Go semantics: condition is evaluated every iteration
+// ForLoop: limit is evaluated once
+// 
+// So ForLoop must NOT be used when limit contains function calls
+
+package main
+
+var callCount int
+
+func getLimit() int {
+	callCount++
+	return 5
+}
+
+func main() {
+	testLimitFunctionCall()
+	testLimitVariableModified()
+	println("PASS")
+}
+
+// Limit is a function call - must evaluate every iteration
+func testLimitFunctionCall() {
+	callCount = 0
+	count := 0
+	for i := 0; i < getLimit(); i++ {
+		count++
+	}
+	// getLimit() called 6 times: 5 true checks + 1 false check
+	if callCount != 6 {
+		panic("callCount should be 6")
+	}
+	if count != 5 {
+		panic("count should be 5")
+	}
+}
+
+// Limit is a variable modified in loop body
+func testLimitVariableModified() {
+	n := 10
+	count := 0
+	for i := 0; i < n; i++ {
+		count++
+		if i == 2 {
+			n = 5 // Reduce limit mid-loop
+		}
+	}
+	// Should stop at i=5, so count=5
+	if count != 5 {
+		panic("count should be 5 after limit modification")
+	}
+}

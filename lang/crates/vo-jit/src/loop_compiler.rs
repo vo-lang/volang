@@ -312,10 +312,10 @@ impl<'a> LoopCompiler<'a> {
     fn forloop(&mut self, inst: &Instruction) -> bool {
         let idx = self.read_var(inst.a);
         let limit = self.read_var(inst.b);
-        let (is_decrement, is_unsigned) = inst.forloop_flags();
+        let (is_decrement, is_unsigned, is_inclusive) = inst.forloop_flags();
         
         let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
-            &mut self.builder, idx, limit, is_decrement, is_unsigned
+            &mut self.builder, idx, limit, is_decrement, is_unsigned, is_inclusive
         );
         self.write_var(inst.a, next_idx);
         
