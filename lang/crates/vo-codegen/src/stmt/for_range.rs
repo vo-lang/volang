@@ -17,33 +17,35 @@ use super::var_def::{DeferredHeapAlloc, LocalDefiner};
 /// Index-based loop for for-range expansion (array, slice, string, map).
 pub(crate) struct IndexLoop {
     idx_slot: u16,
-    loop_start: usize,  // PC of condition check (Jump target)
+    limit_slot: u16,
+    body_start: usize,  // PC of body start (ForLoop target)
     end_jump: usize,
 }
 
 impl IndexLoop {
-    /// Begin: __idx := 0, HINT_LOOP, loop_start: if __idx >= __len { goto end }
+    /// Begin: __idx := 0, bounds check, HINT_LOOP, body_start
     /// 
-    /// Structure after optimization:
-    /// - HINT_LOOP (outside loop, executed once)
-    /// - loop_start: condition check (Jump target)
+    /// Structure with ForLoop optimization:
+    /// - Initial bounds check (executed once, BEFORE HINT_LOOP)
+    /// - HINT_LOOP (begin_pc = body_start)
+    /// - body_start: ForLoop jumps here
     pub fn begin(func: &mut FuncBuilder, len_slot: u16, label: Option<vo_common::Symbol>) -> Self {
         let idx_slot = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
         
-        // Emit HINT_LOOP outside the loop (executed once)
-        // loop_start will be set after this
+        // Initial bounds check BEFORE HINT_LOOP (executed once)
+        let cmp_slot = func.alloc_slots(&[SlotType::Value]);
+        func.emit_op(Opcode::LtI, cmp_slot, idx_slot, len_slot);
+        let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
+        
+        // HINT_LOOP after bounds check
         func.enter_loop(0, label);
         
-        // loop_start is AFTER HINT_LOOP - this is where Jump will target
-        let loop_start = func.current_pc();
-        func.set_loop_start(loop_start);
+        // body_start is AFTER HINT_LOOP - this is where ForLoop will jump
+        let body_start = func.current_pc();
+        func.set_loop_start(body_start);
         
-        let cmp_slot = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::GeI, cmp_slot, idx_slot, len_slot);
-        let end_jump = func.emit_jump(Opcode::JumpIf, cmp_slot);
-        
-        Self { idx_slot, loop_start, end_jump }
+        Self { idx_slot, limit_slot: len_slot, body_start, end_jump }
     }
     
     /// Get the index slot.
@@ -58,19 +60,20 @@ impl IndexLoop {
         }
     }
     
-    /// End: __idx++, goto loop_start, patch breaks/continues, finalize HINT_LOOP
+    /// End: emit ForLoop, patch breaks/continues, finalize HINT_LOOP
     pub fn end(self, func: &mut FuncBuilder) {
+        // post_pc = ForLoop position (continue jumps here)
         let post_pc = func.current_pc();
-        let one = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, one, 1, 0);
-        func.emit_op(Opcode::AddI, self.idx_slot, self.idx_slot, one);
         
-        // exit_loop returns info (no HINT_LOOP_END emitted)
+        // exit_loop returns info
         let exit_info = func.exit_loop();
         
-        // end_pc is the Jump instruction position
+        // end_pc is the ForLoop instruction position
         let end_pc = func.current_pc();
-        func.emit_jump_to(Opcode::Jump, 0, self.loop_start);
+        
+        // Emit ForLoop: idx++; if idx < limit goto body_start
+        // flags = 0: signed, increment
+        func.emit_forloop(self.idx_slot, self.limit_slot, self.body_start, 0);
         
         let exit_pc = func.current_pc();
         func.patch_jump(self.end_jump, exit_pc);

@@ -220,6 +220,11 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
         Opcode::JumpIf | Opcode::JumpIfNot => {
             regs.push(inst.a);
         }
+        // ForLoop reads idx and limit
+        Opcode::ForLoop => {
+            regs.push(inst.a);  // idx
+            regs.push(inst.b);  // limit
+        }
         // Return reads return value registers
         Opcode::Return => {
             let count = inst.b as u16;
@@ -341,7 +346,8 @@ fn get_write_reg(inst: &Instruction) -> Option<u16> {
         Opcode::LtU | Opcode::LeU | Opcode::GtU | Opcode::GeU |
         Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF |
         Opcode::LoadInt | Opcode::LoadConst |
-        Opcode::PtrGet | Opcode::PtrNew | Opcode::SliceGet | Opcode::SliceNew => {
+        Opcode::PtrGet | Opcode::PtrNew | Opcode::SliceGet | Opcode::SliceNew |
+        Opcode::ForLoop => {  // ForLoop writes idx (a)
             Some(inst.a)
         }
         _ => None,

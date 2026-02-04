@@ -68,6 +68,26 @@ impl Instruction {
     pub fn imm32_unsigned(&self) -> u32 {
         (self.b as u32) | ((self.c as u32) << 16)
     }
+
+    /// ForLoop target PC calculation.
+    /// 
+    /// ForLoop stores offset relative to (pc+1), so target = pc + 1 + offset.
+    /// This matches the VM where frame.pc is incremented before dispatch.
+    #[inline]
+    pub fn forloop_target(&self, current_pc: usize) -> usize {
+        let offset = self.c as i16;
+        (current_pc as i32 + 1 + offset as i32) as usize
+    }
+
+    /// ForLoop flags: (is_decrement, is_unsigned)
+    /// - bit 0: unsigned comparison (default: signed)
+    /// - bit 1: decrement (default: increment)
+    #[inline]
+    pub fn forloop_flags(&self) -> (bool, bool) {
+        let is_decrement = (self.flags & 0x02) != 0;
+        let is_unsigned = (self.flags & 0x01) != 0;
+        (is_decrement, is_unsigned)
+    }
 }
 
 #[repr(u8)]
@@ -293,12 +313,17 @@ pub enum Opcode {
     /// a = island, b = closure, flags = capture_slots
     GoIsland,
 
+    /// ForLoop: idx++; if idx < limit goto offset
+    /// a = idx_slot, b = limit_slot, c = jump_offset (signed 16-bit, relative to pc+1)
+    /// flags: bit0 = unsigned (0=signed), bit1 = decrement (0=increment)
+    ForLoop,
+
     // Sentinel for invalid/unknown opcodes
     Invalid = 255,
 }
 
 impl Opcode {
-    const MAX_VALID: u8 = Self::GoIsland as u8;
+    const MAX_VALID: u8 = Self::ForLoop as u8;
 
     #[inline]
     pub fn from_u8(v: u8) -> Self {

@@ -4,7 +4,8 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
-use vo_syntax::ast::{Expr, Stmt, StmtKind};
+use vo_runtime::SlotType;
+use vo_syntax::ast::{BinaryOp, Expr, ExprKind, Stmt, StmtKind};
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -14,6 +15,167 @@ use crate::type_info::TypeInfoWrapper;
 
 use super::var_def::{DeferredHeapAlloc, LocalDefiner};
 use super::{compile_block, compile_block_no_scope, compile_stmt};
+
+/// Pattern match result for simple for loop: `for i := 0; i < n; i++`
+struct SimpleForPattern<'a> {
+    /// The loop variable name
+    var_name: Symbol,
+    /// The loop variable object key
+    obj_key: ObjKey,
+    /// The limit expression (n in `i < n`)
+    limit_expr: &'a Expr,
+    /// Comparison operator (Lt or LtEq)
+    cmp_op: BinaryOp,
+}
+
+/// Try to match the pattern: `for i := 0; i < n; i++`
+/// Returns None if pattern doesn't match or loop var escapes (Go 1.22 semantics).
+fn try_match_simple_for<'a>(
+    init: Option<&'a Stmt>,
+    cond: Option<&'a Expr>,
+    post: Option<&'a Stmt>,
+    info: &TypeInfoWrapper,
+) -> Option<SimpleForPattern<'a>> {
+    // Must have all three parts
+    let init = init?;
+    let cond = cond?;
+    let post = post?;
+    
+    // init must be: i := 0
+    let (var_name, obj_key) = match &init.kind {
+        StmtKind::ShortVar(sv) if sv.names.len() == 1 && sv.values.len() == 1 => {
+            let name = &sv.names[0];
+            // Check init value is 0
+            if info.try_const_int(&sv.values[0]) != Some(0) {
+                return None;
+            }
+            let obj_key = info.get_def(name);
+            // Skip if loop var escapes (Go 1.22 needs per-iteration heap alloc)
+            if info.is_escaped(obj_key) {
+                return None;
+            }
+            (name.symbol, obj_key)
+        }
+        _ => return None,
+    };
+    
+    // cond must be: i < n or i <= n
+    let (cmp_var, limit_expr, cmp_op) = match &cond.kind {
+        ExprKind::Binary(bin) if bin.op == BinaryOp::Lt || bin.op == BinaryOp::LtEq => {
+            match &bin.left.kind {
+                ExprKind::Ident(id) => (id.symbol, &bin.right, bin.op),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    
+    // Ensure cond uses same variable as init
+    if cmp_var != var_name {
+        return None;
+    }
+    
+    // post must be: i++
+    let post_var = match &post.kind {
+        StmtKind::IncDec(inc_dec) if inc_dec.is_inc => {
+            match &inc_dec.expr.kind {
+                ExprKind::Ident(id) => id.symbol,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    
+    // Ensure post uses same variable
+    if post_var != var_name {
+        return None;
+    }
+    
+    Some(SimpleForPattern {
+        var_name,
+        obj_key,
+        limit_expr,
+        cmp_op,
+    })
+}
+
+/// Compile simple for loop using ForLoop instruction.
+/// Pattern: `for i := 0; i < n; i++` or `for i := 0; i <= n-1; i++`
+fn compile_simple_for(
+    for_stmt: &vo_syntax::ast::ForStmt,
+    pattern: SimpleForPattern,
+    label: Option<vo_common::Symbol>,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    func.enter_scope();
+    
+    // Allocate idx slot and initialize to 0
+    let idx_slot = func.alloc_slots(&[SlotType::Value]);
+    func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
+    
+    // Define loop variable
+    let type_key = info.obj_type(pattern.obj_key, "loop var must have type");
+    func.define_local(pattern.var_name, StorageKind::StackValue { slot: idx_slot, slots: 1 });
+    
+    // Compile limit expression
+    let limit_slot = crate::expr::compile_expr(pattern.limit_expr, ctx, func, info)?;
+    
+    // For i <= n, we need limit = n + 1 for ForLoop (which uses <)
+    let effective_limit = if pattern.cmp_op == BinaryOp::LtEq {
+        let adjusted = func.alloc_slots(&[SlotType::Value]);
+        func.emit_op(Opcode::LoadInt, adjusted, 1, 0);
+        let result = func.alloc_slots(&[SlotType::Value]);
+        func.emit_op(Opcode::AddI, result, limit_slot, adjusted);
+        result
+    } else {
+        limit_slot
+    };
+    
+    // Initial bounds check BEFORE HINT_LOOP (executed once)
+    let cmp_slot = func.alloc_slots(&[SlotType::Value]);
+    func.emit_op(Opcode::LtI, cmp_slot, idx_slot, effective_limit);
+    let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
+    
+    // HINT_LOOP after bounds check
+    func.enter_loop(0, label);
+    
+    // body_start is AFTER HINT_LOOP - this is where ForLoop will jump
+    let body_start = func.current_pc();
+    func.set_loop_start(body_start);
+    
+    // Compile body
+    compile_block(&for_stmt.body, ctx, func, info)?;
+    
+    // post_pc = ForLoop position (continue jumps here)
+    let post_pc = func.current_pc();
+    
+    // exit_loop returns info
+    let exit_info = func.exit_loop();
+    
+    // end_pc is the ForLoop instruction position
+    let end_pc = func.current_pc();
+    
+    // Emit ForLoop: idx++; if idx < limit goto body_start
+    // flags = 0: signed, increment
+    func.emit_forloop(idx_slot, effective_limit, body_start, 0);
+    
+    let exit_pc = func.current_pc();
+    func.patch_jump(end_jump, exit_pc);
+    
+    // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+    func.finalize_loop_hint(
+        exit_info.hint_pc, end_pc, exit_pc,
+        exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+    );
+    
+    for pc in exit_info.break_patches { func.patch_jump(pc, exit_pc); }
+    for pc in exit_info.continue_patches { func.patch_jump(pc, post_pc); }
+    
+    func.exit_scope();
+    Ok(())
+}
 
 /// Info for Go 1.22 per-iteration loop variable.
 struct LoopVarInfo {
@@ -162,6 +324,11 @@ pub(super) fn compile_for_three(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    // Try to use ForLoop optimization for simple pattern: for i := 0; i < n; i++
+    if let Some(pattern) = try_match_simple_for(init, cond, post, info) {
+        return compile_simple_for(for_stmt, pattern, label, ctx, func, info);
+    }
+    
     // C-style: for init; cond; post { }
     // Go 1.22 semantics: each iteration gets a fresh copy of loop variables.
     //

@@ -804,6 +804,18 @@ impl FuncBuilder {
         ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
     }
 
+    /// Emit ForLoop instruction.
+    /// idx_slot: index variable slot
+    /// limit_slot: limit value slot
+    /// body_start: PC of loop body start (ForLoop jumps here)
+    /// flags: bit0 = unsigned, bit1 = decrement
+    pub fn emit_forloop(&mut self, idx_slot: u16, limit_slot: u16, body_start: usize, flags: u8) {
+        let current_pc = self.code.len();
+        // offset is relative to pc+1
+        let offset = body_start as i32 - (current_pc as i32 + 1);
+        self.code.push(Instruction::with_flags(Opcode::ForLoop, flags, idx_slot, limit_slot, offset as u16));
+    }
+
     // === Loop ===
 
     /// Enter a loop: emit HINT_LOOP (outside loop) and set loop_start.

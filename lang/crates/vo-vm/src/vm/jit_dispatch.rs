@@ -496,6 +496,16 @@ pub extern "C" fn jit_call_vm_trampoline(
     let vm = unsafe { &mut *(vm as *mut Vm) };
     let args_slice = unsafe { std::slice::from_raw_parts(args, arg_count as usize) };
 
+    // Trigger func JIT compilation for the target function if not already compiled.
+    // This ensures that future JIT-to-JIT calls can use the compiled version.
+    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+        if !jit_mgr.is_compiled(func_id) && !jit_mgr.is_unsupported(func_id) {
+            let module = vm.module.as_ref().unwrap();
+            let func_def = &module.functions[func_id as usize];
+            let _ = jit_mgr.compile_function(func_id, func_def, module);
+        }
+    }
+
     // Execute using callback fiber
     let (success, _panic_state) = vm.execute_closure_sync(func_id, args_slice, ret, ret_count);
 

@@ -123,6 +123,9 @@ impl<'a> FunctionCompiler<'a> {
                     let target = (pc as i32 + offset) as usize;
                     self.ensure_block(target);
                 }
+                Opcode::ForLoop => {
+                    self.ensure_block(inst.forloop_target(pc));
+                }
                 _ => {}
             }
         }
@@ -243,6 +246,10 @@ impl<'a> FunctionCompiler<'a> {
                 });
                 Ok(false)
             }
+            Opcode::ForLoop => {
+                self.forloop(inst);
+                Ok(false)
+            }
             other => Err(JitError::UnsupportedOpcode(other)),
         }
     }
@@ -289,6 +296,24 @@ impl<'a> FunctionCompiler<'a> {
         let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
         self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
         
+        self.builder.switch_to_block(fall_through);
+        self.builder.seal_block(fall_through);
+    }
+
+    fn forloop(&mut self, inst: &Instruction) {
+        let idx = self.load_local(inst.a);
+        let limit = self.load_local(inst.b);
+        let (is_decrement, is_unsigned) = inst.forloop_flags();
+        
+        let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
+            &mut self.builder, idx, limit, is_decrement, is_unsigned
+        );
+        self.store_local(inst.a, next_idx);
+        
+        let target_block = self.blocks[&inst.forloop_target(self.current_pc)];
+        let fall_through = self.builder.create_block();
+        
+        self.builder.ins().brif(continue_loop, target_block, &[], fall_through, &[]);
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
     }

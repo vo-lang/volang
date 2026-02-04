@@ -856,6 +856,65 @@ impl Vm {
                         frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                     }
                 }
+                
+                // ForLoop: idx++; if idx < limit goto offset
+                Opcode::ForLoop => {
+                    let idx = stack_get(stack, bp + inst.a as usize);
+                    let limit = stack_get(stack, bp + inst.b as usize);
+                    let offset = inst.c as i16;
+                    let flags = inst.flags;
+                    
+                    // Increment or decrement
+                    let decrement = (flags & 0x02) != 0;
+                    let next_idx = if decrement {
+                        idx.wrapping_sub(1)
+                    } else {
+                        idx.wrapping_add(1)
+                    };
+                    stack_set(stack, bp + inst.a as usize, next_idx);
+                    
+                    // Compare
+                    let signed = (flags & 0x01) == 0;
+                    let continue_loop = if decrement {
+                        if signed { (next_idx as i64) > (limit as i64) }
+                        else { next_idx > limit }
+                    } else {
+                        if signed { (next_idx as i64) < (limit as i64) }
+                        else { next_idx < limit }
+                    };
+                    
+                    if continue_loop {
+                        let target_pc = (frame.pc as i64 + offset as i64) as usize;
+                        
+                        #[cfg(feature = "jit")]
+                        {
+                            // Back-edge: try OSR
+                            if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
+                                use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                if result_pc == OSR_RESULT_FRAME_CHANGED {
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    stack = fiber.stack_ptr();
+                                    refetch!();
+                                    continue;
+                                } else if result_pc == OSR_RESULT_WAITIO {
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    let token = fiber.resume_io_token
+                                        .expect("OSR_RESULT_WAITIO but resume_io_token is None");
+                                    return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                                } else {
+                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                    fiber.current_frame_mut().unwrap().pc = result_pc;
+                                    stack = fiber.stack_ptr();
+                                    refetch!();
+                                    continue;
+                                }
+                            }
+                        }
+                        
+                        frame.pc = target_pc;
+                    }
+                    // else: fall through (loop exit)
+                }
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
@@ -1683,6 +1742,19 @@ impl Vm {
         if !loop_info.is_jittable() {
             jit_mgr.mark_loop_failed(func_id, loop_pc);
             return None;
+        }
+        
+        // Pre-compile Call targets so JIT-to-JIT calls can succeed
+        let loop_end = loop_info.end_pc + 1;
+        for pc in loop_info.begin_pc..loop_end {
+            let inst = &func_def.code[pc];
+            if inst.opcode() == Opcode::Call {
+                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+                if !jit_mgr.is_compiled(target_func_id) && !jit_mgr.is_unsupported(target_func_id) {
+                    let target_func = &module.functions[target_func_id as usize];
+                    let _ = jit_mgr.compile_function(target_func_id, target_func, module);
+                }
+            }
         }
         
         match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {

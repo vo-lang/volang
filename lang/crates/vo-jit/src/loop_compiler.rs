@@ -160,6 +160,12 @@ impl<'a> LoopCompiler<'a> {
                         self.ensure_block(raw_target);
                     }
                 }
+                Opcode::ForLoop => {
+                    let target = inst.forloop_target(pc);
+                    if target >= self.loop_info.begin_pc && target < loop_end {
+                        self.ensure_block(target);
+                    }
+                }
                 _ => {}
             }
         }
@@ -213,6 +219,7 @@ impl<'a> LoopCompiler<'a> {
             Opcode::Jump => { self.jump(inst); Ok(true) }
             Opcode::JumpIf => { self.jump_if(inst); Ok(false) }
             Opcode::JumpIfNot => { self.jump_if_not(inst); Ok(false) }
+            Opcode::ForLoop => Ok(self.forloop(inst)),
             Opcode::Return => { self.ret(inst); Ok(true) }
             Opcode::Panic => { self.panic(inst); Ok(true) }
             Opcode::Call => { Ok(self.call(inst)) }
@@ -268,24 +275,31 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn jump_if(&mut self, inst: &Instruction) {
+        self.conditional_jump(inst, IntCC::NotEqual);
+    }
+
+    fn jump_if_not(&mut self, inst: &Instruction) {
+        self.conditional_jump(inst, IntCC::Equal);
+    }
+
+    fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
         let cond = self.read_var(inst.a);
-        let offset = inst.imm32();
-        let target = (self.current_pc as i32 + offset) as usize;
-        let loop_end = self.loop_info.end_pc + 1;
+        let target = (self.current_pc as i32 + inst.imm32()) as usize;
         
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
-        let cmp = self.builder.ins().icmp(IntCC::NotEqual, cond, zero);
+        let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
         
-        if target < self.loop_info.begin_pc || target >= loop_end {
+        if target < self.loop_info.begin_pc || target > self.loop_info.end_pc {
+            // Target outside loop - exit to VM
             let exit_block = self.builder.create_block();
             self.builder.ins().brif(cmp, exit_block, &[], fall_through, &[]);
-            
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
             self.emit_loop_exit(target as u32);
         } else {
+            // Target within loop - stay in JIT
             let target_block = self.blocks[&target];
             self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
         }
@@ -294,31 +308,38 @@ impl<'a> LoopCompiler<'a> {
         self.builder.seal_block(fall_through);
     }
 
-    fn jump_if_not(&mut self, inst: &Instruction) {
-        let cond = self.read_var(inst.a);
-        let offset = inst.imm32();
-        let target = (self.current_pc as i32 + offset) as usize;
-        let loop_end = self.loop_info.end_pc + 1;
+    /// Returns true if block is terminated (exit to VM), false if fall-through continues in JIT
+    fn forloop(&mut self, inst: &Instruction) -> bool {
+        let idx = self.read_var(inst.a);
+        let limit = self.read_var(inst.b);
+        let (is_decrement, is_unsigned) = inst.forloop_flags();
         
-        let fall_through = self.builder.create_block();
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let cmp = self.builder.ins().icmp(IntCC::Equal, cond, zero);
+        let (next_idx, continue_loop) = crate::translate::emit_forloop_step(
+            &mut self.builder, idx, limit, is_decrement, is_unsigned
+        );
+        self.write_var(inst.a, next_idx);
         
-        if target < self.loop_info.begin_pc || target >= loop_end {
+        let target_block = self.blocks[&inst.forloop_target(self.current_pc)];
+        let exit_pc = self.current_pc + 1;
+        
+        // Check if exit_pc is within JIT compilation range
+        if exit_pc >= self.loop_info.begin_pc && exit_pc <= self.loop_info.end_pc {
+            // Exit within loop - continue in JIT
+            let fall_through = self.builder.create_block();
+            self.builder.ins().brif(continue_loop, target_block, &[], fall_through, &[]);
+            self.builder.switch_to_block(fall_through);
+            self.builder.seal_block(fall_through);
+            false
+        } else {
+            // Exit outside loop - return to VM
             let exit_block = self.builder.create_block();
-            self.builder.ins().brif(cmp, exit_block, &[], fall_through, &[]);
-            
+            self.builder.ins().brif(continue_loop, target_block, &[], exit_block, &[]);
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
-            self.emit_loop_exit(target as u32);
-        } else {
-            let target_block = self.blocks[&target];
-            self.builder.ins().brif(cmp, target_block, &[], fall_through, &[]);
+            self.emit_loop_exit(exit_pc as u32);
+            true
         }
-        
-        self.builder.switch_to_block(fall_through);
-        self.builder.seal_block(fall_through);
     }
 
     fn ret(&mut self, _inst: &Instruction) {

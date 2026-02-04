@@ -127,6 +127,8 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         StrNew => { str_new(e, inst); Ok(Completed) }
         IfaceAssign => { iface_assign(e, inst); Ok(Completed) }
         IfaceEq => { iface_eq(e, inst); Ok(Completed) }
+        // ForLoop - handled by loop compiler
+        ForLoop => Ok(Unhandled),
         // Control flow - compiler specific
         Jump | JumpIf | JumpIfNot | Return | Panic => Ok(Unhandled),
         // Function calls - compiler specific
@@ -1526,4 +1528,36 @@ fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let one = e.builder().ins().iconst(types::I64, 1);
     let masked = e.builder().ins().band(result, one);
     e.write_var(inst.a, masked);
+}
+
+// =============================================================================
+// ForLoop Helpers
+// =============================================================================
+
+/// Emit ForLoop step: idx += step; return (next_idx, continue_condition)
+/// 
+/// Shared by FuncCompiler and LoopCompiler.
+pub fn emit_forloop_step(
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    idx: Value,
+    limit: Value,
+    is_decrement: bool,
+    is_unsigned: bool,
+) -> (Value, Value) {
+    let one = builder.ins().iconst(types::I64, 1);
+    let next_idx = if is_decrement {
+        builder.ins().isub(idx, one)
+    } else {
+        builder.ins().iadd(idx, one)
+    };
+    
+    let cc = match (is_decrement, is_unsigned) {
+        (false, false) => IntCC::SignedLessThan,
+        (false, true)  => IntCC::UnsignedLessThan,
+        (true, false)  => IntCC::SignedGreaterThan,
+        (true, true)   => IntCC::UnsignedGreaterThan,
+    };
+    let continue_loop = builder.ins().icmp(cc, next_idx, limit);
+    
+    (next_idx, continue_loop)
 }
