@@ -1077,12 +1077,19 @@ fn compile_func_body(
             
             let slot = if escapes {
                 // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
+                // GC uses alloc_zeroed, so heap memory is already zero-initialized
                 let gcref_slot = builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
                 escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {
                 let (_, slot_types) = info.type_expr_layout(result.ty.id);
-                builder.define_local_stack(name.symbol, slots, &slot_types)
+                let slot = builder.define_local_stack(name.symbol, slots, &slot_types);
+                // Zero-initialize non-escaped named return (Go zero-value semantics)
+                // VM no longer does write_bytes, so codegen must handle this
+                for i in 0..slots {
+                    builder.emit_op(vo_vm::instruction::Opcode::LoadInt, slot + i, 0, 0);
+                }
+                slot
             };
             builder.register_named_return(slot, slots, escapes);
         }

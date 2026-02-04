@@ -33,13 +33,11 @@ pub fn exec_call(
     
     fiber.ensure_capacity(new_sp);
     let stack = fiber.stack_ptr();
-    let local_slots = func.local_slots as usize;
     
-    // Zero the entire local slots area first (important for named returns and local vars)
-    // Use write_bytes for efficient bulk zeroing
-    unsafe { core::ptr::write_bytes(stack.add(new_bp), 0, local_slots) };
+    // Note: We don't zero local slots here - codegen handles zero-initialization
+    // for all variables that need it (named returns, var declarations, etc.)
     
-    // Copy args from caller's frame to new frame (overwrites the zeros for arg slots)
+    // Copy args from caller's frame to new frame
     for i in 0..arg_slots {
         stack_set(stack, new_bp + i, stack_get(stack, caller_bp + arg_start + i));
     }
@@ -72,10 +70,8 @@ pub fn exec_call_closure(
     
     fiber.ensure_capacity(new_sp);
     let stack = fiber.stack_ptr();
-    let local_slots = func.local_slots as usize;
     
-    // Zero the entire local slots area first (important for named returns and local vars)
-    unsafe { core::ptr::write_bytes(stack.add(new_bp), 0, local_slots) };
+    // Note: We don't zero local slots here - codegen handles zero-initialization
     
     // Use common closure call layout logic
     let layout = vo_runtime::objects::closure::call_layout(
@@ -128,10 +124,8 @@ pub fn exec_call_iface(
     
     fiber.ensure_capacity(new_sp);
     let stack = fiber.stack_ptr();
-    let local_slots = func.local_slots as usize;
     
-    // Zero the entire local slots area first (important for named returns and local vars)
-    unsafe { core::ptr::write_bytes(stack.add(new_bp), 0, local_slots) };
+    // Note: We don't zero local slots here - codegen handles zero-initialization
     
     // Pass slot1 directly as receiver (1 slot: GcRef or primitive)
     stack_set(stack, new_bp, slot1);

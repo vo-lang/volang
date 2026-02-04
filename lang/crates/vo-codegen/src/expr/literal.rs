@@ -514,12 +514,18 @@ pub fn compile_func_lit(
             let escapes = any_escapes || info.is_escaped(obj_key);
             
             let slot = if escapes {
+                // GC uses alloc_zeroed, so heap memory is already zero-initialized
                 let gcref_slot = closure_builder.define_local_heap_boxed(name.symbol, slots, info.is_pointer(result_type));
                 escaped_returns.push(EscapedReturn { gcref_slot, slots, result_type });
                 gcref_slot
             } else {
                 let (_, slot_types) = info.type_expr_layout(result.ty.id);
-                closure_builder.define_local_stack(name.symbol, slots, &slot_types)
+                let slot = closure_builder.define_local_stack(name.symbol, slots, &slot_types);
+                // Zero-initialize non-escaped named return (Go zero-value semantics)
+                for i in 0..slots {
+                    closure_builder.emit_op(Opcode::LoadInt, slot + i, 0, 0);
+                }
+                slot
             };
             closure_builder.register_named_return(slot, slots, escapes);
         }
