@@ -1060,6 +1060,7 @@ class BenchmarkRunner:
         vo_file = next(bench_dir.glob('*.vo'), None)
         go_file = next(bench_dir.glob('*.go'), None)
         lua_file = next(bench_dir.glob('*.lua'), None)
+        js_file = next(bench_dir.glob('*.js'), None)
         py_file = next(bench_dir.glob('*.py'), None)
         rb_file = next(bench_dir.glob('*.rb'), None)
         java_file = next(bench_dir.glob('*.java'), None)
@@ -1092,6 +1093,10 @@ class BenchmarkRunner:
             if lua_file and command_exists('luajit'):
                 cmds.append(f"luajit '{lua_file}'")
                 names.append('LuaJIT')
+
+            if js_file and command_exists('node'):
+                cmds.append(f"node '{js_file}'")
+                names.append('Node')
 
             if py_file and self.all_langs:
                 cmds.append(f"python3 '{py_file}'")
@@ -1157,7 +1162,7 @@ class BenchmarkRunner:
             for result in data['results']:
                 name = result.get('command', '')
                 mean = result.get('mean')
-                if name in ('Vo-VM', 'Vo-JIT', 'Go', 'Lua', 'LuaJIT', 'Python', 'Ruby', 'Java', 'C'):
+                if name in ('Vo-VM', 'Vo-JIT', 'Go', 'Lua', 'LuaJIT', 'Node', 'Python', 'Ruby', 'Java', 'C'):
                     if mean and mean > 0:
                         mean_times[name] = mean
 
