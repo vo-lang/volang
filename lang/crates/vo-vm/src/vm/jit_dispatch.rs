@@ -224,6 +224,10 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         push_frame_fn: Some(jit_push_frame),
         pop_frame_fn: Some(jit_pop_frame),
         push_resume_point_fn: Some(jit_push_resume_point),
+        // Batch 1 callbacks
+        create_island_fn: Some(jit_create_island),
+        chan_close_fn: Some(jit_chan_close),
+        port_close_fn: Some(jit_port_close),
     };
 
     JitContextWrapper {
@@ -909,5 +913,146 @@ pub fn dispatch_loop_osr(
             panic!("Loop OSR returned WaitIo but std feature not enabled")
         }
     }
+}
+
+// =============================================================================
+// Batch 1: JIT Callbacks for Island/Channel/Port operations
+// =============================================================================
+
+/// JIT callback to create a new island.
+/// Returns the island handle as u64.
+#[cfg(feature = "std")]
+extern "C" fn jit_create_island(ctx: *mut JitContext) -> u64 {
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let module = unsafe { &*(ctx.module as *const Module) };
+    
+    let next_id = vm.state.next_island_id;
+    vm.state.next_island_id += 1;
+    
+    // Create island with proper registration
+    let (tx, rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+    let handle = vo_runtime::island::create(&mut vm.state.gc, next_id);
+    
+    // Initialize island registry if needed
+    if vm.state.island_registry.is_none() {
+        let (main_tx, main_rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+        let mut registry = std::collections::HashMap::new();
+        registry.insert(0u32, main_tx);
+        vm.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
+        vm.state.main_cmd_rx = Some(main_rx);
+    }
+    
+    // Register the island's command channel
+    let registry = vm.state.island_registry.as_ref().unwrap().clone();
+    { let mut guard = registry.lock().unwrap(); guard.insert(next_id, tx.clone()); }
+    
+    // Spawn island thread
+    let module_arc = std::sync::Arc::new(module.clone());
+    let registry_clone = registry.clone();
+    let join_handle = std::thread::spawn(move || {
+        crate::vm::island_thread::run_island_thread(next_id, module_arc, rx, registry_clone);
+    });
+    
+    // Save thread handle
+    vm.state.island_threads.push(crate::vm::types::IslandThread {
+        handle, command_tx: tx, join_handle: Some(join_handle),
+    });
+    
+    handle as u64
+}
+
+#[cfg(not(feature = "std"))]
+extern "C" fn jit_create_island(ctx: *mut JitContext) -> u64 {
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    
+    // Create dummy main island handle for no_std
+    let handle = vo_runtime::island::create_main(&mut vm.state.gc);
+    handle as u64
+}
+
+/// Helper: set panic message on fiber and return JitResult::Panic.
+fn set_jit_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) -> JitResult {
+    let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+    JitResult::Panic
+}
+
+/// JIT callback to close a channel.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel.
+extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::channel;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let ch = chan as GcRef;
+    
+    if ch.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_CLOSE_NIL_CHANNEL);
+    }
+    
+    let state = channel::get_state(ch);
+    if state.is_closed() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_CLOSE_CLOSED_CHANNEL);
+    }
+    
+    state.close();
+    
+    // Wake all waiting fibers
+    let mut wake_ids: Vec<u32> = state.take_waiting_receivers().into_iter().map(|id| id as u32).collect();
+    wake_ids.extend(state.take_waiting_senders().into_iter().map(|(id, _)| id as u32));
+    
+    for id in wake_ids {
+        let fiber_id = crate::scheduler::FiberId::from_raw(id);
+        vm.scheduler.wake_fiber(fiber_id);
+    }
+    
+    JitResult::Ok
+}
+
+/// JIT callback to close a port.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil port.
+#[cfg(feature = "std")]
+extern "C" fn jit_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::port;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    let p = port as GcRef;
+    
+    if p.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_CLOSE_NIL_CHANNEL);
+    }
+    
+    // Port doesn't panic on double close
+    if port::is_closed(p) {
+        return JitResult::Ok;
+    }
+    
+    port::close(p);
+    
+    // Wake all waiting fibers (remote waiters)
+    let mut waiters = port::take_waiting_receivers(p);
+    for (sender, _) in port::take_waiting_senders(p) {
+        waiters.push(sender);
+    }
+    
+    for waiter in &waiters {
+        vm.state.wake_waiter(waiter, &mut vm.scheduler);
+    }
+    
+    JitResult::Ok
+}
+
+#[cfg(not(feature = "std"))]
+extern "C" fn jit_port_close(_ctx: *mut JitContext, _port: u64) -> JitResult {
+    // Ports not supported in no_std
+    JitResult::Ok
 }
 

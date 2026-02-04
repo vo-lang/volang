@@ -562,6 +562,7 @@ impl<'a> FunctionCompiler<'a> {
             self.store_local((arg_start + i) as u16, val);
         }
     }
+    
 }
 
 impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {

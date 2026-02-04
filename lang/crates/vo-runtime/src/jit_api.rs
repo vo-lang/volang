@@ -208,6 +208,22 @@ pub struct JitContext {
     /// Callback to push a resume point on side-exit (Call/WaitIo).
     /// Only called on the slow path when callee returns non-OK.
     pub push_resume_point_fn: Option<JitPushResumePointFn>,
+    
+    // =========================================================================
+    // VM Callbacks for advanced opcodes (Batch 1+)
+    // =========================================================================
+    
+    /// Callback to create a new island.
+    /// Returns the island handle as u64.
+    pub create_island_fn: Option<extern "C" fn(*mut JitContext) -> u64>,
+    
+    /// Callback to close a channel.
+    /// Returns JitResult (Ok or Panic).
+    pub chan_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
+    
+    /// Callback to close a port.
+    /// Returns JitResult (Ok or Panic).
+    pub port_close_fn: Option<extern "C" fn(*mut JitContext, port: u64) -> JitResult>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -247,6 +263,11 @@ impl JitContext {
     pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
     pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
     pub const OFFSET_PUSH_RESUME_POINT_FN: i32 = std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
+    
+    // VM callback offsets (Batch 1+)
+    pub const OFFSET_CREATE_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, create_island_fn) as i32;
+    pub const OFFSET_CHAN_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, chan_close_fn) as i32;
+    pub const OFFSET_PORT_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, port_close_fn) as i32;
 }
 
 // =============================================================================
@@ -1357,6 +1378,42 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_iter_init", vo_map_iter_init as *const u8),
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_copy", vo_copy as *const u8),
+        // Batch 1: Island/Channel/Port operations
+        ("vo_island_new", vo_island_new as *const u8),
+        ("vo_chan_close", vo_chan_close as *const u8),
+        ("vo_port_close", vo_port_close as *const u8),
     ]
+}
+
+// =============================================================================
+// Batch 1: Island/Channel/Port JIT Helpers
+// =============================================================================
+
+/// Create a new island.
+/// Calls into VM via callback to properly register with scheduler.
+/// Returns the island handle.
+#[no_mangle]
+pub extern "C" fn vo_island_new(ctx: *mut JitContext) -> u64 {
+    let ctx = unsafe { &mut *ctx };
+    let create_fn = ctx.create_island_fn.expect("create_island_fn not set");
+    create_fn(ctx)
+}
+
+/// Close a channel.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel.
+#[no_mangle]
+pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let close_fn = ctx.chan_close_fn.expect("chan_close_fn not set");
+    close_fn(ctx, chan)
+}
+
+/// Close a port.
+/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed port.
+#[no_mangle]
+pub extern "C" fn vo_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let close_fn = ctx.port_close_fn.expect("port_close_fn not set");
+    close_fn(ctx, port)
 }
 

@@ -65,6 +65,10 @@ pub struct HelperFuncs {
     pub iface_to_iface: Option<FuncRef>,
     pub iface_eq: Option<FuncRef>,
     pub set_call_request: Option<FuncRef>,
+    // Batch 1: Island/Channel/Port operations
+    pub island_new: Option<FuncRef>,
+    pub chan_close: Option<FuncRef>,
+    pub port_close: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler

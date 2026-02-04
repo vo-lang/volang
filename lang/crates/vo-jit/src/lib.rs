@@ -2,6 +2,7 @@
 
 mod call_helpers;
 mod func_compiler;
+mod helpers;
 pub mod loop_analysis;
 mod loop_compiler;
 mod translate;
@@ -25,28 +26,28 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitContext, JitResult};
 
+use helpers::HelperFuncIds;
+
 // =============================================================================
 // Shared Utilities
 // =============================================================================
 
-/// Check if a function is jittable (does not contain blocking operations or dynamic dispatch).
-/// A function is NOT jittable if it uses defer, channels, select, goroutines, blocking island/port ops,
-/// or closure/interface calls (until Phase 5 unified dispatch is implemented).
+/// Check if a function is jittable (does not contain blocking operations).
+/// A function is NOT jittable if it uses defer, channels, select, goroutines, or blocking port ops.
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
             // Defer/recover
             Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
             // Goroutines
-            | Opcode::GoStart
-            // Channels (send/recv/close can block)
-            | Opcode::ChanSend | Opcode::ChanRecv | Opcode::ChanClose
+            | Opcode::GoStart | Opcode::GoIsland
+            // Channels (send/recv can block)
+            | Opcode::ChanSend | Opcode::ChanRecv
             // Select
             | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec
-            // Island (cross-thread operations)
-            | Opcode::IslandNew | Opcode::GoIsland
-            // Port blocking operations (PortNew/Len/Cap are OK)
-            | Opcode::PortSend | Opcode::PortRecv | Opcode::PortClose => return false,
+            // Port blocking operations (PortNew/Len/Cap are OK, PortClose supported in Batch 1)
+            | Opcode::PortSend | Opcode::PortRecv => return false,
+            // Batch 1: IslandNew, ChanClose, PortClose - now supported
             // CallClosure and CallIface supported via unified call protocol (Phase 4)
             // CallExtern supported via jit_call_extern callback (Step 3)
             _ => {}
@@ -195,60 +196,6 @@ impl Default for JitCache {
 }
 
 // =============================================================================
-// HelperFuncIds
-// =============================================================================
-
-#[derive(Clone, Copy)]
-struct HelperFuncIds {
-    call_vm: cranelift_module::FuncId,
-    gc_alloc: cranelift_module::FuncId,
-    write_barrier: cranelift_module::FuncId,
-    closure_get_func_id: cranelift_module::FuncId,
-    iface_get_func_id: cranelift_module::FuncId,
-    set_closure_call_request: cranelift_module::FuncId,
-    set_iface_call_request: cranelift_module::FuncId,
-    panic: cranelift_module::FuncId,
-    call_extern: cranelift_module::FuncId,
-    str_new: cranelift_module::FuncId,
-    str_len: cranelift_module::FuncId,
-    str_index: cranelift_module::FuncId,
-    str_concat: cranelift_module::FuncId,
-    str_slice: cranelift_module::FuncId,
-    str_eq: cranelift_module::FuncId,
-    str_cmp: cranelift_module::FuncId,
-    str_decode_rune: cranelift_module::FuncId,
-    ptr_clone: cranelift_module::FuncId,
-    closure_new: cranelift_module::FuncId,
-    chan_new: cranelift_module::FuncId,
-    chan_len: cranelift_module::FuncId,
-    chan_cap: cranelift_module::FuncId,
-    port_new: cranelift_module::FuncId,
-    port_len: cranelift_module::FuncId,
-    port_cap: cranelift_module::FuncId,
-    array_new: cranelift_module::FuncId,
-    array_len: cranelift_module::FuncId,
-    slice_new: cranelift_module::FuncId,
-    slice_len: cranelift_module::FuncId,
-    slice_cap: cranelift_module::FuncId,
-    slice_append: cranelift_module::FuncId,
-    slice_slice: cranelift_module::FuncId,
-    slice_slice3: cranelift_module::FuncId,
-    slice_from_array: cranelift_module::FuncId,
-    slice_from_array3: cranelift_module::FuncId,
-    map_new: cranelift_module::FuncId,
-    map_len: cranelift_module::FuncId,
-    map_get: cranelift_module::FuncId,
-    map_set: cranelift_module::FuncId,
-    map_delete: cranelift_module::FuncId,
-    map_iter_init: cranelift_module::FuncId,
-    map_iter_next: cranelift_module::FuncId,
-    iface_assert: cranelift_module::FuncId,
-    iface_to_iface: cranelift_module::FuncId,
-    iface_eq: cranelift_module::FuncId,
-    set_call_request: cranelift_module::FuncId,
-}
-
-// =============================================================================
 // JitCompiler
 // =============================================================================
 
@@ -278,561 +225,42 @@ impl JitCompiler {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         
         // Register runtime helper symbols
-        Self::register_symbols(&mut builder);
+        helpers::register_symbols(&mut builder);
 
         let mut module = JITModule::new(builder);
         let ctx = module.make_context();
         let ptr_type = module.target_config().pointer_type();
-        let helper_funcs = Self::declare_helpers(&mut module, ptr_type)?;
+        let helper_funcs = helpers::declare_helpers(&mut module, ptr_type)?;
 
         Ok(Self { module, ctx, cache: JitCache::new(), helper_funcs, debug_ir })
     }
 
-    fn register_symbols(builder: &mut JITBuilder) {
-        builder.symbol("vo_gc_alloc", vo_runtime::jit_api::vo_gc_alloc as *const u8);
-        builder.symbol("vo_gc_write_barrier", vo_runtime::jit_api::vo_gc_write_barrier as *const u8);
-        builder.symbol("vo_call_vm", vo_runtime::jit_api::vo_call_vm as *const u8);
-        builder.symbol("vo_closure_get_func_id", vo_runtime::jit_api::vo_closure_get_func_id as *const u8);
-        builder.symbol("vo_iface_get_func_id", vo_runtime::jit_api::vo_iface_get_func_id as *const u8);
-        builder.symbol("vo_set_closure_call_request", vo_runtime::jit_api::vo_set_closure_call_request as *const u8);
-        builder.symbol("vo_set_iface_call_request", vo_runtime::jit_api::vo_set_iface_call_request as *const u8);
-        builder.symbol("vo_str_new", vo_runtime::jit_api::vo_str_new as *const u8);
-        builder.symbol("vo_str_len", vo_runtime::jit_api::vo_str_len as *const u8);
-        builder.symbol("vo_str_index", vo_runtime::jit_api::vo_str_index as *const u8);
-        builder.symbol("vo_str_concat", vo_runtime::jit_api::vo_str_concat as *const u8);
-        builder.symbol("vo_str_slice", vo_runtime::jit_api::vo_str_slice as *const u8);
-        builder.symbol("vo_str_eq", vo_runtime::jit_api::vo_str_eq as *const u8);
-        builder.symbol("vo_str_cmp", vo_runtime::jit_api::vo_str_cmp as *const u8);
-        builder.symbol("vo_str_decode_rune", vo_runtime::jit_api::vo_str_decode_rune as *const u8);
-        builder.symbol("vo_map_new", vo_runtime::jit_api::vo_map_new as *const u8);
-        builder.symbol("vo_map_len", vo_runtime::jit_api::vo_map_len as *const u8);
-        builder.symbol("vo_map_get", vo_runtime::jit_api::vo_map_get as *const u8);
-        builder.symbol("vo_map_set", vo_runtime::jit_api::vo_map_set as *const u8);
-        builder.symbol("vo_map_delete", vo_runtime::jit_api::vo_map_delete as *const u8);
-        builder.symbol("vo_ptr_clone", vo_runtime::jit_api::vo_ptr_clone as *const u8);
-        builder.symbol("vo_panic", vo_runtime::jit_api::vo_panic as *const u8);
-        builder.symbol("vo_call_extern", vo_runtime::jit_api::vo_call_extern as *const u8);
-        builder.symbol("vo_closure_new", vo_runtime::jit_api::vo_closure_new as *const u8);
-        builder.symbol("vo_chan_new", vo_runtime::jit_api::vo_chan_new as *const u8);
-        builder.symbol("vo_chan_len", vo_runtime::jit_api::vo_chan_len as *const u8);
-        builder.symbol("vo_chan_cap", vo_runtime::jit_api::vo_chan_cap as *const u8);
-        builder.symbol("vo_port_new", vo_runtime::jit_api::vo_port_new as *const u8);
-        builder.symbol("vo_port_len", vo_runtime::jit_api::vo_port_len as *const u8);
-        builder.symbol("vo_port_cap", vo_runtime::jit_api::vo_port_cap as *const u8);
-        builder.symbol("vo_array_new", vo_runtime::jit_api::vo_array_new as *const u8);
-        builder.symbol("vo_array_len", vo_runtime::jit_api::vo_array_len as *const u8);
-        builder.symbol("vo_slice_new", vo_runtime::jit_api::vo_slice_new as *const u8);
-        builder.symbol("vo_slice_len", vo_runtime::jit_api::vo_slice_len as *const u8);
-        builder.symbol("vo_slice_cap", vo_runtime::jit_api::vo_slice_cap as *const u8);
-        builder.symbol("vo_slice_append", vo_runtime::jit_api::vo_slice_append as *const u8);
-        builder.symbol("vo_slice_slice", vo_runtime::jit_api::vo_slice_slice as *const u8);
-        builder.symbol("vo_slice_slice3", vo_runtime::jit_api::vo_slice_slice3 as *const u8);
-        builder.symbol("vo_slice_from_array", vo_runtime::jit_api::vo_slice_from_array as *const u8);
-        builder.symbol("vo_slice_from_array3", vo_runtime::jit_api::vo_slice_from_array3 as *const u8);
-        builder.symbol("vo_map_iter_init", vo_runtime::jit_api::vo_map_iter_init as *const u8);
-        builder.symbol("vo_map_iter_next", vo_runtime::jit_api::vo_map_iter_next as *const u8);
-        builder.symbol("vo_iface_assert", vo_runtime::jit_api::vo_iface_assert as *const u8);
-        builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
-        builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
-        builder.symbol("vo_set_call_request", vo_runtime::jit_api::vo_set_call_request as *const u8);
-    }
-
-    fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type) -> Result<HelperFuncIds, JitError> {
-        use cranelift_module::Linkage::Import;
-        
-        let call_vm = module.declare_function("vo_call_vm", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I32));
-            sig
-        })?;
-        
-        let gc_alloc = module.declare_function("vo_gc_alloc", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let write_barrier = module.declare_function("vo_gc_write_barrier", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));    // gc
-            sig.params.push(AbiParam::new(types::I64)); // obj (parent)
-            sig.params.push(AbiParam::new(types::I32)); // offset
-            sig.params.push(AbiParam::new(types::I64)); // val (child)
-            sig
-        })?;
-        
-        // vo_closure_get_func_id(closure_ref) -> func_id
-        let closure_get_func_id = module.declare_function("vo_closure_get_func_id", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64)); // closure_ref
-            sig.returns.push(AbiParam::new(types::I32)); // func_id
-            sig
-        })?;
-        
-        // vo_iface_get_func_id(ctx, slot0, method_idx) -> func_id
-        let iface_get_func_id = module.declare_function("vo_iface_get_func_id", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I64)); // slot0
-            sig.params.push(AbiParam::new(types::I32)); // method_idx
-            sig.returns.push(AbiParam::new(types::I32)); // func_id
-            sig
-        })?;
-        
-        // vo_set_closure_call_request(ctx, func_id, arg_start, resume_pc, ret_slots, arg_slots, closure_ref)
-        let set_closure_call_request = module.declare_function("vo_set_closure_call_request", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I32)); // func_id
-            sig.params.push(AbiParam::new(types::I32)); // arg_start
-            sig.params.push(AbiParam::new(types::I32)); // resume_pc
-            sig.params.push(AbiParam::new(types::I32)); // ret_slots
-            sig.params.push(AbiParam::new(types::I32)); // arg_slots
-            sig.params.push(AbiParam::new(types::I64)); // closure_ref
-            sig
-        })?;
-        
-        // vo_set_iface_call_request(ctx, func_id, arg_start, resume_pc, ret_slots, arg_slots, iface_recv)
-        let set_iface_call_request = module.declare_function("vo_set_iface_call_request", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I32)); // func_id
-            sig.params.push(AbiParam::new(types::I32)); // arg_start
-            sig.params.push(AbiParam::new(types::I32)); // resume_pc
-            sig.params.push(AbiParam::new(types::I32)); // ret_slots
-            sig.params.push(AbiParam::new(types::I32)); // arg_slots
-            sig.params.push(AbiParam::new(types::I64)); // iface_recv
-            sig
-        })?;
-        
-        let panic = module.declare_function("vo_panic", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I64)); // msg_slot0
-            sig.params.push(AbiParam::new(types::I64)); // msg_slot1
-            sig
-        })?;
-        
-        let call_extern = module.declare_function("vo_call_extern", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // ctx
-            sig.params.push(AbiParam::new(types::I32)); // extern_id
-            sig.params.push(AbiParam::new(ptr));       // args
-            sig.params.push(AbiParam::new(types::I32)); // arg_count
-            sig.params.push(AbiParam::new(ptr));       // ret
-            sig.params.push(AbiParam::new(types::I32)); // ret_slots
-            sig.returns.push(AbiParam::new(types::I32));
-            sig
-        })?;
-        
-        let str_new = module.declare_function("vo_str_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_len = module.declare_function("vo_str_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_index = module.declare_function("vo_str_index", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_concat = module.declare_function("vo_str_concat", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_slice = module.declare_function("vo_str_slice", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_eq = module.declare_function("vo_str_eq", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let str_cmp = module.declare_function("vo_str_cmp", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I32));
-            sig
-        })?;
-        
-        let str_decode_rune = module.declare_function("vo_str_decode_rune", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let ptr_clone = module.declare_function("vo_ptr_clone", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let closure_new = module.declare_function("vo_closure_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let chan_new = module.declare_function("vo_chan_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let chan_len = module.declare_function("vo_chan_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let chan_cap = module.declare_function("vo_chan_cap", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let port_new = module.declare_function("vo_port_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let port_len = module.declare_function("vo_port_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let port_cap = module.declare_function("vo_port_cap", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let array_new = module.declare_function("vo_array_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let array_len = module.declare_function("vo_array_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_new = module.declare_function("vo_slice_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_len = module.declare_function("vo_slice_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_cap = module.declare_function("vo_slice_cap", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_append = module.declare_function("vo_slice_append", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(ptr));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_slice = module.declare_function("vo_slice_slice", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_slice3 = module.declare_function("vo_slice_slice3", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_from_array = module.declare_function("vo_slice_from_array", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let slice_from_array3 = module.declare_function("vo_slice_from_array3", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let map_new = module.declare_function("vo_map_new", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // gc
-            sig.params.push(AbiParam::new(types::I32)); // key_meta
-            sig.params.push(AbiParam::new(types::I32)); // val_meta
-            sig.params.push(AbiParam::new(types::I32)); // key_slots
-            sig.params.push(AbiParam::new(types::I32)); // val_slots
-            sig.params.push(AbiParam::new(types::I32)); // key_rttid
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let map_len = module.declare_function("vo_map_len", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let map_get = module.declare_function("vo_map_get", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // ctx
-            sig.params.push(AbiParam::new(types::I64)); // m
-            sig.params.push(AbiParam::new(ptr));       // key_ptr
-            sig.params.push(AbiParam::new(types::I32)); // key_slots
-            sig.params.push(AbiParam::new(ptr));       // val_ptr
-            sig.params.push(AbiParam::new(types::I32)); // val_slots
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let map_set = module.declare_function("vo_map_set", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // ctx
-            sig.params.push(AbiParam::new(types::I64)); // m
-            sig.params.push(AbiParam::new(ptr));       // key_ptr
-            sig.params.push(AbiParam::new(types::I32)); // key_slots
-            sig.params.push(AbiParam::new(ptr));       // val_ptr
-            sig.params.push(AbiParam::new(types::I32)); // val_slots
-            sig.returns.push(AbiParam::new(types::I64)); // 0=ok, 1=panic (unhashable)
-            sig
-        })?;
-        
-        let map_delete = module.declare_function("vo_map_delete", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // ctx
-            sig.params.push(AbiParam::new(types::I64)); // m
-            sig.params.push(AbiParam::new(ptr));       // key_ptr
-            sig.params.push(AbiParam::new(types::I32)); // key_slots
-            sig
-        })?;
-        
-        let map_iter_init = module.declare_function("vo_map_iter_init", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(types::I64)); // map
-            sig.params.push(AbiParam::new(ptr));        // iter_ptr
-            sig
-        })?;
-        
-        let map_iter_next = module.declare_function("vo_map_iter_next", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // iter_ptr
-            sig.params.push(AbiParam::new(ptr));        // key_ptr
-            sig.params.push(AbiParam::new(types::I32)); // key_slots
-            sig.params.push(AbiParam::new(ptr));        // val_ptr
-            sig.params.push(AbiParam::new(types::I32)); // val_slots
-            sig.returns.push(AbiParam::new(types::I64)); // ok
-            sig
-        })?;
-        
-        let iface_assert = module.declare_function("vo_iface_assert", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I16));
-            sig.params.push(AbiParam::new(ptr));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        })?;
-        
-        let iface_to_iface = module.declare_function("vo_iface_to_iface", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));       // ctx
-            sig.params.push(AbiParam::new(types::I64)); // src_slot0
-            sig.params.push(AbiParam::new(types::I32)); // iface_meta_id
-            sig.returns.push(AbiParam::new(types::I64)); // new_slot0
-            sig
-        })?;
-        
-        let iface_eq = module.declare_function("vo_iface_eq", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I64)); // b_slot0
-            sig.params.push(AbiParam::new(types::I64)); // b_slot1
-            sig.params.push(AbiParam::new(types::I64)); // c_slot0
-            sig.params.push(AbiParam::new(types::I64)); // c_slot1
-            sig.returns.push(AbiParam::new(types::I64)); // 0=false, 1=true, 2=panic
-            sig
-        })?;
-        
-        let set_call_request = module.declare_function("vo_set_call_request", Import, &{
-            let mut sig = Signature::new(module.target_config().default_call_conv);
-            sig.params.push(AbiParam::new(ptr));        // ctx
-            sig.params.push(AbiParam::new(types::I32)); // func_id
-            sig.params.push(AbiParam::new(types::I32)); // arg_start
-            sig.params.push(AbiParam::new(types::I32)); // resume_pc
-            sig.params.push(AbiParam::new(types::I32)); // ret_slots
-            sig
-        })?;
-        
-        Ok(HelperFuncIds {
-            call_vm, gc_alloc, write_barrier, closure_get_func_id, iface_get_func_id, set_closure_call_request, set_iface_call_request, panic, call_extern,
-            str_new, str_len, str_index, str_concat, str_slice, str_eq, str_cmp, str_decode_rune,
-            ptr_clone, closure_new, chan_new, chan_len, chan_cap, port_new, port_len, port_cap, array_new, array_len,
-            slice_new, slice_len, slice_cap, slice_append, slice_slice, slice_slice3,
-            slice_from_array, slice_from_array3,
-            map_new, map_len, map_get, map_set, map_delete, map_iter_init, map_iter_next, iface_assert, iface_to_iface, iface_eq,
-            set_call_request,
-        })
-    }
-
     fn get_helper_refs(&mut self) -> HelperFuncs {
-        HelperFuncs {
-            call_vm: Some(self.module.declare_func_in_func(self.helper_funcs.call_vm, &mut self.ctx.func)),
-            gc_alloc: Some(self.module.declare_func_in_func(self.helper_funcs.gc_alloc, &mut self.ctx.func)),
-            write_barrier: Some(self.module.declare_func_in_func(self.helper_funcs.write_barrier, &mut self.ctx.func)),
-            closure_get_func_id: Some(self.module.declare_func_in_func(self.helper_funcs.closure_get_func_id, &mut self.ctx.func)),
-            iface_get_func_id: Some(self.module.declare_func_in_func(self.helper_funcs.iface_get_func_id, &mut self.ctx.func)),
-            set_closure_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_closure_call_request, &mut self.ctx.func)),
-            set_iface_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_iface_call_request, &mut self.ctx.func)),
-            panic: Some(self.module.declare_func_in_func(self.helper_funcs.panic, &mut self.ctx.func)),
-            call_extern: Some(self.module.declare_func_in_func(self.helper_funcs.call_extern, &mut self.ctx.func)),
-            str_new: Some(self.module.declare_func_in_func(self.helper_funcs.str_new, &mut self.ctx.func)),
-            str_len: Some(self.module.declare_func_in_func(self.helper_funcs.str_len, &mut self.ctx.func)),
-            str_index: Some(self.module.declare_func_in_func(self.helper_funcs.str_index, &mut self.ctx.func)),
-            str_concat: Some(self.module.declare_func_in_func(self.helper_funcs.str_concat, &mut self.ctx.func)),
-            str_slice: Some(self.module.declare_func_in_func(self.helper_funcs.str_slice, &mut self.ctx.func)),
-            str_eq: Some(self.module.declare_func_in_func(self.helper_funcs.str_eq, &mut self.ctx.func)),
-            str_cmp: Some(self.module.declare_func_in_func(self.helper_funcs.str_cmp, &mut self.ctx.func)),
-            str_decode_rune: Some(self.module.declare_func_in_func(self.helper_funcs.str_decode_rune, &mut self.ctx.func)),
-            ptr_clone: Some(self.module.declare_func_in_func(self.helper_funcs.ptr_clone, &mut self.ctx.func)),
-            closure_new: Some(self.module.declare_func_in_func(self.helper_funcs.closure_new, &mut self.ctx.func)),
-            chan_new: Some(self.module.declare_func_in_func(self.helper_funcs.chan_new, &mut self.ctx.func)),
-            chan_len: Some(self.module.declare_func_in_func(self.helper_funcs.chan_len, &mut self.ctx.func)),
-            chan_cap: Some(self.module.declare_func_in_func(self.helper_funcs.chan_cap, &mut self.ctx.func)),
-            port_new: Some(self.module.declare_func_in_func(self.helper_funcs.port_new, &mut self.ctx.func)),
-            port_len: Some(self.module.declare_func_in_func(self.helper_funcs.port_len, &mut self.ctx.func)),
-            port_cap: Some(self.module.declare_func_in_func(self.helper_funcs.port_cap, &mut self.ctx.func)),
-            array_new: Some(self.module.declare_func_in_func(self.helper_funcs.array_new, &mut self.ctx.func)),
-            array_len: Some(self.module.declare_func_in_func(self.helper_funcs.array_len, &mut self.ctx.func)),
-            slice_new: Some(self.module.declare_func_in_func(self.helper_funcs.slice_new, &mut self.ctx.func)),
-            slice_len: Some(self.module.declare_func_in_func(self.helper_funcs.slice_len, &mut self.ctx.func)),
-            slice_cap: Some(self.module.declare_func_in_func(self.helper_funcs.slice_cap, &mut self.ctx.func)),
-            slice_append: Some(self.module.declare_func_in_func(self.helper_funcs.slice_append, &mut self.ctx.func)),
-            slice_slice: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice, &mut self.ctx.func)),
-            slice_slice3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_slice3, &mut self.ctx.func)),
-            slice_from_array: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array, &mut self.ctx.func)),
-            slice_from_array3: Some(self.module.declare_func_in_func(self.helper_funcs.slice_from_array3, &mut self.ctx.func)),
-            map_new: Some(self.module.declare_func_in_func(self.helper_funcs.map_new, &mut self.ctx.func)),
-            map_len: Some(self.module.declare_func_in_func(self.helper_funcs.map_len, &mut self.ctx.func)),
-            map_get: Some(self.module.declare_func_in_func(self.helper_funcs.map_get, &mut self.ctx.func)),
-            map_set: Some(self.module.declare_func_in_func(self.helper_funcs.map_set, &mut self.ctx.func)),
-            map_delete: Some(self.module.declare_func_in_func(self.helper_funcs.map_delete, &mut self.ctx.func)),
-            map_iter_init: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_init, &mut self.ctx.func)),
-            map_iter_next: Some(self.module.declare_func_in_func(self.helper_funcs.map_iter_next, &mut self.ctx.func)),
-            iface_assert: Some(self.module.declare_func_in_func(self.helper_funcs.iface_assert, &mut self.ctx.func)),
-            iface_to_iface: Some(self.module.declare_func_in_func(self.helper_funcs.iface_to_iface, &mut self.ctx.func)),
-            iface_eq: Some(self.module.declare_func_in_func(self.helper_funcs.iface_eq, &mut self.ctx.func)),
-            set_call_request: Some(self.module.declare_func_in_func(self.helper_funcs.set_call_request, &mut self.ctx.func)),
+        helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
+    }
+
+    fn finalize_function(&mut self, func_id_cl: cranelift_module::FuncId, name: &str) -> Result<*const u8, JitError> {
+        #[cfg(debug_assertions)]
+        {
+            let flags = settings::Flags::new(settings::builder());
+            match verify_function(&self.ctx.func, &flags) {
+                Ok(()) => {
+                    if self.debug_ir {
+                        eprintln!("[JIT VERIFY OK] {}", name);
+                    }
+                }
+                Err(errors) => {
+                    eprintln!("=== IR Verification FAILED for {} ===", name);
+                    eprintln!("Errors: {}", errors);
+                }
+            }
         }
+        
+        self.module.define_function(func_id_cl, &mut self.ctx)?;
+        self.module.clear_context(&mut self.ctx);
+        self.module.finalize_definitions()?;
+        
+        Ok(self.module.get_finalized_function(func_id_cl))
     }
 
     pub fn compile(&mut self, func_id: u32, func: &FunctionDef, vo_module: &VoModule) -> Result<(), JitError> {
@@ -871,28 +299,7 @@ impl JitCompiler {
             eprintln!("{}", self.ctx.func.display());
         }
         
-        // Verify IR in debug builds
-        #[cfg(debug_assertions)]
-        {
-            let flags = settings::Flags::new(settings::builder());
-            match verify_function(&self.ctx.func, &flags) {
-                Ok(()) => {
-                    if self.debug_ir {
-                        eprintln!("[JIT VERIFY OK] func_{} {}", func_id, func.name);
-                    }
-                }
-                Err(errors) => {
-                    eprintln!("=== IR Verification FAILED for func_{} {} ===", func_id, func.name);
-                    eprintln!("Errors: {}", errors);
-                }
-            }
-        }
-        
-        self.module.define_function(func_id_cl, &mut self.ctx)?;
-        self.module.clear_context(&mut self.ctx);
-        self.module.finalize_definitions()?;
-        
-        let code_ptr = self.module.get_finalized_function(func_id_cl);
+        let code_ptr = self.finalize_function(func_id_cl, &format!("func_{} {}", func_id, func.name))?;
         let compiled = CompiledFunction {
             code_ptr, code_size: 0,
             param_slots: func.param_slots, ret_slots: func.ret_slots,
@@ -930,28 +337,7 @@ impl JitCompiler {
         let compiler = LoopCompiler::new(&mut self.ctx.func, &mut func_ctx, func_id, func, vo_module, loop_info, helpers);
         compiler.compile()?;
         
-        // Verify IR in debug builds
-        #[cfg(debug_assertions)]
-        {
-            let flags = settings::Flags::new(settings::builder());
-            match verify_function(&self.ctx.func, &flags) {
-                Ok(()) => {
-                    if self.debug_ir {
-                        eprintln!("[JIT VERIFY OK] loop_{}_{}", func_id, begin_pc);
-                    }
-                }
-                Err(errors) => {
-                    eprintln!("=== IR Verification FAILED for loop_{}_{} ===", func_id, begin_pc);
-                    eprintln!("Errors: {}", errors);
-                }
-            }
-        }
-        
-        self.module.define_function(func_id_cl, &mut self.ctx)?;
-        self.module.clear_context(&mut self.ctx);
-        self.module.finalize_definitions()?;
-        
-        let code_ptr = self.module.get_finalized_function(func_id_cl);
+        let code_ptr = self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
         let compiled = CompiledLoop { code_ptr, loop_info: loop_info.clone() };
         self.cache.insert_loop(func_id, begin_pc, compiled);
         Ok(())

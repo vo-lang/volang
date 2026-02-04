@@ -122,6 +122,10 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         PortNew => { port_new(e, inst); Ok(Completed) }
         PortLen => { port_len(e, inst); Ok(Completed) }
         PortCap => { port_cap(e, inst); Ok(Completed) }
+        // Batch 1: Island/Channel/Port close operations
+        IslandNew => { island_new(e, inst); Ok(Completed) }
+        ChanClose => { chan_close(e, inst)?; Ok(Completed) }
+        PortClose => { port_close(e, inst)?; Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1570,4 +1574,66 @@ pub fn emit_forloop_step(
     let continue_loop = builder.ins().icmp(cc, next_idx, limit);
     
     (next_idx, continue_loop)
+}
+
+// =============================================================================
+// Batch 1: Island/Channel/Port operations
+// =============================================================================
+
+/// IslandNew: a = island_new()
+fn island_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let island_new_func = e.helpers().island_new.expect("island_new helper not registered");
+    let ctx = e.ctx_param();
+    
+    let call = e.builder().ins().call(island_new_func, &[ctx]);
+    let handle = e.builder().inst_results(call)[0];
+    
+    e.write_var(inst.a, handle);
+}
+
+/// ChanClose: close(chan[a])
+/// Returns Panic on nil/closed channel.
+fn chan_close<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let chan_close_func = e.helpers().chan_close.expect("chan_close helper not registered");
+    emit_close_with_panic_check(e, chan_close_func, inst.a)
+}
+
+/// PortClose: close(port[a])
+/// Returns Panic on nil port.
+fn port_close<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let port_close_func = e.helpers().port_close.expect("port_close helper not registered");
+    emit_close_with_panic_check(e, port_close_func, inst.a)
+}
+
+/// Emit close operation: call helper(ctx, obj), check for Panic result.
+fn emit_close_with_panic_check<'a>(
+    e: &mut impl IrEmitter<'a>,
+    close_func: cranelift_codegen::ir::FuncRef,
+    obj_slot: u16,
+) -> Result<(), JitError> {
+    let panic_ret_val = e.panic_return_value();
+    let ctx = e.ctx_param();
+    let obj = e.read_var(obj_slot);
+    
+    let call = e.builder().ins().call(close_func, &[ctx, obj]);
+    let result = e.builder().inst_results(call)[0];
+    
+    // Check for Panic
+    let panic_val = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
+    let is_panic = e.builder().ins().icmp(IntCC::Equal, result, panic_val);
+    
+    let panic_block = e.builder().create_block();
+    let continue_block = e.builder().create_block();
+    
+    e.builder().ins().brif(is_panic, panic_block, &[], continue_block, &[]);
+    
+    e.builder().switch_to_block(panic_block);
+    e.builder().seal_block(panic_block);
+    e.spill_all_vars();
+    e.builder().ins().return_(&[panic_val]);
+    
+    e.builder().switch_to_block(continue_block);
+    e.builder().seal_block(continue_block);
+    
+    Ok(())
 }
