@@ -33,19 +33,20 @@ use helpers::HelperFuncIds;
 // =============================================================================
 
 /// Check if a function is jittable (does not contain unsupported operations).
-/// A function is NOT jittable if it uses defer, select, or goroutines.
+/// A function is NOT jittable if it uses defer, select, or GoIsland.
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
             // Defer/recover
             Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-            // Goroutines
-            | Opcode::GoStart | Opcode::GoIsland
+            // GoIsland (cross-island spawn, needs more work)
+            | Opcode::GoIsland
             // Select (complex control flow)
             | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
             // Batch 1: IslandNew, ChanClose, PortClose - supported
             // Batch 2: ChanSend, ChanRecv - supported (may return WaitIo)
             // Batch 3: PortSend, PortRecv - supported (may return WaitIo)
+            // Batch 4: GoStart - supported (fire-and-forget)
             // CallClosure and CallIface supported via unified call protocol
             // CallExtern supported via jit_call_extern callback
             _ => {}

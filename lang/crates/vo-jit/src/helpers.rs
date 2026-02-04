@@ -74,6 +74,8 @@ pub struct HelperFuncIds {
     // Batch 3: Port Send/Recv
     pub port_send: cranelift_module::FuncId,
     pub port_recv: cranelift_module::FuncId,
+    // Batch 4: Goroutine Start
+    pub go_start: cranelift_module::FuncId,
 }
 
 // =============================================================================
@@ -137,6 +139,8 @@ pub fn register_symbols(builder: &mut JITBuilder) {
     // Batch 3: Port Send/Recv
     builder.symbol("vo_port_send", vo_runtime::jit_api::vo_port_send as *const u8);
     builder.symbol("vo_port_recv", vo_runtime::jit_api::vo_port_recv as *const u8);
+    // Batch 4: Goroutine Start
+    builder.symbol("vo_go_start", vo_runtime::jit_api::vo_go_start as *const u8);
 }
 
 // =============================================================================
@@ -643,6 +647,18 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
+    // Batch 4: Goroutine Start
+    let go_start = module.declare_function("vo_go_start", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I32)); // func_id
+        sig.params.push(AbiParam::new(types::I32)); // is_closure
+        sig.params.push(AbiParam::new(types::I64)); // closure_ref
+        sig.params.push(AbiParam::new(ptr));        // args_ptr
+        sig.params.push(AbiParam::new(types::I32)); // arg_slots
+        sig
+    })?;
+    
     Ok(HelperFuncIds {
         call_vm, gc_alloc, write_barrier, closure_get_func_id, iface_get_func_id,
         set_closure_call_request, set_iface_call_request, panic, call_extern,
@@ -655,6 +671,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         island_new, chan_close, port_close,
         chan_send, chan_recv,
         port_send, port_recv,
+        go_start,
     })
 }
 
@@ -721,5 +738,6 @@ pub fn get_helper_refs(
         chan_recv: Some(module.declare_func_in_func(ids.chan_recv, func)),
         port_send: Some(module.declare_func_in_func(ids.port_send, func)),
         port_recv: Some(module.declare_func_in_func(ids.port_recv, func)),
+        go_start: Some(module.declare_func_in_func(ids.go_start, func)),
     }
 }

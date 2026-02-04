@@ -242,6 +242,12 @@ pub struct JitContext {
     /// Callback to receive from a port.
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub port_recv_fn: Option<extern "C" fn(*mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
+    
+    // Batch 4: Goroutine Start
+    /// Callback to spawn a new goroutine.
+    /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0), 
+    /// args_ptr: pointer to arguments, arg_slots: number of argument slots
+    pub go_start_fn: Option<extern "C" fn(*mut JitContext, func_id: u32, is_closure: u32, closure_ref: u64, args_ptr: *const u64, arg_slots: u32)>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -292,6 +298,8 @@ impl JitContext {
     // Batch 3
     pub const OFFSET_PORT_SEND_FN: i32 = std::mem::offset_of!(JitContext, port_send_fn) as i32;
     pub const OFFSET_PORT_RECV_FN: i32 = std::mem::offset_of!(JitContext, port_recv_fn) as i32;
+    // Batch 4
+    pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
 }
 
 // =============================================================================
@@ -1412,6 +1420,8 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         // Batch 3: Port Send/Recv
         ("vo_port_send", vo_port_send as *const u8),
         ("vo_port_recv", vo_port_recv as *const u8),
+        // Batch 4: Goroutine Start
+        ("vo_go_start", vo_go_start as *const u8),
     ]
 }
 
@@ -1495,3 +1505,22 @@ pub extern "C" fn vo_port_recv(ctx: *mut JitContext, port: u64, dst_ptr: *mut u6
     recv_fn(ctx, port, dst_ptr, elem_slots, has_ok)
 }
 
+// =============================================================================
+// Batch 4: Goroutine Start
+// =============================================================================
+
+/// Spawn a new goroutine.
+/// This is fire-and-forget - the new fiber runs concurrently.
+#[no_mangle]
+pub extern "C" fn vo_go_start(
+    ctx: *mut JitContext,
+    func_id: u32,
+    is_closure: u32,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    let ctx = unsafe { &mut *ctx };
+    let go_fn = ctx.go_start_fn.expect("go_start_fn not set");
+    go_fn(ctx, func_id, is_closure, closure_ref, args_ptr, arg_slots)
+}

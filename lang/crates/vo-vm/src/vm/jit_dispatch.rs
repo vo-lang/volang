@@ -234,6 +234,8 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         // Batch 3 callbacks
         port_send_fn: Some(jit_port_send),
         port_recv_fn: Some(jit_port_recv),
+        // Batch 4 callbacks
+        go_start_fn: Some(jit_go_start),
     };
 
     JitContextWrapper {
@@ -1323,4 +1325,60 @@ extern "C" fn jit_port_recv(
 #[cfg(not(feature = "std"))]
 extern "C" fn jit_port_recv(_ctx: *mut JitContext, _port: u64, _dst_ptr: *mut u64, _elem_slots: u32, _has_ok: u32) -> JitResult {
     panic!("Port not supported in no_std mode")
+}
+
+// =============================================================================
+// Batch 4: JIT Callback for GoStart
+// =============================================================================
+
+/// JIT callback to spawn a new goroutine.
+/// This is fire-and-forget - creates a new fiber and adds it to the scheduler.
+extern "C" fn jit_go_start(
+    ctx: *mut JitContext,
+    func_id: u32,
+    is_closure: u32,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::closure;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    
+    let is_closure = is_closure != 0;
+    
+    // Get func_id: from closure if is_closure, otherwise from parameter
+    let actual_func_id = if is_closure {
+        closure::func_id(closure_ref as GcRef)
+    } else {
+        func_id
+    };
+    
+    let func = &module.functions[actual_func_id as usize];
+    
+    // Create new fiber
+    let next_id = vm.scheduler.fibers.len() as u32;
+    let mut new_fiber = Fiber::new(next_id);
+    new_fiber.push_frame(actual_func_id, func.local_slots, 0, 0);
+    
+    // Copy args to new fiber's stack
+    let new_stack = new_fiber.stack_ptr();
+    if is_closure {
+        // Closure goes in reg[0], args start at reg[1]
+        unsafe { *new_stack = closure_ref };
+        for i in 0..arg_slots as usize {
+            unsafe { *new_stack.add(1 + i) = *args_ptr.add(i) };
+        }
+    } else {
+        // Regular function: args start at reg[0]
+        for i in 0..arg_slots as usize {
+            unsafe { *new_stack.add(i) = *args_ptr.add(i) };
+        }
+    }
+    
+    // Add to scheduler
+    vm.scheduler.spawn(new_fiber);
 }

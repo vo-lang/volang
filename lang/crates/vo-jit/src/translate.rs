@@ -132,6 +132,8 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         // Batch 3: Port Send/Recv
         PortSend => { port_send(e, inst)?; Ok(Completed) }
         PortRecv => { port_recv(e, inst)?; Ok(Completed) }
+        // Batch 4: Goroutine Start
+        GoStart => { go_start(e, inst); Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1759,4 +1761,41 @@ fn port_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), J
 
 fn port_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     emit_queue_recv(e, inst, e.helpers().port_recv.expect("port_recv not registered"))
+}
+
+// =============================================================================
+// Batch 4: Goroutine Start
+// =============================================================================
+
+/// GoStart: Spawn a new goroutine.
+/// - a: func_id_low (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
+/// - b: args_start
+/// - c: arg_slots
+/// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
+fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let go_start_func = e.helpers().go_start.expect("go_start not registered");
+    let ctx = e.ctx_param();
+    
+    let is_closure = (inst.flags & 1) != 0;
+    
+    let (func_id, closure_ref) = if is_closure {
+        // Closure: func_id is extracted from closure, inst.a is closure register
+        let closure = e.read_var(inst.a);
+        // func_id will be extracted by callback from closure_ref
+        // Pass 0 as func_id, callback will read from closure
+        let func_id_val = e.builder().ins().iconst(types::I32, 0);
+        (func_id_val, closure)
+    } else {
+        // Regular function: func_id encoded in inst.a and flags
+        let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
+        let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
+        let closure_ref = e.builder().ins().iconst(types::I64, 0);
+        (func_id_val, closure_ref)
+    };
+    
+    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure { 1 } else { 0 });
+    let args_ptr = e.var_addr(inst.b);
+    let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
+    
+    e.builder().ins().call(go_start_func, &[ctx, func_id, is_closure_val, closure_ref, args_ptr, arg_slots]);
 }
