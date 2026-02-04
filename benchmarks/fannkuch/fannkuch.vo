@@ -72,7 +72,7 @@ func fannkuch(n int) int {
 }
 
 func main() {
-	n := 10
+	n := 9
 	result := fannkuch(n)
 	println("Pfannkuchen:", result)
 }

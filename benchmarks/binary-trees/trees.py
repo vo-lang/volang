@@ -16,7 +16,7 @@ def check(n):
 
 def main():
     min_depth = 4
-    max_depth = 14
+    max_depth = 15
     stretch_depth = max_depth + 1
 
     stretch_tree = make(stretch_depth)

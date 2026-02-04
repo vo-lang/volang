@@ -65,7 +65,7 @@ public class Fannkuch {
     }
 
     public static void main(String[] args) {
-        int n = 10;
+        int n = 9;
         int result = fannkuch(n);
         System.out.printf("Pfannkuchen(%d) = %d%n", n, result);
     }

@@ -127,4 +127,10 @@ pub trait IrEmitter<'a> {
     
     /// Write variable as F64. Store F64 directly to memory.
     fn write_var_f64(&mut self, slot: u16, val: Value);
+    
+    /// Check if a slot has been verified non-nil in the current basic block.
+    fn is_checked_non_nil(&self, slot: u16) -> bool;
+    
+    /// Mark a slot as verified non-nil (after nil check passed).
+    fn mark_checked_non_nil(&mut self, slot: u16);
 }

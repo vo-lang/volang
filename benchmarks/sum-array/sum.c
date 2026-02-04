@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 int main() {
-    int n = 30000000;
+    int n = 10000000;
     int *arr = malloc(n * sizeof(int));
     for (int i = 0; i < n; i++) {
         arr[i] = i;

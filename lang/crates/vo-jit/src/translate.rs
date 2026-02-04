@@ -225,7 +225,16 @@ fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
     emit_panic_if(e, is_zero, true);
-    let r = e.builder().ins().srem(a, b);
+    // Handle MIN_INT64 % -1: x86 idiv traps on this. Result should be 0.
+    // Replace b with 1 when overflow would occur (MIN % 1 = 0).
+    let min_i64 = e.builder().ins().iconst(types::I64, i64::MIN);
+    let neg_one = e.builder().ins().iconst(types::I64, -1i64);
+    let one = e.builder().ins().iconst(types::I64, 1);
+    let is_min = e.builder().ins().icmp(IntCC::Equal, a, min_i64);
+    let is_neg_one = e.builder().ins().icmp(IntCC::Equal, b, neg_one);
+    let is_overflow = e.builder().ins().band(is_min, is_neg_one);
+    let safe_b = e.builder().ins().select(is_overflow, one, b);
+    let r = e.builder().ins().srem(a, safe_b);
     e.write_var(inst.a, r);
 }
 
@@ -445,9 +454,19 @@ fn emit_nil_ptr_check<'a>(e: &mut impl IrEmitter<'a>, ptr: Value) {
     emit_panic_if(e, is_nil, true); // call vo_panic for defer/recover
 }
 
+/// Emit nil check for pointer with slot tracking.
+/// Skips the check if the slot has already been verified non-nil.
+fn emit_nil_ptr_check_for_slot<'a>(e: &mut impl IrEmitter<'a>, ptr_slot: u16, ptr: Value) {
+    if e.is_checked_non_nil(ptr_slot) {
+        return; // Already verified non-nil in this basic block
+    }
+    emit_nil_ptr_check(e, ptr);
+    e.mark_checked_non_nil(ptr_slot);
+}
+
 fn ptr_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.b);
-    emit_nil_ptr_check(e, ptr);
+    emit_nil_ptr_check_for_slot(e, inst.b, ptr);
     let offset = (inst.c as i32) * 8;
     let v = e.builder().ins().load(types::I64, MemFlags::trusted(), ptr, offset);
     e.write_var(inst.a, v);
@@ -455,7 +474,7 @@ fn ptr_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.a);
-    emit_nil_ptr_check(e, ptr);
+    emit_nil_ptr_check_for_slot(e, inst.a, ptr);
     let v = e.read_var(inst.c);
     let offset = (inst.b as i32) * 8;
     e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
@@ -472,7 +491,7 @@ fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.b);
-    emit_nil_ptr_check(e, ptr);
+    emit_nil_ptr_check_for_slot(e, inst.b, ptr);
     for i in 0..inst.flags as usize {
         let offset = ((inst.c as usize + i) * 8) as i32;
         let v = e.builder().ins().load(types::I64, MemFlags::trusted(), ptr, offset);
@@ -482,7 +501,7 @@ fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 fn ptr_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let ptr = e.read_var(inst.a);
-    emit_nil_ptr_check(e, ptr);
+    emit_nil_ptr_check_for_slot(e, inst.a, ptr);
     for i in 0..inst.flags as usize {
         let v = e.read_var(inst.c + i as u16);
         let offset = ((inst.b as usize + i) * 8) as i32;
@@ -710,29 +729,10 @@ const SLICE_FIELD_LEN: i32 = (SLICE_FIELD_LEN_SLOT * 8) as i32;
 /// Emit bounds check for slice access. Panics if idx >= len or slice is nil.
 /// Returns data_ptr for the slice (only valid if bounds check passed).
 fn emit_slice_bounds_check<'a>(e: &mut impl IrEmitter<'a>, s: Value, idx: Value) -> Value {
-    // If s is nil, len=0; otherwise load len from slice
-    let zero = e.builder().ins().iconst(types::I64, 0);
-    let is_nil = e.builder().ins().icmp(IntCC::Equal, s, zero);
-    let nil_block = e.builder().create_block();
-    let not_nil_block = e.builder().create_block();
-    let merge_block = e.builder().create_block();
-    e.builder().append_block_param(merge_block, types::I64); // len
-    e.builder().ins().brif(is_nil, nil_block, &[], not_nil_block, &[]);
+    // len = 0 if nil, otherwise load from slice
+    let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
     
-    e.builder().switch_to_block(nil_block);
-    e.builder().seal_block(nil_block);
-    e.builder().ins().jump(merge_block, &[zero]);
-    
-    e.builder().switch_to_block(not_nil_block);
-    e.builder().seal_block(not_nil_block);
-    let len_from_slice = e.builder().ins().load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_LEN);
-    e.builder().ins().jump(merge_block, &[len_from_slice]);
-    
-    e.builder().switch_to_block(merge_block);
-    e.builder().seal_block(merge_block);
-    let len = e.builder().block_params(merge_block)[0];
-    
-    // Check idx >= len
+    // Check idx >= len (nil slice has len=0, so any idx will be out of bounds)
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
     emit_panic_if(e, out_of_bounds, false);
     
@@ -800,19 +800,43 @@ fn slice_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
+/// Load a field from a pointer, returning 0 if pointer is nil.
+/// Pattern: if ptr == 0 { 0 } else { ptr.field }
+fn emit_nil_guarded_load<'a>(e: &mut impl IrEmitter<'a>, ptr: Value, offset: i32) -> Value {
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let is_nil = e.builder().ins().icmp(IntCC::Equal, ptr, zero);
+    
+    let nil_block = e.builder().create_block();
+    let not_nil_block = e.builder().create_block();
+    let merge_block = e.builder().create_block();
+    e.builder().append_block_param(merge_block, types::I64);
+    e.builder().ins().brif(is_nil, nil_block, &[], not_nil_block, &[]);
+    
+    e.builder().switch_to_block(nil_block);
+    e.builder().seal_block(nil_block);
+    e.builder().ins().jump(merge_block, &[zero]);
+    
+    e.builder().switch_to_block(not_nil_block);
+    e.builder().seal_block(not_nil_block);
+    let val = e.builder().ins().load(types::I64, MemFlags::trusted(), ptr, offset);
+    e.builder().ins().jump(merge_block, &[val]);
+    
+    e.builder().switch_to_block(merge_block);
+    e.builder().seal_block(merge_block);
+    e.builder().block_params(merge_block)[0]
+}
+
 fn slice_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_len_func = e.helpers().slice_len.expect("slice_len helper not registered");
     let s = e.read_var(inst.b);
-    let call = e.builder().ins().call(slice_len_func, &[s]);
-    let result = e.builder().inst_results(call)[0];
+    let result = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
     e.write_var(inst.a, result);
 }
 
+const SLICE_FIELD_CAP: i32 = (vo_runtime::objects::slice::FIELD_CAP * 8) as i32;
+
 fn slice_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_cap_func = e.helpers().slice_cap.expect("slice_cap helper not registered");
     let s = e.read_var(inst.b);
-    let call = e.builder().ins().call(slice_cap_func, &[s]);
-    let result = e.builder().inst_results(call)[0];
+    let result = emit_nil_guarded_load(e, s, SLICE_FIELD_CAP);
     e.write_var(inst.a, result);
 }
 

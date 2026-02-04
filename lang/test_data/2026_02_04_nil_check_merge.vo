@@ -1,0 +1,123 @@
+// Test nil check merging optimization correctness
+
+type Point struct {
+	x int
+	y int
+}
+
+// Test 1: Multiple accesses to same pointer should work
+func testMultipleAccess() {
+	p := &Point{x: 10, y: 20}
+	// First access should do nil check
+	x := p.x
+	// Second access should skip nil check (optimization)
+	y := p.y
+	assert(x == 10)
+	assert(y == 20)
+}
+
+// Test 2: After reassignment, nil check should happen again
+func testReassignment() {
+	p := &Point{x: 10, y: 20}
+	x := p.x  // nil check, mark non-nil
+	
+	// Reassign to different pointer
+	p = &Point{x: 30, y: 40}
+	y := p.y  // should do nil check again (slot was overwritten)
+	
+	assert(x == 10)
+	assert(y == 40)
+}
+
+// Test 3: Nil pointer should panic
+func testNilPanic() {
+	defer func() {
+		r := recover()
+		assert(r != nil)
+	}()
+	
+	var p *Point
+	_ = p.x  // should panic
+	panic("should not reach here")
+}
+
+// Test 4: Conditional branches should clear non-nil state
+func testConditionalBranch(cond bool) {
+	p := &Point{x: 10, y: 20}
+	x := p.x  // nil check, mark non-nil
+	
+	if cond {
+		p = &Point{x: 30, y: 40}
+	}
+	// After branch merge, p might have changed
+	// Non-nil state should be cleared at merge point
+	y := p.y  // should do nil check again
+	
+	if cond {
+		assert(y == 40)
+	} else {
+		assert(y == 20)
+	}
+	_ = x
+}
+
+// Test 5: Loop should clear non-nil state on each iteration
+func testLoop() {
+	points := []*Point{
+		&Point{x: 1, y: 2},
+		&Point{x: 3, y: 4},
+		&Point{x: 5, y: 6},
+	}
+	
+	sum := 0
+	for i := 0; i < len(points); i++ {
+		p := points[i]
+		// Each iteration should do fresh nil check
+		sum += p.x + p.y
+	}
+	assert(sum == 21)  // 1+2+3+4+5+6
+}
+
+// Test 6: Self-overwrite (p = p.next pattern)
+type Node struct {
+	val  int
+	next *Node
+}
+
+func testSelfOverwrite() {
+	n3 := &Node{val: 3, next: nil}
+	n2 := &Node{val: 2, next: n3}
+	n1 := &Node{val: 1, next: n2}
+	
+	sum := 0
+	n := n1
+	for n != nil {
+		sum += n.val
+		n = n.next  // overwrites n, should clear non-nil status
+	}
+	assert(sum == 6)
+}
+
+// Test 7: ptr_get_n - multiple field access
+type BigStruct struct {
+	a, b, c, d int
+}
+
+func testMultiFieldAccess() {
+	s := &BigStruct{a: 1, b: 2, c: 3, d: 4}
+	// Access multiple fields - should only do one nil check
+	sum := s.a + s.b + s.c + s.d
+	assert(sum == 10)
+}
+
+func main() {
+	testMultipleAccess()
+	testReassignment()
+	testNilPanic()
+	testConditionalBranch(true)
+	testConditionalBranch(false)
+	testLoop()
+	testSelfOverwrite()
+	testMultiFieldAccess()
+	println("All nil check merge tests passed!")
+}

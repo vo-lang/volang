@@ -3,7 +3,7 @@ package main
 import "fmt"
 
 func main() {
-	n := 30000000
+	n := 10000000
 	arr := make([]int, n)
 	for i := 0; i < n; i++ {
 		arr[i] = i

@@ -121,7 +121,7 @@ func main() {
 	totalTime := 0
 	
 	// Run multiple rounds
-	rounds := 2000
+	rounds := 200
 	tasksPerRound := 150
 	
 	for round := 0; round < rounds; round++ {

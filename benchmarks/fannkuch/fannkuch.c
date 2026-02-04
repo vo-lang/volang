@@ -72,7 +72,7 @@ int fannkuch(int n) {
 }
 
 int main() {
-    int n = 10;
+    int n = 9;
     int result = fannkuch(n);
     printf("Pfannkuchen(%d) = %d\n", n, result);
     return 0;

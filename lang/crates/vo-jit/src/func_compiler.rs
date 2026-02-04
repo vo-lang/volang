@@ -1,6 +1,6 @@
 //! Function compiler: bytecode -> Cranelift IR.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::{types, Block, Function, FuncRef, InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::StackSlotData;
@@ -33,6 +33,9 @@ pub struct FunctionCompiler<'a> {
     /// The args_ptr parameter passed to this function (points to caller's args_slot on native stack).
     /// Used for all local variable access - no separate locals_slot needed.
     args_ptr_val: Option<Value>,
+    /// Slots that have been verified non-nil in the current basic block.
+    /// Cleared on block transitions (jump targets).
+    checked_non_nil: HashSet<u16>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -63,6 +66,7 @@ impl<'a> FunctionCompiler<'a> {
             self_func_ref,
             saved_jit_bp: None,
             args_ptr_val: None,
+            checked_non_nil: HashSet::new(),
         }
     }
 
@@ -83,6 +87,8 @@ impl<'a> FunctionCompiler<'a> {
                     self.builder.ins().jump(block, &[]);
                 }
                 self.builder.switch_to_block(block);
+                // Clear non-nil tracking at block boundaries (jump targets)
+                self.checked_non_nil.clear();
             } else if block_terminated {
                 let dummy = self.builder.create_block();
                 self.builder.switch_to_block(dummy);
@@ -268,6 +274,8 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.def_var(self.vars[slot as usize], val);
         let args_ptr = self.args_ptr_val.unwrap();
         self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+        // Clear non-nil status when slot is written
+        self.checked_non_nil.remove(&slot);
     }
 
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
@@ -578,5 +586,13 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         // SSA var is I64, need bitcast for def_var
         let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         self.builder.def_var(self.vars[slot as usize], i64_val);
+        // Clear non-nil status when slot is written
+        self.checked_non_nil.remove(&slot);
+    }
+    fn is_checked_non_nil(&self, slot: u16) -> bool {
+        self.checked_non_nil.contains(&slot)
+    }
+    fn mark_checked_non_nil(&mut self, slot: u16) {
+        self.checked_non_nil.insert(slot);
     }
 }

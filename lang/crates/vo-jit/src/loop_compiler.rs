@@ -1,6 +1,6 @@
 //! Loop compiler for OSR (On-Stack Replacement).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::{types, Block, Function, InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -41,6 +41,7 @@ pub struct LoopCompiler<'a> {
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
+    checked_non_nil: HashSet<u16>,
 }
 
 impl<'a> LoopCompiler<'a> {
@@ -73,6 +74,7 @@ impl<'a> LoopCompiler<'a> {
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
+            checked_non_nil: HashSet::new(),
         }
     }
 
@@ -95,6 +97,8 @@ impl<'a> LoopCompiler<'a> {
                     self.builder.ins().jump(block, &[]);
                 }
                 self.builder.switch_to_block(block);
+                // Clear non-nil tracking at block boundaries (jump targets)
+                self.checked_non_nil.clear();
                 block_terminated = false;
             } else if block_terminated {
                 let dummy = self.builder.create_block();
@@ -403,6 +407,8 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         // Also sync to memory for var_addr access (e.g., slice_append reads element from memory)
         let offset = (slot as i32) * 8;
         self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+        // Clear non-nil status when slot is written
+        self.checked_non_nil.remove(&slot);
     }
     fn ctx_param(&mut self) -> Value { self.ctx_ptr }
     fn gc_ptr(&mut self) -> Value {
@@ -444,5 +450,13 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         // SSA var is I64, need bitcast for def_var
         let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         self.builder.def_var(self.vars[slot as usize], i64_val);
+        // Clear non-nil status when slot is written
+        self.checked_non_nil.remove(&slot);
+    }
+    fn is_checked_non_nil(&self, slot: u16) -> bool {
+        self.checked_non_nil.contains(&slot)
+    }
+    fn mark_checked_non_nil(&mut self, slot: u16) {
+        self.checked_non_nil.insert(slot);
     }
 }

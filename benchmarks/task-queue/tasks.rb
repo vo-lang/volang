@@ -98,7 +98,7 @@ def main
   total_failed = 0
   total_time = 0
 
-  rounds = 2000
+  rounds = 200
   tasks_per_round = 150
 
   rounds.times do |round|

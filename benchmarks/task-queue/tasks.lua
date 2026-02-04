@@ -96,7 +96,7 @@ local totalCompleted = 0
 local totalFailed = 0
 local totalTime = 0
 
-local rounds = 2000
+local rounds = 200
 local tasksPerRound = 150
 
 for round = 0, rounds - 1 do

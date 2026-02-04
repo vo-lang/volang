@@ -1,0 +1,35 @@
+// Test integer division and modulo overflow handling
+
+const MinInt64 = -9223372036854775808
+
+func main() {
+	// Test MIN_INT64 / -1 = MIN_INT64 (Go semantics: overflow wraps)
+	a := MinInt64
+	b := -1
+	
+	// Division overflow
+	result := a / b
+	assert(result == MinInt64)
+	
+	// Modulo overflow: MIN_INT64 % -1 = 0
+	modResult := a % b
+	assert(modResult == 0)
+	
+	// Normal cases should still work
+	assert(10 / 3 == 3)
+	assert(10 % 3 == 1)
+	assert(-10 / 3 == -3)
+	assert(-10 % 3 == -1)
+	assert(10 / -3 == -3)
+	assert(10 % -3 == 1)
+	assert(-10 / -3 == 3)
+	assert(-10 % -3 == -1)
+	
+	// Unsigned division
+	var ua uint = 10
+	var ub uint = 3
+	assert(ua / ub == 3)
+	assert(ua % ub == 1)
+	
+	println("All int div/mod overflow tests passed!")
+}
