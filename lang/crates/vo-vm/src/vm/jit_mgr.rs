@@ -215,10 +215,7 @@ impl JitManager {
     /// Record a loop backedge hit. Returns true if loop OSR should be triggered.
     pub fn record_backedge(&mut self, func_id: u32, loop_begin_pc: usize) -> bool {
         let id = func_id as usize;
-        let info = match self.funcs.get_mut(id) {
-            Some(i) => i,
-            None => return false,
-        };
+        let info = &mut self.funcs[id];  // Panic if out of range - same as record_call
         
         let count = info.loop_counts.entry(loop_begin_pc).or_insert(0);
         *count += 1;

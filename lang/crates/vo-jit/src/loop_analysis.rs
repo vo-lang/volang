@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_common_core::instruction::{HINT_LOOP_BEGIN, HINT_LOOP_END, HINT_LOOP_META};
+use vo_common_core::instruction::HINT_LOOP;
 use vo_common_core::instruction::{LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE};
 
 /// Information about a detected loop (from Hint instructions).
@@ -14,14 +14,12 @@ use vo_common_core::instruction::{LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BRE
 pub struct LoopInfo {
     /// Nesting depth (0 = outermost).
     pub depth: u8,
-    /// PC of the LOOP_BEGIN hint.
+    /// PC of the loop start (condition check, Jump target). This is hint_pc + 1.
     pub begin_pc: usize,
-    /// PC of the LOOP_END hint.
+    /// PC of the back-edge Jump instruction.
     pub end_pc: usize,
     /// Exit PC (where the loop exits to, 0 = infinite loop).
     pub exit_pc: usize,
-    /// Continue PC for labeled continue (from LOOP_META).
-    pub continue_pc: Option<usize>,
     /// Whether this loop contains defer statements.
     pub has_defer: bool,
     /// Whether this loop has labeled break to outer loops.
@@ -55,52 +53,6 @@ impl LoopInfo {
     pub fn is_simple(&self) -> bool {
         self.is_jittable() && !self.is_infinite()
     }
-    
-    /// For backward compatibility: alias for begin_pc.
-    pub fn header_pc(&self) -> usize {
-        self.begin_pc
-    }
-    
-    /// For backward compatibility: return exit_pc as single-element vec.
-    pub fn exit_targets(&self) -> Vec<usize> {
-        if self.exit_pc == 0 {
-            vec![]
-        } else {
-            vec![self.exit_pc]
-        }
-    }
-}
-
-/// Builder for constructing LoopInfo from Hint instructions.
-struct LoopInfoBuilder {
-    depth: u8,
-    begin_pc: usize,
-    exit_pc: usize,
-    continue_pc: Option<usize>,
-    has_defer: bool,
-    has_labeled_break: bool,
-    has_labeled_continue: bool,
-}
-
-impl LoopInfoBuilder {
-    fn finish(self, end_pc: usize, code: &[Instruction]) -> LoopInfo {
-        let (live_in, live_out) = analyze_loop_liveness(code, self.begin_pc, end_pc);
-        let has_calls = has_function_calls(code, self.begin_pc, end_pc);
-        
-        LoopInfo {
-            depth: self.depth,
-            begin_pc: self.begin_pc,
-            end_pc,
-            exit_pc: self.exit_pc,
-            continue_pc: self.continue_pc,
-            has_defer: self.has_defer,
-            has_labeled_break: self.has_labeled_break,
-            has_labeled_continue: self.has_labeled_continue,
-            live_in,
-            live_out,
-            has_calls,
-        }
-    }
 }
 
 /// Analyze a function's bytecode to find all loops using Hint instructions.
@@ -109,9 +61,15 @@ pub fn analyze_loops(func_def: &FunctionDef) -> Vec<LoopInfo> {
 }
 
 /// Analyze bytecode to find all loops using Hint instructions.
+/// 
+/// New HINT_LOOP format (no HINT_LOOP_END needed):
+/// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
+/// - bc: exit_pc (32-bit)
+/// 
+/// begin_pc (loop_start) is hint_pc + 1 (the instruction after HINT_LOOP).
+/// end_pc is hint_pc + end_offset (the back-edge Jump).
 pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
     let mut loops = Vec::new();
-    let mut stack: Vec<LoopInfoBuilder> = Vec::new();
     
     for (pc, inst) in code.iter().enumerate() {
         if inst.opcode() != Opcode::Hint {
@@ -119,40 +77,64 @@ pub fn analyze_loops_from_code(code: &[Instruction]) -> Vec<LoopInfo> {
         }
         
         match inst.flags {
-            f if f == HINT_LOOP_BEGIN => {
+            f if f == HINT_LOOP => {
                 let loop_info_bits = inst.a;
-                let depth = ((loop_info_bits >> 4) & 0x0F) as u8;
                 let flags = (loop_info_bits & 0x0F) as u8;
+                let depth = ((loop_info_bits >> 4) & 0x0F) as u8;
+                let end_offset = ((loop_info_bits >> 8) & 0xFF) as usize;
                 let exit_pc = inst.imm32_unsigned() as usize;
                 
-                stack.push(LoopInfoBuilder {
+                // begin_pc is the instruction after HINT_LOOP (the loop_start)
+                let begin_pc = pc + 1;
+                
+                // end_pc: if end_offset > 0, use it; otherwise scan for back-edge Jump
+                let end_pc = if end_offset > 0 {
+                    pc + end_offset
+                } else {
+                    // Fallback: scan forward to find back-edge Jump targeting begin_pc
+                    find_back_edge_jump(code, begin_pc)
+                };
+                
+                let (live_in, live_out) = analyze_loop_liveness(code, begin_pc, end_pc);
+                let has_calls = has_function_calls(code, begin_pc, end_pc);
+                
+                loops.push(LoopInfo {
                     depth,
-                    begin_pc: pc,
+                    begin_pc,
+                    end_pc,
                     exit_pc,
-                    continue_pc: None,
                     has_defer: (flags & LOOP_FLAG_HAS_DEFER) != 0,
                     has_labeled_break: (flags & LOOP_FLAG_HAS_LABELED_BREAK) != 0,
                     has_labeled_continue: (flags & LOOP_FLAG_HAS_LABELED_CONTINUE) != 0,
+                    live_in,
+                    live_out,
+                    has_calls,
                 });
-            }
-            f if f == HINT_LOOP_META => {
-                if let Some(builder) = stack.last_mut() {
-                    let meta_type = inst.a;
-                    if meta_type == 0 {
-                        builder.continue_pc = Some(inst.imm32_unsigned() as usize);
-                    }
-                }
-            }
-            f if f == HINT_LOOP_END => {
-                if let Some(builder) = stack.pop() {
-                    loops.push(builder.finish(pc, code));
-                }
             }
             _ => {}
         }
     }
     
     loops
+}
+
+/// Find the back-edge Jump that targets the given loop_start.
+/// This is a fallback when end_offset is not encoded in HINT_LOOP.
+fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
+    for (pc, inst) in code.iter().enumerate().skip(loop_start) {
+        if inst.opcode() == Opcode::Jump {
+            let offset = inst.imm32();
+            if offset < 0 {
+                let target = (pc as i64 + 1 + offset as i64) as usize;
+                if target == loop_start {
+                    return pc;
+                }
+            }
+        }
+    }
+    // No back-edge found - this is a codegen bug
+    // If HINT_LOOP was emitted, there must be a back-edge Jump
+    panic!("find_back_edge_jump: no back-edge Jump found targeting loop_start={}", loop_start)
 }
 
 /// Find loop info by header PC (begin_pc).
@@ -462,15 +444,12 @@ mod tests {
         }
     }
     
-    fn hint_loop_begin(depth: u8, exit_pc: u32) -> Instruction {
-        let loop_info = (depth as u16) << 4;
+    fn hint_loop(depth: u8, end_offset: u8, exit_pc: u32) -> Instruction {
+        // New format: a = flags(4) | depth(4) | end_offset(8), bc = exit_pc
+        let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4);
         let b = (exit_pc & 0xFFFF) as u16;
         let c = ((exit_pc >> 16) & 0xFFFF) as u16;
-        Instruction { op: Opcode::Hint as u8, flags: HINT_LOOP_BEGIN, a: loop_info, b, c }
-    }
-    
-    fn hint_loop_end(depth: u8) -> Instruction {
-        Instruction { op: Opcode::Hint as u8, flags: HINT_LOOP_END, a: depth as u16, b: 0, c: 0 }
+        Instruction { op: Opcode::Hint as u8, flags: HINT_LOOP, a: loop_info, b, c }
     }
     
     fn load_int(dst: u16, val: i32) -> Instruction {
@@ -505,33 +484,29 @@ mod tests {
     
     #[test]
     fn test_simple_loop_with_hints() {
-        // Simple loop with Hint instructions:
+        // Simple loop with new Hint format (no HINT_LOOP_END):
         // 0: LoadInt r0, 0
-        // 1: Hint LOOP_BEGIN depth=0, exit=7
-        // 2: LoadInt r1, 10
+        // 1: Hint LOOP_BEGIN depth=0, end_offset=3, exit=5
+        // 2: LoadInt r1, 10       <- begin_pc (loop_start)
         // 3: AddI r0, r0, r1
-        // 4: Hint LOOP_END depth=0
-        // 5: Jump -4
-        // 6: ...
-        // 7: Return
+        // 4: Jump -3              <- end_pc (back-edge)
+        // 5: Return               <- exit_pc
         let func = make_func(vec![
-            load_int(0, 0),           // 0
-            hint_loop_begin(0, 7),    // 1: LOOP_BEGIN
-            load_int(1, 10),          // 2
-            add_i(0, 0, 1),           // 3
-            hint_loop_end(0),         // 4: LOOP_END
-            jump(-4),                 // 5: back edge
-            load_int(0, 0),           // 6
-            ret(),                    // 7
+            load_int(0, 0),                  // 0
+            hint_loop(0, 3, 5),              // 1: HINT_LOOP, end_offset=3 -> end_pc=4
+            load_int(1, 10),                 // 2: begin_pc (loop_start)
+            add_i(0, 0, 1),                  // 3
+            jump(-3),                        // 4: back edge (end_pc)
+            ret(),                           // 5: exit_pc
         ]);
         
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 1, "Should detect 1 loop");
         
         let loop_info = &loops[0];
-        assert_eq!(loop_info.begin_pc, 1, "begin_pc should be PC 1");
-        assert_eq!(loop_info.end_pc, 4, "end_pc should be PC 4");
-        assert_eq!(loop_info.exit_pc, 7, "exit_pc should be PC 7");
+        assert_eq!(loop_info.begin_pc, 2, "begin_pc should be hint_pc + 1 = 2");
+        assert_eq!(loop_info.end_pc, 4, "end_pc should be hint_pc + end_offset = 4");
+        assert_eq!(loop_info.exit_pc, 5, "exit_pc should be 5");
         assert_eq!(loop_info.depth, 0, "depth should be 0");
         assert!(loop_info.is_jittable(), "Should be jittable");
         assert!(loop_info.is_simple(), "Should be simple");
@@ -539,63 +514,65 @@ mod tests {
     
     #[test]
     fn test_nested_loops_with_hints() {
-        // Nested loops:
-        // 0: Hint LOOP_BEGIN depth=0, exit=10
-        // 1: LoadInt r0, 0
-        // 2: Hint LOOP_BEGIN depth=1, exit=6
-        // 3: AddI r0, r0, r1
-        // 4: Hint LOOP_END depth=1
-        // 5: Jump -3
-        // 6: ...
-        // 7: Hint LOOP_END depth=0
-        // 8: Jump -8
-        // 9: ...
-        // 10: Return
+        // Nested loops with new format:
+        // 0: Hint LOOP_BEGIN depth=0, end_offset=7, exit=9
+        // 1: LoadInt r0, 0          <- outer begin_pc
+        // 2: Hint LOOP_BEGIN depth=1, end_offset=2, exit=5
+        // 3: AddI r0, r0, r1        <- inner begin_pc
+        // 4: Jump -2                <- inner end_pc (back edge)
+        // 5: LoadInt r0, 0          <- inner exit_pc
+        // 6: LoadInt r0, 0
+        // 7: Jump -7                <- outer end_pc (back edge)
+        // 8: LoadInt r0, 0
+        // 9: Return                 <- outer exit_pc
         let func = make_func(vec![
-            hint_loop_begin(0, 10),   // 0: outer LOOP_BEGIN
-            load_int(0, 0),           // 1
-            hint_loop_begin(1, 6),    // 2: inner LOOP_BEGIN
-            add_i(0, 0, 1),           // 3
-            hint_loop_end(1),         // 4: inner LOOP_END
-            jump(-3),                 // 5: inner back edge
+            hint_loop(0, 7, 9),       // 0: outer HINT_LOOP
+            load_int(0, 0),           // 1: outer begin_pc
+            hint_loop(1, 2, 5),       // 2: inner HINT_LOOP
+            add_i(0, 0, 1),           // 3: inner begin_pc
+            jump(-2),                 // 4: inner back edge
+            load_int(0, 0),           // 5: inner exit_pc
             load_int(0, 0),           // 6
-            hint_loop_end(0),         // 7: outer LOOP_END
-            jump(-8),                 // 8: outer back edge
-            load_int(0, 0),           // 9
-            ret(),                    // 10
+            jump(-7),                 // 7: outer back edge
+            load_int(0, 0),           // 8
+            ret(),                    // 9: outer exit_pc
         ]);
         
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 2, "Should detect 2 nested loops");
         
-        // Inner loop finishes first (stack-based)
-        let inner = &loops[0];
-        assert_eq!(inner.depth, 1);
-        assert_eq!(inner.begin_pc, 2);
-        assert_eq!(inner.end_pc, 4);
-        assert_eq!(inner.exit_pc, 6);
-        
-        let outer = &loops[1];
+        // Loops are in bytecode order (outer first, then inner)
+        let outer = &loops[0];
         assert_eq!(outer.depth, 0);
-        assert_eq!(outer.begin_pc, 0);
-        assert_eq!(outer.end_pc, 7);
-        assert_eq!(outer.exit_pc, 10);
+        assert_eq!(outer.begin_pc, 1, "outer begin_pc = hint_pc + 1");
+        assert_eq!(outer.end_pc, 7, "outer end_pc = hint_pc + end_offset");
+        assert_eq!(outer.exit_pc, 9);
+        
+        let inner = &loops[1];
+        assert_eq!(inner.depth, 1);
+        assert_eq!(inner.begin_pc, 3, "inner begin_pc = hint_pc + 1");
+        assert_eq!(inner.end_pc, 4, "inner end_pc = hint_pc + end_offset");
+        assert_eq!(inner.exit_pc, 5);
     }
     
     #[test]
     fn test_infinite_loop() {
         // Infinite loop: exit_pc = 0
+        // 0: Hint LOOP_BEGIN depth=0, end_offset=2, exit=0 (infinite)
+        // 1: AddI r0, r0, r1        <- begin_pc
+        // 2: Jump -2                <- end_pc (back edge)
         let func = make_func(vec![
-            hint_loop_begin(0, 0),    // 0: LOOP_BEGIN with exit=0 (infinite)
-            add_i(0, 0, 1),           // 1
-            hint_loop_end(0),         // 2: LOOP_END
-            jump(-3),                 // 3: back edge
+            hint_loop(0, 2, 0),       // 0: HINT_LOOP with exit=0 (infinite)
+            add_i(0, 0, 1),           // 1: begin_pc
+            jump(-2),                 // 2: back edge (end_pc)
         ]);
         
         let loops = analyze_loops(&func);
         assert_eq!(loops.len(), 1);
         
         let loop_info = &loops[0];
+        assert_eq!(loop_info.begin_pc, 1, "begin_pc = hint_pc + 1");
+        assert_eq!(loop_info.end_pc, 2, "end_pc = hint_pc + end_offset");
         assert!(loop_info.is_infinite(), "Should be infinite loop");
         assert!(!loop_info.is_simple(), "Infinite loop is not simple");
     }

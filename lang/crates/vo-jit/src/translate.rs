@@ -637,7 +637,7 @@ fn resolve_elem_bytes<'a>(e: &impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> (us
     match flags {
         0 => {
             // Dynamic: elem_bytes > 63, stored in register by LoadConst
-            let eb = e.get_reg_const(eb_reg).unwrap() as usize;
+            let eb = e.get_reg_const(eb_reg).expect("SliceGet/Set: dynamic elem_bytes not in reg_consts") as usize;
             (eb, false)
         }
         0x81 => (1, true),   // int8
@@ -853,21 +853,21 @@ fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let result = if has_max {
         let max = e.read_var(inst.c + 2);
         if is_array {
-            let func = e.helpers().slice_from_array3.unwrap();
+            let func = e.helpers().slice_from_array3.expect("slice_from_array3 helper not registered");
             let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         } else {
-            let func = e.helpers().slice_slice3.unwrap();
+            let func = e.helpers().slice_slice3.expect("slice_slice3 helper not registered");
             let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         }
     } else {
         if is_array {
-            let func = e.helpers().slice_from_array.unwrap();
+            let func = e.helpers().slice_from_array.expect("slice_from_array helper not registered");
             let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         } else {
-            let func = e.helpers().slice_slice.unwrap();
+            let func = e.helpers().slice_slice.expect("slice_slice helper not registered");
             let call = e.builder().ins().call(func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         }

@@ -509,36 +509,8 @@ impl Vm {
             match inst.opcode() {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
                 Opcode::Hint => {
-                    #[cfg(feature = "jit")]
-                    {
-                        use vo_common_core::instruction::HINT_LOOP_BEGIN;
-                        if inst.flags == HINT_LOOP_BEGIN {
-                            let loop_pc = frame.pc - 1;
-                            if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, loop_pc, bp) {
-                                use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
-                                if result_pc == OSR_RESULT_FRAME_CHANGED {
-                                    // Loop made a Call - callee frame pushed, VM continues
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    stack = fiber.stack_ptr();
-                                    refetch!();
-                                    continue;
-                                } else if result_pc == OSR_RESULT_WAITIO {
-                                    // Loop needs WaitIo
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    if let Some(token) = fiber.resume_io_token {
-                                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                                    }
-                                } else {
-                                    // Normal exit - update PC and continue
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    fiber.current_frame_mut().unwrap().pc = result_pc;
-                                    stack = fiber.stack_ptr();
-                                    refetch!();
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+                    // HINT_LOOP is now a no-op in VM - provides metadata for JIT analysis only.
+                    // Hotspot detection moved to Jump instruction (back-edge detection).
                 }
 
                 Opcode::LoadInt => {
@@ -837,7 +809,38 @@ impl Vm {
                 // Jump
                 Opcode::Jump => {
                     let offset = inst.imm32();
-                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                    let target_pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                    
+                    #[cfg(feature = "jit")]
+                    if offset < 0 {
+                        // Back-edge detected - this is a loop iteration
+                        // target_pc is the loop_start (condition check)
+                        if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
+                            use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                            if result_pc == OSR_RESULT_FRAME_CHANGED {
+                                // Loop made a Call - callee frame pushed, VM continues
+                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                stack = fiber.stack_ptr();
+                                refetch!();
+                                continue;
+                            } else if result_pc == OSR_RESULT_WAITIO {
+                                // Loop needs WaitIo
+                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                let token = fiber.resume_io_token
+                                    .expect("OSR_RESULT_WAITIO but resume_io_token is None");
+                                return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                            } else {
+                                // Normal exit - update PC and continue
+                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                                fiber.current_frame_mut().unwrap().pc = result_pc;
+                                stack = fiber.stack_ptr();
+                                refetch!();
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    frame.pc = target_pc;
                 }
                 Opcode::JumpIf => {
                     let cond = stack_get(stack, bp + inst.a as usize);
@@ -1668,8 +1671,17 @@ impl Vm {
         }
         
         // Hot - try to compile
-        let loop_info = jit_mgr.find_loop(func_id, func_def, loop_pc)?;
+        let loop_info = match jit_mgr.find_loop(func_id, func_def, loop_pc) {
+            Some(info) => info,
+            None => {
+                // Back-edge detected but no LoopInfo found - codegen bug or analysis bug
+                // Mark as failed to avoid retrying
+                jit_mgr.mark_loop_failed(func_id, loop_pc);
+                return None;
+            }
+        };
         if !loop_info.is_jittable() {
+            jit_mgr.mark_loop_failed(func_id, loop_pc);
             return None;
         }
         

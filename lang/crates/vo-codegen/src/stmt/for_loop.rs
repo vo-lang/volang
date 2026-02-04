@@ -107,8 +107,11 @@ pub(super) fn compile_for_cond(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // while-style: for cond { } or infinite: for { }
+    
+    // Emit HINT_LOOP outside the loop
+    func.enter_loop(0, label);
     let loop_start = func.current_pc();
-    let begin_pc = func.enter_loop(loop_start, label);
+    func.set_loop_start(loop_start);
 
     let end_jump = if let Some(cond) = cond_opt {
         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -119,9 +122,10 @@ pub(super) fn compile_for_cond(
 
     compile_block(&for_stmt.body, ctx, func, info)?;
     
-    // exit_loop emits HINT_LOOP_END and patches flags
+    // exit_loop returns info (no HINT_LOOP_END emitted)
     let exit_info = func.exit_loop();
     
+    let end_pc = func.current_pc();
     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
     let exit_pc = func.current_pc();
@@ -129,9 +133,12 @@ pub(super) fn compile_for_cond(
         func.patch_jump(j, exit_pc);
     }
     
-    // Finalize HINT_LOOP_BEGIN: exit_pc=0 for infinite loop, actual exit_pc otherwise
+    // Finalize HINT_LOOP: exit_pc=0 for infinite loop, actual exit_pc otherwise
     let hint_exit_pc = if cond_opt.is_some() { exit_pc } else { 0 };
-    func.finalize_loop_hint(begin_pc, hint_exit_pc);
+    func.finalize_loop_hint(
+        exit_info.hint_pc, end_pc, hint_exit_pc,
+        exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+    );
     
     for pc in exit_info.break_patches {
         func.patch_jump(pc, exit_pc);
@@ -220,8 +227,10 @@ pub(super) fn compile_for_three(
         }
     }
 
+    // Emit HINT_LOOP outside the loop
+    func.enter_loop(0, label);
     let loop_start = func.current_pc();
-    let begin_pc = func.enter_loop(0, label);
+    func.set_loop_start(loop_start);
 
     let end_jump = if let Some(cond) = cond {
         // Cond uses stack variable (control var)
@@ -261,8 +270,10 @@ pub(super) fn compile_for_three(
         compile_stmt(post, ctx, func, info)?;
     }
 
+    // exit_loop returns info (no HINT_LOOP_END emitted)
     let exit_info = func.exit_loop();
     
+    let end_pc = func.current_pc();
     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
     let exit_pc = func.current_pc();
@@ -270,8 +281,11 @@ pub(super) fn compile_for_three(
         func.patch_jump(j, exit_pc);
     }
 
-    // Finalize HINT_LOOP_BEGIN with exit_pc
-    func.finalize_loop_hint(begin_pc, exit_pc);
+    // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+    func.finalize_loop_hint(
+        exit_info.hint_pc, end_pc, exit_pc,
+        exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+    );
     
     // Patch break jumps to after loop
     for pc in exit_info.break_patches {

@@ -6,12 +6,8 @@
 
 /// Hint type: pure NOP (backward compatible)
 pub const HINT_NOP: u8 = 0;
-/// Hint type: loop begin marker
-pub const HINT_LOOP_BEGIN: u8 = 1;
-/// Hint type: loop end marker
-pub const HINT_LOOP_END: u8 = 2;
-/// Hint type: loop metadata (e.g., continue_pc for labeled continue)
-pub const HINT_LOOP_META: u8 = 3;
+/// Hint type: loop marker (encodes depth, end_offset, flags, exit_pc)
+pub const HINT_LOOP: u8 = 1;
 
 /// Loop flag: contains defer statement
 pub const LOOP_FLAG_HAS_DEFER: u8 = 0x01;

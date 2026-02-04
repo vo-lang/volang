@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use vo_common::symbol::Symbol;
 use vo_common_core::instruction::{
-    HINT_LOOP_BEGIN, HINT_LOOP_END, HINT_LOOP_META,
+    HINT_LOOP,
     LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
 use vo_runtime::SlotType;
@@ -100,7 +100,8 @@ pub struct CaptureVar {
 /// Loop/switch context for break/continue and Hint generation.
 struct LoopContext {
     depth: u8,                      // nesting depth (0 = outermost)
-    begin_pc: usize,                // PC of HINT_LOOP_BEGIN (0 for switch)
+    hint_pc: usize,                 // PC of HINT_LOOP (0 for switch)
+    loop_start: usize,              // PC where loop body starts (Jump target)
     continue_pc: usize,
     continue_patches: Vec<usize>,   // for patching continue jumps later
     break_patches: Vec<usize>,
@@ -115,8 +116,12 @@ struct LoopContext {
 pub struct LoopExitInfo {
     pub break_patches: Vec<usize>,
     pub continue_patches: Vec<usize>,
-    pub begin_pc: usize,
+    pub hint_pc: usize,             // PC of HINT_LOOP
+    pub loop_start: usize,          // PC where loop body starts (Jump target)
     pub depth: u8,
+    pub has_defer: bool,
+    pub has_labeled_break: bool,
+    pub has_labeled_continue: bool,
 }
 
 /// Function builder.
@@ -801,20 +806,26 @@ impl FuncBuilder {
 
     // === Loop ===
 
-    /// Enter a loop and emit HINT_LOOP_BEGIN.
-    /// Returns the PC of the HINT_LOOP_BEGIN instruction (for patching exit_pc later).
-    pub fn enter_loop(&mut self, continue_pc: usize, label: Option<Symbol>) -> usize {
+    /// Enter a loop: emit HINT_LOOP (outside loop) and set loop_start.
+    /// 
+    /// The HINT_LOOP is emitted once before the loop starts, providing metadata
+    /// for JIT analysis. The loop_start is where the back-edge Jump will target.
+    /// 
+    /// Returns the PC of HINT_LOOP (for patching exit_pc/end_pc later).
+    pub fn enter_loop(&mut self, loop_start: usize, label: Option<Symbol>) -> usize {
         let depth = self.loop_stack.len() as u8;
-        let begin_pc = self.current_pc();
+        let hint_pc = self.current_pc();
         
-        // Emit HINT_LOOP_BEGIN with placeholder exit_pc (will be patched)
-        // Format: flags=HINT_LOOP_BEGIN, a=loop_info, bc=exit_pc
-        self.emit_hint_loop_begin_placeholder(depth, 0);
+        // Emit HINT_LOOP with placeholder values (will be patched in finalize_loop_hint)
+        // Format: flags=HINT_LOOP, a=loop_info, bc=exit_pc
+        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
+        self.emit_hint_loop_placeholder(depth);
         
         self.loop_stack.push(LoopContext {
             depth,
-            begin_pc,
-            continue_pc,
+            hint_pc,
+            loop_start,
+            continue_pc: 0,  // Will be set by caller if needed
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             label,
@@ -824,28 +835,23 @@ impl FuncBuilder {
             is_switch: false,
         });
         
-        begin_pc
+        hint_pc
     }
     
-    /// Emit HINT_LOOP_BEGIN with placeholder values.
-    fn emit_hint_loop_begin_placeholder(&mut self, depth: u8, loop_flags: u8) {
-        // loop_info: bits 0-3 = flags, bits 4-7 = depth
-        let loop_info = ((depth as u16) << 4) | (loop_flags as u16 & 0x0F);
-        // Opcode::Hint = 0, used as Hint
-        self.code.push(Instruction::with_flags(Opcode::Hint, HINT_LOOP_BEGIN, loop_info, 0, 0));
+    /// Set the loop_start for the current loop (called after enter_loop when loop_start is known).
+    pub fn set_loop_start(&mut self, loop_start: usize) {
+        if let Some(ctx) = self.loop_stack.last_mut() {
+            ctx.loop_start = loop_start;
+        }
     }
     
-    /// Emit HINT_LOOP_END.
-    pub fn emit_hint_loop_end(&mut self, depth: u8) {
-        self.code.push(Instruction::with_flags(Opcode::Hint, HINT_LOOP_END, depth as u16, 0, 0));
+    /// Emit HINT_LOOP with placeholder values.
+    fn emit_hint_loop_placeholder(&mut self, depth: u8) {
+        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (all zero initially)
+        let loop_info = (depth as u16) << 4;
+        self.code.push(Instruction::with_flags(Opcode::Hint, HINT_LOOP, loop_info, 0, 0));
     }
     
-    /// Emit HINT_LOOP_META for continue_pc (used by labeled continue).
-    pub fn emit_hint_loop_meta_continue(&mut self, continue_pc: usize) {
-        let (b, c) = Self::encode_jump_offset(continue_pc as i32);
-        // meta_type = 0 means continue_pc
-        self.code.push(Instruction::with_flags(Opcode::Hint, HINT_LOOP_META, 0, b, c));
-    }
     
     /// Mark current loop as containing defer.
     pub fn mark_loop_has_defer(&mut self) {
@@ -859,7 +865,8 @@ impl FuncBuilder {
     pub fn enter_breakable(&mut self, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
             depth: self.loop_stack.len() as u8,
-            begin_pc: 0,  // not used for breakable
+            hint_pc: 0,     // not used for breakable
+            loop_start: 0,  // not used for breakable
             continue_pc: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
@@ -876,50 +883,55 @@ impl FuncBuilder {
         self.loop_stack.pop().expect("exit_breakable without enter_breakable").break_patches
     }
 
-    /// Exit loop: emit HINT_LOOP_END and patch HINT_LOOP_BEGIN flags.
-    /// Returns LoopExitInfo for the caller to patch break/continue and finalize exit_pc.
+    /// Exit loop: record end_pc and return LoopExitInfo for patching.
+    /// 
+    /// The end_pc will be encoded into HINT_LOOP by finalize_loop_hint.
     pub fn exit_loop(&mut self) -> LoopExitInfo {
         let ctx = self.loop_stack.pop().expect("exit_loop without enter_loop");
-        
-        // Emit HINT_LOOP_END
-        self.emit_hint_loop_end(ctx.depth);
-        
-        // Patch HINT_LOOP_BEGIN with correct flags
-        self.patch_loop_begin_flags(ctx.begin_pc, ctx.depth, ctx.has_defer, ctx.has_labeled_break, ctx.has_labeled_continue);
         
         LoopExitInfo {
             break_patches: ctx.break_patches,
             continue_patches: ctx.continue_patches,
-            begin_pc: ctx.begin_pc,
+            hint_pc: ctx.hint_pc,
+            loop_start: ctx.loop_start,
             depth: ctx.depth,
+            has_defer: ctx.has_defer,
+            has_labeled_break: ctx.has_labeled_break,
+            has_labeled_continue: ctx.has_labeled_continue,
         }
     }
     
-    /// Patch HINT_LOOP_BEGIN instruction with flags.
-    fn patch_loop_begin_flags(&mut self, begin_pc: usize, depth: u8, has_defer: bool, has_labeled_break: bool, has_labeled_continue: bool) {
-        if begin_pc >= self.code.len() {
-            return;
-        }
+    /// Finalize loop: patch HINT_LOOP with flags, end_pc, and exit_pc.
+    /// 
+    /// HINT_LOOP format after patching:
+    /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (end_pc - hint_pc)
+    /// - bc: exit_pc (32-bit)
+    pub fn finalize_loop_hint(&mut self, hint_pc: usize, end_pc: usize, exit_pc: usize, has_defer: bool, has_labeled_break: bool, has_labeled_continue: bool) {
+        assert!(hint_pc < self.code.len(), "finalize_loop_hint: hint_pc {} out of range", hint_pc);
+        assert!(end_pc > hint_pc, "finalize_loop_hint: end_pc {} must be > hint_pc {}", end_pc, hint_pc);
+        
+        // Calculate end_offset (distance from hint_pc to end_pc, capped at 255)
+        let offset = end_pc - hint_pc;
+        let end_offset = if offset > 255 { 0 } else { offset as u8 };  // 0 signals JIT to scan for back-edge
+        
+        // Build flags
         let mut flags = 0u8;
         if has_defer { flags |= LOOP_FLAG_HAS_DEFER; }
         if has_labeled_break { flags |= LOOP_FLAG_HAS_LABELED_BREAK; }
         if has_labeled_continue { flags |= LOOP_FLAG_HAS_LABELED_CONTINUE; }
         
-        // loop_info: bits 0-3 = flags, bits 4-7 = depth
-        let loop_info = ((depth as u16) << 4) | (flags as u16 & 0x0F);
-        self.code[begin_pc].a = loop_info;
-    }
-    
-    /// Finalize loop: patch HINT_LOOP_BEGIN with exit_pc.
-    /// Call this after exit_loop when exit_pc is known.
-    pub fn finalize_loop_hint(&mut self, begin_pc: usize, exit_pc: usize) {
-        if begin_pc >= self.code.len() {
-            return;
-        }
+        // Get depth from existing instruction
+        let existing_a = self.code[hint_pc].a;
+        let depth = ((existing_a >> 4) & 0x0F) as u8;
+        
+        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
+        let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4) | (flags as u16 & 0x0F);
+        self.code[hint_pc].a = loop_info;
+        
         // Update exit_pc in bc fields
         let (b, c) = Self::encode_jump_offset(exit_pc as i32);
-        self.code[begin_pc].b = b;
-        self.code[begin_pc].c = c;
+        self.code[hint_pc].b = b;
+        self.code[hint_pc].c = c;
     }
     
     /// Get the depth of the current innermost loop.
@@ -927,9 +939,9 @@ impl FuncBuilder {
         self.loop_stack.last().map(|ctx| ctx.depth)
     }
     
-    /// Get begin_pc of loop at given index.
-    pub fn loop_begin_pc(&self, idx: usize) -> Option<usize> {
-        self.loop_stack.get(idx).map(|ctx| ctx.begin_pc)
+    /// Get loop_start (Jump target) of loop at given index.
+    pub fn loop_start_pc(&self, idx: usize) -> Option<usize> {
+        self.loop_stack.get(idx).map(|ctx| ctx.loop_start)
     }
 
     /// Find breakable context index by label (includes both loops and switches)

@@ -17,19 +17,27 @@ use super::var_def::{DeferredHeapAlloc, LocalDefiner};
 /// Index-based loop for for-range expansion (array, slice, string, map).
 pub(crate) struct IndexLoop {
     idx_slot: u16,
-    loop_start: usize,
+    loop_start: usize,  // PC of condition check (Jump target)
     end_jump: usize,
 }
 
 impl IndexLoop {
-    /// Begin: __idx := 0, HINT_LOOP_BEGIN, loop: if __idx >= __len { goto end }
+    /// Begin: __idx := 0, HINT_LOOP, loop_start: if __idx >= __len { goto end }
+    /// 
+    /// Structure after optimization:
+    /// - HINT_LOOP (outside loop, executed once)
+    /// - loop_start: condition check (Jump target)
     pub fn begin(func: &mut FuncBuilder, len_slot: u16, label: Option<vo_common::Symbol>) -> Self {
         let idx_slot = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_slot, 0, 0);
         
-        let loop_start = func.current_pc();
-        // Pass 0 for continue_pc - it will be patched in end() to point to idx++
+        // Emit HINT_LOOP outside the loop (executed once)
+        // loop_start will be set after this
         func.enter_loop(0, label);
+        
+        // loop_start is AFTER HINT_LOOP - this is where Jump will target
+        let loop_start = func.current_pc();
+        func.set_loop_start(loop_start);
         
         let cmp_slot = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::GeI, cmp_slot, idx_slot, len_slot);
@@ -50,23 +58,28 @@ impl IndexLoop {
         }
     }
     
-    /// End: __idx++, HINT_LOOP_END, goto loop, patch breaks/continues, finalize HINT_LOOP_BEGIN
+    /// End: __idx++, goto loop_start, patch breaks/continues, finalize HINT_LOOP
     pub fn end(self, func: &mut FuncBuilder) {
         let post_pc = func.current_pc();
         let one = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, one, 1, 0);
         func.emit_op(Opcode::AddI, self.idx_slot, self.idx_slot, one);
         
-        // exit_loop emits HINT_LOOP_END and patches flags
+        // exit_loop returns info (no HINT_LOOP_END emitted)
         let exit_info = func.exit_loop();
         
+        // end_pc is the Jump instruction position
+        let end_pc = func.current_pc();
         func.emit_jump_to(Opcode::Jump, 0, self.loop_start);
         
         let exit_pc = func.current_pc();
         func.patch_jump(self.end_jump, exit_pc);
         
-        // Finalize HINT_LOOP_BEGIN with correct exit_pc
-        func.finalize_loop_hint(exit_info.begin_pc, exit_pc);
+        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+        func.finalize_loop_hint(
+            exit_info.hint_pc, end_pc, exit_pc,
+            exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+        );
         
         for pc in exit_info.break_patches { func.patch_jump(pc, exit_pc); }
         for pc in exit_info.continue_patches { func.patch_jump(pc, post_pc); }
@@ -280,8 +293,11 @@ pub(crate) fn compile_for_range(
         sc.func.emit_op(Opcode::LoadInt, pos, 0, 0);
         sc.func.emit_op(Opcode::StrLen, len, reg, 0);
         
+        // Emit HINT_LOOP outside the loop
+        sc.func.enter_loop(0, label);
         let loop_start = sc.func.current_pc();
-        let begin_pc = sc.func.enter_loop(loop_start, label);
+        sc.func.set_loop_start(loop_start);
+        
         sc.func.emit_op(Opcode::GeI, cmp, pos, len);
         let end_jump = sc.func.emit_jump(Opcode::JumpIf, cmp);
         
@@ -304,16 +320,20 @@ pub(crate) fn compile_for_range(
         let post_pc = sc.func.current_pc();
         sc.func.emit_op(Opcode::AddI, pos, pos, rune_width + 1);
         
-        // exit_loop emits HINT_LOOP_END and patches flags
+        // exit_loop returns info (no HINT_LOOP_END emitted)
         let exit_info = sc.func.exit_loop();
         
+        let end_pc = sc.func.current_pc();
         sc.func.emit_jump_to(Opcode::Jump, 0, loop_start);
         
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
         
-        // Finalize HINT_LOOP_BEGIN with exit_pc
-        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+        sc.func.finalize_loop_hint(
+            exit_info.hint_pc, end_pc, exit_pc,
+            exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+        );
         
         for pc in exit_info.break_patches { sc.func.patch_jump(pc, exit_pc); }
         for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
@@ -334,9 +354,10 @@ pub(crate) fn compile_for_range(
         // MapIterInit: a=iter_slot, b=map_reg
         sc.func.emit_op(Opcode::MapIterInit, iter_slot, map_reg, 0);
         
-        // loop:
+        // Emit HINT_LOOP outside the loop
+        sc.func.enter_loop(0, label);
         let loop_start = sc.func.current_pc();
-        let begin_pc = sc.func.enter_loop(loop_start, label);
+        sc.func.set_loop_start(loop_start);
         
         // MapIterNext: a=key_slot, b=iter_slot, c=ok_slot, flags=kn|(vn<<4)
         sc.func.emit_with_flags(Opcode::MapIterNext, (kn as u8) | ((vn as u8) << 4), key_info.slot, iter_slot, ok_slot);
@@ -365,15 +386,21 @@ pub(crate) fn compile_for_range(
         super::compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
         
         let post_pc = sc.func.current_pc();
-        sc.func.emit_jump(Opcode::Jump, 0);
-        let loop_jump_pc = sc.func.current_pc() - 1;
-        sc.func.patch_jump(loop_jump_pc, loop_start);
+        
+        // exit_loop returns info (no HINT_LOOP_END emitted)
+        let exit_info = sc.func.exit_loop();
+        
+        let end_pc = sc.func.current_pc();
+        sc.func.emit_jump_to(Opcode::Jump, 0, loop_start);
         
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
         
-        let exit_info = sc.func.exit_loop();
-        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+        sc.func.finalize_loop_hint(
+            exit_info.hint_pc, end_pc, exit_pc,
+            exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+        );
         
         for pc in exit_info.break_patches { sc.func.patch_jump(pc, exit_pc); }
         for pc in exit_info.continue_patches { sc.func.patch_jump(pc, post_pc); }
@@ -390,9 +417,10 @@ pub(crate) fn compile_for_range(
         // ok slot
         let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
         
-        // loop:
+        // Emit HINT_LOOP outside the loop
+        sc.func.enter_loop(0, label);
         let loop_start = sc.func.current_pc();
-        let begin_pc = sc.func.enter_loop(loop_start, label);
+        sc.func.set_loop_start(loop_start);
         
         // v, ok := <-ch
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
@@ -414,9 +442,11 @@ pub(crate) fn compile_for_range(
         // body
         super::compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
         
-        // exit_loop emits HINT_LOOP_END and patches flags
+        // exit_loop returns info (no HINT_LOOP_END emitted)
         let exit_info = sc.func.exit_loop();
         
+        // end_pc is the Jump instruction position
+        let end_pc = sc.func.current_pc();
         // goto loop (continue target is loop_start for channel)
         sc.func.emit_jump_to(Opcode::Jump, 0, loop_start);
         
@@ -424,8 +454,11 @@ pub(crate) fn compile_for_range(
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
         
-        // Finalize HINT_LOOP_BEGIN with exit_pc
-        sc.func.finalize_loop_hint(begin_pc, exit_pc);
+        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
+        sc.func.finalize_loop_hint(
+            exit_info.hint_pc, end_pc, exit_pc,
+            exit_info.has_defer, exit_info.has_labeled_break, exit_info.has_labeled_continue
+        );
         
         for pc in exit_info.break_patches {
             sc.func.patch_jump(pc, exit_pc);

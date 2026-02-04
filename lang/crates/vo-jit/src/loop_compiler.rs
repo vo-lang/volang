@@ -88,8 +88,9 @@ impl<'a> LoopCompiler<'a> {
         
         let mut block_terminated = false;  // Same as func_compiler!
         
-        // Compile from after LOOP_BEGIN hint to after LOOP_END hint (includes back-edge jump)
-        for pc in (self.loop_info.begin_pc + 1)..(self.loop_info.end_pc + 2) {
+        // Compile from loop_start (begin_pc) to after back-edge Jump (end_pc + 1)
+        // Note: begin_pc is now loop_start (condition check), not HINT position
+        for pc in self.loop_info.begin_pc..(self.loop_info.end_pc + 1) {
             self.current_pc = pc;
             
             if let Some(&block) = self.blocks.get(&pc) {
@@ -143,26 +144,20 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn scan_jump_targets(&mut self) {
-        let loop_end = self.loop_info.end_pc + 2;
+        let loop_end = self.loop_info.end_pc + 1;
         
-        // Always create block for loop header (back-edge target)
-        self.ensure_block(self.loop_info.begin_pc + 1);
+        // Always create block for loop header (begin_pc = loop_start)
+        self.ensure_block(self.loop_info.begin_pc);
         
-        for pc in (self.loop_info.begin_pc + 1)..loop_end {
+        for pc in self.loop_info.begin_pc..loop_end {
             let inst = &self.func_def.code[pc];
             match inst.opcode() {
                 Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
                     let offset = inst.imm32();
                     let raw_target = (pc as i32 + offset) as usize;
-                    // Map LOOP_BEGIN to loop_header (begin_pc + 1)
-                    let target = if raw_target == self.loop_info.begin_pc {
-                        self.loop_info.begin_pc + 1
-                    } else {
-                        raw_target
-                    };
-                    // Create block for targets within loop body (after begin_pc)
-                    if target > self.loop_info.begin_pc && target < loop_end {
-                        self.ensure_block(target);
+                    // Create block for targets within loop body
+                    if raw_target >= self.loop_info.begin_pc && raw_target < loop_end {
+                        self.ensure_block(raw_target);
                     }
                 }
                 _ => {}
@@ -255,13 +250,13 @@ impl<'a> LoopCompiler<'a> {
     fn jump(&mut self, inst: &Instruction) {
         let offset = inst.imm32();
         let raw_target = (self.current_pc as i32 + offset) as usize;
-        let loop_end = self.loop_info.end_pc + 2;
+        let loop_end = self.loop_info.end_pc + 1;
         
-        // Back-edge: jump to loop header (condition check)
-        if raw_target == self.loop_info.begin_pc || raw_target == self.loop_info.begin_pc + 1 {
-            let loop_header = self.blocks[&(self.loop_info.begin_pc + 1)];
+        // Back-edge: jump to loop header (begin_pc = loop_start)
+        if raw_target == self.loop_info.begin_pc {
+            let loop_header = self.blocks[&self.loop_info.begin_pc];
             self.builder.ins().jump(loop_header, &[]);
-        } else if raw_target <= self.loop_info.begin_pc || raw_target >= loop_end {
+        } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
             self.store_vars_to_memory();
             self.emit_loop_exit(raw_target as u32);
@@ -276,7 +271,7 @@ impl<'a> LoopCompiler<'a> {
         let cond = self.read_var(inst.a);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
-        let loop_end = self.loop_info.end_pc + 2;
+        let loop_end = self.loop_info.end_pc + 1;
         
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -303,7 +298,7 @@ impl<'a> LoopCompiler<'a> {
         let cond = self.read_var(inst.a);
         let offset = inst.imm32();
         let target = (self.current_pc as i32 + offset) as usize;
-        let loop_end = self.loop_info.end_pc + 2;
+        let loop_end = self.loop_info.end_pc + 1;
         
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
