@@ -77,6 +77,7 @@ pub struct HelperFuncs {
     pub port_recv: Option<FuncRef>,
     // Batch 4: Goroutine Start
     pub go_start: Option<FuncRef>,
+    pub go_island: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler

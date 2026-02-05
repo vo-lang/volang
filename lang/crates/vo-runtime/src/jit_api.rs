@@ -248,6 +248,10 @@ pub struct JitContext {
     /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0), 
     /// args_ptr: pointer to arguments, arg_slots: number of argument slots
     pub go_start_fn: Option<extern "C" fn(*mut JitContext, func_id: u32, is_closure: u32, closure_ref: u64, args_ptr: *const u64, arg_slots: u32)>,
+    
+    /// Callback to spawn a goroutine on a specific island.
+    /// island: island handle, closure_ref: closure GcRef, args_ptr: arguments, arg_slots: count
+    pub go_island_fn: Option<extern "C" fn(*mut JitContext, island: u64, closure_ref: u64, args_ptr: *const u64, arg_slots: u32)>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -300,6 +304,7 @@ impl JitContext {
     pub const OFFSET_PORT_RECV_FN: i32 = std::mem::offset_of!(JitContext, port_recv_fn) as i32;
     // Batch 4
     pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
+    pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
 }
 
 // =============================================================================
@@ -1422,6 +1427,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_port_recv", vo_port_recv as *const u8),
         // Batch 4: Goroutine Start
         ("vo_go_start", vo_go_start as *const u8),
+        ("vo_go_island", vo_go_island as *const u8),
     ]
 }
 
@@ -1523,4 +1529,19 @@ pub extern "C" fn vo_go_start(
     let ctx = unsafe { &mut *ctx };
     let go_fn = ctx.go_start_fn.expect("go_start_fn not set");
     go_fn(ctx, func_id, is_closure, closure_ref, args_ptr, arg_slots)
+}
+
+/// Spawn a goroutine on a specific island.
+/// If island_id == 0, spawns locally. Otherwise sends to remote island.
+#[no_mangle]
+pub extern "C" fn vo_go_island(
+    ctx: *mut JitContext,
+    island: u64,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    let ctx = unsafe { &mut *ctx };
+    let go_fn = ctx.go_island_fn.expect("go_island_fn not set");
+    go_fn(ctx, island, closure_ref, args_ptr, arg_slots)
 }

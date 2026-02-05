@@ -236,6 +236,7 @@ fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitCont
         port_recv_fn: Some(jit_port_recv),
         // Batch 4 callbacks
         go_start_fn: Some(jit_go_start),
+        go_island_fn: Some(jit_go_island),
     };
 
     JitContextWrapper {
@@ -941,40 +942,9 @@ pub fn dispatch_loop_osr(
 extern "C" fn jit_create_island(ctx: *mut JitContext) -> u64 {
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
-    let module = unsafe { &*(ctx.module as *const Module) };
     
-    let next_id = vm.state.next_island_id;
-    vm.state.next_island_id += 1;
-    
-    // Create island with proper registration
-    let (tx, rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
-    let handle = vo_runtime::island::create(&mut vm.state.gc, next_id);
-    
-    // Initialize island registry if needed
-    if vm.state.island_registry.is_none() {
-        let (main_tx, main_rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
-        let mut registry = std::collections::HashMap::new();
-        registry.insert(0u32, main_tx);
-        vm.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
-        vm.state.main_cmd_rx = Some(main_rx);
-    }
-    
-    // Register the island's command channel
-    let registry = vm.state.island_registry.as_ref().unwrap().clone();
-    { let mut guard = registry.lock().unwrap(); guard.insert(next_id, tx.clone()); }
-    
-    // Spawn island thread
-    let module_arc = std::sync::Arc::new(module.clone());
-    let registry_clone = registry.clone();
-    let join_handle = std::thread::spawn(move || {
-        crate::vm::island_thread::run_island_thread(next_id, module_arc, rx, registry_clone);
-    });
-    
-    // Save thread handle
-    vm.state.island_threads.push(crate::vm::types::IslandThread {
-        handle, command_tx: tx, join_handle: Some(join_handle),
-    });
-    
+    // Use shared implementation
+    let handle = vm.create_island();
     handle as u64
 }
 
@@ -1199,9 +1169,8 @@ extern "C" fn jit_chan_recv(
 // Batch 3: JIT Callbacks for Port Send/Recv
 // =============================================================================
 
-/// JIT callback to send on a port.
-/// Returns JitResult::Ok on success, JitResult::Panic on closed port,
-/// or JitResult::WaitIo if the send would block.
+/// JIT callback to send to a port.
+/// Returns JitResult (Ok, Panic, or WaitIo).
 #[cfg(feature = "std")]
 extern "C" fn jit_port_send(
     ctx: *mut JitContext,
@@ -1210,9 +1179,8 @@ extern "C" fn jit_port_send(
     val_slots: u32,
 ) -> JitResult {
     use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::port::{self, SendResult};
-    use vo_runtime::objects::queue_state;
-    use vo_runtime::pack::pack_slots;
+    use vo_runtime::objects::port;
+    use crate::exec::{PortResult, port_send_core};
     
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
@@ -1229,28 +1197,18 @@ extern "C" fn jit_port_send(
         .map(|i| unsafe { *val_ptr.add(i) })
         .collect();
     
-    // Pack the value for cross-island transfer
-    let elem_meta = queue_state::elem_meta(p);
-    let packed = pack_slots(&vm.state.gc, &src, elem_meta, &module.struct_metas, &module.runtime_types);
+    let island_id = vm.state.current_island_id;
+    let fiber_id = fiber.id as u64;
     
-    let cap = queue_state::capacity(p);
-    match port::try_send(p, packed) {
-        SendResult::DirectSend(receiver) => {
-            // Wake the receiver on remote island
+    match port_send_core(p, &src, island_id, fiber_id, &vm.state.gc, &module.struct_metas, &module.runtime_types) {
+        PortResult::WakeRemote(receiver) => {
             vm.state.wake_waiter(&receiver, &mut vm.scheduler);
             JitResult::Ok
         }
-        SendResult::Buffered => JitResult::Ok,
-        SendResult::WouldBlock(value) => {
-            // Register sender and block
-            let island_id = vm.state.current_island_id;
-            let waiter = vo_runtime::objects::port::WaiterInfo { island_id, fiber_id: fiber.id as u64 };
-            port::register_sender(p, waiter, value);
-            JitResult::WaitIo
-        }
-        SendResult::Closed => {
-            set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
-        }
+        PortResult::Continue => JitResult::Ok,
+        PortResult::Yield => JitResult::WaitIo,
+        PortResult::SendOnClosed => set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED),
+        _ => JitResult::Ok,
     }
 }
 
@@ -1271,8 +1229,7 @@ extern "C" fn jit_port_recv(
     has_ok: u32,
 ) -> JitResult {
     use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::port::{self, RecvResult};
-    use vo_runtime::pack::unpack_slots;
+    use crate::exec::{port_recv_core, PortRecvCoreResult};
     
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
@@ -1281,36 +1238,24 @@ extern "C" fn jit_port_recv(
     let p = port as GcRef;
     let has_ok = has_ok != 0;
     
-    let (result, packed_opt) = port::try_recv(p);
+    let island_id = vm.state.current_island_id;
+    let fiber_id = fiber.id as u64;
     
-    match result {
-        RecvResult::Success(woke_sender) => {
-            // Unpack the value into destination
-            if let Some(packed) = packed_opt {
-                let mut dst: Vec<u64> = vec![0; elem_slots as usize];
-                unpack_slots(&mut vm.state.gc, &packed, &mut dst, &module.struct_metas, &module.runtime_types);
-                for i in 0..elem_slots as usize {
-                    unsafe { *dst_ptr.add(i) = dst[i]; }
-                }
+    match port_recv_core(p, elem_slots as usize, island_id, fiber_id, &mut vm.state.gc, &module.struct_metas, &module.runtime_types) {
+        PortRecvCoreResult::Success { data, wake_sender } => {
+            for i in 0..elem_slots as usize {
+                unsafe { *dst_ptr.add(i) = data[i]; }
             }
             if has_ok {
                 unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
             }
-            // Wake sender if any
-            if let Some(sender) = woke_sender {
+            if let Some(sender) = wake_sender {
                 vm.state.wake_waiter(&sender, &mut vm.scheduler);
             }
             JitResult::Ok
         }
-        RecvResult::WouldBlock => {
-            // Register receiver and block
-            let island_id = vm.state.current_island_id;
-            let waiter = vo_runtime::objects::port::WaiterInfo { island_id, fiber_id: fiber.id as u64 };
-            port::register_receiver(p, waiter);
-            JitResult::WaitIo
-        }
-        RecvResult::Closed => {
-            // Zero out the destination and set ok=false
+        PortRecvCoreResult::WouldBlock => JitResult::WaitIo,
+        PortRecvCoreResult::Closed => {
             for i in 0..elem_slots as usize {
                 unsafe { *dst_ptr.add(i) = 0; }
             }
@@ -1336,7 +1281,7 @@ extern "C" fn jit_port_recv(_ctx: *mut JitContext, _port: u64, _dst_ptr: *mut u6
 extern "C" fn jit_go_start(
     ctx: *mut JitContext,
     func_id: u32,
-    is_closure: u32,
+    is_closure_call: u32,
     closure_ref: u64,
     args_ptr: *const u64,
     arg_slots: u32,
@@ -1348,10 +1293,10 @@ extern "C" fn jit_go_start(
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     
-    let is_closure = is_closure != 0;
+    let is_closure_call = is_closure_call != 0;
     
-    // Get func_id: from closure if is_closure, otherwise from parameter
-    let actual_func_id = if is_closure {
+    // Get func_id: from closure if is_closure_call, otherwise from parameter
+    let actual_func_id = if is_closure_call {
         closure::func_id(closure_ref as GcRef)
     } else {
         func_id
@@ -1366,11 +1311,22 @@ extern "C" fn jit_go_start(
     
     // Copy args to new fiber's stack
     let new_stack = new_fiber.stack_ptr();
-    if is_closure {
-        // Closure goes in reg[0], args start at reg[1]
-        unsafe { *new_stack = closure_ref };
+    if is_closure_call {
+        // Use call_layout for consistent argument placement
+        let closure_gcref = closure_ref as GcRef;
+        let layout = closure::call_layout(
+            closure_ref,
+            closure_gcref,
+            func.recv_slots as usize,
+            func.is_closure,
+        );
+        
+        if let Some(slot0_val) = layout.slot0 {
+            unsafe { *new_stack = slot0_val };
+        }
+        
         for i in 0..arg_slots as usize {
-            unsafe { *new_stack.add(1 + i) = *args_ptr.add(i) };
+            unsafe { *new_stack.add(layout.arg_offset + i) = *args_ptr.add(i) };
         }
     } else {
         // Regular function: args start at reg[0]
@@ -1381,4 +1337,113 @@ extern "C" fn jit_go_start(
     
     // Add to scheduler
     vm.scheduler.spawn(new_fiber);
+}
+
+/// JIT callback to spawn a goroutine on a specific island.
+/// If island_id == 0, spawns locally. Otherwise sends to remote island via command channel.
+#[cfg(feature = "std")]
+extern "C" fn jit_go_island(
+    ctx: *mut JitContext,
+    island: u64,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::closure;
+    
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    
+    let island_handle = island as GcRef;
+    let closure = closure_ref as GcRef;
+    let island_id = vo_runtime::island::id(island_handle);
+    
+    if island_id == 0 {
+        // Local spawn - match VM behavior exactly
+        let func_id = closure::func_id(closure);
+        let func = &module.functions[func_id as usize];
+        
+        let next_id = vm.scheduler.fibers.len() as u32;
+        let mut new_fiber = Fiber::new(next_id);
+        new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+        new_fiber.stack[0] = closure_ref as u64;
+        
+        vm.scheduler.spawn(new_fiber);
+        let _ = (args_ptr, arg_slots); // unused for local spawn
+    } else {
+        // Remote spawn - pack closure and send to island
+        let func_id = closure::func_id(closure);
+        let capture_count = closure::capture_count(closure);
+        
+        // Read capture data from closure
+        let mut capture_data = Vec::with_capacity(capture_count);
+        for i in 0..capture_count {
+            capture_data.push(closure::get_capture(closure, i));
+        }
+        
+        // Read arg data from args_ptr
+        let mut arg_data = Vec::with_capacity(arg_slots as usize);
+        for i in 0..arg_slots as usize {
+            arg_data.push(unsafe { *args_ptr.add(i) });
+        }
+        
+        let func_def = &module.functions[func_id as usize];
+        let result = crate::exec::GoIslandResult {
+            island: island_handle,
+            func_id,
+            capture_data,
+            capture_slots: capture_count as u16,
+            arg_data,
+            arg_slots: arg_slots as u16,
+        };
+        
+        let data = crate::exec::pack_closure_for_island(
+            &vm.state.gc, &result, &func_def.capture_types, &func_def.param_types,
+            &module.struct_metas, &module.runtime_types,
+        );
+        let closure_data = vo_runtime::pack::PackedValue::from_data(data);
+        let cmd = vo_runtime::island::IslandCommand::SpawnFiber { 
+            closure_data, 
+            capture_slots: capture_count as u16 
+        };
+        
+        if let Some(ref registry) = vm.state.island_registry {
+            if let Ok(guard) = registry.lock() {
+                if let Some(tx) = guard.get(&island_id) { 
+                    let _ = tx.send(cmd); 
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+extern "C" fn jit_go_island(
+    ctx: *mut JitContext,
+    island: u64,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) {
+    use vo_runtime::gc::GcRef;
+    use vo_runtime::objects::closure;
+    
+    // In no_std mode, always spawn locally - match VM behavior
+    let ctx = unsafe { &mut *ctx };
+    let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
+    let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
+    
+    let closure = closure_ref as GcRef;
+    let func_id = closure::func_id(closure);
+    let func = &module.functions[func_id as usize];
+    
+    let next_id = vm.scheduler.fibers.len() as u32;
+    let mut new_fiber = Fiber::new(next_id);
+    new_fiber.push_frame(func_id, func.local_slots, 0, 0);
+    new_fiber.stack[0] = closure_ref as u64;
+    
+    vm.scheduler.spawn(new_fiber);
+    let _ = (island, args_ptr, arg_slots); // suppress unused warnings
 }

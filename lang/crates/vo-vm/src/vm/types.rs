@@ -173,8 +173,7 @@ impl VmState {
         if let Some(ref registry) = self.island_registry {
             if let Ok(guard) = registry.lock() {
                 if let Some(tx) = guard.get(&island_id) {
-                    let _ = tx.send(IslandCommand::WakeFiber { fiber_id });
-                    return true;
+                    return tx.send(IslandCommand::WakeFiber { fiber_id }).is_ok();
                 }
             }
         }

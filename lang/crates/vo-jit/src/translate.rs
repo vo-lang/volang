@@ -134,6 +134,7 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         PortRecv => { port_recv(e, inst)?; Ok(Completed) }
         // Batch 4: Goroutine Start
         GoStart => { go_start(e, inst); Ok(Completed) }
+        GoIsland => { go_island(e, inst); Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1659,8 +1660,8 @@ fn emit_queue_send<'a>(
 ) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;
     
-    // Set resume_pc for WaitIo case (VM re-executes this instruction)
-    let resume_pc = e.current_pc() as i32;
+    // Set resume_pc for WaitIo case - resume at NEXT instruction since send is already registered
+    let resume_pc = (e.current_pc() + 1) as i32;
     let ctx = e.ctx_param();
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
     e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
@@ -1702,7 +1703,8 @@ fn emit_queue_recv<'a>(
 ) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;
     
-    // Set resume_pc for WaitIo case
+    // Set resume_pc for WaitIo case - RE-EXECUTE recv to get data from buffer
+    // (when receiver blocks, only waiter is registered; data is in buffer when woken)
     let resume_pc = e.current_pc() as i32;
     let ctx = e.ctx_param();
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
@@ -1798,4 +1800,21 @@ fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
     
     e.builder().ins().call(go_start_func, &[ctx, func_id, is_closure_val, closure_ref, args_ptr, arg_slots]);
+}
+
+/// GoIsland: Spawn goroutine on specific island.
+/// - a: island handle
+/// - b: closure
+/// - c: args_start
+/// - flags: arg_slots
+fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let go_island_func = e.helpers().go_island.expect("go_island not registered");
+    let ctx = e.ctx_param();
+    
+    let island = e.read_var(inst.a);
+    let closure = e.read_var(inst.b);
+    let args_ptr = e.var_addr(inst.c);
+    let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    
+    e.builder().ins().call(go_island_func, &[ctx, island, closure, args_ptr, arg_slots]);
 }

@@ -214,6 +214,46 @@ impl Vm {
         
         self.module = Some(module);
     }
+    
+    /// Create a new island - shared by VM interpreter and JIT callbacks.
+    /// Returns the island handle (GcRef).
+    #[cfg(feature = "std")]
+    pub fn create_island(&mut self) -> GcRef {
+        let module = self.module.as_ref().expect("module required for create_island");
+        let next_id = self.state.next_island_id;
+        self.state.next_island_id += 1;
+        
+        // Create island channel and handle
+        let (tx, rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+        let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
+        
+        // Initialize registry and main_cmd_rx if first island
+        if self.state.island_registry.is_none() {
+            let (main_tx, main_rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
+            let mut registry = std::collections::HashMap::new();
+            registry.insert(0u32, main_tx);
+            self.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
+            self.state.main_cmd_rx = Some(main_rx);
+        }
+        
+        // Register this island
+        let registry = self.state.island_registry.as_ref().unwrap().clone();
+        { let mut guard = registry.lock().unwrap(); guard.insert(next_id, tx.clone()); }
+        
+        // Spawn island thread
+        let module_arc = std::sync::Arc::new(module.clone());
+        let registry_clone = registry.clone();
+        let join_handle = std::thread::spawn(move || {
+            island_thread::run_island_thread(next_id, module_arc, rx, registry_clone);
+        });
+        
+        // Save thread handle
+        self.state.island_threads.push(IslandThread {
+            handle, command_tx: tx, join_handle: Some(join_handle),
+        });
+        
+        handle
+    }
 
     pub fn run(&mut self) -> Result<(), VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
@@ -1453,31 +1493,8 @@ impl Vm {
                 // === ISLAND/PORT: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
-                    let next_id = self.state.next_island_id;
-                    self.state.next_island_id += 1;
-                    let result = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, next_id);
-                    
-                    if self.state.island_registry.is_none() {
-                        let (main_tx, main_rx) = std::sync::mpsc::channel::<vo_runtime::island::IslandCommand>();
-                        let mut registry = std::collections::HashMap::new();
-                        registry.insert(0u32, main_tx);
-                        self.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
-                        self.state.main_cmd_rx = Some(main_rx);
-                    }
-                    
-                    let registry = self.state.island_registry.as_ref().unwrap().clone();
-                    { let mut guard = registry.lock().unwrap(); guard.insert(next_id, result.command_tx.clone()); }
-                    
-                    let cmd_rx = result.command_rx;
-                    let module_arc = std::sync::Arc::new(module.clone());
-                    let registry_clone = registry.clone();
-                    let join_handle = std::thread::spawn(move || {
-                        island_thread::run_island_thread(next_id, module_arc, cmd_rx, registry_clone);
-                    });
-                    
-                    self.state.island_threads.push(IslandThread {
-                        handle: result.handle, command_tx: result.command_tx, join_handle: Some(join_handle),
-                    });
+                    let handle = self.create_island();
+                    stack_set(stack, bp + inst.a as usize, handle as u64);
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::IslandNew => {

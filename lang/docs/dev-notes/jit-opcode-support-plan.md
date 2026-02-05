@@ -13,13 +13,17 @@ Make **all functions JIT-compilable** with **full native JIT execution** where p
 
 ## Current Status
 
-Currently `is_func_jittable()` rejects entire functions containing these opcodes:
+**Completed**:
+- ✅ Batch 1: IslandNew, ChanClose, PortClose
+- ✅ Batch 2: ChanSend, ChanRecv
+- ✅ Batch 3: PortSend, PortRecv
+- ✅ Batch 4: GoStart
+- ⚠️ Batch 4: GoIsland (implementation complete, but disabled - cross-island bidirectional port comm has scheduling issues)
+
+**Remaining** - `is_func_jittable()` rejects functions containing:
 - DeferPush, ErrDeferPush, Recover
-- GoStart, GoIsland
-- ChanSend, ChanRecv, ChanClose
+- GoIsland (scheduling issue with bidirectional port communication)
 - SelectBegin, SelectSend, SelectRecv, SelectExec
-- IslandNew
-- PortSend, PortRecv, PortClose
 
 ## Implementation Batches
 

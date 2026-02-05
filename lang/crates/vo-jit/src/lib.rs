@@ -39,14 +39,12 @@ pub fn is_func_jittable(func: &FunctionDef) -> bool {
         match inst.opcode() {
             // Defer/recover
             Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-            // GoIsland (cross-island spawn, needs more work)
-            | Opcode::GoIsland
             // Select (complex control flow)
             | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
             // Batch 1: IslandNew, ChanClose, PortClose - supported
             // Batch 2: ChanSend, ChanRecv - supported (may return WaitIo)
             // Batch 3: PortSend, PortRecv - supported (may return WaitIo)
-            // Batch 4: GoStart - supported (fire-and-forget)
+            // Batch 4: GoStart, GoIsland - supported (fire-and-forget)
             // CallClosure and CallIface supported via unified call protocol
             // CallExtern supported via jit_call_extern callback
             _ => {}
