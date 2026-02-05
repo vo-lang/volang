@@ -160,8 +160,6 @@ fn handle_jit_result(
             fiber.frames.pop();
             fiber.sp = jit_bp;
             
-            // Clear resume_stack - JIT completed normally, no shadow frames should remain
-            #[cfg(feature = "jit")]
             fiber.resume_stack.clear();
 
             // Copy return values back to caller's stack
@@ -186,7 +184,9 @@ fn handle_jit_result(
                 panic_msg = InterfaceSlot::new(slot0, msg_str as u64);
             }
             
-            // Set panic state on fiber
+            materialize_jit_frames(fiber, 0);
+            
+            // Set panic state on fiber and start unwinding
             fiber.set_recoverable_panic(panic_msg);
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(fiber, stack_ptr, module)
@@ -215,8 +215,6 @@ fn handle_jit_result(
             let callee_ret_slots = ctx.call_ret_slots() as usize;
             let callee_func_def = &module.functions[callee_func_id as usize];
 
-            // Convert shadow frames to real CallFrames before VM takes over
-            #[cfg(feature = "jit")]
             materialize_jit_frames(fiber, resume_pc);
             
             // Set up callee frame like exec_call does:
@@ -233,15 +231,13 @@ fn handle_jit_result(
             
             // Copy args based on call kind
             match call_kind {
-                0 => {
-                    // Regular call: direct copy
+                JitContext::CALL_KIND_REGULAR => {
                     let arg_slots = callee_func_def.param_slots as usize;
                     for i in 0..arg_slots {
                         fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
                     }
                 }
-                1 => {
-                    // Closure call: use call_layout for slot0 and arg_offset
+                JitContext::CALL_KIND_CLOSURE => {
                     use vo_runtime::objects::closure;
                     use vo_runtime::gc::GcRef;
                     
@@ -256,25 +252,21 @@ fn handle_jit_result(
                     if let Some(slot0_val) = layout.slot0 {
                         fiber.stack[callee_bp] = slot0_val;
                     }
-                    
-                    // Copy user args at arg_offset
                     for i in 0..user_arg_slots {
                         fiber.stack[callee_bp + layout.arg_offset + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
                     }
                 }
-                2 => {
-                    // Interface call: set receiver in slot0, copy args at recv_slots
+                JitContext::CALL_KIND_IFACE => {
                     let recv = ctx.ctx.call_iface_recv;
                     let recv_slots = callee_func_def.recv_slots as usize;
                     let user_arg_slots = ctx.ctx.call_arg_slots as usize;
                     
                     fiber.stack[callee_bp] = recv;
-                    
                     for i in 0..user_arg_slots {
                         fiber.stack[callee_bp + recv_slots + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
                     }
                 }
-                _ => unreachable!("invalid call_kind"),
+                _ => unreachable!("invalid call_kind: {}", call_kind),
             }
             
             fiber.sp = new_sp;
@@ -296,34 +288,21 @@ fn handle_jit_result(
 
             ExecResult::FrameChanged
         }
-        #[cfg(feature = "std")]
         JitResult::WaitIo => {
-            // JIT hit a blocking operation (channel or I/O).
-            // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
-            
             let resume_pc = ctx.call_resume_pc();
-            let io_token = ctx.wait_io_token();
-            
-            // Convert shadow frames to real CallFrames before VM parks fiber
-            #[cfg(feature = "jit")]
             materialize_jit_frames(fiber, resume_pc);
             
-            // Distinguish channel ops (Queue) vs real I/O (Io):
-            // - Channel ops: wait_io_token == 0, use Queue (no pc -= 1 in scheduler)
-            // - I/O ops: wait_io_token != 0, use Io (scheduler does pc -= 1)
-            if io_token == 0 {
-                ExecResult::Block(crate::fiber::BlockReason::Queue)
-            } else {
-                fiber.resume_io_token = Some(io_token);
-                ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
+            #[cfg(feature = "std")]
+            {
+                let io_token = ctx.wait_io_token();
+                if io_token == 0 {
+                    ExecResult::Block(crate::fiber::BlockReason::Queue)
+                } else {
+                    fiber.resume_io_token = Some(io_token);
+                    ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
+                }
             }
-        }
-        #[cfg(not(feature = "std"))]
-        JitResult::WaitIo => {
-            // In no_std, only Queue-based blocking is supported
-            let resume_pc = ctx.call_resume_pc();
-            #[cfg(feature = "jit")]
-            materialize_jit_frames(fiber, resume_pc);
+            #[cfg(not(feature = "std"))]
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
     }
@@ -331,62 +310,84 @@ fn handle_jit_result(
 
 /// Convert resume_stack to fiber.frames when VM takes over from JIT.
 ///
-/// This is called when JIT returns Call/WaitIo. The resume_stack contains
+/// Called when JIT returns Call/WaitIo/Panic. The resume_stack contains
 /// shadow frames for the JIT call chain. We convert them to real CallFrames
-/// so the VM can continue execution and GC can scan them.
+/// so the VM can continue execution, GC can scan them, and panic can unwind.
+///
+/// # Resume Stack Structure
 ///
 /// With lazy push, resume_stack is built in REVERSE order (callee first, then caller):
-/// - JIT A calls B, B calls C, C returns Call
+/// - JIT A calls B, B calls C, C returns non-OK
 /// - C's frame info is pushed first (by B's non-OK handler)
 /// - B's frame info is pushed next (by A's non-OK handler)
 /// - resume_stack = [C_info, B_info] (reverse order!)
 ///
-/// We need to reverse it to get [B, C] order for fiber.frames.
+/// We iterate in reverse to get [B, C] order for fiber.frames.
 ///
-/// Also updates the entry frame's pc (fiber.frames.last()) when resume_stack is empty,
-/// ensuring the caller can resume from the correct pc.
-#[cfg(feature = "jit")]
+/// # ResumePoint Semantics
+///
+/// Each ResumePoint contains:
+/// - func_id, bp: identifies the callee frame
+/// - resume_pc: the CALLER's resume pc (where caller should continue after callee returns)
+///
+/// # OSR Deduplication
+///
+/// When a function enters JIT via OSR (On-Stack Replacement), its frame already
+/// exists in fiber.frames (pushed by VM at function entry). If the same function
+/// later appears in resume_stack (from JIT-to-JIT call chain), we must NOT create
+/// a duplicate frame. Instead, we only update the existing frame's pc.
+///
+/// Detection: func_id AND bp must both match (same function at same stack position).
 fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
     let len = fiber.resume_stack.len();
     
     if len == 0 {
-        // No shadow frames, but still update entry frame's pc for resume
+        // No shadow frames, just update entry frame's pc for resume
         if let Some(frame) = fiber.frames.last_mut() {
             frame.pc = resume_pc as usize;
         }
         return;
     }
     
-    // resume_stack is in reverse order (callee first), we need caller first.
-    // Iterate in reverse to get correct order.
-    // 
-    // Entry frame's pc should be set to the first (last in reversed order) resume_pc.
+    // Step 1: Update entry frame's pc (the frame that was in fiber.frames before JIT ran)
+    // The last element in resume_stack is the outermost caller's info, containing
+    // the resume_pc for the entry frame.
     if let Some(entry_frame) = fiber.frames.last_mut() {
-        // The last element in resume_stack is the outermost caller's info
         entry_frame.pc = fiber.resume_stack[len - 1].resume_pc as usize;
     }
     
-    // Convert in reverse order (from outermost caller to innermost callee)
+    // Step 2: Convert resume_stack entries to frames (reverse order: outermost first)
     for i in (0..len).rev() {
         let rp = &fiber.resume_stack[i];
         
-        // pc: for innermost frame (i=0), use resume_pc
-        // for others, use the previous frame's (i-1) resume_pc
+        // Calculate pc for this frame:
+        // - innermost (i=0): use resume_pc parameter (where VM should continue)
+        // - others: use resume_stack[i-1].resume_pc (the next inner frame's caller resume pc)
         let pc = if i == 0 {
             resume_pc as usize
         } else {
             fiber.resume_stack[i - 1].resume_pc as usize
         };
         
-        let mut frame = CallFrame::new(
-            rp.func_id,
-            rp.bp as usize,
-            rp.ret_reg,
-            rp.ret_slots,
+        // Check for OSR duplicate: same func_id AND same bp means same frame
+        let existing = fiber.frames.iter_mut().find(|f| 
+            f.func_id == rp.func_id && f.bp == rp.bp as usize
         );
-        frame.pc = pc;
         
-        fiber.frames.push(frame);
+        if let Some(frame) = existing {
+            // OSR case: frame already exists, just update pc
+            frame.pc = pc;
+        } else {
+            // Normal case: create new frame
+            let mut frame = CallFrame::new(
+                rp.func_id,
+                rp.bp as usize,
+                rp.ret_reg,
+                rp.ret_slots,
+            );
+            frame.pc = pc;
+            fiber.frames.push(frame);
+        }
     }
     
     // Clear resume_stack since VM now owns the frames
