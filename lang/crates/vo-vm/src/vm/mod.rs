@@ -24,8 +24,12 @@ mod types;
 pub mod island_thread;
 #[cfg(feature = "jit")]
 mod jit;
+mod trampoline;
 
 pub use helpers::{stack_get, stack_set};
+#[cfg(feature = "jit")]
+pub use trampoline::vm_call_trampoline;
+pub use trampoline::closure_call_trampoline;
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
@@ -890,7 +894,7 @@ impl Vm {
                     if offset < 0 {
                         // Back-edge detected - this is a loop iteration
                         // target_pc is the loop_start (condition check)
-                        if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
+                        if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, target_pc, bp) {
                             use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
                             if result_pc == OSR_RESULT_FRAME_CHANGED {
                                 // Loop made a Call - callee frame pushed, VM continues
@@ -972,7 +976,7 @@ impl Vm {
                         #[cfg(feature = "jit")]
                         {
                             // Back-edge: try OSR
-                            if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
+                            if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, target_pc, bp) {
                                 use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
                                 if result_pc == OSR_RESULT_FRAME_CHANGED {
                                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
@@ -1641,9 +1645,9 @@ impl Vm {
     }
 
     /// Execute a function synchronously using a pooled callback fiber.
-    /// Used by extern callbacks.
+    /// Used by extern callbacks and JIT VM fallback.
     /// Returns (success, panic_state).
-    pub fn execute_closure_sync(
+    pub fn execute_func_sync(
         &mut self,
         func_id: u32,
         args: &[u64],
@@ -1739,82 +1743,6 @@ impl Vm {
         self.scheduler.release_callback_fiber(fid);
         (success, panic_state)
     }
-    
-    // =========================================================================
-    // Loop OSR
-    // =========================================================================
-    
-    /// Try loop OSR at backedge. Returns result PC or None to continue VM.
-    #[cfg(feature = "jit")]
-    pub(crate) fn try_loop_osr(
-        &mut self,
-        fiber_id: crate::scheduler::FiberId,
-        func_id: u32,
-        loop_pc: usize,
-        bp: usize,
-    ) -> Option<usize> {
-        let loop_func = self.get_or_compile_loop(func_id, loop_pc)?;
-        jit::dispatch_loop_osr(self, fiber_id, loop_func, bp)
-    }
-    
-    /// Get compiled loop or compile if hot. Returns None if not ready.
-    #[cfg(feature = "jit")]
-    fn get_or_compile_loop(&mut self, func_id: u32, loop_pc: usize) -> Option<vo_jit::LoopFunc> {
-        let module = self.module.as_ref()?;
-        let func_def = &module.functions[func_id as usize];
-        let jit_mgr = self.jit_mgr.as_mut()?;
-        
-        // Already compiled?
-        if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
-            return Some(lf);
-        }
-        
-        // Already failed?
-        if jit_mgr.is_loop_failed(func_id, loop_pc) {
-            return None;
-        }
-        
-        // Not hot yet?
-        if !jit_mgr.record_backedge(func_id, loop_pc) {
-            return None;
-        }
-        
-        // Hot - try to compile
-        let loop_info = match jit_mgr.find_loop(func_id, func_def, loop_pc) {
-            Some(info) => info,
-            None => {
-                // Back-edge detected but no LoopInfo found - codegen bug or analysis bug
-                // Mark as failed to avoid retrying
-                jit_mgr.mark_loop_failed(func_id, loop_pc);
-                return None;
-            }
-        };
-        if !loop_info.is_jittable() {
-            jit_mgr.mark_loop_failed(func_id, loop_pc);
-            return None;
-        }
-        
-        // Pre-compile Call targets so JIT-to-JIT calls can succeed
-        let loop_end = loop_info.end_pc + 1;
-        for pc in loop_info.begin_pc..loop_end {
-            let inst = &func_def.code[pc];
-            if inst.opcode() == Opcode::Call {
-                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                if !jit_mgr.is_compiled(target_func_id) && !jit_mgr.is_unsupported(target_func_id) {
-                    let target_func = &module.functions[target_func_id as usize];
-                    let _ = jit_mgr.compile_function(target_func_id, target_func, module);
-                }
-            }
-        }
-        
-        match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
-            Ok(_) => unsafe { jit_mgr.get_loop_func(func_id, loop_pc) },
-            Err(_) => {
-                jit_mgr.mark_loop_failed(func_id, loop_pc);
-                None
-            }
-        }
-    }
 }
 
 
@@ -1823,65 +1751,3 @@ impl Default for Vm {
         Self::new()
     }
 }
-
-/// Trampoline for calling closures from extern functions.
-/// This allows extern functions like dyn_call_closure to execute closures.
-/// Uses a separate fiber because we're already inside run_fiber (would recurse).
-pub extern "C" fn closure_call_trampoline(
-    vm: *mut core::ffi::c_void,
-    _caller_fiber: *mut core::ffi::c_void,
-    closure_ref: u64,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> vo_runtime::ffi::ClosureCallResult {
-    use vo_runtime::gc::GcRef;
-    use vo_runtime::objects::closure;
-    use helpers::build_closure_args;
-    
-    // In std mode, catch panics to prevent unwinding across FFI boundary
-    #[cfg(feature = "std")]
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let vm = unsafe { &mut *(vm as *mut Vm) };
-        let closure_gcref = closure_ref as GcRef;
-        let func_id = closure::func_id(closure_gcref);
-        
-        let module = vm.module().expect("closure_call_trampoline: module not set");
-        let func_def = &module.functions[func_id as usize];
-        let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
-        
-        // Use execute_closure_sync which creates a separate fiber
-        // (we're already inside run_fiber, can't call it recursively)
-        let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
-        success
-    }));
-    
-    #[cfg(feature = "std")]
-    return match result {
-        Ok(true) => vo_runtime::ffi::ClosureCallResult::Ok,
-        _ => vo_runtime::ffi::ClosureCallResult::Panic
-    };
-    
-    // In no_std mode, no panic catching (panics will abort)
-    #[cfg(not(feature = "std"))]
-    {
-        let vm = unsafe { &mut *(vm as *mut Vm) };
-        let closure_gcref = closure_ref as GcRef;
-        let func_id = closure::func_id(closure_gcref);
-        
-        let module = vm.module().expect("closure_call_trampoline: module not set");
-        let func_def = &module.functions[func_id as usize];
-        let full_args = build_closure_args(closure_ref, closure_gcref, func_def, args, arg_count);
-        
-        // Use execute_closure_sync which creates a separate fiber
-        let (success, _panic_state) = vm.execute_closure_sync(func_id, &full_args, ret, ret_count);
-        if success {
-            vo_runtime::ffi::ClosureCallResult::Ok
-        } else {
-            vo_runtime::ffi::ClosureCallResult::Panic
-        }
-    }
-}
-
-

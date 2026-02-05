@@ -393,44 +393,6 @@ fn materialize_jit_frames(fiber: &mut Fiber, resume_pc: u32) {
     fiber.resume_stack.clear();
 }
 
-/// Trampoline for JIT code to call VM-interpreted functions.
-///
-/// This is used when a JIT-compiled function calls another function
-/// that isn't JIT-compiled (VM fallback path in JIT-to-JIT calls).
-///
-/// # Safety
-/// All pointers must be valid. Called from JIT-generated code.
-pub extern "C" fn jit_call_vm_trampoline(
-    vm: *mut core::ffi::c_void,
-    fiber: *mut core::ffi::c_void,
-    func_id: u32,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> JitResult {
-    let vm = unsafe { &mut *(vm as *mut Vm) };
-    let args_slice = unsafe { std::slice::from_raw_parts(args, arg_count as usize) };
-
-    // Trigger func JIT compilation for the target function if not already compiled.
-    // This ensures that future JIT-to-JIT calls can use the compiled version.
-    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-        if !jit_mgr.is_compiled(func_id) && !jit_mgr.is_unsupported(func_id) {
-            let module = vm.module.as_ref().unwrap();
-            let func_def = &module.functions[func_id as usize];
-            let _ = jit_mgr.compile_function(func_id, func_def, module);
-        }
-    }
-
-    // Execute using callback fiber
-    let (success, _panic_state) = vm.execute_closure_sync(func_id, args_slice, ret, ret_count);
-
-    if success {
-        JitResult::Ok
-    } else {
-        JitResult::Panic
-    }
-}
 
 /// Callback for JIT code to call extern functions.
 ///
@@ -712,6 +674,82 @@ pub fn dispatch_loop_osr(
         #[cfg(not(feature = "std"))]
         JitResult::WaitIo => {
             panic!("Loop OSR returned WaitIo but std feature not enabled")
+        }
+    }
+}
+
+// =============================================================================
+// Loop OSR entry points (called from VM main loop)
+// =============================================================================
+
+/// Try loop OSR at backedge. Returns result PC or None to continue VM.
+pub(crate) fn try_loop_osr(
+    vm: &mut Vm,
+    fiber_id: crate::scheduler::FiberId,
+    func_id: u32,
+    loop_pc: usize,
+    bp: usize,
+) -> Option<usize> {
+    let loop_func = get_or_compile_loop(vm, func_id, loop_pc)?;
+    dispatch_loop_osr(vm, fiber_id, loop_func, bp)
+}
+
+/// Get compiled loop or compile if hot. Returns None if not ready.
+fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_jit::LoopFunc> {
+    use vo_runtime::instruction::Opcode;
+    
+    let module = vm.module.as_ref()?;
+    let func_def = &module.functions[func_id as usize];
+    let jit_mgr = vm.jit_mgr.as_mut()?;
+    
+    // Already compiled?
+    if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
+        return Some(lf);
+    }
+    
+    // Already failed?
+    if jit_mgr.is_loop_failed(func_id, loop_pc) {
+        return None;
+    }
+    
+    // Not hot yet?
+    if !jit_mgr.record_backedge(func_id, loop_pc) {
+        return None;
+    }
+    
+    // Hot - try to compile
+    let loop_info = match jit_mgr.find_loop(func_id, func_def, loop_pc) {
+        Some(info) => info,
+        None => {
+            // Back-edge detected but no LoopInfo found - codegen bug or analysis bug
+            // Mark as failed to avoid retrying
+            jit_mgr.mark_loop_failed(func_id, loop_pc);
+            return None;
+        }
+    };
+    if !loop_info.is_jittable() {
+        jit_mgr.mark_loop_failed(func_id, loop_pc);
+        return None;
+    }
+    
+    // Pre-compile Call targets so JIT-to-JIT calls can succeed
+    let loop_end = loop_info.end_pc + 1;
+    for pc in loop_info.begin_pc..loop_end {
+        let inst = &func_def.code[pc];
+        if inst.opcode() == Opcode::Call {
+            let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
+            if !jit_mgr.is_compiled(target_func_id) && !jit_mgr.is_unsupported(target_func_id) {
+                let target_func = &module.functions[target_func_id as usize];
+                let _ = jit_mgr.compile_function(target_func_id, target_func, module);
+            }
+        }
+    }
+    
+    match jit_mgr.compile_loop(func_id, func_def, module, &loop_info) {
+        Ok(_) => unsafe { jit_mgr.get_loop_func(func_id, loop_pc) },
+        Err(_) => {
+            jit_mgr.mark_loop_failed(func_id, loop_pc);
+            None
         }
     }
 }

@@ -77,7 +77,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         panic_msg: &mut *panic_msg as *mut InterfaceSlot,
         vm: vm as *mut Vm as *mut core::ffi::c_void,
         fiber: fiber as *mut Fiber as *mut core::ffi::c_void,
-        call_vm_fn: Some(super::jit_call_vm_trampoline),
+        call_vm_fn: Some(crate::vm::vm_call_trampoline),
         itab_cache: &mut vm.state.itab_cache as *mut _,
         extern_registry: &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
         #[cfg(feature = "std")]

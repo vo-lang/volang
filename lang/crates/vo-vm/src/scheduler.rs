@@ -52,7 +52,7 @@ pub struct Scheduler {
     pub ready_queue: VecDeque<u32>,
     pub current: Option<u32>,
 
-    /// Pool of callback fibers for execute_closure_sync.
+    /// Pool of callback fibers for execute_func_sync.
     /// Supports nested calls: each level pops a fiber, returns it when done.
     /// Avoids 64KB allocation per sync call.
     callback_fiber_pool: Vec<u32>,
@@ -75,7 +75,7 @@ impl Scheduler {
         }
     }
     
-    /// Acquire a callback fiber for execute_closure_sync.
+    /// Acquire a callback fiber for execute_func_sync.
     /// Reuses from pool or creates new. Fiber is reset and ready for use.
     pub fn acquire_callback_fiber(&mut self) -> u32 {
         if let Some(id) = self.callback_fiber_pool.pop() {
@@ -102,7 +102,7 @@ impl Scheduler {
     }
     
     /// Spawn a new fiber without adding to ready_queue.
-    /// Used by execute_closure_sync which sets current directly.
+    /// Used by execute_func_sync which sets current directly.
     pub fn spawn_not_ready(&mut self, mut fiber: Fiber) -> u32 {
         if let Some(slot) = self.free_slots.pop() {
             // Reuse dead fiber slot
