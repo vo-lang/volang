@@ -13,10 +13,6 @@ use crate::expr::compile_expr_to;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
-/// IfaceAssert flags for protocol dispatch: has_ok=1, dst_slots=2, src_slots=2
-/// Format: has_ok | (dst_slots << 2) | (src_slots << 3)
-pub const IFACE_ASSERT_WITH_OK: u8 = 1 | (1 << 2) | (2 << 3);
-
 /// Emit panic with error: call panic_with_error extern.
 /// Dynamic write always panics on error (does not propagate).
 fn emit_dyn_write_panic(

@@ -31,6 +31,9 @@ pub enum PortResult {
     /// Port closed - wake these waiters
     #[cfg(feature = "std")]
     Closed(Vec<WaiterInfo>),
+    /// Port not supported (no_std)
+    #[cfg(not(feature = "std"))]
+    NotSupported,
 }
 
 pub type PortNewResult = Result<(), String>;
@@ -120,7 +123,7 @@ pub fn exec_port_send(
     _inst: &Instruction,
     _gc: &Gc,
 ) -> PortResult {
-    panic!("Port not supported in no_std mode")
+    PortResult::NotSupported
 }
 
 /// Port recv result for core function.
@@ -226,7 +229,7 @@ pub fn exec_port_recv(
     _inst: &Instruction,
     _gc: &mut Gc,
 ) -> PortResult {
-    panic!("Port not supported in no_std mode")
+    PortResult::NotSupported
 }
 
 pub fn exec_port_close(stack: *const Slot, bp: usize, inst: &Instruction) -> PortResult {

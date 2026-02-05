@@ -23,7 +23,7 @@ mod types;
 #[cfg(feature = "std")]
 pub mod island_thread;
 #[cfg(feature = "jit")]
-mod jit_dispatch;
+mod jit;
 
 pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
@@ -501,6 +501,37 @@ impl Vm {
         }
     }
 
+    /// Handle port operation results uniformly.
+    /// Returns Option<(RuntimeTrapKind, waiters_to_wake)> - caller handles trap/wake separately.
+    #[cfg(feature = "std")]
+    fn handle_port_result(
+        result: exec::PortResult,
+        fiber: &mut Fiber,
+        is_recv: bool,
+    ) -> (ExecResult, Option<RuntimeTrapKind>, Vec<vo_runtime::objects::port::WaiterInfo>) {
+        match result {
+            exec::PortResult::Continue => (ExecResult::FrameChanged, None, Vec::new()),
+            exec::PortResult::Yield => {
+                if is_recv {
+                    fiber.current_frame_mut().unwrap().pc -= 1;
+                }
+                (ExecResult::Block(crate::fiber::BlockReason::Queue), None, Vec::new())
+            }
+            exec::PortResult::WakeRemote(waiter) => {
+                (ExecResult::FrameChanged, None, vec![waiter])
+            }
+            exec::PortResult::SendOnClosed => {
+                (ExecResult::Panic, Some(RuntimeTrapKind::SendOnClosedChannel), Vec::new())
+            }
+            exec::PortResult::CloseNil => {
+                (ExecResult::Panic, Some(RuntimeTrapKind::CloseNilChannel), Vec::new())
+            }
+            exec::PortResult::Closed(waiters) => {
+                (ExecResult::FrameChanged, None, waiters)
+            }
+        }
+    }
+
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
@@ -860,7 +891,7 @@ impl Vm {
                         // Back-edge detected - this is a loop iteration
                         // target_pc is the loop_start (condition check)
                         if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
-                            use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                            use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
                             if result_pc == OSR_RESULT_FRAME_CHANGED {
                                 // Loop made a Call - callee frame pushed, VM continues
                                 let fiber = self.scheduler.get_fiber_mut(fiber_id);
@@ -942,7 +973,7 @@ impl Vm {
                         {
                             // Back-edge: try OSR
                             if let Some(result_pc) = self.try_loop_osr(fiber_id, func_id, target_pc, bp) {
-                                use jit_dispatch::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                                use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
                                 if result_pc == OSR_RESULT_FRAME_CHANGED {
                                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
                                     stack = fiber.stack_ptr();
@@ -977,7 +1008,7 @@ impl Vm {
                             let target_func = &module.functions[target_func_id as usize];
                             if let Some(jit_func) = jit_mgr.resolve_call(target_func_id, target_func, module) {
                                 // Execute via JIT
-                                let result = jit_dispatch::dispatch_jit_call(
+                                let result = jit::dispatch_jit_call(
                                     self, fiber, &inst, module, jit_func, target_func_id
                                 );
                                 stack = fiber.stack_ptr();
@@ -1509,15 +1540,11 @@ impl Vm {
                 Opcode::PortSend => {
                     let island_id = self.state.current_island_id;
                     let fid = fiber_id.to_raw() as u64;
-                    match exec::exec_port_send(stack, bp, island_id, fid, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types) {
-                        exec::PortResult::Continue => {}
-                        exec::PortResult::Yield => return ExecResult::Block(crate::fiber::BlockReason::Queue),
-                        exec::PortResult::WakeRemote(waiter) => { self.state.wake_waiter(&waiter, &mut self.scheduler); }
-                        exec::PortResult::SendOnClosed => {
-                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel);
-                        }
-                        _ => {}
-                    }
+                    let result = exec::exec_port_send(stack, bp, island_id, fid, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types);
+                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, false);
+                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortSend => {
@@ -1527,15 +1554,11 @@ impl Vm {
                 Opcode::PortRecv => {
                     let island_id = self.state.current_island_id;
                     let fid = fiber_id.to_raw() as u64;
-                    match exec::exec_port_recv(stack, bp, island_id, fid, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types) {
-                        exec::PortResult::Continue => {}
-                        exec::PortResult::Yield => {
-                            frame.pc -= 1;
-                            return ExecResult::Block(crate::fiber::BlockReason::Queue);
-                        }
-                        exec::PortResult::WakeRemote(waiter) => { self.state.wake_waiter(&waiter, &mut self.scheduler); }
-                        _ => {}
-                    }
+                    let result = exec::exec_port_recv(stack, bp, island_id, fid, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types);
+                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, true);
+                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortRecv => {
@@ -1543,16 +1566,11 @@ impl Vm {
                 }
                 #[cfg(feature = "std")]
                 Opcode::PortClose => {
-                    match exec::exec_port_close(stack, bp, &inst) {
-                        exec::PortResult::Continue => {}
-                        exec::PortResult::CloseNil => {
-                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel);
-                        }
-                        exec::PortResult::Closed(waiters) => {
-                            for waiter in &waiters { self.state.wake_waiter(waiter, &mut self.scheduler); }
-                        }
-                        _ => {}
-                    }
+                    let result = exec::exec_port_close(stack, bp, &inst);
+                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, false);
+                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortClose => {
@@ -1560,6 +1578,9 @@ impl Vm {
                         exec::PortResult::Continue => {}
                         exec::PortResult::CloseNil => {
                             return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel);
+                        }
+                        exec::PortResult::NotSupported => {
+                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported);
                         }
                         _ => {}
                     }
@@ -1733,7 +1754,7 @@ impl Vm {
         bp: usize,
     ) -> Option<usize> {
         let loop_func = self.get_or_compile_loop(func_id, loop_pc)?;
-        jit_dispatch::dispatch_loop_osr(self, fiber_id, loop_func, bp)
+        jit::dispatch_loop_osr(self, fiber_id, loop_func, bp)
     }
     
     /// Get compiled loop or compile if hot. Returns None if not ready.
