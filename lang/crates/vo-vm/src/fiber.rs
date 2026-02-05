@@ -50,11 +50,8 @@ pub struct DeferEntry {
 }
 
 /// How return values are stored while defers execute.
-#[derive(Debug, Clone, Default)]
-pub enum PendingReturnKind {
-    #[default]
-    /// No return values (void function or recovered panic without named returns).
-    None,
+#[derive(Debug, Clone)]
+pub enum ReturnValues {
     /// Return values copied from stack before frame was popped.
     Stack {
         vals: Vec<u64>,
@@ -70,42 +67,13 @@ pub enum PendingReturnKind {
     },
 }
 
-/// What kind of unwinding is in progress.
-#[derive(Debug, Clone)]
-pub enum UnwindingKind {
-    /// Normal return with pending defers.
-    Return {
-        return_kind: PendingReturnKind,
-        caller_ret_reg: u16,
-        caller_ret_count: usize,
-    },
-    /// Panic unwinding - execute defers, check for recover().
-    /// Preserves return values so they can be restored if recover() succeeds.
-    Panic {
-        /// Saved return values from the original return (before panic).
-        /// Used to restore return values when recover() succeeds.
-        saved_return_kind: PendingReturnKind,
-        caller_ret_reg: u16,
-        caller_ret_count: usize,
-    },
-}
-
-/// Defines return semantics - whether this is a normal or error return.
-/// This is the single source of truth for errdefer behavior.
+/// Unwinding mode: Return (normal) or Panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReturnSemantics {
-    /// Normal return: errdefers don't run, preserve named return values.
-    Normal,
-    /// Error return (fail stmt, non-nil error, or unrecovered panic): errdefers run.
-    Error,
-}
-
-impl ReturnSemantics {
-    /// Whether errdefers should be included in defer execution.
-    #[inline]
-    pub fn should_run_errdefers(&self) -> bool {
-        matches!(self, ReturnSemantics::Error)
-    }
+pub enum UnwindingMode {
+    /// Normal return with pending defers.
+    Return,
+    /// Panic unwinding - execute defers, check for recover().
+    Panic,
 }
 
 /// Unified state for defer execution during return or panic unwinding.
@@ -114,7 +82,7 @@ impl ReturnSemantics {
 /// 1. Return/panic triggers unwinding → UnwindingState created
 /// 2. Each defer executes and returns → next defer called
 /// 3. For Return: all defers done → write return values, clear state
-/// 4. For Panic: if recover() called → clear state, resume normal
+/// 4. For Panic: if recover() called → switch to Return mode, resume normal
 /// 5. For Panic: no recover, no more defers → unwind to parent frame
 /// 6. For Panic: no more frames → return ExecResult::Panic
 #[derive(Debug, Clone)]
@@ -124,47 +92,32 @@ pub struct UnwindingState {
     /// Frame depth after the unwinding function was popped.
     /// Defer functions run at depth = target_depth + 1.
     pub target_depth: usize,
-    /// What kind of unwinding is in progress.
-    pub kind: UnwindingKind,
+    /// Unwinding mode: Return or Panic.
+    pub mode: UnwindingMode,
     /// The generation of the currently executing defer.
     /// Used with Fiber.panic_generation to check if recover() should work.
     pub current_defer_generation: u64,
+    /// Return values to write after all defers complete.
+    /// None for void functions. For panic, may contain heap return values for recover().
+    pub return_values: Option<ReturnValues>,
+    /// Where to write return values in caller's frame.
+    pub caller_ret_reg: u16,
+    /// How many slots caller expects.
+    pub caller_ret_count: usize,
 }
 
 impl UnwindingState {
-    /// Transition to Return mode. This is the ONLY place where errdefers are filtered out.
-    /// Call this when:
-    /// - Panic is recovered (panic -> normal return)
-    /// - Continuing with defers after initial return collection
-    pub fn transition_to_return(
-        &mut self,
-        return_kind: PendingReturnKind,
-        caller_ret_reg: u16,
-        caller_ret_count: usize,
-    ) {
-        // Filter out errdefers - function is returning normally (not with an error)
-        self.pending.retain(|d| !d.is_errdefer);
-        self.kind = UnwindingKind::Return {
-            return_kind,
-            caller_ret_reg,
-            caller_ret_count,
-        };
+    /// Check if we're at the defer boundary (defer function just returned).
+    #[inline]
+    pub fn at_defer_boundary(&self, frame_count: usize) -> bool {
+        frame_count == self.target_depth + 1
     }
     
-    /// Transition to Panic mode. Keeps all defers including errdefers.
-    /// Call this when continuing panic unwinding.
-    pub fn transition_to_panic(
-        &mut self,
-        saved_return_kind: PendingReturnKind,
-        caller_ret_reg: u16,
-        caller_ret_count: usize,
-    ) {
-        // Keep errdefers - panic unwinding is an error path
-        self.kind = UnwindingKind::Panic {
-            saved_return_kind,
-            caller_ret_reg,
-            caller_ret_count,
-        };
+    /// Switch from Panic to Return mode after successful recover().
+    /// Filters out errdefers since function is now returning normally.
+    pub fn switch_to_return_mode(&mut self) {
+        self.pending.retain(|d| !d.is_errdefer);
+        self.mode = UnwindingMode::Return;
     }
 }
 
@@ -394,6 +347,13 @@ impl Fiber {
         self.panic_state.as_ref().map(|s| s.message())
     }
     
+    /// Check if we're at the defer boundary (defer function just returned).
+    #[inline]
+    pub fn at_defer_boundary(&self) -> bool {
+        self.unwinding.as_ref()
+            .map_or(false, |s| s.at_defer_boundary(self.frames.len()))
+    }
+    
     /// Check if we're in panic unwinding mode AND directly in the defer function
     /// (not in a nested call from the defer function).
     /// Per Go semantics, recover() only works when called directly from defer.
@@ -402,19 +362,13 @@ impl Fiber {
     #[inline]
     pub fn is_direct_defer_context(&self) -> bool {
         match &self.unwinding {
-            Some(UnwindingState { 
-                kind: UnwindingKind::Panic { .. }, 
-                target_depth, 
-                current_defer_generation,
-                ..
-            }) => {
+            Some(state) if state.mode == UnwindingMode::Panic => {
                 // Must be at defer execution depth
-                if self.frames.len() != *target_depth + 1 {
+                if !state.at_defer_boundary(self.frames.len()) {
                     return false;
                 }
                 // Defer must have been registered before the current panic
-                // (registered_at < panic_generation means it was registered before this panic)
-                *current_defer_generation < self.panic_generation
+                state.current_defer_generation < self.panic_generation
             }
             _ => false,
         }
@@ -422,16 +376,12 @@ impl Fiber {
     
     /// Switch unwinding mode from Panic to Return after successful recover().
     /// This prevents nested calls within the defer function from triggering panic_unwind.
-    /// Delegates to UnwindingState::transition_to_return which handles errdefer filtering.
     pub fn switch_panic_to_return_mode(&mut self) {
-        let Some(ref mut state) = self.unwinding else { return };
-        let UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count } = &mut state.kind else { return };
-        
-        // Use transition method - it handles errdefer filtering
-        let return_kind = core::mem::take(saved_return_kind);
-        let reg = *caller_ret_reg;
-        let count = *caller_ret_count;
-        state.transition_to_return(return_kind, reg, count);
+        if let Some(ref mut state) = self.unwinding {
+            if state.mode == UnwindingMode::Panic {
+                state.switch_to_return_mode();
+            }
+        }
     }
     
     /// Get the effective generation for registering a new defer.
@@ -441,9 +391,7 @@ impl Fiber {
     #[inline]
     pub fn effective_defer_generation(&self) -> u64 {
         match &self.unwinding {
-            Some(UnwindingState { kind: UnwindingKind::Panic { .. }, current_defer_generation, .. }) => {
-                *current_defer_generation
-            }
+            Some(state) if state.mode == UnwindingMode::Panic => state.current_defer_generation,
             _ => self.panic_generation,
         }
     }

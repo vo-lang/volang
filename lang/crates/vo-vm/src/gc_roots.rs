@@ -75,28 +75,14 @@ fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
             for entry in &state.pending {
                 scan_defer_entry(gc, entry);
             }
-            // Scan return values based on unwinding kind
-            match &state.kind {
-                crate::fiber::UnwindingKind::Return { return_kind, .. } => {
-                    match return_kind {
-                        crate::fiber::PendingReturnKind::None => {}
-                        crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
-                            scan_slots_by_types(gc, &vals, &slot_types);
-                        }
-                        crate::fiber::PendingReturnKind::Heap { gcrefs, .. } => {
-                            scan_gcrefs(gc, &gcrefs);
-                        }
+            // Scan return values
+            if let Some(ref rv) = state.return_values {
+                match rv {
+                    crate::fiber::ReturnValues::Stack { vals, slot_types } => {
+                        scan_slots_by_types(gc, vals, slot_types);
                     }
-                }
-                crate::fiber::UnwindingKind::Panic { saved_return_kind, .. } => {
-                    match saved_return_kind {
-                        crate::fiber::PendingReturnKind::None => {}
-                        crate::fiber::PendingReturnKind::Stack { vals, slot_types } => {
-                            scan_slots_by_types(gc, &vals, &slot_types);
-                        }
-                        crate::fiber::PendingReturnKind::Heap { gcrefs, .. } => {
-                            scan_gcrefs(gc, &gcrefs);
-                        }
+                    crate::fiber::ReturnValues::Heap { gcrefs, .. } => {
+                        scan_gcrefs(gc, gcrefs);
                     }
                 }
             }

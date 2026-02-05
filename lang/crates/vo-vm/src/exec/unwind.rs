@@ -39,19 +39,10 @@ use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;
 
 use crate::bytecode::{FunctionDef, Module};
-use crate::fiber::{CallFrame, DeferEntry, Fiber, PanicState, PendingReturnKind, UnwindingKind, UnwindingState};
+use crate::fiber::{CallFrame, DeferEntry, Fiber, PanicState, ReturnValues, UnwindingMode, UnwindingState};
 use crate::instruction::Instruction;
 use crate::vm::ExecResult;
 use crate::vm::helpers::{stack_get, stack_set};
-
-/// Check if we're at the defer boundary (defer function just returned).
-#[inline]
-pub fn at_defer_boundary(frames: &[CallFrame], unwinding: &Option<UnwindingState>) -> bool {
-    match unwinding {
-        Some(state) => frames.len() == state.target_depth + 1,
-        None => false,
-    }
-}
 
 /// Handle Return instruction. This is the ONLY entry point for return logic.
 ///
@@ -71,18 +62,12 @@ pub fn handle_return(
     let include_errdefers = compute_include_errdefers(fiber, inst, func, is_error_return);
     
     // Case 1 & 2: Defer just returned
-    if at_defer_boundary(&fiber.frames, &fiber.unwinding) {
-        let state = fiber.unwinding.as_ref().unwrap();
-        match &state.kind {
-            UnwindingKind::Return { .. } => {
-                return handle_return_defer_returned(fiber, module, include_errdefers);
-            }
-            UnwindingKind::Panic { .. } => {
-                // Defer returned in Panic mode but didn't recover (e.g., nested defer)
-                // Continue with panic unwinding
-                return handle_panic_defer_returned(fiber, module);
-            }
-        }
+    if fiber.at_defer_boundary() {
+        let mode = fiber.unwinding.as_ref().unwrap().mode;
+        return match mode {
+            UnwindingMode::Return => handle_return_defer_returned(fiber, module, include_errdefers),
+            UnwindingMode::Panic => handle_panic_defer_returned(fiber, module),
+        };
     }
     
     // Case 3: Normal return (may start defer execution)
@@ -167,7 +152,7 @@ fn handle_initial_return(
 
     // Collect return values and pending defers
     let stack = fiber.stack.as_ptr();
-    let (return_kind, pending_defers) = if heap_returns {
+    let (return_values, pending_defers) = if heap_returns {
         let gcref_start = inst.a as usize;
         let gcref_count = inst.b as usize;
         let current_bp = fiber.frames.last().unwrap().bp;
@@ -180,7 +165,7 @@ fn handle_initial_return(
         let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
         
         let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
-        (PendingReturnKind::Heap { gcrefs, slots_per_ref }, pending)
+        (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), pending)
     } else {
         let ret_start = inst.a as usize;
         let ret_count = inst.b as usize;
@@ -196,7 +181,7 @@ fn handle_initial_return(
             .unwrap_or_default();
         
         let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
-        (PendingReturnKind::Stack { vals, slot_types }, pending)
+        (Some(ReturnValues::Stack { vals, slot_types }), pending)
     };
 
     // Pop the returning function's frame
@@ -213,23 +198,18 @@ fn handle_initial_return(
         fiber.unwinding = Some(UnwindingState {
             pending,
             target_depth: fiber.frames.len(),
-            kind: UnwindingKind::Return {
-                return_kind,
-                caller_ret_reg: frame.ret_reg,
-                caller_ret_count: frame.ret_count as usize,
-            },
+            mode: UnwindingMode::Return,
             current_defer_generation: first_defer.registered_at_generation,
+            return_values,
+            caller_ret_reg: frame.ret_reg,
+            caller_ret_count: frame.ret_count as usize,
         });
         
         return call_defer_entry(fiber, &first_defer, module);
     }
 
     // No defers - complete return immediately
-    let ret_vals = match return_kind {
-        PendingReturnKind::None => vec![],
-        PendingReturnKind::Stack { vals, .. } => vals,
-        PendingReturnKind::Heap { gcrefs, slots_per_ref } => read_heap_gcrefs(&gcrefs, &slots_per_ref),
-    };
+    let ret_vals = return_values_to_vec(return_values, frame.ret_count as usize);
     write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 
@@ -239,11 +219,11 @@ fn handle_return_defer_returned(
     module: &Module,
     include_errdefers: bool,
 ) -> ExecResult {
-    let state = fiber.unwinding.as_mut().unwrap();
     let current_frame_depth = fiber.frames.len();
     
     // Collect any defers from the defer function itself
-    collect_and_prepend_nested_defers(&mut fiber.defer_stack, &mut state.pending, current_frame_depth, include_errdefers);
+    let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
+    collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, include_errdefers);
     pop_frame(fiber);
     
     let state = fiber.unwinding.as_mut().unwrap();
@@ -252,10 +232,12 @@ fn handle_return_defer_returned(
     }
     
     // All defers complete - finalize return
-    let state = fiber.unwinding.as_mut().unwrap();
-    let (return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
+    let return_values = state.return_values.take();
+    let caller_ret_reg = state.caller_ret_reg;
+    let caller_ret_count = state.caller_ret_count;
     fiber.unwinding = None;
-    let ret_vals = pending_return_to_values(return_kind, caller_ret_count);
+    
+    let ret_vals = return_values_to_vec(return_values, caller_ret_count);
     write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count)
 }
 
@@ -274,7 +256,7 @@ pub fn handle_panic_unwind(
     }
     
     match &fiber.unwinding {
-        Some(_) if at_defer_boundary(&fiber.frames, &fiber.unwinding) => {
+        Some(_) if fiber.at_defer_boundary() => {
             // Defer just returned in Panic mode
             handle_panic_defer_returned(fiber, module)
         }
@@ -294,36 +276,38 @@ fn handle_panic_defer_returned(
     fiber: &mut Fiber,
     module: &Module,
 ) -> ExecResult {
-    let state = fiber.unwinding.as_mut().unwrap();
     let current_frame_depth = fiber.frames.len();
     
     // Collect any defers from the defer function
-    collect_and_prepend_nested_defers(&mut fiber.defer_stack, &mut state.pending, current_frame_depth, true);
+    let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
+    collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
     pop_frame(fiber);
-    
-    // Extract return info (handles both Panic and Return modes for edge cases)
-    let state = fiber.unwinding.as_mut().unwrap();
-    let (saved_return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
     
     // Check if recover() was called (panic_state is None means recovered)
     if fiber.panic_state.is_none() {
-        // Recovered! Use transition_to_return which handles errdefer filtering.
+        // Recovered! Switch to Return mode which filters errdefers.
         let state = fiber.unwinding.as_mut().unwrap();
+        state.switch_to_return_mode();
+        
         if !state.pending.is_empty() {
-            state.transition_to_return(saved_return_kind, caller_ret_reg, caller_ret_count);
             return execute_next_defer(fiber, module);
         }
         
         // No more defers - return to caller with appropriate values
+        let return_values = state.return_values.take();
+        let caller_ret_reg = state.caller_ret_reg;
+        let caller_ret_count = state.caller_ret_count;
         fiber.unwinding = None;
-        let ret_vals = pending_return_to_values(saved_return_kind, caller_ret_count);
+        
+        let ret_vals = return_values_to_vec(return_values, caller_ret_count);
         return write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count);
     }
     
-    // Still panicking - use transition_to_panic (keeps errdefers)
+    // Still panicking - ensure Panic mode (may have been Return if panic occurred during defer)
     let state = fiber.unwinding.as_mut().unwrap();
+    state.mode = UnwindingMode::Panic;
+    
     if !state.pending.is_empty() {
-        state.transition_to_panic(saved_return_kind, caller_ret_reg, caller_ret_count);
         return execute_next_defer(fiber, module);
     }
     
@@ -337,24 +321,21 @@ fn handle_panic_during_unwinding(
     fiber: &mut Fiber,
     module: &Module,
 ) -> ExecResult {
-    let state = fiber.unwinding.as_mut().unwrap();
-    
-    // Extract return info from current state
-    let (saved_return_kind, caller_ret_reg, caller_ret_count) = extract_return_kind_mut(&mut state.kind);
-    let target_depth = state.target_depth;
+    let target_depth = fiber.unwinding.as_ref().unwrap().target_depth;
     
     // Unwind all frames back to defer boundary (including the defer frame itself)
     while fiber.frames.len() > target_depth {
         let current_frame_depth = fiber.frames.len();
-        let state = fiber.unwinding.as_mut().unwrap();
-        collect_and_prepend_nested_defers(&mut fiber.defer_stack, &mut state.pending, current_frame_depth, true);
+        let pending = &mut fiber.unwinding.as_mut().unwrap().pending;
+        collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
         pop_frame(fiber);
     }
     
     // Continue with remaining defers in Panic mode
     let state = fiber.unwinding.as_mut().unwrap();
+    state.mode = UnwindingMode::Panic;  // Ensure we're in Panic mode
+    
     if !state.pending.is_empty() {
-        state.transition_to_panic(saved_return_kind, caller_ret_reg, caller_ret_count);
         return execute_next_defer(fiber, module);
     }
     
@@ -377,8 +358,8 @@ fn start_panic_unwind(
         let pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
         
         if !pending.is_empty() {
-            let (saved_return_kind, caller_ret_reg, caller_ret_count) = 
-                extract_frame_return_kind(fiber, module);
+            let (return_values, caller_ret_reg, caller_ret_count) = 
+                extract_frame_return_values(fiber, module);
             
             pop_frame(fiber);
             
@@ -388,8 +369,11 @@ fn start_panic_unwind(
             fiber.unwinding = Some(UnwindingState {
                 pending,
                 target_depth: fiber.frames.len(),
-                kind: UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count },
+                mode: UnwindingMode::Panic,
                 current_defer_generation: first_defer.registered_at_generation,
+                return_values,
+                caller_ret_reg,
+                caller_ret_count,
             });
             
             return call_defer_entry(fiber, &first_defer, module);
@@ -403,43 +387,32 @@ fn start_panic_unwind(
 // Helper functions
 // ============================================================================
 
-/// Extract return info from UnwindingKind (mutable, takes ownership).
-fn extract_return_kind_mut(kind: &mut UnwindingKind) -> (PendingReturnKind, u16, usize) {
-    match kind {
-        UnwindingKind::Return { return_kind, caller_ret_reg, caller_ret_count } => {
-            (core::mem::take(return_kind), *caller_ret_reg, *caller_ret_count)
-        }
-        UnwindingKind::Panic { saved_return_kind, caller_ret_reg, caller_ret_count } => {
-            (core::mem::take(saved_return_kind), *caller_ret_reg, *caller_ret_count)
-        }
-    }
-}
-
-/// Convert PendingReturnKind to return values.
+/// Convert Option<ReturnValues> to return values vector.
 #[inline]
-fn pending_return_to_values(kind: PendingReturnKind, caller_ret_count: usize) -> Vec<u64> {
-    match kind {
-        PendingReturnKind::None => vec![0u64; caller_ret_count],
-        PendingReturnKind::Stack { vals, .. } => vals,
-        PendingReturnKind::Heap { gcrefs, slots_per_ref } => read_heap_gcrefs(&gcrefs, &slots_per_ref),
+fn return_values_to_vec(rv: Option<ReturnValues>, caller_ret_count: usize) -> Vec<u64> {
+    match rv {
+        None => vec![0u64; caller_ret_count],
+        Some(ReturnValues::Stack { vals, .. }) => vals,
+        Some(ReturnValues::Heap { gcrefs, slots_per_ref }) => read_heap_gcrefs(&gcrefs, &slots_per_ref),
     }
 }
 
-/// Extract return info from the current frame for panic recovery.
-/// For fresh panic, we only have heap returns info (if any).
-fn extract_frame_return_kind(
+/// Extract return values from current frame for panic/recover.
+/// Returns (return_values, ret_reg, ret_count). Only heap returns are captured;
+/// stack returns are None since they'll be zeroed on panic anyway.
+fn extract_frame_return_values(
     fiber: &Fiber,
     module: &Module,
-) -> (PendingReturnKind, u16, usize) {
+) -> (Option<ReturnValues>, u16, usize) {
     let Some(frame) = fiber.frames.last() else {
-        return (PendingReturnKind::None, 0, 0);
+        return (None, 0, 0);
     };
     let Some(func) = module.functions.get(frame.func_id as usize) else {
-        return (PendingReturnKind::None, frame.ret_reg, frame.ret_count as usize);
+        return (None, frame.ret_reg, frame.ret_count as usize);
     };
     
     if func.heap_ret_gcref_count == 0 {
-        return (PendingReturnKind::None, frame.ret_reg, frame.ret_count as usize);
+        return (None, frame.ret_reg, frame.ret_count as usize);
     }
     
     let gcref_count = func.heap_ret_gcref_count as usize;
@@ -451,7 +424,7 @@ fn extract_frame_return_kind(
     
     let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
     
-    (PendingReturnKind::Heap { gcrefs, slots_per_ref }, frame.ret_reg, frame.ret_count as usize)
+    (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), frame.ret_reg, frame.ret_count as usize)
 }
 
 /// Pop frame from call stack.
