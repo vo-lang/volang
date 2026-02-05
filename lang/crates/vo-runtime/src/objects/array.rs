@@ -24,12 +24,22 @@ impl_gc_object!(ArrayHeader);
 
 /// Create a new array with packed element storage.
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)
+/// Returns null on overflow or allocation failure.
 pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usize) -> GcRef {
-    let data_bytes = length * elem_bytes;
+    let data_bytes = match length.checked_mul(elem_bytes) {
+        Some(b) => b,
+        None => return core::ptr::null_mut(), // overflow
+    };
     let data_slots = slots_for_bytes(data_bytes); // round up to slot boundary
-    let total_slots = HEADER_SLOTS + data_slots;
+    let total_slots = match HEADER_SLOTS.checked_add(data_slots) {
+        Some(s) => s,
+        None => return core::ptr::null_mut(), // overflow
+    };
     let array_meta = ValueMeta::new(0, ValueKind::Array);
     let arr = gc.alloc_array(array_meta, total_slots);
+    if arr.is_null() {
+        return arr; // allocation failed
+    }
     let header = ArrayHeader::as_mut(arr);
     header.len = length as Slot;
     header.elem_meta = elem_meta;

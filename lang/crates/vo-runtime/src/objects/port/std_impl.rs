@@ -27,6 +27,18 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, cap: usize) ->
     port
 }
 
+/// Create a new port with validation (unified logic for VM and JIT).
+/// 
+/// Validates:
+/// - cap >= 0
+/// 
+/// Returns Ok(GcRef) on success, Err(error_code) on failure.
+pub fn create_checked(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, cap: i64) -> Result<GcRef, i32> {
+    use crate::objects::alloc_error;
+    if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
+    Ok(create(gc, elem_meta, elem_slots, cap as usize))
+}
+
 /// Access port state via closure. Guard lifetime is bounded to the closure.
 #[inline]
 pub fn with_state<T, F: FnOnce(&mut PortState) -> T>(port: GcRef, f: F) -> T {

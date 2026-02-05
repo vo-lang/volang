@@ -96,6 +96,11 @@ pub struct JitContext {
     /// Pointer to panic flag (set by JIT when panic occurs).
     pub panic_flag: *mut bool,
     
+    /// Flag indicating this is a user panic (via panic() call), not a runtime error.
+    /// When true, panic_msg contains the user-provided value (may be nil).
+    /// When false, panic_msg should be ignored and a default runtime error message created.
+    pub is_user_panic: *mut bool,
+    
     /// Panic message (interface as InterfaceSlot, set by vo_panic for user panics).
     pub panic_msg: *mut InterfaceSlot,
     
@@ -252,6 +257,42 @@ pub struct JitContext {
     /// Callback to spawn a goroutine on a specific island.
     /// island: island handle, closure_ref: closure GcRef, args_ptr: arguments, arg_slots: count
     pub go_island_fn: Option<extern "C" fn(*mut JitContext, island: u64, closure_ref: u64, args_ptr: *const u64, arg_slots: u32)>,
+    
+    // =========================================================================
+    // Defer/Recover Support
+    // =========================================================================
+    
+    /// Callback to push a defer entry.
+    /// func_id: function to call (0 if closure), is_closure: 1 if closure,
+    /// closure_ref: closure GcRef (or 0), args_ptr: captured args, arg_count: number of args,
+    /// is_errdefer: 1 for errdefer
+    pub defer_push_fn: Option<extern "C" fn(
+        ctx: *mut JitContext,
+        func_id: u32,
+        is_closure: u32,
+        closure_ref: u64,
+        args_ptr: *const u64,
+        arg_count: u32,
+        is_errdefer: u32,
+    )>,
+    
+    /// Callback for recover() - writes result to output (2 slots), returns 1 if recovered.
+    pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> u32>,
+    
+    /// Set by JIT Return to indicate explicit `fail` return (for errdefer).
+    pub is_error_return: u8,
+    
+    /// For heap returns: starting register of GcRefs.
+    /// Used when function has heap-escaped named returns and defers.
+    pub ret_gcref_start: u16,
+    
+    /// True if function uses heap returns (named returns that escaped).
+    /// VM reads GcRefs from fiber.stack instead of ret buffer when this is set.
+    pub ret_is_heap: u8,
+    
+    /// Starting slot of return values (from Return instruction's inst.a).
+    /// Used by VM to extract ret_slot_types from func.slot_types for GC scanning.
+    pub ret_start: u16,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -305,6 +346,14 @@ impl JitContext {
     // Batch 4
     pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
     pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
+    
+    // Defer/Recover
+    pub const OFFSET_DEFER_PUSH_FN: i32 = std::mem::offset_of!(JitContext, defer_push_fn) as i32;
+    pub const OFFSET_RECOVER_FN: i32 = std::mem::offset_of!(JitContext, recover_fn) as i32;
+    pub const OFFSET_IS_ERROR_RETURN: i32 = std::mem::offset_of!(JitContext, is_error_return) as i32;
+    pub const OFFSET_RET_GCREF_START: i32 = std::mem::offset_of!(JitContext, ret_gcref_start) as i32;
+    pub const OFFSET_RET_IS_HEAP: i32 = std::mem::offset_of!(JitContext, ret_is_heap) as i32;
+    pub const OFFSET_RET_START: i32 = std::mem::offset_of!(JitContext, ret_start) as i32;
 }
 
 // =============================================================================
@@ -560,13 +609,59 @@ pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
     }
 }
 
-/// Trigger a user panic from JIT code.
-/// The panic message is stored in JitContext for the VM to read later.
+/// Push a defer entry from JIT code.
+/// 
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+/// - `ctx.defer_push_fn` must be set
+#[no_mangle]
+pub extern "C" fn vo_defer_push(
+    ctx: *mut JitContext,
+    func_id: u32,
+    is_closure: u32,
+    closure_ref: u64,
+    args_ptr: *const u64,
+    arg_count: u32,
+    is_errdefer: u32,
+) {
+    let ctx_ref = unsafe { &*ctx };
+    if let Some(f) = ctx_ref.defer_push_fn {
+        f(ctx, func_id, is_closure, closure_ref, args_ptr, arg_count, is_errdefer);
+    }
+}
+
+/// Execute recover() from JIT code.
+/// Returns 1 if panic was recovered, 0 otherwise.
+/// Result is written to result_ptr (2 slots for interface{}).
+/// 
+/// # Safety
+/// - `ctx` must be a valid pointer to JitContext
+/// - `ctx.recover_fn` must be set
+/// - `result_ptr` must point to at least 2 u64 slots
+#[no_mangle]
+pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> u32 {
+    let ctx_ref = unsafe { &*ctx };
+    match ctx_ref.recover_fn {
+        Some(f) => f(ctx, result_ptr),
+        None => {
+            unsafe {
+                *result_ptr = 0;
+                *result_ptr.add(1) = 0;
+            }
+            0
+        }
+    }
+}
+
+/// Trigger a user panic from JIT code (explicit `panic()` call or `?` operator).
+/// 
+/// Sets `is_user_panic=true` to distinguish from runtime errors (nil deref, bounds check).
+/// The panic message is stored in `ctx.panic_msg` and may be a nil interface.
 /// 
 /// # Arguments
 /// - `ctx`: JIT context
-/// - `msg_slot0`: Interface slot0 (packed metadata)
-/// - `msg_slot1`: Interface slot1 (data: string GcRef or immediate)
+/// - `msg_slot0`: Interface slot0 (packed metadata, 0 for nil interface)
+/// - `msg_slot1`: Interface slot1 (data pointer or immediate value)
 /// 
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
@@ -575,7 +670,7 @@ pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64)
     unsafe {
         let ctx = &mut *ctx;
         *ctx.panic_flag = true;
-        // Store panic message in JitContext for VM to read
+        *ctx.is_user_panic = true;
         (*ctx.panic_msg).slot0 = msg_slot0;
         (*ctx.panic_msg).slot1 = msg_slot1;
     }
@@ -888,16 +983,19 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 // Channel Helpers
 // =============================================================================
 
-/// Create a new channel.
+/// Create a new channel with validation (unified logic for VM and JIT).
 #[no_mangle]
-pub extern "C" fn vo_chan_new(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: u64) -> u64 {
+pub extern "C" fn vo_chan_new_checked(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
     use crate::objects::channel;
     use crate::ValueMeta;
     unsafe {
-        let gc = &mut *gc;
-        channel::create(gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap as usize) as u64
+        match channel::create_checked(&mut *gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap) {
+            Ok(result) => { *out = result as u64; 0 }
+            Err(code) => code,
+        }
     }
 }
+
 
 /// Get channel length (number of elements in buffer).
 #[no_mangle]
@@ -921,16 +1019,19 @@ pub extern "C" fn vo_chan_cap(ch: u64) -> u64 {
 // Port Helpers
 // =============================================================================
 
-/// Create a new port.
+/// Create a new port with validation (unified logic for VM and JIT).
 #[no_mangle]
-pub extern "C" fn vo_port_new(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: u64) -> u64 {
+pub extern "C" fn vo_port_new_checked(gc: *mut Gc, elem_meta: u32, elem_slots: u32, cap: i64, out: *mut u64) -> i32 {
     use crate::objects::port;
     use crate::ValueMeta;
     unsafe {
-        let gc = &mut *gc;
-        port::create(gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap as usize) as u64
+        match port::create_checked(&mut *gc, ValueMeta::from_raw(elem_meta), elem_slots as u16, cap) {
+            Ok(result) => { *out = result as u64; 0 }
+            Err(code) => code,
+        }
     }
 }
+
 
 /// Get port length (number of elements in buffer).
 #[no_mangle]
@@ -994,17 +1095,26 @@ pub extern "C" fn vo_array_len(arr: u64) -> u64 {
 // Slice Helpers
 // =============================================================================
 
-/// Create a new slice with packed element storage.
-/// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)
+/// Create a new slice with validation (unified logic for VM and JIT).
+/// Returns: error code (0 = success), writes result to *out on success.
 #[no_mangle]
-pub extern "C" fn vo_slice_new(gc: *mut Gc, elem_meta: u32, elem_bytes: u32, len: u64, cap: u64) -> u64 {
+pub extern "C" fn vo_slice_new_checked(
+    gc: *mut Gc, 
+    elem_meta: u32, 
+    elem_bytes: u32, 
+    len: i64,
+    cap: i64,
+    out: *mut u64
+) -> i32 {
     use crate::objects::slice;
-    use crate::ValueMeta;
     unsafe {
-        let gc = &mut *gc;
-        slice::create(gc, ValueMeta::from_raw(elem_meta), elem_bytes as usize, len as usize, cap as usize) as u64
+        match slice::create_checked(&mut *gc, elem_meta, elem_bytes as usize, len, cap) {
+            Ok(result) => { *out = result as u64; 0 }
+            Err(code) => code,
+        }
     }
 }
+
 
 /// Get slice length.
 #[no_mangle]
@@ -1387,12 +1497,12 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_str_cmp", vo_str_cmp as *const u8),
         ("vo_str_decode_rune", vo_str_decode_rune as *const u8),
         ("vo_closure_new", vo_closure_new as *const u8),
-        ("vo_chan_new", vo_chan_new as *const u8),
+        ("vo_chan_new_checked", vo_chan_new_checked as *const u8),
         ("vo_array_new", vo_array_new as *const u8),
         ("vo_array_get", vo_array_get as *const u8),
         ("vo_array_set", vo_array_set as *const u8),
         ("vo_array_len", vo_array_len as *const u8),
-        ("vo_slice_new", vo_slice_new as *const u8),
+        ("vo_slice_new_checked", vo_slice_new_checked as *const u8),
         ("vo_slice_len", vo_slice_len as *const u8),
         ("vo_slice_cap", vo_slice_cap as *const u8),
         ("vo_slice_get", vo_slice_get as *const u8),
@@ -1415,6 +1525,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_iter_init", vo_map_iter_init as *const u8),
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_copy", vo_copy as *const u8),
+        ("vo_port_new_checked", vo_port_new_checked as *const u8),
         // Batch 1: Island/Channel/Port operations
         ("vo_island_new", vo_island_new as *const u8),
         ("vo_chan_close", vo_chan_close as *const u8),

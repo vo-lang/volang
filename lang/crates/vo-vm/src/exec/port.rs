@@ -47,17 +47,17 @@ pub fn exec_port_new(
 ) -> PortNewResult {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
-
-    let cap_i64 = stack_get(stack, bp + inst.c as usize) as i64;
-    if cap_i64 < 0 {
-        return Err(format!("runtime error: make port: size out of range"));
-    }
-
-    let cap = cap_i64 as usize;
+    let cap = stack_get(stack, bp + inst.c as usize) as i64;
     let elem_slots = inst.flags as u16;
-    let p = port::create(gc, elem_meta, elem_slots, cap);
-    stack_set(stack, bp + inst.a as usize, p as u64);
-    Ok(())
+
+    // Use unified validation logic from port::create_checked
+    match port::create_checked(gc, elem_meta, elem_slots, cap) {
+        Ok(p) => {
+            stack_set(stack, bp + inst.a as usize, p as u64);
+            Ok(())
+        }
+        Err(_) => Err(format!("runtime error: makeport: size out of range")),
+    }
 }
 
 /// Core port send logic - shared by VM interpreter and JIT callbacks.

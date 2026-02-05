@@ -38,6 +38,18 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, cap: usize) ->
     chan
 }
 
+/// Create a new channel with validation (unified logic for VM and JIT).
+/// 
+/// Validates:
+/// - cap >= 0
+/// 
+/// Returns Ok(GcRef) on success, Err(error_code) on failure.
+pub fn create_checked(gc: &mut Gc, elem_meta: ValueMeta, elem_slots: u16, cap: i64) -> Result<GcRef, i32> {
+    use super::alloc_error;
+    if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
+    Ok(create(gc, elem_meta, elem_slots, cap as usize))
+}
+
 #[inline]
 pub fn get_state(chan: GcRef) -> &'static mut ChannelState {
     unsafe { &mut *slot_to_ptr(QueueData::as_ref(chan).state) }

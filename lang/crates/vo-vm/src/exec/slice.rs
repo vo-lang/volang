@@ -20,49 +20,34 @@ pub type SliceNewResult = Result<(), String>;
 
 #[inline]
 pub fn exec_slice_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> SliceNewResult {
+    use vo_runtime::objects::alloc_error;
+    
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
-    let elem_meta = ValueMeta::from_raw(meta_raw);
-    
-    // Read as i64 first to check for negative values
-    let len_i64 = stack_get(stack, bp + inst.c as usize) as i64;
-    let cap_i64 = stack_get(stack, bp + inst.c as usize + 1) as i64;
-    
-    // Check for negative length
-    if len_i64 < 0 {
-        return Err(format!("runtime error: makeslice: len out of range"));
-    }
-    // Check for negative capacity
-    if cap_i64 < 0 {
-        return Err(format!("runtime error: makeslice: cap out of range"));
-    }
-    
-    let len = len_i64 as usize;
-    let cap = cap_i64 as usize;
-    
-    // Check len > cap
-    if len > cap {
-        return Err(format!("runtime error: makeslice: len larger than cap"));
-    }
+    let len = stack_get(stack, bp + inst.c as usize) as i64;
+    let cap = stack_get(stack, bp + inst.c as usize + 1) as i64;
     
     // flags: 0=dynamic (read from c+2), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
     let elem_bytes = match inst.flags {
-        0 => stack_get(stack, bp + inst.c as usize + 2) as usize,  // dynamic: elem_bytes in c+2
-        0x81 => 1,   // int8
-        0x82 => 2,   // int16
-        0x84 | 0x44 => 4,   // int32 or float32
+        0 => stack_get(stack, bp + inst.c as usize + 2) as usize,
+        0x81 => 1,
+        0x82 => 2,
+        0x84 | 0x44 => 4,
         f => f as usize,
     };
     
-    // Check for overflow in allocation size
-    // Use isize::MAX as limit (similar to Go's maxAlloc)
-    match cap.checked_mul(elem_bytes) {
-        Some(total) if total <= isize::MAX as usize => {}
-        _ => return Err(format!("runtime error: makeslice: cap out of range")),
+    // Use unified validation logic from slice::create_checked
+    match slice::create_checked(gc, meta_raw, elem_bytes, len, cap) {
+        Ok(s) => {
+            stack_set(stack, bp + inst.a as usize, s as u64);
+            Ok(())
+        }
+        Err(code) => Err(match code {
+            alloc_error::NEGATIVE_LEN => format!("runtime error: makeslice: len out of range"),
+            alloc_error::NEGATIVE_CAP => format!("runtime error: makeslice: cap out of range"),
+            alloc_error::LEN_GT_CAP => format!("runtime error: makeslice: len larger than cap"),
+            _ => format!("runtime error: makeslice: cap out of range"),
+        }),
     }
-    
-    let s = slice::create(gc, elem_meta, elem_bytes, len, cap);
-    stack_set(stack, bp + inst.a as usize, s as u64);
-    Ok(())
 }
 
 /// SliceSlice: a[lo:hi] or a[lo:hi:max]

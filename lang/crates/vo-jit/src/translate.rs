@@ -1,6 +1,6 @@
 //! Shared instruction translation logic.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlot, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 
 use vo_runtime::bytecode::Constant;
@@ -135,6 +135,10 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         // Batch 4: Goroutine Start
         GoStart => { go_start(e, inst); Ok(Completed) }
         GoIsland => { go_island(e, inst); Ok(Completed) }
+        // Defer/Recover
+        DeferPush => { defer_push(e, inst, false); Ok(Completed) }
+        ErrDeferPush => { defer_push(e, inst, true); Ok(Completed) }
+        Recover => { recover(e, inst); Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -218,7 +222,7 @@ fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero, true);
+    emit_panic_if(e, is_zero);
     // Handle MIN_INT64 / -1 overflow: result would be MAX_INT64+1, which overflows.
     // x86 idiv traps on this. Go semantics: result wraps to MIN_INT64.
     // Replace b with 1 when overflow would occur to avoid the trap.
@@ -239,7 +243,7 @@ fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero, true);
+    emit_panic_if(e, is_zero);
     // Handle MIN_INT64 % -1: x86 idiv traps on this. Result should be 0.
     // Replace b with 1 when overflow would occur (MIN % 1 = 0).
     let min_i64 = e.builder().ins().iconst(types::I64, i64::MIN);
@@ -258,7 +262,7 @@ fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero, true);
+    emit_panic_if(e, is_zero);
     let r = e.builder().ins().udiv(a, b);
     e.write_var(inst.a, r);
 }
@@ -268,7 +272,7 @@ fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for division by zero
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_zero = e.builder().ins().icmp(IntCC::Equal, b, zero);
-    emit_panic_if(e, is_zero, true);
+    emit_panic_if(e, is_zero);
     let r = e.builder().ins().urem(a, b);
     e.write_var(inst.a, r);
 }
@@ -370,7 +374,7 @@ fn and_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 fn shift_precheck<'a>(e: &mut impl IrEmitter<'a>, shift_amt: Value) -> (Value, Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_negative = e.builder().ins().icmp(IntCC::SignedLessThan, shift_amt, zero);
-    emit_panic_if(e, is_negative, true);
+    emit_panic_if(e, is_negative);
     let sixty_four = e.builder().ins().iconst(types::I64, 64);
     let is_large = e.builder().ins().icmp(IntCC::SignedGreaterThanOrEqual, shift_amt, sixty_four);
     (zero, is_large)
@@ -435,25 +439,24 @@ fn global_set_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
-/// Emit conditional panic: if `condition` is true, return panic; otherwise continue.
-/// Optionally calls vo_panic to set panic_flag for defer/recover support.
-/// For runtime panics (nil pointer, bounds check), msg slots are 0 - VM will use default message.
-fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value, call_vo_panic: bool) {
+/// Emit runtime panic (nil pointer, bounds check, division by zero, etc).
+/// Sets panic_flag=true but NOT is_user_panic - VM will create default error message.
+fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value) {
     let panic_block = e.builder().create_block();
     let ok_block = e.builder().create_block();
     e.builder().ins().brif(condition, panic_block, &[], ok_block, &[]);
     
     e.builder().switch_to_block(panic_block);
     e.builder().seal_block(panic_block);
-    if call_vo_panic {
-        if let Some(panic_func) = e.helpers().panic {
-            let ctx = e.ctx_param();
-            // Runtime panics pass 0 for both slots - VM will use default "nil pointer dereference" message
-            let msg_slot0 = e.builder().ins().iconst(types::I64, 0);
-            let msg_slot1 = e.builder().ins().iconst(types::I64, 0);
-            e.builder().ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
-        }
-    }
+    
+    // Runtime errors: just set panic_flag, don't call vo_panic
+    // (vo_panic sets is_user_panic=true which would prevent default message creation)
+    let ctx = e.ctx_param();
+    let panic_flag_offset = std::mem::offset_of!(vo_runtime::jit_api::JitContext, panic_flag) as i32;
+    let panic_flag_ptr = e.builder().ins().load(types::I64, MemFlags::trusted(), ctx, panic_flag_offset);
+    let true_val = e.builder().ins().iconst(types::I8, 1);
+    e.builder().ins().store(MemFlags::trusted(), true_val, panic_flag_ptr, 0);
+    
     let panic_ret_val = e.panic_return_value();
     let panic_ret = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
     e.builder().ins().return_(&[panic_ret]);
@@ -466,7 +469,7 @@ fn emit_panic_if<'a>(e: &mut impl IrEmitter<'a>, condition: Value, call_vo_panic
 fn emit_nil_ptr_check<'a>(e: &mut impl IrEmitter<'a>, ptr: Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, ptr, zero);
-    emit_panic_if(e, is_nil, true); // call vo_panic for defer/recover
+    emit_panic_if(e, is_nil);
 }
 
 /// Emit nil check for pointer with slot tracking.
@@ -638,7 +641,7 @@ fn index_check<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let idx = e.read_var(inst.a);
     let len = e.read_var(inst.b);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds, true);
+    emit_panic_if(e, out_of_bounds);
 }
 
 // =============================================================================
@@ -749,21 +752,35 @@ fn emit_slice_bounds_check<'a>(e: &mut impl IrEmitter<'a>, s: Value, idx: Value)
     
     // Check idx >= len (nil slice has len=0, so any idx will be out of bounds)
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds, false);
+    emit_panic_if(e, out_of_bounds);
     
     e.builder().ins().load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_DATA_PTR)
 }
 
 fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_new_func = e.helpers().slice_new.expect("slice_new helper not registered");
+    let func = e.helpers().slice_new_checked.expect("slice_new_checked helper not registered");
     let elem_bytes_val = emit_elem_bytes_i32(e, inst.flags, inst.c + 2);
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let len = e.read_var(inst.c);
     let cap = e.read_var(inst.c + 1);
-    let call = e.builder().ins().call(slice_new_func, &[gc_ptr, meta_i32, elem_bytes_val, len, cap]);
-    let result = e.builder().inst_results(call)[0];
+    
+    // Create stack slot for output
+    let out_slot = e.builder().create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+    
+    // Call checked helper: (gc, meta, elem_bytes, len, cap, out) -> error_code
+    let call = e.builder().ins().call(func, &[gc_ptr, meta_i32, elem_bytes_val, len, cap, out_ptr]);
+    let error_code = e.builder().inst_results(call)[0];
+    
+    // Panic if error_code != 0
+    let zero = e.builder().ins().iconst(types::I32, 0);
+    let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
+    emit_panic_if(e, has_error);
+    
+    // Load result from output slot
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
 }
 
@@ -891,7 +908,7 @@ fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check for bounds error (helper returns u64::MAX on error)
     let error_val = e.builder().ins().iconst(types::I64, -1i64);
     let is_error = e.builder().ins().icmp(IntCC::Equal, result, error_val);
-    emit_panic_if(e, is_error, true);
+    emit_panic_if(e, is_error);
     
     e.write_var(inst.a, result);
 }
@@ -958,7 +975,7 @@ fn array_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Bounds check: load len from ArrayHeader (offset 0)
     let len = e.builder().ins().load(types::I64, MemFlags::trusted(), arr, 0);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds, true);
+    emit_panic_if(e, out_of_bounds);
     
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.flags, inst.c + 1);
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -986,7 +1003,7 @@ fn array_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Bounds check: load len from ArrayHeader (offset 0)
     let len = e.builder().ins().load(types::I64, MemFlags::trusted(), arr, 0);
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds, true);
+    emit_panic_if(e, out_of_bounds);
     
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.flags, inst.b + 1);
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -1040,7 +1057,7 @@ fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let len_call = e.builder().ins().call(str_len_func, &[s]);
     let len = e.builder().inst_results(len_call)[0];
     let out_of_bounds = e.builder().ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_panic_if(e, out_of_bounds, true);
+    emit_panic_if(e, out_of_bounds);
     let call = e.builder().ins().call(str_index_func, &[s, idx]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
@@ -1202,7 +1219,7 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // nil map write panics (Go semantics)
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
-    emit_panic_if(e, is_nil, false);
+    emit_panic_if(e, is_nil);
     
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
     let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
@@ -1213,7 +1230,7 @@ fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     
     // Check if vo_map_set returned panic (unhashable interface key)
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
-    emit_panic_if(e, is_panic, false);
+    emit_panic_if(e, is_panic);
 }
 
 fn map_delete<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -1330,14 +1347,28 @@ fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn chan_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().chan_new.expect("chan_new helper not registered");
+    let func = e.helpers().chan_new_checked.expect("chan_new_checked helper not registered");
     let gc_ptr = e.gc_ptr();
     let elem_meta = e.read_var(inst.b);
     let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
     let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
     let cap = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap]);
-    let result = e.builder().inst_results(call)[0];
+    
+    // Create stack slot for output
+    let out_slot = e.builder().create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+    
+    // Call checked helper: (gc, meta, slots, cap, out) -> error_code
+    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
+    let error_code = e.builder().inst_results(call)[0];
+    
+    // Panic if error_code != 0
+    let zero = e.builder().ins().iconst(types::I32, 0);
+    let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
+    emit_panic_if(e, has_error);
+    
+    // Load result from output slot
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
 }
 
@@ -1358,14 +1389,28 @@ fn chan_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 fn port_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().port_new.expect("port_new helper not registered");
+    let func = e.helpers().port_new_checked.expect("port_new_checked helper not registered");
     let gc_ptr = e.gc_ptr();
     let elem_meta = e.read_var(inst.b);
     let elem_meta_i32 = e.builder().ins().ireduce(types::I32, elem_meta);
     let elem_slots_i32 = e.builder().ins().iconst(types::I32, inst.flags as i64);
     let cap = e.read_var(inst.c);
-    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap]);
-    let result = e.builder().inst_results(call)[0];
+    
+    // Create stack slot for output
+    let out_slot = e.builder().create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+    
+    // Call checked helper: (gc, meta, slots, cap, out) -> error_code
+    let call = e.builder().ins().call(func, &[gc_ptr, elem_meta_i32, elem_slots_i32, cap, out_ptr]);
+    let error_code = e.builder().inst_results(call)[0];
+    
+    // Panic if error_code != 0
+    let zero = e.builder().ins().iconst(types::I32, 0);
+    let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
+    emit_panic_if(e, has_error);
+    
+    // Load result from output slot
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
 }
 
@@ -1505,7 +1550,7 @@ fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     if !has_ok {
         let zero = e.builder().ins().iconst(types::I64, 0);
         let is_panic = e.builder().ins().icmp(IntCC::Equal, result, zero);
-        emit_panic_if(e, is_panic, false);
+        emit_panic_if(e, is_panic);
     }
     let dst_slots = if assert_kind == 1 { 2 } else { target_slots.max(1) };
     for i in 0..dst_slots {
@@ -1535,7 +1580,7 @@ fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Check if result == 2 (panic for uncomparable type)
     let two = e.builder().ins().iconst(types::I64, 2);
     let is_panic = e.builder().ins().icmp(IntCC::Equal, result, two);
-    emit_panic_if(e, is_panic, false);
+    emit_panic_if(e, is_panic);
     
     // Mask result to 0 or 1 (already know it's not 2)
     let one = e.builder().ins().iconst(types::I64, 1);
@@ -1817,4 +1862,63 @@ fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     
     e.builder().ins().call(go_island_func, &[ctx, island, closure, args_ptr, arg_slots]);
+}
+
+// =============================================================================
+// Defer/Recover
+// =============================================================================
+
+/// DeferPush / ErrDeferPush
+/// - a: func_id_low (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
+/// - b: arg_start
+/// - c: arg_count
+/// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
+fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_errdefer: bool) {
+    let func = e.helpers().defer_push.expect("defer_push not registered");
+    let ctx = e.ctx_param();
+    
+    let is_closure = (inst.flags & 1) != 0;
+    let (func_id_val, closure_ref_val) = if is_closure {
+        let closure = e.read_var(inst.a);
+        let func_id_val = e.builder().ins().iconst(types::I32, 0);
+        (func_id_val, closure)
+    } else {
+        let func_id = inst.a as u32 | ((inst.flags as u32 >> 1) << 16);
+        let func_id_val = e.builder().ins().iconst(types::I32, func_id as i64);
+        let closure_ref = e.builder().ins().iconst(types::I64, 0);
+        (func_id_val, closure_ref)
+    };
+    
+    let is_closure_val = e.builder().ins().iconst(types::I32, if is_closure { 1 } else { 0 });
+    let args_ptr = e.var_addr(inst.b);
+    let arg_count = e.builder().ins().iconst(types::I32, inst.c as i64);
+    let is_errdefer_val = e.builder().ins().iconst(types::I32, if is_errdefer { 1 } else { 0 });
+    
+    e.builder().ins().call(
+        func,
+        &[ctx, func_id_val, is_closure_val, closure_ref_val, args_ptr, arg_count, is_errdefer_val],
+    );
+}
+
+/// Recover
+/// - a: dst_start (interface{} occupies 2 slots)
+fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    
+    let func = e.helpers().recover.expect("recover not registered");
+    let ctx = e.ctx_param();
+    
+    let result_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        16,
+        8,
+    ));
+    let result_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
+    
+    e.builder().ins().call(func, &[ctx, result_ptr]);
+    let slot0 = e.builder().ins().stack_load(types::I64, result_slot, 0);
+    let slot1 = e.builder().ins().stack_load(types::I64, result_slot, 8);
+    
+    e.write_var(inst.a, slot0);
+    e.write_var(inst.a + 1, slot1);
 }

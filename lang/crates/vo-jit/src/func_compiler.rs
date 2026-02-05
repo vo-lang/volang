@@ -321,31 +321,51 @@ impl<'a> FunctionCompiler<'a> {
     fn ret(&mut self, inst: &Instruction) {
         use vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS;
         let ret_ptr = self.builder.block_params(self.entry_block)[2];
+        let ctx = self.builder.block_params(self.entry_block)[0];
         let heap_returns = (inst.flags & RETURN_FLAG_HEAP_RETURNS) != 0;
+        let is_error_return = (inst.flags & 1) != 0;
+
+        // Always set is_error_return for VM errdefer decision.
+        let err_flag = self.builder.ins().iconst(types::I8, if is_error_return { 1 } else { 0 });
+        self.builder.ins().store(MemFlags::trusted(), err_flag, ctx, JitContext::OFFSET_IS_ERROR_RETURN);
         
         if heap_returns {
-            // Escaped named returns: GcRefs store the actual values
-            // Need to dereference each GcRef to get the value
-            let gcref_start = inst.a as usize;
-            let gcref_count = inst.b as usize;
-            
-            let mut ret_offset = 0i32;
-            for i in 0..gcref_count {
-                let gcref = self.load_local((gcref_start + i) as u16);
+            if self.func_def.has_defer {
+                // With defers, VM must read heap returns AFTER defers execute.
+                // Record metadata for VM to read GcRefs from fiber.stack[jit_bp + ret_gcref_start..].
+                let gcref_start = self.builder.ins().iconst(types::I16, inst.a as i64);
+                self.builder.ins().store(MemFlags::trusted(), gcref_start, ctx, JitContext::OFFSET_RET_GCREF_START);
+                let one = self.builder.ins().iconst(types::I8, 1);
+                self.builder.ins().store(MemFlags::trusted(), one, ctx, JitContext::OFFSET_RET_IS_HEAP);
+            } else {
+                let zero = self.builder.ins().iconst(types::I8, 0);
+                self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+
+                // Escaped named returns (no defers): dereference GcRefs and copy to ret buffer.
+                let gcref_start = inst.a as usize;
+                let gcref_count = inst.b as usize;
                 
-                // Get per-ref slot count from FunctionDef (supports mixed sizes)
-                let slots_for_this_ref = self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
-                
-                // Dereference GcRef to get actual value(s)
-                for j in 0..slots_for_this_ref {
-                    let val = self.builder.ins().load(types::I64, MemFlags::trusted(), gcref, (j * 8) as i32);
-                    self.builder.ins().store(MemFlags::trusted(), val, ret_ptr, ret_offset);
-                    ret_offset += 8;
+                let mut ret_offset = 0i32;
+                for i in 0..gcref_count {
+                    let gcref = self.load_local((gcref_start + i) as u16);
+                    let slots_for_this_ref = self.func_def.heap_ret_slots.get(i).copied().unwrap_or(1) as usize;
+                    for j in 0..slots_for_this_ref {
+                        let val = self.builder.ins().load(types::I64, MemFlags::trusted(), gcref, (j * 8) as i32);
+                        self.builder.ins().store(MemFlags::trusted(), val, ret_ptr, ret_offset);
+                        ret_offset += 8;
+                    }
                 }
             }
         } else {
+            let zero = self.builder.ins().iconst(types::I8, 0);
+            self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+
             let ret_slots = self.func_def.ret_slots as usize;
             let ret_reg = inst.a as usize;
+            
+            // Store ret_start for VM to extract slot_types for GC scanning
+            let ret_start_val = self.builder.ins().iconst(types::I16, ret_reg as i64);
+            self.builder.ins().store(MemFlags::trusted(), ret_start_val, ctx, JitContext::OFFSET_RET_START);
             
             for i in 0..ret_slots {
                 let val = self.load_local((ret_reg + i) as u16);
@@ -359,14 +379,14 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn panic(&mut self, inst: &Instruction) {
-        if let Some(panic_func) = self.helpers.panic {
-            let ctx = self.builder.block_params(self.entry_block)[0];
-            // Panic message is an interface (2 slots): slot0=metadata, slot1=data
-            // Note: Panic instruction uses inst.a for the register (not inst.b)
-            let msg_slot0 = self.load_local(inst.a);
-            let msg_slot1 = self.load_local(inst.a + 1);
-            self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
-        }
+        // MUST call vo_panic to set panic_msg for defer/recover support
+        let panic_func = self.helpers.panic.expect("panic helper must be registered");
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        // Panic message is an interface (2 slots): slot0=metadata, slot1=data
+        // Note: Panic instruction uses inst.a for the register (not inst.b)
+        let msg_slot0 = self.load_local(inst.a);
+        let msg_slot1 = self.load_local(inst.a + 1);
+        self.builder.ins().call(panic_func, &[ctx, msg_slot0, msg_slot1]);
         let panic_val = self.builder.ins().iconst(types::I32, 1);
         self.builder.ins().return_(&[panic_val]);
     }

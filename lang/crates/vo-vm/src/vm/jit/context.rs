@@ -17,12 +17,13 @@ use super::frame::{jit_push_frame, jit_pop_frame, jit_push_resume_point};
 
 /// JIT context with owned storage for mutable fields.
 ///
-/// The JitContext contains pointers to mutable state (panic_flag, panic_msg).
+/// The JitContext contains pointers to mutable state (panic_flag, is_user_panic, panic_msg).
 /// This wrapper owns those values to ensure they outlive the JIT call.
 pub struct JitContextWrapper {
     pub ctx: JitContext,
     // Owned storage - pointers in ctx point to these
     _panic_flag: Box<bool>,
+    _is_user_panic: Box<bool>,
     _panic_msg: Box<InterfaceSlot>,
     _safepoint_flag: Box<bool>,
 }
@@ -34,6 +35,10 @@ impl JitContextWrapper {
 
     pub fn panic_msg(&self) -> InterfaceSlot {
         *self._panic_msg
+    }
+
+    pub fn is_user_panic(&self) -> bool {
+        *self._is_user_panic
     }
 
     pub fn call_func_id(&self) -> u32 {
@@ -56,6 +61,10 @@ impl JitContextWrapper {
     pub fn wait_io_token(&self) -> u64 {
         self.ctx.wait_io_token
     }
+
+    pub fn ret_start(&self) -> u16 {
+        self.ctx.ret_start
+    }
 }
 
 pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitContextWrapper {
@@ -66,6 +75,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
     };
 
     let mut panic_flag = Box::new(false);
+    let mut is_user_panic = Box::new(false);
     let mut panic_msg = Box::new(InterfaceSlot::default());
     let mut safepoint_flag = Box::new(false);
 
@@ -74,6 +84,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         globals: vm.state.globals.as_mut_ptr(),
         safepoint_flag: &*safepoint_flag as *const bool,
         panic_flag: &mut *panic_flag as *mut bool,
+        is_user_panic: &mut *is_user_panic as *mut bool,
         panic_msg: &mut *panic_msg as *mut InterfaceSlot,
         vm: vm as *mut Vm as *mut core::ffi::c_void,
         fiber: fiber as *mut Fiber as *mut core::ffi::c_void,
@@ -120,11 +131,18 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         port_recv_fn: Some(callbacks::jit_port_recv),
         go_start_fn: Some(callbacks::jit_go_start),
         go_island_fn: Some(callbacks::jit_go_island),
+        defer_push_fn: Some(callbacks::jit_defer_push),
+        recover_fn: Some(callbacks::jit_recover),
+        is_error_return: 0,
+        ret_gcref_start: 0,
+        ret_is_heap: 0,
+        ret_start: 0,
     };
 
     JitContextWrapper {
         ctx,
         _panic_flag: panic_flag,
+        _is_user_panic: is_user_panic,
         _panic_msg: panic_msg,
         _safepoint_flag: safepoint_flag,
     }

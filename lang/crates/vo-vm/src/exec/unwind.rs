@@ -74,6 +74,87 @@ pub fn handle_return(
     handle_initial_return(fiber, inst, func, module, include_errdefers)
 }
 
+/// Handle a normal return from JIT (JitResult::Ok).
+///
+/// This mirrors `handle_initial_return` but does not require the original Return instruction,
+/// because JIT does not currently expose the `ret_start`/`ret_count` encoding to VM.
+///
+/// Return values are taken from:
+/// - `ret` slice (stack returns)
+/// - heap GcRefs in `fiber.stack[bp + ret_gcref_start ..]` (heap returns)
+///
+/// Defers are collected from `fiber.defer_stack` using `frame_depth = fiber.frames.len()`.
+pub fn handle_jit_ok_return(
+    fiber: &mut Fiber,
+    func: &FunctionDef,
+    module: &Module,
+    ret: &[u64],
+    heap_returns: bool,
+    ret_gcref_start: usize,
+    ret_start: usize,
+    include_errdefers: bool,
+) -> ExecResult {
+    let current_frame_depth = fiber.frames.len();
+    let has_defers = fiber.defer_stack.last()
+        .map_or(false, |e| e.frame_depth == current_frame_depth);
+
+    // Fast path: no defers and no heap returns → just return the buffer
+    if !has_defers && !heap_returns {
+        let frame = match pop_frame(fiber) {
+            Some(f) => f,
+            None => return ExecResult::Done,
+        };
+        return write_return_values(fiber, ret, frame.ret_reg, frame.ret_count as usize);
+    }
+
+    let bp = fiber.frames.last().unwrap().bp;
+    let stack = fiber.stack.as_ptr();
+
+    let (return_values, pending_defers) = if heap_returns {
+        let gcref_count = func.heap_ret_gcref_count as usize;
+        let gcrefs: Vec<u64> = (0..gcref_count)
+            .map(|i| stack_get(stack, bp + ret_gcref_start + i))
+            .collect();
+        let slots_per_ref: Vec<usize> = func.heap_ret_slots.iter().map(|&s| s as usize).collect();
+        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
+        (Some(ReturnValues::Heap { gcrefs, slots_per_ref }), pending)
+    } else {
+        // Extract slot_types from func for GC scanning
+        let ret_count = ret.len();
+        let slot_types: Vec<vo_runtime::SlotType> = func.slot_types
+            .get(ret_start..ret_start + ret_count)
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
+        (Some(ReturnValues::Stack { vals: ret.to_vec(), slot_types }), pending)
+    };
+
+    let frame = match pop_frame(fiber) {
+        Some(f) => f,
+        None => return ExecResult::Done,
+    };
+
+    if !pending_defers.is_empty() {
+        let mut pending = pending_defers;
+        let first_defer = pending.remove(0);
+
+        fiber.unwinding = Some(UnwindingState {
+            pending,
+            target_depth: fiber.frames.len(),
+            mode: UnwindingMode::Return,
+            current_defer_generation: first_defer.registered_at_generation,
+            return_values,
+            caller_ret_reg: frame.ret_reg,
+            caller_ret_count: frame.ret_count as usize,
+        });
+
+        return call_defer_entry(fiber, &first_defer, module);
+    }
+
+    let ret_vals = return_values_to_vec(return_values, frame.ret_count as usize);
+    write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
+}
+
 /// Compute whether to include errdefers based on error return status.
 /// Returns true if: (1) explicit fail statement, or (2) function returns error and it's non-nil.
 #[inline]

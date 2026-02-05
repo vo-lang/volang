@@ -50,6 +50,9 @@ pub struct FunctionDef {
     /// Slot offset of error return value within return slots, or -1 if function doesn't return error.
     /// Used for errdefer runtime check: errdefer runs when returning non-nil error.
     pub error_ret_slot: i16,
+    /// True if function contains DeferPush or ErrDeferPush instructions.
+    /// Used by JIT to route calls through VM (ensuring real CallFrame exists for defer).
+    pub has_defer: bool,
     pub code: Vec<Instruction>,
     pub slot_types: Vec<SlotType>,
     /// Capture types for cross-island transfer (closures only).

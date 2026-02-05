@@ -1134,6 +1134,11 @@ impl FuncBuilder {
             (0, 0, vec![]) // Mixed or non-escaped: not supported for panic recovery
         };
         
+        // Scan code for defer instructions
+        let has_defer = self.code.iter().any(|inst| {
+            matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush)
+        });
+        
         FunctionDef {
             name: self.name,
             param_count: self.param_count,
@@ -1146,6 +1151,7 @@ impl FuncBuilder {
             heap_ret_slots,
             is_closure: self.is_closure,
             error_ret_slot: self.error_ret_slot,
+            has_defer,
             code: self.code,
             slot_types: self.slot_types,
             capture_types: self.capture_types,

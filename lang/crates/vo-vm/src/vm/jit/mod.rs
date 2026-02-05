@@ -41,6 +41,13 @@ mod frame;
 pub use context::{JitContextWrapper, build_jit_context};
 pub use frame::{jit_push_frame, jit_pop_frame, jit_push_resume_point};
 
+/// Create default panic message for runtime errors (nil deref, bounds check, etc).
+fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
+    let msg_str = vo_runtime::objects::string::new_from_string(gc, helpers::ERR_NIL_POINTER.to_string());
+    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+    InterfaceSlot::new(slot0, msg_str as u64)
+}
+
 /// Execute a JIT-compiled function call.
 ///
 /// This function:
@@ -156,37 +163,96 @@ fn handle_jit_result(
 ) -> ExecResult {
     match result {
         JitResult::Ok => {
-            // Pop the JIT frame
-            fiber.frames.pop();
-            fiber.sp = jit_bp;
-            
             fiber.resume_stack.clear();
 
-            // Copy return values back to caller's stack
+            let frame_depth = fiber.frames.len();
+            let has_defers = fiber.defer_stack.last()
+                .map_or(false, |e| e.frame_depth == frame_depth);
+
+            let heap_returns = ctx.ctx.ret_is_heap != 0;
+            let ret_gcref_start = ctx.ctx.ret_gcref_start as usize;
+
+            let frame = fiber.frames.last().unwrap();
+            let func = &module.functions[frame.func_id as usize];
+
+            // errdefer should run if:
+            // - explicit fail return (set by JIT), OR
+            // - function has error return and error is non-nil
+            let include_errdefers = if ctx.ctx.is_error_return != 0 {
+                true
+            } else if func.error_ret_slot < 0 {
+                false
+            } else if heap_returns {
+                // error_ret_slot is the index within heap returns, read from GcRef
+                let gcref_count = func.heap_ret_gcref_count as usize;
+                let error_gcref_idx = func.error_ret_slot as usize;
+                if gcref_count == 0 || error_gcref_idx >= gcref_count {
+                    false
+                } else {
+                    let bp = frame.bp;
+                    let gcref_raw = fiber.stack[bp + ret_gcref_start + error_gcref_idx];
+                    if gcref_raw == 0 {
+                        false
+                    } else {
+                        // Read slot0 of the error interface from heap
+                        let slot0 = unsafe { *(gcref_raw as vo_runtime::gc::GcRef) };
+                        (slot0 & 0xFF) != 0
+                    }
+                }
+            } else {
+                let idx = func.error_ret_slot as usize;
+                if idx < ret.len() {
+                    (ret[idx] & 0xFF) != 0
+                } else {
+                    false
+                }
+            };
+
+            // When there are defers, or when heap returns are enabled, we must
+            // delegate to the unified unwinding engine.
+            if has_defers || heap_returns {
+                let ret_start = ctx.ret_start() as usize;
+                return crate::exec::handle_jit_ok_return(
+                    fiber,
+                    func,
+                    module,
+                    &ret[..ret_slots],
+                    heap_returns,
+                    ret_gcref_start,
+                    ret_start,
+                    include_errdefers,
+                );
+            }
+
+            // No defers, stack returns: fast path
+            fiber.frames.pop();
+            fiber.sp = jit_bp;
+
             for i in 0..ret_slots {
                 fiber.stack[caller_bp + arg_start + i] = ret[i];
             }
             ExecResult::FrameChanged
         }
         JitResult::Panic => {
-            let mut panic_msg = ctx.panic_msg();
+            // Unified panic handling for JIT and VM:
+            // - User panic (via panic() call): is_user_panic=true, use ctx.panic_msg (may be nil)
+            // - Runtime error (nil deref, bounds): is_user_panic=false, create default message
+            // - VM fallback panic: fiber.panic_state already set
             
-            // Check if panic_msg is nil (runtime panic like nil pointer)
-            if panic_msg.slot0 == 0 {
-                // Create default nil pointer message
-                let msg_str = vo_runtime::objects::string::new_from_string(
-                    &mut vm.state.gc,
-                    helpers::ERR_NIL_POINTER.to_string(),
-                );
-                let slot0 = vo_runtime::objects::interface::pack_slot0(
-                    0, 0, vo_runtime::ValueKind::String
-                );
-                panic_msg = InterfaceSlot::new(slot0, msg_str as u64);
+            let is_user_panic = ctx.is_user_panic();
+            if is_user_panic {
+                // User panic: use the value they passed (even if nil interface)
+                fiber.set_recoverable_panic(ctx.panic_msg());
             }
+            // else: VM fallback may have set fiber.panic_state, or it's a runtime error
+            
+            // Get panic message from fiber, or create default for runtime errors
+            let panic_msg = fiber.take_recoverable_panic()
+                .unwrap_or_else(|| create_default_panic_msg(&mut vm.state.gc));
             
             materialize_jit_frames(fiber, 0);
             
-            // Set panic state on fiber and start unwinding
+            // Set panic state and start unwinding
             fiber.set_recoverable_panic(panic_msg);
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(fiber, stack_ptr, module)
@@ -466,10 +532,15 @@ pub extern "C" fn jit_call_extern(
     
     let jit_result = match result {
         ExternResult::Ok => JitResult::Ok,
-        ExternResult::Panic(_msg) => {
-            // Set panic message in context
+        ExternResult::Panic(msg) => {
+            // Set panic message in context - this is a user panic (from ? operator or explicit panic)
+            let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
+            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
             unsafe {
                 *ctx_ref.panic_flag = true;
+                *ctx_ref.is_user_panic = true;
+                (*ctx_ref.panic_msg).slot0 = slot0;
+                (*ctx_ref.panic_msg).slot1 = msg_str as u64;
             }
             JitResult::Panic
         }
@@ -487,6 +558,7 @@ pub extern "C" fn jit_call_extern(
             JitResult::WaitIo
         }
         ExternResult::NotRegistered(_) => {
+            // Runtime error: is_user_panic stays false, VM will create default message
             unsafe {
                 *ctx_ref.panic_flag = true;
             }
@@ -547,20 +619,12 @@ pub fn dispatch_loop_osr(
             Some(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
-            let mut panic_msg = ctx.panic_msg();
-            
-            // Check if panic_msg is nil (runtime panic like nil pointer)
-            if panic_msg.slot0 == 0 {
-                let msg_str = vo_runtime::objects::string::new_from_string(
-                    &mut vm.state.gc,
-                    helpers::ERR_NIL_POINTER.to_string(),
-                );
-                let slot0 = vo_runtime::objects::interface::pack_slot0(
-                    0, 0, vo_runtime::ValueKind::String
-                );
-                panic_msg = InterfaceSlot::new(slot0, msg_str as u64);
-            }
-            
+            // Use is_user_panic to distinguish user panic from runtime errors
+            let panic_msg = if ctx.is_user_panic() {
+                ctx.panic_msg()
+            } else {
+                create_default_panic_msg(&mut vm.state.gc)
+            };
             fiber.set_recoverable_panic(panic_msg);
             None
         }

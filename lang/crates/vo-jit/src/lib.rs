@@ -32,21 +32,17 @@ use helpers::HelperFuncIds;
 // Shared Utilities
 // =============================================================================
 
-/// Check if a function is jittable (does not contain unsupported operations).
-/// A function is NOT jittable if it uses defer, select, or GoIsland.
+/// Check if a function can be JIT compiled at all.
+/// Returns false only for truly unsupported operations (select).
+/// 
+/// Note: Defer is handled separately in `can_jit_to_jit_call` - functions with
+/// defer CAN be JIT compiled, but must go through dispatch_jit_call for proper
+/// frame management.
 pub fn is_func_jittable(func: &FunctionDef) -> bool {
     for inst in &func.code {
         match inst.opcode() {
-            // Defer/recover
-            Opcode::DeferPush | Opcode::ErrDeferPush | Opcode::Recover
-            // Select (complex control flow)
-            | Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
-            // Batch 1: IslandNew, ChanClose, PortClose - supported
-            // Batch 2: ChanSend, ChanRecv - supported (may return WaitIo)
-            // Batch 3: PortSend, PortRecv - supported (may return WaitIo)
-            // Batch 4: GoStart, GoIsland - supported (fire-and-forget)
-            // CallClosure and CallIface supported via unified call protocol
-            // CallExtern supported via jit_call_extern callback
+            // Select requires complex control flow not yet supported
+            Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
             _ => {}
         }
     }
@@ -67,6 +63,11 @@ const MAX_JIT_CHECK_DEPTH: usize = 16;
 
 fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize) -> bool {
     if !is_func_jittable(func) {
+        return false;
+    }
+    // Functions with defer must go through dispatch_jit_call to get a real CallFrame.
+    // This ensures DeferEntry.frame_depth is correct (matches fiber.frames.len()).
+    if func.has_defer {
         return false;
     }
     // Depth limit - conservatively return false

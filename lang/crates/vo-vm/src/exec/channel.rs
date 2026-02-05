@@ -30,20 +30,17 @@ pub type ChanNewResult = Result<(), String>;
 pub fn exec_chan_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> ChanNewResult {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
-    
-    // Read as i64 first to check for negative values
-    let cap_i64 = stack_get(stack, bp + inst.c as usize) as i64;
-    
-    // Check for negative capacity
-    if cap_i64 < 0 {
-        return Err(format!("runtime error: makechan: size out of range"));
-    }
-    
-    let cap = cap_i64 as usize;
+    let cap = stack_get(stack, bp + inst.c as usize) as i64;
     let elem_slots = inst.flags as u16;
-    let ch = channel::create(gc, elem_meta, elem_slots, cap);
-    stack_set(stack, bp + inst.a as usize, ch as u64);
-    Ok(())
+    
+    // Use unified validation logic from channel::create_checked
+    match channel::create_checked(gc, elem_meta, elem_slots, cap) {
+        Ok(ch) => {
+            stack_set(stack, bp + inst.a as usize, ch as u64);
+            Ok(())
+        }
+        Err(_) => Err(format!("runtime error: makechan: size out of range")),
+    }
 }
 
 pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instruction) -> ChanResult {

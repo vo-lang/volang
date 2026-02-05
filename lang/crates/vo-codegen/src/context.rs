@@ -686,6 +686,7 @@ impl CodegenContext {
             heap_ret_slots: Vec::new(),
             is_closure: false,
             error_ret_slot: -1,
+            has_defer: false,
             code: Vec::new(),
             slot_types: Vec::new(),
             capture_types: Vec::new(),
@@ -950,6 +951,7 @@ impl CodegenContext {
             heap_ret_slots: Vec::new(),
             is_closure: true,
             error_ret_slot: -1,
+            has_defer: false,  // wrappers never have defer
             code,
             slot_types: Vec::new(),
             capture_types: Vec::new(),

@@ -20,13 +20,15 @@ use super::Vm;
 #[cfg(feature = "jit")]
 pub extern "C" fn vm_call_trampoline(
     vm: *mut core::ffi::c_void,
-    _fiber: *mut core::ffi::c_void,
+    fiber: *mut core::ffi::c_void,
     func_id: u32,
     args: *const u64,
     arg_count: u32,
     ret: *mut u64,
     ret_count: u32,
 ) -> vo_runtime::jit_api::JitResult {
+    use crate::fiber::Fiber;
+    
     let vm = unsafe { &mut *(vm as *mut Vm) };
     let args_slice = unsafe { std::slice::from_raw_parts(args, arg_count as usize) };
 
@@ -41,11 +43,17 @@ pub extern "C" fn vm_call_trampoline(
     }
 
     // Execute using callback fiber
-    let (success, _panic_state) = vm.execute_func_sync(func_id, args_slice, ret, ret_count);
+    let (success, panic_state) = vm.execute_func_sync(func_id, args_slice, ret, ret_count);
 
     if success {
         vo_runtime::jit_api::JitResult::Ok
     } else {
+        // Transfer panic state from callback fiber to main fiber
+        // so handle_jit_result can read it
+        if let Some(state) = panic_state {
+            let main_fiber = unsafe { &mut *(fiber as *mut Fiber) };
+            main_fiber.panic_state = Some(state);
+        }
         vo_runtime::jit_api::JitResult::Panic
     }
 }

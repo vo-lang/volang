@@ -245,14 +245,38 @@ impl Gc {
     
     fn alloc_inner(&mut self, value_meta: ValueMeta, header_slots: u16, slots: usize) -> GcRef {
         let header_size = GcHeader::SIZE;
-        let data_size = slots * SLOT_BYTES;
-        let total_size = header_size + data_size;
+        let data_size = match slots.checked_mul(SLOT_BYTES) {
+            Some(s) => s,
+            None => {
+                // Overflow - allocation too large
+                #[cfg(feature = "std")]
+                eprintln!("GC allocation overflow: slots={}", slots);
+                return core::ptr::null_mut();
+            }
+        };
+        let total_size = match header_size.checked_add(data_size) {
+            Some(s) => s,
+            None => {
+                #[cfg(feature = "std")]
+                eprintln!("GC allocation overflow: header_size={}, data_size={}", header_size, data_size);
+                return core::ptr::null_mut();
+            }
+        };
 
-        let layout = core::alloc::Layout::from_size_align(total_size, SLOT_BYTES).unwrap();
+        let layout = match core::alloc::Layout::from_size_align(total_size, SLOT_BYTES) {
+            Ok(l) => l,
+            Err(_) => {
+                #[cfg(feature = "std")]
+                eprintln!("GC allocation layout error: total_size={}, align={}", total_size, SLOT_BYTES);
+                return core::ptr::null_mut();
+            }
+        };
         let ptr = unsafe { heap_alloc::alloc_zeroed(layout) };
 
         if ptr.is_null() {
-            panic!("GC allocation failed");
+            #[cfg(feature = "std")]
+            eprintln!("GC allocation failed: out of memory");
+            return core::ptr::null_mut();
         }
 
         // New object gets current white color

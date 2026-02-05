@@ -8,8 +8,10 @@ pub mod island;
 pub mod channel;
 pub mod port;
 pub mod goroutine;
+pub mod defer;
 
 pub use island::jit_create_island;
 pub use channel::{jit_chan_close, jit_chan_send, jit_chan_recv};
 pub use port::{jit_port_close, jit_port_send, jit_port_recv};
 pub use goroutine::{jit_go_start, jit_go_island};
+pub use defer::{jit_defer_push, jit_recover};

@@ -5,6 +5,7 @@
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::array;
+use crate::objects::alloc_error;
 use crate::slot::{ptr_to_slot, slot_to_ptr, slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
@@ -32,6 +33,38 @@ impl_gc_object!(SliceData);
 pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usize, capacity: usize) -> GcRef {
     let arr = array::create(gc, elem_meta, elem_bytes, capacity);
     from_array_range(gc, arr, 0, length)
+}
+
+/// Create a new slice with validation (unified logic for VM and JIT).
+/// 
+/// Validates:
+/// - len >= 0
+/// - cap >= 0
+/// - len <= cap
+/// - cap * elem_bytes <= isize::MAX (overflow check)
+/// 
+/// Returns Ok(GcRef) on success, Err(error_code) on failure.
+pub fn create_checked(gc: &mut Gc, elem_meta: u32, elem_bytes: usize, len: i64, cap: i64) -> Result<GcRef, i32> {
+    // Unified validation logic
+    if len < 0 { return Err(alloc_error::NEGATIVE_LEN); }
+    if cap < 0 { return Err(alloc_error::NEGATIVE_CAP); }
+    if len > cap { return Err(alloc_error::LEN_GT_CAP); }
+    
+    let len_usize = len as usize;
+    let cap_usize = cap as usize;
+    
+    // Overflow check
+    match cap_usize.checked_mul(elem_bytes) {
+        Some(total) if total <= isize::MAX as usize => {}
+        _ => return Err(alloc_error::OVERFLOW),
+    }
+    
+    // Allocation
+    let result = create(gc, ValueMeta::from_raw(elem_meta), elem_bytes, len_usize, cap_usize);
+    if result.is_null() {
+        return Err(alloc_error::OVERFLOW); // OOM treated as overflow
+    }
+    Ok(result)
 }
 
 pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {

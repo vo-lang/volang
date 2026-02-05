@@ -38,15 +38,15 @@ pub struct HelperFuncs {
     pub str_decode_rune: Option<FuncRef>,
     pub ptr_clone: Option<FuncRef>,
     pub closure_new: Option<FuncRef>,
-    pub chan_new: Option<FuncRef>,
+    pub chan_new_checked: Option<FuncRef>,
     pub chan_len: Option<FuncRef>,
     pub chan_cap: Option<FuncRef>,
-    pub port_new: Option<FuncRef>,
+    pub port_new_checked: Option<FuncRef>,
     pub port_len: Option<FuncRef>,
     pub port_cap: Option<FuncRef>,
     pub array_new: Option<FuncRef>,
     pub array_len: Option<FuncRef>,
-    pub slice_new: Option<FuncRef>,
+    pub slice_new_checked: Option<FuncRef>,
     pub slice_len: Option<FuncRef>,
     pub slice_cap: Option<FuncRef>,
     pub slice_append: Option<FuncRef>,
@@ -78,6 +78,9 @@ pub struct HelperFuncs {
     // Batch 4: Goroutine Start
     pub go_start: Option<FuncRef>,
     pub go_island: Option<FuncRef>,
+    // Defer/Recover
+    pub defer_push: Option<FuncRef>,
+    pub recover: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler
