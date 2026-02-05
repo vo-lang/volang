@@ -457,9 +457,29 @@ impl Vm {
             return Err(VmError::Deadlock("vm deadlock: all fibers blocked".to_string()));
         }
     }
-    
+
+    /// Wake a simple (non-select) waiter.
+    fn wake_simple_waiter(scheduler: &mut Scheduler, id: u32, advance_pc: bool) {
+        let fiber_id = crate::scheduler::FiberId::from_raw(id);
+        if advance_pc {
+            if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
+                frame.pc += 1;
+            }
+        }
+        scheduler.wake_fiber(fiber_id);
+    }
+
+    /// Wake a select waiter, setting woken_index.
+    fn wake_select_waiter(scheduler: &mut Scheduler, id: u32, case_index: u16) {
+        let fiber_id = crate::scheduler::FiberId::from_raw(id);
+        if let Some(ref mut select_state) = scheduler.get_fiber_mut(fiber_id).select_state {
+            select_state.woken_index = Some(case_index as usize);
+        }
+        scheduler.wake_fiber(fiber_id);
+    }
+
     /// Handle ChanResult from channel operations.
-    /// 
+    ///
     /// `advance_woken_pc`: When true, increment woken fiber's PC so it doesn't retry.
     /// - Recv waking a sender: true (sender's value was taken, send is complete)
     /// - Send waking a receiver: false (receiver needs to execute recv to get value)
@@ -480,24 +500,19 @@ impl Vm {
                 ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             exec::ChanResult::Wake(id) => {
-                let fiber_id = crate::scheduler::FiberId::from_raw(id);
-                if advance_woken_pc {
-                    if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
-                        frame.pc += 1;
-                    }
-                }
-                scheduler.wake_fiber(fiber_id);
+                Self::wake_simple_waiter(scheduler, id, advance_woken_pc);
                 ExecResult::TimesliceExpired
             }
-            exec::ChanResult::WakeMultiple(ids) => {
-                for id in ids {
-                    let fiber_id = crate::scheduler::FiberId::from_raw(id);
-                    if advance_woken_pc {
-                        if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
-                            frame.pc += 1;
-                        }
+            exec::ChanResult::WakeSelect(id, case_index) => {
+                Self::wake_select_waiter(scheduler, id, case_index);
+                ExecResult::TimesliceExpired
+            }
+            exec::ChanResult::WakeMultiple(wake_infos) => {
+                for info in wake_infos {
+                    match info {
+                        exec::WakeInfo::Simple(id) => Self::wake_simple_waiter(scheduler, id, advance_woken_pc),
+                        exec::WakeInfo::Select { fiber_id, case_index } => Self::wake_select_waiter(scheduler, fiber_id, case_index),
                     }
-                    scheduler.wake_fiber(fiber_id);
                 }
                 ExecResult::TimesliceExpired
             }
@@ -1412,7 +1427,7 @@ impl Vm {
 
                 // Select operations
                 Opcode::SelectBegin => {
-                    exec::exec_select_begin(&mut fiber.select_state, &inst);
+                    exec::exec_select_begin(fiber, &inst);
                 }
                 Opcode::SelectSend => {
                     exec::exec_select_send(&mut fiber.select_state, &inst);
@@ -1421,11 +1436,14 @@ impl Vm {
                     exec::exec_select_recv(&mut fiber.select_state, &inst);
                 }
                 Opcode::SelectExec => {
-                    match exec::exec_select_exec(stack, bp, &mut fiber.select_state, &inst) {
+                    let fiber_id = fiber.id;
+                    match exec::exec_select_exec(stack, bp, fiber_id, &mut fiber.select_state, &inst) {
                         exec::SelectResult::Continue => {}
                         exec::SelectResult::Block => {
+                            // Waiters have been registered on all channels by exec_select_exec.
+                            // Block this fiber - it will be woken when any channel is ready.
                             frame.pc -= 1;
-                            return ExecResult::TimesliceExpired;
+                            return ExecResult::Block(crate::fiber::BlockReason::Queue);
                         }
                         exec::SelectResult::SendOnClosed => {
                             return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel);

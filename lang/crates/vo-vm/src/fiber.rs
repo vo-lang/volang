@@ -142,6 +142,11 @@ pub struct SelectState {
     pub cases: Vec<SelectCase>,
     pub has_default: bool,
     pub woken_index: Option<usize>,
+    /// Unique ID for this select instance, used for cancellation.
+    /// When one case becomes ready, we cancel waiters on other channels using this ID.
+    pub select_id: u64,
+    /// Channels we've registered waiters on (for cancellation when woken).
+    pub registered_channels: Vec<vo_runtime::gc::GcRef>,
 }
 
 /// Fiber lifecycle state - single source of truth.
@@ -252,6 +257,8 @@ pub struct Fiber {
     pub defer_stack: Vec<DeferEntry>,
     pub unwinding: Option<UnwindingState>,
     pub select_state: Option<SelectState>,
+    /// Counter for generating unique select IDs within this fiber.
+    pub next_select_id: u64,
     pub panic_state: Option<PanicState>,
     pub panic_trap_kind: Option<RuntimeTrapKind>,
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
@@ -277,6 +284,7 @@ impl Fiber {
             defer_stack: Vec::new(),
             unwinding: None,
             select_state: None,
+            next_select_id: 0,
             panic_state: None,
             panic_trap_kind: None,
             panic_generation: 0,
@@ -295,6 +303,7 @@ impl Fiber {
         self.defer_stack.clear();
         self.unwinding = None;
         self.select_state = None;
+        self.next_select_id = 0;
         self.panic_state = None;
         self.panic_trap_kind = None;
         self.panic_generation = 0;

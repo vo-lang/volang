@@ -62,7 +62,47 @@ pub fn elem_slots(q: GcRef) -> u16 {
 
 pub type GoId = u64;
 pub type ChannelMessage = Box<[u64]>;
-pub type ChannelState = QueueState<GoId, ChannelMessage>;
+
+/// Select waiter information - for fibers waiting in a select statement.
+/// When a select blocks, it registers SelectWaiter on multiple channels.
+/// When any channel becomes ready, it wakes the fiber and sets woken_case_index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectWaiter {
+    pub fiber_id: u64,
+    pub case_index: u16,      // Index of this case in the select statement
+    pub select_id: u64,       // Unique ID for this select instance (for cancellation)
+}
+
+/// Channel waiter - either a simple fiber ID or a select waiter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelWaiter {
+    /// Simple send/recv operation - just the fiber ID
+    Simple(GoId),
+    /// Select case - includes case index and select ID for cancellation
+    Select(SelectWaiter),
+}
+
+impl ChannelWaiter {
+    /// Get the fiber ID regardless of waiter type.
+    #[inline]
+    pub fn fiber_id(&self) -> u64 {
+        match self {
+            ChannelWaiter::Simple(id) => *id,
+            ChannelWaiter::Select(sw) => sw.fiber_id,
+        }
+    }
+    
+    /// Check if this is a select waiter with the given select_id.
+    #[inline]
+    pub fn is_select_with_id(&self, select_id: u64) -> bool {
+        match self {
+            ChannelWaiter::Simple(_) => false,
+            ChannelWaiter::Select(sw) => sw.select_id == select_id,
+        }
+    }
+}
+
+pub type ChannelState = QueueState<ChannelWaiter, ChannelMessage>;
 
 #[cfg(feature = "std")]
 pub use crate::pack::PackedValue;
@@ -193,5 +233,19 @@ impl<W, M> QueueState<W, M> {
 
     pub fn take_waiting_senders(&mut self) -> Vec<(W, M)> {
         self.waiting_senders.drain(..).collect()
+    }
+}
+
+// =============================================================================
+// ChannelState-specific methods for select cancellation
+// =============================================================================
+
+impl ChannelState {
+    /// Cancel all select waiters with the given select_id.
+    /// Called when a select completes (one case became ready) to remove
+    /// this fiber from all other channels it was waiting on.
+    pub fn cancel_select_waiters(&mut self, select_id: u64) {
+        self.waiting_receivers.retain(|w| !w.is_select_with_id(select_id));
+        self.waiting_senders.retain(|(w, _)| !w.is_select_with_id(select_id));
     }
 }
