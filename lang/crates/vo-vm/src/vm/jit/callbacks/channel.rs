@@ -104,6 +104,7 @@ pub extern "C" fn jit_chan_send(
             state.register_sender(ChannelWaiter::Simple(fiber.id as u64), value);
             JitResult::WaitIo
         }
+        SendResult::Blocked => unreachable!("try_send never returns Blocked"),
         SendResult::Closed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }
@@ -150,6 +151,7 @@ pub extern "C" fn jit_chan_recv(
             state.register_receiver(ChannelWaiter::Simple(fiber.id as u64));
             JitResult::WaitIo
         }
+        RecvResult::Blocked => unreachable!("try_recv never returns Blocked"),
         RecvResult::Closed => {
             // Zero value, ok=false
             for i in 0..elem_slots as usize {

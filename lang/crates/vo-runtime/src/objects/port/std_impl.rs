@@ -62,9 +62,22 @@ pub fn try_send(port: GcRef, value: PackedValue) -> PortSendResult {
     with_state(port, |s| s.try_send(value, cap))
 }
 
+/// Atomic send: try to send, if would block, register waiter in same lock hold.
+/// This avoids TOCTOU race between try_send and register_sender.
+pub fn send_or_block(port: GcRef, value: PackedValue, waiter: WaiterInfo) -> PortSendResult {
+    let cap = crate::objects::queue_state::capacity(port);
+    with_state(port, |s| s.send_or_block(value, cap, waiter))
+}
+
 /// Try to receive a packed value from the port.
 pub fn try_recv(port: GcRef) -> (PortRecvResult, Option<PackedValue>) {
     with_state(port, |s| s.try_recv())
+}
+
+/// Atomic recv: try to receive, if would block, register waiter in same lock hold.
+/// This avoids TOCTOU race between try_recv and register_receiver.
+pub fn recv_or_block(port: GcRef, waiter: WaiterInfo) -> (PortRecvResult, Option<PackedValue>) {
+    with_state(port, |s| s.recv_or_block(waiter))
 }
 
 /// Register a sender to wait.

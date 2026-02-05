@@ -61,6 +61,7 @@ pub fn exec_port_new(
 }
 
 /// Core port send logic - shared by VM interpreter and JIT callbacks.
+/// Uses atomic send_or_block to avoid TOCTOU race condition.
 #[cfg(feature = "std")]
 pub fn port_send_core(
     p: GcRef,
@@ -83,14 +84,14 @@ pub fn port_send_core(
 
     // Pack the value for cross-island transfer
     let packed = pack_slots(gc, src, elem_meta, struct_metas, runtime_types);
-    match port::try_send(p, packed) {
+    let waiter = WaiterInfo { island_id, fiber_id };
+    
+    // Atomic operation: try send, if would block, register waiter in same lock hold
+    match port::send_or_block(p, packed, waiter) {
         SendResult::DirectSend(receiver) => PortResult::WakeRemote(receiver),
         SendResult::Buffered => PortResult::Continue,
-        SendResult::WouldBlock(value) => {
-            let waiter = WaiterInfo { island_id, fiber_id };
-            port::register_sender(p, waiter, value);
-            PortResult::Yield
-        }
+        SendResult::Blocked => PortResult::Yield,
+        SendResult::WouldBlock(_) => unreachable!("send_or_block never returns WouldBlock"),
         SendResult::Closed => PortResult::SendOnClosed,
     }
 }
@@ -138,6 +139,7 @@ pub enum PortRecvCoreResult {
 }
 
 /// Core port recv logic - shared by VM interpreter and JIT callbacks.
+/// Uses atomic recv_or_block to avoid TOCTOU race condition.
 #[cfg(feature = "std")]
 pub fn port_recv_core(
     p: GcRef,
@@ -148,7 +150,10 @@ pub fn port_recv_core(
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
 ) -> PortRecvCoreResult {
-    let (result, packed_opt) = port::try_recv(p);
+    let waiter = WaiterInfo { island_id, fiber_id };
+    
+    // Atomic operation: try recv, if would block, register waiter in same lock hold
+    let (result, packed_opt) = port::recv_or_block(p, waiter);
 
     match result {
         RecvResult::Success(woke_sender) => {
@@ -169,11 +174,8 @@ pub fn port_recv_core(
             }
             PortRecvCoreResult::Success { data: dst, wake_sender: woke_sender }
         }
-        RecvResult::WouldBlock => {
-            let waiter = WaiterInfo { island_id, fiber_id };
-            port::register_receiver(p, waiter);
-            PortRecvCoreResult::WouldBlock
-        }
+        RecvResult::Blocked => PortRecvCoreResult::WouldBlock,
+        RecvResult::WouldBlock => unreachable!("recv_or_block never returns WouldBlock"),
         RecvResult::Closed => PortRecvCoreResult::Closed,
     }
 }

@@ -97,6 +97,7 @@ pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instr
             state.register_sender(ChannelWaiter::Simple(fiber_id as u64), value);
             ChanResult::Yield
         }
+        SendResult::Blocked => unreachable!("try_send never returns Blocked"),
         SendResult::Closed => ChanResult::Trap(RuntimeTrapKind::SendOnClosedChannel),
     }
 }
@@ -134,6 +135,7 @@ pub fn exec_chan_recv(stack: *mut Slot, bp: usize, fiber_id: u32, inst: &Instruc
             state.register_receiver(ChannelWaiter::Simple(fiber_id as u64));
             ChanResult::Yield
         }
+        RecvResult::Blocked => unreachable!("try_recv never returns Blocked"),
         RecvResult::Closed => {
             for i in 0..elem_slots {
                 stack_set(stack, dst_start + i, 0);

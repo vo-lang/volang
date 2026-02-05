@@ -127,6 +127,8 @@ pub enum SendResult<W, M> {
     Buffered,
     /// Would block - buffer full, no receivers. Returns the value back.
     WouldBlock(M),
+    /// Blocked - waiter registered atomically (used by send_or_block).
+    Blocked,
     /// Channel/port is closed.
     Closed,
 }
@@ -138,6 +140,8 @@ pub enum RecvResult<W> {
     Success(Option<W>),
     /// Would block - buffer empty, no senders.
     WouldBlock,
+    /// Blocked - waiter registered atomically (used by recv_or_block).
+    Blocked,
     /// Channel/port is closed.
     Closed,
 }
@@ -182,6 +186,27 @@ impl<W, M> QueueState<W, M> {
         SendResult::WouldBlock(value)
     }
 
+    /// Atomic send: try to send, if would block, register waiter in same operation.
+    /// This avoids TOCTOU race between try_send and register_sender.
+    pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> SendResult<W, M> {
+        if self.closed {
+            return SendResult::Closed;
+        }
+        // If there's a waiting receiver, buffer the value and wake receiver
+        if let Some(receiver) = self.waiting_receivers.pop_front() {
+            self.buffer.push_back(value);
+            return SendResult::DirectSend(receiver);
+        }
+        // Buffer if capacity allows
+        if self.buffer.len() < cap {
+            self.buffer.push_back(value);
+            return SendResult::Buffered;
+        }
+        // Would block - register waiter atomically
+        self.waiting_senders.push_back((waiter, value));
+        SendResult::Blocked
+    }
+
     /// Try to receive a value.
     pub fn try_recv(&mut self) -> (RecvResult<W>, Option<M>) {
         if let Some(value) = self.buffer.pop_front() {
@@ -200,6 +225,30 @@ impl<W, M> QueueState<W, M> {
             (RecvResult::Closed, None)
         } else {
             (RecvResult::WouldBlock, None)
+        }
+    }
+
+    /// Atomic recv: try to receive, if would block, register waiter in same operation.
+    /// This avoids TOCTOU race between try_recv and register_receiver.
+    pub fn recv_or_block(&mut self, waiter: W) -> (RecvResult<W>, Option<M>) {
+        if let Some(value) = self.buffer.pop_front() {
+            let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front() {
+                self.buffer.push_back(sender_value);
+                Some(sender)
+            } else {
+                None
+            };
+            return (RecvResult::Success(woke_sender), Some(value));
+        }
+        if let Some((sender, value)) = self.waiting_senders.pop_front() {
+            return (RecvResult::Success(Some(sender)), Some(value));
+        }
+        if self.closed {
+            (RecvResult::Closed, None)
+        } else {
+            // Would block - register waiter atomically
+            self.waiting_receivers.push_back(waiter);
+            (RecvResult::Blocked, None)
         }
     }
 
