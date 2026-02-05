@@ -1,0 +1,304 @@
+// Test: Loop OSR JIT with defer
+// Loops must iterate >= 50 times to trigger OSR compilation
+package main
+
+import "fmt"
+import "errors"
+
+var deferOrder []int
+
+// =============================================================================
+// Test 1: Hot loop with defer (100 iterations > 50 threshold)
+// =============================================================================
+
+func hotLoopWithDefer() int {
+	sum := 0
+	for i := 0; i < 100; i++ {
+		sum += i
+		if i == 99 {
+			x := i
+			defer func() {
+				deferOrder = append(deferOrder, x)
+			}()
+		}
+	}
+	return sum
+}
+
+func testHotLoopDefer() {
+	deferOrder = nil
+	result := hotLoopWithDefer()
+	assert(result == 4950, "sum 0..99 = 4950")
+	assert(len(deferOrder) == 1, "should have 1 defer")
+	assert(deferOrder[0] == 99, "defer value should be 99")
+}
+
+// =============================================================================
+// Test 2: Hot loop with multiple defers
+// =============================================================================
+
+func hotLoopMultipleDefers() int {
+	sum := 0
+	for i := 0; i < 100; i++ {
+		sum += i
+		// Register defer every 25 iterations
+		if i%25 == 0 {
+			x := i
+			defer func() {
+				deferOrder = append(deferOrder, x)
+			}()
+		}
+	}
+	return sum
+}
+
+func testHotLoopMultipleDefers() {
+	deferOrder = nil
+	result := hotLoopMultipleDefers()
+	assert(result == 4950, "sum 0..99 = 4950")
+	// Defers at i=0, 25, 50, 75 (LIFO: 75, 50, 25, 0)
+	assert(len(deferOrder) == 4, "should have 4 defers")
+	assert(deferOrder[0] == 75, "first defer i=75")
+	assert(deferOrder[1] == 50, "second defer i=50")
+	assert(deferOrder[2] == 25, "third defer i=25")
+	assert(deferOrder[3] == 0, "fourth defer i=0")
+}
+
+// =============================================================================
+// Test 3: Hot loop with panic and recover
+// =============================================================================
+
+func hotLoopPanicRecover() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	
+	for i := 0; i < 100; i++ {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		if i == 75 {
+			panic("test panic at 75")
+		}
+	}
+	return "no panic"
+}
+
+func testHotLoopPanicRecover() {
+	deferOrder = nil
+	result := hotLoopPanicRecover()
+	assert(result == "recovered", "should recover")
+	// Defers for i=0..75 execute (76 defers, LIFO)
+	assert(len(deferOrder) == 76, "should have 76 defers")
+	assert(deferOrder[0] == 75, "first defer i=75 (panic point)")
+	assert(deferOrder[75] == 0, "last defer i=0")
+}
+
+// =============================================================================
+// Test 4: Nested hot loops with defer
+// =============================================================================
+
+func nestedHotLoopsDefer() int {
+	sum := 0
+	for i := 0; i < 20; i++ {  // outer: 20 iterations
+		for j := 0; j < 20; j++ {  // inner: 20 iterations each = 400 total
+			sum += i + j
+			if i == 19 && j == 19 {
+				defer func() {
+					deferOrder = append(deferOrder, 999)
+				}()
+			}
+		}
+	}
+	return sum
+}
+
+func testNestedHotLoopsDefer() {
+	deferOrder = nil
+	result := nestedHotLoopsDefer()
+	// sum = sum of (i+j) for i,j in 0..19
+	// = 20 * sum(0..19) + 20 * sum(0..19) = 40 * 190 = 7600
+	assert(result == 7600, "sum should be 7600")
+	assert(len(deferOrder) == 1, "should have 1 defer")
+	assert(deferOrder[0] == 999, "defer value")
+}
+
+// =============================================================================
+// Test 5: Hot loop with errdefer
+// =============================================================================
+
+func hotLoopErrdefer() (int, error) {
+	sum := 0
+	for i := 0; i < 100; i++ {
+		sum += i
+		if i%33 == 0 {
+			x := i
+			errdefer func() {
+				deferOrder = append(deferOrder, x)
+			}()
+		}
+	}
+	fail errors.New("error after loop")
+}
+
+func testHotLoopErrdefer() {
+	deferOrder = nil
+	_, err := hotLoopErrdefer()
+	assert(err != nil, "should return error")
+	// errdefers at i=0, 33, 66, 99 (LIFO: 99, 66, 33, 0)
+	assert(len(deferOrder) == 4, "should have 4 errdefers")
+	assert(deferOrder[0] == 99, "first errdefer i=99")
+	assert(deferOrder[1] == 66, "second errdefer i=66")
+	assert(deferOrder[2] == 33, "third errdefer i=33")
+	assert(deferOrder[3] == 0, "fourth errdefer i=0")
+}
+
+// =============================================================================
+// Test 6: Hot loop modifying named return
+// =============================================================================
+
+func hotLoopModifyReturn() (sum int) {
+	for i := 0; i < 100; i++ {
+		if i%20 == 0 {
+			x := i
+			defer func() {
+				sum += x
+			}()
+		}
+	}
+	return 1000  // initial value
+}
+
+func testHotLoopModifyReturn() {
+	result := hotLoopModifyReturn()
+	// Defers add 80+60+40+20+0 = 200 to initial 1000
+	assert(result == 1200, "should be 1200")
+}
+
+// =============================================================================
+// Test 7: Hot for-range loop with defer
+// =============================================================================
+
+func hotForRangeDefer() int {
+	arr := make([]int, 100)
+	for i := range arr {
+		arr[i] = i
+	}
+	
+	sum := 0
+	for _, v := range arr {
+		sum += v
+		if v == 99 {
+			defer func() {
+				deferOrder = append(deferOrder, 99)
+			}()
+		}
+	}
+	return sum
+}
+
+func testHotForRangeDefer() {
+	deferOrder = nil
+	result := hotForRangeDefer()
+	assert(result == 4950, "sum should be 4950")
+	assert(len(deferOrder) == 1, "should have 1 defer")
+}
+
+// =============================================================================
+// Test 8: Hot while loop (for condition) with defer
+// =============================================================================
+
+func hotWhileLoopDefer() int {
+	i := 0
+	for i < 100 {
+		x := i
+		if i%25 == 0 {
+			defer func() {
+				deferOrder = append(deferOrder, x)
+			}()
+		}
+		i++
+	}
+	return i
+}
+
+func testHotWhileLoopDefer() {
+	deferOrder = nil
+	result := hotWhileLoopDefer()
+	assert(result == 100, "should return 100")
+	assert(len(deferOrder) == 4, "should have 4 defers (i=0,25,50,75)")
+	assert(deferOrder[0] == 75, "first defer i=75")
+	assert(deferOrder[3] == 0, "last defer i=0")
+}
+
+// =============================================================================
+// Test 9: Hot while loop with panic and recover
+// =============================================================================
+
+func hotWhileLoopPanicRecover() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	
+	i := 0
+	for i < 100 {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		if i == 75 {
+			panic("test panic at 75")
+		}
+		i++
+	}
+	return "no panic"
+}
+
+func testHotWhileLoopPanicRecover() {
+	deferOrder = nil
+	result := hotWhileLoopPanicRecover()
+	assert(result == "recovered", "should recover")
+	assert(len(deferOrder) == 76, "should have 76 defers (i=0..75)")
+	assert(deferOrder[0] == 75, "first defer i=75")
+	assert(deferOrder[75] == 0, "last defer i=0")
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+func main() {
+	testHotLoopDefer()
+	fmt.Println("✓ testHotLoopDefer (100 iterations)")
+	
+	testHotLoopMultipleDefers()
+	fmt.Println("✓ testHotLoopMultipleDefers (100 iterations, 4 defers)")
+	
+	testHotLoopPanicRecover()
+	fmt.Println("✓ testHotLoopPanicRecover (panic at iteration 75)")
+	
+	testNestedHotLoopsDefer()
+	fmt.Println("✓ testNestedHotLoopsDefer (20x20 = 400 iterations)")
+	
+	testHotLoopErrdefer()
+	fmt.Println("✓ testHotLoopErrdefer (100 iterations, errdefer)")
+	
+	testHotLoopModifyReturn()
+	fmt.Println("✓ testHotLoopModifyReturn (named return modification)")
+	
+	testHotForRangeDefer()
+	fmt.Println("✓ testHotForRangeDefer (for-range 100 elements)")
+	
+	testHotWhileLoopDefer()
+	fmt.Println("✓ testHotWhileLoopDefer (while loop 100 iterations)")
+	
+	testHotWhileLoopPanicRecover()
+	fmt.Println("✓ testHotWhileLoopPanicRecover (while loop panic at 75)")
+	
+	fmt.Println("\nAll hot loop OSR + defer tests passed!")
+}

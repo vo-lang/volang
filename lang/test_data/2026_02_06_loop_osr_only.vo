@@ -1,0 +1,44 @@
+// Test: Loop OSR specifically (NOT function JIT)
+// Key: function called only once, but loop iterates >= 50 times
+package main
+
+import "fmt"
+
+var deferOrder []int
+
+// This function is called only ONCE from main
+// So function JIT won't trigger (threshold=100)
+// But loop iterates 100 times > 50, so OSR WILL trigger
+func hotLoopOnce() int {
+	sum := 0
+	for i := 0; i < 100; i++ {
+		sum += i
+		// Register defer at specific iterations (all > 50 threshold)
+		if i == 60 || i == 80 || i == 99 {
+			x := i
+			defer func() {
+				deferOrder = append(deferOrder, x)
+			}()
+		}
+	}
+	return sum
+}
+
+func main() {
+	deferOrder = nil
+	
+	// Call only once - this triggers OSR, not function JIT
+	sum := hotLoopOnce()
+	
+	// Verify loop executed correctly
+	assert(sum == 4950, "sum should be 4950")
+	
+	// Verify defers execute in LIFO order (99, 80, 60)
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 99, "first defer i=99")
+	assert(deferOrder[1] == 80, "second defer i=80")
+	assert(deferOrder[2] == 60, "third defer i=60")
+	
+	fmt.Println("✓ Loop OSR with defer test passed!")
+	fmt.Println("  (Function called once, loop iterated 100x, so this MUST be OSR)")
+}

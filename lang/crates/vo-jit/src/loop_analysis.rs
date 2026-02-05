@@ -35,23 +35,9 @@ pub struct LoopInfo {
 }
 
 impl LoopInfo {
-    /// Check if this loop can be compiled as a loop function.
-    /// Loops with defer are not jittable because defer requires VM unwinding support.
-    pub fn is_jittable(&self) -> bool {
-        !self.has_defer
-    }
-    
     /// Check if this is an infinite loop (for {} without condition).
     pub fn is_infinite(&self) -> bool {
         self.exit_pc == 0
-    }
-    
-    /// Check if this loop is "simple" enough for loop function compilation.
-    /// Simple loops have:
-    /// - No defer
-    /// - Not infinite (has exit)
-    pub fn is_simple(&self) -> bool {
-        self.is_jittable() && !self.is_infinite()
     }
 }
 
@@ -514,8 +500,6 @@ mod tests {
         assert_eq!(loop_info.end_pc, 4, "end_pc should be hint_pc + end_offset = 4");
         assert_eq!(loop_info.exit_pc, 5, "exit_pc should be 5");
         assert_eq!(loop_info.depth, 0, "depth should be 0");
-        assert!(loop_info.is_jittable(), "Should be jittable");
-        assert!(loop_info.is_simple(), "Should be simple");
     }
     
     #[test]
@@ -580,7 +564,6 @@ mod tests {
         assert_eq!(loop_info.begin_pc, 1, "begin_pc = hint_pc + 1");
         assert_eq!(loop_info.end_pc, 2, "end_pc = hint_pc + end_offset");
         assert!(loop_info.is_infinite(), "Should be infinite loop");
-        assert!(!loop_info.is_simple(), "Infinite loop is not simple");
     }
 
     // =========================================================================

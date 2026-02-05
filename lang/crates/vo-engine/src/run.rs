@@ -105,7 +105,7 @@ pub fn run(output: CompileOutput, mode: RunMode, args: Vec<String>) -> Result<()
             let loop_threshold = std::env::var("VO_JIT_LOOP_THRESHOLD")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(1000);
+                .unwrap_or(50);
             let debug_ir = std::env::var("VO_JIT_DEBUG").is_ok();
             
             let config = JitConfig { call_threshold, loop_threshold, debug_ir };

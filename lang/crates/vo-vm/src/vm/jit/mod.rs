@@ -792,10 +792,6 @@ fn get_or_compile_loop(vm: &mut Vm, func_id: u32, loop_pc: usize) -> Option<vo_j
             return None;
         }
     };
-    if !loop_info.is_jittable() {
-        jit_mgr.mark_loop_failed(func_id, loop_pc);
-        return None;
-    }
     
     // Pre-compile Call targets so JIT-to-JIT calls can succeed
     let loop_end = loop_info.end_pc + 1;

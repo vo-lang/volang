@@ -1,0 +1,477 @@
+// Test: Comprehensive Loop + Defer JIT support
+// This tests defer inside loops being correctly handled by JIT OSR compilation
+package main
+
+import "fmt"
+import "errors"
+
+// =============================================================================
+// Global state for tracking defer execution order
+// =============================================================================
+
+var deferOrder []int
+
+// =============================================================================
+// Test 1: Basic defer in for loop
+// =============================================================================
+
+func deferInLoop() {
+	for i := 0; i < 3; i++ {
+		x := i  // capture value
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+	// Defers execute when this function returns (LIFO: 2, 1, 0)
+}
+
+func testBasicDeferInLoop() {
+	deferOrder = nil
+	deferInLoop()
+	
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 2, "first defer should be i=2")
+	assert(deferOrder[1] == 1, "second defer should be i=1")
+	assert(deferOrder[2] == 0, "third defer should be i=0")
+}
+
+// =============================================================================
+// Test 2: Defer in loop with early return
+// =============================================================================
+
+func deferLoopEarlyReturn() int {
+	for i := 0; i < 10; i++ {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		if i == 2 {
+			return 42  // early return after 3 defers registered
+		}
+	}
+	return 0
+}
+
+func testDeferLoopEarlyReturn() {
+	deferOrder = nil
+	result := deferLoopEarlyReturn()
+	
+	assert(result == 42, "should return 42")
+	assert(len(deferOrder) == 3, "should have 3 defers (i=0,1,2)")
+	assert(deferOrder[0] == 2, "first defer i=2")
+	assert(deferOrder[1] == 1, "second defer i=1")
+	assert(deferOrder[2] == 0, "third defer i=0")
+}
+
+// =============================================================================
+// Test 3: Defer in loop with panic and recover
+// =============================================================================
+
+func deferLoopPanicRecover() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	
+	for i := 0; i < 5; i++ {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		if i == 3 {
+			panic("test panic")
+		}
+	}
+	return "no panic"
+}
+
+func testDeferLoopPanicRecover() {
+	deferOrder = nil
+	result := deferLoopPanicRecover()
+	
+	assert(result == "recovered", "should recover from panic")
+	// Defers for i=0,1,2,3 should execute (i=3 panics after defer registered)
+	assert(len(deferOrder) == 4, "should have 4 defers")
+	assert(deferOrder[0] == 3, "first defer i=3")
+	assert(deferOrder[1] == 2, "second defer i=2")
+	assert(deferOrder[2] == 1, "third defer i=1")
+	assert(deferOrder[3] == 0, "fourth defer i=0")
+}
+
+// =============================================================================
+// Test 4: Errdefer in loop (should execute on error return)
+// =============================================================================
+
+func errdeferInLoop() (int, error) {
+	for i := 0; i < 3; i++ {
+		x := i
+		errdefer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+	fail errors.New("test error")
+}
+
+func testErrdeferInLoop() {
+	deferOrder = nil
+	_, err := errdeferInLoop()
+	
+	assert(err != nil, "should return error")
+	assert(len(deferOrder) == 3, "all errdefers should execute")
+	assert(deferOrder[0] == 2, "first errdefer i=2")
+	assert(deferOrder[1] == 1, "second errdefer i=1")
+	assert(deferOrder[2] == 0, "third errdefer i=0")
+}
+
+// =============================================================================
+// Test 5: Errdefer in loop with normal return (should NOT execute)
+// =============================================================================
+
+func errdeferNormalReturn() (int, error) {
+	for i := 0; i < 3; i++ {
+		x := i
+		errdefer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+	return 42, nil
+}
+
+func testErrdeferNormalReturn() {
+	deferOrder = nil
+	result, err := errdeferNormalReturn()
+	
+	assert(err == nil, "should not return error")
+	assert(result == 42, "should return 42")
+	assert(len(deferOrder) == 0, "errdefers should NOT execute on normal return")
+}
+
+// =============================================================================
+// Test 6: Nested loops with defer
+// =============================================================================
+
+func nestedLoopDefer() {
+	for i := 0; i < 2; i++ {
+		x := i * 10
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		
+		for j := 0; j < 2; j++ {
+			y := x + j
+			defer func() {
+				deferOrder = append(deferOrder, y)
+			}()
+		}
+	}
+}
+
+func testNestedLoopDefer() {
+	deferOrder = nil
+	nestedLoopDefer()
+	
+	// Total: 2 outer + 4 inner = 6 defers
+	// LIFO: inner j=1 of i=1, inner j=0 of i=1, outer i=1,
+	//       inner j=1 of i=0, inner j=0 of i=0, outer i=0
+	assert(len(deferOrder) == 6, "should have 6 defers")
+	assert(deferOrder[0] == 11, "i=1,j=1: 10+1=11")
+	assert(deferOrder[1] == 10, "i=1,j=0: 10+0=10")
+	assert(deferOrder[2] == 10, "outer i=1: 10")
+	assert(deferOrder[3] == 1, "i=0,j=1: 0+1=1")
+	assert(deferOrder[4] == 0, "i=0,j=0: 0+0=0")
+	assert(deferOrder[5] == 0, "outer i=0: 0")
+}
+
+// =============================================================================
+// Test 7: Defer in loop modifying named return
+// =============================================================================
+
+func deferModifyReturn() (sum int) {
+	for i := 1; i <= 3; i++ {
+		x := i
+		defer func() {
+			sum += x  // modify named return
+		}()
+	}
+	return 0  // initial return value
+}
+
+func testDeferModifyReturn() {
+	result := deferModifyReturn()
+	// Defers add 3+2+1 = 6 to sum (LIFO: 3, 2, 1)
+	assert(result == 6, "sum should be 6")
+}
+
+// =============================================================================
+// Test 8: Defer in loop with break
+// =============================================================================
+
+func deferLoopBreak() {
+	for i := 0; i < 10; i++ {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		if i == 2 {
+			break
+		}
+	}
+}
+
+func testDeferLoopBreak() {
+	deferOrder = nil
+	deferLoopBreak()
+	
+	// Defers for i=0,1,2 registered before break
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 2, "first defer i=2")
+	assert(deferOrder[1] == 1, "second defer i=1")
+	assert(deferOrder[2] == 0, "third defer i=0")
+}
+
+// =============================================================================
+// Test 9: Defer in loop with continue
+// =============================================================================
+
+func deferLoopContinue() {
+	for i := 0; i < 5; i++ {
+		if i%2 == 0 {
+			continue  // skip even numbers
+		}
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+}
+
+func testDeferLoopContinue() {
+	deferOrder = nil
+	deferLoopContinue()
+	
+	// Defers only for i=1,3 (odd numbers)
+	assert(len(deferOrder) == 2, "should have 2 defers")
+	assert(deferOrder[0] == 3, "first defer i=3")
+	assert(deferOrder[1] == 1, "second defer i=1")
+}
+
+// =============================================================================
+// Test 10: Hot loop with defer (OSR scenario)
+// =============================================================================
+
+func hotLoopDefer() int {
+	sum := 0
+	
+	// Hot loop that should trigger OSR
+	for i := 0; i < 1000; i++ {
+		sum += i
+		if i == 999 {
+			defer func() {
+				deferOrder = append(deferOrder, 999)
+			}()
+		}
+	}
+	return sum
+}
+
+func testHotLoopDefer() {
+	deferOrder = nil
+	sum := hotLoopDefer()
+	
+	assert(sum == 499500, "sum should be 499500")
+	assert(len(deferOrder) == 1, "should have 1 defer")
+	assert(deferOrder[0] == 999, "defer value should be 999")
+}
+
+// =============================================================================
+// Test 11: Defer in for-range loop
+// =============================================================================
+
+func deferForRange() {
+	arr := []int{10, 20, 30}
+	
+	for _, v := range arr {
+		x := v
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+}
+
+func testDeferForRange() {
+	deferOrder = nil
+	deferForRange()
+	
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 30, "first defer v=30")
+	assert(deferOrder[1] == 20, "second defer v=20")
+	assert(deferOrder[2] == 10, "third defer v=10")
+}
+
+// =============================================================================
+// Test 12: Defer in infinite loop with break
+// =============================================================================
+
+func deferInfiniteLoop() {
+	i := 0
+	
+	for {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+		i++
+		if i >= 3 {
+			break
+		}
+	}
+}
+
+func testDeferInfiniteLoop() {
+	deferOrder = nil
+	deferInfiniteLoop()
+	
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 2, "first defer i=2")
+	assert(deferOrder[1] == 1, "second defer i=1")
+	assert(deferOrder[2] == 0, "third defer i=0")
+}
+
+// =============================================================================
+// Test 13: Defer with closure capturing loop variable correctly
+// =============================================================================
+
+func deferClosureCapture() {
+	for i := 0; i < 3; i++ {
+		// Capture value with x := i
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+}
+
+func testDeferClosureCapture() {
+	deferOrder = nil
+	deferClosureCapture()
+	
+	// With proper capture, we get 2,1,0 (LIFO)
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 2, "should be 2")
+	assert(deferOrder[1] == 1, "should be 1")
+	assert(deferOrder[2] == 0, "should be 0")
+}
+
+// =============================================================================
+// Test 14: Mixed defer and errdefer in loop
+// =============================================================================
+
+func mixedDeferErrdefer() (int, error) {
+	for i := 0; i < 3; i++ {
+		x := i
+		defer func() {
+			deferOrder = append(deferOrder, x*10)  // regular defer: 0, 10, 20
+		}()
+		errdefer func() {
+			deferOrder = append(deferOrder, x)  // errdefer: 0, 1, 2
+		}()
+	}
+	fail errors.New("error")
+}
+
+func testMixedDeferErrdefer() {
+	deferOrder = nil
+	_, err := mixedDeferErrdefer()
+	
+	assert(err != nil, "should return error")
+	// Both defer and errdefer execute on error
+	// LIFO order: errdefer i=2, defer i=2, errdefer i=1, defer i=1, errdefer i=0, defer i=0
+	assert(len(deferOrder) == 6, "should have 6 entries")
+	assert(deferOrder[0] == 2, "errdefer i=2")
+	assert(deferOrder[1] == 20, "defer i=2")
+	assert(deferOrder[2] == 1, "errdefer i=1")
+	assert(deferOrder[3] == 10, "defer i=1")
+	assert(deferOrder[4] == 0, "errdefer i=0")
+	assert(deferOrder[5] == 0, "defer i=0")
+}
+
+// =============================================================================
+// Test 15: Defer in loop calling helper function
+// =============================================================================
+
+func helperFunc(n int) int {
+	return n * 2
+}
+
+func deferWithFunctionCall() {
+	for i := 0; i < 3; i++ {
+		x := helperFunc(i)
+		defer func() {
+			deferOrder = append(deferOrder, x)
+		}()
+	}
+}
+
+func testDeferWithFunctionCall() {
+	deferOrder = nil
+	deferWithFunctionCall()
+	
+	assert(len(deferOrder) == 3, "should have 3 defers")
+	assert(deferOrder[0] == 4, "helperFunc(2)=4")
+	assert(deferOrder[1] == 2, "helperFunc(1)=2")
+	assert(deferOrder[2] == 0, "helperFunc(0)=0")
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+func main() {
+	testBasicDeferInLoop()
+	fmt.Println("✓ testBasicDeferInLoop")
+	
+	testDeferLoopEarlyReturn()
+	fmt.Println("✓ testDeferLoopEarlyReturn")
+	
+	testDeferLoopPanicRecover()
+	fmt.Println("✓ testDeferLoopPanicRecover")
+	
+	testErrdeferInLoop()
+	fmt.Println("✓ testErrdeferInLoop")
+	
+	testErrdeferNormalReturn()
+	fmt.Println("✓ testErrdeferNormalReturn")
+	
+	testNestedLoopDefer()
+	fmt.Println("✓ testNestedLoopDefer")
+	
+	testDeferModifyReturn()
+	fmt.Println("✓ testDeferModifyReturn")
+	
+	testDeferLoopBreak()
+	fmt.Println("✓ testDeferLoopBreak")
+	
+	testDeferLoopContinue()
+	fmt.Println("✓ testDeferLoopContinue")
+	
+	testHotLoopDefer()
+	fmt.Println("✓ testHotLoopDefer")
+	
+	testDeferForRange()
+	fmt.Println("✓ testDeferForRange")
+	
+	testDeferInfiniteLoop()
+	fmt.Println("✓ testDeferInfiniteLoop")
+	
+	testDeferClosureCapture()
+	fmt.Println("✓ testDeferClosureCapture")
+	
+	testMixedDeferErrdefer()
+	fmt.Println("✓ testMixedDeferErrdefer")
+	
+	testDeferWithFunctionCall()
+	fmt.Println("✓ testDeferWithFunctionCall")
+	
+	fmt.Println("\nAll Loop + Defer JIT tests passed!")
+}

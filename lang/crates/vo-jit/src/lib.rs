@@ -294,10 +294,6 @@ impl JitCompiler {
         if self.cache.contains_loop(func_id, begin_pc) {
             return Ok(());
         }
-        if !loop_info.is_jittable() {
-            return Err(JitError::Internal("loop with defer cannot be JIT compiled".into()));
-        }
-
         // Clear any residual state from previous compilation
         self.ctx.clear();
 

@@ -594,6 +594,39 @@ impl Vm {
                 code = &module.functions[func_id as usize].code;
             }};
         }
+        
+        // Macro to handle loop OSR result - used by both Jump and ForLoop
+        #[cfg(feature = "jit")]
+        macro_rules! handle_loop_osr {
+            ($target_pc:expr) => {{
+                if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp) {
+                    use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                    if result_pc == OSR_RESULT_FRAME_CHANGED {
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        stack = fiber.stack_ptr();
+                        refetch!();
+                        continue;
+                    } else if result_pc == OSR_RESULT_WAITIO {
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        let token = fiber.resume_io_token
+                            .expect("OSR_RESULT_WAITIO but resume_io_token is None");
+                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                    } else {
+                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                        fiber.current_frame_mut().unwrap().pc = result_pc;
+                        stack = fiber.stack_ptr();
+                        refetch!();
+                        continue;
+                    }
+                } else {
+                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                    if fiber.panic_state.is_some() {
+                        stack = fiber.stack_ptr();
+                        return helpers::panic_unwind(fiber, stack, module);
+                    }
+                }
+            }};
+        }
 
         for _ in 0..TIME_SLICE {
             let frame = unsafe { &mut *frame_ptr };
@@ -907,31 +940,7 @@ impl Vm {
                     
                     #[cfg(feature = "jit")]
                     if offset < 0 {
-                        // Back-edge detected - this is a loop iteration
-                        // target_pc is the loop_start (condition check)
-                        if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, target_pc, bp) {
-                            use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
-                            if result_pc == OSR_RESULT_FRAME_CHANGED {
-                                // Loop made a Call - callee frame pushed, VM continues
-                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                stack = fiber.stack_ptr();
-                                refetch!();
-                                continue;
-                            } else if result_pc == OSR_RESULT_WAITIO {
-                                // Loop needs WaitIo
-                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                let token = fiber.resume_io_token
-                                    .expect("OSR_RESULT_WAITIO but resume_io_token is None");
-                                return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                            } else {
-                                // Normal exit - update PC and continue
-                                let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                fiber.current_frame_mut().unwrap().pc = result_pc;
-                                stack = fiber.stack_ptr();
-                                refetch!();
-                                continue;
-                            }
-                        }
+                        handle_loop_osr!(target_pc);
                     }
                     
                     frame.pc = target_pc;
@@ -989,29 +998,7 @@ impl Vm {
                         let target_pc = (frame.pc as i64 + offset as i64) as usize;
                         
                         #[cfg(feature = "jit")]
-                        {
-                            // Back-edge: try OSR
-                            if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, target_pc, bp) {
-                                use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
-                                if result_pc == OSR_RESULT_FRAME_CHANGED {
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    stack = fiber.stack_ptr();
-                                    refetch!();
-                                    continue;
-                                } else if result_pc == OSR_RESULT_WAITIO {
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    let token = fiber.resume_io_token
-                                        .expect("OSR_RESULT_WAITIO but resume_io_token is None");
-                                    return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                                } else {
-                                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                                    fiber.current_frame_mut().unwrap().pc = result_pc;
-                                    stack = fiber.stack_ptr();
-                                    refetch!();
-                                    continue;
-                                }
-                            }
-                        }
+                        handle_loop_osr!(target_pc);
                         
                         frame.pc = target_pc;
                     }
