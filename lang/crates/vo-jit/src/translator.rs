@@ -81,6 +81,11 @@ pub struct HelperFuncs {
     // Defer/Recover
     pub defer_push: Option<FuncRef>,
     pub recover: Option<FuncRef>,
+    // Select Statement
+    pub select_begin: Option<FuncRef>,
+    pub select_send: Option<FuncRef>,
+    pub select_recv: Option<FuncRef>,
+    pub select_exec: Option<FuncRef>,
 }
 
 /// IR emitter trait - implemented by FunctionCompiler and LoopCompiler

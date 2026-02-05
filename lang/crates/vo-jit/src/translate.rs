@@ -139,6 +139,11 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         DeferPush => { defer_push(e, inst, false); Ok(Completed) }
         ErrDeferPush => { defer_push(e, inst, true); Ok(Completed) }
         Recover => { recover(e, inst); Ok(Completed) }
+        // Select Statement
+        SelectBegin => { select_begin(e, inst); Ok(Completed) }
+        SelectSend => { select_send(e, inst); Ok(Completed) }
+        SelectRecv => { select_recv(e, inst); Ok(Completed) }
+        SelectExec => { select_exec(e, inst)?; Ok(Completed) }
         // Interface
         IfaceAssert => { iface_assert(e, inst); Ok(Completed) }
         StrNew => { str_new(e, inst); Ok(Completed) }
@@ -1921,4 +1926,105 @@ fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     
     e.write_var(inst.a, slot0);
     e.write_var(inst.a + 1, slot1);
+}
+
+// =============================================================================
+// Batch 5: Select Statement
+// =============================================================================
+
+/// SelectBegin: Initialize a select statement.
+/// - a: case_count
+/// - flags bit 0: has_default
+fn select_begin<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().select_begin.expect("select_begin not registered");
+    let ctx = e.ctx_param();
+    
+    let case_count = e.builder().ins().iconst(types::I32, inst.a as i64);
+    let has_default = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
+    
+    // Result is always Ok for select_begin
+    e.builder().ins().call(func, &[ctx, case_count, has_default]);
+}
+
+/// SelectSend: Add a send case to the current select.
+/// - a: chan_reg
+/// - b: val_reg
+/// - c: case_idx
+/// - flags: elem_slots
+fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().select_send.expect("select_send not registered");
+    let ctx = e.ctx_param();
+    
+    let chan_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
+    let val_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
+    let elem_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
+    
+    // Result is always Ok for select_send
+    e.builder().ins().call(func, &[ctx, chan_reg, val_reg, elem_slots, case_idx]);
+}
+
+/// SelectRecv: Add a recv case to the current select.
+/// - a: dst_reg
+/// - b: chan_reg
+/// - c: case_idx
+/// - flags: (elem_slots << 1) | has_ok
+fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+    let func = e.helpers().select_recv.expect("select_recv not registered");
+    let ctx = e.ctx_param();
+    
+    let dst_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
+    let chan_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
+    let elem_slots = e.builder().ins().iconst(types::I32, ((inst.flags >> 1) & 0x7F) as i64);
+    let has_ok = e.builder().ins().iconst(types::I32, (inst.flags & 1) as i64);
+    let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
+    
+    // Result is always Ok for select_recv
+    e.builder().ins().call(func, &[ctx, dst_reg, chan_reg, elem_slots, has_ok, case_idx]);
+}
+
+/// SelectExec: Execute the select statement.
+/// - a: result_reg (to store chosen case index, or -1 for default)
+/// May return WaitIo if select blocks.
+fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    use vo_runtime::jit_api::JitContext;
+    
+    let func = e.helpers().select_exec.expect("select_exec not registered");
+    let ctx = e.ctx_param();
+    
+    // Set resume_pc for WaitIo case - RE-EXECUTE select_exec when woken
+    // (the callback will check woken_index and complete the select)
+    let resume_pc = e.current_pc() as i32;
+    let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
+    e.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+    
+    let result_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
+    
+    let call = e.builder().ins().call(func, &[ctx, result_reg]);
+    let result = e.builder().inst_results(call)[0];
+    
+    // Branch on result
+    let ok_val = e.builder().ins().iconst(types::I32, 0);
+    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
+    let ok_block = e.builder().create_block();
+    let not_ok_block = e.builder().create_block();
+    e.builder().ins().brif(is_ok, ok_block, &[], not_ok_block, &[]);
+    
+    // Not-ok (WaitIo or Panic): spill and return
+    e.builder().switch_to_block(not_ok_block);
+    e.builder().seal_block(not_ok_block);
+    e.spill_all_vars();
+    e.builder().ins().return_(&[result]);
+    
+    // Ok: reload result from fiber stack (callback wrote it there)
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+    
+    // The result is written to fiber.stack[bp + result_reg] by the callback
+    // Load it into SSA variable
+    let dst_ptr = e.var_addr(inst.a);
+    let val = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, 0);
+    e.write_var(inst.a, val);
+    
+    Ok(())
 }

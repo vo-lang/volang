@@ -261,13 +261,6 @@ impl JitManager {
             return Ok(());
         }
         
-        // Check if this function itself is jittable
-        // (callee may or may not be jittable - if not, JIT returns Call)
-        if !vo_jit::is_func_jittable(func_def) {
-            info.state = CompileState::Unsupported;
-            return Err(JitError::NotJittable(func_id));
-        }
-        
         // Compile
         if let Err(e) = self.compiler.compile(func_id, func_def, module) {
             info.state = CompileState::Unsupported;
@@ -305,11 +298,6 @@ impl JitManager {
         if let Some(info) = self.funcs.get_mut(func_id as usize) {
             info.state = CompileState::Unsupported;
         }
-    }
-    
-    /// Check if function can be JIT compiled.
-    pub fn can_jit(&self, _func_id: u32, func_def: &FunctionDef, _module: &VoModule) -> bool {
-        vo_jit::is_func_jittable(func_def)
     }
     
     /// Compile function (alias for compile_full).

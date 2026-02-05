@@ -9,11 +9,10 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use vo_runtime::objects::channel::{self, RecvResult, SendResult};
 use vo_runtime::objects::queue_state::{self, ChannelWaiter};
 
-use crate::fiber::Fiber;
 use crate::scheduler::{FiberId, Scheduler};
-use crate::vm::{helpers, Vm};
+use crate::vm::helpers;
 
-use super::helpers::set_jit_panic;
+use super::helpers::{extract_context, set_jit_panic};
 
 // =============================================================================
 // Helper
@@ -31,15 +30,6 @@ fn wake_channel_waiter(scheduler: &mut Scheduler, waiter: ChannelWaiter) {
     }
     
     scheduler.wake_fiber(fiber_id);
-}
-
-/// Extract VM and Fiber references from JitContext.
-#[inline]
-unsafe fn extract_context(ctx: *mut JitContext) -> (&'static mut Vm, &'static mut Fiber) {
-    let ctx = &mut *ctx;
-    let vm = &mut *(ctx.vm as *mut Vm);
-    let fiber = &mut *(ctx.fiber as *mut Fiber);
-    (vm, fiber)
 }
 
 // =============================================================================

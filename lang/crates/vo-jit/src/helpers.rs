@@ -80,6 +80,11 @@ pub struct HelperFuncIds {
     // Defer/Recover
     pub defer_push: cranelift_module::FuncId,
     pub recover: cranelift_module::FuncId,
+    // Select Statement
+    pub select_begin: cranelift_module::FuncId,
+    pub select_send: cranelift_module::FuncId,
+    pub select_recv: cranelift_module::FuncId,
+    pub select_exec: cranelift_module::FuncId,
 }
 
 // =============================================================================
@@ -149,6 +154,11 @@ pub fn register_symbols(builder: &mut JITBuilder) {
     // Defer/Recover
     builder.symbol("vo_defer_push", vo_runtime::jit_api::vo_defer_push as *const u8);
     builder.symbol("vo_recover", vo_runtime::jit_api::vo_recover as *const u8);
+    // Select Statement
+    builder.symbol("vo_select_begin", vo_runtime::jit_api::vo_select_begin as *const u8);
+    builder.symbol("vo_select_send", vo_runtime::jit_api::vo_select_send as *const u8);
+    builder.symbol("vo_select_recv", vo_runtime::jit_api::vo_select_recv as *const u8);
+    builder.symbol("vo_select_exec", vo_runtime::jit_api::vo_select_exec as *const u8);
 }
 
 // =============================================================================
@@ -702,6 +712,47 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig.returns.push(AbiParam::new(types::I32));
         sig
     })?;
+
+    // Select Statement
+    let select_begin = module.declare_function("vo_select_begin", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I32)); // case_count
+        sig.params.push(AbiParam::new(types::I32)); // has_default
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+
+    let select_send = module.declare_function("vo_select_send", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I32)); // chan_reg
+        sig.params.push(AbiParam::new(types::I32)); // val_reg
+        sig.params.push(AbiParam::new(types::I32)); // elem_slots
+        sig.params.push(AbiParam::new(types::I32)); // case_idx
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+
+    let select_recv = module.declare_function("vo_select_recv", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I32)); // dst_reg
+        sig.params.push(AbiParam::new(types::I32)); // chan_reg
+        sig.params.push(AbiParam::new(types::I32)); // elem_slots
+        sig.params.push(AbiParam::new(types::I32)); // has_ok
+        sig.params.push(AbiParam::new(types::I32)); // case_idx
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
+
+    let select_exec = module.declare_function("vo_select_exec", Import, &{
+        let mut sig = Signature::new(module.target_config().default_call_conv);
+        sig.params.push(AbiParam::new(ptr));        // ctx
+        sig.params.push(AbiParam::new(types::I32)); // result_reg
+        sig.returns.push(AbiParam::new(types::I32)); // JitResult
+        sig
+    })?;
     
     Ok(HelperFuncIds {
         call_vm, gc_alloc, write_barrier, closure_get_func_id, iface_get_func_id,
@@ -720,6 +771,7 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         port_send, port_recv,
         go_start, go_island,
         defer_push, recover,
+        select_begin, select_send, select_recv, select_exec,
     })
 }
 
@@ -790,5 +842,9 @@ pub fn get_helper_refs(
         go_island: Some(module.declare_func_in_func(ids.go_island, func)),
         defer_push: Some(module.declare_func_in_func(ids.defer_push, func)),
         recover: Some(module.declare_func_in_func(ids.recover, func)),
+        select_begin: Some(module.declare_func_in_func(ids.select_begin, func)),
+        select_send: Some(module.declare_func_in_func(ids.select_send, func)),
+        select_recv: Some(module.declare_func_in_func(ids.select_recv, func)),
+        select_exec: Some(module.declare_func_in_func(ids.select_exec, func)),
     }
 }

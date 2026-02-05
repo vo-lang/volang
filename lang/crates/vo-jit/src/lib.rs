@@ -32,23 +32,6 @@ use helpers::HelperFuncIds;
 // Shared Utilities
 // =============================================================================
 
-/// Check if a function can be JIT compiled at all.
-/// Returns false only for truly unsupported operations (select).
-/// 
-/// Note: Defer is handled separately in `can_jit_to_jit_call` - functions with
-/// defer CAN be JIT compiled, but must go through dispatch_jit_call for proper
-/// frame management.
-pub fn is_func_jittable(func: &FunctionDef) -> bool {
-    for inst in &func.code {
-        match inst.opcode() {
-            // Select requires complex control flow not yet supported
-            Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => return false,
-            _ => {}
-        }
-    }
-    true
-}
-
 /// Check if a function can be called via JIT-to-JIT direct call.
 /// Returns false if the function may return Call/WaitIo to caller.
 /// Such functions should use the Call request mechanism instead.
@@ -62,9 +45,6 @@ pub fn can_jit_to_jit_call(func: &FunctionDef, module: &VoModule) -> bool {
 const MAX_JIT_CHECK_DEPTH: usize = 16;
 
 fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize) -> bool {
-    if !is_func_jittable(func) {
-        return false;
-    }
     // Functions with defer must go through dispatch_jit_call to get a real CallFrame.
     // This ensures DeferEntry.frame_depth is correct (matches fiber.frames.len()).
     if func.has_defer {
@@ -95,6 +75,14 @@ fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize)
             Opcode::CallClosure | Opcode::CallIface => {
                 return false;
             }
+            // Select may block and return WaitIo
+            Opcode::SelectExec => {
+                return false;
+            }
+            // Channel/Port send/recv may block and return WaitIo
+            Opcode::ChanSend | Opcode::ChanRecv | Opcode::PortSend | Opcode::PortRecv => {
+                return false;
+            }
             _ => {}
         }
     }
@@ -110,7 +98,6 @@ pub enum JitError {
     Module(cranelift_module::ModuleError),
     Codegen(cranelift_codegen::CodegenError),
     FunctionNotFound(u32),
-    NotJittable(u32),
     InvalidOsrTarget(usize),
     UnsupportedOpcode(Opcode),
     Internal(String),
@@ -122,7 +109,6 @@ impl std::fmt::Display for JitError {
             JitError::Module(e) => write!(f, "Cranelift module error: {}", e),
             JitError::Codegen(e) => write!(f, "Cranelift codegen error: {}", e),
             JitError::FunctionNotFound(id) => write!(f, "function not found: {}", id),
-            JitError::NotJittable(id) => write!(f, "function {} cannot be JIT compiled", id),
             JitError::InvalidOsrTarget(pc) => write!(f, "invalid OSR target PC: {}", pc),
             JitError::UnsupportedOpcode(op) => write!(f, "unsupported opcode: {:?}", op),
             JitError::Internal(msg) => write!(f, "internal error: {}", msg),
@@ -262,9 +248,6 @@ impl JitCompiler {
     }
 
     pub fn compile(&mut self, func_id: u32, func: &FunctionDef, vo_module: &VoModule) -> Result<(), JitError> {
-        if !is_func_jittable(func) {
-            return Err(JitError::NotJittable(func_id));
-        }
         if self.cache.contains(func_id) {
             return Ok(());
         }
@@ -312,7 +295,7 @@ impl JitCompiler {
             return Ok(());
         }
         if !loop_info.is_jittable() {
-            return Err(JitError::NotJittable(func_id));
+            return Err(JitError::Internal("loop with defer cannot be JIT compiled".into()));
         }
 
         // Clear any residual state from previous compilation

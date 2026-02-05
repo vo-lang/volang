@@ -279,6 +279,23 @@ pub struct JitContext {
     /// Callback for recover() - writes result to output (2 slots), returns 1 if recovered.
     pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> u32>,
     
+    // =========================================================================
+    // Select Statement Support
+    // =========================================================================
+    
+    /// Callback to initialize a select statement.
+    pub select_begin_fn: Option<extern "C" fn(ctx: *mut JitContext, case_count: u32, has_default: u32) -> JitResult>,
+    
+    /// Callback to add a send case to select.
+    pub select_send_fn: Option<extern "C" fn(ctx: *mut JitContext, chan_reg: u32, val_reg: u32, elem_slots: u32, case_idx: u32) -> JitResult>,
+    
+    /// Callback to add a recv case to select.
+    pub select_recv_fn: Option<extern "C" fn(ctx: *mut JitContext, dst_reg: u32, chan_reg: u32, elem_slots: u32, has_ok: u32, case_idx: u32) -> JitResult>,
+    
+    /// Callback to execute select statement.
+    /// Returns JitResult::Ok (with result in result_reg), WaitIo (blocked), or Panic.
+    pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
+    
     /// Set by JIT Return to indicate explicit `fail` return (for errdefer).
     pub is_error_return: u8,
     
@@ -1539,6 +1556,11 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         // Batch 4: Goroutine Start
         ("vo_go_start", vo_go_start as *const u8),
         ("vo_go_island", vo_go_island as *const u8),
+        // Batch 5: Select Statement
+        ("vo_select_begin", vo_select_begin as *const u8),
+        ("vo_select_send", vo_select_send as *const u8),
+        ("vo_select_recv", vo_select_recv as *const u8),
+        ("vo_select_exec", vo_select_exec as *const u8),
     ]
 }
 
@@ -1655,4 +1677,54 @@ pub extern "C" fn vo_go_island(
     let ctx = unsafe { &mut *ctx };
     let go_fn = ctx.go_island_fn.expect("go_island_fn not set");
     go_fn(ctx, island, closure_ref, args_ptr, arg_slots)
+}
+
+// =============================================================================
+// Batch 5: Select Statement
+// =============================================================================
+
+/// Initialize a select statement.
+#[no_mangle]
+pub extern "C" fn vo_select_begin(ctx: *mut JitContext, case_count: u32, has_default: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let begin_fn = ctx.select_begin_fn.expect("select_begin_fn not set");
+    begin_fn(ctx, case_count, has_default)
+}
+
+/// Add a send case to the current select.
+#[no_mangle]
+pub extern "C" fn vo_select_send(
+    ctx: *mut JitContext,
+    chan_reg: u32,
+    val_reg: u32,
+    elem_slots: u32,
+    case_idx: u32,
+) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let send_fn = ctx.select_send_fn.expect("select_send_fn not set");
+    send_fn(ctx, chan_reg, val_reg, elem_slots, case_idx)
+}
+
+/// Add a recv case to the current select.
+#[no_mangle]
+pub extern "C" fn vo_select_recv(
+    ctx: *mut JitContext,
+    dst_reg: u32,
+    chan_reg: u32,
+    elem_slots: u32,
+    has_ok: u32,
+    case_idx: u32,
+) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let recv_fn = ctx.select_recv_fn.expect("select_recv_fn not set");
+    recv_fn(ctx, dst_reg, chan_reg, elem_slots, has_ok, case_idx)
+}
+
+/// Execute the select statement.
+/// Returns JitResult::Ok (result written to fiber stack), WaitIo (blocked), or Panic.
+#[no_mangle]
+pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let exec_fn = ctx.select_exec_fn.expect("select_exec_fn not set");
+    exec_fn(ctx, result_reg)
 }
