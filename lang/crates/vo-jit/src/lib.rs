@@ -38,53 +38,16 @@ use helpers::HelperFuncIds;
 ///
 /// Note: This is a conservative check. When Call/WaitIo is returned, VM continues
 /// execution in the interpreter (shadow-frame design).
-pub fn can_jit_to_jit_call(func: &FunctionDef, module: &VoModule) -> bool {
-    can_jit_to_jit_call_impl(func, module, 0)
-}
-
-const MAX_JIT_CHECK_DEPTH: usize = 16;
-
-fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize) -> bool {
+pub fn can_jit_to_jit_call(func: &FunctionDef, _module: &VoModule) -> bool {
     // Functions with defer must go through dispatch_jit_call to get a real CallFrame.
     // This ensures DeferEntry.frame_depth is correct (matches fiber.frames.len()).
-    if func.has_defer {
-        return false;
-    }
-    // Depth limit - conservatively return false
-    if depth >= MAX_JIT_CHECK_DEPTH {
-        return false;
-    }
-    for inst in &func.code {
-        match inst.opcode() {
-            // Check for blocking extern calls (may return WaitIo)
-            Opcode::CallExtern => {
-                let extern_id = inst.b as usize;
-                if module.externs[extern_id].is_blocking {
-                    return false;
-                }
-            }
-            // Check Call targets recursively
-            Opcode::Call => {
-                let target_func_id = (inst.a as u32) | ((inst.flags as u32) << 16);
-                let target_func = &module.functions[target_func_id as usize];
-                if !can_jit_to_jit_call_impl(target_func, module, depth + 1) {
-                    return false;
-                }
-            }
-            // CallClosure and CallIface: now safe for JIT-to-JIT calls.
-            // They use prepare callbacks for direct JIT dispatch or trampoline fallback,
-            // never returning Call/WaitIo to the caller.
-            // Select uses fiber.current_frame() to get bp, which is wrong during JIT-to-JIT calls
-            Opcode::SelectExec => {
-                return false;
-            }
-            // Port operations: now safe for JIT-to-JIT calls.
-            // execute_func_sync's mini-scheduler processes island commands and polls I/O,
-            // so cross-island port wakes are properly delivered.
-            _ => {}
-        }
-    }
-    true
+    //
+    // All other opcodes are safe for JIT-to-JIT calls:
+    // - CallClosure/CallIface: use prepare callbacks for direct JIT dispatch or trampoline
+    // - Blocking externs: WaitIo propagates via non-OK path with push_resume_point
+    // - SelectExec: push_frame maintains correct fiber.frames, so current_frame() works
+    // - Port/Channel ops: execute_func_sync's mini-scheduler handles island commands + I/O
+    !func.has_defer
 }
 
 // =============================================================================
