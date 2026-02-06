@@ -725,9 +725,6 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
         let jit_func_ptr = emitter.builder().ins().load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
         
-        // Debug: print func_id being called
-        // eprintln!("JIT-to-JIT call to func {}", config.func_id);
-        
         // Check if null
         let zero = emitter.builder().ins().iconst(types::I64, 0);
         let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, zero);

@@ -381,9 +381,9 @@ impl<'a> LoopCompiler<'a> {
         
         // Get target function info
         let target_func = &self.vo_module.functions[func_id as usize];
-        let callee_jittable = crate::can_jit_to_jit_call(target_func, self.vo_module);
-        
-        if callee_jittable && self.helpers.call_vm.is_some() {
+        // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
+        // Everything else can use JIT-to-JIT direct call with VM fallback.
+        if !target_func.has_defer && self.helpers.call_vm.is_some() {
             // JIT-to-JIT direct call with fallback to VM
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {
                 func_id,

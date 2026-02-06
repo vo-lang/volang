@@ -401,17 +401,16 @@ impl<'a> FunctionCompiler<'a> {
         // Get target function info
         let target_func = &self.vo_module.functions[target_func_id as usize];
         
-        // Self-recursive call: skip can_jit_to_jit_call check (would fail due to depth limit)
+        // Self-recursive call: always use direct JIT call
         // We know the current function is jittable since we're compiling it
         if target_func_id == self.func_id {
             self.call_self_recursive(arg_start, arg_slots, call_ret_slots, target_func);
             return false;
         }
         
-        // Check if callee can be called via JIT-to-JIT (no blocking externs, etc)
-        let callee_jittable = crate::can_jit_to_jit_call(target_func, self.vo_module);
-        
-        if callee_jittable {
+        // has_defer callees need VM execution (defer requires real CallFrame in fiber.frames).
+        // Everything else can use JIT-to-JIT direct call with VM fallback.
+        if !target_func.has_defer {
             // JIT-to-JIT direct call with runtime check for compiled callee
             // If callee returns Call/WaitIo, we propagate it to VM
             crate::call_helpers::emit_jit_call_with_fallback(self, crate::call_helpers::JitCallWithFallbackConfig {

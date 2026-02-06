@@ -29,28 +29,6 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use helpers::HelperFuncIds;
 
 // =============================================================================
-// Shared Utilities
-// =============================================================================
-
-/// Check if a function can be called via JIT-to-JIT direct call.
-/// Returns false if the function may return Call/WaitIo to caller.
-/// Such functions should use the Call request mechanism instead.
-///
-/// Note: This is a conservative check. When Call/WaitIo is returned, VM continues
-/// execution in the interpreter (shadow-frame design).
-pub fn can_jit_to_jit_call(func: &FunctionDef, _module: &VoModule) -> bool {
-    // Functions with defer must go through dispatch_jit_call to get a real CallFrame.
-    // This ensures DeferEntry.frame_depth is correct (matches fiber.frames.len()).
-    //
-    // All other opcodes are safe for JIT-to-JIT calls:
-    // - CallClosure/CallIface: use prepare callbacks for direct JIT dispatch or trampoline
-    // - Blocking externs: WaitIo propagates via non-OK path with push_resume_point
-    // - SelectExec: push_frame maintains correct fiber.frames, so current_frame() works
-    // - Port/Channel ops: execute_func_sync's mini-scheduler handles island commands + I/O
-    !func.has_defer
-}
-
-// =============================================================================
 // JitError
 // =============================================================================
 
