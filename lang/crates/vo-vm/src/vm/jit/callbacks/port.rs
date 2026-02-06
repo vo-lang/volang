@@ -36,6 +36,7 @@ pub extern "C" fn jit_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
         waiters.push(sender);
     }
     
+    // Wake all waiters
     for waiter in &waiters {
         vm.state.wake_waiter(waiter, &mut vm.scheduler);
     }

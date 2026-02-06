@@ -1,0 +1,140 @@
+// Test: Channel wake PC advancement
+// This tests that when recv wakes a blocked sender, the sender's PC is correctly
+// advanced so it continues to the next instruction (not re-executing send).
+package main
+
+import "fmt"
+
+func main() {
+	test1_unbuffered_basic()
+	test2_unbuffered_loop()
+	test3_sender_continues_after_wake()
+	test4_multiple_senders()
+	test5_ping_pong()
+	fmt.Println("channel_wake_pc: ALL PASSED")
+}
+
+// Test 1: Basic unbuffered channel - sender blocks, recv wakes it
+func test1_unbuffered_basic() {
+	ch := make(chan int)
+	result := make(chan int, 1)
+	
+	go func() {
+		ch <- 42      // Block until main receives
+		result <- 1   // This should execute exactly once after send completes
+	}()
+	
+	v := <-ch
+	assert(v == 42, "test1: expected 42")
+	
+	r := <-result
+	assert(r == 1, fmt.Sprintf("test1: expected result=1, got %d", r))
+	fmt.Println("Test 1: PASSED - unbuffered basic")
+}
+
+// Test 2: Loop creating goroutines with unbuffered sends
+func test2_unbuffered_loop() {
+	ch := make(chan int)
+	done := make(chan int, 5)
+	
+	// Create 5 goroutines in a loop
+	for i := 0; i < 5; i++ {
+		i := i
+		go func() {
+			ch <- i    // Block on unbuffered send
+			done <- i  // Execute after send completes - CRITICAL: must not re-execute send
+		}()
+	}
+	
+	// Receive 5 values from ch (wakes senders)
+	sum1 := 0
+	for j := 0; j < 5; j++ {
+		sum1 += <-ch
+	}
+	
+	// Receive 5 values from done (confirms each sender continued correctly)
+	sum2 := 0
+	for k := 0; k < 5; k++ {
+		sum2 += <-done
+	}
+	
+	// Both sums should be 0+1+2+3+4 = 10
+	assert(sum1 == 10, fmt.Sprintf("test2: expected sum1=10, got %d", sum1))
+	assert(sum2 == 10, fmt.Sprintf("test2: expected sum2=10, got %d", sum2))
+	fmt.Println("Test 2: PASSED - unbuffered loop")
+}
+
+// Test 3: Verify sender continues after wake (not re-executing send)
+func test3_sender_continues_after_wake() {
+	ch := make(chan int)
+	done := make(chan int, 3)
+	
+	// 3 goroutines, each sends once then signals done
+	for i := 0; i < 3; i++ {
+		go func() {
+			ch <- 1      // Block on send
+			done <- 1    // Signal completion after send - should execute exactly once
+		}()
+	}
+	
+	// Receive 3 values from ch, waking 3 senders
+	for j := 0; j < 3; j++ {
+		<-ch
+	}
+	
+	// Count completions from done channel
+	counter := 0
+	for k := 0; k < 3; k++ {
+		counter += <-done
+	}
+	
+	assert(counter == 3, fmt.Sprintf("test3: expected counter=3, got %d (sender re-executed?)", counter))
+	fmt.Println("Test 3: PASSED - sender continues after wake")
+}
+
+// Test 4: Multiple senders in loop, all must complete exactly once
+func test4_multiple_senders() {
+	ch := make(chan int)
+	
+	// Start 4 sender goroutines
+	for i := 0; i < 4; i++ {
+		i := i
+		go func() {
+			ch <- i * 10
+		}()
+	}
+	
+	// Receive all 4
+	sum := 0
+	for j := 0; j < 4; j++ {
+		sum += <-ch
+	}
+	
+	// Sum should be 0+10+20+30 = 60
+	assert(sum == 60, fmt.Sprintf("test4: expected sum=60, got %d", sum))
+	fmt.Println("Test 4: PASSED - multiple senders")
+}
+
+// Test 5: Ping-pong communication in loop
+// MINIMAL: goroutine with loop that does send then recv
+func test5_ping_pong() {
+	ping := make(chan int)
+	pong := make(chan int)
+	
+	go func() {
+		// This loop will be OSR compiled
+		for i := 0; i < 5; i++ {
+			ping <- i        // Send in OSR loop
+			<-pong           // Recv in OSR loop - THIS TRIGGERS THE BUG
+		}
+		ping <- -1
+	}()
+	
+	for j := 0; j < 5; j++ {
+		<-ping
+		pong <- 0
+	}
+	<-ping  // Wait for -1
+	
+	fmt.Println("Test 5: PASSED - ping pong loop")
+}

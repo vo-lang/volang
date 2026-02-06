@@ -17,6 +17,22 @@ use super::Vm;
 pub type IslandRegistry = Arc<std::sync::Mutex<HashMap<u32, Sender<IslandCommand>>>>;
 
 /// Run an island thread - processes commands and executes fibers.
+#[cfg(feature = "jit")]
+pub fn run_island_thread(
+    island_id: u32,
+    module: Arc<Module>,
+    cmd_rx: Receiver<IslandCommand>,
+    island_registry: IslandRegistry,
+    jit_config: Option<super::JitConfig>,
+) {
+    let mut vm = match jit_config {
+        Some(config) => Vm::with_jit_config(config),
+        None => Vm::new(),
+    };
+    run_island_vm(island_id, module, cmd_rx, island_registry, &mut vm);
+}
+
+#[cfg(not(feature = "jit"))]
 pub fn run_island_thread(
     island_id: u32,
     module: Arc<Module>,
@@ -24,18 +40,29 @@ pub fn run_island_thread(
     island_registry: IslandRegistry,
 ) {
     let mut vm = Vm::new();
+    run_island_vm(island_id, module, cmd_rx, island_registry, &mut vm);
+}
+
+fn run_island_vm(
+    island_id: u32,
+    module: Arc<Module>,
+    cmd_rx: Receiver<IslandCommand>,
+    island_registry: IslandRegistry,
+    vm: &mut Vm,
+) {
     vm.load((*module).clone());
-    
-    // Register our ability to send to other islands
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
-    
+    run_island_loop(vm, cmd_rx);
+}
+
+fn run_island_loop(vm: &mut Vm, cmd_rx: Receiver<IslandCommand>) {
     loop {
         // 1. Process all pending commands first
         loop {
             match cmd_rx.try_recv() {
                 Ok(cmd) => {
-                    if handle_command(&mut vm, cmd) { return; }
+                    if handle_command(vm, cmd) { return; }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
@@ -55,7 +82,7 @@ pub fn run_island_thread(
             // Has pending I/O or blocked fibers - use timeout to allow periodic polling
             match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(cmd) => {
-                    if handle_command(&mut vm, cmd) { return; }
+                    if handle_command(vm, cmd) { return; }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Poll I/O to check for completions
@@ -67,13 +94,12 @@ pub fn run_island_thread(
             // Completely idle - block until command arrives
             match cmd_rx.recv() {
                 Ok(cmd) => {
-                    if handle_command(&mut vm, cmd) { return; }
+                    if handle_command(vm, cmd) { return; }
                 }
                 Err(_) => return,
             }
         }
     }
-    
 }
 
 /// Returns true if should exit loop.

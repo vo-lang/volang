@@ -18,7 +18,7 @@ use super::helpers::{extract_context, set_jit_panic};
 // Helper
 // =============================================================================
 
-/// Wake a channel waiter, handling both simple and select waiters.
+/// Wake a channel waiter. No PC modification - blocker sets resume PC.
 fn wake_channel_waiter(scheduler: &mut Scheduler, waiter: ChannelWaiter) {
     let fiber_id = FiberId::from_raw(waiter.fiber_id() as u32);
     
@@ -52,7 +52,7 @@ pub extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
 
     state.close();
 
-    // Wake all waiting fibers
+    // Wake all waiting fibers - they need to retry to see closed state
     for waiter in state.take_waiting_receivers() {
         wake_channel_waiter(&mut vm.scheduler, waiter);
     }

@@ -1,0 +1,92 @@
+// Test: Island + Port + OSR loop wake PC advancement
+// This tests cross-island port communication with OSR loops,
+// ensuring sender's PC is correctly advanced after being woken.
+package main
+
+import "fmt"
+
+func main() {
+	test1_island_basic()
+	test2_island_loop()
+	test3_island_ping_pong_osr()
+	fmt.Println("island_port_osr: ALL PASSED")
+}
+
+// Test 1: Basic cross-island port communication
+func test1_island_basic() {
+	i := make(island)
+	p := make(port int)
+	done := make(port int)
+	
+	// Run on separate island
+	go @(i) func(p port int, done port int) {
+		p <- 42      // Block until main receives
+		done <- 1    // Should execute exactly once after send completes
+	}(p, done)
+	
+	v := <-p
+	assert(v == 42, "test1: expected 42")
+	
+	r := <-done
+	assert(r == 1, fmt.Sprintf("test1: expected done=1, got %d", r))
+	fmt.Println("Test 1: PASSED - island basic")
+}
+
+// Test 2: Cross-island port in loop
+func test2_island_loop() {
+	i := make(island)
+	p := make(port int)
+	
+	// Island with loop sending values
+	go @(i) func(p port int) {
+		// This loop will be OSR compiled on the island
+		for j := 0; j < 5; j++ {
+			p <- j       // Block on port send to main island
+		}
+		p <- -1  // Signal done
+	}(p)
+	
+	// Receive values from island, verify sender continues correctly
+	sum := 0
+	for {
+		v := <-p
+		if v == -1 {
+			break
+		}
+		sum += v
+	}
+	
+	assert(sum == 10, fmt.Sprintf("test2: expected sum=10, got %d", sum))
+	fmt.Println("Test 2: PASSED - island loop")
+}
+
+// Test 3: Cross-island bidirectional ping-pong with OSR loop
+// Island has loop with send then recv - this triggers OSR compilation
+func test3_island_ping_pong_osr() {
+	i := make(island)
+	reqPort := make(port int)
+	respPort := make(port int)
+	
+	// Island runs OSR loop: send request, recv response
+	go @(i) func(req port int, resp port int) {
+		// This loop will be OSR compiled on the island
+		for j := 0; j < 5; j++ {
+			req <- j     // Send to main island
+			<-resp       // Recv from main island - tests wake PC in OSR
+		}
+		req <- -1    // Signal done
+	}(reqPort, respPort)
+	
+	// Main responds to each request
+	for k := 0; k < 5; k++ {
+		v := <-reqPort
+		assert(v == k, fmt.Sprintf("test3: expected req=%d, got %d", k, v))
+		respPort <- v * 2
+	}
+	
+	// Wait for done signal
+	v := <-reqPort
+	assert(v == -1, "test3: expected -1 for done signal")
+	
+	fmt.Println("Test 3: PASSED - island ping pong OSR")
+}

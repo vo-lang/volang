@@ -1710,7 +1710,9 @@ fn emit_queue_send<'a>(
 ) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;
     
-    // Set resume_pc for WaitIo case - resume at NEXT instruction since send is already registered
+    // Set resume_pc for blocking case - use pc+1 because send is already registered.
+    // When sender wakes, it should continue to next instruction (not re-execute send).
+    // This is the "blocker sets resume PC" principle - no PC modification needed at wake time.
     let resume_pc = (e.current_pc() + 1) as i32;
     let ctx = e.ctx_param();
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);

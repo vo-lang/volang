@@ -38,7 +38,7 @@ pub enum IslandCommand {
         closure_data: PackedValue,
         capture_slots: u16,
     },
-    /// Wake a blocked fiber
+    /// Wake a blocked fiber (no PC modification - blocker sets resume PC)
     WakeFiber { fiber_id: u32 },
     /// Request island shutdown
     Shutdown,

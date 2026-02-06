@@ -1421,3 +1421,13 @@ reason = "island requires goroutine"
 file = "skill_debug_vo/2026_01_28_1411_island_port_capture.vo"
 skip = ["wasm"]
 reason = "island requires goroutine"
+
+[[tests]]
+file = "2026_02_06_port_wake_pc.vo"
+skip = ["wasm"]
+reason = "island requires goroutine"
+
+[[tests]]
+file = "2026_02_06_channel_wake_pc.vo"
+skip = ["wasm"]
+reason = "channel requires goroutine"

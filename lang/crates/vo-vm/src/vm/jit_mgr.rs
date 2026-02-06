@@ -161,6 +161,12 @@ impl JitManager {
         self.func_table.len()
     }
     
+    /// Get JIT configuration (for passing to island threads).
+    #[inline]
+    pub fn config(&self) -> &JitConfig {
+        &self.config
+    }
+    
     // =========================================================================
     // Query API
     // =========================================================================

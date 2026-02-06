@@ -244,10 +244,15 @@ impl Vm {
         let registry = self.state.island_registry.as_ref().unwrap().clone();
         { let mut guard = registry.lock().unwrap(); guard.insert(next_id, tx.clone()); }
         
-        // Spawn island thread
+        // Spawn island thread with JIT config from main VM
         let module_arc = std::sync::Arc::new(module.clone());
         let registry_clone = registry.clone();
+        #[cfg(feature = "jit")]
+        let jit_config = self.jit_mgr.as_ref().map(|mgr| mgr.config().clone());
         let join_handle = std::thread::spawn(move || {
+            #[cfg(feature = "jit")]
+            island_thread::run_island_thread(next_id, module_arc, rx, registry_clone, jit_config);
+            #[cfg(not(feature = "jit"))]
             island_thread::run_island_thread(next_id, module_arc, rx, registry_clone);
         });
         
@@ -307,11 +312,8 @@ impl Vm {
             #[cfg(feature = "std")]
             if let Some(ref rx) = self.state.main_cmd_rx {
                 while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        vo_runtime::island::IslandCommand::WakeFiber { fiber_id } => {
-                            self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-                        }
-                        _ => {}
+                    if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
+                        self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
                     }
                 }
             }
@@ -459,13 +461,9 @@ impl Vm {
     }
 
     /// Wake a simple (non-select) waiter.
-    fn wake_simple_waiter(scheduler: &mut Scheduler, id: u32, advance_pc: bool) {
+    /// No PC modification - blocker already set correct resume PC.
+    fn wake_simple_waiter(scheduler: &mut Scheduler, id: u32) {
         let fiber_id = crate::scheduler::FiberId::from_raw(id);
-        if advance_pc {
-            if let Some(frame) = scheduler.get_fiber_mut(fiber_id).current_frame_mut() {
-                frame.pc += 1;
-            }
-        }
         scheduler.wake_fiber(fiber_id);
     }
 
@@ -478,12 +476,9 @@ impl Vm {
         scheduler.wake_fiber(fiber_id);
     }
 
-    /// Handle ChanResult from channel operations.
-    ///
-    /// `advance_woken_pc`: When true, increment woken fiber's PC so it doesn't retry.
-    /// - Recv waking a sender: true (sender's value was taken, send is complete)
-    /// - Send waking a receiver: false (receiver needs to execute recv to get value)
-    /// - Close waking waiters: false (they need to retry to see closed state)
+    /// Handle channel operation result.
+    /// 
+    /// **Blocker sets resume PC:** Only recv decrements PC (to re-execute and fetch data).
     fn handle_chan_result(
         result: exec::ChanResult,
         gc: &mut vo_runtime::gc::Gc,
@@ -491,16 +486,16 @@ impl Vm {
         stack: *mut vo_runtime::slot::Slot,
         module: &Module,
         scheduler: &mut Scheduler,
-        advance_woken_pc: bool,
+        is_recv: bool,
     ) -> ExecResult {
         match result {
             exec::ChanResult::Continue => ExecResult::FrameChanged,
             exec::ChanResult::Yield => {
-                fiber.current_frame_mut().unwrap().pc -= 1;
+                if is_recv { fiber.current_frame_mut().unwrap().pc -= 1; }
                 ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
             exec::ChanResult::Wake(id) => {
-                Self::wake_simple_waiter(scheduler, id, advance_woken_pc);
+                Self::wake_simple_waiter(scheduler, id);
                 ExecResult::TimesliceExpired
             }
             exec::ChanResult::WakeSelect(id, case_index) => {
@@ -510,7 +505,7 @@ impl Vm {
             exec::ChanResult::WakeMultiple(wake_infos) => {
                 for info in wake_infos {
                     match info {
-                        exec::WakeInfo::Simple(id) => Self::wake_simple_waiter(scheduler, id, advance_woken_pc),
+                        exec::WakeInfo::Simple(id) => Self::wake_simple_waiter(scheduler, id),
                         exec::WakeInfo::Select { fiber_id, case_index } => Self::wake_select_waiter(scheduler, fiber_id, case_index),
                     }
                 }

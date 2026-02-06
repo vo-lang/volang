@@ -312,6 +312,11 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 	runJIT := mode == "jit" || mode == "both" || mode == "gc" || mode == "osr"
 	isGCMode := mode == "gc"
 	isNoStdMode := mode == "nostd"
+	isOSRMode := mode == "osr"
+	jitModeName := "jit"
+	if isOSRMode {
+		jitModeName = "osr"
+	}
 
 	// Collect .vo files
 	files := findVoFiles(testDir)
@@ -386,7 +391,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 			if config.shouldSkip("jit") {
 				jobs = append(jobs, TestJob{
 					file: file,
-					mode: "jit",
+					mode: jitModeName,
 					shouldFail: false,
 					gcDebug: false,
 					index: 0,
@@ -395,7 +400,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 			} else {
 			jobs = append(jobs, TestJob{
 				file: file,
-				mode: "jit",
+				mode: jitModeName,
 				shouldFail: false,
 				gcDebug: gcDebug,
 				index: 0,
@@ -454,7 +459,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				if config.shouldSkip("jit") {
 					jobs = append(jobs, TestJob{
 						file: dir,
-						mode: "jit",
+						mode: jitModeName,
 						shouldFail: false,
 						gcDebug: false,
 						index: 0,
@@ -463,7 +468,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				} else {
 				jobs = append(jobs, TestJob{
 					file: dir,
-					mode: "jit",
+					mode: jitModeName,
 					shouldFail: false,
 					gcDebug: false,
 					index: 0,
@@ -515,7 +520,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				if config.shouldSkip("jit") {
 					jobs = append(jobs, TestJob{
 						file: testPath,
-						mode: "jit",
+						mode: jitModeName,
 						shouldFail: false,
 						gcDebug: false,
 						index: 0,
@@ -524,7 +529,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 				} else {
 				jobs = append(jobs, TestJob{
 					file: testPath,
-					mode: "jit",
+					mode: jitModeName,
 					shouldFail: false,
 					gcDebug: false,
 					index: 0,
@@ -636,7 +641,7 @@ func runSingleTest(job TestJob, verbose bool) TestResult {
 	output := ""
 	if job.mode == "nostd" {
 		output, err = runWithVoEmbed(module)
-	} else if job.mode == "jit" {
+	} else if job.mode == "jit" || job.mode == "osr" {
 		output, err = vox.RunJitCapture(module)
 	} else {
 		output, err = vox.RunCapture(module)
@@ -792,9 +797,13 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 	}
 
 	if runJIT {
+		jitModeName := "jit"
+		if mode == "osr" {
+			jitModeName = "osr"
+		}
 		job := TestJob{
 			file: testPath,
-			mode: "jit",
+			mode: jitModeName,
 			shouldFail: false,
 			gcDebug: strings.Contains(file, "gc_"),
 		}
@@ -864,7 +873,7 @@ func calculateStats(results []TestResult) TestStats {
 		if r.skipped {
 			if r.mode == "vm" {
 				stats.vmSkipped++
-			} else if r.mode == "jit" {
+			} else if r.mode == "jit" || r.mode == "osr" {
 				stats.jitSkipped++
 			} else if r.mode == "nostd" {
 				stats.nostdSkipped++
@@ -875,7 +884,7 @@ func calculateStats(results []TestResult) TestStats {
 		if r.passed {
 			if r.mode == "vm" || r.mode == "should_fail" {
 				stats.vmPassed++
-			} else if r.mode == "jit" {
+			} else if r.mode == "jit" || r.mode == "osr" {
 				stats.jitPassed++
 			} else if r.mode == "nostd" {
 				stats.nostdPassed++
@@ -883,7 +892,7 @@ func calculateStats(results []TestResult) TestStats {
 		} else {
 			if r.mode == "vm" || r.mode == "should_fail" {
 				stats.vmFailed++
-			} else if r.mode == "jit" {
+			} else if r.mode == "jit" || r.mode == "osr" {
 				stats.jitFailed++
 			} else if r.mode == "nostd" {
 				stats.nostdFailed++

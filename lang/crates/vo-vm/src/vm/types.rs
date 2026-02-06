@@ -187,11 +187,12 @@ impl VmState {
         waiter.island_id == self.current_island_id
     }
 
-    /// Wake a waiter (local or remote).
+    /// Wake a waiter (local or remote). No PC modification - blocker sets resume PC.
     #[cfg(feature = "std")]
     pub fn wake_waiter(&self, waiter: &vo_runtime::objects::port::WaiterInfo, scheduler: &mut crate::scheduler::Scheduler) {
         if waiter.island_id == self.current_island_id {
-            scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(waiter.fiber_id as u32));
+            let fiber_id = crate::scheduler::FiberId::from_raw(waiter.fiber_id as u32);
+            scheduler.wake_fiber(fiber_id);
         } else {
             self.send_wake_to_island(waiter.island_id, waiter.fiber_id as u32);
         }
