@@ -111,7 +111,9 @@ fn find_back_edge_jump(code: &[Instruction], loop_start: usize) -> usize {
         if inst.opcode() == Opcode::Jump {
             let offset = inst.imm32();
             if offset < 0 {
-                let target = (pc as i64 + 1 + offset as i64) as usize;
+                // VM executes: frame.pc += 1; target_pc = frame.pc + offset - 1
+                // So actual target = pc + offset (the +1 and -1 cancel out)
+                let target = (pc as i64 + offset as i64) as usize;
                 if target == loop_start {
                     return pc;
                 }

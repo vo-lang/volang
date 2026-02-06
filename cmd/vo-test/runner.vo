@@ -259,6 +259,12 @@ func runTests(mode string, args []string) int {
 			return 1
 		}
 	}
+	
+	// OSR mode: high call threshold, low loop threshold to test loop OSR specifically
+	if mode == "osr" {
+		_ = os.Setenv("VO_JIT_CALL_THRESHOLD", "1000")
+		_ = os.Setenv("VO_JIT_LOOP_THRESHOLD", "1")
+	}
 
 	// Load test configuration
 	testDataDir := "lang/test_data"
@@ -303,7 +309,7 @@ func collectTestJobs(testDir string, mode string, configs map[string]TestConfig)
 	jobs := []TestJob{}
 	
 	runVM := mode == "vm" || mode == "both" || mode == "gc" || mode == "nostd"
-	runJIT := mode == "jit" || mode == "both" || mode == "gc"
+	runJIT := mode == "jit" || mode == "both" || mode == "gc" || mode == "osr"
 	isGCMode := mode == "gc"
 	isNoStdMode := mode == "nostd"
 
@@ -752,7 +758,7 @@ func runSingleFile(file string, mode string, verbose bool, configs map[string]Te
 	}
 
 	runVM := mode == "vm" || mode == "both"
-	runJIT := mode == "jit" || mode == "both"
+	runJIT := mode == "jit" || mode == "both" || mode == "osr"
 	runNoStd := mode == "nostd"
 
 	failed := false

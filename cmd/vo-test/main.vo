@@ -27,6 +27,7 @@ func printUsage() {
 	fmt.Println("Modes:")
 	fmt.Println("  vm          Run VM tests only")
 	fmt.Println("  jit         Run JIT tests only")
+	fmt.Println("  osr         Run JIT tests with loop OSR (call=1000, loop=1)")
 	fmt.Println("  both        Run both VM and JIT tests")
 	fmt.Println("  gc          Run GC validation tests")
 	fmt.Println("  nostd       Run no_std tests")

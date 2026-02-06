@@ -3,7 +3,7 @@
 Vo Development Tool - Wrapper for vo-test and other utilities
 
 Usage:
-    ./d.py test [vm|jit|both|gc|nostd|wasm] [-v] [--jobs N] [file]
+    ./d.py test [vm|jit|osr|both|gc|nostd|wasm] [-v] [--jobs N] [file]
     ./d.py bench [all|vo|<name>|score] [--all-langs]
     ./d.py loc [--with-tests]
     ./d.py clean [all|vo|rust]

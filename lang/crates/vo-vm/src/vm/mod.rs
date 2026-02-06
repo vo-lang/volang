@@ -620,7 +620,10 @@ impl Vm {
                     }
                 } else {
                     let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                    if fiber.panic_state.is_some() {
+                    // Only trigger panic_unwind if there's a panic AND we're not already
+                    // executing a defer (during defer execution, panic_state stays Some
+                    // so that recover() can access it)
+                    if fiber.panic_state.is_some() && fiber.unwinding.is_none() {
                         stack = fiber.stack_ptr();
                         return helpers::panic_unwind(fiber, stack, module);
                     }
