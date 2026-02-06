@@ -26,8 +26,12 @@ if Path.cwd().resolve() != _expected_cwd:
     sys.exit(1)
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
-VO_TEST_BIN = PROJECT_ROOT / 'target' / 'debug' / 'vo-test'
-VO_BIN = PROJECT_ROOT / 'target' / 'debug' / 'vo'
+USE_RELEASE = '--release' in sys.argv
+if USE_RELEASE:
+    sys.argv.remove('--release')
+_PROFILE_DIR = 'release' if USE_RELEASE else 'debug'
+VO_TEST_BIN = PROJECT_ROOT / 'target' / _PROFILE_DIR / 'vo-test'
+VO_BIN = PROJECT_ROOT / 'target' / _PROFILE_DIR / 'vo'
 
 
 
@@ -38,6 +42,8 @@ def ensure_vo_test_built(need_embed=False):
         packages.append('vo-embed')
     
     cmd = ['cargo', 'build']
+    if USE_RELEASE:
+        cmd.append('--release')
     for pkg in packages:
         cmd.extend(['-p', pkg])
     
@@ -54,8 +60,11 @@ def ensure_vo_test_built(need_embed=False):
 
 
 def ensure_vo_cli_built():
+    cmd = ['cargo', 'build', '-p', 'vo']
+    if USE_RELEASE:
+        cmd.append('--release')
     result = subprocess.run(
-        ['cargo', 'build', '-p', 'vo'],
+        cmd,
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True

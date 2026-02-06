@@ -79,6 +79,15 @@ fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize)
             Opcode::SelectExec => {
                 return false;
             }
+            // Port operations may block waiting for cross-island wakes.
+            // The JIT-to-JIT VM fallback (vo_call_vm → execute_func_sync) runs on a
+            // callback fiber whose mini-scheduler cannot process island commands,
+            // so cross-island wakes are never delivered → deadlock.
+            // Channel is local-only and its wakes come from local goroutines which
+            // the mini-scheduler CAN run, so channels are fine for JIT-to-JIT.
+            Opcode::PortSend | Opcode::PortRecv => {
+                return false;
+            }
             _ => {}
         }
     }

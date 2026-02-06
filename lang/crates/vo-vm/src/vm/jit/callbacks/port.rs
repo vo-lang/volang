@@ -69,6 +69,10 @@ pub extern "C" fn jit_port_send(
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     let p = port as GcRef;
     
+    if p.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_NIL_POINTER);
+    }
+    
     if port::is_closed(p) {
         return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED);
     }
@@ -121,6 +125,10 @@ pub extern "C" fn jit_port_recv(
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     let p = port as GcRef;
     let has_ok = has_ok != 0;
+    
+    if p.is_null() {
+        return set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_NIL_POINTER);
+    }
     
     let island_id = vm.state.current_island_id;
     let fiber_id = fiber.id as u64;
