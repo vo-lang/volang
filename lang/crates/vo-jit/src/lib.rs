@@ -71,23 +71,16 @@ fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize)
                     return false;
                 }
             }
-            // CallClosure and CallIface always go through VM helpers and may return Call/WaitIo
-            Opcode::CallClosure | Opcode::CallIface => {
-                return false;
-            }
+            // CallClosure and CallIface: now safe for JIT-to-JIT calls.
+            // They use prepare callbacks for direct JIT dispatch or trampoline fallback,
+            // never returning Call/WaitIo to the caller.
             // Select uses fiber.current_frame() to get bp, which is wrong during JIT-to-JIT calls
             Opcode::SelectExec => {
                 return false;
             }
-            // Port operations may block waiting for cross-island wakes.
-            // The JIT-to-JIT VM fallback (vo_call_vm → execute_func_sync) runs on a
-            // callback fiber whose mini-scheduler cannot process island commands,
-            // so cross-island wakes are never delivered → deadlock.
-            // Channel is local-only and its wakes come from local goroutines which
-            // the mini-scheduler CAN run, so channels are fine for JIT-to-JIT.
-            Opcode::PortSend | Opcode::PortRecv => {
-                return false;
-            }
+            // Port operations: now safe for JIT-to-JIT calls.
+            // execute_func_sync's mini-scheduler processes island commands and polls I/O,
+            // so cross-island port wakes are properly delivered.
             _ => {}
         }
     }

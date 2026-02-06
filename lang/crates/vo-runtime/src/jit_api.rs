@@ -81,6 +81,63 @@ pub type JitPushResumePointFn = extern "C" fn(
     ret_slots: u32,
 );
 
+/// Result of preparing a closure or interface call.
+/// Contains information needed for JIT-to-JIT direct call or trampoline fallback.
+#[repr(C)]
+pub struct PreparedCall {
+    /// JIT function pointer for direct call. Null if callee should use trampoline.
+    pub jit_func_ptr: *const u8,
+    /// Pointer to callee's args in fiber.stack (after push_frame).
+    /// Only valid if jit_func_ptr is not null.
+    pub callee_args_ptr: *mut u64,
+    /// Pointer to ret slot (native stack, for JIT call to write returns).
+    pub ret_ptr: *mut u64,
+    /// Callee's local_slots (for caller_bp restoration).
+    pub callee_local_slots: u32,
+    /// Resolved func_id (for trampoline fallback).
+    pub func_id: u32,
+}
+
+impl PreparedCall {
+    /// Create a fallback result (callee should use trampoline).
+    pub fn fallback(func_id: u32, callee_local_slots: u32) -> Self {
+        PreparedCall {
+            jit_func_ptr: core::ptr::null(),
+            callee_args_ptr: core::ptr::null_mut(),
+            ret_ptr: core::ptr::null_mut(),
+            callee_local_slots,
+            func_id,
+        }
+    }
+}
+
+/// Function pointer type for preparing a closure call.
+/// Returns PreparedCall with jit_func_ptr set if direct JIT call is possible.
+pub type PrepareClosureCallFn = extern "C" fn(
+    ctx: *mut JitContext,
+    closure_ref: u64,
+    ret_reg: u32,
+    ret_slots: u32,
+    caller_resume_pc: u32,
+    user_args: *const u64,
+    user_arg_count: u32,
+    ret_ptr: *mut u64,
+) -> PreparedCall;
+
+/// Function pointer type for preparing an interface method call.
+pub type PrepareIfaceCallFn = extern "C" fn(
+    ctx: *mut JitContext,
+    iface_slot0: u64,
+    iface_slot1: u64,
+    method_idx: u32,
+    ret_reg: u32,
+    ret_slots: u32,
+    caller_resume_pc: u32,
+    user_args: *const u64,
+    user_arg_count: u32,
+    ret_ptr: *mut u64,
+) -> PreparedCall;
+
 #[repr(C)]
 pub struct JitContext {
     /// Pointer to the GC instance.
@@ -160,18 +217,8 @@ pub struct JitContext {
     /// Call request: number of return slots caller expects
     pub call_ret_slots: u16,
     
-    /// Call request: call kind (0=regular, 1=closure, 2=iface, 253=yield, 254=block)
+    /// Call request: call kind (0=regular, 253=yield, 254=block)
     pub call_kind: u8,
-    
-    /// Call request: actual number of arg slots passed by caller
-    pub call_arg_slots: u16,
-    
-    /// Call request: for closure calls, the closure GcRef
-    /// Used to compute call_layout for slot0 and arg_offset
-    pub call_closure_ref: u64,
-    
-    /// Call request: for iface calls, the receiver value (slot1)
-    pub call_iface_recv: u64,
     
     /// I/O wait token (for WaitIo result).
     /// Set by jit_call_extern when extern returns WaitIo.
@@ -310,6 +357,18 @@ pub struct JitContext {
     /// Starting slot of return values (from Return instruction's inst.a).
     /// Used by VM to extract ret_slot_types from func.slot_types for GC scanning.
     pub ret_start: u16,
+    
+    // =========================================================================
+    // JIT-to-JIT Direct Call for Closure/Iface (Phase 2)
+    // =========================================================================
+    
+    /// Callback to prepare a closure call for JIT-to-JIT dispatch.
+    /// Resolves func_id, checks jit_func_table, does push_frame + arg layout.
+    /// Returns PreparedCall with jit_func_ptr set if direct call is possible.
+    pub prepare_closure_call_fn: Option<PrepareClosureCallFn>,
+    
+    /// Callback to prepare an interface method call for JIT-to-JIT dispatch.
+    pub prepare_iface_call_fn: Option<PrepareIfaceCallFn>,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -322,8 +381,6 @@ impl JitContext {
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
     pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
     pub const OFFSET_CALL_KIND: i32 = std::mem::offset_of!(JitContext, call_kind) as i32;
-    pub const OFFSET_CALL_CLOSURE_REF: i32 = std::mem::offset_of!(JitContext, call_closure_ref) as i32;
-    pub const OFFSET_CALL_IFACE_RECV: i32 = std::mem::offset_of!(JitContext, call_iface_recv) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
     pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
@@ -336,8 +393,6 @@ impl JitContext {
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
-    pub const CALL_KIND_CLOSURE: u8 = 1;
-    pub const CALL_KIND_IFACE: u8 = 2;
     pub const CALL_KIND_YIELD: u8 = 253;
     pub const CALL_KIND_BLOCK: u8 = 254;
 
@@ -371,6 +426,10 @@ impl JitContext {
     pub const OFFSET_RET_GCREF_START: i32 = std::mem::offset_of!(JitContext, ret_gcref_start) as i32;
     pub const OFFSET_RET_IS_HEAP: i32 = std::mem::offset_of!(JitContext, ret_is_heap) as i32;
     pub const OFFSET_RET_START: i32 = std::mem::offset_of!(JitContext, ret_start) as i32;
+    
+    // JIT-to-JIT Direct Call for Closure/Iface
+    pub const OFFSET_PREPARE_CLOSURE_CALL_FN: i32 = std::mem::offset_of!(JitContext, prepare_closure_call_fn) as i32;
+    pub const OFFSET_PREPARE_IFACE_CALL_FN: i32 = std::mem::offset_of!(JitContext, prepare_iface_call_fn) as i32;
 }
 
 // =============================================================================
@@ -532,56 +591,6 @@ pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_st
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
         (*ctx).call_kind = JitContext::CALL_KIND_REGULAR;
-    }
-}
-
-/// Called by JIT for closure call that needs VM fallback.
-/// 
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
-#[no_mangle]
-pub extern "C" fn vo_set_closure_call_request(
-    ctx: *mut JitContext,
-    func_id: u32,
-    arg_start: u32,
-    resume_pc: u32,
-    ret_slots: u32,
-    arg_slots: u32,
-    closure_ref: u64,
-) {
-    unsafe {
-        (*ctx).call_func_id = func_id;
-        (*ctx).call_arg_start = arg_start as u16;
-        (*ctx).call_resume_pc = resume_pc;
-        (*ctx).call_ret_slots = ret_slots as u16;
-        (*ctx).call_kind = JitContext::CALL_KIND_CLOSURE;
-        (*ctx).call_arg_slots = arg_slots as u16;
-        (*ctx).call_closure_ref = closure_ref;
-    }
-}
-
-/// Called by JIT for interface call that needs VM fallback.
-/// 
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
-#[no_mangle]
-pub extern "C" fn vo_set_iface_call_request(
-    ctx: *mut JitContext,
-    func_id: u32,
-    arg_start: u32,
-    resume_pc: u32,
-    ret_slots: u32,
-    arg_slots: u32,
-    iface_recv: u64,
-) {
-    unsafe {
-        (*ctx).call_func_id = func_id;
-        (*ctx).call_arg_start = arg_start as u16;
-        (*ctx).call_resume_pc = resume_pc;
-        (*ctx).call_ret_slots = ret_slots as u16;
-        (*ctx).call_kind = JitContext::CALL_KIND_IFACE;
-        (*ctx).call_arg_slots = arg_slots as u16;
-        (*ctx).call_iface_recv = iface_recv;
     }
 }
 
@@ -1505,8 +1514,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_call_vm", vo_call_vm as *const u8),
         ("vo_closure_get_func_id", vo_closure_get_func_id as *const u8),
         ("vo_iface_get_func_id", vo_iface_get_func_id as *const u8),
-        ("vo_set_closure_call_request", vo_set_closure_call_request as *const u8),
-        ("vo_set_iface_call_request", vo_set_iface_call_request as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),

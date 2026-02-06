@@ -1679,7 +1679,6 @@ impl Vm {
         fiber.ensure_capacity(new_sp);
         
         // Zero the entire local slots area first (important for named returns and local vars)
-        // write_bytes writes count * size_of::<T>() bytes, so pass local_slots (not * 8)
         unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots) };
         
         // Copy args (overwrites the zeros for arg slots)
@@ -1690,7 +1689,7 @@ impl Vm {
         fiber.sp = new_sp;
         fiber.frames.push(CallFrame::new(func_id, bp, 0, func_def.ret_slots));
 
-        // Run to completion, with goroutine scheduling support
+        // Run callback fiber directly — always runs first to preserve execution order.
         let saved_current = self.scheduler.current;
         self.scheduler.current = Some(fid);
         
@@ -1699,7 +1698,6 @@ impl Vm {
                 ExecResult::Done => {
                     let fiber = self.scheduler.fiber(fid);
                     let n = (ret_count as usize).min(func_def.ret_slots as usize);
-                    // Return values are at bp (start of function's local slots)
                     for i in 0..n {
                         unsafe { *ret.add(i) = fiber.stack[bp + i] };
                     }
@@ -1708,10 +1706,20 @@ impl Vm {
                 ExecResult::Panic => {
                     break (false, self.scheduler.fiber_mut(fid).panic_state.take());
                 }
-                ExecResult::Block(_) => {
-                    // Callback fiber blocked (e.g., channel receive).
-                    // Run other fibers (goroutines) until callback is unblocked.
-                    self.scheduler.block_for_queue();
+                ExecResult::Block(reason) => {
+                    // Block callback fiber with correct reason (Queue vs Io)
+                    match reason {
+                        crate::fiber::BlockReason::Queue => {
+                            self.scheduler.block_for_queue();
+                        }
+                        #[cfg(feature = "std")]
+                        crate::fiber::BlockReason::Io(token) => {
+                            let fiber = self.scheduler.current_fiber_mut().unwrap();
+                            let frame = fiber.current_frame_mut().unwrap();
+                            frame.pc -= 1;
+                            self.scheduler.block_for_io(token);
+                        }
+                    }
                     
                     let is_callback_runnable = |sched: &crate::scheduler::Scheduler| {
                         sched.fibers.get(fid as usize)
@@ -1719,18 +1727,77 @@ impl Vm {
                             .unwrap_or(false)
                     };
                     
-                    while let Some(next_id) = self.scheduler.schedule_next() {
-                        match self.run_fiber(FiberId::Regular(next_id)) {
-                            ExecResult::Done | ExecResult::Panic => {
-                                let _ = self.scheduler.kill_current();
+                    // Mini-scheduler: run other fibers and process events until callback is unblocked.
+                    loop {
+                        // Process island wake commands
+                        #[cfg(feature = "std")]
+                        if let Some(ref rx) = self.state.main_cmd_rx {
+                            while let Ok(cmd) = rx.try_recv() {
+                                if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
+                                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                                }
                             }
-                            ExecResult::Block(_) => self.scheduler.block_for_queue(),
-                            ExecResult::TimesliceExpired => self.scheduler.yield_current(),
-                            _ => {}
                         }
+                        
+                        // Poll I/O to wake fibers waiting on I/O completion
+                        #[cfg(feature = "std")]
+                        self.scheduler.poll_io(&mut self.state.io);
+                        
                         if is_callback_runnable(&self.scheduler) {
                             self.scheduler.current = Some(fid);
                             break;
+                        }
+                        
+                        match self.scheduler.schedule_next() {
+                            Some(next_id) => {
+                                match self.run_fiber(FiberId::Regular(next_id)) {
+                                    ExecResult::Done | ExecResult::Panic => {
+                                        let _ = self.scheduler.kill_current();
+                                    }
+                                    ExecResult::Block(reason) => {
+                                        match reason {
+                                            crate::fiber::BlockReason::Queue => {
+                                                self.scheduler.block_for_queue();
+                                            }
+                                            #[cfg(feature = "std")]
+                                            crate::fiber::BlockReason::Io(token) => {
+                                                let fiber = self.scheduler.current_fiber_mut().unwrap();
+                                                let frame = fiber.current_frame_mut().unwrap();
+                                                frame.pc -= 1;
+                                                self.scheduler.block_for_io(token);
+                                            }
+                                        }
+                                    }
+                                    ExecResult::TimesliceExpired => self.scheduler.yield_current(),
+                                    _ => {}
+                                }
+                                if is_callback_runnable(&self.scheduler) {
+                                    self.scheduler.current = Some(fid);
+                                    break;
+                                }
+                            }
+                            None => {
+                                // No runnable fibers — wait for external events
+                                #[cfg(feature = "std")]
+                                {
+                                    let has_wakers = self.state.main_cmd_rx.is_some()
+                                        || self.scheduler.has_io_waiters();
+                                    if has_wakers {
+                                        if let Some(ref rx) = self.state.main_cmd_rx {
+                                            match rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                                                Ok(vo_runtime::island::IslandCommand::WakeFiber { fiber_id }) => {
+                                                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                                                }
+                                                Ok(_) => {}
+                                                Err(_) => {}
+                                            }
+                                        }
+                                        self.scheduler.poll_io(&mut self.state.io);
+                                        continue;
+                                    }
+                                }
+                                break; // No potential wakers — deadlock
+                            }
                         }
                     }
                     

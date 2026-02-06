@@ -39,7 +39,6 @@ mod context;
 mod frame;
 
 pub use context::{JitContextWrapper, build_jit_context};
-pub use frame::{jit_push_frame, jit_pop_frame, jit_push_resume_point};
 
 /// Create default panic message for runtime errors (nil deref, bounds check, etc).
 fn create_default_panic_msg(gc: &mut vo_runtime::gc::Gc) -> InterfaceSlot {
@@ -295,44 +294,11 @@ fn handle_jit_result(
             let stack = fiber.stack_ptr();
             unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
             
-            // Copy args based on call kind
-            match call_kind {
-                JitContext::CALL_KIND_REGULAR => {
-                    let arg_slots = callee_func_def.param_slots as usize;
-                    for i in 0..arg_slots {
-                        fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
-                    }
-                }
-                JitContext::CALL_KIND_CLOSURE => {
-                    use vo_runtime::objects::closure;
-                    use vo_runtime::gc::GcRef;
-                    
-                    let closure_ref = ctx.ctx.call_closure_ref;
-                    let closure_gcref = closure_ref as GcRef;
-                    let recv_slots = callee_func_def.recv_slots as usize;
-                    let is_closure = callee_func_def.is_closure;
-                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
-                    
-                    let layout = closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure);
-                    
-                    if let Some(slot0_val) = layout.slot0 {
-                        fiber.stack[callee_bp] = slot0_val;
-                    }
-                    for i in 0..user_arg_slots {
-                        fiber.stack[callee_bp + layout.arg_offset + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
-                    }
-                }
-                JitContext::CALL_KIND_IFACE => {
-                    let recv = ctx.ctx.call_iface_recv;
-                    let recv_slots = callee_func_def.recv_slots as usize;
-                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
-                    
-                    fiber.stack[callee_bp] = recv;
-                    for i in 0..user_arg_slots {
-                        fiber.stack[callee_bp + recv_slots + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
-                    }
-                }
-                _ => unreachable!("invalid call_kind: {}", call_kind),
+            // Copy args (only regular calls use this path now;
+            // closure/iface calls use prepare callbacks + direct JIT dispatch)
+            let arg_slots = callee_func_def.param_slots as usize;
+            for i in 0..arg_slots {
+                fiber.stack[callee_bp + i] = fiber.stack[actual_jit_bp + call_arg_start + i];
             }
             
             fiber.sp = new_sp;
@@ -671,49 +637,10 @@ pub fn dispatch_loop_osr(
             let stack = fiber.stack_ptr();
             unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
             
-            // Copy args based on call kind
-            match call_kind {
-                0 => {
-                    // Regular call
-                    let arg_slots = callee_func_def.param_slots as usize;
-                    for i in 0..arg_slots {
-                        fiber.stack[callee_bp + i] = fiber.stack[bp + call_arg_start + i];
-                    }
-                }
-                1 => {
-                    // Closure call
-                    use vo_runtime::objects::closure;
-                    use vo_runtime::gc::GcRef;
-                    
-                    let closure_ref = ctx.ctx.call_closure_ref;
-                    let closure_gcref = closure_ref as GcRef;
-                    let recv_slots = callee_func_def.recv_slots as usize;
-                    let is_closure = callee_func_def.is_closure;
-                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
-                    
-                    let layout = closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure);
-                    
-                    if let Some(slot0_val) = layout.slot0 {
-                        fiber.stack[callee_bp] = slot0_val;
-                    }
-                    
-                    for i in 0..user_arg_slots {
-                        fiber.stack[callee_bp + layout.arg_offset + i] = fiber.stack[bp + call_arg_start + i];
-                    }
-                }
-                2 => {
-                    // Interface call
-                    let recv = ctx.ctx.call_iface_recv;
-                    let recv_slots = callee_func_def.recv_slots as usize;
-                    let user_arg_slots = ctx.ctx.call_arg_slots as usize;
-                    
-                    fiber.stack[callee_bp] = recv;
-                    
-                    for i in 0..user_arg_slots {
-                        fiber.stack[callee_bp + recv_slots + i] = fiber.stack[bp + call_arg_start + i];
-                    }
-                }
-                _ => unreachable!("invalid call_kind"),
+            // Copy args (only regular calls use this path now)
+            let arg_slots = callee_func_def.param_slots as usize;
+            for i in 0..arg_slots {
+                fiber.stack[callee_bp + i] = fiber.stack[bp + call_arg_start + i];
             }
             
             fiber.sp = new_sp;

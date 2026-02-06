@@ -107,9 +107,6 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         call_resume_pc: 0,
         call_ret_slots: 0,
         call_kind: 0,
-        call_arg_slots: 0,
-        call_closure_ref: 0,
-        call_iface_recv: 0,
         #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
@@ -141,6 +138,8 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         ret_gcref_start: 0,
         ret_is_heap: 0,
         ret_start: 0,
+        prepare_closure_call_fn: Some(callbacks::jit_prepare_closure_call),
+        prepare_iface_call_fn: Some(callbacks::jit_prepare_iface_call),
     };
 
     JitContextWrapper {
