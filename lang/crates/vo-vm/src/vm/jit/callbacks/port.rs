@@ -50,7 +50,7 @@ pub extern "C" fn jit_port_close(_ctx: *mut JitContext, _port: u64) -> JitResult
 }
 
 /// JIT callback to send to a port.
-/// Returns JitResult (Ok, Panic, or WaitIo).
+/// Returns JitResult (Ok, Panic, or WaitQueue).
 #[cfg(feature = "std")]
 pub extern "C" fn jit_port_send(
     ctx: *mut JitContext,
@@ -86,7 +86,7 @@ pub extern "C" fn jit_port_send(
             JitResult::Ok
         }
         PortResult::Continue => JitResult::Ok,
-        PortResult::Yield => JitResult::WaitIo,
+        PortResult::Yield => JitResult::WaitQueue,
         PortResult::SendOnClosed => set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED),
         _ => JitResult::Ok,
     }
@@ -102,7 +102,7 @@ pub extern "C" fn jit_port_send(ctx: *mut JitContext, _port: u64, _val_ptr: *con
 
 /// JIT callback to receive from a port.
 /// Returns JitResult::Ok on success (including closed port),
-/// or JitResult::WaitIo if would block.
+/// or JitResult::WaitQueue if would block.
 #[cfg(feature = "std")]
 pub extern "C" fn jit_port_recv(
     ctx: *mut JitContext,
@@ -137,7 +137,7 @@ pub extern "C" fn jit_port_recv(
             }
             JitResult::Ok
         }
-        PortRecvCoreResult::WouldBlock => JitResult::WaitIo,
+        PortRecvCoreResult::WouldBlock => JitResult::WaitQueue,
         PortRecvCoreResult::Closed => {
             for i in 0..elem_slots as usize {
                 unsafe { *dst_ptr.add(i) = 0; }

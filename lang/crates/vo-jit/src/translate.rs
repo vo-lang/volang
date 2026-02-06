@@ -1985,14 +1985,14 @@ fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
 /// SelectExec: Execute the select statement.
 /// - a: result_reg (to store chosen case index, or -1 for default)
-/// May return WaitIo if select blocks.
+/// May return WaitQueue if select blocks.
 fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;
     
     let func = e.helpers().select_exec.expect("select_exec not registered");
     let ctx = e.ctx_param();
     
-    // Set resume_pc for WaitIo case - RE-EXECUTE select_exec when woken
+    // Set resume_pc for WaitQueue case - RE-EXECUTE select_exec when woken
     // (the callback will check woken_index and complete the select)
     let resume_pc = e.current_pc() as i32;
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);

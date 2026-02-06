@@ -394,6 +394,10 @@ pub enum JitResult {
     /// The IoToken is stored in JitContext.wait_io_token.
     /// After I/O completes, VM resumes execution in interpreter at call_resume_pc.
     WaitIo = 3,
+    /// JIT requests VM to block on queue operation (channel/port send/recv).
+    /// Unlike WaitIo, no token is needed - fiber is woken via ChannelWaiter.
+    /// After being woken, VM resumes execution in interpreter at call_resume_pc.
+    WaitQueue = 4,
 }
 
 // =============================================================================

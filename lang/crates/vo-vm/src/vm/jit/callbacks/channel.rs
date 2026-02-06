@@ -63,7 +63,7 @@ pub extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     JitResult::Ok
 }
 
-/// Send on a channel. Returns WaitIo if would block.
+/// Send on a channel. Returns WaitQueue if would block.
 pub extern "C" fn jit_chan_send(
     ctx: *mut JitContext,
     chan: u64,
@@ -92,7 +92,7 @@ pub extern "C" fn jit_chan_send(
         SendResult::Buffered => JitResult::Ok,
         SendResult::WouldBlock(value) => {
             state.register_sender(ChannelWaiter::Simple(fiber.id as u64), value);
-            JitResult::WaitIo
+            JitResult::WaitQueue
         }
         SendResult::Blocked => unreachable!("try_send never returns Blocked"),
         SendResult::Closed => {
@@ -101,7 +101,7 @@ pub extern "C" fn jit_chan_send(
     }
 }
 
-/// Receive from a channel. Returns WaitIo if would block.
+/// Receive from a channel. Returns WaitQueue if would block.
 /// Writes received value to dst_ptr. If has_ok, writes ok flag after value.
 pub extern "C" fn jit_chan_recv(
     ctx: *mut JitContext,
@@ -139,7 +139,7 @@ pub extern "C" fn jit_chan_recv(
         }
         RecvResult::WouldBlock => {
             state.register_receiver(ChannelWaiter::Simple(fiber.id as u64));
-            JitResult::WaitIo
+            JitResult::WaitQueue
         }
         RecvResult::Blocked => unreachable!("try_recv never returns Blocked"),
         RecvResult::Closed => {

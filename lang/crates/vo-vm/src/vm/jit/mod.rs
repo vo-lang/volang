@@ -5,7 +5,7 @@
 //! When VM encounters a `Call` instruction for a JIT-compiled function:
 //! 1. `dispatch_jit_call` allocates frame in fiber.stack and prepares JitContext
 //! 2. JIT function executes natively, using fiber.stack directly
-//! 3. Results (Ok/Panic/Call/WaitIo) are translated back to VM state
+//! 3. Results (Ok/Panic/Call/WaitIo/WaitQueue) are translated back to VM state
 //!
 //! ## fiber.stack ABI
 //!
@@ -17,7 +17,7 @@
 //! JIT-to-JIT calls use lightweight `resume_stack` (shadow frames) instead of `fiber.frames`:
 //! - `jit_push_frame`: Push ResumePoint to resume_stack (not fiber.frames)
 //! - `jit_pop_frame`: Pop ResumePoint and restore caller's bp
-//! - On Call/WaitIo: `convert_resume_stack_to_frames` converts shadow frames to real CallFrames
+//! - On Call/WaitIo/WaitQueue: `materialize_jit_frames` converts shadow frames to real CallFrames
 //!
 //! This avoids redundant frame management during pure JIT execution.
 
@@ -361,14 +361,17 @@ fn handle_jit_result(
             #[cfg(feature = "std")]
             {
                 let io_token = ctx.wait_io_token();
-                if io_token == 0 {
-                    ExecResult::Block(crate::fiber::BlockReason::Queue)
-                } else {
-                    fiber.resume_io_token = Some(io_token);
-                    ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
-                }
+                fiber.resume_io_token = Some(io_token);
+                ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
             }
             #[cfg(not(feature = "std"))]
+            {
+                panic!("JIT returned WaitIo but std feature not enabled")
+            }
+        }
+        JitResult::WaitQueue => {
+            let resume_pc = ctx.call_resume_pc();
+            materialize_jit_frames(fiber, resume_pc);
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
     }
@@ -575,12 +578,14 @@ pub extern "C" fn jit_call_extern(
 /// Special return values from loop OSR execution.
 pub const OSR_RESULT_FRAME_CHANGED: usize = usize::MAX;
 pub const OSR_RESULT_WAITIO: usize = usize::MAX - 1;
+pub const OSR_RESULT_WAITQUEUE: usize = usize::MAX - 2;
 
 /// Execute a compiled loop via OSR.
 /// Returns:
 /// - Some(exit_pc) for normal exit
 /// - Some(OSR_RESULT_FRAME_CHANGED) if loop made a Call (VM should continue)
-/// - Some(OSR_RESULT_WAITIO) if loop needs WaitIo
+/// - Some(OSR_RESULT_WAITIO) if loop blocks on I/O
+/// - Some(OSR_RESULT_WAITQUEUE) if loop blocks on channel/port
 /// - None for panic
 pub fn dispatch_loop_osr(
     vm: &mut Vm,
@@ -739,6 +744,16 @@ pub fn dispatch_loop_osr(
         #[cfg(not(feature = "std"))]
         JitResult::WaitIo => {
             panic!("Loop OSR returned WaitIo but std feature not enabled")
+        }
+        JitResult::WaitQueue => {
+            let resume_pc = ctx.call_resume_pc();
+            
+            // Update frame for resume (re-execute the blocking instruction)
+            if let Some(frame) = fiber.current_frame_mut() {
+                frame.pc = resume_pc as usize;
+            }
+            
+            Some(OSR_RESULT_WAITQUEUE)
         }
     }
 }

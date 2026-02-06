@@ -16,6 +16,7 @@ pub const JIT_RESULT_OK: i32 = 0;
 pub const JIT_RESULT_PANIC: i32 = 1;
 pub const JIT_RESULT_CALL: i32 = 2;
 pub const JIT_RESULT_WAIT_IO: i32 = 3;
+pub const JIT_RESULT_WAIT_QUEUE: i32 = 4;
 
 /// Create signature for vo_jit_push_frame: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
 pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
@@ -637,7 +638,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
 
 /// Check call result and handle non-Ok cases.
 /// 
-/// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3
+/// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3, WaitQueue=4
 /// 
 /// For non-Ok results:
 /// - If spill_vars is true: spill all variables to memory before returning

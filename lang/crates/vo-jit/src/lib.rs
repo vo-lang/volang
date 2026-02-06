@@ -75,12 +75,8 @@ fn can_jit_to_jit_call_impl(func: &FunctionDef, module: &VoModule, depth: usize)
             Opcode::CallClosure | Opcode::CallIface => {
                 return false;
             }
-            // Select may block and return WaitIo
+            // Select uses fiber.current_frame() to get bp, which is wrong during JIT-to-JIT calls
             Opcode::SelectExec => {
-                return false;
-            }
-            // Channel/Port send/recv may block and return WaitIo
-            Opcode::ChanSend | Opcode::ChanRecv | Opcode::PortSend | Opcode::PortRecv => {
                 return false;
             }
             _ => {}

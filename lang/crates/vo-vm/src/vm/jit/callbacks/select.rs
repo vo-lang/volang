@@ -110,7 +110,7 @@ pub extern "C" fn jit_select_recv(
 ///
 /// Returns:
 /// - JitResult::Ok if select completed (result_reg contains case index)
-/// - JitResult::WaitIo if select blocked (fiber registered on channels)
+/// - JitResult::WaitQueue if select blocked (fiber registered on channels)
 /// - JitResult::Panic if send on closed channel
 pub extern "C" fn jit_select_exec(
     ctx: *mut JitContext,
@@ -132,7 +132,7 @@ pub extern "C" fn jit_select_exec(
     
     match exec::exec_select_exec(stack, bp, fiber.id, &mut fiber.select_state, &inst) {
         SelectResult::Continue => JitResult::Ok,
-        SelectResult::Block => JitResult::WaitIo,
+        SelectResult::Block => JitResult::WaitQueue,
         SelectResult::SendOnClosed => {
             set_jit_panic(&mut vm.state.gc, fiber, helpers::ERR_SEND_ON_CLOSED)
         }

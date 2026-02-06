@@ -600,7 +600,7 @@ impl Vm {
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
                 if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp) {
-                    use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO};
+                    use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO, OSR_RESULT_WAITQUEUE};
                     if result_pc == OSR_RESULT_FRAME_CHANGED {
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         stack = fiber.stack_ptr();
@@ -611,6 +611,8 @@ impl Vm {
                         let token = fiber.resume_io_token
                             .expect("OSR_RESULT_WAITIO but resume_io_token is None");
                         return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                    } else if result_pc == OSR_RESULT_WAITQUEUE {
+                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     } else {
                         let fiber = self.scheduler.get_fiber_mut(fiber_id);
                         fiber.current_frame_mut().unwrap().pc = result_pc;
