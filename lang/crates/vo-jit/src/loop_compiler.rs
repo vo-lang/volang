@@ -42,6 +42,8 @@ pub struct LoopCompiler<'a> {
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
     checked_non_nil: HashSet<u16>,
+    /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
+    memory_only_start: u16,
 }
 
 impl<'a> LoopCompiler<'a> {
@@ -75,10 +77,14 @@ impl<'a> LoopCompiler<'a> {
             helpers,
             reg_consts: HashMap::new(),
             checked_non_nil: HashSet::new(),
+            memory_only_start: u16::MAX,
         }
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
+        self.memory_only_start = crate::translator::compute_memory_only_start(
+            &self.func_def.code[self.loop_info.begin_pc..=self.loop_info.end_pc]
+        );
         self.declare_variables();
         self.scan_jump_targets();
         
@@ -411,7 +417,13 @@ impl<'a> LoopCompiler<'a> {
 
 impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
-    fn read_var(&mut self, slot: u16) -> Value { self.load_var_from_memory(slot) }
+    fn read_var(&mut self, slot: u16) -> Value {
+        if slot < self.memory_only_start {
+            self.builder.use_var(self.vars[slot as usize])
+        } else {
+            self.load_var_from_memory(slot)
+        }
+    }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
         // Also sync to memory for var_addr access (e.g., slice_append reads element from memory)
@@ -450,8 +462,13 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         self.func_def.slot_types.get(slot as usize).copied().unwrap_or_default()
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
-        let offset = (slot as i32) * 8;
-        self.builder.ins().load(types::F64, MemFlags::trusted(), self.locals_ptr, offset)
+        if slot < self.memory_only_start {
+            let i64_val = self.builder.use_var(self.vars[slot as usize]);
+            self.builder.ins().bitcast(types::F64, MemFlags::new(), i64_val)
+        } else {
+            let offset = (slot as i32) * 8;
+            self.builder.ins().load(types::F64, MemFlags::trusted(), self.locals_ptr, offset)
+        }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         // Store directly as F64 to memory, no bitcast needed
@@ -462,6 +479,16 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         self.builder.def_var(self.vars[slot as usize], i64_val);
         // Clear non-nil status when slot is written
         self.checked_non_nil.remove(&slot);
+    }
+    fn reload_all_vars_from_memory(&mut self) {
+        // LoopCompiler's locals_ptr IS fiber.stack[bp].
+        // External callbacks (select_exec, etc.) write directly to fiber.stack,
+        // so SSA variables may be stale. Reload all from memory.
+        for i in 0..self.vars.len() {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
+            self.builder.def_var(self.vars[i], val);
+        }
     }
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)

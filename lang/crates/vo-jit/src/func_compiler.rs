@@ -30,12 +30,15 @@ pub struct FunctionCompiler<'a> {
     self_func_ref: Option<FuncRef>,
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Option<Variable>,
-    /// The args_ptr parameter passed to this function (points to caller's args_slot on native stack).
-    /// Used for all local variable access - no separate locals_slot needed.
+    /// The args_ptr parameter passed to this function (points to fiber.stack[jit_bp]).
+    /// Used for all local variable access.
     args_ptr_val: Option<Value>,
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
+    /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
+    /// Slots below this value use SSA reads via use_var for better register allocation.
+    memory_only_start: u16,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -67,10 +70,12 @@ impl<'a> FunctionCompiler<'a> {
             saved_jit_bp: None,
             args_ptr_val: None,
             checked_non_nil: HashSet::new(),
+            memory_only_start: u16::MAX,
         }
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
+        self.memory_only_start = crate::translator::compute_memory_only_start(&self.func_def.code);
         self.declare_variables();
         self.scan_jump_targets();
         
@@ -138,24 +143,22 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Spill all variables from caller's args_slot (native stack) to fiber.stack.
+    /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
     /// Called on slow path (Call/WaitIo) so VM can see the current state.
+    /// Note: args_ptr may be stale if fiber.stack was reallocated during nested calls,
+    /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
-        let src_ptr = self.args_ptr_val.unwrap();  // Caller's native stack
-        let dst_ptr = self.fiber_stack_args_ptr(); // Fiber.stack (may have reallocated)
+        let dst_ptr = self.fiber_stack_args_ptr();
         let num_slots = self.vars.len();
-        
-        // Copy from caller's args_slot to fiber.stack
         for i in 0..num_slots {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), src_ptr, offset);
+            let val = self.builder.use_var(self.vars[i]);
             self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
         }
     }
     
-    /// Compute fiber.stack args_ptr dynamically from ctx.stack_ptr + saved_jit_bp.
-    /// This is necessary because fiber.stack may reallocate during nested calls.
-    /// Used only for spilling variables to fiber.stack on slow path.
+    /// Compute fiber.stack base dynamically from ctx.stack_ptr + saved_jit_bp.
+    /// Needed because fiber.stack may reallocate during nested calls.
     fn fiber_stack_args_ptr(&mut self) -> Value {
         let ctx = self.builder.block_params(self.entry_block)[0];
         let stack_ptr = self.builder.ins().load(
@@ -173,11 +176,10 @@ impl<'a> FunctionCompiler<'a> {
         
         let params = self.builder.block_params(self.entry_block);
         let ctx = params[0];
-        let args_ptr = params[1];  // Points to caller's args_slot (native stack)
+        let args_ptr = params[1];  // Points to fiber.stack[jit_bp]
         let _ret = params[2];
         
         // Save args_ptr for local variable access
-        // This points to caller's native stack where our locals live
         self.args_ptr_val = Some(args_ptr);
         
         // Save jit_bp from ctx at function entry.
@@ -264,13 +266,17 @@ impl<'a> FunctionCompiler<'a> {
         self.conditional_jump(inst, IntCC::Equal);
     }
 
-    /// Load variable from args_ptr (caller's native stack).
+    /// Read variable: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
-        let args_ptr = self.args_ptr_val.unwrap();
-        self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+        if slot < self.memory_only_start {
+            self.builder.use_var(self.vars[slot as usize])
+        } else {
+            let args_ptr = self.args_ptr_val.unwrap();
+            self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+        }
     }
-    
-    /// Store value to both SSA variable and args_ptr (caller's native stack).
+
+    /// Write value to both SSA variable and fiber.stack memory.
     fn store_local(&mut self, slot: u16, val: Value) {
         self.builder.def_var(self.vars[slot as usize], val);
         let args_ptr = self.args_ptr_val.unwrap();
@@ -445,14 +451,10 @@ impl<'a> FunctionCompiler<'a> {
             types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
         );
         
-        // Read args from args_ptr (caller's native stack)
-        let caller_args_ptr = self.args_ptr_val.unwrap();
+        // Read args via load_local (SSA when safe, memory when aliased)
         let mut arg_values = Vec::with_capacity(arg_slots);
         for i in 0..arg_slots {
-            let val = self.builder.ins().load(
-                types::I64, MemFlags::trusted(), caller_args_ptr, ((arg_start + i) * 8) as i32
-            );
-            arg_values.push(val);
+            arg_values.push(self.load_local((arg_start + i) as u16));
         }
         
         // Create args_slot on native stack for passing args to callee
@@ -598,7 +600,6 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn get_reg_const(&self, reg: u16) -> Option<i64> { self.reg_consts.get(&reg).copied() }
     fn panic_return_value(&self) -> i32 { 1 }
     fn var_addr(&mut self, slot: u16) -> Value {
-        // Return address in caller's args_slot (native stack)
         let args_ptr = self.args_ptr_val.unwrap();
         self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
     }
@@ -615,8 +616,13 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         self.func_def.slot_types.get(slot as usize).copied().unwrap_or_default()
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
-        let args_ptr = self.args_ptr_val.unwrap();
-        self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+        if slot < self.memory_only_start {
+            let i64_val = self.builder.use_var(self.vars[slot as usize]);
+            self.builder.ins().bitcast(types::F64, MemFlags::new(), i64_val)
+        } else {
+            let args_ptr = self.args_ptr_val.unwrap();
+            self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
+        }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         // Store directly as F64 to memory, no bitcast needed
@@ -627,6 +633,17 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         self.builder.def_var(self.vars[slot as usize], i64_val);
         // Clear non-nil status when slot is written
         self.checked_non_nil.remove(&slot);
+    }
+    fn reload_all_vars_from_memory(&mut self) {
+        // Reload all SSA variables from args_ptr (which points to fiber.stack[jit_bp]).
+        // Needed after external callbacks (e.g., select_exec) that write to fiber.stack
+        // directly without updating SSA.
+        let args_ptr = self.args_ptr_val.unwrap();
+        for i in 0..self.vars.len() {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+            self.builder.def_var(self.vars[i], val);
+        }
     }
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)

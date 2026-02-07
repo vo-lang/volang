@@ -2022,11 +2022,10 @@ fn select_exec<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(),
     e.builder().switch_to_block(ok_block);
     e.builder().seal_block(ok_block);
     
-    // The result is written to fiber.stack[bp + result_reg] by the callback
-    // Load it into SSA variable
-    let dst_ptr = e.var_addr(inst.a);
-    let val = e.builder().ins().load(types::I64, MemFlags::trusted(), dst_ptr, 0);
-    e.write_var(inst.a, val);
+    // The select callback writes result_reg AND recv dst slots directly to fiber.stack.
+    // Reload all SSA variables from memory to resync.
+    // (For FunctionCompiler this is a no-op since args_ptr != fiber.stack.)
+    e.reload_all_vars_from_memory();
     
     Ok(())
 }

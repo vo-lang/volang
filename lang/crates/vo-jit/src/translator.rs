@@ -3,6 +3,7 @@
 use cranelift_codegen::ir::{FuncRef, Value};
 use cranelift_frontend::FunctionBuilder;
 use vo_runtime::bytecode::Module as VoModule;
+use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
 /// Translation result
@@ -141,9 +142,29 @@ pub trait IrEmitter<'a> {
     /// Write variable as F64. Store F64 directly to memory.
     fn write_var_f64(&mut self, slot: u16, val: Value);
     
+    /// Reload all SSA variables from memory.
+    /// Called after external callbacks that may write to locals memory without updating SSA
+    /// (e.g., select_exec writes recv results to fiber.stack via callback).
+    fn reload_all_vars_from_memory(&mut self);
+
     /// Check if a slot has been verified non-nil in the current basic block.
     fn is_checked_non_nil(&self, slot: u16) -> bool;
     
     /// Mark a slot as verified non-nil (after nil check passed).
     fn mark_checked_non_nil(&mut self, slot: u16);
+}
+
+/// Scan instructions to find the minimum base register used in SlotSet/SlotSetN.
+/// All slots below this value are safe for SSA reads (no aliasing with pointer-based memory writes).
+pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
+    let mut min_base = u16::MAX;
+    for inst in code {
+        match inst.opcode() {
+            Opcode::SlotSet | Opcode::SlotSetN => {
+                min_base = min_base.min(inst.a);
+            }
+            _ => {}
+        }
+    }
+    min_base
 }
