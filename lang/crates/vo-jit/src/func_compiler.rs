@@ -110,14 +110,16 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        let num_slots = self.func_def.local_slots as usize;
-        self.vars.reserve(num_slots);
-        
-        for i in 0..num_slots {
-            let var = Variable::from_u32(i as u32);
-            self.builder.declare_var(var, types::I64);
-            self.vars.push(var);
-        }
+        self.vars = crate::translator::declare_variables(
+            &mut self.builder,
+            self.func_def.local_slots as usize,
+            &self.func_def.slot_types,
+        );
+    }
+
+    #[inline]
+    fn is_float_slot(&self, slot: u16) -> bool {
+        crate::translator::is_float_slot(&self.func_def.slot_types, slot)
     }
 
     fn scan_jump_targets(&mut self) {
@@ -199,16 +201,22 @@ impl<'a> FunctionCompiler<'a> {
         // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
         for i in 0..param_slots {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
         
         // Initialize non-param SSA vars to 0 and store to args_ptr
-        let zero = self.builder.ins().iconst(types::I64, 0);
+        let zero_i64 = self.builder.ins().iconst(types::I64, 0);
+        let zero_f64 = self.builder.ins().f64const(0.0);
         for i in param_slots..num_slots {
-            self.builder.def_var(self.vars[i], zero);
+            if self.is_float_slot(i as u16) {
+                self.builder.def_var(self.vars[i], zero_f64);
+            } else {
+                self.builder.def_var(self.vars[i], zero_i64);
+            }
             let offset = (i * 8) as i32;
-            self.builder.ins().store(MemFlags::trusted(), zero, args_ptr, offset);
+            self.builder.ins().store(MemFlags::trusted(), zero_i64, args_ptr, offset);
         }
     }
 
@@ -266,19 +274,29 @@ impl<'a> FunctionCompiler<'a> {
         self.conditional_jump(inst, IntCC::Equal);
     }
 
-    /// Read variable: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
+    /// Read variable as I64: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
-            self.builder.use_var(self.vars[slot as usize])
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            if self.is_float_slot(slot) {
+                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+            } else {
+                val
+            }
         } else {
             let args_ptr = self.args_ptr_val.unwrap();
             self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
 
-    /// Write value to both SSA variable and fiber.stack memory.
+    /// Write I64 value to both SSA variable and fiber.stack memory.
     fn store_local(&mut self, slot: u16, val: Value) {
-        self.builder.def_var(self.vars[slot as usize], val);
+        if self.is_float_slot(slot) {
+            let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            self.builder.def_var(self.vars[slot as usize], f64_val);
+        } else {
+            self.builder.def_var(self.vars[slot as usize], val);
+        }
         let args_ptr = self.args_ptr_val.unwrap();
         self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         // Clear non-nil status when slot is written
@@ -617,31 +635,35 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
-            let i64_val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder.ins().bitcast(types::F64, MemFlags::new(), i64_val)
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            if self.is_float_slot(slot) {
+                val // Already F64, no bitcast needed!
+            } else {
+                self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
+            }
         } else {
             let args_ptr = self.args_ptr_val.unwrap();
             self.builder.ins().load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        // Store directly as F64 to memory, no bitcast needed
+        // Store directly as F64 to memory
         let args_ptr = self.args_ptr_val.unwrap();
         self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
-        // SSA var is I64, need bitcast for def_var
-        let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
-        self.builder.def_var(self.vars[slot as usize], i64_val);
-        // Clear non-nil status when slot is written
+        if self.is_float_slot(slot) {
+            self.builder.def_var(self.vars[slot as usize], val); // Already F64, no bitcast!
+        } else {
+            let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+            self.builder.def_var(self.vars[slot as usize], i64_val);
+        }
         self.checked_non_nil.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
-        // Reload all SSA variables from args_ptr (which points to fiber.stack[jit_bp]).
-        // Needed after external callbacks (e.g., select_exec) that write to fiber.stack
-        // directly without updating SSA.
         let args_ptr = self.args_ptr_val.unwrap();
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
+            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), args_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }

@@ -1,7 +1,7 @@
 //! IrEmitter trait - shared IR generation interface.
 
-use cranelift_codegen::ir::{FuncRef, Value};
-use cranelift_frontend::FunctionBuilder;
+use cranelift_codegen::ir::{types, FuncRef, Value};
+use cranelift_frontend::{FunctionBuilder, Variable};
 use vo_runtime::bytecode::Module as VoModule;
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
@@ -167,4 +167,31 @@ pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
         }
     }
     min_base
+}
+
+#[inline]
+pub fn is_float_slot(slot_types: &[SlotType], slot: u16) -> bool {
+    slot_types.get(slot as usize).copied() == Some(SlotType::Float)
+}
+
+/// Cranelift IR type for a variable slot: F64 for Float slots, I64 for everything else.
+#[inline]
+pub fn slot_ir_type(slot_types: &[SlotType], slot: u16) -> cranelift_codegen::ir::Type {
+    if is_float_slot(slot_types, slot) { types::F64 } else { types::I64 }
+}
+
+/// Declare SSA variables for all local slots, using F64 for Float slots.
+pub fn declare_variables(
+    builder: &mut FunctionBuilder,
+    num_slots: usize,
+    slot_types: &[SlotType],
+) -> Vec<Variable> {
+    let mut vars = Vec::with_capacity(num_slots);
+    for i in 0..num_slots {
+        let var = Variable::from_u32(i as u32);
+        let ty = slot_ir_type(slot_types, i as u16);
+        builder.declare_var(var, ty);
+        vars.push(var);
+    }
+    vars
 }

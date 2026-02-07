@@ -139,14 +139,16 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        let num_slots = self.func_def.local_slots as usize;
-        self.vars.reserve(num_slots);
-        
-        for i in 0..num_slots {
-            let var = Variable::from_u32(i as u32);
-            self.builder.declare_var(var, types::I64);
-            self.vars.push(var);
-        }
+        self.vars = crate::translator::declare_variables(
+            &mut self.builder,
+            self.func_def.local_slots as usize,
+            &self.func_def.slot_types,
+        );
+    }
+
+    #[inline]
+    fn is_float_slot(&self, slot: u16) -> bool {
+        crate::translator::is_float_slot(&self.func_def.slot_types, slot)
     }
 
     fn scan_jump_targets(&mut self) {
@@ -198,7 +200,8 @@ impl<'a> LoopCompiler<'a> {
         // Normal entry: load all variables from memory
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
+            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), self.locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
@@ -419,17 +422,25 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> { &mut self.builder }
     fn read_var(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
-            self.builder.use_var(self.vars[slot as usize])
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            if self.is_float_slot(slot) {
+                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+            } else {
+                val
+            }
         } else {
             self.load_var_from_memory(slot)
         }
     }
     fn write_var(&mut self, slot: u16, val: Value) {
-        self.builder.def_var(self.vars[slot as usize], val);
-        // Also sync to memory for var_addr access (e.g., slice_append reads element from memory)
+        if self.is_float_slot(slot) {
+            let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            self.builder.def_var(self.vars[slot as usize], f64_val);
+        } else {
+            self.builder.def_var(self.vars[slot as usize], val);
+        }
         let offset = (slot as i32) * 8;
         self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
-        // Clear non-nil status when slot is written
         self.checked_non_nil.remove(&slot);
     }
     fn ctx_param(&mut self) -> Value { self.ctx_ptr }
@@ -463,30 +474,33 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
-            let i64_val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder.ins().bitcast(types::F64, MemFlags::new(), i64_val)
+            let val = self.builder.use_var(self.vars[slot as usize]);
+            if self.is_float_slot(slot) {
+                val // Already F64, no bitcast needed!
+            } else {
+                self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
+            }
         } else {
             let offset = (slot as i32) * 8;
             self.builder.ins().load(types::F64, MemFlags::trusted(), self.locals_ptr, offset)
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        // Store directly as F64 to memory, no bitcast needed
         let offset = (slot as i32) * 8;
         self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
-        // SSA var is I64, need bitcast for def_var
-        let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
-        self.builder.def_var(self.vars[slot as usize], i64_val);
-        // Clear non-nil status when slot is written
+        if self.is_float_slot(slot) {
+            self.builder.def_var(self.vars[slot as usize], val); // Already F64, no bitcast!
+        } else {
+            let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+            self.builder.def_var(self.vars[slot as usize], i64_val);
+        }
         self.checked_non_nil.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
-        // LoopCompiler's locals_ptr IS fiber.stack[bp].
-        // External callbacks (select_exec, etc.) write directly to fiber.stack,
-        // so SSA variables may be stale. Reload all from memory.
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
-            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), self.locals_ptr, offset);
+            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
+            let val = self.builder.ins().load(ty, MemFlags::trusted(), self.locals_ptr, offset);
             self.builder.def_var(self.vars[i], val);
         }
     }
