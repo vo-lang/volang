@@ -9,6 +9,7 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitContext;
 
+use crate::intrinsics;
 use crate::translator::IrEmitter;
 
 // JitResult constants for readability
@@ -402,6 +403,11 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
     config: CallExternConfig,
 ) {
+    // Fast path: emit intrinsic instruction directly, skip FFI entirely
+    if intrinsics::try_emit_for_extern(emitter, inst) {
+        return;
+    }
+
     let call_extern_func = emitter.helpers().call_extern.expect("call_extern helper not registered");
     
     let dst = inst.a as usize;

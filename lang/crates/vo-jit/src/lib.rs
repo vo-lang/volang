@@ -3,6 +3,7 @@
 mod call_helpers;
 mod func_compiler;
 mod helpers;
+mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
 mod translate;
