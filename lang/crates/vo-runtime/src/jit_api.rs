@@ -253,7 +253,7 @@ pub struct JitContext {
     pub push_resume_point_fn: Option<JitPushResumePointFn>,
     
     // =========================================================================
-    // VM Callbacks for advanced opcodes (Batch 1+)
+    // VM Callbacks for advanced opcodes
     // =========================================================================
     
     /// Callback to create a new island.
@@ -268,7 +268,6 @@ pub struct JitContext {
     /// Returns JitResult (Ok or Panic).
     pub port_close_fn: Option<extern "C" fn(*mut JitContext, port: u64) -> JitResult>,
     
-    // Batch 2: Channel Send/Recv
     /// Callback to send on a channel.
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub chan_send_fn: Option<extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
@@ -277,7 +276,6 @@ pub struct JitContext {
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub chan_recv_fn: Option<extern "C" fn(*mut JitContext, chan: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
     
-    // Batch 3: Port Send/Recv
     /// Callback to send on a port.
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub port_send_fn: Option<extern "C" fn(*mut JitContext, port: u64, val_ptr: *const u64, val_slots: u32) -> JitResult>,
@@ -286,7 +284,6 @@ pub struct JitContext {
     /// Returns JitResult (Ok, Panic, or WaitIo).
     pub port_recv_fn: Option<extern "C" fn(*mut JitContext, port: u64, dst_ptr: *mut u64, elem_slots: u32, has_ok: u32) -> JitResult>,
     
-    // Batch 4: Goroutine Start
     /// Callback to spawn a new goroutine.
     /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0), 
     /// args_ptr: pointer to arguments, arg_slots: number of argument slots
@@ -396,17 +393,14 @@ impl JitContext {
     pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
     pub const OFFSET_PUSH_RESUME_POINT_FN: i32 = std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
     
-    // VM callback offsets (Batch 1+)
+    // VM callback offsets
     pub const OFFSET_CREATE_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, create_island_fn) as i32;
     pub const OFFSET_CHAN_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, chan_close_fn) as i32;
     pub const OFFSET_PORT_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, port_close_fn) as i32;
-    // Batch 2
     pub const OFFSET_CHAN_SEND_FN: i32 = std::mem::offset_of!(JitContext, chan_send_fn) as i32;
     pub const OFFSET_CHAN_RECV_FN: i32 = std::mem::offset_of!(JitContext, chan_recv_fn) as i32;
-    // Batch 3
     pub const OFFSET_PORT_SEND_FN: i32 = std::mem::offset_of!(JitContext, port_send_fn) as i32;
     pub const OFFSET_PORT_RECV_FN: i32 = std::mem::offset_of!(JitContext, port_recv_fn) as i32;
-    // Batch 4
     pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
     pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
     
@@ -681,31 +675,6 @@ pub extern "C" fn vo_call_extern(
     };
     
     call_fn(ctx, ctx_ref.extern_registry, ctx_ref.gc, ctx_ref.module as *const c_void, extern_id, args, arg_count, ret, ret_slots)
-}
-
-/// Get func_id from closure. Returns 0 if closure_ref is nil.
-#[no_mangle]
-pub extern "C" fn vo_closure_get_func_id(closure_ref: u64) -> u32 {
-    use crate::objects::closure;
-    use crate::gc::GcRef;
-    
-    if closure_ref == 0 {
-        return 0; // Will cause nil pointer panic in JIT
-    }
-    
-    closure::func_id(closure_ref as GcRef)
-}
-
-/// Get func_id from interface method. Looks up via itab cache.
-#[no_mangle]
-pub extern "C" fn vo_iface_get_func_id(ctx: *mut JitContext, slot0: u64, method_idx: u32) -> u32 {
-    use crate::objects::interface;
-    
-    let ctx_ref = unsafe { &*ctx };
-    let itab_cache = unsafe { &*ctx_ref.itab_cache };
-    
-    let itab_id = interface::unpack_itab_id(slot0);
-    itab_cache.lookup_method(itab_id, method_idx as usize)
 }
 
 // =============================================================================
@@ -1498,20 +1467,15 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_copy", vo_copy as *const u8),
         ("vo_port_new_checked", vo_port_new_checked as *const u8),
-        // Batch 1: Island/Channel/Port operations
         ("vo_island_new", vo_island_new as *const u8),
         ("vo_chan_close", vo_chan_close as *const u8),
         ("vo_port_close", vo_port_close as *const u8),
-        // Batch 2: Channel Send/Recv
         ("vo_chan_send", vo_chan_send as *const u8),
         ("vo_chan_recv", vo_chan_recv as *const u8),
-        // Batch 3: Port Send/Recv
         ("vo_port_send", vo_port_send as *const u8),
         ("vo_port_recv", vo_port_recv as *const u8),
-        // Batch 4: Goroutine Start
         ("vo_go_start", vo_go_start as *const u8),
         ("vo_go_island", vo_go_island as *const u8),
-        // Batch 5: Select Statement
         ("vo_select_begin", vo_select_begin as *const u8),
         ("vo_select_send", vo_select_send as *const u8),
         ("vo_select_recv", vo_select_recv as *const u8),
@@ -1520,7 +1484,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
 }
 
 // =============================================================================
-// Batch 1: Island/Channel/Port JIT Helpers
+// Island/Channel/Port JIT Helpers
 // =============================================================================
 
 /// Create a new island.
@@ -1552,7 +1516,7 @@ pub extern "C" fn vo_port_close(ctx: *mut JitContext, port: u64) -> JitResult {
 }
 
 // =============================================================================
-// Batch 2: Channel Send/Recv
+// Channel Send/Recv
 // =============================================================================
 
 /// Send on a channel.
@@ -1576,7 +1540,7 @@ pub extern "C" fn vo_chan_recv(ctx: *mut JitContext, chan: u64, dst_ptr: *mut u6
 }
 
 // =============================================================================
-// Batch 3: Port Send/Recv
+// Port Send/Recv
 // =============================================================================
 
 /// Send on a port.
@@ -1600,7 +1564,7 @@ pub extern "C" fn vo_port_recv(ctx: *mut JitContext, port: u64, dst_ptr: *mut u6
 }
 
 // =============================================================================
-// Batch 4: Goroutine Start
+// Goroutine Start
 // =============================================================================
 
 /// Spawn a new goroutine.
@@ -1635,7 +1599,7 @@ pub extern "C" fn vo_go_island(
 }
 
 // =============================================================================
-// Batch 5: Select Statement
+// Select Statement
 // =============================================================================
 
 /// Initialize a select statement.

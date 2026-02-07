@@ -418,7 +418,7 @@ impl<'a> FunctionCompiler<'a> {
             });
             false // Block not terminated - we have a merge block for continuation
         } else {
-            // Callee is NOT jittable (has defer/channel/select/etc)
+            // Callee has defer: requires real CallFrame in fiber.frames.
             // Use Call request mechanism: return JitResult::Call, VM executes callee,
             // then continues execution in interpreter
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {

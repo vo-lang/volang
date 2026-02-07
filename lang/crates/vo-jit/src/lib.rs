@@ -17,7 +17,6 @@ use std::collections::HashMap;
 
 use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_codegen::verifier::verify_function;
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
@@ -162,11 +161,11 @@ impl JitCompiler {
         helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
     }
 
-    fn finalize_function(&mut self, func_id_cl: cranelift_module::FuncId, name: &str) -> Result<*const u8, JitError> {
+    fn finalize_function(&mut self, func_id_cl: cranelift_module::FuncId, #[cfg_attr(not(debug_assertions), allow(unused))] name: &str) -> Result<*const u8, JitError> {
         #[cfg(debug_assertions)]
         {
             let flags = settings::Flags::new(settings::builder());
-            match verify_function(&self.ctx.func, &flags) {
+            match cranelift_codegen::verifier::verify_function(&self.ctx.func, &flags) {
                 Ok(()) => {
                     if self.debug_ir {
                         eprintln!("[JIT VERIFY OK] {}", name);

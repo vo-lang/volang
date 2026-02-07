@@ -17,7 +17,7 @@ pub const JIT_RESULT_PANIC: i32 = 1;
 pub const JIT_RESULT_CALL: i32 = 2;
 pub const JIT_RESULT_WAIT_IO: i32 = 3;
 
-/// Create signature for vo_jit_push_frame: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
+/// Create signature for push_frame_fn callback: (ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc) -> args_ptr
 pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -32,7 +32,7 @@ pub fn import_push_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
-/// Create signature for vo_jit_pop_frame: (ctx, caller_bp) -> ()
+/// Create signature for pop_frame_fn callback: (ctx, caller_bp) -> ()
 pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -42,7 +42,7 @@ pub fn import_pop_frame_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
-/// Create signature for vo_jit_push_resume_point: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
+/// Create signature for push_resume_point_fn callback: (ctx, func_id, resume_pc, bp, caller_bp, ret_reg, ret_slots) -> ()
 pub fn import_push_resume_point_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -194,7 +194,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     
     emit_prepared_call(emitter, PreparedCallParams {
         jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
-        arg_start, arg_slots, ret_slots, ret_slot,
+        arg_start, ret_slots, ret_slot,
         resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
     });
 }
@@ -263,7 +263,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     
     emit_prepared_call(emitter, PreparedCallParams {
         jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
-        arg_start, arg_slots, ret_slots, ret_slot,
+        arg_start, ret_slots, ret_slot,
         resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
     });
 }
@@ -275,7 +275,6 @@ struct PreparedCallParams {
     func_id: Value,
     ret_ptr: Value,
     arg_start: usize,
-    arg_slots: usize,
     ret_slots: usize,
     ret_slot: cranelift_codegen::ir::StackSlot,
     resume_pc_val: Value,
@@ -499,7 +498,7 @@ pub struct CallExternConfig {
 
 /// Emit a call via VM using Call request mechanism.
 /// 
-/// This is used when the callee is not jittable (has defer/channel/select/etc).
+/// This is used when the callee has defer (requires real CallFrame in fiber.frames).
 /// Instead of synchronously calling vo_call_vm, we:
 /// 1. Set call request info in JitContext
 /// 2. Return JitResult::Call

@@ -86,7 +86,7 @@ impl<'a> LoopCompiler<'a> {
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
         
-        let mut block_terminated = false;  // Same as func_compiler!
+        let mut block_terminated = false;
         
         // Compile from loop_start (begin_pc) to after back-edge Jump (end_pc + 1)
         // Note: begin_pc is now loop_start (condition check), not HINT position
@@ -390,7 +390,7 @@ impl<'a> LoopCompiler<'a> {
             });
             false // Block not terminated - we have a merge block
         } else {
-            // Not jittable or no call_vm helper - use Call request mechanism
+            // Callee has defer or no call_vm helper - use Call request mechanism
             crate::call_helpers::emit_call_via_vm(self, crate::call_helpers::CallViaVmConfig {
                 func_id,
                 arg_start,

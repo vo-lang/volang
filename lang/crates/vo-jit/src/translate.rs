@@ -122,17 +122,17 @@ pub fn translate_inst<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         PortNew => { port_new(e, inst); Ok(Completed) }
         PortLen => { port_len(e, inst); Ok(Completed) }
         PortCap => { port_cap(e, inst); Ok(Completed) }
-        // Batch 1: Island/Channel/Port close operations
+        // Island/Channel/Port
         IslandNew => { island_new(e, inst); Ok(Completed) }
         ChanClose => { chan_close(e, inst)?; Ok(Completed) }
         PortClose => { port_close(e, inst)?; Ok(Completed) }
-        // Batch 2: Channel Send/Recv
+        // Channel Send/Recv
         ChanSend => { chan_send(e, inst)?; Ok(Completed) }
         ChanRecv => { chan_recv(e, inst)?; Ok(Completed) }
-        // Batch 3: Port Send/Recv
+        // Port Send/Recv
         PortSend => { port_send(e, inst)?; Ok(Completed) }
         PortRecv => { port_recv(e, inst)?; Ok(Completed) }
-        // Batch 4: Goroutine Start
+        // Goroutine Start
         GoStart => { go_start(e, inst); Ok(Completed) }
         GoIsland => { go_island(e, inst); Ok(Completed) }
         // Defer/Recover
@@ -1636,7 +1636,7 @@ pub fn emit_forloop_step(
 }
 
 // =============================================================================
-// Batch 1: Island/Channel/Port operations
+// Island/Channel/Port operations
 // =============================================================================
 
 /// IslandNew: a = island_new()
@@ -1698,7 +1698,7 @@ fn emit_close_with_panic_check<'a>(
 }
 
 // =============================================================================
-// Batch 2+3: Channel/Port Send/Recv (unified implementation)
+// Channel/Port Send/Recv
 // =============================================================================
 
 /// Emit queue send operation (used by ChanSend and PortSend).
@@ -1818,7 +1818,7 @@ fn port_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), J
 }
 
 // =============================================================================
-// Batch 4: Goroutine Start
+// Goroutine Start
 // =============================================================================
 
 /// GoStart: Spawn a new goroutine.
@@ -1931,7 +1931,7 @@ fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 }
 
 // =============================================================================
-// Batch 5: Select Statement
+// Select Statement
 // =============================================================================
 
 /// SelectBegin: Initialize a select statement.

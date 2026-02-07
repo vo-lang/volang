@@ -60,17 +60,13 @@ pub struct HelperFuncIds {
     pub iface_to_iface: cranelift_module::FuncId,
     pub iface_eq: cranelift_module::FuncId,
     pub set_call_request: cranelift_module::FuncId,
-    // Batch 1: Island/Channel/Port operations
     pub island_new: cranelift_module::FuncId,
     pub chan_close: cranelift_module::FuncId,
     pub port_close: cranelift_module::FuncId,
-    // Batch 2: Channel Send/Recv
     pub chan_send: cranelift_module::FuncId,
     pub chan_recv: cranelift_module::FuncId,
-    // Batch 3: Port Send/Recv
     pub port_send: cranelift_module::FuncId,
     pub port_recv: cranelift_module::FuncId,
-    // Batch 4: Goroutine Start
     pub go_start: cranelift_module::FuncId,
     pub go_island: cranelift_module::FuncId,
     // Defer/Recover
@@ -130,17 +126,13 @@ pub fn register_symbols(builder: &mut JITBuilder) {
     builder.symbol("vo_iface_to_iface", vo_runtime::jit_api::vo_iface_to_iface as *const u8);
     builder.symbol("vo_iface_eq", vo_runtime::jit_api::vo_iface_eq as *const u8);
     builder.symbol("vo_set_call_request", vo_runtime::jit_api::vo_set_call_request as *const u8);
-    // Batch 1: Island/Channel/Port operations
     builder.symbol("vo_island_new", vo_runtime::jit_api::vo_island_new as *const u8);
     builder.symbol("vo_chan_close", vo_runtime::jit_api::vo_chan_close as *const u8);
     builder.symbol("vo_port_close", vo_runtime::jit_api::vo_port_close as *const u8);
-    // Batch 2: Channel Send/Recv
     builder.symbol("vo_chan_send", vo_runtime::jit_api::vo_chan_send as *const u8);
     builder.symbol("vo_chan_recv", vo_runtime::jit_api::vo_chan_recv as *const u8);
-    // Batch 3: Port Send/Recv
     builder.symbol("vo_port_send", vo_runtime::jit_api::vo_port_send as *const u8);
     builder.symbol("vo_port_recv", vo_runtime::jit_api::vo_port_recv as *const u8);
-    // Batch 4: Goroutine Start
     builder.symbol("vo_go_start", vo_runtime::jit_api::vo_go_start as *const u8);
     builder.symbol("vo_go_island", vo_runtime::jit_api::vo_go_island as *const u8);
     // Defer/Recover
@@ -555,7 +547,6 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    // Batch 1: Island/Channel/Port operations
     let island_new = module.declare_function("vo_island_new", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));
@@ -579,7 +570,6 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    // Batch 2: Channel Send/Recv
     let chan_send = module.declare_function("vo_chan_send", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));        // ctx
@@ -601,7 +591,6 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    // Batch 3: Port Send/Recv (same signature as Channel)
     let port_send = module.declare_function("vo_port_send", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));        // ctx
@@ -623,7 +612,6 @@ pub fn declare_helpers(module: &mut JITModule, ptr: cranelift_codegen::ir::Type)
         sig
     })?;
     
-    // Batch 4: Goroutine Start
     let go_start = module.declare_function("vo_go_start", Import, &{
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr));        // ctx
