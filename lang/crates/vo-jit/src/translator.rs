@@ -22,8 +22,6 @@ pub struct HelperFuncs {
     pub call_vm: Option<FuncRef>,
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
-    pub closure_get_func_id: Option<FuncRef>,
-    pub iface_get_func_id: Option<FuncRef>,
     pub panic: Option<FuncRef>,
     pub call_extern: Option<FuncRef>,
     pub str_new: Option<FuncRef>,

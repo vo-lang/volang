@@ -31,15 +31,6 @@ use vo_common_core::bytecode::Module;
 // JitContext
 // =============================================================================
 
-/// Runtime context passed to JIT functions.
-///
-/// This struct is passed as the first argument to all JIT functions.
-/// It provides access to runtime resources needed during execution.
-///
-/// # Memory Layout
-///
-/// This struct uses `#[repr(C)]` to ensure predictable field layout for
-/// access from JIT-generated code.
 /// Function pointer type for VM call trampoline.
 /// This allows vo_call_vm to call back into the VM without circular dependency.
 pub type VmCallFn = extern "C" fn(
@@ -242,7 +233,7 @@ pub struct JitContext {
     pub stack_cap: u32,
     
     /// Current JIT frame base pointer (index into fiber.stack).
-    /// Updated by vo_jit_push_frame / vo_jit_pop_frame.
+    /// Updated by push_frame_fn / pop_frame_fn callbacks.
     pub jit_bp: u32,
     
     /// Current stack pointer (fiber.sp). JIT uses this for fast path frame management.
@@ -591,51 +582,6 @@ pub extern "C" fn vo_set_call_request(ctx: *mut JitContext, func_id: u32, arg_st
         (*ctx).call_resume_pc = resume_pc;
         (*ctx).call_ret_slots = ret_slots as u16;
         (*ctx).call_kind = JitContext::CALL_KIND_REGULAR;
-    }
-}
-
-/// Push a new frame for JIT-to-JIT call.
-/// 
-/// This function:
-/// 1. Ensures fiber.stack has capacity for local_slots
-/// 2. Zeros the new frame region
-/// 3. Updates fiber.sp
-/// 4. Pushes CallFrame to fiber.frames
-/// 5. Updates ctx.jit_bp and ctx.stack_ptr (in case of reallocation)
-///
-/// # Returns
-/// args_ptr for the new frame (fiber.stack_ptr + new_bp)
-///
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
-/// - `ctx.push_frame_fn` must be set
-#[no_mangle]
-pub extern "C" fn vo_jit_push_frame(
-    ctx: *mut JitContext,
-    func_id: u32,
-    local_slots: u32,
-    ret_reg: u32,
-    ret_slots: u32,
-    caller_resume_pc: u32,
-) -> *mut u64 {
-    let ctx_ref = unsafe { &*ctx };
-    match ctx_ref.push_frame_fn {
-        Some(f) => f(ctx, func_id, local_slots, ret_reg, ret_slots, caller_resume_pc),
-        None => core::ptr::null_mut(),
-    }
-}
-
-/// Pop the current JIT frame after callee returns.
-/// Restores ctx.jit_bp to caller's bp.
-///
-/// # Safety
-/// - `ctx` must be a valid pointer to JitContext
-/// - `ctx.pop_frame_fn` must be set
-#[no_mangle]
-pub extern "C" fn vo_jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
-    let ctx_ref = unsafe { &*ctx };
-    if let Some(f) = ctx_ref.pop_frame_fn {
-        f(ctx, caller_bp);
     }
 }
 
@@ -1512,8 +1458,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
         ("vo_call_vm", vo_call_vm as *const u8),
-        ("vo_closure_get_func_id", vo_closure_get_func_id as *const u8),
-        ("vo_iface_get_func_id", vo_iface_get_func_id as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),

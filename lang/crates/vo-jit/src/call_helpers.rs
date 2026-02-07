@@ -69,27 +69,60 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
-/// Configuration for call emission - captures the differences between compilers.
-/// NOTE: Currently only used by placeholder functions (emit_call_closure, emit_call_iface).
-#[allow(dead_code)]
-pub struct CallConfig {
-    /// Resume PC to store before call (for WaitIo handling). None = don't set.
-    pub resume_pc: Option<usize>,
-    /// Whether to spill variables on non-ok result before returning.
-    pub spill_on_non_ok: bool,
+/// Create signature for prepare_closure_call callback.
+/// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
+fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // closure_ref
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
+        // PreparedCall returns: jit_func_ptr, callee_args_ptr, ret_ptr, callee_local_slots, func_id
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig
+    })
+}
+
+/// Create signature for prepare_iface_call callback.
+/// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
+fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
+    emitter.builder().func.import_signature({
+        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot0
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot1
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // method_idx
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
+        // PreparedCall returns: jit_func_ptr, callee_args_ptr, ret_ptr, callee_local_slots, func_id
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig
+    })
 }
 
 /// Emit a closure call instruction.
 /// 
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
-/// 
-/// Strategy: Try JIT-to-JIT direct call via prepare callback, fallback to trampoline.
-/// - Fast path: callee is JIT-compiled and doesn't need VM → direct JIT call
-/// - Slow path: callee needs VM (has_defer) or not compiled → vo_call_vm trampoline
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
-    _config: CallConfig,
 ) {
     let closure_slot = inst.a as usize;
     let arg_start = inst.b as usize;
@@ -118,12 +151,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
     
-    // Save caller_bp for pop_frame
-    let caller_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
-    
-    // Read user args from SSA vars and copy to native stack slot
+    // Read user args and copy to native stack
     let args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (arg_slots.max(1) * 8) as u32,
@@ -135,7 +163,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     }
     let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, args_slot, 0);
     
-    // Create ret_slot for return values
+    // Create ret_slot
     let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (ret_slots.max(1) * 8) as u32,
@@ -147,26 +175,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN
     );
-    
-    // PreparedCall signature: (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
-    let prepare_sig = emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // closure_ref
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
-        // PreparedCall returns: jit_func_ptr(i64), callee_args_ptr(i64), ret_ptr(i64), callee_local_slots(i32), func_id(i32)
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // jit_func_ptr
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr (passthrough)
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // callee_local_slots
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
-        sig
-    });
+    let prepare_sig = import_prepare_closure_sig(emitter);
     
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
@@ -181,125 +190,22 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let results = emitter.builder().inst_results(prepare_call);
     let jit_func_ptr = results[0];
     let callee_args_ptr = results[1];
-    let _ret_ptr_out = results[2];
-    let _callee_local_slots = results[3];
     let func_id = results[4];
     
-    // Check if jit_func_ptr is null (needs trampoline fallback)
-    let null_ptr = emitter.builder().ins().iconst(types::I64, 0);
-    let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, null_ptr);
-    
-    let trampoline_block = emitter.builder().create_block();
-    let jit_call_block = emitter.builder().create_block();
-    let merge_block = emitter.builder().create_block();
-    
-    emitter.builder().ins().brif(is_null, trampoline_block, &[], jit_call_block, &[]);
-    
-    // === Trampoline path (slow) ===
-    emitter.builder().switch_to_block(trampoline_block);
-    emitter.builder().seal_block(trampoline_block);
-    
-    // Call vo_call_vm(ctx, func_id, args_ptr, arg_count, ret_ptr, ret_count)
-    // Note: args are already in callee_args_ptr (fiber.stack) from prepare callback
-    let call_vm_func = emitter.helpers().call_vm.expect("call_vm helper not registered");
-    let func_ret_slots = ret_slots_val; // Same as call ret_slots for closures
-    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id, callee_args_ptr, arg_count_val, ret_ptr, func_ret_slots]);
-    let vm_result = emitter.builder().inst_results(vm_call)[0];
-    
-    // Check for panic
-    let panic_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
-    let is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, panic_val);
-    
-    let vm_panic_block = emitter.builder().create_block();
-    let vm_ok_block = emitter.builder().create_block();
-    
-    emitter.builder().ins().brif(is_panic, vm_panic_block, &[], vm_ok_block, &[]);
-    
-    emitter.builder().switch_to_block(vm_panic_block);
-    emitter.builder().seal_block(vm_panic_block);
-    let panic_ret = emitter.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    emitter.builder().ins().return_(&[panic_ret]);
-    
-    emitter.builder().switch_to_block(vm_ok_block);
-    emitter.builder().seal_block(vm_ok_block);
-    
-    // pop_frame
-    let pop_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
-    );
-    let pop_frame_sig = import_pop_frame_sig(emitter);
-    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
-    emitter.builder().ins().jump(merge_block, &[]);
-    
-    // === JIT call path (fast) ===
-    emitter.builder().switch_to_block(jit_call_block);
-    emitter.builder().seal_block(jit_call_block);
-    
-    // Direct JIT call: jit_func(ctx, callee_args_ptr, ret_ptr) -> JitResult
-    let jit_func_sig = import_jit_func_sig(emitter);
-    let jit_call = emitter.builder().ins().call_indirect(
-        jit_func_sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]
-    );
-    let jit_result = emitter.builder().inst_results(jit_call)[0];
-    
-    // Check for non-OK result
-    let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
-    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, ok_val);
-    
-    let jit_non_ok_block = emitter.builder().create_block();
-    let jit_ok_block = emitter.builder().create_block();
-    
-    emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
-    
-    // Non-OK path: spill vars, push resume point, propagate result
-    emitter.builder().switch_to_block(jit_non_ok_block);
-    emitter.builder().seal_block(jit_non_ok_block);
-    emitter.spill_all_vars();
-    
-    // Push resume point for caller
-    let caller_func_id_val = emitter.func_id();
-    let push_resume_point_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
-    );
-    let push_resume_point_sig = import_push_resume_point_sig(emitter);
-    let callee_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
-    let caller_func_id = emitter.builder().ins().iconst(types::I32, caller_func_id_val as i64);
-    emitter.builder().ins().call_indirect(
-        push_resume_point_sig, push_resume_point_fn_ptr,
-        &[ctx, caller_func_id, resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
-    );
-    emitter.builder().ins().return_(&[jit_result]);
-    
-    // OK path: pop_frame, jump to merge
-    emitter.builder().switch_to_block(jit_ok_block);
-    emitter.builder().seal_block(jit_ok_block);
-    emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
-    emitter.builder().ins().jump(merge_block, &[]);
-    
-    // === Merge block: copy return values to SSA vars ===
-    emitter.builder().switch_to_block(merge_block);
-    emitter.builder().seal_block(merge_block);
-    
-    for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
-    }
+    emit_prepared_call(emitter, PreparedCallParams {
+        jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
+        arg_start, arg_slots, ret_slots, ret_slot,
+        resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
+    });
 }
 
 /// Emit an interface method call instruction.
 /// 
 /// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
 ///            inst.flags = method_idx
-/// 
-/// Strategy: Try JIT-to-JIT direct call via prepare callback, fallback to trampoline.
-/// - Fast path: callee is JIT-compiled and doesn't need VM → direct JIT call
-/// - Slow path: callee needs VM (has_defer) or not compiled → vo_call_vm trampoline
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
-    _config: CallConfig,
 ) {
     let iface_slot = inst.a as usize;
     let arg_start = inst.b as usize;
@@ -308,19 +214,12 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let method_idx = inst.flags as u32;
     
     let ctx = emitter.ctx_param();
-    let panic_ret_val = emitter.panic_return_value();
-    let caller_func_id_val = emitter.func_id();
     
     // Read interface slots
     let slot0 = emitter.read_var(iface_slot as u16);
     let slot1 = emitter.read_var((iface_slot + 1) as u16);
     
-    // Save caller_bp for pop_frame
-    let caller_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
-    
-    // Read user args from SSA vars and copy to native stack slot
+    // Read user args and copy to native stack
     let args_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (arg_slots.max(1) * 8) as u32,
@@ -332,7 +231,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     }
     let user_args_ptr = emitter.builder().ins().stack_addr(types::I64, args_slot, 0);
     
-    // Create ret_slot for return values
+    // Create ret_slot
     let ret_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (ret_slots.max(1) * 8) as u32,
@@ -344,28 +243,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_IFACE_CALL_FN
     );
-    
-    // PreparedCall signature for iface: (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
-    let prepare_sig = emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot0
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // iface_slot1 (receiver)
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // method_idx
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_reg
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // ret_slots
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // caller_resume_pc
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
-        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
-        // PreparedCall returns: jit_func_ptr(i64), callee_args_ptr(i64), ret_ptr(i64), callee_local_slots(i32), func_id(i32)
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // jit_func_ptr
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // callee_args_ptr
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr (passthrough)
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // callee_local_slots
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // func_id
-        sig
-    });
+    let prepare_sig = import_prepare_iface_sig(emitter);
     
     let method_idx_val = emitter.builder().ins().iconst(types::I32, method_idx as i64);
     let ret_reg_val = emitter.builder().ins().iconst(types::I32, arg_start as i64);
@@ -381,13 +259,51 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let results = emitter.builder().inst_results(prepare_call);
     let jit_func_ptr = results[0];
     let callee_args_ptr = results[1];
-    let _ret_ptr_out = results[2];
-    let _callee_local_slots = results[3];
     let func_id = results[4];
+    
+    emit_prepared_call(emitter, PreparedCallParams {
+        jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
+        arg_start, arg_slots, ret_slots, ret_slot,
+        resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
+    });
+}
+
+/// Parameters for the common prepared-call dispatch.
+struct PreparedCallParams {
+    jit_func_ptr: Value,
+    callee_args_ptr: Value,
+    func_id: Value,
+    ret_ptr: Value,
+    arg_start: usize,
+    arg_slots: usize,
+    ret_slots: usize,
+    ret_slot: cranelift_codegen::ir::StackSlot,
+    resume_pc_val: Value,
+    ret_reg_val: Value,
+    ret_slots_val: Value,
+    arg_count_val: Value,
+}
+
+/// Emit the common dispatch logic after a prepare callback returns PreparedCall.
+///
+/// Handles: null check → trampoline(call_vm + pop_frame) or JIT direct call
+///          → non-OK (push_resume_point + propagate) or OK (pop_frame) → merge.
+fn emit_prepared_call<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    p: PreparedCallParams,
+) {
+    let ctx = emitter.ctx_param();
+    let panic_ret_val = emitter.panic_return_value();
+    let caller_func_id_val = emitter.func_id();
+    
+    // Save caller_bp for pop_frame
+    let caller_bp = emitter.builder().ins().load(
+        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
+    );
     
     // Check if jit_func_ptr is null (needs trampoline fallback)
     let null_ptr = emitter.builder().ins().iconst(types::I64, 0);
-    let is_null = emitter.builder().ins().icmp(IntCC::Equal, jit_func_ptr, null_ptr);
+    let is_null = emitter.builder().ins().icmp(IntCC::Equal, p.jit_func_ptr, null_ptr);
     
     let trampoline_block = emitter.builder().create_block();
     let jit_call_block = emitter.builder().create_block();
@@ -395,23 +311,22 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     
     emitter.builder().ins().brif(is_null, trampoline_block, &[], jit_call_block, &[]);
     
-    // === Trampoline path (slow) ===
+    // === Trampoline path (slow): call_vm + pop_frame ===
     emitter.builder().switch_to_block(trampoline_block);
     emitter.builder().seal_block(trampoline_block);
     
-    // Call vo_call_vm(ctx, func_id, args_ptr, arg_count, ret_ptr, ret_count)
     let call_vm_func = emitter.helpers().call_vm.expect("call_vm helper not registered");
-    let func_ret_slots = ret_slots_val;
-    let vm_call = emitter.builder().ins().call(call_vm_func, &[ctx, func_id, callee_args_ptr, arg_count_val, ret_ptr, func_ret_slots]);
+    let vm_call = emitter.builder().ins().call(
+        call_vm_func,
+        &[ctx, p.func_id, p.callee_args_ptr, p.arg_count_val, p.ret_ptr, p.ret_slots_val]
+    );
     let vm_result = emitter.builder().inst_results(vm_call)[0];
     
-    // Check for panic
     let panic_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_PANIC as i64);
     let is_panic = emitter.builder().ins().icmp(IntCC::Equal, vm_result, panic_val);
     
     let vm_panic_block = emitter.builder().create_block();
     let vm_ok_block = emitter.builder().create_block();
-    
     emitter.builder().ins().brif(is_panic, vm_panic_block, &[], vm_ok_block, &[]);
     
     emitter.builder().switch_to_block(vm_panic_block);
@@ -421,8 +336,6 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     
     emitter.builder().switch_to_block(vm_ok_block);
     emitter.builder().seal_block(vm_ok_block);
-    
-    // pop_frame
     let pop_frame_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
     );
@@ -430,32 +343,28 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
     emitter.builder().ins().jump(merge_block, &[]);
     
-    // === JIT call path (fast) ===
+    // === JIT call path (fast): direct call + result check ===
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
     
-    // Direct JIT call: jit_func(ctx, callee_args_ptr, ret_ptr) -> JitResult
     let jit_func_sig = import_jit_func_sig(emitter);
     let jit_call = emitter.builder().ins().call_indirect(
-        jit_func_sig, jit_func_ptr, &[ctx, callee_args_ptr, ret_ptr]
+        jit_func_sig, p.jit_func_ptr, &[ctx, p.callee_args_ptr, p.ret_ptr]
     );
     let jit_result = emitter.builder().inst_results(jit_call)[0];
     
-    // Check for non-OK result
     let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
     let is_ok = emitter.builder().ins().icmp(IntCC::Equal, jit_result, ok_val);
     
     let jit_non_ok_block = emitter.builder().create_block();
     let jit_ok_block = emitter.builder().create_block();
-    
     emitter.builder().ins().brif(is_ok, jit_ok_block, &[], jit_non_ok_block, &[]);
     
-    // Non-OK path: spill vars, push resume point, propagate result
+    // Non-OK: spill, push resume point, propagate
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
     emitter.spill_all_vars();
     
-    // Push resume point for caller
     let push_resume_point_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PUSH_RESUME_POINT_FN
     );
@@ -466,23 +375,23 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let caller_func_id = emitter.builder().ins().iconst(types::I32, caller_func_id_val as i64);
     emitter.builder().ins().call_indirect(
         push_resume_point_sig, push_resume_point_fn_ptr,
-        &[ctx, caller_func_id, resume_pc_val, callee_bp, caller_bp, ret_reg_val, ret_slots_val]
+        &[ctx, caller_func_id, p.resume_pc_val, callee_bp, caller_bp, p.ret_reg_val, p.ret_slots_val]
     );
     emitter.builder().ins().return_(&[jit_result]);
     
-    // OK path: pop_frame, jump to merge
+    // OK: pop_frame, jump to merge
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
     emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
     emitter.builder().ins().jump(merge_block, &[]);
     
-    // === Merge block: copy return values to SSA vars ===
+    // === Merge: copy return values to SSA vars ===
     emitter.builder().switch_to_block(merge_block);
     emitter.builder().seal_block(merge_block);
     
-    for i in 0..ret_slots {
-        let val = emitter.builder().ins().stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + i) as u16, val);
+    for i in 0..p.ret_slots {
+        let val = emitter.builder().ins().stack_load(types::I64, p.ret_slot, (i * 8) as i32);
+        emitter.write_var((p.arg_start + i) as u16, val);
     }
 }
 

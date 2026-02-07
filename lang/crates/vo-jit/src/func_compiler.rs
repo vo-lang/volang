@@ -233,17 +233,11 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(false)
             }
             Opcode::CallClosure => {
-                crate::call_helpers::emit_call_closure(self, inst, crate::call_helpers::CallConfig {
-                    resume_pc: None,
-                    spill_on_non_ok: false,
-                });
+                crate::call_helpers::emit_call_closure(self, inst);
                 Ok(false)
             }
             Opcode::CallIface => {
-                crate::call_helpers::emit_call_iface(self, inst, crate::call_helpers::CallConfig {
-                    resume_pc: None,
-                    spill_on_non_ok: false,
-                });
+                crate::call_helpers::emit_call_iface(self, inst);
                 Ok(false)
             }
             Opcode::ForLoop => {

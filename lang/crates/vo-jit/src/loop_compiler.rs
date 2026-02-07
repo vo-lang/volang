@@ -232,17 +232,11 @@ impl<'a> LoopCompiler<'a> {
                 Ok(false)
             }
             Opcode::CallClosure => {
-                crate::call_helpers::emit_call_closure(self, inst, crate::call_helpers::CallConfig {
-                    resume_pc: Some(self.current_pc),
-                    spill_on_non_ok: true,
-                });
+                crate::call_helpers::emit_call_closure(self, inst);
                 Ok(false)
             }
             Opcode::CallIface => {
-                crate::call_helpers::emit_call_iface(self, inst, crate::call_helpers::CallConfig {
-                    resume_pc: Some(self.current_pc),
-                    spill_on_non_ok: true,
-                });
+                crate::call_helpers::emit_call_iface(self, inst);
                 Ok(false)
             }
             _ => {
