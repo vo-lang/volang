@@ -285,9 +285,10 @@ pub fn type_slot_types(type_key: TypeKey, tc_objs: &TCObjects) -> Vec<SlotType> 
     let underlying = typ::underlying_type(type_key, tc_objs);
     match &tc_objs.types[underlying] {
         Type::Basic(b) => {
-            // String is a GcRef, other basic types are Value
             if matches!(b.typ(), typ::BasicType::Str | typ::BasicType::UntypedString) {
                 vec![SlotType::GcRef]
+            } else if matches!(b.typ(), typ::BasicType::Float64 | typ::BasicType::Float32 | typ::BasicType::UntypedFloat) {
+                vec![SlotType::Float]
             } else {
                 vec![SlotType::Value]
             }
