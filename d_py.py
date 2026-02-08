@@ -1152,8 +1152,16 @@ class BenchmarkRunner:
             benchmark_name = file.stem
             print(f"Processing: {benchmark_name}")
 
-            with open(file) as f:
-                data = json.load(f)
+            try:
+                with open(file) as f:
+                    content = f.read()
+                if not content.strip():
+                    print(f"  Skipping: empty file")
+                    continue
+                data = json.loads(content)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"  Skipping: invalid JSON ({e})")
+                continue
 
             if 'results' not in data:
                 continue
