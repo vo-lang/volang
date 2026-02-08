@@ -1062,30 +1062,44 @@ impl Vm {
                     refetch!();
                 }
                 Opcode::CallExtern => {
-                    let mut extern_panic_msg: Option<String> = None;
+                    use vo_runtime::ffi::ExternResult;
+                    // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
+                    let extern_id = inst.b as u32;
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let (closure_replay_results, closure_replay_panicked) = fiber.closure_replay.take_for_extern();
-                    let result = exec::exec_call_extern(
-                        &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
+                    let extern_result = self.state.extern_registry.call(
+                        extern_id,
+                        &mut fiber.stack, bp, inst.c, inst.flags as u16, inst.a,
                         &mut self.state.gc, module, &mut self.state.itab_cache,
-                        vm_ptr, fiber_ptr, &mut extern_panic_msg,
+                        vm_ptr, fiber_ptr,
                         &self.state.program_args, &mut self.state.sentinel_errors,
                         #[cfg(feature = "std")] &mut self.state.io,
                         #[cfg(feature = "std")] resume_io_token,
                         closure_replay_results,
                         closure_replay_panicked,
                     );
-                    match result {
-                        ExecResult::Panic => {
-                            let r = if let Some(msg) = extern_panic_msg {
-                                runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg)
-                            } else { result };
+                    match extern_result {
+                        ExternResult::Ok => { refetch!(); }
+                        ExternResult::Panic(msg) => {
+                            let r = runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
                             if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
                         }
-                        ExecResult::CallClosure { closure_ref, args } => {
+                        ExternResult::NotRegistered(id) => {
+                            let name = &module.externs[extern_id as usize].name;
+                            let msg = format!("extern function '{}' (id={}) not registered", name, id);
+                            let r = runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
+                            if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                        }
+                        ExternResult::Yield => { return ExecResult::TimesliceExpired; }
+                        ExternResult::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        #[cfg(feature = "std")]
+                        ExternResult::WaitIo { token } => {
+                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                        }
+                        ExternResult::CallClosure { closure_ref, args } => {
                             // Undo PC pre-increment so extern replays on return
                             let frame = fiber.current_frame_mut().unwrap();
                             frame.pc -= 1;
@@ -1132,8 +1146,6 @@ impl Vm {
                             stack = fiber.stack_ptr();
                             refetch!();
                         }
-                        ExecResult::FrameChanged => { refetch!(); }
-                        _ => { return result; }
                     }
                 }
                 Opcode::CallClosure => {

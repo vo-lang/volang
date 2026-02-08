@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::SentinelErrorCache;
 
-use crate::exec::ExternRegistry;
+use vo_runtime::ffi::ExternRegistry;
 use vo_runtime::itab::ItabCache;
 
 #[cfg(feature = "std")]
