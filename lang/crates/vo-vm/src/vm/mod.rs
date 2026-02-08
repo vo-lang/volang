@@ -600,6 +600,21 @@ impl Vm {
             }};
         }
         
+        // Macro to handle panic/trap results that may return FrameChanged (when defer/recover exists).
+        // Without this, `return runtime_trap(...)` would leak FrameChanged to the scheduling loop.
+        macro_rules! handle_panic_result {
+            ($result:expr) => {{
+                let r = $result;
+                if matches!(r, ExecResult::FrameChanged) {
+                    stack = fiber.stack_ptr();
+                    refetch!();
+                    continue;
+                } else {
+                    return r;
+                }
+            }};
+        }
+
         // Macro to handle loop OSR result - used by both Jump and ForLoop
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
@@ -632,7 +647,7 @@ impl Vm {
                         jit::OsrResult::Panic => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
-                            return helpers::panic_unwind(fiber, stack, module);
+                            handle_panic_result!(helpers::panic_unwind(fiber, stack, module));
                         }
                     }
                 }
@@ -646,7 +661,7 @@ impl Vm {
                 match $action {
                     PortAction::Continue => { refetch!(); }
                     PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                    PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                    PortAction::Trap(kind) => { handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, kind)); }
                     PortAction::Wake(waiters) => {
                         for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
                         refetch!();
@@ -713,22 +728,22 @@ impl Vm {
                 }
                 Opcode::PtrGet => {
                     if !exec::exec_ptr_get(stack, bp, &inst) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
                     }
                 }
                 Opcode::PtrSet => {
                     if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
                     }
                 }
                 Opcode::PtrGetN => {
                     if !exec::exec_ptr_get_n(stack, bp, &inst) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
                     }
                 }
                 Opcode::PtrSetN => {
                     if !exec::exec_ptr_set_n(stack, bp, &inst) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilPointerDereference));
                     }
                 }
                 Opcode::PtrAdd => {
@@ -758,7 +773,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_div(b) as u64);
                 }
@@ -766,7 +781,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b == 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b) as u64);
                 }
@@ -774,7 +789,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_div(b));
                 }
@@ -782,7 +797,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize);
                     if b == 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::DivisionByZero));
                     }
                     stack_set(stack, bp + inst.a as usize, a.wrapping_rem(b));
                 }
@@ -932,7 +947,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
                     }
                     let result = if b >= 64 { 0 } else { a.wrapping_shl(b as u32) };
                     stack_set(stack, bp + inst.a as usize, result);
@@ -941,7 +956,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
                     }
                     let result = if b >= 64 { if a < 0 { -1i64 } else { 0i64 } } else { a.wrapping_shr(b as u32) };
                     stack_set(stack, bp + inst.a as usize, result as u64);
@@ -950,7 +965,7 @@ impl Vm {
                     let a = stack_get(stack, bp + inst.b as usize);
                     let b = stack_get(stack, bp + inst.c as usize) as i64;
                     if b < 0 {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NegativeShift));
                     }
                     let result = if b >= 64 { 0 } else { a.wrapping_shr(b as u32) };
                     stack_set(stack, bp + inst.a as usize, result);
@@ -1151,7 +1166,7 @@ impl Vm {
                 Opcode::CallClosure => {
                     let closure_ref = stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
                     if closure_ref.is_null() {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall));
                     }
                     exec::exec_call_closure(fiber, &inst, module);
                     stack = fiber.stack_ptr();  // Re-fetch after potential stack growth
@@ -1189,11 +1204,11 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
                     let len = if s.is_null() { 0 } else { string_len(s) };
                     if idx >= len {
-                        return runtime_panic(
+                        handle_panic_result!(runtime_panic(
                             &mut self.state.gc, fiber, stack, module,
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!("runtime error: index out of range [{}] with length {}", idx, len)
-                        );
+                        ));
                     }
                     let byte = string_index(s, idx);
                     stack_set(stack, bp + inst.a as usize, byte as u64);
@@ -1251,8 +1266,8 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
                     let len = array::len(arr);
                     if idx >= len {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
+                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
                     }
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
@@ -1290,8 +1305,8 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.b as usize) as usize;
                     let len = array::len(arr);
                     if idx >= len {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
+                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
                     }
                     let src = bp + inst.c as usize;
                     let off = idx as isize;
@@ -1331,7 +1346,7 @@ impl Vm {
                 // Slice operations
                 Opcode::SliceNew => {
                     if let Err(msg) = exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeSlice, msg);
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeSlice, msg));
                     }
                 }
                 Opcode::SliceGet => {
@@ -1339,8 +1354,8 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
                     let len = if s.is_null() { 0 } else { slice_len(s) };
                     if idx >= len {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
+                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
                     }
                     let base = slice_data_ptr(s);
                     let dst = bp + inst.a as usize;
@@ -1377,8 +1392,8 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.b as usize) as usize;
                     let len = if s.is_null() { 0 } else { slice_len(s) };
                     if idx >= len {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
+                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
                     }
                     let base = slice_data_ptr(s);
                     let src = bp + inst.c as usize;
@@ -1419,8 +1434,8 @@ impl Vm {
                     if !exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc) {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SliceBoundsOutOfRange,
-                            format!("runtime error: slice bounds out of range [{}:{}]", lo, hi));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SliceBoundsOutOfRange,
+                            format!("runtime error: slice bounds out of range [{}:{}]", lo, hi)));
                     }
                 }
                 Opcode::SliceAppend => {
@@ -1445,10 +1460,10 @@ impl Vm {
                 Opcode::MapSet => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilMapWrite);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::NilMapWrite));
                     }
                     if !exec::exec_map_set(stack, bp, &inst, &mut self.state.gc, Some(module)) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UnhashableType);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UnhashableType));
                     }
                 }
                 Opcode::MapDelete => {
@@ -1470,7 +1485,7 @@ impl Vm {
                 // Channel operations
                 Opcode::ChanNew => {
                     if let Err(msg) = exec::exec_chan_new(stack, bp, &inst, &mut self.state.gc) {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeChan, msg);
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakeChan, msg));
                     }
                 }
                 Opcode::ChanSend => {
@@ -1519,7 +1534,7 @@ impl Vm {
                             return ExecResult::Block(crate::fiber::BlockReason::Queue);
                         }
                         exec::SelectResult::SendOnClosed => {
-                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel);
+                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::SendOnClosedChannel));
                         }
                     }
                 }
@@ -1563,13 +1578,13 @@ impl Vm {
                 Opcode::IfaceAssert => {
                     let result = exec::exec_iface_assert(stack, bp, &inst, &mut self.state.itab_cache, module);
                     if matches!(result, ExecResult::Panic) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::TypeAssertionFailed);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::TypeAssertionFailed));
                     }
                 }
                 Opcode::IfaceEq => {
                     let result = exec::exec_iface_eq(stack, bp, &inst, module);
                     if matches!(result, ExecResult::Panic) {
-                        return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UncomparableType);
+                        handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::UncomparableType));
                     }
                 }
 
@@ -1611,8 +1626,8 @@ impl Vm {
                     let idx = stack_get(stack, bp + inst.a as usize) as usize;
                     let len = stack_get(stack, bp + inst.b as usize) as usize;
                     if idx >= len {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
-                            format!("runtime error: index out of range [{}] with length {}", idx, len));
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::IndexOutOfBounds,
+                            format!("runtime error: index out of range [{}] with length {}", idx, len)));
                     }
                 }
 
@@ -1628,7 +1643,7 @@ impl Vm {
                 }
                 Opcode::PortNew => {
                     if let Err(msg) = exec::exec_port_new(stack, bp, &inst, &mut self.state.gc) {
-                        return runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg);
+                        handle_panic_result!(runtime_panic(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::MakePort, msg));
                     }
                 }
                 #[cfg(feature = "std")]
@@ -1641,7 +1656,7 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortSend => {
-                    return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported);
+                    handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
                 }
                 #[cfg(feature = "std")]
                 Opcode::PortRecv => {
@@ -1653,7 +1668,7 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortRecv => {
-                    return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported);
+                    handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
                 }
                 #[cfg(feature = "std")]
                 Opcode::PortClose => {
@@ -1666,10 +1681,10 @@ impl Vm {
                     match exec::exec_port_close(stack, bp, &inst) {
                         exec::PortResult::Continue => {}
                         exec::PortResult::CloseNil => {
-                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel);
+                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::CloseNilChannel));
                         }
                         exec::PortResult::NotSupported => {
-                            return runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported);
+                            handle_panic_result!(runtime_trap(&mut self.state.gc, fiber, stack, module, RuntimeTrapKind::PortNotSupported));
                         }
                         _ => {}
                     }
