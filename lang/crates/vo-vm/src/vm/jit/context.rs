@@ -15,17 +15,23 @@ use crate::vm::Vm;
 use super::callbacks;
 use super::frame::{jit_push_frame, jit_pop_frame, jit_push_resume_point};
 
+/// Owned mutable state that JitContext points into.
+/// Single allocation instead of 4 separate Box allocations.
+struct JitOwnedState {
+    panic_flag: bool,
+    is_user_panic: bool,
+    safepoint_flag: bool,
+    panic_msg: InterfaceSlot,
+}
+
 /// JIT context with owned storage for mutable fields.
 ///
 /// The JitContext contains pointers to mutable state (panic_flag, is_user_panic, panic_msg).
 /// This wrapper owns those values to ensure they outlive the JIT call.
 pub struct JitContextWrapper {
     pub ctx: JitContext,
-    // Owned storage - pointers in ctx point to these
-    _panic_flag: Box<bool>,
-    _is_user_panic: Box<bool>,
-    _panic_msg: Box<InterfaceSlot>,
-    _safepoint_flag: Box<bool>,
+    // Single allocation — pointers in ctx point into this
+    _owned: Box<JitOwnedState>,
 }
 
 impl JitContextWrapper {
@@ -34,11 +40,11 @@ impl JitContextWrapper {
     }
 
     pub fn panic_msg(&self) -> InterfaceSlot {
-        *self._panic_msg
+        self._owned.panic_msg
     }
 
     pub fn is_user_panic(&self) -> bool {
-        *self._is_user_panic
+        self._owned.is_user_panic
     }
 
     pub fn call_func_id(&self) -> u32 {
@@ -83,18 +89,20 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         )
     };
 
-    let mut panic_flag = Box::new(false);
-    let mut is_user_panic = Box::new(false);
-    let mut panic_msg = Box::new(InterfaceSlot::default());
-    let mut safepoint_flag = Box::new(false);
+    let mut owned = Box::new(JitOwnedState {
+        panic_flag: false,
+        is_user_panic: false,
+        safepoint_flag: false,
+        panic_msg: InterfaceSlot::default(),
+    });
 
     let ctx = JitContext {
         gc: &mut vm.state.gc as *mut _,
         globals: vm.state.globals.as_mut_ptr(),
-        safepoint_flag: &*safepoint_flag as *const bool,
-        panic_flag: &mut *panic_flag as *mut bool,
-        is_user_panic: &mut *is_user_panic as *mut bool,
-        panic_msg: &mut *panic_msg as *mut InterfaceSlot,
+        safepoint_flag: &owned.safepoint_flag as *const bool,
+        panic_flag: &mut owned.panic_flag as *mut bool,
+        is_user_panic: &mut owned.is_user_panic as *mut bool,
+        panic_msg: &mut owned.panic_msg as *mut InterfaceSlot,
         vm: vm as *mut Vm as *mut core::ffi::c_void,
         fiber: fiber as *mut Fiber as *mut core::ffi::c_void,
         itab_cache: &mut vm.state.itab_cache as *mut _,
@@ -155,9 +163,6 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
 
     JitContextWrapper {
         ctx,
-        _panic_flag: panic_flag,
-        _is_user_panic: is_user_panic,
-        _panic_msg: panic_msg,
-        _safepoint_flag: safepoint_flag,
+        _owned: owned,
     }
 }
