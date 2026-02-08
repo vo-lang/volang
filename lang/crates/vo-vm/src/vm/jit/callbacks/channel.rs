@@ -9,32 +9,9 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 use vo_runtime::objects::channel::{self, RecvResult, SendResult};
 use vo_runtime::objects::queue_state::{self, ChannelWaiter};
 
-use crate::scheduler::{FiberId, Scheduler};
 use crate::vm::helpers;
 
 use super::helpers::{extract_context, set_jit_panic};
-
-// =============================================================================
-// Helper
-// =============================================================================
-
-/// Wake a channel waiter. No PC modification - blocker sets resume PC.
-fn wake_channel_waiter(scheduler: &mut Scheduler, waiter: ChannelWaiter) {
-    let fiber_id = FiberId::from_raw(waiter.fiber_id() as u32);
-    
-    // For select waiters, set woken_index before waking
-    if let ChannelWaiter::Select(ref sw) = waiter {
-        if let Some(ref mut select_state) = scheduler.get_fiber_mut(fiber_id).select_state {
-            select_state.woken_index = Some(sw.case_index as usize);
-        }
-    }
-    
-    scheduler.wake_fiber(fiber_id);
-}
-
-// =============================================================================
-// Public JIT Callbacks
-// =============================================================================
 
 /// Close a channel.
 pub extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
@@ -54,10 +31,10 @@ pub extern "C" fn jit_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
 
     // Wake all waiting fibers - they need to retry to see closed state
     for waiter in state.take_waiting_receivers() {
-        wake_channel_waiter(&mut vm.scheduler, waiter);
+        vm.scheduler.wake_channel_waiter(&waiter);
     }
     for (waiter, _) in state.take_waiting_senders() {
-        wake_channel_waiter(&mut vm.scheduler, waiter);
+        vm.scheduler.wake_channel_waiter(&waiter);
     }
 
     JitResult::Ok
@@ -86,7 +63,7 @@ pub extern "C" fn jit_chan_send(
 
     match state.try_send(value, cap) {
         SendResult::DirectSend(receiver) => {
-            wake_channel_waiter(&mut vm.scheduler, receiver);
+            vm.scheduler.wake_channel_waiter(&receiver);
             JitResult::Ok
         }
         SendResult::Buffered => JitResult::Ok,
@@ -133,7 +110,7 @@ pub extern "C" fn jit_chan_recv(
                 unsafe { *dst_ptr.add(elem_slots as usize) = 1; }
             }
             if let Some(sender) = woke_sender {
-                wake_channel_waiter(&mut vm.scheduler, sender);
+                vm.scheduler.wake_channel_waiter(&sender);
             }
             JitResult::Ok
         }

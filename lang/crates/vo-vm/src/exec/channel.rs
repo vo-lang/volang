@@ -20,42 +20,11 @@ use crate::vm::helpers::{stack_get, stack_set};
 pub enum ChanResult {
     Continue,
     Yield,
-    /// Wake a simple waiter (fiber_id).
-    Wake(u32),
-    /// Wake a select waiter - needs to set woken_index on the fiber.
-    /// (fiber_id, case_index)
-    WakeSelect(u32, u16),
+    /// Wake a single waiter (simple or select).
+    Wake(ChannelWaiter),
     /// Wake multiple waiters (for close).
-    WakeMultiple(Vec<WakeInfo>),
+    WakeMultiple(Vec<ChannelWaiter>),
     Trap(RuntimeTrapKind),
-}
-
-/// Information about a waiter to wake.
-#[derive(Debug, Clone)]
-pub enum WakeInfo {
-    Simple(u32),
-    Select { fiber_id: u32, case_index: u16 },
-}
-
-impl From<ChannelWaiter> for WakeInfo {
-    fn from(w: ChannelWaiter) -> Self {
-        match w {
-            ChannelWaiter::Simple(id) => WakeInfo::Simple(id as u32),
-            ChannelWaiter::Select(sw) => WakeInfo::Select {
-                fiber_id: sw.fiber_id as u32,
-                case_index: sw.case_index,
-            },
-        }
-    }
-}
-
-impl From<&ChannelWaiter> for ChanResult {
-    fn from(w: &ChannelWaiter) -> Self {
-        match w {
-            ChannelWaiter::Simple(id) => ChanResult::Wake(*id as u32),
-            ChannelWaiter::Select(sw) => ChanResult::WakeSelect(sw.fiber_id as u32, sw.case_index),
-        }
-    }
 }
 
 /// Result of exec_chan_new: Ok(()) on success, Err(msg) on invalid parameters
@@ -91,7 +60,7 @@ pub fn exec_chan_send(stack: *const Slot, bp: usize, fiber_id: u32, inst: &Instr
     let state = channel::get_state(ch);
 
     match state.try_send(value, cap) {
-        SendResult::DirectSend(receiver) => ChanResult::from(&receiver),
+        SendResult::DirectSend(receiver) => ChanResult::Wake(receiver),
         SendResult::Buffered => ChanResult::Continue,
         SendResult::WouldBlock(value) => {
             state.register_sender(ChannelWaiter::Simple(fiber_id as u64), value);
@@ -127,7 +96,7 @@ pub fn exec_chan_recv(stack: *mut Slot, bp: usize, fiber_id: u32, inst: &Instruc
                 stack_set(stack, dst_start + elem_slots, 1);
             }
             match woke_sender {
-                Some(sender) => ChanResult::from(&sender),
+                Some(sender) => ChanResult::Wake(sender),
                 None => ChanResult::Continue,
             }
         }
@@ -167,18 +136,15 @@ pub fn exec_chan_close(stack: *const Slot, bp: usize, inst: &Instruction) -> Cha
         return ChanResult::Trap(RuntimeTrapKind::CloseClosedChannel);
     }
     state.close();
-    let mut wake_infos: Vec<WakeInfo> = state.take_waiting_receivers()
-        .into_iter()
-        .map(WakeInfo::from)
-        .collect();
-    wake_infos.extend(
+    let mut waiters: Vec<ChannelWaiter> = state.take_waiting_receivers();
+    waiters.extend(
         state.take_waiting_senders()
             .into_iter()
-            .map(|(w, _)| WakeInfo::from(w))
+            .map(|(w, _)| w)
     );
-    if wake_infos.is_empty() {
+    if waiters.is_empty() {
         ChanResult::Continue
     } else {
-        ChanResult::WakeMultiple(wake_infos)
+        ChanResult::WakeMultiple(waiters)
     }
 }

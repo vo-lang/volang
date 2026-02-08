@@ -34,9 +34,7 @@ use helpers::{slice_data_ptr, slice_len, slice_cap, string_len, string_index, ru
 
 use crate::bytecode::Module;
 use crate::exec;
-use crate::fiber::{CallFrame, Fiber, FiberState};
-use crate::scheduler::FiberId;
-
+use crate::fiber::{CallFrame, Fiber};
 /// Result of wait_for_work() — what the scheduling loop should do next.
 enum WaitResult {
     /// Work became available, retry the loop.
@@ -502,22 +500,6 @@ impl Vm {
         }
     }
 
-    /// Wake a simple (non-select) waiter.
-    /// No PC modification - blocker already set correct resume PC.
-    fn wake_simple_waiter(scheduler: &mut Scheduler, id: u32) {
-        let fiber_id = crate::scheduler::FiberId::from_raw(id);
-        scheduler.wake_fiber(fiber_id);
-    }
-
-    /// Wake a select waiter, setting woken_index.
-    fn wake_select_waiter(scheduler: &mut Scheduler, id: u32, case_index: u16) {
-        let fiber_id = crate::scheduler::FiberId::from_raw(id);
-        if let Some(ref mut select_state) = scheduler.get_fiber_mut(fiber_id).select_state {
-            select_state.woken_index = Some(case_index as usize);
-        }
-        scheduler.wake_fiber(fiber_id);
-    }
-
     /// Handle channel operation result.
     /// 
     /// **Blocker sets resume PC:** Only recv decrements PC (to re-execute and fetch data).
@@ -536,20 +518,13 @@ impl Vm {
                 if is_recv { fiber.current_frame_mut().unwrap().pc -= 1; }
                 ExecResult::Block(crate::fiber::BlockReason::Queue)
             }
-            exec::ChanResult::Wake(id) => {
-                Self::wake_simple_waiter(scheduler, id);
+            exec::ChanResult::Wake(waiter) => {
+                scheduler.wake_channel_waiter(&waiter);
                 ExecResult::TimesliceExpired
             }
-            exec::ChanResult::WakeSelect(id, case_index) => {
-                Self::wake_select_waiter(scheduler, id, case_index);
-                ExecResult::TimesliceExpired
-            }
-            exec::ChanResult::WakeMultiple(wake_infos) => {
-                for info in wake_infos {
-                    match info {
-                        exec::WakeInfo::Simple(id) => Self::wake_simple_waiter(scheduler, id),
-                        exec::WakeInfo::Select { fiber_id, case_index } => Self::wake_select_waiter(scheduler, fiber_id, case_index),
-                    }
+            exec::ChanResult::WakeMultiple(waiters) => {
+                for waiter in &waiters {
+                    scheduler.wake_channel_waiter(waiter);
                 }
                 ExecResult::TimesliceExpired
             }
@@ -629,38 +604,55 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if let Some(result_pc) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp) {
-                    use jit::{OSR_RESULT_FRAME_CHANGED, OSR_RESULT_WAITIO, OSR_RESULT_WAITQUEUE};
-                    if result_pc == OSR_RESULT_FRAME_CHANGED {
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        stack = fiber.stack_ptr();
-                        refetch!();
-                        continue;
-                    } else if result_pc == OSR_RESULT_WAITIO {
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        let token = fiber.resume_io_token
-                            .expect("OSR_RESULT_WAITIO but resume_io_token is None");
-                        return ExecResult::Block(crate::fiber::BlockReason::Io(token));
-                    } else if result_pc == OSR_RESULT_WAITQUEUE {
-                        return ExecResult::Block(crate::fiber::BlockReason::Queue);
-                    } else {
-                        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                        fiber.current_frame_mut().unwrap().pc = result_pc;
-                        stack = fiber.stack_ptr();
-                        refetch!();
-                        continue;
-                    }
-                } else {
-                    let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                    // Only trigger panic_unwind if there's a panic AND we're not already
-                    // executing a defer (during defer execution, panic_state stays Some
-                    // so that recover() can access it)
-                    if fiber.panic_state.is_some() && fiber.unwinding.is_none() {
-                        stack = fiber.stack_ptr();
-                        return helpers::panic_unwind(fiber, stack, module);
+                if let Some(osr_result) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp) {
+                    match osr_result {
+                        jit::OsrResult::FrameChanged => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            stack = fiber.stack_ptr();
+                            refetch!();
+                            continue;
+                        }
+                        #[cfg(feature = "std")]
+                        jit::OsrResult::WaitIo => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            let token = fiber.resume_io_token
+                                .expect("OsrResult::WaitIo but resume_io_token is None");
+                            return ExecResult::Block(crate::fiber::BlockReason::Io(token));
+                        }
+                        jit::OsrResult::WaitQueue => {
+                            return ExecResult::Block(crate::fiber::BlockReason::Queue);
+                        }
+                        jit::OsrResult::ExitPc(exit_pc) => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            fiber.current_frame_mut().unwrap().pc = exit_pc;
+                            stack = fiber.stack_ptr();
+                            refetch!();
+                            continue;
+                        }
+                        jit::OsrResult::Panic => {
+                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
+                            stack = fiber.stack_ptr();
+                            return helpers::panic_unwind(fiber, stack, module);
+                        }
                     }
                 }
             }};
+        }
+
+        // Macro to handle PortAction result - used by PortSend, PortRecv, PortClose
+        #[cfg(feature = "std")]
+        macro_rules! handle_port_action {
+            ($action:expr) => {
+                match $action {
+                    PortAction::Continue => { refetch!(); }
+                    PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                    PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                    PortAction::Wake(waiters) => {
+                        for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                        refetch!();
+                    }
+                }
+            };
         }
 
         for _ in 0..TIME_SLICE {
@@ -1635,15 +1627,7 @@ impl Vm {
                     let fid = fiber_id.to_raw() as u64;
                     let result = exec::exec_port_send(stack, bp, island_id, fid, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types);
                     let action = Self::process_port_result(result, fiber, false);
-                    match action {
-                        PortAction::Continue => { refetch!(); }
-                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                        PortAction::Wake(waiters) => {
-                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                            refetch!();
-                        }
-                    }
+                    handle_port_action!(action);
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortSend => {
@@ -1655,15 +1639,7 @@ impl Vm {
                     let fid = fiber_id.to_raw() as u64;
                     let result = exec::exec_port_recv(stack, bp, island_id, fid, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types);
                     let action = Self::process_port_result(result, fiber, true);
-                    match action {
-                        PortAction::Continue => { refetch!(); }
-                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                        PortAction::Wake(waiters) => {
-                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                            refetch!();
-                        }
-                    }
+                    handle_port_action!(action);
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortRecv => {
@@ -1673,15 +1649,7 @@ impl Vm {
                 Opcode::PortClose => {
                     let result = exec::exec_port_close(stack, bp, &inst);
                     let action = Self::process_port_result(result, fiber, false);
-                    match action {
-                        PortAction::Continue => { refetch!(); }
-                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
-                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                        PortAction::Wake(waiters) => {
-                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                            refetch!();
-                        }
-                    }
+                    handle_port_action!(action);
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortClose => {

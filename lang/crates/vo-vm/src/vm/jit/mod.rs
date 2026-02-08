@@ -93,59 +93,48 @@ pub fn dispatch_jit_call(
     // ret_reg = arg_start so return values go to correct location in caller's stack
     fiber.frames.push(CallFrame::new(func_id, jit_bp, arg_start as u16, ret_slots as u16));
 
-    // Build JitContext with fiber stack access
-    let mut ctx = build_jit_context(vm, fiber, module);
-    
-    // Update ctx with current frame info
-    ctx.ctx.stack_ptr = fiber.stack_ptr();
-    ctx.ctx.stack_cap = fiber.stack.len() as u32;
-    ctx.ctx.jit_bp = jit_bp as u32;
-
-    // Prepare ret buffer (still separate - return values copied back after call)
-    let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)];
-
-    // args_ptr points directly to fiber.stack[jit_bp]
-    let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
-    
-    // Call JIT function
-    let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
-
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, arg_start, ret_slots, jit_bp, &ret)
+    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots, caller_bp, arg_start)
 }
 
 /// Execute a JIT callee when frame is already set up (from Call request).
 ///
-/// This is called recursively from handle_jit_result when the callee can be JIT-executed.
+/// Called recursively from handle_jit_result when the callee can be JIT-executed.
 /// The callee's frame has already been pushed to fiber.frames.
 fn execute_jit_callee(
     vm: &mut Vm,
     fiber: &mut Fiber,
     module: &Module,
     jit_func: vo_jit::JitFunc,
-    callee_func_id: u32,
+    _callee_func_id: u32,
     callee_bp: usize,
     callee_ret_slots: usize,
     caller_bp: usize,
     caller_arg_start: usize,
 ) -> ExecResult {
-    // Build JitContext
+    invoke_jit_and_handle(vm, fiber, module, jit_func, callee_bp, callee_ret_slots, caller_bp, caller_arg_start)
+}
+
+/// Shared JIT invocation: build context, call function, handle result.
+fn invoke_jit_and_handle(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    jit_func: vo_jit::JitFunc,
+    jit_bp: usize,
+    ret_slots: usize,
+    caller_bp: usize,
+    caller_arg_start: usize,
+) -> ExecResult {
     let mut ctx = build_jit_context(vm, fiber, module);
     ctx.ctx.stack_ptr = fiber.stack_ptr();
     ctx.ctx.stack_cap = fiber.stack.len() as u32;
-    ctx.ctx.jit_bp = callee_bp as u32;
-    
-    // Prepare ret buffer
-    let mut ret: Vec<u64> = vec![0u64; callee_ret_slots.max(1)];
-    
-    // args_ptr points to callee's frame
-    let args_ptr = unsafe { fiber.stack_ptr().add(callee_bp) };
-    
-    // Call JIT function
+    ctx.ctx.jit_bp = jit_bp as u32;
+
+    let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)];
+    let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
-    
-    // Handle result (may recurse again)
-    let _ = callee_func_id; // suppress unused warning
-    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, callee_ret_slots, callee_bp, &ret)
+
+    handle_jit_result(vm, fiber, module, result, ctx, caller_bp, caller_arg_start, ret_slots, jit_bp, &ret)
 }
 
 fn handle_jit_result(
@@ -268,7 +257,6 @@ fn handle_jit_result(
             let callee_func_id = ctx.call_func_id();
             let call_arg_start = ctx.call_arg_start() as usize;
             let callee_ret_slots = ctx.call_ret_slots() as usize;
-            let callee_func_def = &module.functions[callee_func_id as usize];
 
             if call_kind == JitContext::CALL_KIND_PREPARED {
                 let callee_bp = ctx.call_resume_pc() as usize;
@@ -629,24 +617,28 @@ pub extern "C" fn jit_call_extern(
 // Loop OSR Dispatch
 // =============================================================================
 
-/// Special return values from loop OSR execution.
-pub const OSR_RESULT_FRAME_CHANGED: usize = usize::MAX;
-pub const OSR_RESULT_WAITIO: usize = usize::MAX - 1;
-pub const OSR_RESULT_WAITQUEUE: usize = usize::MAX - 2;
+/// Result of loop OSR execution.
+pub enum OsrResult {
+    /// Loop exited normally at exit_pc.
+    ExitPc(usize),
+    /// Loop made a Call — VM should refetch and continue.
+    FrameChanged,
+    /// Loop blocks on I/O (token stored in fiber.resume_io_token).
+    #[cfg(feature = "std")]
+    WaitIo,
+    /// Loop blocks on channel/port.
+    WaitQueue,
+    /// Panic occurred during loop execution.
+    Panic,
+}
 
 /// Execute a compiled loop via OSR.
-/// Returns:
-/// - Some(exit_pc) for normal exit
-/// - Some(OSR_RESULT_FRAME_CHANGED) if loop made a Call (VM should continue)
-/// - Some(OSR_RESULT_WAITIO) if loop blocks on I/O
-/// - Some(OSR_RESULT_WAITQUEUE) if loop blocks on channel/port
-/// - None for panic
 pub fn dispatch_loop_osr(
     vm: &mut Vm,
     fiber_id: crate::scheduler::FiberId,
     loop_func: vo_jit::LoopFunc,
     bp: usize,
-) -> Option<usize> {
+) -> OsrResult {
     // Use raw pointers to avoid borrow conflicts
     let module_ptr = vm.module.as_ref().unwrap() as *const Module;
     let fiber_ptr = vm.scheduler.get_fiber_mut(fiber_id) as *mut Fiber;
@@ -683,18 +675,16 @@ pub fn dispatch_loop_osr(
     
     match result {
         JitResult::Ok => {
-            // Loop exited normally - return exit_pc from context
-            Some(ctx.ctx.loop_exit_pc as usize)
+            OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
         JitResult::Panic => {
-            // Use is_user_panic to distinguish user panic from runtime errors
             let panic_msg = if ctx.is_user_panic() {
                 ctx.panic_msg()
             } else {
                 create_default_panic_msg(&mut vm.state.gc)
             };
             fiber.set_recoverable_panic(panic_msg);
-            None
+            OsrResult::Panic
         }
         JitResult::Call => {
             let callee_func_id = ctx.call_func_id();
@@ -711,7 +701,7 @@ pub fn dispatch_loop_osr(
                     if let Some(frame) = fiber.current_frame_mut() {
                         frame.pc = resume_pc as usize;
                     }
-                    return Some(OSR_RESULT_FRAME_CHANGED);
+                    return OsrResult::FrameChanged;
                 }
                 _ => {}
             }
@@ -724,7 +714,7 @@ pub fn dispatch_loop_osr(
                     callee_ret_slots, call_ret_reg,
                     callee_bp, caller_resume_pc,
                 );
-                Some(OSR_RESULT_FRAME_CHANGED)
+                OsrResult::FrameChanged
             } else {
                 let resume_pc = ctx.call_resume_pc();
                 setup_regular_call(
@@ -732,7 +722,7 @@ pub fn dispatch_loop_osr(
                     callee_ret_slots, call_ret_reg,
                     call_arg_start, resume_pc,
                 );
-                Some(OSR_RESULT_FRAME_CHANGED)
+                OsrResult::FrameChanged
             }
         }
         #[cfg(feature = "std")]
@@ -748,7 +738,7 @@ pub fn dispatch_loop_osr(
             // Store token for scheduler
             fiber.resume_io_token = Some(token);
             
-            Some(OSR_RESULT_WAITIO)
+            OsrResult::WaitIo
         }
         #[cfg(not(feature = "std"))]
         JitResult::WaitIo => {
@@ -762,7 +752,7 @@ pub fn dispatch_loop_osr(
                 frame.pc = resume_pc as usize;
             }
             
-            Some(OSR_RESULT_WAITQUEUE)
+            OsrResult::WaitQueue
         }
         JitResult::Replay => {
             let resume_pc = ctx.call_resume_pc();
@@ -772,7 +762,7 @@ pub fn dispatch_loop_osr(
                 frame.pc = resume_pc as usize;
             }
             
-            Some(OSR_RESULT_FRAME_CHANGED)
+            OsrResult::FrameChanged
         }
     }
 }
@@ -781,16 +771,16 @@ pub fn dispatch_loop_osr(
 // Loop OSR entry points (called from VM main loop)
 // =============================================================================
 
-/// Try loop OSR at backedge. Returns result PC or None to continue VM.
+/// Try loop OSR at backedge. Returns None if loop not compiled/not hot.
 pub(crate) fn try_loop_osr(
     vm: &mut Vm,
     fiber_id: crate::scheduler::FiberId,
     func_id: u32,
     loop_pc: usize,
     bp: usize,
-) -> Option<usize> {
+) -> Option<OsrResult> {
     let loop_func = get_or_compile_loop(vm, func_id, loop_pc)?;
-    dispatch_loop_osr(vm, fiber_id, loop_func, bp)
+    Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp))
 }
 
 /// Get compiled loop or compile if hot. Returns None if not ready.

@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::fiber::{BlockReason, Fiber, FiberState};
 use crate::vm::RuntimeTrapKind;
+use vo_runtime::objects::queue_state::ChannelWaiter;
 #[cfg(feature = "std")]
 use vo_runtime::io::{IoRuntime, IoToken};
 
@@ -234,6 +235,19 @@ impl Scheduler {
         !self.io_waiters.is_empty()
     }
 
+    /// Wake a channel waiter (simple or select).
+    ///
+    /// For select waiters, sets `woken_index` on the fiber before waking.
+    /// Unified entry point used by both VM interpreter and JIT callbacks.
+    pub fn wake_channel_waiter(&mut self, waiter: &ChannelWaiter) {
+        let fiber_id = FiberId::from_raw(waiter.fiber_id() as u32);
+        if let ChannelWaiter::Select(ref sw) = waiter {
+            if let Some(ref mut select_state) = self.get_fiber_mut(fiber_id).select_state {
+                select_state.woken_index = Some(sw.case_index as usize);
+            }
+        }
+        self.wake_fiber(fiber_id);
+    }
 }
 
 impl Default for Scheduler {
