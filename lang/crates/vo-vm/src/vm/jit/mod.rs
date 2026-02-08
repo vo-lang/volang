@@ -271,103 +271,29 @@ fn handle_jit_result(
             let callee_func_def = &module.functions[callee_func_id as usize];
 
             if call_kind == JitContext::CALL_KIND_PREPARED {
-                // Prepared call: prepare_closure/iface_call already did:
-                // - jit_push_frame: args copied to fiber.stack[callee_bp..],
-                //   ensure_capacity called, fiber.sp set
-                //
-                // callee_bp was saved in call_resume_pc by the trampoline.
-                // caller_resume_pc was saved in call_arg_start by the trampoline
-                // (PREPARED repurposes arg_start since args are already copied).
                 let callee_bp = ctx.call_resume_pc() as usize;
                 let caller_resume_pc = ctx.call_arg_start() as u32;
-                let param_slots = callee_func_def.param_slots as usize;
-                let local_slots = callee_func_def.local_slots as usize;
-                let new_sp = callee_bp + local_slots;
-                
-                // Materialize any intermediate JIT frames from non-OK propagation.
-                // caller_resume_pc is the pc where the innermost caller should
-                // continue after the callee returns (instruction after CallIface/CallClosure).
-                if !fiber.resume_stack.is_empty() {
-                    materialize_jit_frames(fiber, caller_resume_pc);
-                    fiber.resume_stack.clear();
-                } else {
-                    // Simple case: no intermediate frames. Set entry_frame.pc directly.
-                    if let Some(frame) = fiber.frames.last_mut() {
-                        frame.pc = caller_resume_pc as usize;
-                    }
-                }
-                
-                // Zero non-arg local slots for VM interpreter.
-                // Args are already at fiber.stack[callee_bp..callee_bp+param_slots].
-                // ensure_capacity was done by prepare's push_frame.
-                if local_slots > param_slots {
-                    let stack = fiber.stack_ptr();
-                    unsafe {
-                        core::ptr::write_bytes(
-                            stack.add(callee_bp + param_slots), 0,
-                            local_slots - param_slots
-                        );
-                    };
-                }
-                
-                fiber.sp = new_sp;
                 let call_ret_reg = ctx.call_ret_reg();
-                fiber.frames.push(CallFrame::new(
-                    callee_func_id,
-                    callee_bp,
-                    call_ret_reg, // ret_reg from inst.a
-                    callee_ret_slots as u16,
-                ));
-                
+                setup_prepared_call(
+                    fiber, module, callee_func_id,
+                    callee_ret_slots as u16, call_ret_reg,
+                    callee_bp, caller_resume_pc,
+                );
                 return ExecResult::FrameChanged;
             }
             
             // Regular call: JIT requests VM to execute a non-JIT function.
-            // JIT locals are already in fiber.stack[jit_bp..] - no copy needed!
             let resume_pc = ctx.call_resume_pc();
-
-            materialize_jit_frames(fiber, resume_pc);
-            
-            // After materialize_jit_frames, the last frame in fiber.frames is the
-            // immediate caller of the requested callee. Use its bp as the source
-            // for arg copying (NOT ctx.jit_bp, which was overwritten by intermediate
-            // non-OK blocks' push_frame calls when resume_stack > 0).
-            let caller_frame = fiber.frames.last().unwrap();
-            let actual_caller_bp = caller_frame.bp;
-            let caller_func = &module.functions[caller_frame.func_id as usize];
-            
-            // Recompute fiber.sp from the materialized caller frame.
-            // Intermediate push_frame calls may have left fiber.sp at the wrong position.
-            fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
-            
-            // Set up callee frame like exec_call does
-            let callee_bp = fiber.sp;
-            let callee_local_slots = callee_func_def.local_slots as usize;
-            let new_sp = callee_bp + callee_local_slots;
-            
-            fiber.ensure_capacity(new_sp);
-            
-            // Zero callee's local slots
-            let stack = fiber.stack_ptr();
-            unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
-            
-            // Copy args from caller's locals area
-            let arg_slots = callee_func_def.param_slots as usize;
-            for i in 0..arg_slots {
-                fiber.stack[callee_bp + i] = fiber.stack[actual_caller_bp + call_arg_start + i];
-            }
-            
-            fiber.sp = new_sp;
             let call_ret_reg = ctx.call_ret_reg();
-            fiber.frames.push(CallFrame::new(
-                callee_func_id,
-                callee_bp,
-                call_ret_reg, // ret_reg: where caller expects returns (relative to caller_bp)
-                callee_ret_slots as u16,
-            ));
+            let (callee_bp, actual_caller_bp) = setup_regular_call(
+                fiber, module, callee_func_id,
+                callee_ret_slots as u16, call_ret_reg,
+                call_arg_start, resume_pc,
+            );
 
             // Check if callee can be JIT-executed instead of interpreter fallback
             if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+                let callee_func_def = &module.functions[callee_func_id as usize];
                 if let Some(jit_func) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
                     return execute_jit_callee(vm, fiber, module, jit_func, callee_func_id, callee_bp, callee_ret_slots, actual_caller_bp, call_arg_start);
                 }
@@ -404,6 +330,110 @@ fn handle_jit_result(
             ExecResult::FrameChanged
         }
     }
+}
+
+// =============================================================================
+// Shared call frame setup helpers (used by both handle_jit_result and dispatch_loop_osr)
+// =============================================================================
+
+/// Set up a prepared call frame (closure/interface call where args are already in place).
+///
+/// Materializes JIT frames, zeros non-arg local slots, sets fiber.sp, and pushes
+/// the callee's CallFrame. Returns the callee_bp for the caller.
+fn setup_prepared_call(
+    fiber: &mut Fiber,
+    module: &Module,
+    callee_func_id: u32,
+    callee_ret_slots: u16,
+    call_ret_reg: u16,
+    callee_bp: usize,
+    caller_resume_pc: u32,
+) {
+    let callee_func_def = &module.functions[callee_func_id as usize];
+    let param_slots = callee_func_def.param_slots as usize;
+    let local_slots = callee_func_def.local_slots as usize;
+    let new_sp = callee_bp + local_slots;
+    
+    // Materialize any intermediate JIT frames from non-OK propagation
+    if !fiber.resume_stack.is_empty() {
+        materialize_jit_frames(fiber, caller_resume_pc);
+        fiber.resume_stack.clear();
+    } else {
+        if let Some(frame) = fiber.frames.last_mut() {
+            frame.pc = caller_resume_pc as usize;
+        }
+    }
+    
+    // Zero non-arg local slots for VM interpreter
+    if local_slots > param_slots {
+        let stack = fiber.stack_ptr();
+        unsafe {
+            core::ptr::write_bytes(
+                stack.add(callee_bp + param_slots), 0,
+                local_slots - param_slots
+            );
+        };
+    }
+    
+    fiber.sp = new_sp;
+    fiber.frames.push(CallFrame::new(
+        callee_func_id,
+        callee_bp,
+        call_ret_reg,
+        callee_ret_slots,
+    ));
+}
+
+/// Set up a regular call frame (JIT requests VM to execute a non-JIT function).
+///
+/// Materializes JIT frames, recomputes caller bp/sp, allocates callee frame,
+/// zeros locals, copies args, and pushes the callee's CallFrame.
+/// Returns (callee_bp, actual_caller_bp, call_arg_start) for potential JIT re-dispatch.
+fn setup_regular_call(
+    fiber: &mut Fiber,
+    module: &Module,
+    callee_func_id: u32,
+    callee_ret_slots: u16,
+    call_ret_reg: u16,
+    call_arg_start: usize,
+    resume_pc: u32,
+) -> (usize, usize) {
+    materialize_jit_frames(fiber, resume_pc);
+    
+    // After materialize_jit_frames, the last frame is the immediate caller.
+    let caller_frame = fiber.frames.last().unwrap();
+    let actual_caller_bp = caller_frame.bp;
+    let caller_func = &module.functions[caller_frame.func_id as usize];
+    
+    // Recompute fiber.sp from the materialized caller frame
+    fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
+    
+    let callee_func_def = &module.functions[callee_func_id as usize];
+    let callee_bp = fiber.sp;
+    let callee_local_slots = callee_func_def.local_slots as usize;
+    let new_sp = callee_bp + callee_local_slots;
+    
+    fiber.ensure_capacity(new_sp);
+    
+    // Zero callee's local slots
+    let stack = fiber.stack_ptr();
+    unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
+    
+    // Copy args from caller's locals area
+    let arg_slots = callee_func_def.param_slots as usize;
+    for i in 0..arg_slots {
+        fiber.stack[callee_bp + i] = fiber.stack[actual_caller_bp + call_arg_start + i];
+    }
+    
+    fiber.sp = new_sp;
+    fiber.frames.push(CallFrame::new(
+        callee_func_id,
+        callee_bp,
+        call_ret_reg,
+        callee_ret_slots,
+    ));
+    
+    (callee_bp, actual_caller_bp)
 }
 
 /// Convert resume_stack to fiber.frames when VM takes over from JIT.
@@ -686,86 +716,22 @@ pub fn dispatch_loop_osr(
                 _ => {}
             }
             
-            let callee_func_def = &module.functions[callee_func_id as usize];
-            
             if call_kind == JitContext::CALL_KIND_PREPARED {
-                // Prepared call (closure/interface): prepare callback already did
-                // push_frame (args copied, fiber.sp set). We just need to:
-                // 1. Set caller's frame.pc for resume
-                // 2. Zero non-arg local slots
-                // 3. Push callee frame to fiber.frames
                 let callee_bp = ctx.call_resume_pc() as usize;
-                let caller_resume_pc = ctx.call_arg_start() as usize;
-                let param_slots = callee_func_def.param_slots as usize;
-                let local_slots = callee_func_def.local_slots as usize;
-                let new_sp = callee_bp + local_slots;
-                
-                // Materialize any intermediate JIT frames from non-OK propagation
-                if !fiber.resume_stack.is_empty() {
-                    materialize_jit_frames(fiber, caller_resume_pc as u32);
-                    fiber.resume_stack.clear();
-                } else {
-                    if let Some(frame) = fiber.current_frame_mut() {
-                        frame.pc = caller_resume_pc;
-                    }
-                }
-                
-                // Zero non-arg local slots
-                if local_slots > param_slots {
-                    let stack = fiber.stack_ptr();
-                    unsafe {
-                        core::ptr::write_bytes(
-                            stack.add(callee_bp + param_slots), 0,
-                            local_slots - param_slots
-                        );
-                    };
-                }
-                
-                fiber.sp = new_sp;
-                fiber.frames.push(CallFrame::new(
-                    callee_func_id,
-                    callee_bp,
-                    call_ret_reg,
-                    callee_ret_slots,
-                ));
-                
+                let caller_resume_pc = ctx.call_arg_start() as u32;
+                setup_prepared_call(
+                    fiber, module, callee_func_id,
+                    callee_ret_slots, call_ret_reg,
+                    callee_bp, caller_resume_pc,
+                );
                 Some(OSR_RESULT_FRAME_CHANGED)
             } else {
-                // Regular call: read args from caller's frame, push callee frame
                 let resume_pc = ctx.call_resume_pc();
-                
-                // Materialize intermediate frames, then use last frame as caller
-                materialize_jit_frames(fiber, resume_pc);
-                fiber.resume_stack.clear();
-                
-                // After materialize, last frame is the immediate caller
-                let caller_frame = fiber.frames.last().unwrap();
-                let actual_caller_bp = caller_frame.bp;
-                let caller_func = &module.functions[caller_frame.func_id as usize];
-                fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
-                
-                let callee_bp = fiber.sp;
-                let callee_local_slots = callee_func_def.local_slots as usize;
-                let new_sp = callee_bp + callee_local_slots;
-                
-                fiber.ensure_capacity(new_sp);
-                
-                let stack = fiber.stack_ptr();
-                unsafe { core::ptr::write_bytes(stack.add(callee_bp), 0, callee_local_slots) };
-                
-                let arg_slots = callee_func_def.param_slots as usize;
-                for i in 0..arg_slots {
-                    fiber.stack[callee_bp + i] = fiber.stack[actual_caller_bp + call_arg_start + i];
-                }
-                
-                fiber.sp = new_sp;
-                fiber.frames.push(CallFrame::new(
-                    callee_func_id,
-                    callee_bp,
-                    call_ret_reg,
-                    callee_ret_slots,
-                ));
-                
+                setup_regular_call(
+                    fiber, module, callee_func_id,
+                    callee_ret_slots, call_ret_reg,
+                    call_arg_start, resume_pc,
+                );
                 Some(OSR_RESULT_FRAME_CHANGED)
             }
         }

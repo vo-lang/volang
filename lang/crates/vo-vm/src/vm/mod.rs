@@ -36,6 +36,27 @@ use crate::bytecode::Module;
 use crate::exec;
 use crate::fiber::{CallFrame, Fiber, FiberState};
 use crate::scheduler::FiberId;
+
+/// Result of wait_for_work() — what the scheduling loop should do next.
+enum WaitResult {
+    /// Work became available, retry the loop.
+    Retry,
+    /// All fibers completed normally.
+    Done,
+    /// All fibers blocked (potential deadlock).
+    Blocked,
+    /// Island VM should return to its command loop.
+    Break,
+}
+
+/// Processed port operation outcome.
+#[cfg(feature = "std")]
+enum PortAction {
+    Continue,
+    Block,
+    Trap(RuntimeTrapKind),
+    Wake(Vec<vo_runtime::objects::port::WaiterInfo>),
+}
 use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
 use vo_runtime::itab::ItabCache;
@@ -298,77 +319,20 @@ impl Vm {
             if let Some(max) = max_iterations {
                 iterations += 1;
                 if iterations > max {
-                    // Suspend current fiber before breaking so it can be rescheduled later
                     self.scheduler.yield_current();
                     break;
                 }
             }
             
-            // Process any wake commands from other islands
-            #[cfg(feature = "std")]
-            if let Some(ref rx) = self.state.main_cmd_rx {
-                while let Ok(cmd) = rx.try_recv() {
-                    if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
-                        self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-                    }
-                }
-            }
+            self.process_island_commands();
             
-            // Check if we have runnable fibers
             if !self.scheduler.has_work() {
-                // Poll I/O first to wake any fibers waiting on I/O
-                #[cfg(feature = "std")]
-                {
-                    let woken = self.scheduler.poll_io(&mut self.state.io);
-                    if woken > 0 {
-                        continue;
-                    }
+                match self.wait_for_work() {
+                    WaitResult::Retry => continue,
+                    WaitResult::Done => return Ok(SchedulingOutcome::Completed),
+                    WaitResult::Blocked => return Ok(SchedulingOutcome::Blocked),
+                    WaitResult::Break => break,
                 }
-                
-                // No runnable fibers - check if we have blocked fibers waiting for island wakes
-                #[cfg(feature = "std")]
-                if self.scheduler.has_blocked() && self.state.main_cmd_rx.is_some() {
-                    // Wait for wake command from other islands
-                    if let Some(ref rx) = self.state.main_cmd_rx {
-                        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                            Ok(vo_runtime::island::IslandCommand::WakeFiber { fiber_id }) => {
-                                self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-                                continue;
-                            }
-                            Ok(_) => continue,
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                // Also poll I/O during timeout wait
-                                self.scheduler.poll_io(&mut self.state.io);
-                                continue;
-                            }
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
-                    }
-                }
-                
-                // Check if there are I/O waiters or blocked fibers - if so, keep polling
-                #[cfg(feature = "std")]
-                if self.scheduler.has_io_waiters() || self.scheduler.has_blocked() {
-                    // Island VMs (current_island_id != 0) should return to let run_island_thread
-                    // handle commands. Poll I/O once before returning to wake any ready fibers.
-                    if self.state.current_island_id != 0 {
-                        if self.scheduler.has_io_waiters() {
-                            self.scheduler.poll_io(&mut self.state.io);
-                        }
-                        break;
-                    }
-                    // All fibers blocked, no I/O waiters, no island communication
-                    // Return Blocked - caller decides if this is a deadlock
-                    if !self.scheduler.has_io_waiters() && self.state.main_cmd_rx.is_none() {
-                        return Ok(SchedulingOutcome::Blocked);
-                    }
-
-                    self.scheduler.poll_io(&mut self.state.io);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                
-                return Ok(SchedulingOutcome::Completed);
             }
             
             let fiber_id = match self.scheduler.schedule_next() {
@@ -377,50 +341,132 @@ impl Vm {
             };
 
             let result = self.run_fiber(fiber_id);
-            match result {
-                ExecResult::TimesliceExpired => {
-                    self.scheduler.yield_current();
-                }
-                ExecResult::Block(reason) => {
-                    match reason {
-                        crate::fiber::BlockReason::Queue => {
-                            self.scheduler.block_for_queue();
-                        }
-                        #[cfg(feature = "std")]
-                        crate::fiber::BlockReason::Io(token) => {
-                            let fiber = self.scheduler.current_fiber_mut().unwrap();
-                            let frame = fiber.current_frame_mut().unwrap();
-                            frame.pc -= 1;
-                            self.scheduler.block_for_io(token);
-                        }
-                    }
-                }
-                ExecResult::Done => {
-                    let _ = self.scheduler.kill_current();
-                }
-                ExecResult::Panic => {
-                    let (trap_kind, msg, loc_tuple) = self.scheduler.kill_current();
-                    let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
-                    // For top-level callers, convert to error. For run_scheduler_round, just return.
-                    if max_iterations.is_none() {
-                        if let Some(kind) = trap_kind {
-                            let msg = msg.expect("runtime trap should have message");
-                            return Err(VmError::RuntimeTrap { kind, msg, loc });
-                        }
-                        return Err(VmError::PanicUnwound { msg, loc });
-                    } else {
-                        return Ok(SchedulingOutcome::Panicked);
-                    }
-                }
-                ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
-                    // Internal to run_fiber — should never escape to scheduling loop.
-                    debug_assert!(false, "internal ExecResult leaked to scheduling loop: {:?}", result);
-                    self.scheduler.yield_current();
-                }
+            match self.handle_exec_result(result, max_iterations.is_some()) {
+                None => {} // continue scheduling
+                Some(Ok(outcome)) => return Ok(outcome),
+                Some(Err(e)) => return Err(e),
             }
         }
 
         Ok(SchedulingOutcome::Completed)
+    }
+    
+    /// Process wake commands from other island threads (non-blocking).
+    #[inline]
+    fn process_island_commands(&mut self) {
+        #[cfg(feature = "std")]
+        if let Some(ref rx) = self.state.main_cmd_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
+                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                }
+            }
+        }
+    }
+    
+    /// When no fibers are runnable, try to make progress via I/O polling or
+    /// island command waiting. Returns what the scheduling loop should do next.
+    fn wait_for_work(&mut self) -> WaitResult {
+        // Try I/O polling first
+        #[cfg(feature = "std")]
+        {
+            if self.scheduler.poll_io(&mut self.state.io) > 0 {
+                return WaitResult::Retry;
+            }
+        }
+        
+        // Try waiting for island commands
+        #[cfg(feature = "std")]
+        if self.scheduler.has_blocked() && self.state.main_cmd_rx.is_some() {
+            if let Some(ref rx) = self.state.main_cmd_rx {
+                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(vo_runtime::island::IslandCommand::WakeFiber { fiber_id }) => {
+                        self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                        return WaitResult::Retry;
+                    }
+                    Ok(_) => return WaitResult::Retry,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        self.scheduler.poll_io(&mut self.state.io);
+                        return WaitResult::Retry;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return WaitResult::Break;
+                    }
+                }
+            }
+        }
+        
+        // Check if there are waiters that might still make progress
+        #[cfg(feature = "std")]
+        if self.scheduler.has_io_waiters() || self.scheduler.has_blocked() {
+            // Island VMs return to let run_island_thread handle commands
+            if self.state.current_island_id != 0 {
+                if self.scheduler.has_io_waiters() {
+                    self.scheduler.poll_io(&mut self.state.io);
+                }
+                return WaitResult::Break;
+            }
+            // No I/O waiters and no island communication => true deadlock
+            if !self.scheduler.has_io_waiters() && self.state.main_cmd_rx.is_none() {
+                return WaitResult::Blocked;
+            }
+            // Keep polling
+            self.scheduler.poll_io(&mut self.state.io);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            return WaitResult::Retry;
+        }
+        
+        WaitResult::Done
+    }
+    
+    /// Handle a fiber execution result. Returns:
+    /// - `None`: continue scheduling loop
+    /// - `Some(Ok(outcome))`: return this outcome
+    /// - `Some(Err(e))`: return this error
+    fn handle_exec_result(
+        &mut self,
+        result: ExecResult,
+        is_bounded: bool,
+    ) -> Option<Result<SchedulingOutcome, VmError>> {
+        match result {
+            ExecResult::TimesliceExpired => {
+                self.scheduler.yield_current();
+            }
+            ExecResult::Block(reason) => {
+                match reason {
+                    crate::fiber::BlockReason::Queue => {
+                        self.scheduler.block_for_queue();
+                    }
+                    #[cfg(feature = "std")]
+                    crate::fiber::BlockReason::Io(token) => {
+                        let fiber = self.scheduler.current_fiber_mut().unwrap();
+                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        self.scheduler.block_for_io(token);
+                    }
+                }
+            }
+            ExecResult::Done => {
+                let _ = self.scheduler.kill_current();
+            }
+            ExecResult::Panic => {
+                let (trap_kind, msg, loc_tuple) = self.scheduler.kill_current();
+                let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
+                if !is_bounded {
+                    if let Some(kind) = trap_kind {
+                        let msg = msg.expect("runtime trap should have message");
+                        return Some(Err(VmError::RuntimeTrap { kind, msg, loc }));
+                    }
+                    return Some(Err(VmError::PanicUnwound { msg, loc }));
+                } else {
+                    return Some(Ok(SchedulingOutcome::Panicked));
+                }
+            }
+            ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
+                debug_assert!(false, "internal ExecResult leaked to scheduling loop: {:?}", result);
+                self.scheduler.yield_current();
+            }
+        }
+        None
     }
     
     
@@ -511,36 +557,29 @@ impl Vm {
         }
     }
 
-    /// Handle port operation results uniformly.
-    /// Returns Option<(RuntimeTrapKind, waiters_to_wake)> - caller handles trap/wake separately.
+    /// Process port operation result into a PortAction.
+    /// Handles PC adjustment for recv blocking. Does not touch gc or scheduler.
     #[cfg(feature = "std")]
-    fn handle_port_result(
+    fn process_port_result(
         result: exec::PortResult,
         fiber: &mut Fiber,
         is_recv: bool,
-    ) -> (ExecResult, Option<RuntimeTrapKind>, Vec<vo_runtime::objects::port::WaiterInfo>) {
+    ) -> PortAction {
         match result {
-            exec::PortResult::Continue => (ExecResult::FrameChanged, None, Vec::new()),
+            exec::PortResult::Continue => PortAction::Continue,
             exec::PortResult::Yield => {
                 if is_recv {
                     fiber.current_frame_mut().unwrap().pc -= 1;
                 }
-                (ExecResult::Block(crate::fiber::BlockReason::Queue), None, Vec::new())
+                PortAction::Block
             }
-            exec::PortResult::WakeRemote(waiter) => {
-                (ExecResult::FrameChanged, None, vec![waiter])
-            }
-            exec::PortResult::SendOnClosed => {
-                (ExecResult::Panic, Some(RuntimeTrapKind::SendOnClosedChannel), Vec::new())
-            }
-            exec::PortResult::CloseNil => {
-                (ExecResult::Panic, Some(RuntimeTrapKind::CloseNilChannel), Vec::new())
-            }
-            exec::PortResult::Closed(waiters) => {
-                (ExecResult::FrameChanged, None, waiters)
-            }
+            exec::PortResult::WakeRemote(waiter) => PortAction::Wake(vec![waiter]),
+            exec::PortResult::SendOnClosed => PortAction::Trap(RuntimeTrapKind::SendOnClosedChannel),
+            exec::PortResult::CloseNil => PortAction::Trap(RuntimeTrapKind::CloseNilChannel),
+            exec::PortResult::Closed(waiters) => PortAction::Wake(waiters),
         }
     }
+
 
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
@@ -1595,10 +1634,16 @@ impl Vm {
                     let island_id = self.state.current_island_id;
                     let fid = fiber_id.to_raw() as u64;
                     let result = exec::exec_port_send(stack, bp, island_id, fid, &inst, &self.state.gc, &module.struct_metas, &module.runtime_types);
-                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, false);
-                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                    let action = Self::process_port_result(result, fiber, false);
+                    match action {
+                        PortAction::Continue => { refetch!(); }
+                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                        PortAction::Wake(waiters) => {
+                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                            refetch!();
+                        }
+                    }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortSend => {
@@ -1609,10 +1654,16 @@ impl Vm {
                     let island_id = self.state.current_island_id;
                     let fid = fiber_id.to_raw() as u64;
                     let result = exec::exec_port_recv(stack, bp, island_id, fid, &inst, &mut self.state.gc, &module.struct_metas, &module.runtime_types);
-                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, true);
-                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                    let action = Self::process_port_result(result, fiber, true);
+                    match action {
+                        PortAction::Continue => { refetch!(); }
+                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                        PortAction::Wake(waiters) => {
+                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                            refetch!();
+                        }
+                    }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortRecv => {
@@ -1621,10 +1672,16 @@ impl Vm {
                 #[cfg(feature = "std")]
                 Opcode::PortClose => {
                     let result = exec::exec_port_close(stack, bp, &inst);
-                    let (r, trap, waiters) = Self::handle_port_result(result, fiber, false);
-                    for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
-                    if let Some(kind) = trap { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
-                    if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                    let action = Self::process_port_result(result, fiber, false);
+                    match action {
+                        PortAction::Continue => { refetch!(); }
+                        PortAction::Block => { return ExecResult::Block(crate::fiber::BlockReason::Queue); }
+                        PortAction::Trap(kind) => { return runtime_trap(&mut self.state.gc, fiber, stack, module, kind); }
+                        PortAction::Wake(waiters) => {
+                            for w in &waiters { self.state.wake_waiter(w, &mut self.scheduler); }
+                            refetch!();
+                        }
+                    }
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::PortClose => {
