@@ -151,14 +151,24 @@ impl<'a> FunctionCompiler<'a> {
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
-        // Only spill SSA-only slots (< memory_only_start).
-        // Memory-only slots (>= memory_only_start) are the source of truth in
-        // fiber.stack. SlotSet writes to memory without updating SSA, so spilling
-        // those slots would overwrite correct memory values with stale SSA zeros.
-        let spill_count = (self.memory_only_start as usize).min(self.vars.len());
-        for i in 0..spill_count {
+        let args_ptr = self.args_ptr_val.unwrap();
+        let num_slots = self.vars.len();
+        let mem_start = (self.memory_only_start as usize).min(num_slots);
+        
+        // SSA-only slots (< memory_only_start): spill from SSA to fiber.stack.
+        for i in 0..mem_start {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
+            self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
+        }
+        
+        // Memory-aliased slots (>= memory_only_start): copy from args_ptr to fiber.stack.
+        // In JIT-to-JIT direct calls, args_ptr points to native stack, not fiber.stack.
+        // The VM reads from fiber.stack on Call fallback, so we must sync these slots.
+        // SlotSet writes go through args_ptr, so args_ptr is the source of truth.
+        for i in mem_start..num_slots {
+            let offset = (i * 8) as i32;
+            let val = self.builder.ins().load(types::I64, MemFlags::trusted(), args_ptr, offset);
             self.builder.ins().store(MemFlags::trusted(), val, dst_ptr, offset);
         }
     }
@@ -210,7 +220,8 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.def_var(self.vars[i], val);
         }
         
-        // Initialize non-param SSA vars to 0 and store to args_ptr
+        // Initialize non-param SSA vars to 0.
+        // Memory store only needed for memory-aliased slots (>= memory_only_start).
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
         let zero_f64 = self.builder.ins().f64const(0.0);
         for i in param_slots..num_slots {
@@ -219,8 +230,10 @@ impl<'a> FunctionCompiler<'a> {
             } else {
                 self.builder.def_var(self.vars[i], zero_i64);
             }
-            let offset = (i * 8) as i32;
-            self.builder.ins().store(MemFlags::trusted(), zero_i64, args_ptr, offset);
+            if i as u16 >= self.memory_only_start {
+                let offset = (i * 8) as i32;
+                self.builder.ins().store(MemFlags::trusted(), zero_i64, args_ptr, offset);
+            }
         }
     }
 
@@ -291,7 +304,9 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    /// Write I64 value to both SSA variable and fiber.stack memory.
+    /// Write I64 value to variable slot.
+    /// SSA-only slots (< memory_only_start): only update SSA variable (memory synced on slow path by spill).
+    /// Memory-aliased slots (>= memory_only_start): write both SSA and memory.
     fn store_local(&mut self, slot: u16, val: Value) {
         if self.is_float_slot(slot) {
             let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
@@ -299,8 +314,10 @@ impl<'a> FunctionCompiler<'a> {
         } else {
             self.builder.def_var(self.vars[slot as usize], val);
         }
-        let args_ptr = self.args_ptr_val.unwrap();
-        self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+        if slot >= self.memory_only_start {
+            let args_ptr = self.args_ptr_val.unwrap();
+            self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
+        }
         // Clear non-nil status when slot is written
         self.checked_non_nil.remove(&slot);
     }
@@ -357,6 +374,23 @@ impl<'a> FunctionCompiler<'a> {
                 self.builder.ins().store(MemFlags::trusted(), gcref_start, ctx, JitContext::OFFSET_RET_GCREF_START);
                 let one = self.builder.ins().iconst(types::I8, 1);
                 self.builder.ins().store(MemFlags::trusted(), one, ctx, JitContext::OFFSET_RET_IS_HEAP);
+                
+                // Spill GcRef slots to args_ptr so VM can read them from fiber.stack.
+                // SSA-only slots (< memory_only_start) aren't written to memory by store_local.
+                let gcref_count = inst.b as usize;
+                let args_ptr = self.args_ptr_val.unwrap();
+                for i in 0..gcref_count {
+                    let slot = (inst.a as usize + i) as u16;
+                    if slot < self.memory_only_start {
+                        let val = self.builder.use_var(self.vars[slot as usize]);
+                        let val_i64 = if self.is_float_slot(slot) {
+                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else {
+                            val
+                        };
+                        self.builder.ins().store(MemFlags::trusted(), val_i64, args_ptr, (slot as i32) * 8);
+                    }
+                }
             } else {
                 let zero = self.builder.ins().iconst(types::I8, 0);
                 self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
@@ -611,7 +645,7 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         if slot < self.memory_only_start {
             let val = self.builder.use_var(self.vars[slot as usize]);
             if self.is_float_slot(slot) {
-                val // Already F64, no bitcast needed!
+                val
             } else {
                 self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
             }
@@ -621,14 +655,15 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        // Store directly as F64 to memory
-        let args_ptr = self.args_ptr_val.unwrap();
-        self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         if self.is_float_slot(slot) {
-            self.builder.def_var(self.vars[slot as usize], val); // Already F64, no bitcast!
+            self.builder.def_var(self.vars[slot as usize], val);
         } else {
             let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
             self.builder.def_var(self.vars[slot as usize], i64_val);
+        }
+        if slot >= self.memory_only_start {
+            let args_ptr = self.args_ptr_val.unwrap();
+            self.builder.ins().store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
         }
         self.checked_non_nil.remove(&slot);
     }

@@ -476,7 +476,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         if slot < self.memory_only_start {
             let val = self.builder.use_var(self.vars[slot as usize]);
             if self.is_float_slot(slot) {
-                val // Already F64, no bitcast needed!
+                val
             } else {
                 self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
             }

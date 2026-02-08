@@ -153,15 +153,27 @@ pub trait IrEmitter<'a> {
     fn mark_checked_non_nil(&mut self, slot: u16);
 }
 
-/// Scan instructions to find the minimum base register used in SlotSet/SlotSetN.
-/// All slots below this value are safe for SSA reads (no aliasing with pointer-based memory writes).
+/// Scan instructions to find the minimum base register accessed via memory pointers.
+/// Slots below this value are pure SSA — never accessed through memory by callbacks
+/// or dynamic indexing, so store_local can skip memory writes for them.
 pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
     let mut min_base = u16::MAX;
     for inst in code {
         match inst.opcode() {
-            Opcode::SlotSet | Opcode::SlotSetN => {
-                min_base = min_base.min(inst.a);
+            // Dynamic indexed memory access (SlotGet reads, SlotSet writes)
+            Opcode::SlotSet | Opcode::SlotSetN => { min_base = min_base.min(inst.a); }
+            Opcode::SlotGet | Opcode::SlotGetN => { min_base = min_base.min(inst.b); }
+            // Callbacks that read from var_addr pointers
+            Opcode::ChanSend | Opcode::PortSend => { min_base = min_base.min(inst.b); }
+            Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => { min_base = min_base.min(inst.b); }
+            Opcode::GoIsland => { min_base = min_base.min(inst.c); }
+            Opcode::SliceAppend => {
+                let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
+                min_base = min_base.min(elem_slot);
             }
+            // Select callbacks read/write fiber.stack directly via register numbers —
+            // all slots must be memory-synced
+            Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => { return 0; }
             _ => {}
         }
     }
