@@ -108,6 +108,11 @@ pub struct JitManager {
     /// Used by JIT code for direct JIT-to-JIT calls.
     func_table: Vec<*const u8>,
     
+    /// Direct call table: only populated for functions that pass can_direct_jit_call
+    /// (no CallClosure/CallIface). Used by prepare_closure_call / prepare_iface_call
+    /// to decide if JIT-to-JIT direct call is safe from the fast path.
+    direct_call_table: Vec<*const u8>,
+    
     /// Cranelift compiler.
     compiler: JitCompiler,
     
@@ -125,6 +130,7 @@ impl JitManager {
         Ok(Self {
             funcs: Vec::new(),
             func_table: Vec::new(),
+            direct_call_table: Vec::new(),
             compiler: JitCompiler::new()?,
             config: JitConfig::default(),
         })
@@ -136,6 +142,7 @@ impl JitManager {
         Ok(Self {
             funcs: Vec::new(),
             func_table: Vec::new(),
+            direct_call_table: Vec::new(),
             compiler,
             config,
         })
@@ -147,6 +154,7 @@ impl JitManager {
             .map(|_| FunctionJitInfo::new())
             .collect();
         self.func_table = vec![std::ptr::null(); func_count];
+        self.direct_call_table = vec![std::ptr::null(); func_count];
     }
     
     /// Get function table pointer for JIT code.
@@ -159,6 +167,19 @@ impl JitManager {
     #[inline]
     pub fn func_table_len(&self) -> usize {
         self.func_table.len()
+    }
+    
+    /// Get direct call table pointer for JIT code.
+    /// Only contains entries for functions safe for JIT-to-JIT direct calls (no CallClosure/CallIface).
+    #[inline]
+    pub fn direct_call_table_ptr(&self) -> *const *const u8 {
+        self.direct_call_table.as_ptr()
+    }
+    
+    /// Get direct call table length.
+    #[inline]
+    pub fn direct_call_table_len(&self) -> usize {
+        self.direct_call_table.len()
     }
     
     /// Get JIT configuration (for passing to island threads).
@@ -281,6 +302,13 @@ impl JitManager {
         info.full_entry = Some(ptr);
         info.state = CompileState::FullyCompiled;
         self.func_table[func_id as usize] = ptr as *const u8;
+        
+        // Only populate direct_call_table if function is safe for JIT-to-JIT direct calls
+        // from prepare callbacks. Functions with CallClosure/CallIface can return JitResult::Call
+        // which the fast path non-OK handler cannot handle.
+        if vo_jit::can_direct_jit_call(func_def) {
+            self.direct_call_table[func_id as usize] = ptr as *const u8;
+        }
         
         Ok(())
     }

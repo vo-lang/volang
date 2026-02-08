@@ -1431,3 +1431,14 @@ reason = "island requires goroutine"
 file = "2026_02_06_channel_wake_pc.vo"
 skip = ["wasm"]
 reason = "channel requires goroutine"
+
+[[tests]]
+file = "lang/test/http_server_test.vo"
+skip = ["jit"]
+reason = "concurrent IO read on fd causes crash under JIT"
+
+[[tests]]
+file = "bugs/2026_01_31_jit_http_server_client.vo"
+skip = ["jit"]
+reason = "concurrent IO read on fd causes crash under JIT"
+

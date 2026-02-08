@@ -103,7 +103,8 @@ impl PreparedCall {
 }
 
 /// Function pointer type for preparing a closure call.
-/// Returns PreparedCall with jit_func_ptr set if direct JIT call is possible.
+/// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch
+/// on SystemV x86_64 where structs > 16 bytes use sret).
 pub type PrepareClosureCallFn = extern "C" fn(
     ctx: *mut JitContext,
     closure_ref: u64,
@@ -113,9 +114,11 @@ pub type PrepareClosureCallFn = extern "C" fn(
     user_args: *const u64,
     user_arg_count: u32,
     ret_ptr: *mut u64,
-) -> PreparedCall;
+    out: *mut PreparedCall,
+);
 
 /// Function pointer type for preparing an interface method call.
+/// Writes result to `out` pointer instead of returning struct.
 pub type PrepareIfaceCallFn = extern "C" fn(
     ctx: *mut JitContext,
     iface_slot0: u64,
@@ -127,7 +130,8 @@ pub type PrepareIfaceCallFn = extern "C" fn(
     user_args: *const u64,
     user_arg_count: u32,
     ret_ptr: *mut u64,
-) -> PreparedCall;
+    out: *mut PreparedCall,
+);
 
 #[repr(C)]
 pub struct JitContext {
@@ -184,6 +188,15 @@ pub struct JitContext {
     
     /// Number of functions (length of jit_func_table).
     pub jit_func_count: u32,
+    
+    /// Direct call table: only contains entries for functions that pass can_direct_jit_call
+    /// (no CallClosure/CallIface). Used by prepare_closure_call / prepare_iface_call to
+    /// decide if JIT-to-JIT direct call is safe. Functions with CallClosure/CallIface can
+    /// return JitResult::Call, which the fast path non-OK handler cannot handle.
+    pub direct_call_table: *const *const u8,
+    
+    /// Number of entries in direct_call_table.
+    pub direct_call_count: u32,
     
     /// Pointer to program arguments.
     pub program_args: *const Vec<String>,
@@ -364,6 +377,8 @@ pub struct JitContext {
 impl JitContext {
     pub const OFFSET_JIT_FUNC_TABLE: i32 = std::mem::offset_of!(JitContext, jit_func_table) as i32;
     pub const OFFSET_JIT_FUNC_COUNT: i32 = std::mem::offset_of!(JitContext, jit_func_count) as i32;
+    pub const OFFSET_DIRECT_CALL_TABLE: i32 = std::mem::offset_of!(JitContext, direct_call_table) as i32;
+    pub const OFFSET_DIRECT_CALL_COUNT: i32 = std::mem::offset_of!(JitContext, direct_call_count) as i32;
     pub const OFFSET_CALL_FUNC_ID: i32 = std::mem::offset_of!(JitContext, call_func_id) as i32;
     pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
     pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;

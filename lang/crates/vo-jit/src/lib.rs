@@ -269,3 +269,23 @@ impl JitCompiler {
 impl Default for JitCompiler {
     fn default() -> Self { Self::new().expect("failed to create JIT compiler") }
 }
+
+/// Check if a function can be safely called via JIT-to-JIT direct call from
+/// prepare_closure_call / prepare_iface_call fast path.
+///
+/// Returns false if the function contains CallClosure or CallIface instructions,
+/// because those can return JitResult::Call (when the nested prepare callback
+/// returns null / slow path). The fast path non-OK handler only propagates the
+/// result — it doesn't handle Call semantics (no push_frame for the nested callee).
+///
+/// This is used to populate the direct_call_table, which prepare callbacks consult
+/// to decide if a JIT-to-JIT direct call is safe.
+pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
+    for inst in &func.code {
+        match inst.opcode() {
+            Opcode::CallClosure | Opcode::CallIface => return false,
+            _ => {}
+        }
+    }
+    true
+}

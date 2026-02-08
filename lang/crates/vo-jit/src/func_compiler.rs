@@ -544,6 +544,12 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.switch_to_block(non_ok_block);
         self.builder.seal_block(non_ok_block);
         
+        // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
+        // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
+        // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
+        self.builder.ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+        self.builder.ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        
         // Spill caller's variables to fiber.stack
         self.emit_variable_spill();
         

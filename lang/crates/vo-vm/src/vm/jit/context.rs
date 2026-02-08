@@ -69,9 +69,14 @@ impl JitContextWrapper {
 
 pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitContextWrapper {
     // Extract jit_mgr values first to avoid borrow conflicts
-    let (jit_func_table, jit_func_count) = {
+    let (jit_func_table, jit_func_count, direct_call_table, direct_call_count) = {
         let jit_mgr = vm.jit_mgr.as_ref().unwrap();
-        (jit_mgr.func_table_ptr(), jit_mgr.func_table_len() as u32)
+        (
+            jit_mgr.func_table_ptr(),
+            jit_mgr.func_table_len() as u32,
+            jit_mgr.direct_call_table_ptr(),
+            jit_mgr.direct_call_table_len() as u32,
+        )
     };
 
     let mut panic_flag = Box::new(false);
@@ -98,6 +103,8 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         module: module as *const Module as *const vo_runtime::bytecode::Module,
         jit_func_table,
         jit_func_count,
+        direct_call_table,
+        direct_call_count,
         program_args: &vm.state.program_args as *const Vec<String>,
         sentinel_errors: &mut vm.state.sentinel_errors as *mut _,
         #[cfg(feature = "std")]

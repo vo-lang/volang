@@ -71,7 +71,8 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 }
 
 /// Create signature for prepare_closure_call callback.
-/// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
+/// (ctx, closure_ref, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
+/// Uses output pointer to avoid ABI mismatch (PreparedCall is 32 bytes, too large for register return).
 fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -83,18 +84,13 @@ fn import_prepare_closure_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
-        // PreparedCall returns: jit_func_ptr, callee_args_ptr, ret_ptr, callee_local_slots, func_id
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // out: *mut PreparedCall
         sig
     })
 }
 
 /// Create signature for prepare_iface_call callback.
-/// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr) -> PreparedCall
+/// (ctx, slot0, slot1, method_idx, ret_reg, ret_slots, caller_resume_pc, user_args, user_arg_count, ret_ptr, out) -> void
 fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     emitter.builder().func.import_signature({
         let mut sig = cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
@@ -108,12 +104,7 @@ fn import_prepare_iface_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // user_args
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I32)); // user_arg_count
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
-        // PreparedCall returns: jit_func_ptr, callee_args_ptr, ret_ptr, callee_local_slots, func_id
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I32));
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64)); // out: *mut PreparedCall
         sig
     })
 }
@@ -172,7 +163,14 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Call prepare_closure_call callback
+    // Allocate stack slot for PreparedCall output (32 bytes, 8-aligned)
+    // Layout: [jit_func_ptr:I64@0, callee_args_ptr:I64@8, ret_ptr:I64@16, callee_local_slots:I32@24, func_id:I32@28]
+    let out_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot, 32, 8,
+    ));
+    let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
+    
+    // Call prepare_closure_call callback (writes to out_ptr)
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN
     );
@@ -184,17 +182,20 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     
-    let prepare_call = emitter.builder().ins().call_indirect(
+    emitter.builder().ins().call_indirect(
         prepare_sig, prepare_fn_ptr,
-        &[ctx, closure_ref, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr]
+        &[ctx, closure_ref, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr, out_ptr]
     );
-    let results = emitter.builder().inst_results(prepare_call);
-    let jit_func_ptr = results[0];
-    let callee_args_ptr = results[1];
-    let func_id = results[4];
+    
+    // Load fields from PreparedCall output
+    let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 0);
+    let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 8);
+    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, out_slot, 24);
+    let func_id = emitter.builder().ins().stack_load(types::I32, out_slot, 28);
     
     emit_prepared_call(emitter, PreparedCallParams {
         jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
+        callee_local_slots,
         arg_start, ret_slots, ret_slot,
         resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
     });
@@ -240,7 +241,13 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     ));
     let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
     
-    // Call prepare_iface_call callback
+    // Allocate stack slot for PreparedCall output (32 bytes, 8-aligned)
+    let out_slot = emitter.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot, 32, 8,
+    ));
+    let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
+    
+    // Call prepare_iface_call callback (writes to out_ptr)
     let prepare_fn_ptr = emitter.builder().ins().load(
         types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_PREPARE_IFACE_CALL_FN
     );
@@ -253,17 +260,20 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
     
-    let prepare_call = emitter.builder().ins().call_indirect(
+    emitter.builder().ins().call_indirect(
         prepare_sig, prepare_fn_ptr,
-        &[ctx, slot0, slot1, method_idx_val, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr]
+        &[ctx, slot0, slot1, method_idx_val, ret_reg_val, ret_slots_val, resume_pc_val, user_args_ptr, arg_count_val, ret_ptr, out_ptr]
     );
-    let results = emitter.builder().inst_results(prepare_call);
-    let jit_func_ptr = results[0];
-    let callee_args_ptr = results[1];
-    let func_id = results[4];
+    
+    // Load fields from PreparedCall output
+    let jit_func_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 0);
+    let callee_args_ptr = emitter.builder().ins().stack_load(types::I64, out_slot, 8);
+    let callee_local_slots = emitter.builder().ins().stack_load(types::I32, out_slot, 24);
+    let func_id = emitter.builder().ins().stack_load(types::I32, out_slot, 28);
     
     emit_prepared_call(emitter, PreparedCallParams {
         jit_func_ptr, callee_args_ptr, func_id, ret_ptr,
+        callee_local_slots,
         arg_start, ret_slots, ret_slot,
         resume_pc_val, ret_reg_val, ret_slots_val, arg_count_val,
     });
@@ -275,6 +285,7 @@ struct PreparedCallParams {
     callee_args_ptr: Value,
     func_id: Value,
     ret_ptr: Value,
+    callee_local_slots: Value,
     arg_start: usize,
     ret_slots: usize,
     ret_slot: cranelift_codegen::ir::StackSlot,
@@ -301,6 +312,12 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
     );
     
+    // Load pop_frame resources before branching (needed in both trampoline and JIT-OK paths)
+    let pop_frame_fn_ptr = emitter.builder().ins().load(
+        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
+    );
+    let pop_frame_sig = import_pop_frame_sig(emitter);
+    
     // Check if jit_func_ptr is null (needs trampoline fallback)
     let null_ptr = emitter.builder().ins().iconst(types::I64, 0);
     let is_null = emitter.builder().ins().icmp(IntCC::Equal, p.jit_func_ptr, null_ptr);
@@ -315,10 +332,12 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(trampoline_block);
     emitter.builder().seal_block(trampoline_block);
     
+    // call_vm with callee_local_slots as arg_count (prepare callback laid out all args
+    // including receiver/closure_ref; execute_func_sync does min(param_slots, args.len()))
     let call_vm_func = emitter.helpers().call_vm.expect("call_vm helper not registered");
     let vm_call = emitter.builder().ins().call(
         call_vm_func,
-        &[ctx, p.func_id, p.callee_args_ptr, p.arg_count_val, p.ret_ptr, p.ret_slots_val]
+        &[ctx, p.func_id, p.callee_args_ptr, p.callee_local_slots, p.ret_ptr, p.ret_slots_val]
     );
     let vm_result = emitter.builder().inst_results(vm_call)[0];
     
@@ -336,10 +355,6 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     
     emitter.builder().switch_to_block(vm_ok_block);
     emitter.builder().seal_block(vm_ok_block);
-    let pop_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64, MemFlags::trusted(), ctx, JitContext::OFFSET_POP_FRAME_FN
-    );
-    let pop_frame_sig = import_pop_frame_sig(emitter);
     emitter.builder().ins().call_indirect(pop_frame_sig, pop_frame_fn_ptr, &[ctx, caller_bp]);
     emitter.builder().ins().jump(merge_block, &[]);
     
@@ -668,6 +683,13 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         // JIT non-OK path
         emitter.builder().switch_to_block(jit_non_ok_block);
         emitter.builder().seal_block(jit_non_ok_block);
+        
+        // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
+        // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
+        // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
+        emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+        emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+        
         emitter.spill_all_vars();
         
         let push_frame_fn_ptr = emitter.builder().ins().load(
@@ -781,6 +803,13 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     // Non-OK path (SLOW PATH)
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
+    
+    // Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
+    // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
+    // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
+    emitter.builder().ins().store(MemFlags::trusted(), caller_bp, ctx, JitContext::OFFSET_JIT_BP);
+    emitter.builder().ins().store(MemFlags::trusted(), old_fiber_sp, ctx, JitContext::OFFSET_FIBER_SP);
+    
     emitter.spill_all_vars();
     
     let push_frame_fn_ptr = emitter.builder().ins().load(

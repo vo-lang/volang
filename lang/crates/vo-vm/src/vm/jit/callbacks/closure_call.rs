@@ -7,14 +7,10 @@ use vo_runtime::jit_api::{JitContext, PreparedCall};
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 
-/// Prepare a closure call for JIT-to-JIT dispatch.
+/// Prepare a closure call for JIT dispatch.
 ///
-/// 1. Resolve func_id from closure_ref
-/// 2. Look up func_def → check has_defer (needs VM)
-/// 3. Check jit_func_table[func_id] → if null, needs trampoline
-/// 4. push_frame(func_id, local_slots, ...) → allocate fiber.stack
-/// 5. Copy args with correct closure layout (slot0 + user_args)
-/// 6. Return PreparedCall with jit_func_ptr (or null for fallback)
+/// Always does push_frame + arg layout so callee_args_ptr is valid for both paths.
+/// jit_func_ptr is non-null only when callee is in direct_call_table (safe for fast path).
 pub extern "C" fn jit_prepare_closure_call(
     ctx: *mut JitContext,
     closure_ref: u64,
@@ -24,7 +20,8 @@ pub extern "C" fn jit_prepare_closure_call(
     user_args: *const u64,
     user_arg_count: u32,
     ret_ptr: *mut u64,
-) -> PreparedCall {
+    out: *mut PreparedCall,
+) {
     let ctx = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx.module as *const vo_runtime::bytecode::Module) };
     
@@ -34,24 +31,21 @@ pub extern "C" fn jit_prepare_closure_call(
     let func_def = &module.functions[func_id as usize];
     let local_slots = func_def.local_slots as usize;
     
-    // 2. Check if callee needs VM (has_defer implies potential complex control flow)
-    if func_def.has_defer {
-        return PreparedCall::fallback(func_id, local_slots as u32);
-    }
-    
-    // 3. Check if callee is JIT-compiled
-    let jit_func_ptr = if func_id < ctx.jit_func_count {
-        let table = ctx.jit_func_table;
-        unsafe { *table.add(func_id as usize) }
+    // 2. Determine if callee can use JIT fast path:
+    //    - Must not have defer (complex control flow)
+    //    - Must be in direct_call_table (no CallClosure/CallIface → won't return JitResult::Call)
+    let jit_func_ptr = if !func_def.has_defer {
+        if func_id < ctx.direct_call_count {
+            unsafe { *ctx.direct_call_table.add(func_id as usize) }
+        } else {
+            core::ptr::null()
+        }
     } else {
         core::ptr::null()
     };
     
-    if jit_func_ptr.is_null() {
-        return PreparedCall::fallback(func_id, local_slots as u32);
-    }
-    
-    // 4. push_frame: allocate callee frame on fiber.stack
+    // 3. push_frame: always allocate callee frame on fiber.stack.
+    //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
     let push_frame_fn = ctx.push_frame_fn.expect("push_frame_fn not set");
     let callee_args_ptr = push_frame_fn(
         ctx,
@@ -62,7 +56,7 @@ pub extern "C" fn jit_prepare_closure_call(
         caller_resume_pc,
     );
     
-    // 5. Copy args with correct closure layout
+    // 4. Copy args with correct closure layout
     let layout = closure::call_layout(
         closure_ref,
         closure_gcref,
@@ -70,12 +64,10 @@ pub extern "C" fn jit_prepare_closure_call(
         func_def.is_closure,
     );
     
-    // Write slot0 if present
     if let Some(slot0_val) = layout.slot0 {
         unsafe { *callee_args_ptr = slot0_val };
     }
     
-    // Copy user args at arg_offset
     let arg_offset = layout.arg_offset;
     for i in 0..user_arg_count as usize {
         unsafe {
@@ -83,16 +75,20 @@ pub extern "C" fn jit_prepare_closure_call(
         }
     }
     
-    PreparedCall {
-        jit_func_ptr,
-        callee_args_ptr,
-        ret_ptr,
-        callee_local_slots: local_slots as u32,
-        func_id,
+    unsafe {
+        *out = PreparedCall {
+            jit_func_ptr,
+            callee_args_ptr,
+            ret_ptr,
+            callee_local_slots: local_slots as u32,
+            func_id,
+        };
     }
 }
 
-/// Prepare an interface method call for JIT-to-JIT dispatch.
+/// Prepare an interface method call for JIT dispatch.
+///
+/// Always does push_frame + arg layout so callee_args_ptr is valid for both paths.
 pub extern "C" fn jit_prepare_iface_call(
     ctx: *mut JitContext,
     iface_slot0: u64,
@@ -104,7 +100,8 @@ pub extern "C" fn jit_prepare_iface_call(
     user_args: *const u64,
     user_arg_count: u32,
     ret_ptr: *mut u64,
-) -> PreparedCall {
+    out: *mut PreparedCall,
+) {
     use vo_runtime::objects::interface;
     
     let ctx_ref = unsafe { &mut *ctx };
@@ -118,24 +115,18 @@ pub extern "C" fn jit_prepare_iface_call(
     let local_slots = func_def.local_slots as usize;
     let recv_slots = func_def.recv_slots as usize;
     
-    // 2. Check if callee needs VM
-    if func_def.has_defer {
-        return PreparedCall::fallback(func_id, local_slots as u32);
-    }
-    
-    // 3. Check if callee is JIT-compiled
-    let jit_func_ptr = if func_id < ctx_ref.jit_func_count {
-        let table = ctx_ref.jit_func_table;
-        unsafe { *table.add(func_id as usize) }
+    // 2. Determine if callee can use JIT fast path
+    let jit_func_ptr = if !func_def.has_defer {
+        if func_id < ctx_ref.direct_call_count {
+            unsafe { *ctx_ref.direct_call_table.add(func_id as usize) }
+        } else {
+            core::ptr::null()
+        }
     } else {
         core::ptr::null()
     };
     
-    if jit_func_ptr.is_null() {
-        return PreparedCall::fallback(func_id, local_slots as u32);
-    }
-    
-    // 4. push_frame
+    // 3. push_frame: always allocate callee frame on fiber.stack
     let push_frame_fn = ctx_ref.push_frame_fn.expect("push_frame_fn not set");
     let callee_args_ptr = push_frame_fn(
         ctx,
@@ -146,24 +137,22 @@ pub extern "C" fn jit_prepare_iface_call(
         caller_resume_pc,
     );
     
-    // 5. Copy args: receiver at slot 0, user args at recv_slots
-    // For interface calls: slot0 = itab, slot1 = receiver
-    // Callee expects: [receiver (recv_slots), user_args...]
+    // 4. Copy args: receiver at slot 0, user args at recv_slots
     unsafe {
-        // Copy receiver (iface_slot1) to slot 0
         *callee_args_ptr = iface_slot1;
         
-        // Copy user args starting at recv_slots (typically 1)
         for i in 0..user_arg_count as usize {
             *callee_args_ptr.add(recv_slots + i) = *user_args.add(i);
         }
     }
     
-    PreparedCall {
-        jit_func_ptr,
-        callee_args_ptr,
-        ret_ptr,
-        callee_local_slots: local_slots as u32,
-        func_id,
+    unsafe {
+        *out = PreparedCall {
+            jit_func_ptr,
+            callee_args_ptr,
+            ret_ptr,
+            callee_local_slots: local_slots as u32,
+            func_id,
+        };
     }
 }
