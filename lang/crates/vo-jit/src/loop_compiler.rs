@@ -207,9 +207,14 @@ impl<'a> LoopCompiler<'a> {
     }
     
     fn store_vars_to_memory(&mut self) {
-        // Write modified variables back to memory
-        // No-op: locals_ptr is the source of truth and is updated on every write_var
-        // and SlotSet/SlotSetN (via var_addr).
+        // Spill SSA-only slots (< memory_only_start) to locals_ptr.
+        // Memory-aliased slots (>= memory_only_start) are already up-to-date in memory.
+        let spill_count = (self.memory_only_start as usize).min(self.vars.len());
+        for i in 0..spill_count {
+            let offset = (i * 8) as i32;
+            let val = self.builder.use_var(self.vars[i]);
+            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+        }
     }
 
     fn load_var_from_memory(&mut self, slot: u16) -> Value {
@@ -413,7 +418,7 @@ impl<'a> LoopCompiler<'a> {
     /// Emit code to spill all SSA variables to fiber.stack.
     /// Called before returning Call so VM can see/restore state.
     fn emit_variable_spill(&mut self) {
-        // No-op: locals_ptr is already kept up-to-date by write_var and SlotSet/SlotSetN.
+        self.store_vars_to_memory();
     }
     
 }
@@ -439,8 +444,10 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         } else {
             self.builder.def_var(self.vars[slot as usize], val);
         }
-        let offset = (slot as i32) * 8;
-        self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+        if slot >= self.memory_only_start {
+            let offset = (slot as i32) * 8;
+            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
+        }
         self.checked_non_nil.remove(&slot);
     }
     fn ctx_param(&mut self) -> Value { self.ctx_ptr }
@@ -486,13 +493,15 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        let offset = (slot as i32) * 8;
-        self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
         if self.is_float_slot(slot) {
-            self.builder.def_var(self.vars[slot as usize], val); // Already F64, no bitcast!
+            self.builder.def_var(self.vars[slot as usize], val);
         } else {
             let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
             self.builder.def_var(self.vars[slot as usize], i64_val);
+        }
+        if slot >= self.memory_only_start {
+            let offset = (slot as i32) * 8;
+            self.builder.ins().store(MemFlags::trusted(), val, self.locals_ptr, offset);
         }
         self.checked_non_nil.remove(&slot);
     }
