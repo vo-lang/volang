@@ -241,8 +241,6 @@ impl<'a> FunctionCompiler<'a> {
             Opcode::CallExtern => {
                 crate::call_helpers::emit_call_extern(self, inst, crate::call_helpers::CallExternConfig {
                     current_pc: self.current_pc,
-                    spill_on_non_ok: false,
-                    handle_waitio_specially: true,
                 });
                 Ok(false)
             }

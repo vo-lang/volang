@@ -395,6 +395,14 @@ fn handle_jit_result(
             materialize_jit_frames(fiber, resume_pc);
             ExecResult::Block(crate::fiber::BlockReason::Queue)
         }
+        JitResult::Replay => {
+            // Extern returned CallClosure — exit JIT and let VM handle it.
+            // resume_pc points at the CallExtern instruction itself, so VM will
+            // re-execute it and go through the suspend/replay path.
+            let resume_pc = ctx.call_resume_pc();
+            materialize_jit_frames(fiber, resume_pc);
+            ExecResult::FrameChanged
+        }
     }
 }
 
@@ -504,7 +512,7 @@ pub extern "C" fn jit_call_extern(
     _ret: *mut u64,
     ret_slots: u32,
 ) -> JitResult {
-    use vo_runtime::ffi::{ExternRegistry, ExternResult, ClosureCallResult};
+    use vo_runtime::ffi::{ExternRegistry, ExternResult};
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
@@ -517,9 +525,6 @@ pub extern "C" fn jit_call_extern(
     // Use the args buffer directly as our temp_stack (it's the same as ret buffer)
     let buffer = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
     
-    // Save original args so we can restore on replay
-    let saved_args: Vec<u64> = buffer[..arg_count as usize].to_vec();
-    
     // Get additional context needed for extern calls
     let itab_cache = unsafe { &mut *ctx_ref.itab_cache };
     let program_args = unsafe { &*ctx_ref.program_args };
@@ -530,94 +535,65 @@ pub extern "C" fn jit_call_extern(
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let resume_io_token = fiber.resume_io_token.take();
     
-    // Closure replay state: starts empty, accumulates across replays
-    let mut closure_replay_results: Vec<Vec<u64>> = Vec::new();
-    let mut closure_replay_panicked = false;
+    // Take closure_replay_results from fiber (populated by VM suspend/replay on re-entry)
+    let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);
+    let closure_replay_panicked = fiber.closure_replay_panicked;
+    fiber.closure_replay_panicked = false;
     
-    loop {
-        let result = registry.call(
-            extern_id,
-            buffer,
-            0, // bp = 0 (start of buffer)
-            0, // arg_start = 0
-            arg_count as u16,
-            0, // ret_start = 0 (returns overwrite args in same buffer)
-            gc,
-            &module.struct_metas,
-            &module.interface_metas,
-            &module.named_type_metas,
-            &module.runtime_types,
-            itab_cache,
-            &module.functions,
-            module,
-            ctx_ref.vm,
-            ctx_ref.fiber,
-            Some(super::closure_call_trampoline),
-            &module.well_known,
-            program_args,
-            sentinel_errors,
-            io,
-            resume_io_token.clone(),
-            core::mem::take(&mut closure_replay_results),
-            closure_replay_panicked,
-        );
-        
-        match result {
-            ExternResult::CallClosure { closure_ref, args: closure_args } => {
-                // Execute closure synchronously via trampoline
-                let closure_func_id = vo_runtime::objects::closure::func_id(closure_ref);
-                let func_def = &module.functions[closure_func_id as usize];
-                let ret_slot_count = func_def.ret_slots as u32;
-                let mut ret_buffer = vec![0u64; ret_slot_count as usize];
-                
-                let trampoline = super::closure_call_trampoline;
-                let call_result = trampoline(
-                    ctx_ref.vm,
-                    ctx_ref.fiber,
-                    closure_ref as u64,
-                    closure_args.as_ptr(),
-                    closure_args.len() as u32,
-                    ret_buffer.as_mut_ptr(),
-                    ret_slot_count,
-                );
-                
-                match call_result {
-                    ClosureCallResult::Ok => {
-                        closure_replay_results.push(ret_buffer);
-                        closure_replay_panicked = false;
-                    }
-                    ClosureCallResult::Panic => {
-                        closure_replay_panicked = true;
-                    }
-                }
-                
-                // Restore original args for replay (extern may have modified buffer)
-                buffer[..saved_args.len()].copy_from_slice(&saved_args);
-                continue;
+    let result = registry.call(
+        extern_id,
+        buffer,
+        0, // bp = 0 (start of buffer)
+        0, // arg_start = 0
+        arg_count as u16,
+        0, // ret_start = 0 (returns overwrite args in same buffer)
+        gc,
+        &module.struct_metas,
+        &module.interface_metas,
+        &module.named_type_metas,
+        &module.runtime_types,
+        itab_cache,
+        &module.functions,
+        module,
+        ctx_ref.vm,
+        ctx_ref.fiber,
+        None, // No closure_call_fn — CallClosure handled by Replay exit
+        &module.well_known,
+        program_args,
+        sentinel_errors,
+        io,
+        resume_io_token,
+        closure_replay_results,
+        closure_replay_panicked,
+    );
+    
+    match result {
+        ExternResult::Ok => JitResult::Ok,
+        ExternResult::CallClosure { .. } => {
+            // Exit JIT — VM will re-execute CallExtern and handle suspend/replay
+            JitResult::Replay
+        }
+        ExternResult::Panic(msg) => {
+            let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
+            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+            unsafe {
+                *ctx_ref.panic_flag = true;
+                *ctx_ref.is_user_panic = true;
+                (*ctx_ref.panic_msg).slot0 = slot0;
+                (*ctx_ref.panic_msg).slot1 = msg_str as u64;
             }
-            ExternResult::Ok => return JitResult::Ok,
-            ExternResult::Panic(msg) => {
-                let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
-                let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-                unsafe {
-                    *ctx_ref.panic_flag = true;
-                    *ctx_ref.is_user_panic = true;
-                    (*ctx_ref.panic_msg).slot0 = slot0;
-                    (*ctx_ref.panic_msg).slot1 = msg_str as u64;
-                }
-                return JitResult::Panic;
-            }
-            ExternResult::Yield => return JitResult::Call,
-            ExternResult::Block => return JitResult::Call,
-            #[cfg(feature = "std")]
-            ExternResult::WaitIo { token } => {
-                ctx_ref.wait_io_token = token;
-                return JitResult::WaitIo;
-            }
-            ExternResult::NotRegistered(_) => {
-                unsafe { *ctx_ref.panic_flag = true; }
-                return JitResult::Panic;
-            }
+            JitResult::Panic
+        }
+        ExternResult::Yield => JitResult::Call,
+        ExternResult::Block => JitResult::Call,
+        #[cfg(feature = "std")]
+        ExternResult::WaitIo { token } => {
+            ctx_ref.wait_io_token = token;
+            JitResult::WaitIo
+        }
+        ExternResult::NotRegistered(_) => {
+            unsafe { *ctx_ref.panic_flag = true; }
+            JitResult::Panic
         }
     }
 }
@@ -824,6 +800,16 @@ pub fn dispatch_loop_osr(
             }
             
             Some(OSR_RESULT_WAITQUEUE)
+        }
+        JitResult::Replay => {
+            let resume_pc = ctx.call_resume_pc();
+            
+            // Exit loop OSR: set frame.pc to CallExtern instruction, VM will replay it
+            if let Some(frame) = fiber.current_frame_mut() {
+                frame.pc = resume_pc as usize;
+            }
+            
+            Some(OSR_RESULT_FRAME_CHANGED)
         }
     }
 }

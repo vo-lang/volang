@@ -27,7 +27,6 @@ mod jit;
 mod trampoline;
 
 pub use helpers::{stack_get, stack_set};
-pub use trampoline::closure_call_trampoline;
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
 #[cfg(feature = "std")]
 pub use types::IslandThread;
@@ -1038,7 +1037,7 @@ impl Vm {
                     let mut extern_panic_msg: Option<String> = None;
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
-                    let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = Some(closure_call_trampoline);
+                    let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = None;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);

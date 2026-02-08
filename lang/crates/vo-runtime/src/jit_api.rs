@@ -446,6 +446,10 @@ pub enum JitResult {
     /// Unlike WaitIo, no token is needed - fiber is woken via ChannelWaiter.
     /// After being woken, VM resumes execution in interpreter at call_resume_pc.
     WaitQueue = 4,
+    /// JIT requests VM to replay the current CallExtern instruction in interpreter mode.
+    /// Used when an extern returns CallClosure — JIT exits, frames are materialized,
+    /// and VM re-executes the CallExtern which handles suspend/replay natively.
+    Replay = 5,
 }
 
 // =============================================================================

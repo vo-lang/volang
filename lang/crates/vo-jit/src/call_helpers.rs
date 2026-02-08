@@ -433,7 +433,6 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     
     // Get extern info
     let extern_def = &emitter.vo_module().externs[extern_id as usize];
-    let is_blocking = extern_def.is_blocking;
     let extern_ret_slots = extern_def.ret_slots as usize;
     let buffer_size = arg_count.max(extern_ret_slots).max(1);
     
@@ -460,46 +459,17 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_count as i64);
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, extern_ret_slots as i64);
     
-    if is_blocking && config.handle_waitio_specially {
-        // FunctionCompiler path: special WaitIo handling
-        // Spill before call for blocking externs
-        emitter.spill_all_vars();
-        
-        let call = emitter.builder().ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
-        let result = emitter.builder().inst_results(call)[0];
-        
-        // Check for WaitIo
-        let wait_io_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_WAIT_IO as i64);
-        let is_wait_io = emitter.builder().ins().icmp(IntCC::Equal, result, wait_io_val);
-        
-        let wait_io_block = emitter.builder().create_block();
-        let continue_block = emitter.builder().create_block();
-        
-        emitter.builder().ins().brif(is_wait_io, wait_io_block, &[], continue_block, &[]);
-        
-        // WaitIo path: set resume_pc and return WaitIo
-        emitter.builder().switch_to_block(wait_io_block);
-        emitter.builder().seal_block(wait_io_block);
-        
-        let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.current_pc as i64);
-        emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
-        emitter.builder().ins().return_(&[wait_io_val]);
-        
-        // Continue path: check for panic
-        emitter.builder().switch_to_block(continue_block);
-        emitter.builder().seal_block(continue_block);
-        
-        check_call_result(emitter, result, false); // Already spilled above
-    } else {
-        // LoopCompiler path: set resume_pc, unified check_call_result
-        let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.current_pc as i64);
-        emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
-        
-        let call = emitter.builder().ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
-        let result = emitter.builder().inst_results(call)[0];
-        
-        check_call_result(emitter, result, config.spill_on_non_ok);
-    }
+    // Set resume_pc before the call so VM can re-execute CallExtern on exit.
+    // Any extern can return Replay (CallClosure) or WaitIo, both need resume_pc.
+    let resume_pc_val = emitter.builder().ins().iconst(types::I32, config.current_pc as i64);
+    emitter.builder().ins().store(MemFlags::trusted(), resume_pc_val, ctx, JitContext::OFFSET_CALL_RESUME_PC);
+    
+    let call = emitter.builder().ins().call(call_extern_func, &[ctx, extern_id_val, args_ptr, arg_count_val, args_ptr, ret_slots_val]);
+    let result = emitter.builder().inst_results(call)[0];
+    
+    // Non-OK results (Panic, WaitIo, Replay, Call) exit JIT.
+    // Always spill on non-OK so VM can read fiber stack correctly.
+    check_call_result(emitter, result, true);
     
     // Copy return values back
     for i in 0..copy_back_slots {
@@ -512,10 +482,6 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
 pub struct CallExternConfig {
     /// Current PC (for resume_pc setting).
     pub current_pc: usize,
-    /// Whether to spill variables on non-ok result (LoopCompiler needs this).
-    pub spill_on_non_ok: bool,
-    /// Whether to handle WaitIo specially (FunctionCompiler does, LoopCompiler doesn't).
-    pub handle_waitio_specially: bool,
 }
 
 /// Emit a call via VM using Call request mechanism.
