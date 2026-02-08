@@ -80,6 +80,21 @@ impl From<DynErr> for DynErrorKind {
 
 type DynResult<T> = Result<T, (DynErr, &'static str)>;
 
+/// Error type that can carry either a DynErr or a CallClosure suspend request.
+/// Used by helpers that need to call closures via the replay pattern.
+enum DynOrSuspend {
+    Dyn(DynErr, &'static str),
+    Suspend(ExternResult),
+}
+
+impl From<(DynErr, &'static str)> for DynOrSuspend {
+    fn from((e, m): (DynErr, &'static str)) -> Self {
+        DynOrSuspend::Dyn(e, m)
+    }
+}
+
+type DynSuspendResult<T> = Result<T, DynOrSuspend>;
+
 // ============================================================================
 // Layer 1: Protocol Infrastructure
 // ============================================================================
@@ -123,26 +138,38 @@ fn protocol_func_id(
 }
 
 /// Call a protocol method and check for error in return value.
+/// Uses suspend/replay pattern: returns Suspend on first call, cached result on replay.
 fn call_protocol<const N: usize>(
     call: &mut ExternCallContext,
     func_id: u32,
     args: &[u64],
     err: DynErr,
-) -> DynResult<[u64; N]> {
-    let closure_ref = closure::create(call.gc(), func_id, 0);
-    let mut ret = [0u64; N];
-    
-    match call.call_closure(closure_ref, args, &mut ret) {
-        Ok(_) => {
-            // Error is always in last 2 slots
-            let err_start = N.saturating_sub(2);
-            if ret[err_start] != 0 || ret.get(err_start + 1).copied().unwrap_or(0) != 0 {
-                return Err((err, "protocol returned error"));
-            }
-            Ok(ret)
-        }
-        Err(_) => Err((DynErr::BadCall, "protocol call failed")),
+) -> DynSuspendResult<[u64; N]> {
+    if call.is_closure_replay_panicked() {
+        return Err(DynOrSuspend::Dyn(DynErr::BadCall, "closure panicked"));
     }
+    let ret_vec = match call.resume_closure_result() {
+        Some(cached) => cached,
+        None => {
+            let closure_ref = closure::create(call.gc(), func_id, 0);
+            return Err(DynOrSuspend::Suspend(ExternResult::CallClosure {
+                closure_ref,
+                args: args.to_vec(),
+            }));
+        }
+    };
+    
+    // Unpack cached result into fixed-size array
+    let mut ret = [0u64; N];
+    let copy_len = ret_vec.len().min(N);
+    ret[..copy_len].copy_from_slice(&ret_vec[..copy_len]);
+    
+    // Error is always in last 2 slots
+    let err_start = N.saturating_sub(2);
+    if ret[err_start] != 0 || ret.get(err_start + 1).copied().unwrap_or(0) != 0 {
+        return Err(DynOrSuspend::Dyn(err, "protocol returned error"));
+    }
+    Ok(ret)
 }
 
 // ============================================================================
@@ -155,7 +182,7 @@ fn get_value(
     base_slot0: u64,
     base_slot1: u64,
     key: DynKey,
-) -> DynResult<(u64, u64)> {
+) -> DynSuspendResult<(u64, u64)> {
     let vk = interface::unpack_value_kind(base_slot0);
     let rttid = interface::unpack_rttid(base_slot0);
     
@@ -169,7 +196,7 @@ fn get_value(
     }
     
     // Reflection fallback
-    get_reflection(call, base_slot0, base_slot1, rttid, vk, key)
+    get_reflection(call, base_slot0, base_slot1, rttid, vk, key).map_err(|e| e.into())
 }
 
 /// Set a value by field name or index.
@@ -180,7 +207,7 @@ fn set_value(
     key: DynKey,
     val_slot0: u64,
     val_slot1: u64,
-) -> DynResult<()> {
+) -> DynSuspendResult<()> {
     let vk = interface::unpack_value_kind(base_slot0);
     let rttid = interface::unpack_rttid(base_slot0);
     
@@ -194,7 +221,7 @@ fn set_value(
     }
     
     // Reflection fallback
-    set_reflection(call, base_slot0, base_slot1, rttid, vk, key, val_slot0, val_slot1)
+    set_reflection(call, base_slot0, base_slot1, rttid, vk, key, val_slot0, val_slot1).map_err(|e| e.into())
 }
 
 /// Get via protocol (AttrObject or IndexObject)
@@ -205,7 +232,7 @@ fn get_via_protocol(
     vk: ValueKind,
     iface_id: u32,
     key: &DynKey,
-) -> DynResult<(u64, u64)> {
+) -> DynSuspendResult<(u64, u64)> {
     let err = match key {
         DynKey::Field(_) => DynErr::BadField,
         DynKey::Index(..) => DynErr::BadIndex,
@@ -234,7 +261,7 @@ fn set_via_protocol(
     key: &DynKey,
     val_slot0: u64,
     val_slot1: u64,
-) -> DynResult<()> {
+) -> DynSuspendResult<()> {
     let err = match key {
         DynKey::Field(_) => DynErr::BadField,
         DynKey::Index(..) => DynErr::BadIndex,
@@ -1046,8 +1073,8 @@ fn do_call(
     is_any_start: u16,
     error_offset: u16,
 ) -> ExternResult {
-    if !call.can_call_closure() {
-        return call_return_error(call, error_offset, DynErr::BadCall, "closure calling not available");
+    if call.is_closure_replay_panicked() {
+        return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
     }
     if closure_ref.is_null() {
         return call_return_error(call, error_offset, DynErr::BadCall, "closure is null");
@@ -1088,18 +1115,16 @@ fn do_call(
         Err(_) => return call_return_error(call, error_offset, DynErr::SigMismatch, "argument type mismatch"),
     };
     
-    // Call closure
-    let func_id = closure::func_id(closure_ref);
-    let func_def = match call.get_func_def(func_id) {
-        Some(fd) => fd,
-        None => return call_return_error(call, error_offset, DynErr::BadCall, "function not found"),
+    // Call closure via suspend/replay
+    let ret_buffer = match call.resume_closure_result() {
+        Some(cached) => cached,
+        None => {
+            return ExternResult::CallClosure {
+                closure_ref,
+                args,
+            };
+        }
     };
-    let ret_slots = func_def.ret_slots as usize;
-    
-    let mut ret_buffer = vec![0u64; ret_slots];
-    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret_buffer) {
-        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
-    }
     
     // Pack returns
     pack_returns(call, &ret_buffer, &ret_value_rttids, ret_count, metas_start, is_any_start, error_offset);
@@ -1124,7 +1149,8 @@ fn do_method(
     let closure = if let Some(iface_id) = check_protocol(call, rttid, vk, call.well_known().attr_object_iface_id) {
         match get_method_via_protocol(call, base_slot1, rttid, vk, iface_id, method_name) {
             Ok(c) => Some(c),
-            Err((e, m)) => return call_return_error(call, error_offset, e, m),
+            Err(DynOrSuspend::Dyn(e, m)) => return call_return_error(call, error_offset, e, m),
+            Err(DynOrSuspend::Suspend(r)) => return r,
         }
     } else {
         None
@@ -1159,7 +1185,7 @@ fn get_method_via_protocol(
     vk: ValueKind,
     iface_id: u32,
     method_name: &str,
-) -> DynResult<(u64, u64)> {
+) -> DynSuspendResult<(u64, u64)> {
     let func_id = protocol_func_id(call, rttid, vk, iface_id, DynErr::BadField)?;
     let name_ref = call.alloc_str(method_name);
     let ret = call_protocol::<4>(call, func_id, &[base_slot1, name_ref as u64], DynErr::BadField)?;
@@ -1377,7 +1403,8 @@ fn dyn_field(call: &mut ExternCallContext) -> ExternResult {
     
     match get_value(call, base_slot0, base_slot1, DynKey::Field(field_name)) {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
-        Err((e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1395,7 +1422,8 @@ fn dyn_index(call: &mut ExternCallContext) -> ExternResult {
     
     match get_value(call, base_slot0, base_slot1, DynKey::Index(key_slot0, key_slot1)) {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
-        Err((e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1422,7 +1450,8 @@ fn dyn_set_field(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err((e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1444,7 +1473,8 @@ fn dyn_set_index_unified(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err((e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1517,13 +1547,27 @@ fn do_call_via_protocol(
         Err((e, m)) => return call_return_error(call, error_offset, e, m),
     };
     
-    let closure_ref = closure::create(call.gc(), func_id, 0);
-    let args = [base_slot1, args_slice_ref as u64];
-    let mut ret = [0u64; 4];
-    
-    if let Err(msg) = call.call_closure(closure_ref, &args, &mut ret) {
-        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
+    if call.is_closure_replay_panicked() {
+        return call_return_error(call, error_offset, DynErr::BadCall, "closure panicked");
     }
+    
+    let closure_ref = closure::create(call.gc(), func_id, 0);
+    let args = vec![base_slot1, args_slice_ref as u64];
+    
+    let ret_vec = match call.resume_closure_result() {
+        Some(cached) => cached,
+        None => {
+            return ExternResult::CallClosure {
+                closure_ref,
+                args,
+            };
+        }
+    };
+    
+    // Unpack into fixed-size array
+    let mut ret = [0u64; 4];
+    let copy_len = ret_vec.len().min(4);
+    ret[..copy_len].copy_from_slice(&ret_vec[..copy_len]);
     
     // Check error
     if ret[2] != 0 || ret[3] != 0 {
@@ -1649,7 +1693,8 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
             ExternResult::Ok
         }
-        Err((e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1671,7 +1716,8 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(3);
             ExternResult::Ok
         }
-        Err((e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1698,7 +1744,8 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err((e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 
@@ -1720,7 +1767,8 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
             call.ret_nil(1);
             ExternResult::Ok
         }
-        Err((e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Dyn(e, m)) => write_set_error(call, e, m),
+        Err(DynOrSuspend::Suspend(r)) => r,
     }
 }
 

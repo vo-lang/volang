@@ -104,6 +104,10 @@ pub struct UnwindingState {
     pub caller_ret_reg: u16,
     /// How many slots caller expects.
     pub caller_ret_count: usize,
+    /// True when this is a closure-for-extern-replay return.
+    /// When set, return_values=None means "skip writing return values" (handled by replay).
+    /// When false, return_values=None means "write zeroed return values" (panic/recover).
+    pub is_closure_replay: bool,
 }
 
 impl UnwindingState {
@@ -271,6 +275,25 @@ pub struct Fiber {
     /// On resume, they are popped and converted to VM frames.
     #[cfg(feature = "jit")]
     pub resume_stack: Vec<ResumePoint>,
+    /// Accumulated closure call results for extern replay.
+    /// Each entry is the return values from one closure call.
+    /// On extern replay, results are consumed in order via closure_replay_index.
+    /// Cleared when extern finally returns Ok/Panic (not CallClosure).
+    pub closure_replay_results: Vec<Vec<u64>>,
+    /// Consumption index during extern replay.
+    /// Tracks how many cached results have been consumed in the current replay.
+    /// Reset to 0 at the start of each CallExtern execution.
+    pub closure_replay_index: usize,
+    /// Frame depth at which a closure-for-extern-replay was pushed.
+    /// When a Return pops down to this depth, the return values are
+    /// appended to closure_replay_results and the extern is replayed.
+    /// 0 = no pending closure replay.
+    pub closure_replay_depth: usize,
+    /// Set when a closure-for-replay panicked. The extern function should
+    /// check this and return an error instead of using the cached result.
+    pub closure_replay_panicked: bool,
+    /// Stack of saved closure_replay_depth values for nested replay cycles.
+    pub closure_replay_depth_stack: Vec<usize>,
 }
 
 impl Fiber {
@@ -292,6 +315,11 @@ impl Fiber {
             resume_io_token: None,
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(),  // Lazy: only allocates on first push (Call/WaitIo)
+            closure_replay_results: Vec::new(),
+            closure_replay_index: 0,
+            closure_replay_depth: 0,
+            closure_replay_panicked: false,
+            closure_replay_depth_stack: Vec::new(),
         }
     }
     
@@ -313,6 +341,11 @@ impl Fiber {
         }
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
+        self.closure_replay_results.clear();
+        self.closure_replay_index = 0;
+        self.closure_replay_depth = 0;
+        self.closure_replay_panicked = false;
+        self.closure_replay_depth_stack.clear();
     }
     
     /// Check if current panic is recoverable and return the interface{} value if so.

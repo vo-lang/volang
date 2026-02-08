@@ -146,6 +146,7 @@ pub fn handle_jit_ok_return(
             return_values,
             caller_ret_reg: frame.ret_reg,
             caller_ret_count: frame.ret_count as usize,
+            is_closure_replay: false,
         });
 
         return call_defer_entry(fiber, &first_defer, module);
@@ -204,6 +205,53 @@ fn handle_initial_return(
     include_errdefers: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
+    
+    // Check: is this return from a closure-for-extern-replay?
+    if fiber.closure_replay_depth == current_frame_depth && current_frame_depth > 0 {
+        let ret_start = inst.a as usize;
+        let ret_count = inst.b as usize;
+        let current_bp = fiber.frames.last().unwrap().bp;
+        let stack = fiber.stack.as_ptr();
+        
+        // Cache return values — append to accumulated results
+        let vals: Vec<u64> = (0..ret_count)
+            .map(|i| stack_get(stack, current_bp + ret_start + i))
+            .collect();
+        
+        fiber.closure_replay_results.push(vals);
+        fiber.closure_replay_depth = fiber.closure_replay_depth_stack.pop().unwrap_or(0);
+        
+        // Check for defers in the closure — they must run first
+        let has_defers = fiber.defer_stack.last()
+            .map_or(false, |e| e.frame_depth == current_frame_depth);
+        if has_defers {
+            // Collect defers, pop frame, run defers, then FrameChanged on completion
+            let pending = collect_defers(&mut fiber.defer_stack, current_frame_depth, include_errdefers);
+            let frame = pop_frame(fiber).unwrap();
+            let first_defer = pending[0].clone();
+            let rest: Vec<_> = pending[1..].to_vec();
+            
+            fiber.unwinding = Some(UnwindingState {
+                pending: rest,
+                target_depth: fiber.frames.len(),
+                mode: UnwindingMode::Return,
+                current_defer_generation: first_defer.registered_at_generation,
+                return_values: None, // No return values to write (replay handles it)
+                caller_ret_reg: frame.ret_reg,
+                caller_ret_count: frame.ret_count as usize,
+                is_closure_replay: true,
+            });
+            
+            return call_defer_entry(fiber, &first_defer, module);
+        }
+        
+        // No defers — pop closure frame and return FrameChanged.
+        // Caller's PC still points at CallExtern (we did pc -= 1 earlier).
+        // VM will re-execute CallExtern → extern replays → consumes cached result.
+        pop_frame(fiber);
+        return ExecResult::FrameChanged;
+    }
+    
     let heap_returns = (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0;
     let has_defers = fiber.defer_stack.last()
         .map_or(false, |e| e.frame_depth == current_frame_depth);
@@ -284,6 +332,7 @@ fn handle_initial_return(
             return_values,
             caller_ret_reg: frame.ret_reg,
             caller_ret_count: frame.ret_count as usize,
+            is_closure_replay: false,
         });
         
         return call_defer_entry(fiber, &first_defer, module);
@@ -316,7 +365,13 @@ fn handle_return_defer_returned(
     let return_values = state.return_values.take();
     let caller_ret_reg = state.caller_ret_reg;
     let caller_ret_count = state.caller_ret_count;
+    let is_closure_replay = state.is_closure_replay;
     fiber.unwinding = None;
+    
+    // Closure-replay return: no return values to write (handled by extern replay)
+    if is_closure_replay {
+        return ExecResult::FrameChanged;
+    }
     
     let ret_vals = return_values_to_vec(return_values, caller_ret_count);
     write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count)
@@ -435,6 +490,29 @@ fn start_panic_unwind(
             return ExecResult::Panic;
         }
         
+        // Intercept panic at closure replay boundary: convert to error for extern replay.
+        // The closure frame is at depth == closure_replay_depth. When panic unwinds
+        // to or past it, we pop the closure frame and let the caller's CallExtern replay
+        // with the panicked flag set.
+        if fiber.closure_replay_depth > 0 && fiber.frames.len() <= fiber.closure_replay_depth {
+            let target_depth = fiber.closure_replay_depth - 1; // caller's frame depth
+            fiber.closure_replay_depth = fiber.closure_replay_depth_stack.pop().unwrap_or(0);
+            fiber.closure_replay_panicked = true;
+            // Consume the panic — it will be reported as an error by the extern function
+            fiber.panic_state = None;
+            fiber.panic_trap_kind = None;
+            // Pop frames down to caller's CallExtern frame
+            while fiber.frames.len() > target_depth {
+                let depth = fiber.frames.len();
+                fiber.defer_stack.retain(|e| e.frame_depth < depth);
+                if pop_frame(fiber).is_none() {
+                    return ExecResult::Panic;
+                }
+            }
+            fiber.unwinding = None;
+            return ExecResult::FrameChanged;
+        }
+        
         let frame_depth = fiber.frames.len();
         let pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
         
@@ -455,6 +533,7 @@ fn start_panic_unwind(
                 return_values,
                 caller_ret_reg,
                 caller_ret_count,
+                is_closure_replay: false,
             });
             
             return call_defer_entry(fiber, &first_defer, module);

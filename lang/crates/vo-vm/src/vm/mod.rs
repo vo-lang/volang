@@ -417,7 +417,7 @@ impl Vm {
                         return Ok(SchedulingOutcome::Panicked);
                     }
                 }
-                ExecResult::FrameChanged => {
+                ExecResult::FrameChanged | ExecResult::CallClosure { .. } => {
                     // Internal to run_fiber, should not reach here
                     self.scheduler.yield_current();
                 }
@@ -1041,6 +1041,10 @@ impl Vm {
                     let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = Some(closure_call_trampoline);
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
+                    let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);
+                    let closure_replay_panicked = fiber.closure_replay_panicked;
+                    fiber.closure_replay_panicked = false;
+                    fiber.closure_replay_index = 0;
                     let result = exec::exec_call_extern(
                         &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
                         &mut self.state.gc, &module.struct_metas, &module.interface_metas,
@@ -1050,16 +1054,66 @@ impl Vm {
                         &mut self.state.sentinel_errors,
                         #[cfg(feature = "std")] &mut self.state.io,
                         #[cfg(feature = "std")] resume_io_token,
+                        closure_replay_results,
+                        closure_replay_panicked,
                     );
-                    if matches!(result, ExecResult::Panic) {
-                        let r = if let Some(msg) = extern_panic_msg {
-                            runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg)
-                        } else { result };
-                        if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
-                    } else if matches!(result, ExecResult::FrameChanged) {
-                        refetch!();
-                    } else if !matches!(result, ExecResult::FrameChanged) {
-                        return result;
+                    match result {
+                        ExecResult::Panic => {
+                            let r = if let Some(msg) = extern_panic_msg {
+                                runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg)
+                            } else { result };
+                            if matches!(r, ExecResult::FrameChanged) { refetch!(); } else { return r; }
+                        }
+                        ExecResult::CallClosure { closure_ref, args } => {
+                            // Undo PC pre-increment so extern replays on return
+                            let frame = fiber.current_frame_mut().unwrap();
+                            frame.pc -= 1;
+                            
+                            // Push closure frame on current fiber using same layout as exec_call_closure
+                            let closure_func_id = vo_runtime::objects::closure::func_id(closure_ref);
+                            let func_def = &module.functions[closure_func_id as usize];
+                            
+                            let new_bp = fiber.sp;
+                            let local_slots = func_def.local_slots as usize;
+                            let new_sp = new_bp + local_slots;
+                            fiber.ensure_capacity(new_sp);
+                            
+                            // Use call_layout for correct slot placement (matches exec_call_closure)
+                            let layout = vo_runtime::objects::closure::call_layout(
+                                closure_ref as u64,
+                                closure_ref,
+                                func_def.recv_slots as usize,
+                                func_def.is_closure,
+                            );
+                            
+                            let fstack = fiber.stack_ptr();
+                            if let Some(slot0_val) = layout.slot0 {
+                                helpers::stack_set(fstack, new_bp, slot0_val);
+                            }
+                            
+                            // Copy args at the correct offset
+                            for (i, &arg) in args.iter().enumerate() {
+                                helpers::stack_set(fstack, new_bp + layout.arg_offset + i, arg);
+                            }
+                            
+                            fiber.sp = new_sp;
+                            fiber.frames.push(crate::fiber::CallFrame::new(
+                                closure_func_id,
+                                new_bp,
+                                0, // ret_reg=0 (return values go via replay cache, not caller stack)
+                                func_def.ret_slots,
+                            ));
+                            
+                            // Mark replay depth so return path knows to cache results.
+                            // Push previous depth so nested CallExterns don't clobber it.
+                            fiber.closure_replay_depth_stack.push(fiber.closure_replay_depth);
+                            fiber.closure_replay_depth = fiber.frames.len();
+                            
+                            stack = fiber.stack_ptr();
+                            refetch!();
+                        }
+                        ExecResult::FrameChanged => { refetch!(); }
+                        _ => { return result; }
                     }
                 }
                 Opcode::CallClosure => {

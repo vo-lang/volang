@@ -46,6 +46,12 @@ pub enum ExecResult {
     /// OSR request: (func_id, backedge_pc, loop_header_pc).
     /// Reserved for future OSR integration.
     Osr(u32, usize, usize),
+    /// Extern function requests closure execution.
+    /// VM pushes the closure frame, sets replay depth, and re-executes the extern on return.
+    CallClosure {
+        closure_ref: vo_runtime::gc::GcRef,
+        args: Vec<u64>,
+    },
 }
 
 /// Runtime error location for debug info lookup.

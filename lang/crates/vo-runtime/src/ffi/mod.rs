@@ -104,6 +104,13 @@ pub enum ExternResult {
     Panic(String),
     /// Extern function not registered.
     NotRegistered(u32),
+    /// Request VM to execute a closure and replay the extern with cached results.
+    /// The extern function will be re-executed from the beginning; previous
+    /// closure results are available via `resume_closure_result()`.
+    CallClosure {
+        closure_ref: GcRef,
+        args: Vec<u64>,
+    },
 }
 
 /// Extern function signature.
@@ -371,6 +378,13 @@ pub struct ExternCallContext<'a> {
     /// consume the completion for this token instead of submitting a new op.
     #[cfg(feature = "std")]
     resume_io_token: Option<IoToken>,
+    /// Cached closure results from previous CallClosure suspends.
+    /// Consumed in order via closure_replay_index.
+    closure_replay_results: Vec<Vec<u64>>,
+    /// Current consumption index into closure_replay_results.
+    closure_replay_index: usize,
+    /// Whether a closure-for-replay panicked.
+    closure_replay_panicked: bool,
 }
 
 impl<'a> ExternCallContext<'a> {
@@ -398,6 +412,8 @@ impl<'a> ExternCallContext<'a> {
         sentinel_errors: &'a mut SentinelErrorCache,
         #[cfg(feature = "std")] io: &'a mut IoRuntime,
         #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
+        closure_replay_results: Vec<Vec<u64>>,
+        closure_replay_panicked: bool,
     ) -> Self {
         Self {
             call: ExternCall::new(stack, bp, arg_start, arg_count, ret_start),
@@ -419,6 +435,9 @@ impl<'a> ExternCallContext<'a> {
             io,
             #[cfg(feature = "std")]
             resume_io_token,
+            closure_replay_results,
+            closure_replay_index: 0,
+            closure_replay_panicked,
         }
     }
     
@@ -1171,6 +1190,27 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    /// Check if a previous closure-for-replay panicked.
+    /// If true, the extern function should return an error.
+    #[inline]
+    pub fn is_closure_replay_panicked(&self) -> bool {
+        self.closure_replay_panicked
+    }
+
+    /// Get cached closure result from a previous CallClosure suspend.
+    /// Returns None if no more cached results (caller should return CallClosure to suspend).
+    /// Returns Some(ret_values) if a cached result is available.
+    /// Each call advances the internal index — results are consumed in order.
+    pub fn resume_closure_result(&mut self) -> Option<Vec<u64>> {
+        if self.closure_replay_index < self.closure_replay_results.len() {
+            let result = self.closure_replay_results[self.closure_replay_index].clone();
+            self.closure_replay_index += 1;
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     /// Get the VM pointer for direct closure calls.
     #[inline]
     pub fn vm_ptr(&self) -> *mut core::ffi::c_void {
@@ -1319,6 +1359,8 @@ impl ExternRegistry {
         sentinel_errors: &mut SentinelErrorCache,
         #[cfg(feature = "std")] io: &mut IoRuntime,
         #[cfg(feature = "std")] resume_io_token: Option<IoToken>,
+        closure_replay_results: Vec<Vec<u64>>,
+        closure_replay_panicked: bool,
     ) -> ExternResult {
         match self.funcs.get(id as usize) {
             Some(Some(ExternFnEntry::Simple(f))) => {
@@ -1350,6 +1392,8 @@ impl ExternRegistry {
                     io,
                     #[cfg(feature = "std")]
                     resume_io_token,
+                    closure_replay_results,
+                    closure_replay_panicked,
                 );
                 f(&mut call)
             }

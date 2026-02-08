@@ -49,6 +49,8 @@ pub fn exec_call_extern(
     io: &mut IoRuntime,
     #[cfg(feature = "std")]
     resume_io_token: Option<IoToken>,
+    closure_replay_results: Vec<Vec<u64>>,
+    closure_replay_panicked: bool,
 ) -> ExecResult {
     // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
     let extern_id = inst.b as u32;
@@ -89,6 +91,8 @@ pub fn exec_call_extern(
         io,
         #[cfg(feature = "std")]
         resume_io_token,
+        closure_replay_results,
+        closure_replay_panicked,
     );
 
     match result {
@@ -107,6 +111,9 @@ pub fn exec_call_extern(
                 extern_def.name, id
             ));
             ExecResult::Panic
+        }
+        ExternResult::CallClosure { closure_ref, args } => {
+            ExecResult::CallClosure { closure_ref, args }
         }
     }
 }

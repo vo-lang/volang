@@ -501,10 +501,10 @@ pub extern "C" fn jit_call_extern(
     extern_id: u32,
     args: *const u64,
     arg_count: u32,
-    ret: *mut u64,
+    _ret: *mut u64,
     ret_slots: u32,
 ) -> JitResult {
-    use vo_runtime::ffi::{ExternRegistry, ExternResult};
+    use vo_runtime::ffi::{ExternRegistry, ExternResult, ClosureCallResult};
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let gc = unsafe { &mut *gc };
@@ -517,6 +517,9 @@ pub extern "C" fn jit_call_extern(
     // Use the args buffer directly as our temp_stack (it's the same as ret buffer)
     let buffer = unsafe { std::slice::from_raw_parts_mut(args as *mut u64, buffer_size) };
     
+    // Save original args so we can restore on replay
+    let saved_args: Vec<u64> = buffer[..arg_count as usize].to_vec();
+    
     // Get additional context needed for extern calls
     let itab_cache = unsafe { &mut *ctx_ref.itab_cache };
     let program_args = unsafe { &*ctx_ref.program_args };
@@ -527,69 +530,96 @@ pub extern "C" fn jit_call_extern(
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let resume_io_token = fiber.resume_io_token.take();
     
-    let result = registry.call(
-        extern_id,
-        buffer,
-        0, // bp = 0 (start of buffer)
-        0, // arg_start = 0
-        arg_count as u16,
-        0, // ret_start = 0 (returns overwrite args in same buffer)
-        gc,
-        &module.struct_metas,
-        &module.interface_metas,
-        &module.named_type_metas,
-        &module.runtime_types,
-        itab_cache,
-        &module.functions,
-        module,
-        ctx_ref.vm,
-        ctx_ref.fiber,
-        Some(super::closure_call_trampoline), // call_closure_fn for dyn_call_closure etc
-        &module.well_known,
-        program_args,
-        sentinel_errors,
-        io,
-        resume_io_token, // Pass fiber's resume_io_token for replay-at-PC semantics
-    );
+    // Closure replay state: starts empty, accumulates across replays
+    let mut closure_replay_results: Vec<Vec<u64>> = Vec::new();
+    let mut closure_replay_panicked = false;
     
-    // Return values already in buffer (same as ret pointer), no copy needed
-    
-    let jit_result = match result {
-        ExternResult::Ok => JitResult::Ok,
-        ExternResult::Panic(msg) => {
-            // Set panic message in context - this is a user panic (from ? operator or explicit panic)
-            let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
-            let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-            unsafe {
-                *ctx_ref.panic_flag = true;
-                *ctx_ref.is_user_panic = true;
-                (*ctx_ref.panic_msg).slot0 = slot0;
-                (*ctx_ref.panic_msg).slot1 = msg_str as u64;
+    loop {
+        let result = registry.call(
+            extern_id,
+            buffer,
+            0, // bp = 0 (start of buffer)
+            0, // arg_start = 0
+            arg_count as u16,
+            0, // ret_start = 0 (returns overwrite args in same buffer)
+            gc,
+            &module.struct_metas,
+            &module.interface_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
+            itab_cache,
+            &module.functions,
+            module,
+            ctx_ref.vm,
+            ctx_ref.fiber,
+            Some(super::closure_call_trampoline),
+            &module.well_known,
+            program_args,
+            sentinel_errors,
+            io,
+            resume_io_token.clone(),
+            core::mem::take(&mut closure_replay_results),
+            closure_replay_panicked,
+        );
+        
+        match result {
+            ExternResult::CallClosure { closure_ref, args: closure_args } => {
+                // Execute closure synchronously via trampoline
+                let closure_func_id = vo_runtime::objects::closure::func_id(closure_ref);
+                let func_def = &module.functions[closure_func_id as usize];
+                let ret_slot_count = func_def.ret_slots as u32;
+                let mut ret_buffer = vec![0u64; ret_slot_count as usize];
+                
+                let trampoline = super::closure_call_trampoline;
+                let call_result = trampoline(
+                    ctx_ref.vm,
+                    ctx_ref.fiber,
+                    closure_ref as u64,
+                    closure_args.as_ptr(),
+                    closure_args.len() as u32,
+                    ret_buffer.as_mut_ptr(),
+                    ret_slot_count,
+                );
+                
+                match call_result {
+                    ClosureCallResult::Ok => {
+                        closure_replay_results.push(ret_buffer);
+                        closure_replay_panicked = false;
+                    }
+                    ClosureCallResult::Panic => {
+                        closure_replay_panicked = true;
+                    }
+                }
+                
+                // Restore original args for replay (extern may have modified buffer)
+                buffer[..saved_args.len()].copy_from_slice(&saved_args);
+                continue;
             }
-            JitResult::Panic
-        }
-        ExternResult::Yield => {
-            ctx_ref.call_kind = JitContext::CALL_KIND_YIELD;
-            JitResult::Call
-        }
-        ExternResult::Block => {
-            ctx_ref.call_kind = JitContext::CALL_KIND_BLOCK;
-            JitResult::Call
-        }
-        ExternResult::WaitIo { token } => {
-            // Store IO token in context for VM to handle
-            ctx_ref.wait_io_token = token;
-            JitResult::WaitIo
-        }
-        ExternResult::NotRegistered(_) => {
-            // Runtime error: is_user_panic stays false, VM will create default message
-            unsafe {
-                *ctx_ref.panic_flag = true;
+            ExternResult::Ok => return JitResult::Ok,
+            ExternResult::Panic(msg) => {
+                let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
+                let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+                unsafe {
+                    *ctx_ref.panic_flag = true;
+                    *ctx_ref.is_user_panic = true;
+                    (*ctx_ref.panic_msg).slot0 = slot0;
+                    (*ctx_ref.panic_msg).slot1 = msg_str as u64;
+                }
+                return JitResult::Panic;
             }
-            JitResult::Panic
+            ExternResult::Yield => return JitResult::Call,
+            ExternResult::Block => return JitResult::Call,
+            #[cfg(feature = "std")]
+            ExternResult::WaitIo { token } => {
+                ctx_ref.wait_io_token = token;
+                return JitResult::WaitIo;
+            }
+            ExternResult::NotRegistered(_) => {
+                unsafe { *ctx_ref.panic_flag = true; }
+                return JitResult::Panic;
+            }
         }
-    };
-    jit_result
+    }
 }
 
 // =============================================================================
