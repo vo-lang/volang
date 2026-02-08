@@ -52,10 +52,6 @@ pub struct Scheduler {
     pub ready_queue: VecDeque<u32>,
     pub current: Option<u32>,
 
-    /// Pool of callback fibers for execute_func_sync.
-    /// Supports nested calls: each level pops a fiber, returns it when done.
-    /// Avoids 64KB allocation per sync call.
-    callback_fiber_pool: Vec<u32>,
 
     /// Map from I/O token to waiting fiber.
     #[cfg(feature = "std")]
@@ -69,29 +65,11 @@ impl Scheduler {
             free_slots: Vec::new(),
             ready_queue: VecDeque::new(),
             current: None,
-            callback_fiber_pool: Vec::new(),
             #[cfg(feature = "std")]
             io_waiters: HashMap::new(),
         }
     }
     
-    /// Acquire a callback fiber for execute_func_sync.
-    /// Reuses from pool or creates new. Fiber is reset and ready for use.
-    pub fn acquire_callback_fiber(&mut self) -> u32 {
-        if let Some(id) = self.callback_fiber_pool.pop() {
-            id
-        } else {
-            self.spawn_not_ready(Fiber::new(0))
-        }
-    }
-    
-    /// Release a callback fiber back to the pool for reuse.
-    pub fn release_callback_fiber(&mut self, id: u32) {
-        let fiber = &mut *self.fibers[id as usize];
-        fiber.reset();
-        fiber.state = FiberState::Dead;
-        self.callback_fiber_pool.push(id);
-    }
 
     /// Spawn a new fiber, returns its id.
     /// Reuses dead fiber slots when available.
@@ -102,8 +80,7 @@ impl Scheduler {
     }
     
     /// Spawn a new fiber without adding to ready_queue.
-    /// Used by execute_func_sync which sets current directly.
-    pub fn spawn_not_ready(&mut self, mut fiber: Fiber) -> u32 {
+    fn spawn_not_ready(&mut self, mut fiber: Fiber) -> u32 {
         if let Some(slot) = self.free_slots.pop() {
             // Reuse dead fiber slot
             fiber.id = slot;

@@ -147,26 +147,6 @@ impl StdlibEntry {
     }
 }
 
-/// Result of calling a closure from within an extern function.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClosureCallResult {
-    Ok = 0,
-    Panic = 1,
-}
-
-/// Callback type for calling closures from extern functions.
-/// This allows extern functions to call back into the VM to execute closures.
-pub type ClosureCallFn = extern "C" fn(
-    vm: *mut core::ffi::c_void,
-    fiber: *mut core::ffi::c_void,
-    closure_ref: u64,
-    args: *const u64,
-    arg_count: u32,
-    ret: *mut u64,
-    ret_count: u32,
-) -> ClosureCallResult;
-
 // ==================== Auto-registration via linkme (std only) ====================
 
 /// Entry for auto-registered extern functions.
@@ -363,8 +343,6 @@ pub struct ExternCallContext<'a> {
     vm: *mut core::ffi::c_void,
     /// Opaque pointer to current Fiber (for closure calls).
     fiber: *mut core::ffi::c_void,
-    /// Callback to execute closures.
-    call_closure_fn: Option<ClosureCallFn>,
     /// Pre-computed IDs for well-known types.
     well_known: &'a WellKnownTypes,
     /// Program arguments.
@@ -406,7 +384,6 @@ impl<'a> ExternCallContext<'a> {
         module: &'a Module,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
-        call_closure_fn: Option<ClosureCallFn>,
         well_known: &'a WellKnownTypes,
         program_args: &'a [String],
         sentinel_errors: &'a mut SentinelErrorCache,
@@ -427,7 +404,6 @@ impl<'a> ExternCallContext<'a> {
             module,
             vm,
             fiber,
-            call_closure_fn,
             well_known,
             program_args,
             sentinel_errors,
@@ -1147,49 +1123,6 @@ impl<'a> ExternCallContext<'a> {
         self.func_defs.get(func_id as usize)
     }
 
-    /// Check if closure calling capability is available.
-    #[inline]
-    pub fn can_call_closure(&self) -> bool {
-        self.call_closure_fn.is_some()
-    }
-
-    /// Call a closure from within an extern function.
-    /// 
-    /// This allows dynamic call implementations to execute closures and get results
-    /// without needing a fixed-size buffer allocated at compile time.
-    ///
-    /// # Arguments
-    /// - `closure_ref`: GcRef to the closure object
-    /// - `args`: Argument slots to pass to the closure
-    /// - `ret_buffer`: Buffer to receive return values (must be large enough for ret_slots)
-    ///
-    /// # Returns
-    /// - `Ok(ret_slots)`: Number of return slots written to ret_buffer
-    /// - `Err(msg)`: Error message if call failed
-    pub fn call_closure(
-        &mut self,
-        closure_ref: GcRef,
-        args: &[u64],
-        ret_buffer: &mut [u64],
-    ) -> Result<usize, String> {
-        let call_fn = self.call_closure_fn.ok_or("Closure calling not available")?;
-        
-        let result = call_fn(
-            self.vm,
-            self.fiber,
-            closure_ref as u64,
-            args.as_ptr(),
-            args.len() as u32,
-            ret_buffer.as_mut_ptr(),
-            ret_buffer.len() as u32,
-        );
-        
-        match result {
-            ClosureCallResult::Ok => Ok(ret_buffer.len()),
-            ClosureCallResult::Panic => Err("Closure panicked".to_string()),
-        }
-    }
-
     /// Check if a previous closure-for-replay panicked.
     /// If true, the extern function should return an error.
     #[inline]
@@ -1223,11 +1156,6 @@ impl<'a> ExternCallContext<'a> {
         self.fiber
     }
 
-    /// Get the closure call function for direct closure calls.
-    #[inline]
-    pub fn closure_call_fn(&self) -> Option<ClosureCallFn> {
-        self.call_closure_fn
-    }
 
     // ==================== Protocol/Interface Support ====================
 
@@ -1353,7 +1281,6 @@ impl ExternRegistry {
         module: &Module,
         vm: *mut core::ffi::c_void,
         fiber: *mut core::ffi::c_void,
-        call_closure_fn: Option<ClosureCallFn>,
         well_known: &WellKnownTypes,
         program_args: &[String],
         sentinel_errors: &mut SentinelErrorCache,
@@ -1384,7 +1311,6 @@ impl ExternRegistry {
                     module,
                     vm,
                     fiber,
-                    call_closure_fn,
                     well_known,
                     program_args,
                     sentinel_errors,

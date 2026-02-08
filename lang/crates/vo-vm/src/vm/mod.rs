@@ -24,7 +24,6 @@ mod types;
 pub mod island_thread;
 #[cfg(feature = "jit")]
 mod jit;
-mod trampoline;
 
 pub use helpers::{stack_get, stack_set};
 pub use types::{ExecResult, VmError, VmState, ErrorLocation, TIME_SLICE, SchedulingOutcome, RuntimeTrapKind};
@@ -1037,7 +1036,6 @@ impl Vm {
                     let mut extern_panic_msg: Option<String> = None;
                     let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
-                    let closure_call_fn: Option<vo_runtime::ffi::ClosureCallFn> = None;
                     #[cfg(feature = "std")]
                     let resume_io_token = fiber.resume_io_token.take();
                     let closure_replay_results = core::mem::take(&mut fiber.closure_replay_results);
@@ -1048,7 +1046,7 @@ impl Vm {
                         &mut fiber.stack, bp, &inst, &module.externs, &self.state.extern_registry,
                         &mut self.state.gc, &module.struct_metas, &module.interface_metas,
                         &module.named_type_metas, &module.runtime_types, &mut self.state.itab_cache,
-                        &module.functions, module, vm_ptr, fiber_ptr, closure_call_fn,
+                        &module.functions, module, vm_ptr, fiber_ptr,
                         &mut extern_panic_msg, &module.well_known, &self.state.program_args,
                         &mut self.state.sentinel_errors,
                         #[cfg(feature = "std")] &mut self.state.io,
@@ -1702,174 +1700,27 @@ impl Vm {
         ExecResult::TimesliceExpired
     }
 
-    /// Execute a function synchronously using a pooled callback fiber.
-    /// Used by extern callbacks and JIT VM fallback.
-    /// Returns (success, panic_state).
-    pub fn execute_func_sync(
-        &mut self,
-        func_id: u32,
-        args: &[u64],
-        ret: *mut u64,
-        ret_count: u32,
-    ) -> (bool, Option<crate::fiber::PanicState>) {
-        let module = match &self.module {
-            Some(m) => m as *const Module,
-            None => return (false, None),
-        };
-        let module = unsafe { &*module };
-        
+    /// Spawn a new fiber that calls a function with the given arguments.
+    /// The fiber is added to the ready queue and will be executed by run_scheduled().
+    pub fn spawn_call(&mut self, func_id: u32, args: &[u64]) {
+        let module = self.module.as_ref().expect("spawn_call: module not set");
         let func_def = &module.functions[func_id as usize];
         
-        // Acquire callback fiber and set up frame
-        let fid = self.scheduler.acquire_callback_fiber();
-        let fiber = self.scheduler.fiber_mut(fid);
-        fiber.state = FiberState::Running;
-        
-        // Set up frame similar to exec_call
+        let mut fiber = Fiber::new(0);
         let bp = fiber.sp;
         let local_slots = func_def.local_slots as usize;
         let new_sp = bp + local_slots;
         fiber.ensure_capacity(new_sp);
         
-        // Zero the entire local slots area first (important for named returns and local vars)
+        // Zero locals, then copy args
         unsafe { core::ptr::write_bytes(fiber.stack.as_mut_ptr().add(bp), 0, local_slots) };
-        
-        // Copy args (overwrites the zeros for arg slots)
         let n = (func_def.param_slots as usize).min(args.len());
         fiber.stack[bp..bp + n].copy_from_slice(&args[..n]);
         
-        // Update sp and push frame
         fiber.sp = new_sp;
         fiber.frames.push(CallFrame::new(func_id, bp, 0, func_def.ret_slots));
-
-        // Run callback fiber directly — always runs first to preserve execution order.
-        let saved_current = self.scheduler.current;
-        self.scheduler.current = Some(fid);
         
-        let (success, panic_state) = loop {
-            match self.run_fiber(FiberId::Regular(fid)) {
-                ExecResult::Done => {
-                    let fiber = self.scheduler.fiber(fid);
-                    let n = (ret_count as usize).min(func_def.ret_slots as usize);
-                    for i in 0..n {
-                        unsafe { *ret.add(i) = fiber.stack[bp + i] };
-                    }
-                    break (true, None);
-                }
-                ExecResult::Panic => {
-                    break (false, self.scheduler.fiber_mut(fid).panic_state.take());
-                }
-                ExecResult::Block(reason) => {
-                    // Block callback fiber with correct reason (Queue vs Io)
-                    match reason {
-                        crate::fiber::BlockReason::Queue => {
-                            self.scheduler.block_for_queue();
-                        }
-                        #[cfg(feature = "std")]
-                        crate::fiber::BlockReason::Io(token) => {
-                            let fiber = self.scheduler.current_fiber_mut().unwrap();
-                            let frame = fiber.current_frame_mut().unwrap();
-                            frame.pc -= 1;
-                            self.scheduler.block_for_io(token);
-                        }
-                    }
-                    
-                    let is_callback_runnable = |sched: &crate::scheduler::Scheduler| {
-                        sched.fibers.get(fid as usize)
-                            .map(|f| matches!(f.state, FiberState::Runnable))
-                            .unwrap_or(false)
-                    };
-                    
-                    // Mini-scheduler: run other fibers and process events until callback is unblocked.
-                    loop {
-                        // Process island wake commands
-                        #[cfg(feature = "std")]
-                        if let Some(ref rx) = self.state.main_cmd_rx {
-                            while let Ok(cmd) = rx.try_recv() {
-                                if let vo_runtime::island::IslandCommand::WakeFiber { fiber_id } = cmd {
-                                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-                                }
-                            }
-                        }
-                        
-                        // Poll I/O to wake fibers waiting on I/O completion
-                        #[cfg(feature = "std")]
-                        self.scheduler.poll_io(&mut self.state.io);
-                        
-                        if is_callback_runnable(&self.scheduler) {
-                            self.scheduler.current = Some(fid);
-                            break;
-                        }
-                        
-                        match self.scheduler.schedule_next() {
-                            Some(next_id) => {
-                                let mini_result = self.run_fiber(FiberId::Regular(next_id));
-                                match mini_result {
-                                    ExecResult::Done | ExecResult::Panic => {
-                                        let _ = self.scheduler.kill_current();
-                                    }
-                                    ExecResult::Block(reason) => {
-                                        match reason {
-                                            crate::fiber::BlockReason::Queue => {
-                                                self.scheduler.block_for_queue();
-                                            }
-                                            #[cfg(feature = "std")]
-                                            crate::fiber::BlockReason::Io(token) => {
-                                                let fiber = self.scheduler.current_fiber_mut().unwrap();
-                                                let frame = fiber.current_frame_mut().unwrap();
-                                                frame.pc -= 1;
-                                                self.scheduler.block_for_io(token);
-                                            }
-                                        }
-                                    }
-                                    ExecResult::TimesliceExpired | ExecResult::Osr(_, _, _) => {
-                                        self.scheduler.yield_current();
-                                    }
-                                    _ => {}
-                                }
-                                if is_callback_runnable(&self.scheduler) {
-                                    self.scheduler.current = Some(fid);
-                                    break;
-                                }
-                            }
-                            None => {
-                                // No runnable fibers — wait for external events
-                                #[cfg(feature = "std")]
-                                {
-                                    let has_wakers = self.state.main_cmd_rx.is_some()
-                                        || self.scheduler.has_io_waiters();
-                                    if has_wakers {
-                                        if let Some(ref rx) = self.state.main_cmd_rx {
-                                            match rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                                                Ok(vo_runtime::island::IslandCommand::WakeFiber { fiber_id }) => {
-                                                    self.scheduler.wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-                                                }
-                                                Ok(_) => {}
-                                                Err(_) => {}
-                                            }
-                                        }
-                                        self.scheduler.poll_io(&mut self.state.io);
-                                        continue;
-                                    }
-                                }
-                                break; // No potential wakers — deadlock
-                            }
-                        }
-                    }
-                    
-                    if is_callback_runnable(&self.scheduler) {
-                        continue; // Resume callback fiber
-                    } else {
-                        break (false, None); // Deadlock or still blocked
-                    }
-                }
-                _ => continue,
-            }
-        };
-
-        self.scheduler.current = saved_current;
-        self.scheduler.release_callback_fiber(fid);
-        (success, panic_state)
+        self.scheduler.spawn(fiber);
     }
 }
 

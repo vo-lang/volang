@@ -13,7 +13,12 @@ use super::WaiterInfo;
 /// This will cause a runtime error when actually used.
 pub fn create(_gc: &mut Gc, _elem_meta: ValueMeta, _elem_slots: u16, _cap: usize) -> GcRef {
     // Return null GcRef - caller should check and handle
-    0
+    core::ptr::null_mut()
+}
+
+/// Validated port creation - not supported in no_std mode.
+pub fn create_checked(_gc: &mut Gc, _elem_meta: ValueMeta, _elem_slots: u16, _cap: i64) -> Result<GcRef, i32> {
+    Err(1) // Not supported
 }
 
 #[inline]

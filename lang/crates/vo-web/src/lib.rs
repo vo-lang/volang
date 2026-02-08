@@ -276,12 +276,7 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
         args.len() as u32,
     );
     
-    let mut ret: [u64; 0] = [];
-    let (success, _panic_state) = vm.execute_func_sync(func_id, &full_args, ret.as_mut_ptr(), 0);
-    if !success {
-        return Err("Closure panicked".to_string());
-    }
-    
+    vm.spawn_call(func_id, &full_args);
     vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
     
     Ok(())

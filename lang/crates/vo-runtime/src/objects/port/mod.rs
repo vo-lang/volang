@@ -31,6 +31,6 @@ pub use nostd_stub::*;
 /// # Safety
 /// port must be a valid Port GcRef.
 #[cfg(not(feature = "std"))]
-pub unsafe fn drop_inner(_port: GcRef) {
+pub unsafe fn drop_inner(_port: crate::gc::GcRef) {
     // No-op in no_std - ports not supported
 }

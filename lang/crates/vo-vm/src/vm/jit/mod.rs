@@ -557,7 +557,6 @@ pub extern "C" fn jit_call_extern(
         module,
         ctx_ref.vm,
         ctx_ref.fiber,
-        None, // No closure_call_fn — CallClosure handled by Replay exit
         &module.well_known,
         program_args,
         sentinel_errors,
