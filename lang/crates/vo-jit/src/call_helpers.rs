@@ -556,10 +556,13 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ctx = emitter.ctx_param();
     let panic_ret_val = emitter.panic_return_value();
     
-    // Save caller_bp for slow path (needed for resume_point)
-    let caller_bp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-    );
+    // Reuse prologue-saved caller_bp and fiber_sp if available (avoids redundant ctx loads)
+    let caller_bp = emitter.prologue_caller_bp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP)
+    });
+    let old_fiber_sp = emitter.prologue_fiber_sp().unwrap_or_else(|| {
+        emitter.builder().ins().load(types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP)
+    });
     
     // Read args from caller's locals_slot
     let mut arg_values = Vec::with_capacity(config.arg_slots);
@@ -595,11 +598,6 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     let ret_slots_val = emitter.builder().ins().iconst(types::I32, config.call_ret_slots as i64);
     let current_pc = emitter.current_pc();
     let caller_resume_pc_val = emitter.builder().ins().iconst(types::I32, (current_pc + 1) as i64);
-    
-    // Save old fiber_sp for restoration after call (needed for both direct and indirect paths)
-    let old_fiber_sp = emitter.builder().ins().load(
-        types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
-    );
     
     // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
     let new_bp = old_fiber_sp;

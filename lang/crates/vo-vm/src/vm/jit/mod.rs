@@ -157,19 +157,22 @@ fn handle_jit_result(
             let has_defers = fiber.defer_stack.last()
                 .map_or(false, |e| e.frame_depth == frame_depth);
 
-            let heap_returns = ctx.ctx.ret_is_heap != 0;
-            let ret_gcref_start = ctx.ctx.ret_gcref_start as usize;
-
             let frame = fiber.frames.last().unwrap();
             let func = &module.functions[frame.func_id as usize];
+
+            // Guard ctx metadata with function's own attributes.
+            // Nested JIT callees may leave stale values in ctx; the function's
+            // static properties are the ground truth.
+            let heap_returns = func.heap_ret_gcref_count > 0 && ctx.ctx.ret_is_heap != 0;
+            let ret_gcref_start = ctx.ctx.ret_gcref_start as usize;
 
             // errdefer should run if:
             // - explicit fail return (set by JIT), OR
             // - function has error return and error is non-nil
-            let include_errdefers = if ctx.ctx.is_error_return != 0 {
-                true
-            } else if func.error_ret_slot < 0 {
+            let include_errdefers = if func.error_ret_slot < 0 {
                 false
+            } else if ctx.ctx.is_error_return != 0 {
+                true
             } else if heap_returns {
                 // error_ret_slot is the index within heap returns, read from GcRef
                 let gcref_count = func.heap_ret_gcref_count as usize;

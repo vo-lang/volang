@@ -39,6 +39,10 @@ pub struct FunctionCompiler<'a> {
     /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
     /// Slots below this value use SSA reads via use_var for better register allocation.
     memory_only_start: u16,
+    /// ctx.jit_bp at function entry (i32). Reused by all call sites as caller_bp.
+    saved_caller_bp: Option<Value>,
+    /// ctx.fiber_sp at function entry (i32). Reused by all call sites as old_fiber_sp.
+    saved_fiber_sp: Option<Value>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -71,6 +75,8 @@ impl<'a> FunctionCompiler<'a> {
             args_ptr_val: None,
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
+            saved_caller_bp: None,
+            saved_fiber_sp: None,
         }
     }
 
@@ -200,6 +206,7 @@ impl<'a> FunctionCompiler<'a> {
         
         // Save jit_bp from ctx at function entry.
         // This is needed to compute fiber.stack address for spilling.
+        // Also saved as caller_bp (i32) for reuse by all call sites.
         let jit_bp_var = Variable::from_u32((self.vars.len() + 1000) as u32);
         self.builder.declare_var(jit_bp_var, types::I64);
         let jit_bp_i32 = self.builder.ins().load(
@@ -208,6 +215,13 @@ impl<'a> FunctionCompiler<'a> {
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         self.builder.def_var(jit_bp_var, jit_bp_i64);
         self.saved_jit_bp = Some(jit_bp_var);
+        self.saved_caller_bp = Some(jit_bp_i32);
+        
+        // Save fiber_sp from ctx at function entry. Reused by all call sites.
+        let fiber_sp_i32 = self.builder.ins().load(
+            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
+        );
+        self.saved_fiber_sp = Some(fiber_sp_i32);
         
         let param_slots = self.func_def.param_slots as usize;
         let num_slots = self.vars.len();
@@ -362,9 +376,17 @@ impl<'a> FunctionCompiler<'a> {
         let heap_returns = (inst.flags & RETURN_FLAG_HEAP_RETURNS) != 0;
         let is_error_return = (inst.flags & 1) != 0;
 
-        // Always set is_error_return for VM errdefer decision.
-        let err_flag = self.builder.ins().iconst(types::I8, if is_error_return { 1 } else { 0 });
-        self.builder.ins().store(MemFlags::trusted(), err_flag, ctx, JitContext::OFFSET_IS_ERROR_RETURN);
+        // Pure function: no defer, no error return, no heap returns.
+        // VM guards metadata reads with func attributes, so we can skip all metadata stores.
+        let is_pure = !self.func_def.has_defer
+            && self.func_def.error_ret_slot < 0
+            && self.func_def.heap_ret_gcref_count == 0;
+
+        if !is_pure {
+            // Set is_error_return for VM errdefer decision.
+            let err_flag = self.builder.ins().iconst(types::I8, if is_error_return { 1 } else { 0 });
+            self.builder.ins().store(MemFlags::trusted(), err_flag, ctx, JitContext::OFFSET_IS_ERROR_RETURN);
+        }
         
         if heap_returns {
             if self.func_def.has_defer {
@@ -411,15 +433,17 @@ impl<'a> FunctionCompiler<'a> {
                 }
             }
         } else {
-            let zero = self.builder.ins().iconst(types::I8, 0);
-            self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+            if !is_pure {
+                let zero = self.builder.ins().iconst(types::I8, 0);
+                self.builder.ins().store(MemFlags::trusted(), zero, ctx, JitContext::OFFSET_RET_IS_HEAP);
+
+                // Store ret_start for VM to extract slot_types for GC scanning
+                let ret_start_val = self.builder.ins().iconst(types::I16, inst.a as i64);
+                self.builder.ins().store(MemFlags::trusted(), ret_start_val, ctx, JitContext::OFFSET_RET_START);
+            }
 
             let ret_slots = self.func_def.ret_slots as usize;
             let ret_reg = inst.a as usize;
-            
-            // Store ret_start for VM to extract slot_types for GC scanning
-            let ret_start_val = self.builder.ins().iconst(types::I16, ret_reg as i64);
-            self.builder.ins().store(MemFlags::trusted(), ret_start_val, ctx, JitContext::OFFSET_RET_START);
             
             for i in 0..ret_slots {
                 let val = self.load_local((ret_reg + i) as u16);
@@ -502,10 +526,9 @@ impl<'a> FunctionCompiler<'a> {
         let callee_local_slots = target_func.local_slots as usize;
         let ctx = self.builder.block_params(self.entry_block)[0];
         
-        // Save caller_bp for slow path
-        let caller_bp = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_JIT_BP
-        );
+        // Reuse prologue-saved caller_bp and fiber_sp (avoids redundant ctx loads per call site)
+        let caller_bp = self.saved_caller_bp.unwrap();
+        let old_fiber_sp = self.saved_fiber_sp.unwrap();
         
         // Read args via load_local (SSA when safe, memory when aliased)
         let mut arg_values = Vec::with_capacity(arg_slots);
@@ -540,11 +563,6 @@ impl<'a> FunctionCompiler<'a> {
         let ret_reg_val = self.builder.ins().iconst(types::I32, arg_start as i64);
         let ret_slots_val = self.builder.ins().iconst(types::I32, call_ret_slots as i64);
         let caller_resume_pc_val = self.builder.ins().iconst(types::I32, (self.current_pc + 1) as i64);
-        
-        // Save old fiber_sp for restoration after call
-        let old_fiber_sp = self.builder.ins().load(
-            types::I32, MemFlags::trusted(), ctx, JitContext::OFFSET_FIBER_SP
-        );
         
         // Inline update ctx.jit_bp and ctx.fiber_sp for callee's correct saved_jit_bp
         let new_bp = old_fiber_sp;
@@ -681,5 +699,11 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     }
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
+    }
+    fn prologue_caller_bp(&self) -> Option<Value> {
+        self.saved_caller_bp
+    }
+    fn prologue_fiber_sp(&self) -> Option<Value> {
+        self.saved_fiber_sp
     }
 }

@@ -151,6 +151,12 @@ pub trait IrEmitter<'a> {
     
     /// Mark a slot as verified non-nil (after nil check passed).
     fn mark_checked_non_nil(&mut self, slot: u16);
+
+    /// Prologue-saved ctx.jit_bp (i32). Reused by call sites to avoid redundant loads.
+    fn prologue_caller_bp(&self) -> Option<Value> { None }
+    
+    /// Prologue-saved ctx.fiber_sp (i32). Reused by call sites to avoid redundant loads.
+    fn prologue_fiber_sp(&self) -> Option<Value> { None }
 }
 
 /// Scan instructions to find the minimum base register accessed via memory pointers.
